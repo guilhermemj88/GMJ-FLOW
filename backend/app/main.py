@@ -450,16 +450,14 @@ def search_flows(
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
     if ip:
-        normalized_ip = clickhouse_ipv6_param(ip, "ip")
-        params["ip_src"] = normalized_ip
-        params["ip_dst"] = normalized_ip
-        filters.append("(src_ip = {ip_src:IPv6} OR dst_ip = {ip_dst:IPv6})")
+        params["ip"] = clickhouse_ipv6_param(ip, "ip")
+        filters.append("(src_ip = toIPv6({ip:String}) OR dst_ip = toIPv6({ip:String}))")
     if src_ip:
         params["src_ip"] = clickhouse_ipv6_param(src_ip, "src_ip")
-        filters.append("src_ip = {src_ip:IPv6}")
+        filters.append("src_ip = toIPv6({src_ip:String})")
     if dst_ip:
         params["dst_ip"] = clickhouse_ipv6_param(dst_ip, "dst_ip")
-        filters.append("dst_ip = {dst_ip:IPv6}")
+        filters.append("dst_ip = toIPv6({dst_ip:String})")
     if port is not None:
         params["port"] = port
         filters.append("(src_port = {port:UInt16} OR dst_port = {port:UInt16})")
