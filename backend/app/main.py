@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from ipaddress import ip_address
 from typing import Any
 
 import clickhouse_connect
@@ -27,6 +30,8 @@ PROTO_LABELS = {
     "50": "ESP",
     "58": "ICMPv6",
 }
+
+PROTO_NUMBERS = {name.lower(): int(number) for number, name in PROTO_LABELS.items()}
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -104,16 +109,79 @@ def sensor_clause(sensor: str | None, params: dict[str, Any]) -> str:
     return " AND sensor = {sensor:String}"
 
 
+def clean_ip(value: Any) -> str:
+    text = str(value or "")
+    try:
+        parsed = ip_address(text)
+    except ValueError:
+        return text
+    if getattr(parsed, "ipv4_mapped", None):
+        return str(parsed.ipv4_mapped)
+    return str(parsed)
+
+
+def proto_name(value: Any) -> str:
+    return PROTO_LABELS.get(str(value), str(value))
+
+
+def parse_proto_filter(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if text in PROTO_NUMBERS:
+        return PROTO_NUMBERS[text]
+    try:
+        proto = int(text)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="proto invalido") from None
+    if proto < 0 or proto > 255:
+        raise HTTPException(status_code=400, detail="proto fora da faixa 0-255")
+    return proto
+
+
+def tcp_flags_name(value: Any) -> str:
+    try:
+        flags = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    names = [name for bit, name in TCP_FLAG_BITS if flags & bit]
+    return ",".join(names) if names else "NONE"
+
+
+def parse_tcp_flags_filter(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        if text.lower().startswith("0x"):
+            flags = int(text, 16)
+        else:
+            flags = int(text)
+        if flags < 0 or flags > 65535:
+            raise HTTPException(status_code=400, detail="tcp_flags fora da faixa 0-65535")
+        return flags
+    except ValueError:
+        pass
+
+    flags = 0
+    by_name = {name.lower(): bit for bit, name in TCP_FLAG_BITS}
+    for token in text.replace("+", ",").replace("|", ",").replace(" ", ",").split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        if token not in by_name:
+            raise HTTPException(status_code=400, detail="tcp_flags invalido")
+        flags |= by_name[token]
+    return flags
+
+
 def label_for_dimension(dimension: str, key: str) -> str:
+    if dimension in {"src_ip", "dst_ip"}:
+        return clean_ip(key)
     if dimension == "proto":
-        return PROTO_LABELS.get(key, f"Proto {key}")
+        return proto_name(key)
     if dimension == "tcp_flags":
-        try:
-            flags = int(key)
-        except ValueError:
-            return key
-        names = [name for bit, name in TCP_FLAG_BITS if flags & bit]
-        return "+".join(names) if names else "NONE"
+        return tcp_flags_name(key)
     if dimension == "dst_port":
         return f"Porta {key}"
     return key
@@ -262,17 +330,28 @@ def top_dimension(
         bytes_value = int(row["bytes"] or 0)
         packets_value = int(row["packets"] or 0)
         key = str(row["key"])
-        items.append(
-            {
-                "key": key,
-                "label": label_for_dimension(dimension, key),
-                "bytes": bytes_value,
-                "packets": packets_value,
-                "flows": int(row["flows"] or 0),
-                "bps": round((bytes_value * 8) / seconds, 2),
-                "pps": round(packets_value / seconds, 2),
-            }
-        )
+        label = label_for_dimension(dimension, key)
+        item = {
+            "key": label if dimension in {"src_ip", "dst_ip"} else key,
+            "raw_key": key,
+            "label": label,
+            "bytes": bytes_value,
+            "packets": packets_value,
+            "flows": int(row["flows"] or 0),
+            "bps": round((bytes_value * 8) / seconds, 2),
+            "pps": round(packets_value / seconds, 2),
+        }
+        if dimension == "src_ip":
+            item["src_ip"] = label
+        elif dimension == "dst_ip":
+            item["dst_ip"] = label
+        elif dimension == "proto":
+            item["proto"] = int(key) if key.isdigit() else key
+            item["proto_name"] = label
+        elif dimension == "tcp_flags":
+            item["tcp_flags"] = int(key) if key.isdigit() else key
+            item["tcp_flags_name"] = label
+        items.append(item)
 
     return {
         "dimension": dimension,
@@ -344,12 +423,15 @@ def search_flows(
     start: datetime | None = None,
     end: datetime | None = None,
     sensor: str | None = None,
+    ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
+    port: int | None = Query(None, ge=0, le=65535),
     src_port: int | None = Query(None, ge=0, le=65535),
     dst_port: int | None = Query(None, ge=0, le=65535),
-    proto: int | None = Query(None, ge=0, le=255),
-    limit: int = Query(100, ge=1, le=1000),
+    proto: str | None = None,
+    tcp_flags: str | None = None,
+    limit: int = Query(200, ge=1, le=5000),
 ):
     start_dt, end_dt = resolve_range(range_minutes, start, end)
     params: dict[str, Any] = {"start": start_dt, "end": end_dt, "limit": limit}
@@ -357,21 +439,32 @@ def search_flows(
     if sensor:
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
+    if ip:
+        params["ip"] = ip
+        filters.append("(src_ip = toIPv6({ip:String}) OR dst_ip = toIPv6({ip:String}))")
     if src_ip:
         params["src_ip"] = src_ip
         filters.append("src_ip = toIPv6({src_ip:String})")
     if dst_ip:
         params["dst_ip"] = dst_ip
         filters.append("dst_ip = toIPv6({dst_ip:String})")
+    if port is not None:
+        params["port"] = port
+        filters.append("(src_port = {port:UInt16} OR dst_port = {port:UInt16})")
     if src_port is not None:
         params["src_port"] = src_port
         filters.append("src_port = {src_port:UInt16}")
     if dst_port is not None:
         params["dst_port"] = dst_port
         filters.append("dst_port = {dst_port:UInt16}")
-    if proto is not None:
-        params["proto"] = proto
+    proto_value = parse_proto_filter(proto)
+    if proto_value is not None:
+        params["proto"] = proto_value
         filters.append("proto = {proto:UInt8}")
+    tcp_flags_value = parse_tcp_flags_filter(tcp_flags)
+    if tcp_flags_value is not None:
+        params["tcp_flags"] = tcp_flags_value
+        filters.append("tcp_flags = {tcp_flags:UInt16}")
 
     result = get_client().query(
         f"""
@@ -402,8 +495,13 @@ def search_flows(
     items = []
     for row in rows_as_dicts(result):
         row["flow_time"] = iso(row["flow_time"])
-        row["proto_label"] = label_for_dimension("proto", str(row["proto"]))
-        row["tcp_flags_label"] = label_for_dimension("tcp_flags", str(row["tcp_flags"]))
+        row["exporter_ip"] = clean_ip(row["exporter_ip"])
+        row["src_ip"] = clean_ip(row["src_ip"])
+        row["dst_ip"] = clean_ip(row["dst_ip"])
+        row["proto_name"] = proto_name(row["proto"])
+        row["tcp_flags_name"] = tcp_flags_name(row["tcp_flags"])
+        row["proto_label"] = row["proto_name"]
+        row["tcp_flags_label"] = row["tcp_flags_name"]
         items.append(row)
 
     return {

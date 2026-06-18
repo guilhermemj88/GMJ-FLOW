@@ -101,6 +101,17 @@
       font-size: .86rem;
     }
 
+    .flow-search-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: .5rem;
+      align-items: end;
+    }
+
+    .flow-table {
+      font-size: .84rem;
+    }
+
     @media (max-width: 767.98px) {
       .chart {
         height: 230px;
@@ -108,6 +119,10 @@
 
       .top-chart {
         height: 210px;
+      }
+
+      .flow-search-grid {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -224,6 +239,57 @@
         </div>
       </div>
     </section>
+
+    <section class="row g-3 mt-1">
+      <div class="col-12">
+        <div class="panel p-3">
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+            <div>
+              <div class="panel-title">Flow Search</div>
+              <div id="flowSearchStatus" class="metric-readout">Ultimos flows brutos</div>
+            </div>
+            <div class="flow-search-grid">
+              <input id="flowIp" class="form-control form-control-sm" placeholder="IP">
+              <input id="flowPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="Porta">
+              <select id="flowProto" class="form-select form-select-sm" aria-label="Protocolo">
+                <option value="">Todos</option>
+                <option value="1">ICMP</option>
+                <option value="6">TCP</option>
+                <option value="17">UDP</option>
+              </select>
+              <select id="flowRangeMinutes" class="form-select form-select-sm" aria-label="Janela Flow Search">
+                <option value="15">15 min</option>
+                <option value="60" selected>60 min</option>
+                <option value="360">6 h</option>
+                <option value="1440">24 h</option>
+              </select>
+              <button id="flowSearchButton" class="btn btn-sm btn-success">Buscar</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table table-sm table-hover align-middle mb-0 flow-table">
+              <thead>
+                <tr>
+                  <th>Horario</th>
+                  <th>Sensor</th>
+                  <th>Src IP</th>
+                  <th class="text-end">Src porta</th>
+                  <th>Dst IP</th>
+                  <th class="text-end">Dst porta</th>
+                  <th>Proto</th>
+                  <th>Flags</th>
+                  <th class="text-end">In if</th>
+                  <th class="text-end">Out if</th>
+                  <th class="text-end">Bytes</th>
+                  <th class="text-end">Pacotes</th>
+                </tr>
+              </thead>
+              <tbody id="flowSearchTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -277,6 +343,38 @@
 
     function formatNumber(value) {
       return new Intl.NumberFormat('pt-BR').format(Number(value) || 0);
+    }
+
+    function formatBytes(value) {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let size = Number(value) || 0;
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+      }
+      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[char]));
+    }
+
+    function formatDateTime(value) {
+      if (!value) return '';
+      return new Date(value).toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
     }
 
     function trafficOption(series, metric, color) {
@@ -360,11 +458,61 @@
       const tbody = document.getElementById(id);
       tbody.innerHTML = items.slice(0, 8).map(item => `
         <tr>
-          <td title="${item.label}">${item.label}</td>
+          <td title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</td>
           <td class="text-end">${formatBps(item.bps)}</td>
           <td class="text-end">${formatNumber(item[thirdKey])}</td>
         </tr>
       `).join('') || `<tr><td colspan="3" class="text-muted">Sem dados</td></tr>`;
+    }
+
+    function flowSearchParams() {
+      const query = new URLSearchParams();
+      query.set('range_minutes', document.getElementById('flowRangeMinutes').value);
+      query.set('limit', '200');
+
+      const ip = document.getElementById('flowIp').value.trim();
+      const port = document.getElementById('flowPort').value.trim();
+      const proto = document.getElementById('flowProto').value;
+      const sensor = document.getElementById('sensor').value.trim();
+
+      if (ip) query.set('ip', ip);
+      if (port) query.set('port', port);
+      if (proto) query.set('proto', proto);
+      if (sensor) query.set('sensor', sensor);
+      return query.toString();
+    }
+
+    async function searchFlows() {
+      const status = document.getElementById('flowSearchStatus');
+      const tbody = document.getElementById('flowSearchTable');
+      status.textContent = 'Buscando flows';
+      try {
+        const response = await fetch(`/api/flows/search?${flowSearchParams()}`);
+        if (!response.ok) throw new Error(`flows ${response.status}`);
+        const payload = await response.json();
+        const items = payload.items || [];
+        tbody.innerHTML = items.map(flow => `
+          <tr>
+            <td>${formatDateTime(flow.flow_time)}</td>
+            <td>${escapeHtml(flow.sensor)}</td>
+            <td>${escapeHtml(flow.src_ip)}</td>
+            <td class="text-end">${formatNumber(flow.src_port)}</td>
+            <td>${escapeHtml(flow.dst_ip)}</td>
+            <td class="text-end">${formatNumber(flow.dst_port)}</td>
+            <td>${escapeHtml(flow.proto_name)}</td>
+            <td>${escapeHtml(flow.tcp_flags_name)}</td>
+            <td class="text-end">${formatNumber(flow.input_if)}</td>
+            <td class="text-end">${formatNumber(flow.output_if)}</td>
+            <td class="text-end">${formatBytes(flow.bytes)}</td>
+            <td class="text-end">${formatNumber(flow.packets)}</td>
+          </tr>
+        `).join('') || `<tr><td colspan="12" class="text-muted">Sem flows no intervalo</td></tr>`;
+        status.textContent = `${formatNumber(items.length)} flows brutos`;
+      } catch (error) {
+        tbody.innerHTML = `<tr><td colspan="12" class="text-danger">Falha ao buscar flows</td></tr>`;
+        status.textContent = 'Falha na busca';
+        console.error(error);
+      }
     }
 
     async function checkHealth() {
@@ -411,9 +559,17 @@
       fillTable('portsTable', ports.items, 'Porta', 'packets');
       fillTable('protocolsTable', protocols.items, 'Proto', 'packets');
       fillTable('tcpFlagsTable', tcpFlags.items, 'Flags');
+      await searchFlows();
     }
 
     document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
+    document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
+    document.getElementById('flowIp').addEventListener('keydown', event => {
+      if (event.key === 'Enter') searchFlows().catch(console.error);
+    });
+    document.getElementById('flowPort').addEventListener('keydown', event => {
+      if (event.key === 'Enter') searchFlows().catch(console.error);
+    });
     document.getElementById('rangeMinutes').addEventListener('change', () => refresh().catch(console.error));
     document.getElementById('sensor').addEventListener('change', () => refresh().catch(console.error));
     window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
