@@ -120,7 +120,7 @@ def clean_ip(value: Any) -> str:
     return str(parsed)
 
 
-def clickhouse_ipv6_param(value: str, field_name: str) -> str:
+def clickhouse_ip_string_param(value: str, field_name: str) -> str:
     try:
         parsed = ip_address(value.strip())
     except ValueError:
@@ -450,14 +450,14 @@ def search_flows(
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
     if ip:
-        params["ip"] = clickhouse_ipv6_param(ip, "ip")
-        filters.append("(src_ip = toIPv6({ip:String}) OR dst_ip = toIPv6({ip:String}))")
+        params["ip"] = clickhouse_ip_string_param(ip, "ip")
+        filters.append("(toString(src_ip) = {ip:String} OR toString(dst_ip) = {ip:String})")
     if src_ip:
-        params["src_ip"] = clickhouse_ipv6_param(src_ip, "src_ip")
-        filters.append("src_ip = toIPv6({src_ip:String})")
+        params["src_ip"] = clickhouse_ip_string_param(src_ip, "src_ip")
+        filters.append("toString(src_ip) = {src_ip:String}")
     if dst_ip:
-        params["dst_ip"] = clickhouse_ipv6_param(dst_ip, "dst_ip")
-        filters.append("dst_ip = toIPv6({dst_ip:String})")
+        params["dst_ip"] = clickhouse_ip_string_param(dst_ip, "dst_ip")
+        filters.append("toString(dst_ip) = {dst_ip:String}")
     if port is not None:
         params["port"] = port
         filters.append("(src_port = {port:UInt16} OR dst_port = {port:UInt16})")
