@@ -91,6 +91,8 @@ def make_flow(sensor: str, exporter_ip: str) -> tuple:
         output_if,
         bytes_value,
         packets,
+        'fake',
+        1,
     )
 
 
@@ -112,6 +114,8 @@ def insert_batch(client, rows: list[tuple]):
             "output_if",
             "bytes",
             "packets",
+            "flow_type",
+            "sample_rate",
         ],
     )
 

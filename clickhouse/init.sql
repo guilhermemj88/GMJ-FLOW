@@ -7,9 +7,9 @@ CREATE TABLE IF NOT EXISTS flow_raw
     flow_time DateTime64(3, 'UTC'),
     received_at DateTime DEFAULT now(),
     sensor LowCardinality(String),
-    exporter_ip IPv4,
-    src_ip IPv4,
-    dst_ip IPv4,
+    exporter_ip IPv6,
+    src_ip IPv6,
+    dst_ip IPv6,
     src_port UInt16,
     dst_port UInt16,
     proto UInt8,
@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS flow_raw
     output_if UInt32,
     bytes UInt64,
     packets UInt64,
-    flow_count UInt64 DEFAULT 1
+    flow_count UInt64 DEFAULT 1,
+    flow_type LowCardinality(String) DEFAULT 'netflow-v9',
+    sample_rate UInt32 DEFAULT 1
 )
 ENGINE = MergeTree
 PARTITION BY toDate(flow_time)
@@ -30,7 +32,7 @@ CREATE TABLE IF NOT EXISTS flow_1m
 (
     minute DateTime('UTC'),
     sensor LowCardinality(String),
-    exporter_ip IPv4,
+    exporter_ip IPv6,
     input_if UInt32,
     output_if UInt32,
     proto UInt8,
@@ -83,8 +85,8 @@ CREATE TABLE IF NOT EXISTS anomaly_events
     metric_name String,
     metric_value Float64,
     threshold Float64,
-    src_ip Nullable(IPv4),
-    dst_ip Nullable(IPv4),
+    src_ip Nullable(IPv6),
+    dst_ip Nullable(IPv6),
     status LowCardinality(String) DEFAULT 'open',
     created_at DateTime DEFAULT now()
 )
@@ -96,7 +98,7 @@ CREATE TABLE IF NOT EXISTS sensors
 (
     sensor String,
     description String,
-    exporter_ip IPv4,
+    exporter_ip IPv6,
     enabled UInt8 DEFAULT 1,
     created_at DateTime DEFAULT now(),
     updated_at DateTime DEFAULT now()
@@ -230,7 +232,7 @@ SELECT 'flow_1m', 180
 WHERE NOT EXISTS (SELECT 1 FROM retention_settings WHERE table_name = 'flow_1m');
 
 INSERT INTO sensors (sensor, description, exporter_ip)
-SELECT 'edge-01', 'Sensor fake inicial', toIPv4('192.0.2.10')
+SELECT 'edge-01', 'Sensor fake inicial', toIPv6('192.0.2.10')
 WHERE NOT EXISTS (SELECT 1 FROM sensors WHERE sensor = 'edge-01');
 
 INSERT INTO sensor_interfaces (sensor, if_index, if_name, if_alias, speed_bps)
@@ -240,3 +242,16 @@ WHERE NOT EXISTS (SELECT 1 FROM sensor_interfaces WHERE sensor = 'edge-01' AND i
 INSERT INTO sensor_interfaces (sensor, if_index, if_name, if_alias, speed_bps)
 SELECT 'edge-01', 2, 'lan0', 'Clientes', 10000000000
 WHERE NOT EXISTS (SELECT 1 FROM sensor_interfaces WHERE sensor = 'edge-01' AND if_index = 2);
+
+
+INSERT INTO sensors (sensor, description, exporter_ip)
+SELECT 'mikrotik-lab', 'MikroTik laboratorio NetFlow v9/IPFIX', toIPv6('192.168.0.157')
+WHERE NOT EXISTS (SELECT 1 FROM sensors WHERE sensor = 'mikrotik-lab');
+
+INSERT INTO sensor_interfaces (sensor, if_index, if_name, if_alias, speed_bps)
+SELECT 'mikrotik-lab', 1, 'if1', 'Interface MikroTik 1', 1000000000
+WHERE NOT EXISTS (SELECT 1 FROM sensor_interfaces WHERE sensor = 'mikrotik-lab' AND if_index = 1);
+
+INSERT INTO sensor_interfaces (sensor, if_index, if_name, if_alias, speed_bps)
+SELECT 'mikrotik-lab', 2, 'if2', 'Interface MikroTik 2', 1000000000
+WHERE NOT EXISTS (SELECT 1 FROM sensor_interfaces WHERE sensor = 'mikrotik-lab' AND if_index = 2);

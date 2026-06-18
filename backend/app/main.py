@@ -359,10 +359,10 @@ def search_flows(
         filters.append("sensor = {sensor:String}")
     if src_ip:
         params["src_ip"] = src_ip
-        filters.append("src_ip = toIPv4({src_ip:String})")
+        filters.append("src_ip = toIPv6({src_ip:String})")
     if dst_ip:
         params["dst_ip"] = dst_ip
-        filters.append("dst_ip = toIPv4({dst_ip:String})")
+        filters.append("dst_ip = toIPv6({dst_ip:String})")
     if src_port is not None:
         params["src_port"] = src_port
         filters.append("src_port = {src_port:UInt16}")
@@ -388,7 +388,9 @@ def search_flows(
             input_if,
             output_if,
             bytes,
-            packets
+            packets,
+            flow_type,
+            sample_rate
         FROM flow_raw
         WHERE {' AND '.join(filters)}
         ORDER BY flow_time DESC
