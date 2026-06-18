@@ -1,0 +1,68 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: gmj-flow-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE-flowdb}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT-9000}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build:
+      context: ./backend
+    container_name: gmj-flow-backend
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
+      API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
+    ports:
+      - "${BACKEND_PORT-8000}:8000"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  frontend:
+    image: nginx:1.27-alpine
+    container_name: gmj-flow-frontend
+    ports:
+      - "${FRONTEND_PORT-8080}:80"
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+
+  collector:
+    build:
+      context: ./collector
+    container_name: gmj-flow-collector
+    profiles:
+      - tools
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
+      FAKE_FLOW_BATCH_SIZE: ${FAKE_FLOW_BATCH_SIZE-1000}
+      FAKE_FLOW_INTERVAL_SECONDS: ${FAKE_FLOW_INTERVAL_SECONDS-5}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse_data:

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GMJ-FLOW</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --page-bg: #f3f5f7;
+      --panel-bg: #ffffff;
+      --ink: #20242a;
+      --muted: #6b7280;
+      --line: #d9dee5;
+      --accent: #0f766e;
+      --warning: #b45309;
+      --danger: #b91c1c;
+      --violet: #6d28d9;
+      --radius: 8px;
+    }
+
+    body {
+      min-height: 100vh;
+      color: var(--ink);
+      background: var(--page-bg);
+      letter-spacing: 0;
+    }
+
+    .topbar {
+      background: #242830;
+      color: #f8fafc;
+      border-bottom: 4px solid var(--accent);
+    }
+
+    .brand {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+    }
+
+    .panel-title {
+      font-size: .86rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #374151;
+    }
+
+    .chart {
+      width: 100%;
+      height: 280px;
+    }
+
+    .top-chart {
+      width: 100%;
+      height: 230px;
+    }
+
+    .table-sm td,
+    .table-sm th {
+      padding-top: .42rem;
+      padding-bottom: .42rem;
+      white-space: nowrap;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: .55rem;
+      height: .55rem;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+
+    .status-dot.ok {
+      background: #22c55e;
+    }
+
+    .status-dot.fail {
+      background: #ef4444;
+    }
+
+    .form-control,
+    .form-select,
+    .btn {
+      border-radius: 6px;
+    }
+
+    .metric-readout {
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    @media (max-width: 767.98px) {
+      .chart {
+        height: 230px;
+      }
+
+      .top-chart {
+        height: 210px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container-fluid py-3">
+      <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-3 justify-content-between">
+        <div class="d-flex align-items-center gap-3">
+          <div class="brand">GMJ-FLOW</div>
+          <div class="d-flex align-items-center gap-2 small">
+            <span id="statusDot" class="status-dot"></span>
+            <span id="statusText">Conectando</span>
+          </div>
+        </div>
+        <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center">
+          <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
+            <option value="15">15 min</option>
+            <option value="60" selected>60 min</option>
+            <option value="360">6 h</option>
+            <option value="1440">24 h</option>
+          </select>
+          <input id="sensor" class="form-control form-control-sm" placeholder="sensor" value="">
+          <button id="refresh" class="btn btn-sm btn-success">Atualizar</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container-fluid py-3">
+    <section class="row g-3">
+      <div class="col-12 col-xl-6">
+        <div class="panel p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="panel-title">Bits/s</div>
+            <div id="bpsReadout" class="metric-readout">0 bps</div>
+          </div>
+          <div id="bpsChart" class="chart"></div>
+        </div>
+      </div>
+      <div class="col-12 col-xl-6">
+        <div class="panel p-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="panel-title">Packets/s</div>
+            <div id="ppsReadout" class="metric-readout">0 pps</div>
+          </div>
+          <div id="ppsChart" class="chart"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="row g-3 mt-1">
+      <div class="col-12 col-xl-4">
+        <div class="panel p-3 h-100">
+          <div class="panel-title mb-2">Top IP origem</div>
+          <div id="srcIpChart" class="top-chart"></div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+              <tbody id="srcIpTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-xl-4">
+        <div class="panel p-3 h-100">
+          <div class="panel-title mb-2">Top IP destino</div>
+          <div id="dstIpChart" class="top-chart"></div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+              <tbody id="dstIpTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-xl-4">
+        <div class="panel p-3 h-100">
+          <div class="panel-title mb-2">Top portas</div>
+          <div id="portsChart" class="top-chart"></div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Porta</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
+              <tbody id="portsTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="row g-3 mt-1">
+      <div class="col-12 col-lg-6">
+        <div class="panel p-3 h-100">
+          <div class="panel-title mb-2">Protocolos</div>
+          <div id="protocolsChart" class="top-chart"></div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Proto</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
+              <tbody id="protocolsTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-lg-6">
+        <div class="panel p-3 h-100">
+          <div class="panel-title mb-2">TCP flags</div>
+          <div id="tcpFlagsChart" class="top-chart"></div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Flags</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+              <tbody id="tcpFlagsTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const charts = {
+      bps: echarts.init(document.getElementById('bpsChart')),
+      pps: echarts.init(document.getElementById('ppsChart')),
+      srcIp: echarts.init(document.getElementById('srcIpChart')),
+      dstIp: echarts.init(document.getElementById('dstIpChart')),
+      ports: echarts.init(document.getElementById('portsChart')),
+      protocols: echarts.init(document.getElementById('protocolsChart')),
+      tcpFlags: echarts.init(document.getElementById('tcpFlagsChart'))
+    };
+
+    const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
+
+    function params() {
+      const query = new URLSearchParams();
+      query.set('range_minutes', document.getElementById('rangeMinutes').value);
+      const sensor = document.getElementById('sensor').value.trim();
+      if (sensor) query.set('sensor', sensor);
+      return query.toString();
+    }
+
+    async function fetchJSON(path) {
+      const response = await fetch(`${path}?${params()}`);
+      if (!response.ok) throw new Error(`${path} ${response.status}`);
+      return response.json();
+    }
+
+    function formatBps(value) {
+      const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
+      let size = Number(value) || 0;
+      let unit = 0;
+      while (size >= 1000 && unit < units.length - 1) {
+        size /= 1000;
+        unit += 1;
+      }
+      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    }
+
+    function formatPps(value) {
+      const units = ['pps', 'Kpps', 'Mpps', 'Gpps'];
+      let size = Number(value) || 0;
+      let unit = 0;
+      while (size >= 1000 && unit < units.length - 1) {
+        size /= 1000;
+        unit += 1;
+      }
+      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    }
+
+    function formatNumber(value) {
+      return new Intl.NumberFormat('pt-BR').format(Number(value) || 0);
+    }
+
+    function trafficOption(series, metric, color) {
+      return {
+        animation: false,
+        color: [color],
+        grid: { left: 52, right: 18, top: 22, bottom: 38 },
+        tooltip: {
+          trigger: 'axis',
+          valueFormatter: metric === 'bps' ? formatBps : formatPps
+        },
+        xAxis: {
+          type: 'category',
+          boundaryGap: false,
+          data: series.map(point => new Date(point.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })),
+          axisLabel: { color: '#6b7280' },
+          axisLine: { lineStyle: { color: '#d9dee5' } }
+        },
+        yAxis: {
+          type: 'value',
+          axisLabel: { color: '#6b7280', formatter: metric === 'bps' ? formatBps : formatPps },
+          splitLine: { lineStyle: { color: '#edf0f3' } }
+        },
+        series: [{
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          areaStyle: { opacity: .12 },
+          lineStyle: { width: 2 },
+          data: series.map(point => point[metric])
+        }]
+      };
+    }
+
+    function barOption(items, valueKey = 'bps') {
+      const top = items.slice(0, 8).reverse();
+      return {
+        animation: false,
+        color: palette,
+        grid: { left: 92, right: 16, top: 10, bottom: 22 },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          valueFormatter: valueKey === 'bps' ? formatBps : formatNumber
+        },
+        xAxis: {
+          type: 'value',
+          axisLabel: { color: '#6b7280', formatter: valueKey === 'bps' ? formatBps : formatNumber },
+          splitLine: { lineStyle: { color: '#edf0f3' } }
+        },
+        yAxis: {
+          type: 'category',
+          data: top.map(item => item.label),
+          axisLabel: { color: '#374151', width: 82, overflow: 'truncate' },
+          axisLine: { lineStyle: { color: '#d9dee5' } }
+        },
+        series: [{
+          type: 'bar',
+          data: top.map(item => item[valueKey]),
+          barMaxWidth: 18
+        }]
+      };
+    }
+
+    function pieOption(items) {
+      return {
+        animation: false,
+        color: palette,
+        tooltip: { trigger: 'item', valueFormatter: formatBps },
+        series: [{
+          type: 'pie',
+          radius: ['48%', '72%'],
+          center: ['50%', '50%'],
+          label: { formatter: '{b}', color: '#374151' },
+          data: items.map(item => ({ name: item.label, value: item.bps }))
+        }]
+      };
+    }
+
+    function fillTable(id, items, firstLabel, thirdKey = 'flows') {
+      const tbody = document.getElementById(id);
+      tbody.innerHTML = items.slice(0, 8).map(item => `
+        <tr>
+          <td title="${item.label}">${item.label}</td>
+          <td class="text-end">${formatBps(item.bps)}</td>
+          <td class="text-end">${formatNumber(item[thirdKey])}</td>
+        </tr>
+      `).join('') || `<tr><td colspan="3" class="text-muted">Sem dados</td></tr>`;
+    }
+
+    async function checkHealth() {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      try {
+        const health = await fetch('/health').then(response => response.json());
+        dot.className = 'status-dot ok';
+        text.textContent = health.status === 'ok' ? 'Online' : 'Instavel';
+      } catch (error) {
+        dot.className = 'status-dot fail';
+        text.textContent = 'Offline';
+      }
+    }
+
+    async function refresh() {
+      await checkHealth();
+      const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags] = await Promise.all([
+        fetchJSON('/api/traffic/bps'),
+        fetchJSON('/api/traffic/pps'),
+        fetchJSON('/api/tops/src-ip'),
+        fetchJSON('/api/tops/dst-ip'),
+        fetchJSON('/api/tops/ports'),
+        fetchJSON('/api/tops/protocols'),
+        fetchJSON('/api/tops/tcp-flags')
+      ]);
+
+      charts.bps.setOption(trafficOption(bps.series, 'bps', '#0f766e'), true);
+      charts.pps.setOption(trafficOption(pps.series, 'pps', '#b45309'), true);
+
+      const latestBps = bps.series.length ? bps.series[bps.series.length - 1].bps : 0;
+      const latestPps = pps.series.length ? pps.series[pps.series.length - 1].pps : 0;
+      document.getElementById('bpsReadout').textContent = formatBps(latestBps);
+      document.getElementById('ppsReadout').textContent = formatPps(latestPps);
+
+      charts.srcIp.setOption(barOption(srcIp.items), true);
+      charts.dstIp.setOption(barOption(dstIp.items), true);
+      charts.ports.setOption(barOption(ports.items), true);
+      charts.protocols.setOption(pieOption(protocols.items), true);
+      charts.tcpFlags.setOption(barOption(tcpFlags.items), true);
+
+      fillTable('srcIpTable', srcIp.items, 'IP');
+      fillTable('dstIpTable', dstIp.items, 'IP');
+      fillTable('portsTable', ports.items, 'Porta', 'packets');
+      fillTable('protocolsTable', protocols.items, 'Proto', 'packets');
+      fillTable('tcpFlagsTable', tcpFlags.items, 'Flags');
+    }
+
+    document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
+    document.getElementById('rangeMinutes').addEventListener('change', () => refresh().catch(console.error));
+    document.getElementById('sensor').addEventListener('change', () => refresh().catch(console.error));
+    window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
+
+    refresh().catch(console.error);
+    setInterval(() => refresh().catch(console.error), 60000);
+  </script>
+</body>
+</html>
