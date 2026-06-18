@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from ipaddress import ip_address
+from ipaddress import IPv4Address, ip_address
 from typing import Any
 
 import clickhouse_connect
@@ -117,6 +117,16 @@ def clean_ip(value: Any) -> str:
         return text
     if getattr(parsed, "ipv4_mapped", None):
         return str(parsed.ipv4_mapped)
+    return str(parsed)
+
+
+def clickhouse_ipv6_param(value: str, field_name: str) -> str:
+    try:
+        parsed = ip_address(value.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+    if isinstance(parsed, IPv4Address):
+        return f"::ffff:{parsed}"
     return str(parsed)
 
 
@@ -440,14 +450,16 @@ def search_flows(
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
     if ip:
-        params["ip"] = ip
-        filters.append("(src_ip = toIPv6({ip:String}) OR dst_ip = toIPv6({ip:String}))")
+        normalized_ip = clickhouse_ipv6_param(ip, "ip")
+        params["ip_src"] = normalized_ip
+        params["ip_dst"] = normalized_ip
+        filters.append("(src_ip = {ip_src:IPv6} OR dst_ip = {ip_dst:IPv6})")
     if src_ip:
-        params["src_ip"] = src_ip
-        filters.append("src_ip = toIPv6({src_ip:String})")
+        params["src_ip"] = clickhouse_ipv6_param(src_ip, "src_ip")
+        filters.append("src_ip = {src_ip:IPv6}")
     if dst_ip:
-        params["dst_ip"] = dst_ip
-        filters.append("dst_ip = toIPv6({dst_ip:String})")
+        params["dst_ip"] = clickhouse_ipv6_param(dst_ip, "dst_ip")
+        filters.append("dst_ip = {dst_ip:IPv6}")
     if port is not None:
         params["port"] = port
         filters.append("(src_port = {port:UInt16} OR dst_port = {port:UInt16})")
