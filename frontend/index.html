@@ -293,6 +293,8 @@
   </main>
 
   <script>
+    const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
+
     const charts = {
       bps: echarts.init(document.getElementById('bpsChart')),
       pps: echarts.init(document.getElementById('ppsChart')),
@@ -314,8 +316,12 @@
     }
 
     async function fetchJSON(path) {
-      const response = await fetch(`${path}?${params()}`);
-      if (!response.ok) throw new Error(`${path} ${response.status}`);
+      const endpoint = `${API_BASE}${path}?${params()}`;
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        console.error('Falha na chamada da API', endpoint, response.status);
+        throw new Error(`${endpoint} ${response.status}`);
+      }
       return response.json();
     }
 
@@ -486,9 +492,13 @@
       const status = document.getElementById('flowSearchStatus');
       const tbody = document.getElementById('flowSearchTable');
       status.textContent = 'Buscando flows';
+      const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}`;
       try {
-        const response = await fetch(`/api/flows/search?${flowSearchParams()}`);
-        if (!response.ok) throw new Error(`flows ${response.status}`);
+        const response = await fetch(endpoint);
+        if (!response.ok) {
+          console.error('Falha na chamada da API', endpoint, response.status);
+          throw new Error(`${endpoint} ${response.status}`);
+        }
         const payload = await response.json();
         const items = payload.items || [];
         tbody.innerHTML = items.map(flow => `
@@ -511,20 +521,27 @@
       } catch (error) {
         tbody.innerHTML = `<tr><td colspan="12" class="text-danger">Falha ao buscar flows</td></tr>`;
         status.textContent = 'Falha na busca';
-        console.error(error);
+        console.error('Falha na chamada da API', endpoint, error);
       }
     }
 
     async function checkHealth() {
       const dot = document.getElementById('statusDot');
       const text = document.getElementById('statusText');
+      const endpoint = `${API_BASE}/health`;
       try {
-        const health = await fetch('/health').then(response => response.json());
+        const response = await fetch(endpoint);
+        if (!response.ok) {
+          console.error('Falha na chamada da API', endpoint, response.status);
+          throw new Error(`${endpoint} ${response.status}`);
+        }
+        const health = await response.json();
         dot.className = 'status-dot ok';
         text.textContent = health.status === 'ok' ? 'Online' : 'Instavel';
       } catch (error) {
         dot.className = 'status-dot fail';
         text.textContent = 'Offline';
+        console.error('Falha na chamada da API', endpoint, error);
       }
     }
 
