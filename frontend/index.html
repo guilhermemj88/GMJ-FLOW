@@ -172,7 +172,17 @@
     }
 
     .dashboard-controls {
-      max-width: 560px;
+      max-width: 760px;
+    }
+
+    .dashboard-controls .form-select {
+      width: auto;
+      min-width: 130px;
+    }
+
+    #sensor,
+    #interface {
+      min-width: 190px;
     }
 
     .panel {
@@ -353,6 +363,54 @@
       vertical-align: middle;
     }
 
+    .ip-link {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: #2563eb;
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .ip-link:hover,
+    .ip-link:focus {
+      color: #1d4ed8;
+    }
+
+    .ip-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .75rem;
+    }
+
+    .ip-detail-item {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: .65rem .75rem;
+      min-width: 0;
+    }
+
+    .ip-detail-label {
+      color: var(--muted);
+      font-size: .74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .ip-detail-value {
+      margin-top: .18rem;
+      color: #111827;
+      overflow-wrap: anywhere;
+    }
+
+    .ip-entity-list {
+      display: grid;
+      gap: .5rem;
+    }
+
     .icon-button {
       display: inline-flex;
       align-items: center;
@@ -501,7 +559,8 @@
       .flow-search-grid,
       .sensor-form-grid,
       .snmp-form-grid,
-      .interface-form-grid {
+      .interface-form-grid,
+      .ip-detail-grid {
         grid-template-columns: 1fr;
       }
 
@@ -561,7 +620,12 @@
                 <option value="360">6 h</option>
                 <option value="1440">24 h</option>
               </select>
-              <input id="sensor" class="form-control form-control-sm" placeholder="sensor" value="">
+              <select id="sensor" class="form-select form-select-sm" aria-label="Sensor">
+                <option value="">Todos os sensores</option>
+              </select>
+              <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
+                <option value="">Todas as interfaces</option>
+              </select>
               <button id="refresh" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
@@ -1146,6 +1210,23 @@
     </div>
   </div>
 
+  <div id="ipDetailsModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="ipDetailsModalTitle">
+    <div class="gmj-dialog small">
+      <div class="gmj-dialog-header">
+        <h2 id="ipDetailsModalTitle" class="view-title">WHOIS / RDAP</h2>
+        <button type="button" class="icon-button" data-close-modal="ipDetailsModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="ipDetailsBody" class="subtle">Carregando</div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="ipDetailsModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
 
@@ -1161,6 +1242,8 @@
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
     let activeView = 'dashboard';
+    let dashboardSensorCache = [];
+    let dashboardInterfaceCache = [];
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -1172,11 +1255,23 @@
       }
     }
 
-    function params() {
+    function selectedDashboardSensorId() {
+      const value = document.getElementById('sensor').value;
+      return value ? Number(value) : null;
+    }
+
+    function selectedDashboardInterfaceId() {
+      const value = document.getElementById('interface').value;
+      return value ? Number(value) : null;
+    }
+
+    function dashboardParams({ includeSensorId = true, includeInterfaceId = false } = {}) {
       const query = new URLSearchParams();
       query.set('range_minutes', document.getElementById('rangeMinutes').value);
-      const sensor = document.getElementById('sensor').value.trim();
-      if (sensor) query.set('sensor', sensor);
+      const sensorId = selectedDashboardSensorId();
+      const interfaceId = selectedDashboardInterfaceId();
+      if (includeSensorId && sensorId) query.set('sensor_id', String(sensorId));
+      if (includeInterfaceId && interfaceId) query.set('interface_id', String(interfaceId));
       return query.toString();
     }
 
@@ -1184,8 +1279,8 @@
       return `${API_BASE}${path}`;
     }
 
-    async function fetchJSON(path) {
-      const endpoint = `${API_BASE}${path}?${params()}`;
+    async function fetchJSON(path, queryString = dashboardParams()) {
+      const endpoint = `${API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
       const response = await fetch(endpoint);
       if (!response.ok) {
         console.error('Falha na chamada da API', endpoint, response.status);
@@ -1212,6 +1307,72 @@
         throw new Error(message);
       }
       return payload;
+    }
+
+    function dashboardInterfaceLabel(iface) {
+      const name = iface.name || iface.if_alias || iface.if_name || `ifIndex ${iface.if_index}`;
+      return `${name} (ifIndex ${formatNumber(iface.if_index)})`;
+    }
+
+    function renderDashboardSensorSelect() {
+      const select = document.getElementById('sensor');
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Todos os sensores</option>',
+        ...dashboardSensorCache.map(sensor => (
+          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
+        ))
+      ].join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
+    }
+
+    function renderDashboardInterfaceSelect() {
+      const select = document.getElementById('interface');
+      const current = select.value;
+      const sensorId = selectedDashboardSensorId();
+      select.disabled = !sensorId;
+      select.innerHTML = [
+        '<option value="">Todas as interfaces</option>',
+        ...dashboardInterfaceCache.map(iface => (
+          `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
+        ))
+      ].join('');
+      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+    }
+
+    async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
+      dashboardInterfaceCache = [];
+      document.getElementById('interface').value = '';
+      renderDashboardInterfaceSelect();
+      if (!sensorId) return;
+
+      try {
+        const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
+        dashboardInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
+        renderDashboardInterfaceSelect();
+      } catch (error) {
+        console.error('Falha ao carregar interfaces do sensor', error);
+      }
+    }
+
+    async function loadDashboardSensors() {
+      try {
+        const payload = await apiRequest('/api/dashboard/sensors');
+        dashboardSensorCache = Array.isArray(payload.items) ? payload.items : [];
+        renderDashboardSensorSelect();
+        await loadDashboardInterfaces();
+      } catch (error) {
+        dashboardSensorCache = [];
+        dashboardInterfaceCache = [];
+        renderDashboardSensorSelect();
+        renderDashboardInterfaceSelect();
+        console.error('Falha ao carregar sensores do dashboard', error);
+      }
+    }
+
+    async function handleDashboardSensorChange() {
+      await loadDashboardInterfaces();
+      await refresh();
     }
 
     function formatBps(value) {
@@ -1261,6 +1422,91 @@
       }[char]));
     }
 
+    function ipLink(ip) {
+      const value = String(ip || '').trim();
+      if (!value) return '-';
+      return `<button type="button" class="ip-link" data-ip="${escapeHtml(value)}" title="Consultar WHOIS/RDAP">${escapeHtml(value)}</button>`;
+    }
+
+    function ipDetailItem(label, value) {
+      return `
+        <div class="ip-detail-item">
+          <div class="ip-detail-label">${escapeHtml(label)}</div>
+          <div class="ip-detail-value">${escapeHtml(value || '-')}</div>
+        </div>
+      `;
+    }
+
+    function renderIpEntities(entities) {
+      const items = Array.isArray(entities) ? entities.filter(Boolean).slice(0, 8) : [];
+      if (!items.length) {
+        return '<div class="text-muted">Sem entidades no RDAP.</div>';
+      }
+      return `
+        <div class="ip-entity-list">
+          ${items.map(entity => `
+            <div class="ip-detail-item">
+              <div class="fw-semibold">${escapeHtml(entity.name || entity.handle || 'Entidade')}</div>
+              <div class="subtle">Roles: ${escapeHtml((entity.roles || []).join(', ') || '-')}</div>
+              <div class="subtle">Handle: ${escapeHtml(entity.handle || '-')}</div>
+              <div class="subtle">Email: ${escapeHtml(entity.email || '-')}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function setIpDetailsLoading(ip) {
+      document.getElementById('ipDetailsModalTitle').textContent = `WHOIS / RDAP ${ip}`;
+      document.getElementById('ipDetailsBody').innerHTML = `<div class="subtle">Consultando ${escapeHtml(ip)}</div>`;
+      openModal('ipDetailsModal');
+    }
+
+    function renderIpDetails(payload) {
+      const isPublic = Boolean(payload.is_public);
+      const typeLabel = isPublic ? 'Publico' : 'Privado/local';
+      const message = payload.message
+        ? `<div class="${payload.ok === false ? 'text-danger' : 'subtle'} mb-3">${escapeHtml(payload.message)}</div>`
+        : '';
+      document.getElementById('ipDetailsModalTitle').textContent = `WHOIS / RDAP ${payload.ip || ''}`.trim();
+      document.getElementById('ipDetailsBody').innerHTML = `
+        ${message}
+        <div class="ip-detail-grid mb-3">
+          ${ipDetailItem('IP', payload.ip)}
+          ${ipDetailItem('Tipo', typeLabel)}
+          ${ipDetailItem('Nome/Organizacao', payload.name)}
+          ${ipDetailItem('Pais', payload.country)}
+          ${ipDetailItem('Range inicial', payload.start_address)}
+          ${ipDetailItem('Range final', payload.end_address)}
+          ${ipDetailItem('Handle', payload.handle)}
+          ${ipDetailItem('Parent Handle', payload.parent_handle)}
+        </div>
+        <div class="panel-title mb-2">Entidades principais</div>
+        ${renderIpEntities(payload.entities)}
+      `;
+    }
+
+    async function openIpDetails(ip) {
+      setIpDetailsLoading(ip);
+      const endpoint = `${API_BASE}/api/ip/whois?ip=${encodeURIComponent(ip)}`;
+      try {
+        const response = await fetch(endpoint);
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.detail || `${endpoint} ${response.status}`);
+        }
+        renderIpDetails(payload);
+      } catch (error) {
+        renderIpDetails({
+          ip,
+          is_public: true,
+          ok: false,
+          message: `Falha ao consultar RDAP: ${error.message}`,
+          entities: []
+        });
+      }
+    }
+
     function formatDateTime(value) {
       if (!value) return '';
       return new Date(value).toLocaleString('pt-BR', {
@@ -1302,6 +1548,77 @@
           data: items.map(point => Number(point[metric]) || 0)
         }]
       };
+    }
+
+    function metricFormatter(metric) {
+      return metric === 'bps' ? formatBps : formatPps;
+    }
+
+    function tooltipValue(value, metric) {
+      const pointValue = Array.isArray(value) ? value[1] : value;
+      return metricFormatter(metric)(pointValue);
+    }
+
+    function interfaceTrafficOption(items, metric) {
+      const colors = items.map((item, index) => item.color || palette[index % palette.length]);
+      return {
+        animation: false,
+        color: colors,
+        grid: { left: 52, right: 18, top: 48, bottom: 38 },
+        legend: {
+          type: 'scroll',
+          top: 0,
+          left: 0,
+          right: 0,
+          textStyle: { color: '#374151' }
+        },
+        tooltip: {
+          trigger: 'axis',
+          formatter(params) {
+            const rows = Array.isArray(params) ? params : [params];
+            const first = rows[0];
+            const timeValue = Array.isArray(first?.value) ? first.value[0] : first?.axisValue;
+            const title = timeValue
+              ? new Date(timeValue).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+              : '';
+            const lines = rows.map(row => (
+              `${row.marker}${escapeHtml(row.seriesName)}: ${tooltipValue(row.value, metric)}`
+            ));
+            return [title, ...lines].filter(Boolean).join('<br>');
+          }
+        },
+        xAxis: {
+          type: 'time',
+          boundaryGap: false,
+          axisLabel: {
+            color: '#6b7280',
+            formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          },
+          axisLine: { lineStyle: { color: '#d9dee5' } }
+        },
+        yAxis: {
+          type: 'value',
+          axisLabel: { color: '#6b7280', formatter: metricFormatter(metric) },
+          splitLine: { lineStyle: { color: '#edf0f3' } }
+        },
+        series: items.map((item, index) => ({
+          name: item.interface_name || `ifIndex ${item.if_index}`,
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: colors[index] },
+          itemStyle: { color: colors[index] },
+          data: (item.points || []).map(point => [point.time, Number(point[metric]) || 0])
+        }))
+      };
+    }
+
+    function latestInterfaceValue(items, metric) {
+      return items.reduce((total, item) => {
+        const points = Array.isArray(item.points) ? item.points : [];
+        const latest = points.length ? points[points.length - 1] : null;
+        return total + (Number(latest?.[metric]) || 0);
+      }, 0);
     }
 
     function itemLabel(item, type) {
@@ -1361,7 +1678,9 @@
       const tbody = document.getElementById(id);
       tbody.innerHTML = items.slice(0, 8).map(item => `
         <tr>
-          <td title="${escapeHtml(itemLabel(item, type))}">${escapeHtml(itemLabel(item, type))}</td>
+          <td title="${type === 'ip' ? 'Consultar WHOIS/RDAP' : escapeHtml(itemLabel(item, type))}">
+            ${type === 'ip' ? ipLink(item.ip) : escapeHtml(itemLabel(item, type))}
+          </td>
           <td class="text-end">${formatBps(item.bps)}</td>
           <td class="text-end">${formatNumber(item[thirdKey])}</td>
         </tr>
@@ -1376,12 +1695,12 @@
       const ip = document.getElementById('flowIp').value.trim();
       const port = document.getElementById('flowPort').value.trim();
       const proto = document.getElementById('flowProto').value;
-      const sensor = document.getElementById('sensor').value.trim();
+      const sensorId = selectedDashboardSensorId();
 
       if (ip) query.set('ip', ip);
       if (port) query.set('port', port);
       if (proto) query.set('proto', proto);
-      if (sensor) query.set('sensor', sensor);
+      if (sensorId) query.set('sensor_id', String(sensorId));
       return query.toString();
     }
 
@@ -1409,9 +1728,9 @@
           <tr>
             <td>${formatDateTime(flow.flow_time)}</td>
             <td>${escapeHtml(flow.sensor)}</td>
-            <td>${escapeHtml(flow.src_ip)}</td>
+            <td>${ipLink(flow.src_ip)}</td>
             <td class="text-end">${formatNumber(flow.src_port)}</td>
-            <td>${escapeHtml(flow.dst_ip)}</td>
+            <td>${ipLink(flow.dst_ip)}</td>
             <td class="text-end">${formatNumber(flow.dst_port)}</td>
             <td>${escapeHtml(flow.proto_name)}</td>
             <td>${escapeHtml(flow.tcp_flags_name)}</td>
@@ -1452,9 +1771,13 @@
     async function refresh() {
       await checkHealth();
       if (activeView !== 'dashboard') return;
+      const sensorId = selectedDashboardSensorId();
+      const trafficQuery = sensorId
+        ? dashboardParams({ includeSensorId: true, includeInterfaceId: true })
+        : dashboardParams({ includeSensorId: false });
       const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags] = await Promise.all([
-        fetchJSON('/api/traffic/bps'),
-        fetchJSON('/api/traffic/pps'),
+        fetchJSON(sensorId ? '/api/traffic/interface-bps' : '/api/traffic/bps', trafficQuery),
+        fetchJSON(sensorId ? '/api/traffic/interface-pps' : '/api/traffic/pps', trafficQuery),
         fetchJSON('/api/tops/src-ip'),
         fetchJSON('/api/tops/dst-ip'),
         fetchJSON('/api/tops/ports'),
@@ -1470,11 +1793,20 @@
       const protocolItems = protocols.items;
       const tcpFlagItems = tcpFlags.items;
 
-      charts.bps.setOption(trafficOption(bpsItems, 'bps', '#0f766e'), true);
-      charts.pps.setOption(trafficOption(ppsItems, 'pps', '#b45309'), true);
+      if (sensorId) {
+        charts.bps.setOption(interfaceTrafficOption(bpsItems, 'bps'), true);
+        charts.pps.setOption(interfaceTrafficOption(ppsItems, 'pps'), true);
+      } else {
+        charts.bps.setOption(trafficOption(bpsItems, 'bps', '#0f766e'), true);
+        charts.pps.setOption(trafficOption(ppsItems, 'pps', '#b45309'), true);
+      }
 
-      const latestBps = bpsItems.length ? bpsItems[bpsItems.length - 1].bps : 0;
-      const latestPps = ppsItems.length ? ppsItems[ppsItems.length - 1].pps : 0;
+      const latestBps = sensorId
+        ? latestInterfaceValue(bpsItems, 'bps')
+        : (bpsItems.length ? bpsItems[bpsItems.length - 1].bps : 0);
+      const latestPps = sensorId
+        ? latestInterfaceValue(ppsItems, 'pps')
+        : (ppsItems.length ? ppsItems[ppsItems.length - 1].pps : 0);
       document.getElementById('bpsReadout').textContent = formatBps(latestBps);
       document.getElementById('ppsReadout').textContent = formatPps(latestPps);
 
@@ -1710,6 +2042,7 @@
         const saved = await apiRequest(path, options);
         currentSensorId = saved.id;
         await loadSensors();
+        await loadDashboardSensors();
         setSensorStatus(`Sensor ${saved.name} salvo`);
       } catch (error) {
         setSensorStatus(`Falha ao salvar sensor: ${error.message}`, 'error');
@@ -1729,6 +2062,7 @@
         await apiRequest(`/api/sensors/${currentSensorId}`, { method: 'DELETE' });
         currentSensorId = null;
         await loadSensors();
+        await loadDashboardSensors();
         setSensorStatus('Sensor excluido');
       } catch (error) {
         setSensorStatus(`Falha ao excluir sensor: ${error.message}`, 'error');
@@ -1979,7 +2313,7 @@
         document.getElementById('view-dashboard').classList.add('active');
         document.querySelector('[data-nav-view="dashboard"]').classList.add('active');
         Object.values(charts).forEach(chart => chart.resize());
-        refresh().catch(console.error);
+        loadDashboardSensors().then(() => refresh()).catch(console.error);
       } else if (view === 'sensors') {
         document.getElementById('view-sensors').classList.add('active');
         document.querySelector('[data-nav-view="sensors"]').classList.add('active');
@@ -1996,6 +2330,21 @@
       button.addEventListener('click', () => showView(button.dataset.navView, button.dataset.placeholderTitle || ''));
     });
 
+    document.addEventListener('click', event => {
+      const target = event.target.closest('.ip-link[data-ip]');
+      if (!target) return;
+      event.preventDefault();
+      openIpDetails(target.dataset.ip).catch(console.error);
+    });
+
+    charts.srcIp.on('click', params => {
+      if (params?.name) openIpDetails(params.name).catch(console.error);
+    });
+
+    charts.dstIp.on('click', params => {
+      if (params?.name) openIpDetails(params.name).catch(console.error);
+    });
+
     document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
     document.getElementById('flowIp').addEventListener('keydown', event => {
@@ -2005,7 +2354,8 @@
       if (event.key === 'Enter') searchFlows().catch(console.error);
     });
     document.getElementById('rangeMinutes').addEventListener('change', () => refresh().catch(console.error));
-    document.getElementById('sensor').addEventListener('change', () => refresh().catch(console.error));
+    document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
+    document.getElementById('interface').addEventListener('change', () => refresh().catch(console.error));
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
@@ -2038,7 +2388,7 @@
     window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
 
     createIcons();
-    refresh().catch(console.error);
+    loadDashboardSensors().then(() => refresh()).catch(console.error);
     setInterval(() => refresh().catch(console.error), 60000);
   </script>
 </body>

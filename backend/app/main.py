@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import asyncio
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from ipaddress import IPv4Address, ip_address
@@ -126,6 +131,9 @@ INTERFACE_COLUMNS = [
 ]
 
 INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
+
+WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
+WHOIS_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class SensorInterfacePayload(BaseModel):
@@ -458,6 +466,21 @@ def interface_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def interface_display_name(interface: sqlite3.Row | dict[str, Any]) -> str:
+    return (
+        clean_text(interface["if_alias"])
+        or clean_text(interface["if_name"])
+        or clean_text(interface["if_descr"])
+        or f"ifIndex {interface['if_index']}"
+    )
+
+
+def interface_dashboard_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = interface_row_to_dict(row)
+    item["name"] = interface_display_name(item)
+    return item
+
+
 def sensor_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_interfaces: bool = True) -> dict[str, Any]:
     item = dict(row)
     for field in SENSOR_BOOL_COLUMNS:
@@ -481,6 +504,13 @@ def fetch_sensor(conn: sqlite3.Connection, sensor_id: int) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="Sensor nao encontrado")
     return sensor_row_to_dict(conn, row)
+
+
+def fetch_sensor_without_interfaces(conn: sqlite3.Connection, sensor_id: int) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM sensors WHERE id = ?", (sensor_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sensor nao encontrado")
+    return sensor_row_to_dict(conn, row, include_interfaces=False)
 
 
 def replace_sensor_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]], now: str) -> None:
@@ -943,7 +973,111 @@ def clickhouse_ip_string_param(value: str, field_name: str) -> str:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
     if isinstance(parsed, IPv4Address):
         return f"::ffff:{parsed}"
+    if getattr(parsed, "ipv4_mapped", None):
+        return f"::ffff:{parsed.ipv4_mapped}"
     return str(parsed)
+
+
+def whois_ip_text(value: str) -> str:
+    try:
+        parsed = ip_address(value.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ip invalido") from None
+    if getattr(parsed, "ipv4_mapped", None):
+        return str(parsed.ipv4_mapped)
+    return str(parsed)
+
+
+def is_public_ip(value: str) -> bool:
+    parsed = ip_address(value)
+    return not (
+        parsed.is_private
+        or parsed.is_loopback
+        or parsed.is_multicast
+        or parsed.is_link_local
+        or parsed.is_reserved
+        or parsed.is_unspecified
+    )
+
+
+def cached_whois(ip: str) -> dict[str, Any] | None:
+    item = WHOIS_CACHE.get(ip)
+    if not item:
+        return None
+    if float(item.get("expires_at", 0)) <= time.time():
+        WHOIS_CACHE.pop(ip, None)
+        return None
+    data = item.get("data")
+    return data if isinstance(data, dict) else None
+
+
+def cache_whois(ip: str, data: dict[str, Any]) -> dict[str, Any]:
+    WHOIS_CACHE[ip] = {
+        "expires_at": time.time() + WHOIS_CACHE_TTL_SECONDS,
+        "data": data,
+    }
+    return data
+
+
+def rdap_link(data: dict[str, Any]) -> str:
+    for link in data.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        href = clean_text(link.get("href"))
+        if href and (link.get("rel") == "self" or not link.get("rel")):
+            return href
+    return ""
+
+
+def vcard_values(entity: dict[str, Any], key: str) -> list[str]:
+    values = []
+    vcard = entity.get("vcardArray")
+    if not isinstance(vcard, list) or len(vcard) < 2 or not isinstance(vcard[1], list):
+        return values
+    for entry in vcard[1]:
+        if not isinstance(entry, list) or len(entry) < 4 or entry[0] != key:
+            continue
+        value = entry[3]
+        if isinstance(value, list):
+            value = " ".join(clean_text(part) for part in value if clean_text(part))
+        value_text = clean_text(value)
+        if value_text:
+            values.append(value_text)
+    return values
+
+
+def rdap_entity(entity: dict[str, Any]) -> dict[str, Any]:
+    names = [*vcard_values(entity, "fn"), *vcard_values(entity, "org")]
+    emails = vcard_values(entity, "email")
+    return {
+        "handle": clean_text(entity.get("handle")),
+        "roles": [clean_text(role) for role in entity.get("roles") or [] if clean_text(role)],
+        "name": names[0] if names else "",
+        "email": emails[0] if emails else "",
+    }
+
+
+def rdap_response(ip: str, data: dict[str, Any]) -> dict[str, Any]:
+    entities = [
+        rdap_entity(entity)
+        for entity in data.get("entities") or []
+        if isinstance(entity, dict)
+    ]
+    return {
+        "ip": ip,
+        "type": "public",
+        "is_public": True,
+        "ok": True,
+        "name": clean_text(data.get("name")),
+        "handle": clean_text(data.get("handle")),
+        "country": clean_text(data.get("country")),
+        "start_address": clean_text(data.get("startAddress")),
+        "end_address": clean_text(data.get("endAddress")),
+        "parent_handle": clean_text(data.get("parentHandle")),
+        "rdap_url": rdap_link(data),
+        "entities": entities,
+        "raw": data,
+    }
 
 
 def proto_name(value: Any) -> str:
@@ -1037,12 +1171,96 @@ def health(
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
 
 
+@app.get("/api/ip/whois")
+def ip_whois(ip: str = Query(..., min_length=2)):
+    ip_text = whois_ip_text(ip)
+    cached = cached_whois(ip_text)
+    if cached is not None:
+        return cached
+
+    if not is_public_ip(ip_text):
+        return cache_whois(
+            ip_text,
+            {
+                "ip": ip_text,
+                "type": "private",
+                "is_public": False,
+                "ok": True,
+                "message": "IP privado/local. Nao possui WHOIS publico.",
+            },
+        )
+
+    rdap_url = f"https://rdap.org/ip/{urllib.parse.quote(ip_text, safe=':.')}"
+    request = urllib.request.Request(
+        rdap_url,
+        headers={
+            "Accept": "application/rdap+json, application/json",
+            "User-Agent": "GMJ-FLOW/0.1",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:
+            payload = response.read()
+        data = json.loads(payload.decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return {
+            "ip": ip_text,
+            "type": "public",
+            "is_public": True,
+            "ok": False,
+            "message": f"Falha ao consultar RDAP: HTTP {exc.code}",
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "ip": ip_text,
+            "type": "public",
+            "is_public": True,
+            "ok": False,
+            "message": f"Falha ao consultar RDAP: {exc.reason}",
+        }
+    except Exception as exc:
+        return {
+            "ip": ip_text,
+            "type": "public",
+            "is_public": True,
+            "ok": False,
+            "message": f"Falha ao consultar RDAP: {exc}",
+        }
+
+    if not isinstance(data, dict):
+        return {
+            "ip": ip_text,
+            "type": "public",
+            "is_public": True,
+            "ok": False,
+            "message": "Falha ao consultar RDAP: resposta invalida",
+        }
+
+    return cache_whois(ip_text, rdap_response(ip_text, data))
+
+
 @app.get("/api/sensors")
 def list_sensors():
     ensure_sensor_db()
     with sqlite_connection() as conn:
         rows = conn.execute("SELECT * FROM sensors ORDER BY name, id").fetchall()
         return {"items": [sensor_row_to_dict(conn, row) for row in rows]}
+
+
+@app.get("/api/dashboard/sensors")
+def list_dashboard_sensors():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, exporter_ip
+            FROM sensors
+            WHERE active = 1
+            ORDER BY name, id
+            """
+        ).fetchall()
+        return {"items": [dict(row) for row in rows]}
 
 
 @app.post("/api/sensors", status_code=201)
@@ -1070,6 +1288,23 @@ def get_sensor(sensor_id: int):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         return fetch_sensor(conn, sensor_id)
+
+
+@app.get("/api/sensors/{sensor_id}/interfaces")
+def list_sensor_interfaces(sensor_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_sensor_without_interfaces(conn, sensor_id)
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND monitor_enabled = 1
+            ORDER BY if_index, id
+            """,
+            (sensor_id,),
+        ).fetchall()
+        return {"items": [interface_dashboard_row_to_dict(row) for row in rows]}
 
 
 @app.put("/api/sensors/{sensor_id}")
@@ -1157,13 +1392,31 @@ def discover_sensor_interfaces(sensor_id: int, payload: SnmpActionPayload | None
     }
 
 
-def raw_flow_where(range_minutes: int, sensor: str | None, params: dict[str, Any]) -> str:
+def raw_flow_where(
+    range_minutes: int,
+    sensor: str | None,
+    params: dict[str, Any],
+    exporter_ip: str | None = None,
+) -> str:
     safe_range_minutes = max(1, min(int(range_minutes), 10080))
     where = f"flow_time >= now() - INTERVAL {safe_range_minutes} MINUTE"
-    if sensor:
+    if exporter_ip:
+        params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
+        where += " AND toString(exporter_ip) = {exporter_ip:String}"
+    elif sensor:
         params["sensor"] = sensor
         where += " AND sensor = {sensor:String}"
     return where
+
+
+def sensor_exporter_ip(sensor_id: int) -> str:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+    exporter_ip = clean_text(sensor.get("exporter_ip"))
+    if not exporter_ip:
+        raise HTTPException(status_code=400, detail="Sensor sem exporter_ip configurado")
+    return exporter_ip
 
 
 def traffic_items(metric: str, range_minutes: int, sensor: str | None):
@@ -1205,15 +1458,120 @@ def get_pps(
     return traffic_items("pps", range_minutes, sensor)
 
 
+def monitored_sensor_interfaces(
+    conn: sqlite3.Connection,
+    sensor_id: int,
+    interface_id: int | None = None,
+    if_index: int | None = None,
+) -> list[dict[str, Any]]:
+    filters = ["sensor_id = ?", "monitor_enabled = 1"]
+    values: list[Any] = [sensor_id]
+    if interface_id is not None:
+        filters.append("id = ?")
+        values.append(interface_id)
+    if if_index is not None:
+        filters.append("if_index = ?")
+        values.append(if_index)
+
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM sensor_interfaces
+        WHERE {' AND '.join(filters)}
+        ORDER BY if_index, id
+        """,
+        values,
+    ).fetchall()
+    return [interface_dashboard_row_to_dict(row) for row in rows]
+
+
+def interface_traffic_items(
+    metric: str,
+    sensor_id: int,
+    range_minutes: int,
+    interface_id: int | None = None,
+    if_index: int | None = None,
+) -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        interfaces = monitored_sensor_interfaces(conn, sensor_id, interface_id, if_index)
+
+    exporter_ip = clean_text(sensor.get("exporter_ip"))
+    if not exporter_ip:
+        raise HTTPException(status_code=400, detail="Sensor sem exporter_ip configurado")
+
+    value_expr = "sum(bytes) * 8 / 60" if metric == "bps" else "sum(packets) / 60"
+    safe_range_minutes = max(1, min(int(range_minutes), 10080))
+    items = []
+    for interface in interfaces:
+        params: dict[str, Any] = {
+            "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
+            "if_index": int(interface["if_index"] or 0),
+        }
+        result = query_clickhouse(
+            f"""
+            SELECT
+                toStartOfMinute(flow_time) AS time,
+                {value_expr} AS {metric}
+            FROM flow_raw
+            WHERE flow_time >= now() - INTERVAL {safe_range_minutes} MINUTE
+              AND toString(exporter_ip) = {{exporter_ip:String}}
+              AND (input_if = {{if_index:UInt32}} OR output_if = {{if_index:UInt32}})
+            GROUP BY time
+            ORDER BY time
+            """,
+            params,
+        )
+
+        points = [
+            {"time": iso(row["time"]), metric: round(float(row[metric] or 0), 2)}
+            for row in rows_as_dicts(result)
+        ]
+        items.append(
+            {
+                "interface_id": interface["id"],
+                "if_index": interface["if_index"],
+                "interface_name": interface["name"],
+                "color": interface["color"] or "#64748b",
+                "points": points,
+            }
+        )
+
+    return {"items": items}
+
+
+@app.get("/api/traffic/interface-bps")
+def get_interface_bps(
+    sensor_id: int = Query(..., ge=1),
+    range_minutes: int = Query(60, ge=1, le=10080),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+):
+    return interface_traffic_items("bps", sensor_id, range_minutes, interface_id, if_index)
+
+
+@app.get("/api/traffic/interface-pps")
+def get_interface_pps(
+    sensor_id: int = Query(..., ge=1),
+    range_minutes: int = Query(60, ge=1, le=10080),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+):
+    return interface_traffic_items("pps", sensor_id, range_minutes, interface_id, if_index)
+
+
 def top_dimension(
     dimension: str,
     range_minutes: int,
     sensor: str | None,
+    sensor_id: int | None,
     limit: int,
 ):
     seconds = max(range_minutes * 60, 1)
     params: dict[str, Any] = {"limit": limit, "seconds": seconds}
-    where = raw_flow_where(range_minutes, sensor, params)
+    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
+    where = raw_flow_where(range_minutes, sensor, params, exporter_ip)
 
     if dimension == "src_ip":
         query = f"""
@@ -1317,45 +1675,50 @@ def top_dimension(
 def top_src_ip(
     range_minutes: int = Query(60, ge=1, le=10080),
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("src_ip", range_minutes, sensor, limit)
+    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit)
 
 
 @app.get("/api/tops/dst-ip")
 def top_dst_ip(
     range_minutes: int = Query(60, ge=1, le=10080),
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_ip", range_minutes, sensor, limit)
+    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit)
 
 
 @app.get("/api/tops/ports")
 def top_ports(
     range_minutes: int = Query(60, ge=1, le=10080),
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_port", range_minutes, sensor, limit)
+    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit)
 
 
 @app.get("/api/tops/protocols")
 def top_protocols(
     range_minutes: int = Query(60, ge=1, le=10080),
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("proto", range_minutes, sensor, limit)
+    return top_dimension("proto", range_minutes, sensor, sensor_id, limit)
 
 
 @app.get("/api/tops/tcp-flags")
 def top_tcp_flags(
     range_minutes: int = Query(60, ge=1, le=10080),
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("tcp_flags", range_minutes, sensor, limit)
+    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit)
 
 
 @app.get("/api/flows/search")
@@ -1364,6 +1727,7 @@ def search_flows(
     start: datetime | None = None,
     end: datetime | None = None,
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
     ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
@@ -1377,7 +1741,10 @@ def search_flows(
     start_dt, end_dt = resolve_range(range_minutes, start, end)
     params: dict[str, Any] = {"start": start_dt, "end": end_dt, "limit": limit}
     filters = ["flow_time >= {start:DateTime}", "flow_time < {end:DateTime}"]
-    if sensor:
+    if sensor_id is not None:
+        params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
+        filters.append("toString(exporter_ip) = {exporter_ip:String}")
+    elif sensor:
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
     if ip:
