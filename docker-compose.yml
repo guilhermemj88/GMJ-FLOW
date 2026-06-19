@@ -30,6 +30,7 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
       API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
       GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
+      GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
     ports:
       - "${BACKEND_PORT-8000}:8000"
     volumes:

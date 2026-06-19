@@ -4,6 +4,7 @@ import os
 import sqlite3
 import asyncio
 import json
+import logging
 import socket
 import time
 import urllib.error
@@ -16,12 +17,16 @@ from pathlib import Path
 from typing import Any
 
 import clickhouse_connect
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pydantic import BaseModel, Field
+from starlette.responses import JSONResponse
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
+logger = logging.getLogger("gmj-flow")
 
 cors_origins = os.getenv("API_CORS_ORIGINS", "*")
 app.add_middleware(
@@ -135,6 +140,13 @@ INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
 
 WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
 WHOIS_CACHE: dict[str, dict[str, Any]] = {}
+AUTH_ALGORITHM = "HS256"
+AUTH_TOKEN_EXPIRE_HOURS = 8
+AUTH_SECRET = os.getenv("GMJFLOW_AUTH_SECRET")
+if not AUTH_SECRET:
+    AUTH_SECRET = "gmj-flow-dev-secret-change-me"
+    logger.warning("GMJFLOW_AUTH_SECRET nao definido; usando segredo de desenvolvimento.")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class SensorInterfacePayload(BaseModel):
@@ -201,6 +213,16 @@ class SnmpActionPayload(BaseModel):
     snmp_privacy_passphrase: str | None = None
     timeout_seconds: float | None = None
     retries: int | None = None
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordPayload(BaseModel):
+    current_password: str
+    new_password: str
 
 
 def get_client():
@@ -309,8 +331,30 @@ def sqlite_connection() -> sqlite3.Connection:
     return conn
 
 
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
+
+
 def ensure_sensor_db() -> None:
     with sqlite_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                must_change_password INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sensors (
@@ -374,6 +418,25 @@ def ensure_sensor_db() -> None:
             )
             """
         )
+        user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
+        if int(user_count or 0) == 0:
+            now = utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username,
+                    password_hash,
+                    role,
+                    must_change_password,
+                    active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("admin", hash_password("admin"), "admin", 1, 1, now, now),
+            )
+            conn.commit()
 
 
 @app.on_event("startup")
@@ -512,6 +575,91 @@ def fetch_sensor_without_interfaces(conn: sqlite3.Connection, sensor_id: int) ->
     if row is None:
         raise HTTPException(status_code=404, detail="Sensor nao encontrado")
     return sensor_row_to_dict(conn, row, include_interfaces=False)
+
+
+def user_row_to_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "username": row["username"],
+        "role": row["role"],
+        "must_change_password": bool(row["must_change_password"]),
+    }
+
+
+def fetch_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE username = ?
+        """,
+        (username,),
+    ).fetchone()
+
+
+def fetch_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT *
+        FROM users
+        WHERE id = ?
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def create_access_token(user: sqlite3.Row | dict[str, Any]) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=AUTH_TOKEN_EXPIRE_HOURS)
+    payload = {
+        "sub": str(user["id"]),
+        "username": user["username"],
+        "role": user["role"],
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, AUTH_SECRET, algorithm=AUTH_ALGORITHM)
+
+
+def unauthorized_response() -> JSONResponse:
+    return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+
+def token_user_from_request(request: Request) -> sqlite3.Row | None:
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    try:
+        payload = jwt.decode(token, AUTH_SECRET, algorithms=[AUTH_ALGORITHM])
+        user_id = int(payload.get("sub") or 0)
+    except (JWTError, TypeError, ValueError):
+        return None
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        user = fetch_user_by_id(conn, user_id)
+    if user is None or not bool(user["active"]):
+        return None
+    return user
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or path == "/health" or path == "/api/auth/login" or not path.startswith("/api/"):
+        return await call_next(request)
+
+    user = token_user_from_request(request)
+    if user is None:
+        return unauthorized_response()
+
+    request.state.user = user_row_to_public(user)
+    if bool(user["must_change_password"]) and path not in {
+        "/api/auth/me",
+        "/api/auth/logout",
+        "/api/auth/change-password",
+    }:
+        return JSONResponse({"detail": "Password change required"}, status_code=403)
+
+    return await call_next(request)
 
 
 def replace_sensor_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]], now: str) -> None:
@@ -1274,6 +1422,73 @@ def health(
     except Exception as exc:  # pragma: no cover - exposed as health detail.
         raise HTTPException(status_code=503, detail=f"ClickHouse indisponivel: {exc}") from exc
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: LoginPayload):
+    ensure_sensor_db()
+    username = clean_text(payload.username)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    with sqlite_connection() as conn:
+        user = fetch_user_by_username(conn, username)
+    if user is None or not bool(user["active"]) or not verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {
+        "ok": True,
+        "user": user_row_to_public(user),
+        "token": create_access_token(user),
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(request: Request, payload: ChangePasswordPayload):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    new_password = payload.new_password or ""
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Nova senha deve ter pelo menos 8 caracteres")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = fetch_user_by_id(conn, int(user["id"]))
+        if row is None or not bool(row["active"]):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        if not verify_password(payload.current_password, row["password_hash"]):
+            raise HTTPException(status_code=400, detail="Senha atual invalida")
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?,
+                must_change_password = 0,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (hash_password(new_password), now, int(user["id"])),
+        )
+        conn.commit()
+        updated = fetch_user_by_id(conn, int(user["id"]))
+        if updated is None:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    return {
+        "ok": True,
+        "user": user_row_to_public(updated),
+        "token": create_access_token(updated),
+    }
 
 
 @app.get("/api/ip/whois")
