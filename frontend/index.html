@@ -1446,9 +1446,8 @@
         <div class="ip-entity-list">
           ${items.map(entity => `
             <div class="ip-detail-item">
-              <div class="fw-semibold">${escapeHtml(entity.name || entity.handle || 'Entidade')}</div>
+              <div class="fw-semibold">${escapeHtml(entity.name || 'Entidade')}</div>
               <div class="subtle">Roles: ${escapeHtml((entity.roles || []).join(', ') || '-')}</div>
-              <div class="subtle">Handle: ${escapeHtml(entity.handle || '-')}</div>
               <div class="subtle">Email: ${escapeHtml(entity.email || '-')}</div>
             </div>
           `).join('')}
@@ -1474,12 +1473,12 @@
         <div class="ip-detail-grid mb-3">
           ${ipDetailItem('IP', payload.ip)}
           ${ipDetailItem('Tipo', typeLabel)}
-          ${ipDetailItem('Nome/Organizacao', payload.name)}
+          ${ipDetailItem('DNS Reverso', payload.reverse_dns)}
+          ${ipDetailItem('Organizacao', payload.organization)}
+          ${ipDetailItem('ASN', payload.asn)}
           ${ipDetailItem('Pais', payload.country)}
-          ${ipDetailItem('Range inicial', payload.start_address)}
-          ${ipDetailItem('Range final', payload.end_address)}
-          ${ipDetailItem('Handle', payload.handle)}
-          ${ipDetailItem('Parent Handle', payload.parent_handle)}
+          ${ipDetailItem('Regiao/Estado', payload.region)}
+          ${ipDetailItem('Cidade', payload.city)}
         </div>
         <div class="panel-title mb-2">Entidades principais</div>
         ${renderIpEntities(payload.entities)}

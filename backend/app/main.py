@@ -4,6 +4,7 @@ import os
 import sqlite3
 import asyncio
 import json
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -1019,6 +1020,34 @@ def cache_whois(ip: str, data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def reverse_dns_lookup(ip: str) -> str | None:
+    previous_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(3)
+        hostname, _aliases, _addresses = socket.gethostbyaddr(ip)
+        return clean_text(hostname) or None
+    except Exception:
+        return None
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
+
+
+def fetch_json_url(url: str, timeout: int = 4) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/rdap+json, application/json",
+            "User-Agent": "GMJ-FLOW/0.1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read()
+    data = json.loads(payload.decode("utf-8", errors="replace"))
+    if not isinstance(data, dict):
+        raise ValueError("resposta invalida")
+    return data
+
+
 def rdap_link(data: dict[str, Any]) -> str:
     for link in data.get("links") or []:
         if not isinstance(link, dict):
@@ -1053,30 +1082,106 @@ def rdap_entity(entity: dict[str, Any]) -> dict[str, Any]:
         "handle": clean_text(entity.get("handle")),
         "roles": [clean_text(role) for role in entity.get("roles") or [] if clean_text(role)],
         "name": names[0] if names else "",
-        "email": emails[0] if emails else "",
+        "email": emails[0] if emails else None,
     }
 
 
-def rdap_response(ip: str, data: dict[str, Any]) -> dict[str, Any]:
-    entities = [
+def rdap_entities(data: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
         rdap_entity(entity)
         for entity in data.get("entities") or []
         if isinstance(entity, dict)
     ]
-    return {
+
+
+def rdap_organization(rdap_name: str, entities: list[dict[str, Any]]) -> str:
+    for entity in entities:
+        roles = {role.lower() for role in entity.get("roles") or []}
+        if "registrant" in roles and clean_text(entity.get("name")):
+            return clean_text(entity.get("name"))
+    for entity in entities:
+        name = clean_text(entity.get("name"))
+        if name:
+            return name
+    return rdap_name
+
+
+def geo_response(ip: str) -> tuple[dict[str, Any], str | None]:
+    geo_url = (
+        f"http://ip-api.com/json/{urllib.parse.quote(ip, safe=':.')}"
+        "?fields=status,message,country,regionName,city,as,org,query"
+    )
+    try:
+        data = fetch_json_url(geo_url, timeout=4)
+    except Exception as exc:
+        return {}, f"Falha ao consultar geolocalizacao: {exc}"
+    if data.get("status") != "success":
+        message = clean_text(data.get("message")) or "resposta sem sucesso"
+        return {}, f"Falha ao consultar geolocalizacao: {message}"
+    return data, None
+
+
+def rdap_response(
+    ip: str,
+    data: dict[str, Any],
+    reverse_dns: str | None,
+    geo: dict[str, Any] | None = None,
+    geo_message: str | None = None,
+) -> dict[str, Any]:
+    geo = geo or {}
+    entities = rdap_entities(data)
+    rdap_name = clean_text(data.get("name"))
+    organization = rdap_organization(rdap_name, entities)
+    if not organization:
+        organization = clean_text(geo.get("org"))
+
+    country = clean_text(geo.get("country")) or clean_text(data.get("country"))
+    messages = [message for message in [geo_message] if message]
+
+    response = {
         "ip": ip,
         "type": "public",
         "is_public": True,
         "ok": True,
-        "name": clean_text(data.get("name")),
-        "handle": clean_text(data.get("handle")),
-        "country": clean_text(data.get("country")),
-        "start_address": clean_text(data.get("startAddress")),
-        "end_address": clean_text(data.get("endAddress")),
-        "parent_handle": clean_text(data.get("parentHandle")),
-        "rdap_url": rdap_link(data),
+        "reverse_dns": reverse_dns,
+        "country": country or None,
+        "region": clean_text(geo.get("regionName")) or None,
+        "city": clean_text(geo.get("city")) or None,
+        "asn": clean_text(geo.get("as")) or None,
+        "organization": organization or None,
+        "rdap_name": rdap_name or None,
         "entities": entities,
+        "messages": messages,
+        "message": "; ".join(messages) if messages else "",
         "raw": data,
+    }
+    return response
+
+
+def rdap_failure_response(
+    ip: str,
+    reverse_dns: str | None,
+    message: str,
+    geo: dict[str, Any] | None = None,
+    geo_message: str | None = None,
+) -> dict[str, Any]:
+    geo = geo or {}
+    messages = [message, *([geo_message] if geo_message else [])]
+    return {
+        "ip": ip,
+        "type": "public",
+        "is_public": True,
+        "ok": False,
+        "reverse_dns": reverse_dns,
+        "country": clean_text(geo.get("country")) or None,
+        "region": clean_text(geo.get("regionName")) or None,
+        "city": clean_text(geo.get("city")) or None,
+        "asn": clean_text(geo.get("as")) or None,
+        "organization": clean_text(geo.get("org")) or None,
+        "rdap_name": None,
+        "entities": [],
+        "messages": messages,
+        "message": "; ".join(messages),
     }
 
 
@@ -1178,6 +1283,8 @@ def ip_whois(ip: str = Query(..., min_length=2)):
     if cached is not None:
         return cached
 
+    reverse_dns = reverse_dns_lookup(ip_text)
+
     if not is_public_ip(ip_text):
         return cache_whois(
             ip_text,
@@ -1186,58 +1293,46 @@ def ip_whois(ip: str = Query(..., min_length=2)):
                 "type": "private",
                 "is_public": False,
                 "ok": True,
+                "reverse_dns": reverse_dns,
+                "country": None,
+                "region": None,
+                "city": None,
+                "asn": None,
+                "organization": None,
                 "message": "IP privado/local. Nao possui WHOIS publico.",
             },
         )
 
+    geo, geo_message = geo_response(ip_text)
     rdap_url = f"https://rdap.org/ip/{urllib.parse.quote(ip_text, safe=':.')}"
-    request = urllib.request.Request(
-        rdap_url,
-        headers={
-            "Accept": "application/rdap+json, application/json",
-            "User-Agent": "GMJ-FLOW/0.1",
-        },
-    )
-
     try:
-        with urllib.request.urlopen(request, timeout=4) as response:
-            payload = response.read()
-        data = json.loads(payload.decode("utf-8", errors="replace"))
+        data = fetch_json_url(rdap_url, timeout=4)
     except urllib.error.HTTPError as exc:
-        return {
-            "ip": ip_text,
-            "type": "public",
-            "is_public": True,
-            "ok": False,
-            "message": f"Falha ao consultar RDAP: HTTP {exc.code}",
-        }
+        return rdap_failure_response(
+            ip_text,
+            reverse_dns,
+            f"Falha ao consultar RDAP: HTTP {exc.code}",
+            geo,
+            geo_message,
+        )
     except urllib.error.URLError as exc:
-        return {
-            "ip": ip_text,
-            "type": "public",
-            "is_public": True,
-            "ok": False,
-            "message": f"Falha ao consultar RDAP: {exc.reason}",
-        }
+        return rdap_failure_response(
+            ip_text,
+            reverse_dns,
+            f"Falha ao consultar RDAP: {exc.reason}",
+            geo,
+            geo_message,
+        )
     except Exception as exc:
-        return {
-            "ip": ip_text,
-            "type": "public",
-            "is_public": True,
-            "ok": False,
-            "message": f"Falha ao consultar RDAP: {exc}",
-        }
+        return rdap_failure_response(
+            ip_text,
+            reverse_dns,
+            f"Falha ao consultar RDAP: {exc}",
+            geo,
+            geo_message,
+        )
 
-    if not isinstance(data, dict):
-        return {
-            "ip": ip_text,
-            "type": "public",
-            "is_public": True,
-            "ok": False,
-            "message": "Falha ao consultar RDAP: resposta invalida",
-        }
-
-    return cache_whois(ip_text, rdap_response(ip_text, data))
+    return cache_whois(ip_text, rdap_response(ip_text, data, reverse_dns, geo, geo_message))
 
 
 @app.get("/api/sensors")
