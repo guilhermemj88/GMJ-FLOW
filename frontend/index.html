@@ -867,6 +867,9 @@
               <button id="saveSensorButton" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="save"></i><span>Save</span>
               </button>
+              <button id="applyCollectorsButton" type="button" class="btn btn-sm btn-outline-success">
+                <i data-lucide="radio-tower"></i><span>Aplicar Coletor</span>
+              </button>
               <button id="deleteSensorButton" type="button" class="btn btn-sm btn-outline-danger">
                 <i data-lucide="trash-2"></i><span>Delete</span>
               </button>
@@ -935,6 +938,7 @@
                 <div class="field">
                   <label for="listenerPort">Listener Port</label>
                   <input id="listenerPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="9995">
+                  <div class="subtle">No MVP, cada sensor ativo precisa usar uma porta UDP exclusiva.</div>
                 </div>
                 <div class="field">
                   <label for="exporterIp">Exporter IP</label>
@@ -1036,6 +1040,12 @@
                 <input id="snmpCountersMode" value="auto">
                 <input id="snmpPollingSeconds" value="60">
               </div>
+              <div class="split-line"></div>
+              <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                <div class="panel-title">Collector Config</div>
+                <div id="collectorApplyStatus" class="metric-readout">Aguardando aplicacao</div>
+              </div>
+              <pre id="collectorApplyResult" class="result-box">Nenhuma configuracao aplicada.</pre>
             </section>
           </div>
 
@@ -1398,6 +1408,7 @@
       currentAuthUser = user || currentAuthUser;
       document.getElementById('loginView').classList.add('auth-hidden');
       document.getElementById('appShell').classList.remove('auth-hidden');
+      document.getElementById('applyCollectorsButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
       loadDashboardSensors().then(() => refresh()).catch(console.error);
@@ -2274,10 +2285,34 @@
       }
     }
 
+    function validateSensorCollectorConfig(payload) {
+      if (!payload.active) return '';
+      if (!payload.exporter_ip) {
+        return 'Sensor ativo precisa ter Exporter IP valido.';
+      }
+      if (payload.listener_port < 1024 || payload.listener_port > 65535) {
+        return 'Sensor ativo precisa usar Listener Port entre 1024 e 65535.';
+      }
+      const duplicate = sensorCache.find(sensor => (
+        sensor.active
+        && Number(sensor.listener_port) === Number(payload.listener_port)
+        && Number(sensor.id) !== Number(currentSensorId || 0)
+      ));
+      if (duplicate) {
+        return `Listener Port ${payload.listener_port} ja esta em uso pelo sensor ativo ${duplicate.name}.`;
+      }
+      return '';
+    }
+
     async function saveSensor() {
       const payload = collectSensorForm();
       if (!payload.name) {
         setSensorStatus('Sensor Name obrigatorio', 'error');
+        return;
+      }
+      const collectorError = validateSensorCollectorConfig(payload);
+      if (collectorError) {
+        setSensorStatus(collectorError, 'error');
         return;
       }
 
@@ -2296,6 +2331,22 @@
         setSensorStatus(`Sensor ${saved.name} salvo`);
       } catch (error) {
         setSensorStatus(`Falha ao salvar sensor: ${error.message}`, 'error');
+      }
+    }
+
+    async function applyCollectors() {
+      const status = document.getElementById('collectorApplyStatus');
+      const resultBox = document.getElementById('collectorApplyResult');
+      status.textContent = 'Aplicando...';
+      resultBox.textContent = 'Gerando configuracoes e aplicando collectors...';
+      try {
+        const payload = await apiRequest('/api/collectors/apply', { method: 'POST' });
+        status.textContent = payload.services_updated ? 'Collectors atualizados' : 'Configs geradas';
+        resultBox.textContent = JSON.stringify(payload, null, 2);
+        await loadSensors();
+      } catch (error) {
+        status.textContent = 'Falha ao aplicar';
+        resultBox.textContent = error.message || 'Falha ao aplicar collector';
       }
     }
 
@@ -2612,6 +2663,7 @@
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
+    document.getElementById('applyCollectorsButton').addEventListener('click', () => applyCollectors().catch(console.error));
     document.getElementById('deleteSensorButton').addEventListener('click', () => deleteSensor().catch(console.error));
     document.getElementById('openSnmpButton').addEventListener('click', openSnmpModal);
     document.getElementById('addInterfaceButton').addEventListener('click', () => openInterfaceModal());

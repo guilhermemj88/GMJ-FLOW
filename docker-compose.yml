@@ -31,6 +31,8 @@ services:
       API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
       GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
       GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
+      GMJFLOW_COLLECTORS_DIR: "${GMJFLOW_COLLECTORS_DIR-/app/data/collectors}"
+      GMJFLOW_APPLY_COLLECTORS_SCRIPT: "${GMJFLOW_APPLY_COLLECTORS_SCRIPT-}"
     ports:
       - "${BACKEND_PORT-8000}:8000"
     volumes:
