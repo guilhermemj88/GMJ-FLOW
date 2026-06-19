@@ -221,210 +221,205 @@ def health(
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
 
 
-def traffic_series(
-    metric: str,
-    range_minutes: int,
-    start: datetime | None,
-    end: datetime | None,
-    sensor: str | None,
-):
-    start_dt, end_dt = resolve_range(range_minutes, start, end)
-    query_start = floor_minute(start_dt)
-    query_end = ceil_minute(end_dt)
-    params: dict[str, Any] = {"start": query_start, "end": query_end}
-    where = f"minute >= {{start:DateTime}} AND minute < {{end:DateTime}}{sensor_clause(sensor, params)}"
+def raw_flow_where(range_minutes: int, sensor: str | None, params: dict[str, Any]) -> str:
+    safe_range_minutes = max(1, min(int(range_minutes), 10080))
+    where = f"flow_time >= now() - INTERVAL {safe_range_minutes} MINUTE"
+    if sensor:
+        params["sensor"] = sensor
+        where += " AND sensor = {sensor:String}"
+    return where
+
+
+def traffic_items(metric: str, range_minutes: int, sensor: str | None):
+    params: dict[str, Any] = {}
+    where = raw_flow_where(range_minutes, sensor, params)
+    value_expr = "sum(bytes) * 8 / 60" if metric == "bps" else "sum(packets) / 60"
     result = get_client().query(
         f"""
         SELECT
-            minute,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
-            sum(flows) AS flows
-        FROM flow_1m
+            toStartOfMinute(flow_time) AS time,
+            {value_expr} AS {metric}
+        FROM flow_raw
         WHERE {where}
-        GROUP BY minute
-        ORDER BY minute
-        """,
-        parameters=params,
-    )
-    values = {utc_dt(row["minute"]): row for row in rows_as_dicts(result)}
-
-    points = []
-    current = query_start
-    while current < query_end:
-        row = values.get(current, {"bytes": 0, "packets": 0, "flows": 0})
-        bytes_value = int(row["bytes"] or 0)
-        packets_value = int(row["packets"] or 0)
-        point = {
-            "timestamp": iso(current),
-            "bytes": bytes_value,
-            "packets": packets_value,
-            "flows": int(row["flows"] or 0),
-            "bps": round((bytes_value * 8) / 60, 2),
-            "pps": round(packets_value / 60, 2),
-        }
-        points.append(point)
-        current += timedelta(minutes=1)
-
-    return {
-        "metric": metric,
-        "start": iso(start_dt),
-        "end": iso(end_dt),
-        "sensor": sensor,
-        "series": points,
-    }
-
-
-@app.get("/api/traffic/bps")
-def get_bps(
-    range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
-    sensor: str | None = None,
-):
-    return traffic_series("bps", range_minutes, start, end, sensor)
-
-
-@app.get("/api/traffic/pps")
-def get_pps(
-    range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
-    sensor: str | None = None,
-):
-    return traffic_series("pps", range_minutes, start, end, sensor)
-
-
-def top_dimension(
-    dimension: str,
-    range_minutes: int,
-    start: datetime | None,
-    end: datetime | None,
-    sensor: str | None,
-    limit: int,
-):
-    start_dt, end_dt = resolve_range(range_minutes, start, end)
-    query_start = floor_minute(start_dt)
-    query_end = ceil_minute(end_dt)
-    seconds = max(int((end_dt - start_dt).total_seconds()), 1)
-    params: dict[str, Any] = {
-        "dimension": dimension,
-        "start": query_start,
-        "end": query_end,
-        "limit": limit,
-    }
-    where = (
-        "dimension = {dimension:String} "
-        "AND minute >= {start:DateTime} "
-        "AND minute < {end:DateTime}"
-        f"{sensor_clause(sensor, params)}"
-    )
-    result = get_client().query(
-        f"""
-        SELECT
-            key,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
-            sum(flows) AS flows
-        FROM flow_tops_1m
-        WHERE {where}
-        GROUP BY key
-        ORDER BY bytes DESC
-        LIMIT {{limit:UInt32}}
+        GROUP BY time
+        ORDER BY time
         """,
         parameters=params,
     )
 
     items = []
     for row in rows_as_dicts(result):
-        bytes_value = int(row["bytes"] or 0)
-        packets_value = int(row["packets"] or 0)
-        key = str(row["key"])
-        label = label_for_dimension(dimension, key)
-        item = {
-            "key": label if dimension in {"src_ip", "dst_ip"} else key,
-            "raw_key": key,
-            "label": label,
-            "bytes": bytes_value,
-            "packets": packets_value,
-            "flows": int(row["flows"] or 0),
-            "bps": round((bytes_value * 8) / seconds, 2),
-            "pps": round(packets_value / seconds, 2),
-        }
-        if dimension == "src_ip":
-            item["src_ip"] = label
-        elif dimension == "dst_ip":
-            item["dst_ip"] = label
+        items.append({"time": iso(row["time"]), metric: round(float(row[metric] or 0), 2)})
+    return {"items": items}
+
+
+@app.get("/api/traffic/bps")
+def get_bps(
+    range_minutes: int = Query(60, ge=1, le=10080),
+    sensor: str | None = None,
+):
+    return traffic_items("bps", range_minutes, sensor)
+
+
+@app.get("/api/traffic/pps")
+def get_pps(
+    range_minutes: int = Query(60, ge=1, le=10080),
+    sensor: str | None = None,
+):
+    return traffic_items("pps", range_minutes, sensor)
+
+
+def top_dimension(
+    dimension: str,
+    range_minutes: int,
+    sensor: str | None,
+    limit: int,
+):
+    seconds = max(range_minutes * 60, 1)
+    params: dict[str, Any] = {"limit": limit, "seconds": seconds}
+    where = raw_flow_where(range_minutes, sensor, params)
+
+    if dimension == "src_ip":
+        query = f"""
+        SELECT
+            toString(src_ip) AS ip,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY ip
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """
+    elif dimension == "dst_ip":
+        query = f"""
+        SELECT
+            toString(dst_ip) AS ip,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY ip
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """
+    elif dimension == "dst_port":
+        query = f"""
+        SELECT
+            dst_port AS port,
+            proto,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY port, proto
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """
+    elif dimension == "proto":
+        query = f"""
+        SELECT
+            proto,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY proto
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """
+    elif dimension == "tcp_flags":
+        query = f"""
+        SELECT
+            tcp_flags,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY tcp_flags
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """
+    else:
+        raise HTTPException(status_code=400, detail="dimensao invalida")
+
+    result = get_client().query(query, parameters=params)
+    items = []
+    for row in rows_as_dicts(result):
+        bps = round(float(row["bps"] or 0), 2)
+        packets = int(row["packets"] or 0)
+        flows = int(row["flows"] or 0)
+        if dimension in {"src_ip", "dst_ip"}:
+            ip = clean_ip(row["ip"])
+            item = {"ip": ip, "bps": bps, "flows": flows, "packets": packets}
+        elif dimension == "dst_port":
+            proto = proto_name(row["proto"])
+            item = {
+                "port": int(row["port"] or 0),
+                "proto": proto,
+                "bps": bps,
+                "flows": flows,
+                "packets": packets,
+            }
         elif dimension == "proto":
-            item["proto"] = int(key) if key.isdigit() else key
-            item["proto_name"] = label
-        elif dimension == "tcp_flags":
-            item["tcp_flags"] = int(key) if key.isdigit() else key
-            item["tcp_flags_name"] = label
+            proto = proto_name(row["proto"])
+            item = {"proto": proto, "bps": bps, "flows": flows, "packets": packets}
+        else:
+            flags = tcp_flags_name(row["tcp_flags"])
+            item = {"flags": flags, "bps": bps, "flows": flows, "packets": packets}
         items.append(item)
 
-    return {
-        "dimension": dimension,
-        "start": iso(start_dt),
-        "end": iso(end_dt),
-        "sensor": sensor,
-        "items": items,
-    }
+    return {"items": items}
 
 
 @app.get("/api/tops/src-ip")
 def top_src_ip(
     range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
     sensor: str | None = None,
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("src_ip", range_minutes, start, end, sensor, limit)
+    return top_dimension("src_ip", range_minutes, sensor, limit)
 
 
 @app.get("/api/tops/dst-ip")
 def top_dst_ip(
     range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
     sensor: str | None = None,
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_ip", range_minutes, start, end, sensor, limit)
+    return top_dimension("dst_ip", range_minutes, sensor, limit)
 
 
 @app.get("/api/tops/ports")
 def top_ports(
     range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
     sensor: str | None = None,
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_port", range_minutes, start, end, sensor, limit)
+    return top_dimension("dst_port", range_minutes, sensor, limit)
 
 
 @app.get("/api/tops/protocols")
 def top_protocols(
     range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
     sensor: str | None = None,
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("proto", range_minutes, start, end, sensor, limit)
+    return top_dimension("proto", range_minutes, sensor, limit)
 
 
 @app.get("/api/tops/tcp-flags")
 def top_tcp_flags(
     range_minutes: int = Query(60, ge=1, le=10080),
-    start: datetime | None = None,
-    end: datetime | None = None,
     sensor: str | None = None,
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("tcp_flags", range_minutes, start, end, sensor, limit)
+    return top_dimension("tcp_flags", range_minutes, sensor, limit)
 
 
 @app.get("/api/flows/search")

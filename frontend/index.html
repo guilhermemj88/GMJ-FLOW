@@ -322,7 +322,16 @@
         console.error('Falha na chamada da API', endpoint, response.status);
         throw new Error(`${endpoint} ${response.status}`);
       }
-      return response.json();
+      const payload = await response.json();
+      if (!Array.isArray(payload.items)) {
+        console.warn('Endpoint sem items array', endpoint, payload);
+        return { items: [] };
+      }
+      console.info('Endpoint retornou itens', endpoint, payload.items.length);
+      if (payload.items.length === 0) {
+        console.warn('Endpoint retornou vazio', endpoint);
+      }
+      return payload;
     }
 
     function formatBps(value) {
@@ -383,7 +392,7 @@
       });
     }
 
-    function trafficOption(series, metric, color) {
+    function trafficOption(items, metric, color) {
       return {
         animation: false,
         color: [color],
@@ -395,7 +404,7 @@
         xAxis: {
           type: 'category',
           boundaryGap: false,
-          data: series.map(point => new Date(point.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })),
+          data: items.map(point => new Date(point.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })),
           axisLabel: { color: '#6b7280' },
           axisLine: { lineStyle: { color: '#d9dee5' } }
         },
@@ -410,12 +419,20 @@
           showSymbol: false,
           areaStyle: { opacity: .12 },
           lineStyle: { width: 2 },
-          data: series.map(point => point[metric])
+          data: items.map(point => Number(point[metric]) || 0)
         }]
       };
     }
 
-    function barOption(items, valueKey = 'bps') {
+    function itemLabel(item, type) {
+      if (type === 'ip') return item.ip;
+      if (type === 'port') return `${item.proto}/${item.port}`;
+      if (type === 'proto') return item.proto;
+      if (type === 'flags') return item.flags;
+      return '';
+    }
+
+    function barOption(items, type, valueKey = 'bps') {
       const top = items.slice(0, 8).reverse();
       return {
         animation: false,
@@ -433,7 +450,7 @@
         },
         yAxis: {
           type: 'category',
-          data: top.map(item => item.label),
+          data: top.map(item => itemLabel(item, type)),
           axisLabel: { color: '#374151', width: 82, overflow: 'truncate' },
           axisLine: { lineStyle: { color: '#d9dee5' } }
         },
@@ -445,7 +462,7 @@
       };
     }
 
-    function pieOption(items) {
+    function pieOption(items, type) {
       return {
         animation: false,
         color: palette,
@@ -455,16 +472,16 @@
           radius: ['48%', '72%'],
           center: ['50%', '50%'],
           label: { formatter: '{b}', color: '#374151' },
-          data: items.map(item => ({ name: item.label, value: item.bps }))
+          data: items.map(item => ({ name: itemLabel(item, type), value: item.bps }))
         }]
       };
     }
 
-    function fillTable(id, items, firstLabel, thirdKey = 'flows') {
+    function fillTable(id, items, type, thirdKey = 'flows') {
       const tbody = document.getElementById(id);
       tbody.innerHTML = items.slice(0, 8).map(item => `
         <tr>
-          <td title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</td>
+          <td title="${escapeHtml(itemLabel(item, type))}">${escapeHtml(itemLabel(item, type))}</td>
           <td class="text-end">${formatBps(item.bps)}</td>
           <td class="text-end">${formatNumber(item[thirdKey])}</td>
         </tr>
@@ -500,7 +517,14 @@
           throw new Error(`${endpoint} ${response.status}`);
         }
         const payload = await response.json();
-        const items = payload.items || [];
+        if (!Array.isArray(payload.items)) {
+          console.warn('Endpoint sem items array', endpoint, payload);
+        }
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        console.info('Endpoint retornou itens', endpoint, items.length);
+        if (items.length === 0) {
+          console.warn('Endpoint retornou vazio', endpoint);
+        }
         tbody.innerHTML = items.map(flow => `
           <tr>
             <td>${formatDateTime(flow.flow_time)}</td>
@@ -557,25 +581,33 @@
         fetchJSON('/api/tops/tcp-flags')
       ]);
 
-      charts.bps.setOption(trafficOption(bps.series, 'bps', '#0f766e'), true);
-      charts.pps.setOption(trafficOption(pps.series, 'pps', '#b45309'), true);
+      const bpsItems = bps.items;
+      const ppsItems = pps.items;
+      const srcIpItems = srcIp.items;
+      const dstIpItems = dstIp.items;
+      const portItems = ports.items;
+      const protocolItems = protocols.items;
+      const tcpFlagItems = tcpFlags.items;
 
-      const latestBps = bps.series.length ? bps.series[bps.series.length - 1].bps : 0;
-      const latestPps = pps.series.length ? pps.series[pps.series.length - 1].pps : 0;
+      charts.bps.setOption(trafficOption(bpsItems, 'bps', '#0f766e'), true);
+      charts.pps.setOption(trafficOption(ppsItems, 'pps', '#b45309'), true);
+
+      const latestBps = bpsItems.length ? bpsItems[bpsItems.length - 1].bps : 0;
+      const latestPps = ppsItems.length ? ppsItems[ppsItems.length - 1].pps : 0;
       document.getElementById('bpsReadout').textContent = formatBps(latestBps);
       document.getElementById('ppsReadout').textContent = formatPps(latestPps);
 
-      charts.srcIp.setOption(barOption(srcIp.items), true);
-      charts.dstIp.setOption(barOption(dstIp.items), true);
-      charts.ports.setOption(barOption(ports.items), true);
-      charts.protocols.setOption(pieOption(protocols.items), true);
-      charts.tcpFlags.setOption(barOption(tcpFlags.items), true);
+      charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
+      charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
+      charts.ports.setOption(barOption(portItems, 'port'), true);
+      charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
+      charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
 
-      fillTable('srcIpTable', srcIp.items, 'IP');
-      fillTable('dstIpTable', dstIp.items, 'IP');
-      fillTable('portsTable', ports.items, 'Porta', 'packets');
-      fillTable('protocolsTable', protocols.items, 'Proto', 'packets');
-      fillTable('tcpFlagsTable', tcpFlags.items, 'Flags');
+      fillTable('srcIpTable', srcIpItems, 'ip');
+      fillTable('dstIpTable', dstIpItems, 'ip');
+      fillTable('portsTable', portItems, 'port', 'packets');
+      fillTable('protocolsTable', protocolItems, 'proto', 'packets');
+      fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
       await searchFlows();
     }
 
