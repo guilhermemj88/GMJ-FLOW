@@ -29,8 +29,11 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
       API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
+      GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
     ports:
       - "${BACKEND_PORT-8000}:8000"
+    volumes:
+      - backend_data:/app/data
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -104,5 +107,6 @@ services:
         condition: service_healthy
 
 volumes:
+  backend_data:
   clickhouse_data:
   pmacct_spool:

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import asyncio
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 from ipaddress import IPv4Address, ip_address
+from pathlib import Path
 from typing import Any
 
 import clickhouse_connect
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -42,6 +47,151 @@ TCP_FLAG_BITS = (
     (0x40, "ECE"),
     (0x80, "CWR"),
 )
+
+SNMP_SYSTEM_OIDS = {
+    "sys_descr": "1.3.6.1.2.1.1.1.0",
+    "sys_object_id": "1.3.6.1.2.1.1.2.0",
+    "sys_name": "1.3.6.1.2.1.1.5.0",
+}
+
+SNMP_INTERFACE_OIDS = {
+    "if_index": "1.3.6.1.2.1.2.2.1.1",
+    "if_descr": "1.3.6.1.2.1.2.2.1.2",
+    "if_speed": "1.3.6.1.2.1.2.2.1.5",
+    "if_oper_status": "1.3.6.1.2.1.2.2.1.8",
+    "if_name": "1.3.6.1.2.1.31.1.1.1.1",
+    "if_alias": "1.3.6.1.2.1.31.1.1.1.18",
+    "if_high_speed": "1.3.6.1.2.1.31.1.1.1.15",
+}
+
+IF_OPER_STATUS_LABELS = {
+    1: "up",
+    2: "down",
+    3: "testing",
+    4: "unknown",
+    5: "dormant",
+    6: "notPresent",
+    7: "lowerLayerDown",
+}
+
+SENSOR_COLUMNS = [
+    "name",
+    "visibility",
+    "device_group",
+    "sensor_server",
+    "sensor_license",
+    "listener_ip",
+    "listener_port",
+    "exporter_ip",
+    "flow_protocol",
+    "flow_version",
+    "exporter_snmp_enabled",
+    "ip_zone",
+    "ip_validation",
+    "flow_collector_enabled",
+    "as_validation",
+    "granularity_seconds",
+    "timezone",
+    "active",
+    "snmp_ip",
+    "snmp_port",
+    "snmp_mib",
+    "snmp_version",
+    "snmp_community",
+    "snmp_security_level",
+    "snmp_security_name",
+    "snmp_auth_protocol",
+    "snmp_auth_passphrase",
+    "snmp_privacy_protocol",
+    "snmp_privacy_passphrase",
+    "snmp_interface_name_mode",
+    "snmp_counters_mode",
+    "snmp_polling_seconds",
+]
+
+SENSOR_BOOL_COLUMNS = {"exporter_snmp_enabled", "flow_collector_enabled", "active"}
+
+INTERFACE_COLUMNS = [
+    "if_index",
+    "if_name",
+    "if_descr",
+    "if_alias",
+    "direction",
+    "stats",
+    "speed_in_bps",
+    "speed_out_bps",
+    "if_oper_status",
+    "color",
+    "monitor_enabled",
+]
+
+INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
+
+
+class SensorInterfacePayload(BaseModel):
+    id: int | None = None
+    if_index: int = 0
+    if_name: str = ""
+    if_descr: str = ""
+    if_alias: str = ""
+    direction: str = "Unset"
+    stats: str = "Basic"
+    speed_in_bps: int = 0
+    speed_out_bps: int = 0
+    if_oper_status: str = ""
+    color: str = "#64748b"
+    monitor_enabled: bool = True
+
+
+class SensorPayload(BaseModel):
+    name: str
+    visibility: str = "show_in_reports"
+    device_group: str = ""
+    sensor_server: str = "console"
+    sensor_license: str = "gmj-flow"
+    listener_ip: str = ""
+    listener_port: int = 9995
+    exporter_ip: str = ""
+    flow_protocol: str = "netflow"
+    flow_version: str = "netflow-v9"
+    exporter_snmp_enabled: bool = False
+    ip_zone: str = "default"
+    ip_validation: str = "off"
+    flow_collector_enabled: bool = True
+    as_validation: str = "off"
+    granularity_seconds: int = 60
+    timezone: str = "local-server"
+    active: bool = True
+    snmp_ip: str = ""
+    snmp_port: int = 161
+    snmp_mib: str = "generic"
+    snmp_version: str = "2c"
+    snmp_community: str = "public"
+    snmp_security_level: str = "noAuthNoPriv"
+    snmp_security_name: str = ""
+    snmp_auth_protocol: str = ""
+    snmp_auth_passphrase: str = ""
+    snmp_privacy_protocol: str = ""
+    snmp_privacy_passphrase: str = ""
+    snmp_interface_name_mode: str = "auto"
+    snmp_counters_mode: str = "auto"
+    snmp_polling_seconds: int = 60
+    interfaces: list[SensorInterfacePayload] = Field(default_factory=list)
+
+
+class SnmpActionPayload(BaseModel):
+    snmp_ip: str | None = None
+    snmp_port: int | None = None
+    snmp_version: str | None = None
+    snmp_community: str | None = None
+    snmp_security_level: str | None = None
+    snmp_security_name: str | None = None
+    snmp_auth_protocol: str | None = None
+    snmp_auth_passphrase: str | None = None
+    snmp_privacy_protocol: str | None = None
+    snmp_privacy_passphrase: str | None = None
+    timeout_seconds: float | None = None
+    retries: int | None = None
 
 
 def get_client():
@@ -125,6 +275,647 @@ def iso(value: datetime) -> str:
 
 def rows_as_dicts(result: Any) -> list[dict[str, Any]]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def dump_model(model: BaseModel) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def sqlite_path() -> Path:
+    return Path(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
+
+
+def sqlite_connection() -> sqlite3.Connection:
+    path = sqlite_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def ensure_sensor_db() -> None:
+    with sqlite_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'show_in_reports',
+                device_group TEXT NOT NULL DEFAULT '',
+                sensor_server TEXT NOT NULL DEFAULT 'console',
+                sensor_license TEXT NOT NULL DEFAULT 'gmj-flow',
+                listener_ip TEXT NOT NULL DEFAULT '',
+                listener_port INTEGER NOT NULL DEFAULT 9995,
+                exporter_ip TEXT NOT NULL DEFAULT '',
+                flow_protocol TEXT NOT NULL DEFAULT 'netflow',
+                flow_version TEXT NOT NULL DEFAULT 'netflow-v9',
+                exporter_snmp_enabled INTEGER NOT NULL DEFAULT 0,
+                ip_zone TEXT NOT NULL DEFAULT 'default',
+                ip_validation TEXT NOT NULL DEFAULT 'off',
+                flow_collector_enabled INTEGER NOT NULL DEFAULT 1,
+                as_validation TEXT NOT NULL DEFAULT 'off',
+                granularity_seconds INTEGER NOT NULL DEFAULT 60,
+                timezone TEXT NOT NULL DEFAULT 'local-server',
+                active INTEGER NOT NULL DEFAULT 1,
+                snmp_ip TEXT NOT NULL DEFAULT '',
+                snmp_port INTEGER NOT NULL DEFAULT 161,
+                snmp_mib TEXT NOT NULL DEFAULT 'generic',
+                snmp_version TEXT NOT NULL DEFAULT '2c',
+                snmp_community TEXT NOT NULL DEFAULT 'public',
+                snmp_security_level TEXT NOT NULL DEFAULT 'noAuthNoPriv',
+                snmp_security_name TEXT NOT NULL DEFAULT '',
+                snmp_auth_protocol TEXT NOT NULL DEFAULT '',
+                snmp_auth_passphrase TEXT NOT NULL DEFAULT '',
+                snmp_privacy_protocol TEXT NOT NULL DEFAULT '',
+                snmp_privacy_passphrase TEXT NOT NULL DEFAULT '',
+                snmp_interface_name_mode TEXT NOT NULL DEFAULT 'auto',
+                snmp_counters_mode TEXT NOT NULL DEFAULT 'auto',
+                snmp_polling_seconds INTEGER NOT NULL DEFAULT 60,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensor_interfaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sensor_id INTEGER NOT NULL,
+                if_index INTEGER NOT NULL DEFAULT 0,
+                if_name TEXT NOT NULL DEFAULT '',
+                if_descr TEXT NOT NULL DEFAULT '',
+                if_alias TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT 'Unset',
+                stats TEXT NOT NULL DEFAULT 'Basic',
+                speed_in_bps INTEGER NOT NULL DEFAULT 0,
+                speed_out_bps INTEGER NOT NULL DEFAULT 0,
+                if_oper_status TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT '#64748b',
+                monitor_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+
+@app.on_event("startup")
+def startup() -> None:
+    ensure_sensor_db()
+
+
+def clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def optional_ip(value: Any, field_name: str) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    try:
+        return str(ip_address(text))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+
+
+def bounded_port(value: Any, field_name: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+    if port < 1 or port > 65535:
+        raise HTTPException(status_code=400, detail=f"{field_name} fora da faixa 1-65535")
+    return port
+
+
+def non_negative_int(value: Any, field_name: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+    if number < 0:
+        raise HTTPException(status_code=400, detail=f"{field_name} deve ser maior ou igual a zero")
+    return number
+
+
+def positive_int(value: Any, field_name: str) -> int:
+    number = non_negative_int(value, field_name)
+    if number < 1:
+        raise HTTPException(status_code=400, detail=f"{field_name} deve ser maior que zero")
+    return number
+
+
+def normalize_interface_payload(payload: SensorInterfacePayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    data["if_index"] = non_negative_int(data.get("if_index"), "if_index")
+    data["speed_in_bps"] = non_negative_int(data.get("speed_in_bps"), "speed_in_bps")
+    data["speed_out_bps"] = non_negative_int(data.get("speed_out_bps"), "speed_out_bps")
+    for field in ("if_name", "if_descr", "if_alias", "direction", "stats", "if_oper_status", "color"):
+        data[field] = clean_text(data.get(field))
+    data["monitor_enabled"] = 1 if data.get("monitor_enabled") else 0
+    return {column: data[column] for column in INTERFACE_COLUMNS}
+
+
+def normalize_sensor_payload(payload: SensorPayload) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    data = dump_model(payload)
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Sensor Name obrigatorio")
+
+    data["name"] = name
+    data["listener_ip"] = optional_ip(data.get("listener_ip"), "listener_ip")
+    data["exporter_ip"] = optional_ip(data.get("exporter_ip"), "exporter_ip")
+    data["snmp_ip"] = optional_ip(data.get("snmp_ip"), "snmp_ip")
+    data["listener_port"] = bounded_port(data.get("listener_port"), "listener_port")
+    data["snmp_port"] = bounded_port(data.get("snmp_port"), "snmp_port")
+    data["granularity_seconds"] = positive_int(data.get("granularity_seconds"), "granularity_seconds")
+    data["snmp_polling_seconds"] = positive_int(data.get("snmp_polling_seconds"), "snmp_polling_seconds")
+
+    for field in SENSOR_COLUMNS:
+        if field in SENSOR_BOOL_COLUMNS:
+            data[field] = 1 if data.get(field) else 0
+        elif field not in {"listener_port", "snmp_port", "granularity_seconds", "snmp_polling_seconds"}:
+            data[field] = clean_text(data.get(field))
+
+    interfaces = [
+        normalize_interface_payload(interface)
+        for interface in payload.interfaces
+    ]
+    return {column: data[column] for column in SENSOR_COLUMNS}, interfaces
+
+
+def interface_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["monitor_enabled"] = bool(item["monitor_enabled"])
+    return item
+
+
+def sensor_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_interfaces: bool = True) -> dict[str, Any]:
+    item = dict(row)
+    for field in SENSOR_BOOL_COLUMNS:
+        item[field] = bool(item[field])
+    if include_interfaces:
+        interface_rows = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ?
+            ORDER BY if_index, id
+            """,
+            (item["id"],),
+        ).fetchall()
+        item["interfaces"] = [interface_row_to_dict(interface_row) for interface_row in interface_rows]
+    return item
+
+
+def fetch_sensor(conn: sqlite3.Connection, sensor_id: int) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM sensors WHERE id = ?", (sensor_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sensor nao encontrado")
+    return sensor_row_to_dict(conn, row)
+
+
+def replace_sensor_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]], now: str) -> None:
+    conn.execute("DELETE FROM sensor_interfaces WHERE sensor_id = ?", (sensor_id,))
+    if not interfaces:
+        return
+    columns = ["sensor_id", *INTERFACE_COLUMNS, "created_at", "updated_at"]
+    placeholders = ", ".join("?" for _ in columns)
+    conn.executemany(
+        f"INSERT INTO sensor_interfaces ({', '.join(columns)}) VALUES ({placeholders})",
+        [
+            [sensor_id, *[interface[column] for column in INTERFACE_COLUMNS], now, now]
+            for interface in interfaces
+        ],
+    )
+
+
+class SnmpQueryError(Exception):
+    pass
+
+
+def snmp_action_dict(payload: SnmpActionPayload | None) -> dict[str, Any]:
+    return dump_model(payload) if payload is not None else {}
+
+
+def normalize_snmp_version(value: Any) -> str:
+    text = clean_text(value).lower()
+    if text in {"3", "v3", "snmpv3", "snmp version 3"}:
+        return "3"
+    if text in {"1", "v1", "snmpv1", "snmp version 1"}:
+        return "1"
+    return "2c"
+
+
+def snmp_config(sensor: dict[str, Any], payload: SnmpActionPayload | None) -> dict[str, Any]:
+    action = snmp_action_dict(payload)
+    target_ip = clean_text(action.get("snmp_ip")) or sensor.get("snmp_ip") or sensor.get("exporter_ip")
+    target_ip = clean_text(target_ip)
+    if not target_ip:
+        raise SnmpQueryError("SNMP IP nao informado")
+    try:
+        target_ip = str(ip_address(target_ip))
+    except ValueError:
+        raise SnmpQueryError("SNMP IP invalido") from None
+
+    target_port = action.get("snmp_port") or sensor.get("snmp_port") or 161
+    try:
+        target_port = int(target_port)
+    except (TypeError, ValueError):
+        raise SnmpQueryError("SNMP port invalido") from None
+    if target_port < 1 or target_port > 65535:
+        raise SnmpQueryError("SNMP port fora da faixa 1-65535")
+
+    timeout_seconds = action.get("timeout_seconds") or os.getenv("SNMP_TIMEOUT_SECONDS", "2")
+    retries = action.get("retries") if action.get("retries") is not None else os.getenv("SNMP_RETRIES", "1")
+    try:
+        timeout_seconds = float(timeout_seconds)
+        retries = int(retries)
+    except (TypeError, ValueError):
+        raise SnmpQueryError("timeout/retries SNMP invalidos") from None
+    timeout_seconds = max(0.5, min(timeout_seconds, 30.0))
+    retries = max(0, min(retries, 5))
+
+    return {
+        "ip": target_ip,
+        "port": target_port,
+        "version": normalize_snmp_version(action.get("snmp_version") or sensor.get("snmp_version")),
+        "community": clean_text(action.get("snmp_community")) or sensor.get("snmp_community") or "public",
+        "security_level": clean_text(action.get("snmp_security_level")) or sensor.get("snmp_security_level") or "noAuthNoPriv",
+        "security_name": clean_text(action.get("snmp_security_name")) or sensor.get("snmp_security_name") or "",
+        "auth_protocol": clean_text(action.get("snmp_auth_protocol")) or sensor.get("snmp_auth_protocol") or "",
+        "auth_passphrase": clean_text(action.get("snmp_auth_passphrase")) or sensor.get("snmp_auth_passphrase") or "",
+        "privacy_protocol": clean_text(action.get("snmp_privacy_protocol")) or sensor.get("snmp_privacy_protocol") or "",
+        "privacy_passphrase": clean_text(action.get("snmp_privacy_passphrase")) or sensor.get("snmp_privacy_passphrase") or "",
+        "timeout_seconds": timeout_seconds,
+        "retries": retries,
+    }
+
+
+def load_pysnmp_api():
+    try:
+        return import_module("pysnmp.hlapi.v3arch.asyncio")
+    except ModuleNotFoundError as exc:
+        raise SnmpQueryError("pysnmp nao instalado no backend") from exc
+
+
+def snmp_protocol_constant(api: Any, protocol_name: str, mapping: dict[str, str], default_name: str) -> Any:
+    key = clean_text(protocol_name).lower()
+    attr_name = mapping.get(key, default_name)
+    return getattr(api, attr_name)
+
+
+def snmp_auth_data(api: Any, config: dict[str, Any]) -> Any:
+    version = config["version"]
+    if version in {"1", "2c"}:
+        return api.CommunityData(config["community"], mpModel=0 if version == "1" else 1)
+
+    if version != "3":
+        raise SnmpQueryError(f"Versao SNMP nao suportada: {version}")
+
+    security_name = clean_text(config.get("security_name"))
+    if not security_name:
+        raise SnmpQueryError("SNMPv3 Security Name obrigatorio")
+
+    security_level = clean_text(config.get("security_level")).lower()
+    auth_map = {
+        "md5": "usmHMACMD5AuthProtocol",
+        "sha": "usmHMACSHAAuthProtocol",
+        "sha1": "usmHMACSHAAuthProtocol",
+        "sha256": "usmHMAC192SHA256AuthProtocol",
+    }
+    privacy_map = {
+        "des": "usmDESPrivProtocol",
+        "aes": "usmAesCfb128Protocol",
+        "aes128": "usmAesCfb128Protocol",
+        "aes192": "usmAesCfb192Protocol",
+        "aes256": "usmAesCfb256Protocol",
+    }
+    kwargs: dict[str, Any] = {
+        "authProtocol": getattr(api, "usmNoAuthProtocol"),
+        "privProtocol": getattr(api, "usmNoPrivProtocol"),
+    }
+
+    if security_level in {"authnopriv", "authpriv"}:
+        auth_passphrase = clean_text(config.get("auth_passphrase"))
+        if not auth_passphrase:
+            raise SnmpQueryError("SNMPv3 Auth Passphrase obrigatoria")
+        kwargs["authKey"] = auth_passphrase
+        kwargs["authProtocol"] = snmp_protocol_constant(
+            api,
+            config.get("auth_protocol"),
+            auth_map,
+            "usmHMACSHAAuthProtocol",
+        )
+
+    if security_level == "authpriv":
+        privacy_passphrase = clean_text(config.get("privacy_passphrase"))
+        if not privacy_passphrase:
+            raise SnmpQueryError("SNMPv3 Privacy Passphrase obrigatoria")
+        kwargs["privKey"] = privacy_passphrase
+        kwargs["privProtocol"] = snmp_protocol_constant(
+            api,
+            config.get("privacy_protocol"),
+            privacy_map,
+            "usmAesCfb128Protocol",
+        )
+
+    return api.UsmUserData(security_name, **kwargs)
+
+
+async def snmp_transport(api: Any, config: dict[str, Any]) -> Any:
+    return await api.UdpTransportTarget.create(
+        (config["ip"], config["port"]),
+        timeout=config["timeout_seconds"],
+        retries=config["retries"],
+    )
+
+
+def snmp_value_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "prettyPrint"):
+        return value.prettyPrint()
+    return str(value)
+
+
+def snmp_value_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        text = snmp_value_text(value)
+        try:
+            return int(text)
+        except ValueError:
+            return default
+
+
+def is_snmp_exception_value(value: Any) -> bool:
+    return value.__class__.__name__ in {"NoSuchObject", "NoSuchInstance", "EndOfMibView"}
+
+
+def snmp_varbind_pair(var_bind: Any) -> tuple[Any, Any]:
+    try:
+        oid, value = var_bind
+        return oid, value
+    except (TypeError, ValueError):
+        return var_bind[0], var_bind[1]
+
+
+def check_snmp_response(error_indication: Any, error_status: Any, error_index: Any, var_binds: Any) -> None:
+    if error_indication:
+        raise SnmpQueryError(str(error_indication))
+    if error_status:
+        status = error_status.prettyPrint() if hasattr(error_status, "prettyPrint") else str(error_status)
+        try:
+            index = int(error_index)
+        except (TypeError, ValueError):
+            index = 0
+        oid = ""
+        if index and var_binds:
+            try:
+                oid = f" em {var_binds[index - 1][0]}"
+            except Exception:
+                oid = ""
+        raise SnmpQueryError(f"{status}{oid}")
+
+
+def oid_index(base_oid: str, oid: Any) -> int | None:
+    oid_text = str(oid)
+    prefix = f"{base_oid}."
+    if not oid_text.startswith(prefix):
+        return None
+    suffix = oid_text[len(prefix):]
+    if not suffix:
+        return None
+    try:
+        return int(suffix.split(".")[0])
+    except ValueError:
+        return None
+
+
+async def snmp_get_system(config: dict[str, Any]) -> dict[str, str]:
+    api = load_pysnmp_api()
+    snmp_engine = api.SnmpEngine()
+    try:
+        auth_data = snmp_auth_data(api, config)
+        transport = await snmp_transport(api, config)
+        context = api.ContextData()
+        request_timeout = config["timeout_seconds"] * (config["retries"] + 1) + 2
+        oid_names = list(SNMP_SYSTEM_OIDS.keys())
+        var_binds = [
+            api.ObjectType(api.ObjectIdentity(SNMP_SYSTEM_OIDS[name]))
+            for name in oid_names
+        ]
+        response = await asyncio.wait_for(
+            api.get_cmd(snmp_engine, auth_data, transport, context, *var_binds, lookupMib=False),
+            timeout=request_timeout,
+        )
+        error_indication, error_status, error_index, response_var_binds = response
+        check_snmp_response(error_indication, error_status, error_index, response_var_binds)
+
+        result: dict[str, str] = {}
+        for name, var_bind in zip(oid_names, response_var_binds):
+            _oid, value = snmp_varbind_pair(var_bind)
+            result[name] = "" if is_snmp_exception_value(value) else snmp_value_text(value)
+        return result
+    finally:
+        snmp_engine.close_dispatcher()
+
+
+async def snmp_walk_oid(
+    api: Any,
+    snmp_engine: Any,
+    auth_data: Any,
+    transport: Any,
+    context: Any,
+    base_oid: str,
+    max_rows: int,
+) -> dict[int, Any]:
+    rows: dict[int, Any] = {}
+    walker = api.bulk_walk_cmd(
+        snmp_engine,
+        auth_data,
+        transport,
+        context,
+        0,
+        25,
+        api.ObjectType(api.ObjectIdentity(base_oid)),
+        lookupMib=False,
+        lexicographicMode=False,
+        ignoreNonIncreasingOid=True,
+        maxRows=max_rows,
+    )
+    async for error_indication, error_status, error_index, var_binds in walker:
+        check_snmp_response(error_indication, error_status, error_index, var_binds)
+        for var_bind in var_binds:
+            oid, value = snmp_varbind_pair(var_bind)
+            index = oid_index(base_oid, oid)
+            if index is None or is_snmp_exception_value(value):
+                continue
+            rows[index] = value
+    return rows
+
+
+async def snmp_discover_interfaces(config: dict[str, Any]) -> list[dict[str, Any]]:
+    api = load_pysnmp_api()
+    snmp_engine = api.SnmpEngine()
+    try:
+        auth_data = snmp_auth_data(api, config)
+        transport = await snmp_transport(api, config)
+        context = api.ContextData()
+        max_rows = int(os.getenv("SNMP_MAX_INTERFACES", "2048"))
+        max_rows = max(1, min(max_rows, 20000))
+
+        tables = {
+            name: await snmp_walk_oid(api, snmp_engine, auth_data, transport, context, oid, max_rows)
+            for name, oid in SNMP_INTERFACE_OIDS.items()
+        }
+
+        indexes = set()
+        for table in tables.values():
+            indexes.update(table.keys())
+
+        interfaces: list[dict[str, Any]] = []
+        for table_index in sorted(indexes):
+            if_index = snmp_value_int(tables["if_index"].get(table_index), table_index)
+            if if_index <= 0:
+                continue
+            if_descr = snmp_value_text(tables["if_descr"].get(table_index)).strip()
+            raw_if_name = snmp_value_text(tables["if_name"].get(table_index)).strip()
+            if_alias = snmp_value_text(tables["if_alias"].get(table_index)).strip()
+            display_name = if_alias or raw_if_name or if_descr or f"if{if_index}"
+            high_speed_mbps = snmp_value_int(tables["if_high_speed"].get(table_index))
+            speed_bps = high_speed_mbps * 1_000_000 if high_speed_mbps > 0 else snmp_value_int(
+                tables["if_speed"].get(table_index)
+            )
+            oper_status = snmp_value_int(tables["if_oper_status"].get(table_index))
+            interfaces.append(
+                {
+                    "if_index": if_index,
+                    "if_name": display_name,
+                    "if_descr": if_descr,
+                    "if_alias": if_alias,
+                    "direction": "Unset",
+                    "stats": "Basic",
+                    "speed_in_bps": speed_bps,
+                    "speed_out_bps": speed_bps,
+                    "if_oper_status": IF_OPER_STATUS_LABELS.get(oper_status, str(oper_status) if oper_status else ""),
+                    "color": "#64748b",
+                    "monitor_enabled": True,
+                }
+            )
+        return interfaces
+    finally:
+        snmp_engine.close_dispatcher()
+
+
+def run_snmp(coro: Any) -> Any:
+    try:
+        return asyncio.run(coro)
+    except asyncio.TimeoutError as exc:
+        raise SnmpQueryError("timeout SNMP") from exc
+
+
+def upsert_discovered_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]]) -> None:
+    now = utc_now_iso()
+    for interface in interfaces:
+        if_index = non_negative_int(interface.get("if_index"), "if_index")
+        if if_index <= 0:
+            continue
+        updates = {
+            "if_name": clean_text(interface.get("if_name")),
+            "if_descr": clean_text(interface.get("if_descr")),
+            "if_alias": clean_text(interface.get("if_alias")),
+            "speed_in_bps": non_negative_int(interface.get("speed_in_bps"), "speed_in_bps"),
+            "speed_out_bps": non_negative_int(interface.get("speed_out_bps"), "speed_out_bps"),
+            "if_oper_status": clean_text(interface.get("if_oper_status")),
+            "updated_at": now,
+        }
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            """,
+            (sensor_id, if_index),
+        ).fetchall()
+        if rows:
+            first_id = rows[0]["id"]
+            conn.execute(
+                """
+                UPDATE sensor_interfaces
+                SET if_name = ?,
+                    if_descr = ?,
+                    if_alias = ?,
+                    speed_in_bps = ?,
+                    speed_out_bps = ?,
+                    if_oper_status = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updates["if_name"],
+                    updates["if_descr"],
+                    updates["if_alias"],
+                    updates["speed_in_bps"],
+                    updates["speed_out_bps"],
+                    updates["if_oper_status"],
+                    updates["updated_at"],
+                    first_id,
+                ),
+            )
+            duplicate_ids = [row["id"] for row in rows[1:]]
+            if duplicate_ids:
+                placeholders = ", ".join("?" for _ in duplicate_ids)
+                conn.execute(f"DELETE FROM sensor_interfaces WHERE id IN ({placeholders})", duplicate_ids)
+        else:
+            conn.execute(
+                """
+                INSERT INTO sensor_interfaces (
+                    sensor_id,
+                    if_index,
+                    if_name,
+                    if_descr,
+                    if_alias,
+                    direction,
+                    stats,
+                    speed_in_bps,
+                    speed_out_bps,
+                    if_oper_status,
+                    color,
+                    monitor_enabled,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sensor_id,
+                    if_index,
+                    updates["if_name"],
+                    updates["if_descr"],
+                    updates["if_alias"],
+                    clean_text(interface.get("direction")) or "Unset",
+                    clean_text(interface.get("stats")) or "Basic",
+                    updates["speed_in_bps"],
+                    updates["speed_out_bps"],
+                    updates["if_oper_status"],
+                    clean_text(interface.get("color")) or "#64748b",
+                    1 if interface.get("monitor_enabled", True) else 0,
+                    now,
+                    now,
+                ),
+            )
 
 
 def sensor_clause(sensor: str | None, params: dict[str, Any]) -> str:
@@ -244,6 +1035,126 @@ def health(
     except Exception as exc:  # pragma: no cover - exposed as health detail.
         raise HTTPException(status_code=503, detail=f"ClickHouse indisponivel: {exc}") from exc
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
+
+
+@app.get("/api/sensors")
+def list_sensors():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute("SELECT * FROM sensors ORDER BY name, id").fetchall()
+        return {"items": [sensor_row_to_dict(conn, row) for row in rows]}
+
+
+@app.post("/api/sensors", status_code=201)
+def create_sensor(payload: SensorPayload):
+    ensure_sensor_db()
+    sensor_data, interfaces = normalize_sensor_payload(payload)
+    now = utc_now_iso()
+    columns = [*SENSOR_COLUMNS, "created_at", "updated_at"]
+    placeholders = ", ".join("?" for _ in columns)
+    values = [*[sensor_data[column] for column in SENSOR_COLUMNS], now, now]
+
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            f"INSERT INTO sensors ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+        sensor_id = int(cursor.lastrowid)
+        replace_sensor_interfaces(conn, sensor_id, interfaces, now)
+        conn.commit()
+        return fetch_sensor(conn, sensor_id)
+
+
+@app.get("/api/sensors/{sensor_id}")
+def get_sensor(sensor_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return fetch_sensor(conn, sensor_id)
+
+
+@app.put("/api/sensors/{sensor_id}")
+def update_sensor(sensor_id: int, payload: SensorPayload):
+    ensure_sensor_db()
+    sensor_data, interfaces = normalize_sensor_payload(payload)
+    now = utc_now_iso()
+    assignments = ", ".join(f"{column} = ?" for column in SENSOR_COLUMNS)
+    values = [*[sensor_data[column] for column in SENSOR_COLUMNS], now, sensor_id]
+
+    with sqlite_connection() as conn:
+        existing = conn.execute("SELECT id FROM sensors WHERE id = ?", (sensor_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Sensor nao encontrado")
+        conn.execute(
+            f"UPDATE sensors SET {assignments}, updated_at = ? WHERE id = ?",
+            values,
+        )
+        replace_sensor_interfaces(conn, sensor_id, interfaces, now)
+        conn.commit()
+        return fetch_sensor(conn, sensor_id)
+
+
+@app.delete("/api/sensors/{sensor_id}")
+def delete_sensor(sensor_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        cursor = conn.execute("DELETE FROM sensors WHERE id = ?", (sensor_id,))
+        conn.commit()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Sensor nao encontrado")
+        return {"status": "deleted", "id": sensor_id}
+
+
+@app.post("/api/sensors/{sensor_id}/snmp/test")
+def test_sensor_snmp(sensor_id: int, payload: SnmpActionPayload | None = None):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor(conn, sensor_id)
+
+    try:
+        config = snmp_config(sensor, payload)
+        system = run_snmp(snmp_get_system(config))
+    except SnmpQueryError as exc:
+        return {"ok": False, "sensor_id": sensor_id, "message": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive wrapper for external SNMP stack errors.
+        return {"ok": False, "sensor_id": sensor_id, "message": f"erro SNMP: {exc}"}
+
+    return {
+        "ok": True,
+        "sensor_id": sensor_id,
+        "target": {"ip": config["ip"], "port": config["port"]},
+        "sysName": system.get("sys_name", ""),
+        "sysDescr": system.get("sys_descr", ""),
+        "sysObjectID": system.get("sys_object_id", ""),
+        "system": system,
+    }
+
+
+@app.post("/api/sensors/{sensor_id}/snmp/discover-interfaces")
+def discover_sensor_interfaces(sensor_id: int, payload: SnmpActionPayload | None = None):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor(conn, sensor_id)
+
+    try:
+        config = snmp_config(sensor, payload)
+        interfaces = run_snmp(snmp_discover_interfaces(config))
+    except SnmpQueryError as exc:
+        return {"ok": False, "sensor_id": sensor_id, "message": str(exc)}
+    except Exception as exc:  # pragma: no cover - defensive wrapper for external SNMP stack errors.
+        return {"ok": False, "sensor_id": sensor_id, "message": f"erro SNMP: {exc}"}
+
+    with sqlite_connection() as conn:
+        _ = fetch_sensor(conn, sensor_id)
+        upsert_discovered_interfaces(conn, sensor_id, interfaces)
+        conn.commit()
+
+    return {
+        "ok": True,
+        "sensor_id": sensor_id,
+        "target": {"ip": config["ip"], "port": config["port"]},
+        "interfaces": interfaces,
+        "items": interfaces,
+    }
 
 
 def raw_flow_where(range_minutes: int, sensor: str | None, params: dict[str, Any]) -> str:

@@ -6,6 +6,7 @@
   <title>GMJ-FLOW</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
       --page-bg: #f3f5f7;
@@ -13,30 +14,165 @@
       --ink: #20242a;
       --muted: #6b7280;
       --line: #d9dee5;
+      --line-strong: #cbd5e1;
       --accent: #0f766e;
+      --accent-dark: #115e59;
       --warning: #b45309;
       --danger: #b91c1c;
       --violet: #6d28d9;
+      --sidebar: #242830;
+      --sidebar-2: #1d2229;
       --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
     }
 
     body {
       min-height: 100vh;
+      margin: 0;
       color: var(--ink);
       background: var(--page-bg);
       letter-spacing: 0;
     }
 
-    .topbar {
-      background: #242830;
+    button,
+    input,
+    select,
+    textarea {
+      letter-spacing: 0;
+    }
+
+    .app-shell {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      width: 238px;
+      flex: 0 0 238px;
+      background: var(--sidebar);
       color: #f8fafc;
-      border-bottom: 4px solid var(--accent);
+      border-right: 1px solid rgba(255, 255, 255, .08);
+      display: flex;
+      flex-direction: column;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+
+    .brand-block {
+      padding: 18px 18px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, .08);
     }
 
     .brand {
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-top: .75rem;
+      color: #d1d5db;
+      font-size: .86rem;
+    }
+
+    .side-nav {
+      display: grid;
+      gap: .25rem;
+      padding: 12px;
+    }
+
+    .side-nav button {
+      width: 100%;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      gap: .7rem;
+      border: 0;
+      border-radius: 6px;
+      color: #d7dde5;
+      background: transparent;
+      font-weight: 600;
+      text-align: left;
+      padding: .58rem .72rem;
+    }
+
+    .side-nav button:hover,
+    .side-nav button.active {
+      color: #ffffff;
+      background: var(--sidebar-2);
+    }
+
+    .side-nav button.active {
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .side-nav svg,
+    .btn svg,
+    .icon-button svg {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+    }
+
+    .content-shell {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .content {
+      width: 100%;
+      padding: 18px;
+    }
+
+    .app-view {
+      display: none;
+    }
+
+    .app-view.active {
+      display: block;
+    }
+
+    .view-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+      margin-bottom: 14px;
+    }
+
+    .view-title {
+      margin: 0;
+      font-size: 1.3rem;
+      line-height: 1.2;
+      font-weight: 750;
+      color: #111827;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: .9rem;
+      margin-top: .2rem;
+    }
+
+    .dashboard-controls,
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .dashboard-controls {
+      max-width: 560px;
     }
 
     .panel {
@@ -51,6 +187,14 @@
       font-weight: 700;
       text-transform: uppercase;
       color: #374151;
+    }
+
+    .section-title {
+      font-size: .9rem;
+      font-weight: 750;
+      color: #111827;
+      margin: 0 0 .8rem;
+      text-transform: uppercase;
     }
 
     .chart {
@@ -96,6 +240,14 @@
       border-radius: 6px;
     }
 
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: .4rem;
+      min-height: 32px;
+    }
+
     .metric-readout {
       color: var(--muted);
       font-size: .86rem;
@@ -112,7 +264,232 @@
       font-size: .84rem;
     }
 
+    .sensor-layout {
+      display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .sensor-list-table {
+      font-size: .86rem;
+    }
+
+    .sensor-list-table tr {
+      cursor: pointer;
+    }
+
+    .sensor-list-table tr.active td {
+      background: #ecfdf5;
+    }
+
+    .sensor-form-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
+      gap: .75rem;
+    }
+
+    .snmp-form-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(150px, 1fr));
+      gap: .75rem;
+    }
+
+    .interface-form-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(150px, 1fr));
+      gap: .75rem;
+    }
+
+    .field label {
+      display: block;
+      font-size: .76rem;
+      font-weight: 700;
+      color: #4b5563;
+      margin-bottom: .25rem;
+      text-transform: uppercase;
+    }
+
+    .field .form-control,
+    .field .form-select {
+      min-height: 36px;
+      font-size: .9rem;
+    }
+
+    .split-line {
+      height: 1px;
+      background: var(--line);
+      margin: 1rem 0;
+    }
+
+    .badge-soft {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      border-radius: 999px;
+      padding: .15rem .55rem;
+      font-size: .76rem;
+      font-weight: 700;
+      background: #eef2ff;
+      color: #3730a3;
+    }
+
+    .badge-soft.ok {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .badge-soft.off {
+      background: #f1f5f9;
+      color: #475569;
+    }
+
+    .color-swatch {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 0, 0, .18);
+      vertical-align: middle;
+    }
+
+    .icon-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: #374151;
+    }
+
+    .placeholder-panel {
+      min-height: 240px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .gmj-modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(15, 23, 42, .48);
+      z-index: 40;
+    }
+
+    .gmj-modal.open {
+      display: flex;
+    }
+
+    .gmj-dialog {
+      width: min(1040px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 24px 80px rgba(15, 23, 42, .28);
+    }
+
+    .gmj-dialog.small {
+      width: min(760px, 100%);
+    }
+
+    .gmj-dialog-header,
+    .gmj-dialog-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .gmj-dialog-footer {
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+      justify-content: flex-end;
+    }
+
+    .gmj-dialog-body {
+      padding: 16px;
+    }
+
+    .result-box {
+      width: 100%;
+      min-height: 90px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0f172a;
+      color: #d1d5db;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: .82rem;
+      padding: .75rem;
+      white-space: pre-wrap;
+    }
+
+    .hidden-field {
+      display: none;
+    }
+
+    @media (max-width: 1199.98px) {
+      .sensor-form-grid {
+        grid-template-columns: repeat(3, minmax(150px, 1fr));
+      }
+    }
+
+    @media (max-width: 991.98px) {
+      .app-shell {
+        display: block;
+      }
+
+      .sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+      }
+
+      .side-nav {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .side-nav button {
+        justify-content: center;
+      }
+
+      .sensor-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .view-header {
+        flex-direction: column;
+      }
+
+      .dashboard-controls,
+      .toolbar {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .sensor-form-grid,
+      .snmp-form-grid,
+      .interface-form-grid {
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+      }
+    }
+
     @media (max-width: 767.98px) {
+      .content {
+        padding: 12px;
+      }
+
       .chart {
         height: 230px;
       }
@@ -121,176 +498,653 @@
         height: 210px;
       }
 
-      .flow-search-grid {
+      .flow-search-grid,
+      .sensor-form-grid,
+      .snmp-form-grid,
+      .interface-form-grid {
         grid-template-columns: 1fr;
+      }
+
+      .side-nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
     }
   </style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="container-fluid py-3">
-      <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-3 justify-content-between">
-        <div class="d-flex align-items-center gap-3">
-          <div class="brand">GMJ-FLOW</div>
-          <div class="d-flex align-items-center gap-2 small">
-            <span id="statusDot" class="status-dot"></span>
-            <span id="statusText">Conectando</span>
-          </div>
-        </div>
-        <div class="d-flex flex-column flex-md-row gap-2 align-items-md-center">
-          <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
-            <option value="15">15 min</option>
-            <option value="60" selected>60 min</option>
-            <option value="360">6 h</option>
-            <option value="1440">24 h</option>
-          </select>
-          <input id="sensor" class="form-control form-control-sm" placeholder="sensor" value="">
-          <button id="refresh" class="btn btn-sm btn-success">Atualizar</button>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand">GMJ-FLOW</div>
+        <div class="status-line">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">Conectando</span>
         </div>
       </div>
-    </div>
-  </header>
+      <nav class="side-nav" aria-label="Menu principal">
+        <button type="button" class="active" data-nav-view="dashboard">
+          <i data-lucide="layout-dashboard"></i><span>Dashboard</span>
+        </button>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Flows">
+          <i data-lucide="search"></i><span>Flows</span>
+        </button>
+        <button type="button" data-nav-view="sensors">
+          <i data-lucide="radio-tower"></i><span>Sensores</span>
+        </button>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
+          <i data-lucide="panel-top"></i><span>Interfaces</span>
+        </button>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Clientes/Prefixos">
+          <i data-lucide="network"></i><span>Clientes/Prefixos</span>
+        </button>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas">
+          <i data-lucide="bell"></i><span>Alertas</span>
+        </button>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Configuracoes">
+          <i data-lucide="settings"></i><span>Configuracoes</span>
+        </button>
+      </nav>
+    </aside>
 
-  <main class="container-fluid py-3">
-    <section class="row g-3">
-      <div class="col-12 col-xl-6">
-        <div class="panel p-3">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="panel-title">Bits/s</div>
-            <div id="bpsReadout" class="metric-readout">0 bps</div>
-          </div>
-          <div id="bpsChart" class="chart"></div>
-        </div>
-      </div>
-      <div class="col-12 col-xl-6">
-        <div class="panel p-3">
-          <div class="d-flex justify-content-between align-items-center mb-2">
-            <div class="panel-title">Packets/s</div>
-            <div id="ppsReadout" class="metric-readout">0 pps</div>
-          </div>
-          <div id="ppsChart" class="chart"></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="row g-3 mt-1">
-      <div class="col-12 col-xl-4">
-        <div class="panel p-3 h-100">
-          <div class="panel-title mb-2">Top IP origem</div>
-          <div id="srcIpChart" class="top-chart"></div>
-          <div class="table-wrap">
-            <table class="table table-sm align-middle mb-0">
-              <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
-              <tbody id="srcIpTable"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div class="col-12 col-xl-4">
-        <div class="panel p-3 h-100">
-          <div class="panel-title mb-2">Top IP destino</div>
-          <div id="dstIpChart" class="top-chart"></div>
-          <div class="table-wrap">
-            <table class="table table-sm align-middle mb-0">
-              <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
-              <tbody id="dstIpTable"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div class="col-12 col-xl-4">
-        <div class="panel p-3 h-100">
-          <div class="panel-title mb-2">Top portas</div>
-          <div id="portsChart" class="top-chart"></div>
-          <div class="table-wrap">
-            <table class="table table-sm align-middle mb-0">
-              <thead><tr><th>Porta</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
-              <tbody id="portsTable"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="row g-3 mt-1">
-      <div class="col-12 col-lg-6">
-        <div class="panel p-3 h-100">
-          <div class="panel-title mb-2">Protocolos</div>
-          <div id="protocolsChart" class="top-chart"></div>
-          <div class="table-wrap">
-            <table class="table table-sm align-middle mb-0">
-              <thead><tr><th>Proto</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
-              <tbody id="protocolsTable"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      <div class="col-12 col-lg-6">
-        <div class="panel p-3 h-100">
-          <div class="panel-title mb-2">TCP flags</div>
-          <div id="tcpFlagsChart" class="top-chart"></div>
-          <div class="table-wrap">
-            <table class="table table-sm align-middle mb-0">
-              <thead><tr><th>Flags</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
-              <tbody id="tcpFlagsTable"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="row g-3 mt-1">
-      <div class="col-12">
-        <div class="panel p-3">
-          <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+    <div class="content-shell">
+      <main class="content">
+        <section id="view-dashboard" class="app-view active">
+          <div class="view-header">
             <div>
-              <div class="panel-title">Flow Search</div>
-              <div id="flowSearchStatus" class="metric-readout">Ultimos flows brutos</div>
+              <h1 class="view-title">Dashboard</h1>
+              <div class="subtle">NetFlow/IPFIX/sFlow em tempo quase real</div>
             </div>
-            <div class="flow-search-grid">
-              <input id="flowIp" class="form-control form-control-sm" placeholder="IP">
-              <input id="flowPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="Porta">
-              <select id="flowProto" class="form-select form-select-sm" aria-label="Protocolo">
-                <option value="">Todos</option>
-                <option value="1">ICMP</option>
-                <option value="6">TCP</option>
-                <option value="17">UDP</option>
-              </select>
-              <select id="flowRangeMinutes" class="form-select form-select-sm" aria-label="Janela Flow Search">
+            <div class="dashboard-controls">
+              <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
                 <option value="15">15 min</option>
                 <option value="60" selected>60 min</option>
                 <option value="360">6 h</option>
                 <option value="1440">24 h</option>
               </select>
-              <button id="flowSearchButton" class="btn btn-sm btn-success">Buscar</button>
+              <input id="sensor" class="form-control form-control-sm" placeholder="sensor" value="">
+              <button id="refresh" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
             </div>
           </div>
-          <div class="table-wrap">
-            <table class="table table-sm table-hover align-middle mb-0 flow-table">
-              <thead>
-                <tr>
-                  <th>Horario</th>
-                  <th>Sensor</th>
-                  <th>Src IP</th>
-                  <th class="text-end">Src porta</th>
-                  <th>Dst IP</th>
-                  <th class="text-end">Dst porta</th>
-                  <th>Proto</th>
-                  <th>Flags</th>
-                  <th class="text-end">In if</th>
-                  <th class="text-end">Out if</th>
-                  <th class="text-end">Bytes</th>
-                  <th class="text-end">Pacotes</th>
-                </tr>
-              </thead>
-              <tbody id="flowSearchTable"></tbody>
-            </table>
+
+          <section class="row g-3">
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Bits/s</div>
+                  <div id="bpsReadout" class="metric-readout">0 bps</div>
+                </div>
+                <div id="bpsChart" class="chart"></div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Packets/s</div>
+                  <div id="ppsReadout" class="metric-readout">0 pps</div>
+                </div>
+                <div id="ppsChart" class="chart"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3 mt-1">
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-2">Top IP origem</div>
+                <div id="srcIpChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+                    <tbody id="srcIpTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-2">Top IP destino</div>
+                <div id="dstIpChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+                    <tbody id="dstIpTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-2">Top portas</div>
+                <div id="portsChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Porta</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
+                    <tbody id="portsTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3 mt-1">
+            <div class="col-12 col-lg-6">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-2">Protocolos</div>
+                <div id="protocolsChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Proto</th><th class="text-end">Bits/s</th><th class="text-end">Pacotes</th></tr></thead>
+                    <tbody id="protocolsTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-6">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-2">TCP flags</div>
+                <div id="tcpFlagsChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Flags</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+                    <tbody id="tcpFlagsTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3 mt-1">
+            <div class="col-12">
+              <div class="panel p-3">
+                <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+                  <div>
+                    <div class="panel-title">Flow Search</div>
+                    <div id="flowSearchStatus" class="metric-readout">Ultimos flows brutos</div>
+                  </div>
+                  <div class="flow-search-grid">
+                    <input id="flowIp" class="form-control form-control-sm" placeholder="IP">
+                    <input id="flowPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="Porta">
+                    <select id="flowProto" class="form-select form-select-sm" aria-label="Protocolo">
+                      <option value="">Todos</option>
+                      <option value="1">ICMP</option>
+                      <option value="6">TCP</option>
+                      <option value="17">UDP</option>
+                    </select>
+                    <select id="flowRangeMinutes" class="form-select form-select-sm" aria-label="Janela Flow Search">
+                      <option value="15">15 min</option>
+                      <option value="60" selected>60 min</option>
+                      <option value="360">6 h</option>
+                      <option value="1440">24 h</option>
+                    </select>
+                    <button id="flowSearchButton" type="button" class="btn btn-sm btn-success">
+                      <i data-lucide="search"></i><span>Buscar</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm table-hover align-middle mb-0 flow-table">
+                    <thead>
+                      <tr>
+                        <th>Horario</th>
+                        <th>Sensor</th>
+                        <th>Src IP</th>
+                        <th class="text-end">Src porta</th>
+                        <th>Dst IP</th>
+                        <th class="text-end">Dst porta</th>
+                        <th>Proto</th>
+                        <th>Flags</th>
+                        <th class="text-end">In if</th>
+                        <th class="text-end">Out if</th>
+                        <th class="text-end">Bytes</th>
+                        <th class="text-end">Pacotes</th>
+                      </tr>
+                    </thead>
+                    <tbody id="flowSearchTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-sensors" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Flow Sensor Configuration</h1>
+              <div id="sensorStatus" class="subtle">Sensores de flow e opcoes SNMP do exportador</div>
+            </div>
+            <div class="toolbar">
+              <button id="newSensorButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="file-plus-2"></i><span>New</span>
+              </button>
+              <button id="openSnmpButton" type="button" class="btn btn-sm btn-outline-primary">
+                <i data-lucide="sliders-horizontal"></i><span>SNMP Options</span>
+              </button>
+              <button id="saveSensorButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="save"></i><span>Save</span>
+              </button>
+              <button id="deleteSensorButton" type="button" class="btn btn-sm btn-outline-danger">
+                <i data-lucide="trash-2"></i><span>Delete</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="sensor-layout">
+            <section class="panel p-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="panel-title">Sensores</div>
+                <span id="sensorCount" class="badge-soft off">0</span>
+              </div>
+              <div class="table-wrap">
+                <table class="table table-sm table-hover align-middle mb-0 sensor-list-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Exporter</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sensorListTable"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel p-3">
+              <h2 class="section-title">Sensor</h2>
+              <div class="sensor-form-grid">
+                <div class="field">
+                  <label for="sensorName">Sensor Name</label>
+                  <input id="sensorName" class="form-control form-control-sm" value="NE-40-BGP" required>
+                </div>
+                <div class="field">
+                  <label for="sensorVisibility">Sensor Visibility</label>
+                  <select id="sensorVisibility" class="form-select form-select-sm">
+                    <option value="show_in_reports">Show in Reports &raquo; Devices</option>
+                    <option value="hidden">Hidden</option>
+                    <option value="internal_only">Internal Only</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="deviceGroup">Device Group</label>
+                  <input id="deviceGroup" class="form-control form-control-sm">
+                </div>
+                <div class="field">
+                  <label for="sensorServer">Sensor Server</label>
+                  <select id="sensorServer" class="form-select form-select-sm">
+                    <option value="console">Console</option>
+                    <option value="local">Local</option>
+                    <option value="remote">Remote</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="sensorLicense">Sensor License</label>
+                  <select id="sensorLicense" class="form-select form-select-sm">
+                    <option value="gmj-flow">GMJ-FLOW</option>
+                    <option value="wanguard-compatible">Wanguard Compatible</option>
+                    <option value="lab">Lab</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="listenerIp">Listener IP</label>
+                  <input id="listenerIp" class="form-control form-control-sm" placeholder="192.168.0.210">
+                </div>
+                <div class="field">
+                  <label for="listenerPort">Listener Port</label>
+                  <input id="listenerPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="9995">
+                </div>
+                <div class="field">
+                  <label for="exporterIp">Exporter IP</label>
+                  <input id="exporterIp" class="form-control form-control-sm" placeholder="192.168.0.157">
+                </div>
+                <div class="field">
+                  <label for="exporterSnmpEnabled">Exporter SNMP</label>
+                  <select id="exporterSnmpEnabled" class="form-select form-select-sm">
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="flowProtocol">Flow Protocol</label>
+                  <select id="flowProtocol" class="form-select form-select-sm">
+                    <option value="netflow">NetFlow</option>
+                    <option value="ipfix">IPFIX</option>
+                    <option value="sflow">sFlow</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="flowVersion">Flow Version</label>
+                  <select id="flowVersion" class="form-select form-select-sm">
+                    <option value="netflow-v5">NetFlow v5</option>
+                    <option value="netflow-v9" selected>NetFlow v9</option>
+                    <option value="ipfix">IPFIX</option>
+                    <option value="sflow-v5">sFlow v5</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ipZone">IP Zone</label>
+                  <select id="ipZone" class="form-select form-select-sm">
+                    <option value="default">IP Zone Default</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ipValidation">IP Validation</label>
+                  <select id="ipValidation" class="form-select form-select-sm">
+                    <option value="off">Off</option>
+                    <option value="strict">Strict</option>
+                    <option value="loose">Loose</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="flowCollectorEnabled">Flow Collector</label>
+                  <select id="flowCollectorEnabled" class="form-select form-select-sm">
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="asValidation">AS Validation</label>
+                  <select id="asValidation" class="form-select form-select-sm">
+                    <option value="off">Off</option>
+                    <option value="enabled">Enabled</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="granularitySeconds">Granularity</label>
+                  <select id="granularitySeconds" class="form-select form-select-sm">
+                    <option value="20">20 seconds</option>
+                    <option value="30">30 seconds</option>
+                    <option value="60" selected>60 seconds</option>
+                    <option value="300">5 minutes</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="timezone">Time Zone</label>
+                  <select id="timezone" class="form-select form-select-sm">
+                    <option value="same-as-exporter">Same as Exporter</option>
+                    <option value="local-server" selected>Local Server</option>
+                    <option value="UTC">UTC</option>
+                    <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="sensorActive">Active</label>
+                  <select id="sensorActive" class="form-select form-select-sm">
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="hidden-field" aria-hidden="true">
+                <input id="snmpIp">
+                <input id="snmpPort" value="161">
+                <input id="snmpMib" value="generic">
+                <input id="snmpVersion" value="2c">
+                <input id="snmpCommunity" value="public">
+                <input id="snmpSecurityLevel" value="noAuthNoPriv">
+                <input id="snmpSecurityName">
+                <input id="snmpAuthProtocol">
+                <input id="snmpAuthPassphrase">
+                <input id="snmpPrivacyProtocol">
+                <input id="snmpPrivacyPassphrase">
+                <input id="snmpInterfaceNameMode" value="auto">
+                <input id="snmpCountersMode" value="auto">
+                <input id="snmpPollingSeconds" value="60">
+              </div>
+            </section>
+          </div>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+              <div>
+                <div class="panel-title">Monitored Interfaces</div>
+                <div id="interfacesStatus" class="metric-readout">0 interfaces</div>
+              </div>
+              <div class="toolbar">
+                <button id="addInterfaceButton" type="button" class="btn btn-sm btn-outline-primary">
+                  <i data-lucide="plus"></i><span>Add Interface</span>
+                </button>
+                <button id="editInterfaceButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="pencil"></i><span>Edit Interface</span>
+                </button>
+                <button id="deleteInterfaceButton" type="button" class="btn btn-sm btn-outline-danger">
+                  <i data-lucide="trash"></i><span>Delete Interface(s)</span>
+                </button>
+                <button id="manageInterfacesButton" type="button" class="btn btn-sm btn-outline-success">
+                  <i data-lucide="list-plus"></i><span>Manage Interfaces</span>
+                </button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th><input id="selectAllInterfaces" type="checkbox" aria-label="Selecionar interfaces"></th>
+                    <th>Index</th>
+                    <th>Interface Name</th>
+                    <th>Direction</th>
+                    <th>Stats</th>
+                    <th class="text-end">Speed IN</th>
+                    <th class="text-end">Speed OUT</th>
+                    <th>Color</th>
+                    <th>Monitor</th>
+                  </tr>
+                </thead>
+                <tbody id="interfacesTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-placeholder" class="app-view">
+          <div class="panel placeholder-panel p-4">
+            <div>
+              <h1 id="placeholderTitle" class="view-title">Modulo</h1>
+              <div class="subtle">Area preparada para a proxima etapa do GMJ-FLOW.</div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="snmpModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="snmpModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="snmpModalTitle" class="view-title">Exporter SNMP Options</h2>
+        <button type="button" class="icon-button" data-close-modal="snmpModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="snmp-form-grid">
+          <div class="field">
+            <label for="modalSnmpIp">Exporter IP</label>
+            <input id="modalSnmpIp" class="form-control form-control-sm" placeholder="192.168.88.1">
+          </div>
+          <div class="field">
+            <label for="modalSnmpPort">SNMP Port</label>
+            <input id="modalSnmpPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="161">
+          </div>
+          <div class="field">
+            <label for="modalSnmpMib">Exporter SNMP MIB</label>
+            <select id="modalSnmpMib" class="form-select form-select-sm">
+              <option value="generic">Generic (RFC 2863)</option>
+              <option value="mikrotik">MikroTik</option>
+              <option value="huawei">Huawei</option>
+              <option value="cisco">Cisco</option>
+              <option value="juniper">Juniper</option>
+              <option value="zte">ZTE</option>
+              <option value="fiberhome">FiberHome</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpVersion">SNMP Protocol</label>
+            <select id="modalSnmpVersion" class="form-select form-select-sm">
+              <option value="2c">SNMP version 2c</option>
+              <option value="3">SNMP version 3</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpCommunity">Community String</label>
+            <input id="modalSnmpCommunity" class="form-control form-control-sm" value="public">
+          </div>
+          <div class="field">
+            <label for="modalSnmpSecurityLevel">Security Level</label>
+            <select id="modalSnmpSecurityLevel" class="form-select form-select-sm">
+              <option value="noAuthNoPriv">noAuthNoPriv</option>
+              <option value="authNoPriv">authNoPriv</option>
+              <option value="authPriv">authPriv</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpSecurityName">Security Name</label>
+            <input id="modalSnmpSecurityName" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalSnmpAuthProtocol">Auth Protocol</label>
+            <select id="modalSnmpAuthProtocol" class="form-select form-select-sm">
+              <option value="">Unset</option>
+              <option value="MD5">MD5</option>
+              <option value="SHA">SHA</option>
+              <option value="SHA256">SHA256</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpAuthPassphrase">Auth Passphrase</label>
+            <input id="modalSnmpAuthPassphrase" type="password" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalSnmpPrivacyProtocol">Privacy Protocol</label>
+            <select id="modalSnmpPrivacyProtocol" class="form-select form-select-sm">
+              <option value="">Unset</option>
+              <option value="DES">DES</option>
+              <option value="AES">AES</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpPrivacyPassphrase">Privacy Passphrase</label>
+            <input id="modalSnmpPrivacyPassphrase" type="password" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalSnmpInterfaceNameMode">Interface Name</label>
+            <select id="modalSnmpInterfaceNameMode" class="form-select form-select-sm">
+              <option value="auto">Auto (ifAlias preferred)</option>
+              <option value="ifName">ifName</option>
+              <option value="ifDescr">ifDescr</option>
+              <option value="ifAlias">ifAlias</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpCountersMode">SNMP Counters</label>
+            <select id="modalSnmpCountersMode" class="form-select form-select-sm">
+              <option value="auto">Auto (64-bit preferred)</option>
+              <option value="64-bit">64-bit only</option>
+              <option value="32-bit">32-bit only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSnmpPollingSeconds">Polling Seconds</label>
+            <input id="modalSnmpPollingSeconds" type="number" min="1" class="form-control form-control-sm" value="60">
+          </div>
+        </div>
+        <div class="split-line"></div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+          <div class="panel-title">SNMP Tester</div>
+          <button id="querySnmpButton" type="button" class="btn btn-sm btn-outline-success">
+            <i data-lucide="terminal"></i><span>Query Device</span>
+          </button>
+        </div>
+        <pre id="snmpTestResult" class="result-box">No query executed.</pre>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="snmpModal">Cancel</button>
+        <button id="saveSnmpButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="save"></i><span>Save</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="interfaceModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="interfaceModalTitle">
+    <div class="gmj-dialog small">
+      <div class="gmj-dialog-header">
+        <h2 id="interfaceModalTitle" class="view-title">Interface</h2>
+        <button type="button" class="icon-button" data-close-modal="interfaceModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="interface-form-grid">
+          <div class="field">
+            <label for="modalIfIndex">ifIndex</label>
+            <input id="modalIfIndex" type="number" min="0" class="form-control form-control-sm" value="0">
+          </div>
+          <div class="field">
+            <label for="modalIfName">Interface Name</label>
+            <input id="modalIfName" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalIfAlias">ifAlias</label>
+            <input id="modalIfAlias" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalDirection">Direction</label>
+            <select id="modalDirection" class="form-select form-select-sm">
+              <option value="Upstream">Upstream</option>
+              <option value="Downstream">Downstream</option>
+              <option value="Both">Both</option>
+              <option value="Ignore">Ignore</option>
+              <option value="Unset">Unset</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalStats">Stats</label>
+            <select id="modalStats" class="form-select form-select-sm">
+              <option value="Basic">Basic</option>
+              <option value="Extended">Extended</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalSpeedIn">Speed IN bps</label>
+            <input id="modalSpeedIn" type="number" min="0" class="form-control form-control-sm" value="0">
+          </div>
+          <div class="field">
+            <label for="modalSpeedOut">Speed OUT bps</label>
+            <input id="modalSpeedOut" type="number" min="0" class="form-control form-control-sm" value="0">
+          </div>
+          <div class="field">
+            <label for="modalIfDescr">ifDescr</label>
+            <input id="modalIfDescr" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalIfOperStatus">ifOperStatus</label>
+            <input id="modalIfOperStatus" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalColor">Color</label>
+            <input id="modalColor" type="color" class="form-control form-control-sm" value="#d946ef">
+          </div>
+          <div class="field">
+            <label for="modalMonitorEnabled">Monitor</label>
+            <select id="modalMonitorEnabled" class="form-select form-select-sm">
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
           </div>
         </div>
       </div>
-    </section>
-  </main>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="interfaceModal">Cancel</button>
+        <button id="saveInterfaceButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="save"></i><span>Save</span>
+        </button>
+      </div>
+    </div>
+  </div>
 
   <script>
     const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
@@ -306,6 +1160,17 @@
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
+    let activeView = 'dashboard';
+    let sensorCache = [];
+    let currentSensorId = null;
+    let currentInterfaces = [];
+    let editingInterfaceIndex = -1;
+
+    function createIcons() {
+      if (window.lucide) {
+        window.lucide.createIcons();
+      }
+    }
 
     function params() {
       const query = new URLSearchParams();
@@ -313,6 +1178,10 @@
       const sensor = document.getElementById('sensor').value.trim();
       if (sensor) query.set('sensor', sensor);
       return query.toString();
+    }
+
+    function apiUrl(path) {
+      return `${API_BASE}${path}`;
     }
 
     async function fetchJSON(path) {
@@ -330,6 +1199,17 @@
       console.info('Endpoint retornou itens', endpoint, payload.items.length);
       if (payload.items.length === 0) {
         console.warn('Endpoint retornou vazio', endpoint);
+      }
+      return payload;
+    }
+
+    async function apiRequest(path, options = {}) {
+      const endpoint = apiUrl(path);
+      const response = await fetch(endpoint, options);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = payload.detail || `${endpoint} ${response.status}`;
+        throw new Error(message);
       }
       return payload;
     }
@@ -571,6 +1451,7 @@
 
     async function refresh() {
       await checkHealth();
+      if (activeView !== 'dashboard') return;
       const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags] = await Promise.all([
         fetchJSON('/api/traffic/bps'),
         fetchJSON('/api/traffic/pps'),
@@ -611,6 +1492,510 @@
       await searchFlows();
     }
 
+    function defaultSensor() {
+      return {
+        id: null,
+        name: 'NE-40-BGP',
+        visibility: 'show_in_reports',
+        device_group: '',
+        sensor_server: 'console',
+        sensor_license: 'gmj-flow',
+        listener_ip: '192.168.0.210',
+        listener_port: 9995,
+        exporter_ip: '192.168.0.157',
+        flow_protocol: 'netflow',
+        flow_version: 'netflow-v9',
+        exporter_snmp_enabled: true,
+        ip_zone: 'default',
+        ip_validation: 'off',
+        flow_collector_enabled: true,
+        as_validation: 'off',
+        granularity_seconds: 60,
+        timezone: 'local-server',
+        active: true,
+        snmp_ip: '',
+        snmp_port: 161,
+        snmp_mib: 'generic',
+        snmp_version: '2c',
+        snmp_community: 'public',
+        snmp_security_level: 'noAuthNoPriv',
+        snmp_security_name: '',
+        snmp_auth_protocol: '',
+        snmp_auth_passphrase: '',
+        snmp_privacy_protocol: '',
+        snmp_privacy_passphrase: '',
+        snmp_interface_name_mode: 'auto',
+        snmp_counters_mode: 'auto',
+        snmp_polling_seconds: 60,
+        interfaces: []
+      };
+    }
+
+    function setValue(id, value) {
+      document.getElementById(id).value = value ?? '';
+    }
+
+    function setBoolSelect(id, value) {
+      document.getElementById(id).value = value ? 'true' : 'false';
+    }
+
+    function selectValue(id, fallback = '') {
+      return document.getElementById(id).value || fallback;
+    }
+
+    function boolSelectValue(id) {
+      return document.getElementById(id).value === 'true';
+    }
+
+    function numberValue(id, fallback = 0) {
+      const value = Number(document.getElementById(id).value);
+      return Number.isFinite(value) ? value : fallback;
+    }
+
+    function setSensorStatus(message, kind = 'muted') {
+      const status = document.getElementById('sensorStatus');
+      status.textContent = message;
+      status.className = kind === 'error' ? 'subtle text-danger' : 'subtle';
+    }
+
+    function fillSensorForm(sensor) {
+      const item = { ...defaultSensor(), ...sensor };
+      currentSensorId = item.id || null;
+      currentInterfaces = Array.isArray(item.interfaces) ? item.interfaces.map(entry => ({ ...entry })) : [];
+
+      setValue('sensorName', item.name);
+      setValue('sensorVisibility', item.visibility);
+      setValue('deviceGroup', item.device_group);
+      setValue('sensorServer', item.sensor_server);
+      setValue('sensorLicense', item.sensor_license);
+      setValue('listenerIp', item.listener_ip);
+      setValue('listenerPort', item.listener_port);
+      setValue('exporterIp', item.exporter_ip);
+      setBoolSelect('exporterSnmpEnabled', item.exporter_snmp_enabled);
+      setValue('flowProtocol', item.flow_protocol);
+      setValue('flowVersion', item.flow_version);
+      setValue('ipZone', item.ip_zone);
+      setValue('ipValidation', item.ip_validation);
+      setBoolSelect('flowCollectorEnabled', item.flow_collector_enabled);
+      setValue('asValidation', item.as_validation);
+      setValue('granularitySeconds', item.granularity_seconds);
+      setValue('timezone', item.timezone);
+      setBoolSelect('sensorActive', item.active);
+
+      setValue('snmpIp', item.snmp_ip);
+      setValue('snmpPort', item.snmp_port);
+      setValue('snmpMib', item.snmp_mib);
+      setValue('snmpVersion', item.snmp_version);
+      setValue('snmpCommunity', item.snmp_community);
+      setValue('snmpSecurityLevel', item.snmp_security_level);
+      setValue('snmpSecurityName', item.snmp_security_name);
+      setValue('snmpAuthProtocol', item.snmp_auth_protocol);
+      setValue('snmpAuthPassphrase', item.snmp_auth_passphrase);
+      setValue('snmpPrivacyProtocol', item.snmp_privacy_protocol);
+      setValue('snmpPrivacyPassphrase', item.snmp_privacy_passphrase);
+      setValue('snmpInterfaceNameMode', item.snmp_interface_name_mode);
+      setValue('snmpCountersMode', item.snmp_counters_mode);
+      setValue('snmpPollingSeconds', item.snmp_polling_seconds);
+
+      renderSensorList();
+      renderInterfaces();
+    }
+
+    function collectSensorForm() {
+      return {
+        name: selectValue('sensorName').trim(),
+        visibility: selectValue('sensorVisibility', 'show_in_reports'),
+        device_group: selectValue('deviceGroup').trim(),
+        sensor_server: selectValue('sensorServer', 'console'),
+        sensor_license: selectValue('sensorLicense', 'gmj-flow'),
+        listener_ip: selectValue('listenerIp').trim(),
+        listener_port: numberValue('listenerPort', 9995),
+        exporter_ip: selectValue('exporterIp').trim(),
+        flow_protocol: selectValue('flowProtocol', 'netflow'),
+        flow_version: selectValue('flowVersion', 'netflow-v9'),
+        exporter_snmp_enabled: boolSelectValue('exporterSnmpEnabled'),
+        ip_zone: selectValue('ipZone', 'default'),
+        ip_validation: selectValue('ipValidation', 'off'),
+        flow_collector_enabled: boolSelectValue('flowCollectorEnabled'),
+        as_validation: selectValue('asValidation', 'off'),
+        granularity_seconds: numberValue('granularitySeconds', 60),
+        timezone: selectValue('timezone', 'local-server'),
+        active: boolSelectValue('sensorActive'),
+        snmp_ip: selectValue('snmpIp').trim(),
+        snmp_port: numberValue('snmpPort', 161),
+        snmp_mib: selectValue('snmpMib', 'generic'),
+        snmp_version: selectValue('snmpVersion', '2c'),
+        snmp_community: selectValue('snmpCommunity', 'public'),
+        snmp_security_level: selectValue('snmpSecurityLevel', 'noAuthNoPriv'),
+        snmp_security_name: selectValue('snmpSecurityName').trim(),
+        snmp_auth_protocol: selectValue('snmpAuthProtocol'),
+        snmp_auth_passphrase: selectValue('snmpAuthPassphrase'),
+        snmp_privacy_protocol: selectValue('snmpPrivacyProtocol'),
+        snmp_privacy_passphrase: selectValue('snmpPrivacyPassphrase'),
+        snmp_interface_name_mode: selectValue('snmpInterfaceNameMode', 'auto'),
+        snmp_counters_mode: selectValue('snmpCountersMode', 'auto'),
+        snmp_polling_seconds: numberValue('snmpPollingSeconds', 60),
+        interfaces: currentInterfaces.map(entry => ({
+          if_index: Number(entry.if_index) || 0,
+          if_name: entry.if_name || '',
+          if_descr: entry.if_descr || '',
+          if_alias: entry.if_alias || '',
+          direction: entry.direction || 'Unset',
+          stats: entry.stats || 'Basic',
+          speed_in_bps: Number(entry.speed_in_bps) || 0,
+          speed_out_bps: Number(entry.speed_out_bps) || 0,
+          if_oper_status: entry.if_oper_status || '',
+          color: entry.color || '#64748b',
+          monitor_enabled: Boolean(entry.monitor_enabled)
+        }))
+      };
+    }
+
+    function renderSensorList() {
+      const tbody = document.getElementById('sensorListTable');
+      const count = document.getElementById('sensorCount');
+      count.textContent = formatNumber(sensorCache.length);
+      tbody.innerHTML = sensorCache.map(sensor => `
+        <tr data-sensor-id="${sensor.id}" class="${sensor.id === currentSensorId ? 'active' : ''}">
+          <td>${escapeHtml(sensor.name)}</td>
+          <td>${escapeHtml(sensor.exporter_ip || '-')}</td>
+          <td><span class="badge-soft ${sensor.active ? 'ok' : 'off'}">${sensor.active ? 'Enabled' : 'Disabled'}</span></td>
+        </tr>
+      `).join('') || `<tr><td colspan="3" class="text-muted">Sem sensores</td></tr>`;
+
+      tbody.querySelectorAll('tr[data-sensor-id]').forEach(row => {
+        row.addEventListener('click', () => {
+          const sensorId = Number(row.dataset.sensorId);
+          const sensor = sensorCache.find(item => item.id === sensorId);
+          if (sensor) {
+            fillSensorForm(sensor);
+            setSensorStatus(`Sensor ${sensor.name}`);
+          }
+        });
+      });
+    }
+
+    async function loadSensors() {
+      try {
+        const payload = await apiRequest('/api/sensors');
+        sensorCache = Array.isArray(payload.items) ? payload.items : [];
+        const selected = sensorCache.find(item => item.id === currentSensorId) || sensorCache[0];
+        if (selected) {
+          fillSensorForm(selected);
+          setSensorStatus(`Sensor ${selected.name}`);
+        } else {
+          fillSensorForm(defaultSensor());
+          setSensorStatus('Novo sensor');
+        }
+      } catch (error) {
+        setSensorStatus(`Falha ao carregar sensores: ${error.message}`, 'error');
+      }
+    }
+
+    async function saveSensor() {
+      const payload = collectSensorForm();
+      if (!payload.name) {
+        setSensorStatus('Sensor Name obrigatorio', 'error');
+        return;
+      }
+
+      const options = {
+        method: currentSensorId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      };
+      const path = currentSensorId ? `/api/sensors/${currentSensorId}` : '/api/sensors';
+
+      try {
+        const saved = await apiRequest(path, options);
+        currentSensorId = saved.id;
+        await loadSensors();
+        setSensorStatus(`Sensor ${saved.name} salvo`);
+      } catch (error) {
+        setSensorStatus(`Falha ao salvar sensor: ${error.message}`, 'error');
+      }
+    }
+
+    async function deleteSensor() {
+      if (!currentSensorId) {
+        fillSensorForm(defaultSensor());
+        setSensorStatus('Novo sensor');
+        return;
+      }
+
+      if (!window.confirm('Excluir sensor selecionado?')) return;
+
+      try {
+        await apiRequest(`/api/sensors/${currentSensorId}`, { method: 'DELETE' });
+        currentSensorId = null;
+        await loadSensors();
+        setSensorStatus('Sensor excluido');
+      } catch (error) {
+        setSensorStatus(`Falha ao excluir sensor: ${error.message}`, 'error');
+      }
+    }
+
+    function newSensor() {
+      fillSensorForm(defaultSensor());
+      setSensorStatus('Novo sensor');
+    }
+
+    function formatSpeed(value) {
+      return formatBps(value).replace('bps', 'b/s');
+    }
+
+    function selectedInterfaceIndexes() {
+      return Array.from(document.querySelectorAll('.interface-select:checked'))
+        .map(input => Number(input.dataset.index))
+        .filter(index => Number.isInteger(index));
+    }
+
+    function renderInterfaces() {
+      const tbody = document.getElementById('interfacesTable');
+      const status = document.getElementById('interfacesStatus');
+      status.textContent = `${formatNumber(currentInterfaces.length)} interfaces`;
+      document.getElementById('selectAllInterfaces').checked = false;
+      tbody.innerHTML = currentInterfaces.map((iface, index) => `
+        <tr>
+          <td><input class="interface-select" data-index="${index}" type="checkbox" aria-label="Selecionar interface"></td>
+          <td>${formatNumber(iface.if_index)}</td>
+          <td>${escapeHtml(iface.if_name || iface.if_alias || '-')}</td>
+          <td>${escapeHtml(iface.direction || 'Unset')}</td>
+          <td>${escapeHtml(iface.stats || 'Basic')}</td>
+          <td class="text-end">${formatSpeed(iface.speed_in_bps)}</td>
+          <td class="text-end">${formatSpeed(iface.speed_out_bps)}</td>
+          <td><span class="color-swatch" style="background:${escapeHtml(iface.color || '#64748b')}"></span></td>
+          <td><span class="badge-soft ${iface.monitor_enabled ? 'ok' : 'off'}">${iface.monitor_enabled ? 'Enabled' : 'Disabled'}</span></td>
+        </tr>
+      `).join('') || `<tr><td colspan="9" class="text-muted">Sem interfaces monitoradas</td></tr>`;
+    }
+
+    function defaultInterface() {
+      return {
+        if_index: 0,
+        if_name: '',
+        if_descr: '',
+        if_alias: '',
+        direction: 'Unset',
+        stats: 'Basic',
+        speed_in_bps: 0,
+        speed_out_bps: 0,
+        if_oper_status: '',
+        color: '#d946ef',
+        monitor_enabled: true
+      };
+    }
+
+    function openModal(id) {
+      document.getElementById(id).classList.add('open');
+      createIcons();
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('open');
+    }
+
+    function openInterfaceModal(index = -1) {
+      editingInterfaceIndex = index;
+      const iface = index >= 0 ? { ...defaultInterface(), ...currentInterfaces[index] } : defaultInterface();
+      document.getElementById('interfaceModalTitle').textContent = index >= 0 ? 'Edit Interface' : 'Add Interface';
+      setValue('modalIfIndex', iface.if_index);
+      setValue('modalIfName', iface.if_name);
+      setValue('modalIfAlias', iface.if_alias);
+      setValue('modalDirection', iface.direction);
+      setValue('modalStats', iface.stats);
+      setValue('modalSpeedIn', iface.speed_in_bps);
+      setValue('modalSpeedOut', iface.speed_out_bps);
+      setValue('modalIfDescr', iface.if_descr);
+      setValue('modalIfOperStatus', iface.if_oper_status);
+      setValue('modalColor', iface.color || '#d946ef');
+      setBoolSelect('modalMonitorEnabled', iface.monitor_enabled);
+      openModal('interfaceModal');
+    }
+
+    function saveInterfaceFromModal() {
+      const iface = {
+        if_index: numberValue('modalIfIndex', 0),
+        if_name: selectValue('modalIfName').trim(),
+        if_alias: selectValue('modalIfAlias').trim(),
+        direction: selectValue('modalDirection', 'Unset'),
+        stats: selectValue('modalStats', 'Basic'),
+        speed_in_bps: numberValue('modalSpeedIn', 0),
+        speed_out_bps: numberValue('modalSpeedOut', 0),
+        if_descr: selectValue('modalIfDescr').trim(),
+        if_oper_status: selectValue('modalIfOperStatus').trim(),
+        color: selectValue('modalColor', '#64748b'),
+        monitor_enabled: boolSelectValue('modalMonitorEnabled')
+      };
+
+      if (editingInterfaceIndex >= 0) {
+        currentInterfaces[editingInterfaceIndex] = iface;
+      } else {
+        currentInterfaces.push(iface);
+      }
+      closeModal('interfaceModal');
+      renderInterfaces();
+    }
+
+    function editSelectedInterface() {
+      const selected = selectedInterfaceIndexes();
+      if (selected.length !== 1) {
+        document.getElementById('interfacesStatus').textContent = 'Selecione uma interface';
+        return;
+      }
+      openInterfaceModal(selected[0]);
+    }
+
+    function deleteSelectedInterfaces() {
+      const selected = new Set(selectedInterfaceIndexes());
+      if (!selected.size) {
+        document.getElementById('interfacesStatus').textContent = 'Selecione interfaces';
+        return;
+      }
+      currentInterfaces = currentInterfaces.filter((_, index) => !selected.has(index));
+      renderInterfaces();
+    }
+
+    async function discoverInterfaces() {
+      if (!currentSensorId) {
+        document.getElementById('interfacesStatus').textContent = 'Salve o sensor antes da descoberta SNMP';
+        return;
+      }
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/snmp/discover-interfaces`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(currentSnmpPayload())
+        });
+        if (payload.ok === false) {
+          document.getElementById('interfacesStatus').textContent = payload.message || 'Falha na descoberta SNMP';
+          return;
+        }
+        const items = Array.isArray(payload.interfaces) ? payload.interfaces : (Array.isArray(payload.items) ? payload.items : []);
+        if (items.length) {
+          currentInterfaces = items;
+          renderInterfaces();
+        }
+        document.getElementById('interfacesStatus').textContent = `${formatNumber(items.length)} interfaces descobertas`;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Falha na descoberta: ${error.message}`;
+      }
+    }
+
+    function currentSnmpPayload() {
+      return {
+        snmp_ip: selectValue('modalSnmpIp').trim() || selectValue('snmpIp').trim() || selectValue('exporterIp').trim(),
+        snmp_port: numberValue('modalSnmpPort', numberValue('snmpPort', 161)),
+        snmp_version: selectValue('modalSnmpVersion') || selectValue('snmpVersion', '2c'),
+        snmp_community: selectValue('modalSnmpCommunity') || selectValue('snmpCommunity', 'public'),
+        snmp_security_level: selectValue('modalSnmpSecurityLevel') || selectValue('snmpSecurityLevel', 'noAuthNoPriv'),
+        snmp_security_name: selectValue('modalSnmpSecurityName') || selectValue('snmpSecurityName'),
+        snmp_auth_protocol: selectValue('modalSnmpAuthProtocol') || selectValue('snmpAuthProtocol'),
+        snmp_auth_passphrase: selectValue('modalSnmpAuthPassphrase') || selectValue('snmpAuthPassphrase'),
+        snmp_privacy_protocol: selectValue('modalSnmpPrivacyProtocol') || selectValue('snmpPrivacyProtocol'),
+        snmp_privacy_passphrase: selectValue('modalSnmpPrivacyPassphrase') || selectValue('snmpPrivacyPassphrase')
+      };
+    }
+
+    function openSnmpModal() {
+      setValue('modalSnmpIp', selectValue('snmpIp') || selectValue('exporterIp'));
+      setValue('modalSnmpPort', selectValue('snmpPort', '161'));
+      setValue('modalSnmpMib', selectValue('snmpMib', 'generic'));
+      setValue('modalSnmpVersion', selectValue('snmpVersion', '2c'));
+      setValue('modalSnmpCommunity', selectValue('snmpCommunity', 'public'));
+      setValue('modalSnmpSecurityLevel', selectValue('snmpSecurityLevel', 'noAuthNoPriv'));
+      setValue('modalSnmpSecurityName', selectValue('snmpSecurityName'));
+      setValue('modalSnmpAuthProtocol', selectValue('snmpAuthProtocol'));
+      setValue('modalSnmpAuthPassphrase', selectValue('snmpAuthPassphrase'));
+      setValue('modalSnmpPrivacyProtocol', selectValue('snmpPrivacyProtocol'));
+      setValue('modalSnmpPrivacyPassphrase', selectValue('snmpPrivacyPassphrase'));
+      setValue('modalSnmpInterfaceNameMode', selectValue('snmpInterfaceNameMode', 'auto'));
+      setValue('modalSnmpCountersMode', selectValue('snmpCountersMode', 'auto'));
+      setValue('modalSnmpPollingSeconds', selectValue('snmpPollingSeconds', '60'));
+      syncSnmpVersionFields();
+      openModal('snmpModal');
+    }
+
+    function syncSnmpVersionFields() {
+      const isV3 = document.getElementById('modalSnmpVersion').value === '3';
+      document.getElementById('modalSnmpCommunity').disabled = isV3;
+      [
+        'modalSnmpSecurityLevel',
+        'modalSnmpSecurityName',
+        'modalSnmpAuthProtocol',
+        'modalSnmpAuthPassphrase',
+        'modalSnmpPrivacyProtocol',
+        'modalSnmpPrivacyPassphrase'
+      ].forEach(id => {
+        document.getElementById(id).disabled = !isV3;
+      });
+    }
+
+    function saveSnmpOptions() {
+      setValue('snmpIp', selectValue('modalSnmpIp').trim());
+      setValue('snmpPort', numberValue('modalSnmpPort', 161));
+      setValue('snmpMib', selectValue('modalSnmpMib', 'generic'));
+      setValue('snmpVersion', selectValue('modalSnmpVersion', '2c'));
+      setValue('snmpCommunity', selectValue('modalSnmpCommunity', 'public'));
+      setValue('snmpSecurityLevel', selectValue('modalSnmpSecurityLevel', 'noAuthNoPriv'));
+      setValue('snmpSecurityName', selectValue('modalSnmpSecurityName').trim());
+      setValue('snmpAuthProtocol', selectValue('modalSnmpAuthProtocol'));
+      setValue('snmpAuthPassphrase', selectValue('modalSnmpAuthPassphrase'));
+      setValue('snmpPrivacyProtocol', selectValue('modalSnmpPrivacyProtocol'));
+      setValue('snmpPrivacyPassphrase', selectValue('modalSnmpPrivacyPassphrase'));
+      setValue('snmpInterfaceNameMode', selectValue('modalSnmpInterfaceNameMode', 'auto'));
+      setValue('snmpCountersMode', selectValue('modalSnmpCountersMode', 'auto'));
+      setValue('snmpPollingSeconds', numberValue('modalSnmpPollingSeconds', 60));
+      setBoolSelect('exporterSnmpEnabled', true);
+      closeModal('snmpModal');
+      setSensorStatus('Opcoes SNMP atualizadas no formulario');
+    }
+
+    async function querySnmp() {
+      const result = document.getElementById('snmpTestResult');
+      if (!currentSensorId) {
+        result.textContent = 'Save the sensor before querying SNMP.';
+        return;
+      }
+      result.textContent = 'Querying...';
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/snmp/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(currentSnmpPayload())
+        });
+        result.textContent = JSON.stringify(payload, null, 2);
+      } catch (error) {
+        result.textContent = `Error: ${error.message}`;
+      }
+    }
+
+    function showView(view, placeholderTitle = '') {
+      activeView = view === 'placeholder' ? 'placeholder' : view;
+      document.querySelectorAll('.app-view').forEach(section => section.classList.remove('active'));
+      document.querySelectorAll('.side-nav button').forEach(button => button.classList.remove('active'));
+
+      if (view === 'dashboard') {
+        document.getElementById('view-dashboard').classList.add('active');
+        document.querySelector('[data-nav-view="dashboard"]').classList.add('active');
+        Object.values(charts).forEach(chart => chart.resize());
+        refresh().catch(console.error);
+      } else if (view === 'sensors') {
+        document.getElementById('view-sensors').classList.add('active');
+        document.querySelector('[data-nav-view="sensors"]').classList.add('active');
+        loadSensors().catch(console.error);
+      } else {
+        document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
+        document.getElementById('view-placeholder').classList.add('active');
+        const button = Array.from(document.querySelectorAll('.side-nav button')).find(item => item.dataset.placeholderTitle === placeholderTitle);
+        if (button) button.classList.add('active');
+      }
+    }
+
+    document.querySelectorAll('.side-nav button').forEach(button => {
+      button.addEventListener('click', () => showView(button.dataset.navView, button.dataset.placeholderTitle || ''));
+    });
+
     document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
     document.getElementById('flowIp').addEventListener('keydown', event => {
@@ -621,8 +2006,38 @@
     });
     document.getElementById('rangeMinutes').addEventListener('change', () => refresh().catch(console.error));
     document.getElementById('sensor').addEventListener('change', () => refresh().catch(console.error));
+
+    document.getElementById('newSensorButton').addEventListener('click', newSensor);
+    document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
+    document.getElementById('deleteSensorButton').addEventListener('click', () => deleteSensor().catch(console.error));
+    document.getElementById('openSnmpButton').addEventListener('click', openSnmpModal);
+    document.getElementById('addInterfaceButton').addEventListener('click', () => openInterfaceModal());
+    document.getElementById('editInterfaceButton').addEventListener('click', editSelectedInterface);
+    document.getElementById('deleteInterfaceButton').addEventListener('click', deleteSelectedInterfaces);
+    document.getElementById('manageInterfacesButton').addEventListener('click', () => discoverInterfaces().catch(console.error));
+    document.getElementById('saveInterfaceButton').addEventListener('click', saveInterfaceFromModal);
+    document.getElementById('saveSnmpButton').addEventListener('click', saveSnmpOptions);
+    document.getElementById('querySnmpButton').addEventListener('click', () => querySnmp().catch(console.error));
+    document.getElementById('modalSnmpVersion').addEventListener('change', syncSnmpVersionFields);
+    document.getElementById('selectAllInterfaces').addEventListener('change', event => {
+      document.querySelectorAll('.interface-select').forEach(input => {
+        input.checked = event.target.checked;
+      });
+    });
+
+    document.querySelectorAll('[data-close-modal]').forEach(button => {
+      button.addEventListener('click', () => closeModal(button.dataset.closeModal));
+    });
+
+    document.querySelectorAll('.gmj-modal').forEach(modal => {
+      modal.addEventListener('click', event => {
+        if (event.target === modal) closeModal(modal.id);
+      });
+    });
+
     window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
 
+    createIcons();
     refresh().catch(console.error);
     setInterval(() => refresh().catch(console.error), 60000);
   </script>
