@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from ipaddress import IPv4Address, ip_address
 from typing import Any
 
@@ -45,7 +44,6 @@ TCP_FLAG_BITS = (
 )
 
 
-@lru_cache(maxsize=1)
 def get_client():
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
@@ -54,6 +52,33 @@ def get_client():
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
         database=os.getenv("CLICKHOUSE_DATABASE", "flowdb"),
     )
+
+
+def close_client(client: Any) -> None:
+    for method_name in ("close", "disconnect"):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+            return
+
+
+def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> Any:
+    client = get_client()
+    try:
+        return client.query(query, parameters=parameters or {})
+    finally:
+        close_client(client)
+
+
+def ping_clickhouse() -> bool:
+    client = get_client()
+    try:
+        return bool(client.ping())
+    finally:
+        close_client(client)
 
 
 def utc_dt(value: datetime | None) -> datetime | None:
@@ -215,7 +240,7 @@ def health(
 ):
     _ = (range_minutes, start, end, sensor)
     try:
-        alive = get_client().ping()
+        alive = ping_clickhouse()
     except Exception as exc:  # pragma: no cover - exposed as health detail.
         raise HTTPException(status_code=503, detail=f"ClickHouse indisponivel: {exc}") from exc
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
@@ -234,7 +259,7 @@ def traffic_items(metric: str, range_minutes: int, sensor: str | None):
     params: dict[str, Any] = {}
     where = raw_flow_where(range_minutes, sensor, params)
     value_expr = "sum(bytes) * 8 / 60" if metric == "bps" else "sum(packets) / 60"
-    result = get_client().query(
+    result = query_clickhouse(
         f"""
         SELECT
             toStartOfMinute(flow_time) AS time,
@@ -244,7 +269,7 @@ def traffic_items(metric: str, range_minutes: int, sensor: str | None):
         GROUP BY time
         ORDER BY time
         """,
-        parameters=params,
+        params,
     )
 
     items = []
@@ -348,7 +373,7 @@ def top_dimension(
     else:
         raise HTTPException(status_code=400, detail="dimensao invalida")
 
-    result = get_client().query(query, parameters=params)
+    result = query_clickhouse(query, params)
     items = []
     for row in rows_as_dicts(result):
         bps = round(float(row["bps"] or 0), 2)
@@ -471,7 +496,7 @@ def search_flows(
         params["tcp_flags"] = tcp_flags_value
         filters.append("tcp_flags = {tcp_flags:UInt16}")
 
-    result = get_client().query(
+    result = query_clickhouse(
         f"""
         SELECT
             flow_time,
@@ -494,7 +519,7 @@ def search_flows(
         ORDER BY flow_time DESC
         LIMIT {{limit:UInt32}}
         """,
-        parameters=params,
+        params,
     )
 
     items = []
