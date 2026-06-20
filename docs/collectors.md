@@ -6,6 +6,7 @@ O motivo e uma limitacao do CSV gerado pelo `pmacct`: o parser atual nao recebe 
 
 - um `nfacctd` escutando a `listener_port` do sensor;
 - um arquivo CSV proprio em `/var/spool/pmacct/sensor-<id>-<porta>.csv`;
+- um `allow.lst` proprio contendo o `exporter_ip` cadastrado no sensor;
 - um parser com `PMACCT_EXPORTER_IP` e `PMACCT_SENSOR` fixos para aquele sensor.
 
 ## Aplicar configuracao
@@ -19,7 +20,22 @@ Na tela **Flow Sensor Configuration**, mantenha cada sensor ativo com:
 Depois clique em **Aplicar Coletor**. O backend gera:
 
 - `/app/data/collectors/sensor-<id>/nfacctd.conf`;
+- `/app/data/collectors/sensor-<id>/allow.lst`;
 - `/app/data/collectors/docker-compose.collectors.yml`.
+
+Cada `nfacctd.conf` gerado aponta para o allow list do proprio sensor:
+
+```text
+nfacctd_allow_file: /app/data/collectors/sensor-<id>/allow.lst
+```
+
+O backend grava nesse `allow.lst` apenas o `exporter_ip` cadastrado naquele sensor. Assim, por exemplo, um sensor com `exporter_ip=192.168.0.171` recebe um arquivo contendo:
+
+```text
+192.168.0.171
+```
+
+Collectors dinamicos nao usam o allow list global `/etc/pmacct/allow.lst`. O retorno de `POST /api/collectors/apply` inclui o campo `allow_file` em `configs_generated` com o caminho gerado para cada sensor.
 
 Se o script configurado em `GMJFLOW_APPLY_COLLECTORS_SCRIPT` existir, o backend executa esse script fixo para aplicar o override com Docker Compose. O script incluido em `scripts/apply_collectors.sh` executa:
 
