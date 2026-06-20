@@ -7,6 +7,7 @@ import json
 import logging
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 import clickhouse_connect
@@ -89,6 +91,12 @@ SNMP_INTERFACE_OIDS = {
     "if_high_speed": "1.3.6.1.2.1.31.1.1.1.15",
 }
 
+SNMP_COUNTER_OIDS = {
+    "if_hc_in_octets": "1.3.6.1.2.1.31.1.1.1.6",
+    "if_hc_out_octets": "1.3.6.1.2.1.31.1.1.1.10",
+    "if_oper_status": SNMP_INTERFACE_OIDS["if_oper_status"],
+}
+
 IF_OPER_STATUS_LABELS = {
     1: "up",
     2: "down",
@@ -98,6 +106,12 @@ IF_OPER_STATUS_LABELS = {
     6: "notPresent",
     7: "lowerLayerDown",
 }
+
+CALIBRATION_METHOD = "snmp_vs_flow"
+CALIBRATION_MIN_BPS = float(os.getenv("GMJFLOW_CALIBRATION_MIN_BPS", "10000"))
+CALIBRATION_MIN_CONFIDENCE = float(os.getenv("GMJFLOW_CALIBRATION_MIN_CONFIDENCE", "0.6"))
+SNMP_POLL_STOP = threading.Event()
+SNMP_POLL_THREAD: threading.Thread | None = None
 
 SENSOR_COLUMNS = [
     "name",
@@ -145,6 +159,8 @@ INTERFACE_COLUMNS = [
     "stats",
     "speed_in_bps",
     "speed_out_bps",
+    "sample_rate_in",
+    "sample_rate_out",
     "if_oper_status",
     "color",
     "monitor_enabled",
@@ -178,6 +194,8 @@ class SensorInterfacePayload(BaseModel):
     stats: str = "Basic"
     speed_in_bps: int = 0
     speed_out_bps: int = 0
+    sample_rate_in: int = 1
+    sample_rate_out: int = 1
     if_oper_status: str = ""
     color: str = "#64748b"
     monitor_enabled: bool = True
@@ -366,6 +384,17 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def parse_datetime_text(value: Any) -> datetime | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return utc_dt(parsed)
+
+
 def rows_as_dicts(result: Any) -> list[dict[str, Any]]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
@@ -391,6 +420,12 @@ def sqlite_connection() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def ensure_sqlite_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def hash_password(password: str) -> str:
@@ -471,11 +506,57 @@ def ensure_sensor_db() -> None:
                 stats TEXT NOT NULL DEFAULT 'Basic',
                 speed_in_bps INTEGER NOT NULL DEFAULT 0,
                 speed_out_bps INTEGER NOT NULL DEFAULT 0,
+                sample_rate_in INTEGER NOT NULL DEFAULT 1,
+                sample_rate_out INTEGER NOT NULL DEFAULT 1,
                 if_oper_status TEXT NOT NULL DEFAULT '',
                 color TEXT NOT NULL DEFAULT '#64748b',
                 monitor_enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
+            )
+            """
+        )
+        ensure_sqlite_column(conn, "sensor_interfaces", "sample_rate_in", "sample_rate_in INTEGER NOT NULL DEFAULT 1")
+        ensure_sqlite_column(conn, "sensor_interfaces", "sample_rate_out", "sample_rate_out INTEGER NOT NULL DEFAULT 1")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS interface_snmp_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sensor_id INTEGER NOT NULL,
+                if_index INTEGER NOT NULL,
+                sample_time TEXT NOT NULL,
+                in_octets INTEGER NOT NULL DEFAULT 0,
+                out_octets INTEGER NOT NULL DEFAULT 0,
+                in_bps REAL NOT NULL DEFAULT 0,
+                out_bps REAL NOT NULL DEFAULT 0,
+                if_oper_status TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_interface_snmp_samples_lookup
+            ON interface_snmp_samples(sensor_id, if_index, sample_time)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sensor_interface_calibration (
+                sensor_id INTEGER NOT NULL,
+                if_index INTEGER NOT NULL,
+                estimated_sample_rate_in REAL NOT NULL DEFAULT 1,
+                estimated_sample_rate_out REAL NOT NULL DEFAULT 1,
+                confidence REAL NOT NULL DEFAULT 0,
+                last_calibrated_at TEXT NOT NULL,
+                method TEXT NOT NULL DEFAULT 'snmp_vs_flow',
+                samples_used INTEGER NOT NULL DEFAULT 0,
+                snmp_in_bps REAL NOT NULL DEFAULT 0,
+                snmp_out_bps REAL NOT NULL DEFAULT 0,
+                flow_in_bps REAL NOT NULL DEFAULT 0,
+                flow_out_bps REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(sensor_id, if_index),
                 FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
             )
             """
@@ -498,12 +579,18 @@ def ensure_sensor_db() -> None:
                 """,
                 ("admin", hash_password("admin"), "admin", 1, 1, now, now),
             )
-            conn.commit()
+        conn.commit()
 
 
 @app.on_event("startup")
 def startup() -> None:
     ensure_sensor_db()
+    start_snmp_polling_thread()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    SNMP_POLL_STOP.set()
 
 
 def clean_text(value: Any) -> str:
@@ -552,6 +639,8 @@ def normalize_interface_payload(payload: SensorInterfacePayload) -> dict[str, An
     data["if_index"] = non_negative_int(data.get("if_index"), "if_index")
     data["speed_in_bps"] = non_negative_int(data.get("speed_in_bps"), "speed_in_bps")
     data["speed_out_bps"] = non_negative_int(data.get("speed_out_bps"), "speed_out_bps")
+    data["sample_rate_in"] = positive_int(data.get("sample_rate_in") or 1, "sample_rate_in")
+    data["sample_rate_out"] = positive_int(data.get("sample_rate_out") or 1, "sample_rate_out")
     for field in ("if_name", "if_descr", "if_alias", "direction", "stats", "if_oper_status", "color"):
         data[field] = clean_text(data.get(field))
     data["monitor_enabled"] = 1 if data.get("monitor_enabled") else 0
@@ -607,6 +696,51 @@ def interface_dashboard_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def calibration_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "estimated_sample_rate_in": round(float(row["estimated_sample_rate_in"] or 1), 2),
+        "estimated_sample_rate_out": round(float(row["estimated_sample_rate_out"] or 1), 2),
+        "confidence": round(float(row["confidence"] or 0), 3),
+        "last_calibrated_at": row["last_calibrated_at"],
+        "method": row["method"],
+        "samples_used": int(row["samples_used"] or 0),
+        "snmp_in_bps": round(float(row["snmp_in_bps"] or 0), 2),
+        "snmp_out_bps": round(float(row["snmp_out_bps"] or 0), 2),
+        "flow_in_bps": round(float(row["flow_in_bps"] or 0), 2),
+        "flow_out_bps": round(float(row["flow_out_bps"] or 0), 2),
+    }
+
+
+def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sensor_id: int) -> dict[str, Any]:
+    if_index = int(item.get("if_index") or 0)
+    sample = conn.execute(
+        """
+        SELECT sample_time, in_bps, out_bps, if_oper_status
+        FROM interface_snmp_samples
+        WHERE sensor_id = ? AND if_index = ?
+        ORDER BY sample_time DESC
+        LIMIT 1
+        """,
+        (sensor_id, if_index),
+    ).fetchone()
+    calibration = conn.execute(
+        """
+        SELECT *
+        FROM sensor_interface_calibration
+        WHERE sensor_id = ? AND if_index = ?
+        """,
+        (sensor_id, if_index),
+    ).fetchone()
+    item["snmp_in_bps"] = round(float(sample["in_bps"] or 0), 2) if sample else 0
+    item["snmp_out_bps"] = round(float(sample["out_bps"] or 0), 2) if sample else 0
+    item["snmp_sample_time"] = sample["sample_time"] if sample else ""
+    item["snmp_if_oper_status"] = sample["if_oper_status"] if sample else ""
+    item["calibration"] = calibration_row_to_dict(calibration)
+    return item
+
+
 def deterministic_color(key: Any) -> str:
     text = str(key or "")
     seed = 0
@@ -629,7 +763,10 @@ def sensor_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_inter
             """,
             (item["id"],),
         ).fetchall()
-        item["interfaces"] = [interface_row_to_dict(interface_row) for interface_row in interface_rows]
+        item["interfaces"] = [
+            enrich_interface_metrics(conn, interface_row_to_dict(interface_row), int(item["id"]))
+            for interface_row in interface_rows
+        ]
     return item
 
 
@@ -1304,11 +1441,211 @@ async def snmp_discover_interfaces(config: dict[str, Any]) -> list[dict[str, Any
         snmp_engine.close_dispatcher()
 
 
+async def snmp_get_interface_counters(config: dict[str, Any]) -> list[dict[str, Any]]:
+    api = load_pysnmp_api()
+    snmp_engine = api.SnmpEngine()
+    try:
+        auth_data = snmp_auth_data(api, config)
+        transport = await snmp_transport(api, config)
+        context = api.ContextData()
+        max_rows = int(os.getenv("SNMP_MAX_INTERFACES", "2048"))
+        max_rows = max(1, min(max_rows, 20000))
+
+        tables = {
+            name: await snmp_walk_oid(api, snmp_engine, auth_data, transport, context, oid, max_rows)
+            for name, oid in SNMP_COUNTER_OIDS.items()
+        }
+
+        indexes = set(tables["if_hc_in_octets"].keys()) | set(tables["if_hc_out_octets"].keys())
+        counters: list[dict[str, Any]] = []
+        for if_index in sorted(indexes):
+            in_octets = snmp_value_int(tables["if_hc_in_octets"].get(if_index))
+            out_octets = snmp_value_int(tables["if_hc_out_octets"].get(if_index))
+            oper_status = snmp_value_int(tables["if_oper_status"].get(if_index))
+            counters.append(
+                {
+                    "if_index": if_index,
+                    "in_octets": in_octets,
+                    "out_octets": out_octets,
+                    "if_oper_status": IF_OPER_STATUS_LABELS.get(oper_status, str(oper_status) if oper_status else ""),
+                }
+            )
+        return counters
+    finally:
+        snmp_engine.close_dispatcher()
+
+
 def run_snmp(coro: Any) -> Any:
     try:
         return asyncio.run(coro)
     except asyncio.TimeoutError as exc:
         raise SnmpQueryError("timeout SNMP") from exc
+
+
+def counter_bps(current_value: int, previous_value: int, elapsed_seconds: float) -> float:
+    if elapsed_seconds <= 0:
+        return 0.0
+    delta = current_value - previous_value
+    if delta < 0:
+        delta += 2**64
+    if delta < 0:
+        return 0.0
+    return max(0.0, (delta * 8) / elapsed_seconds)
+
+
+def insert_snmp_counter_sample(
+    conn: sqlite3.Connection,
+    sensor_id: int,
+    counter: dict[str, Any],
+    sample_time: datetime,
+) -> dict[str, Any]:
+    if_index = int(counter["if_index"])
+    in_octets = int(counter.get("in_octets") or 0)
+    out_octets = int(counter.get("out_octets") or 0)
+    previous = conn.execute(
+        """
+        SELECT sample_time, in_octets, out_octets
+        FROM interface_snmp_samples
+        WHERE sensor_id = ? AND if_index = ?
+        ORDER BY sample_time DESC
+        LIMIT 1
+        """,
+        (sensor_id, if_index),
+    ).fetchone()
+
+    in_bps = 0.0
+    out_bps = 0.0
+    if previous is not None:
+        previous_time = parse_datetime_text(previous["sample_time"])
+        if previous_time is not None:
+            elapsed = (sample_time - previous_time).total_seconds()
+            in_bps = counter_bps(in_octets, int(previous["in_octets"] or 0), elapsed)
+            out_bps = counter_bps(out_octets, int(previous["out_octets"] or 0), elapsed)
+
+    item = {
+        "sensor_id": sensor_id,
+        "if_index": if_index,
+        "sample_time": iso(sample_time),
+        "in_octets": in_octets,
+        "out_octets": out_octets,
+        "in_bps": round(in_bps, 2),
+        "out_bps": round(out_bps, 2),
+        "if_oper_status": clean_text(counter.get("if_oper_status")),
+    }
+    conn.execute(
+        """
+        INSERT INTO interface_snmp_samples (
+            sensor_id,
+            if_index,
+            sample_time,
+            in_octets,
+            out_octets,
+            in_bps,
+            out_bps,
+            if_oper_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item["sensor_id"],
+            item["if_index"],
+            item["sample_time"],
+            item["in_octets"],
+            item["out_octets"],
+            item["in_bps"],
+            item["out_bps"],
+            item["if_oper_status"],
+        ),
+    )
+    return item
+
+
+def sensor_poll_due(conn: sqlite3.Connection, sensor: dict[str, Any], now: datetime) -> bool:
+    polling_seconds = max(30, min(int(sensor.get("snmp_polling_seconds") or 60), 3600))
+    row = conn.execute(
+        """
+        SELECT MAX(sample_time) AS sample_time
+        FROM interface_snmp_samples
+        WHERE sensor_id = ?
+        """,
+        (sensor["id"],),
+    ).fetchone()
+    last_time = parse_datetime_text(row["sample_time"] if row else None)
+    if last_time is None:
+        return True
+    return (now - last_time).total_seconds() >= polling_seconds
+
+
+def poll_snmp_samples(sensor_id: int | None = None, force: bool = True) -> dict[str, Any]:
+    ensure_sensor_db()
+    now = datetime.now(timezone.utc)
+    filters = ["active = 1", "exporter_snmp_enabled = 1"]
+    values: list[Any] = []
+    if sensor_id is not None:
+        filters.append("id = ?")
+        values.append(sensor_id)
+
+    results: list[dict[str, Any]] = []
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM sensors
+            WHERE {' AND '.join(filters)}
+            ORDER BY id
+            """,
+            values,
+        ).fetchall()
+        if sensor_id is not None and not rows:
+            _ = fetch_sensor_without_interfaces(conn, sensor_id)
+            raise HTTPException(status_code=400, detail="Sensor precisa estar ativo e com Exporter SNMP habilitado")
+        for row in rows:
+            sensor = dict(row)
+            if not force and not sensor_poll_due(conn, sensor, now):
+                continue
+            try:
+                config = snmp_config(sensor, None)
+                counters = run_snmp(snmp_get_interface_counters(config))
+                samples = [insert_snmp_counter_sample(conn, int(sensor["id"]), counter, now) for counter in counters]
+                results.append(
+                    {
+                        "sensor_id": int(sensor["id"]),
+                        "sensor": sensor["name"],
+                        "ok": True,
+                        "samples": samples,
+                        "sample_count": len(samples),
+                    }
+                )
+            except SnmpQueryError as exc:
+                results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive guard for SNMP stack/runtime surprises.
+                results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": f"erro SNMP: {exc}"})
+        conn.commit()
+
+    return {"ok": all(item.get("ok") for item in results), "items": results}
+
+
+def snmp_polling_enabled() -> bool:
+    return clean_text(os.getenv("GMJFLOW_SNMP_POLLING_ENABLED", "1")).lower() not in {"0", "false", "no", "off"}
+
+
+def snmp_polling_loop() -> None:
+    while not SNMP_POLL_STOP.wait(15):
+        try:
+            poll_snmp_samples(force=False)
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no polling SNMP: %s", exc)
+
+
+def start_snmp_polling_thread() -> None:
+    global SNMP_POLL_THREAD
+    if not snmp_polling_enabled():
+        return
+    if SNMP_POLL_THREAD is not None and SNMP_POLL_THREAD.is_alive():
+        return
+    SNMP_POLL_STOP.clear()
+    SNMP_POLL_THREAD = threading.Thread(target=snmp_polling_loop, name="gmj-flow-snmp-poller", daemon=True)
+    SNMP_POLL_THREAD.start()
 
 
 def upsert_discovered_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]]) -> None:
@@ -1976,7 +2313,7 @@ def list_sensor_interfaces(sensor_id: int):
             """,
             (sensor_id,),
         ).fetchall()
-        return {"items": [interface_dashboard_row_to_dict(row) for row in rows]}
+        return {"items": [enrich_interface_metrics(conn, interface_dashboard_row_to_dict(row), sensor_id) for row in rows]}
 
 
 @app.put("/api/sensors/{sensor_id}")
@@ -2063,6 +2400,56 @@ def discover_sensor_interfaces(sensor_id: int, payload: SnmpActionPayload | None
         "interfaces": interfaces,
         "items": interfaces,
     }
+
+
+@app.post("/api/sensors/{sensor_id}/snmp/poll")
+def poll_sensor_snmp(sensor_id: int):
+    ensure_sensor_db()
+    _ = sensor_exporter_ip(sensor_id)
+    return poll_snmp_samples(sensor_id=sensor_id, force=True)
+
+
+@app.get("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration")
+def get_interface_calibration(sensor_id: int, if_index: int):
+    return calibration_detail(sensor_id, if_index)
+
+
+@app.post("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration/run")
+def run_interface_calibration(
+    sensor_id: int,
+    if_index: int,
+    window_minutes: int = Query(15, ge=5, le=15),
+):
+    poll_result = poll_snmp_samples(sensor_id=sensor_id, force=True)
+    calibration = calibrate_interface_sample_rate(sensor_id, if_index, window_minutes)
+    return {"ok": True, "poll": poll_result, "calibration": calibration}
+
+
+@app.post("/api/sensors/{sensor_id}/interfaces/calibration/run")
+def run_sensor_interfaces_calibration(
+    sensor_id: int,
+    window_minutes: int = Query(15, ge=5, le=15),
+):
+    ensure_sensor_db()
+    poll_result = poll_snmp_samples(sensor_id=sensor_id, force=True)
+    with sqlite_connection() as conn:
+        _ = fetch_sensor_without_interfaces(conn, sensor_id)
+        rows = conn.execute(
+            """
+            SELECT if_index
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND monitor_enabled = 1
+            ORDER BY if_index, id
+            """,
+            (sensor_id,),
+        ).fetchall()
+    items = [calibrate_interface_sample_rate(sensor_id, int(row["if_index"]), window_minutes) for row in rows]
+    return {"ok": True, "poll": poll_result, "items": items}
+
+
+@app.post("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration/apply")
+def apply_calibration_sample_rate(sensor_id: int, if_index: int):
+    return apply_interface_calibration(sensor_id, if_index)
 
 
 def raw_flow_where(
@@ -2231,6 +2618,279 @@ def resolve_dashboard_if_index(
     if row is None:
         raise HTTPException(status_code=404, detail="Interface nao encontrada para o sensor informado")
     return int(row["if_index"])
+
+
+def flow_interface_direction_bps(
+    exporter_ip: str,
+    if_index: int,
+    direction: str,
+    start: datetime,
+    end: datetime,
+) -> float:
+    seconds = range_seconds(start, end)
+    interface_field = "input_if" if direction == "in" else "output_if"
+    params = {
+        "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
+        "if_index": int(if_index),
+        "start": start,
+        "end": end,
+        "seconds": seconds,
+    }
+    result = query_clickhouse(
+        f"""
+        SELECT sum(bytes) * 8 / {{seconds:Float64}} AS bps
+        FROM flow_raw
+        WHERE flow_time > {{start:DateTime}}
+          AND flow_time <= {{end:DateTime}}
+          AND toString(exporter_ip) = {{exporter_ip:String}}
+          AND {interface_field} = {{if_index:UInt32}}
+        """,
+        params,
+    )
+    rows = rows_as_dicts(result)
+    if not rows:
+        return 0.0
+    return round(float(rows[0]["bps"] or 0), 2)
+
+
+def robust_ratio_estimate(ratios: list[float]) -> tuple[float, float, int]:
+    clean = [ratio for ratio in ratios if ratio > 0 and ratio < 1_000_000]
+    if not clean:
+        return 1.0, 0.0, 0
+    first_median = median(clean)
+    if first_median <= 0:
+        return 1.0, 0.0, 0
+    filtered = [
+        ratio
+        for ratio in clean
+        if first_median / 4 <= ratio <= first_median * 4
+    ]
+    if not filtered:
+        filtered = clean
+    estimate = float(median(filtered))
+    dispersion = float(median([abs(ratio - estimate) / estimate for ratio in filtered])) if estimate > 0 else 1.0
+    confidence = min(1.0, len(filtered) / 5) * max(0.0, 1.0 - min(dispersion, 1.0))
+    return round(estimate, 2), round(confidence, 3), len(filtered)
+
+
+def median_or_zero(values: list[float]) -> float:
+    clean = [float(value) for value in values if value > 0]
+    return round(float(median(clean)), 2) if clean else 0.0
+
+
+def calibrate_interface_sample_rate(
+    sensor_id: int,
+    if_index: int,
+    window_minutes: int = 15,
+) -> dict[str, Any]:
+    ensure_sensor_db()
+    window_minutes = max(5, min(int(window_minutes), 15))
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(minutes=window_minutes + 5)
+
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        interface = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if interface is None:
+            raise HTTPException(status_code=404, detail="Interface nao encontrada")
+        exporter_ip = clean_text(sensor.get("exporter_ip"))
+        if not exporter_ip:
+            raise HTTPException(status_code=400, detail="Sensor sem exporter_ip configurado")
+
+        rows = conn.execute(
+            """
+            SELECT sample_time, in_bps, out_bps
+            FROM interface_snmp_samples
+            WHERE sensor_id = ? AND if_index = ? AND sample_time >= ?
+            ORDER BY sample_time ASC
+            """,
+            (sensor_id, if_index, iso(since)),
+        ).fetchall()
+
+    ratios_in: list[float] = []
+    ratios_out: list[float] = []
+    snmp_in_values: list[float] = []
+    snmp_out_values: list[float] = []
+    flow_in_values: list[float] = []
+    flow_out_values: list[float] = []
+    previous_time: datetime | None = None
+
+    for row in rows:
+        sample_time = parse_datetime_text(row["sample_time"])
+        if sample_time is None:
+            continue
+        if previous_time is None:
+            previous_time = sample_time
+            continue
+        if sample_time < now - timedelta(minutes=window_minutes):
+            previous_time = sample_time
+            continue
+
+        snmp_in = float(row["in_bps"] or 0)
+        snmp_out = float(row["out_bps"] or 0)
+        flow_in = flow_interface_direction_bps(exporter_ip, if_index, "in", previous_time, sample_time)
+        flow_out = flow_interface_direction_bps(exporter_ip, if_index, "out", previous_time, sample_time)
+
+        if snmp_in >= CALIBRATION_MIN_BPS and flow_in >= CALIBRATION_MIN_BPS:
+            ratios_in.append(snmp_in / flow_in)
+            snmp_in_values.append(snmp_in)
+            flow_in_values.append(flow_in)
+        if snmp_out >= CALIBRATION_MIN_BPS and flow_out >= CALIBRATION_MIN_BPS:
+            ratios_out.append(snmp_out / flow_out)
+            snmp_out_values.append(snmp_out)
+            flow_out_values.append(flow_out)
+
+        previous_time = sample_time
+
+    estimated_in, confidence_in, samples_in = robust_ratio_estimate(ratios_in)
+    estimated_out, confidence_out, samples_out = robust_ratio_estimate(ratios_out)
+    confidences = [value for value, count in ((confidence_in, samples_in), (confidence_out, samples_out)) if count > 0]
+    confidence = round(min(confidences), 3) if confidences else 0.0
+    samples_used = samples_in + samples_out
+    calibrated_at = iso(now)
+
+    result = {
+        "sensor_id": sensor_id,
+        "if_index": if_index,
+        "estimated_sample_rate_in": estimated_in,
+        "estimated_sample_rate_out": estimated_out,
+        "confidence": confidence,
+        "confidence_in": confidence_in,
+        "confidence_out": confidence_out,
+        "samples_used": samples_used,
+        "samples_used_in": samples_in,
+        "samples_used_out": samples_out,
+        "snmp_in_bps": median_or_zero(snmp_in_values),
+        "snmp_out_bps": median_or_zero(snmp_out_values),
+        "flow_in_bps": median_or_zero(flow_in_values),
+        "flow_out_bps": median_or_zero(flow_out_values),
+        "last_calibrated_at": calibrated_at,
+        "method": CALIBRATION_METHOD,
+        "confidence_low": confidence < CALIBRATION_MIN_CONFIDENCE,
+        "min_confidence": CALIBRATION_MIN_CONFIDENCE,
+    }
+
+    with sqlite_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO sensor_interface_calibration (
+                sensor_id,
+                if_index,
+                estimated_sample_rate_in,
+                estimated_sample_rate_out,
+                confidence,
+                last_calibrated_at,
+                method,
+                samples_used,
+                snmp_in_bps,
+                snmp_out_bps,
+                flow_in_bps,
+                flow_out_bps
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sensor_id, if_index) DO UPDATE SET
+                estimated_sample_rate_in = excluded.estimated_sample_rate_in,
+                estimated_sample_rate_out = excluded.estimated_sample_rate_out,
+                confidence = excluded.confidence,
+                last_calibrated_at = excluded.last_calibrated_at,
+                method = excluded.method,
+                samples_used = excluded.samples_used,
+                snmp_in_bps = excluded.snmp_in_bps,
+                snmp_out_bps = excluded.snmp_out_bps,
+                flow_in_bps = excluded.flow_in_bps,
+                flow_out_bps = excluded.flow_out_bps
+            """,
+            (
+                sensor_id,
+                if_index,
+                result["estimated_sample_rate_in"],
+                result["estimated_sample_rate_out"],
+                result["confidence"],
+                result["last_calibrated_at"],
+                result["method"],
+                result["samples_used"],
+                result["snmp_in_bps"],
+                result["snmp_out_bps"],
+                result["flow_in_bps"],
+                result["flow_out_bps"],
+            ),
+        )
+        conn.commit()
+
+    return result
+
+
+def calibration_detail(sensor_id: int, if_index: int) -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        interface = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if interface is None:
+            raise HTTPException(status_code=404, detail="Interface nao encontrada")
+        item = enrich_interface_metrics(conn, interface_dashboard_row_to_dict(interface), sensor_id)
+    return {
+        "sensor_id": sensor_id,
+        "if_index": if_index,
+        "interface": item,
+        "calibration": item.get("calibration"),
+        "min_confidence": CALIBRATION_MIN_CONFIDENCE,
+    }
+
+
+def apply_interface_calibration(sensor_id: int, if_index: int) -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        calibration = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interface_calibration
+            WHERE sensor_id = ? AND if_index = ?
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if calibration is None:
+            raise HTTPException(status_code=404, detail="Calibracao nao encontrada")
+        confidence = float(calibration["confidence"] or 0)
+        if confidence < CALIBRATION_MIN_CONFIDENCE:
+            raise HTTPException(
+                status_code=400,
+                detail="Confianca baixa; revise as amostras antes de aplicar o sample_rate",
+            )
+        sample_rate_in = max(1, int(round(float(calibration["estimated_sample_rate_in"] or 1))))
+        sample_rate_out = max(1, int(round(float(calibration["estimated_sample_rate_out"] or 1))))
+        conn.execute(
+            """
+            UPDATE sensor_interfaces
+            SET sample_rate_in = ?,
+                sample_rate_out = ?,
+                updated_at = ?
+            WHERE sensor_id = ? AND if_index = ?
+            """,
+            (sample_rate_in, sample_rate_out, utc_now_iso(), sensor_id, if_index),
+        )
+        conn.commit()
+    detail = calibration_detail(sensor_id, if_index)
+    detail["applied"] = True
+    detail["sample_rate_in"] = sample_rate_in
+    detail["sample_rate_out"] = sample_rate_out
+    return detail
 
 
 def interface_traffic_items(

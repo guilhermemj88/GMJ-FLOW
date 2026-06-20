@@ -1186,6 +1186,9 @@
                 <button id="manageInterfacesButton" type="button" class="btn btn-sm btn-outline-success">
                   <i data-lucide="list-plus"></i><span>Manage Interfaces</span>
                 </button>
+                <button id="calibrateSampleRateButton" type="button" class="btn btn-sm btn-outline-success">
+                  <i data-lucide="activity"></i><span>Calibrar sample rate por SNMP</span>
+                </button>
               </div>
             </div>
             <div class="table-wrap">
@@ -1199,8 +1202,15 @@
                     <th>Stats</th>
                     <th class="text-end">Speed IN</th>
                     <th class="text-end">Speed OUT</th>
+                    <th class="text-end">SNMP Bits/s</th>
+                    <th class="text-end">Flow bruto</th>
+                    <th class="text-end">Fator estimado</th>
+                    <th class="text-end">Confianca</th>
+                    <th>Ultima calibracao</th>
+                    <th class="text-end">Sample rate</th>
                     <th>Color</th>
                     <th>Monitor</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody id="interfacesTable"></tbody>
@@ -2549,6 +2559,8 @@
           stats: entry.stats || 'Basic',
           speed_in_bps: Number(entry.speed_in_bps) || 0,
           speed_out_bps: Number(entry.speed_out_bps) || 0,
+          sample_rate_in: Number(entry.sample_rate_in) || 1,
+          sample_rate_out: Number(entry.sample_rate_out) || 1,
           if_oper_status: entry.if_oper_status || '',
           color: entry.color || '#64748b',
           monitor_enabled: Boolean(entry.monitor_enabled)
@@ -2691,6 +2703,22 @@
       return formatBps(value).replace('bps', 'b/s');
     }
 
+    function formatPair(inValue, outValue, formatter = formatBps) {
+      const inbound = Number(inValue) || 0;
+      const outbound = Number(outValue) || 0;
+      if (!inbound && !outbound) return '-';
+      return `IN ${formatter(inbound)} / OUT ${formatter(outbound)}`;
+    }
+
+    function formatConfidence(value) {
+      const number = Number(value) || 0;
+      return `${Math.round(number * 100)}%`;
+    }
+
+    function calibrationForInterface(iface) {
+      return iface.calibration || {};
+    }
+
     function selectedInterfaceIndexes() {
       return Array.from(document.querySelectorAll('.interface-select:checked'))
         .map(input => Number(input.dataset.index))
@@ -2711,10 +2739,21 @@
           <td>${escapeHtml(iface.stats || 'Basic')}</td>
           <td class="text-end">${formatSpeed(iface.speed_in_bps)}</td>
           <td class="text-end">${formatSpeed(iface.speed_out_bps)}</td>
+          <td class="text-end">${formatPair(iface.snmp_in_bps, iface.snmp_out_bps)}</td>
+          <td class="text-end">${formatPair(calibrationForInterface(iface).flow_in_bps, calibrationForInterface(iface).flow_out_bps)}</td>
+          <td class="text-end">${formatPair(calibrationForInterface(iface).estimated_sample_rate_in, calibrationForInterface(iface).estimated_sample_rate_out, value => `${Number(value || 0).toFixed(2)}x`)}</td>
+          <td class="text-end">${calibrationForInterface(iface).last_calibrated_at ? formatConfidence(calibrationForInterface(iface).confidence) : '-'}</td>
+          <td>${calibrationForInterface(iface).last_calibrated_at ? formatDateTime(calibrationForInterface(iface).last_calibrated_at) : '-'}</td>
+          <td class="text-end">${formatPair(iface.sample_rate_in || 1, iface.sample_rate_out || 1, value => `${formatNumber(value)}x`)}</td>
           <td><span class="color-swatch" style="background:${escapeHtml(iface.color || '#64748b')}"></span></td>
           <td><span class="badge-soft ${iface.monitor_enabled ? 'ok' : 'off'}">${iface.monitor_enabled ? 'Enabled' : 'Disabled'}</span></td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary apply-calibration-button" data-if-index="${Number(iface.if_index) || 0}">
+              Aplicar fator
+            </button>
+          </td>
         </tr>
-      `).join('') || `<tr><td colspan="9" class="text-muted">Sem interfaces monitoradas</td></tr>`;
+      `).join('') || `<tr><td colspan="16" class="text-muted">Sem interfaces monitoradas</td></tr>`;
     }
 
     function defaultInterface() {
@@ -2727,6 +2766,8 @@
         stats: 'Basic',
         speed_in_bps: 0,
         speed_out_bps: 0,
+        sample_rate_in: 1,
+        sample_rate_out: 1,
         if_oper_status: '',
         color: '#d946ef',
         monitor_enabled: true
@@ -2824,6 +2865,7 @@
     }
 
     function saveInterfaceFromModal() {
+      const existing = editingInterfaceIndex >= 0 ? currentInterfaces[editingInterfaceIndex] || {} : {};
       const iface = {
         if_index: numberValue('modalIfIndex', 0),
         if_name: selectValue('modalIfName').trim(),
@@ -2832,10 +2874,15 @@
         stats: selectValue('modalStats', 'Basic'),
         speed_in_bps: numberValue('modalSpeedIn', 0),
         speed_out_bps: numberValue('modalSpeedOut', 0),
+        sample_rate_in: Number(existing.sample_rate_in) || 1,
+        sample_rate_out: Number(existing.sample_rate_out) || 1,
         if_descr: selectValue('modalIfDescr').trim(),
         if_oper_status: selectValue('modalIfOperStatus').trim(),
         color: selectValue('modalColor', '#64748b'),
-        monitor_enabled: boolSelectValue('modalMonitorEnabled')
+        monitor_enabled: boolSelectValue('modalMonitorEnabled'),
+        snmp_in_bps: existing.snmp_in_bps || 0,
+        snmp_out_bps: existing.snmp_out_bps || 0,
+        calibration: existing.calibration || null
       };
 
       if (editingInterfaceIndex >= 0) {
@@ -2864,6 +2911,68 @@
       }
       currentInterfaces = currentInterfaces.filter((_, index) => !selected.has(index));
       renderInterfaces();
+    }
+
+    function mergeInterfaceCalibration(calibration) {
+      const ifIndex = Number(calibration.if_index);
+      currentInterfaces = currentInterfaces.map(iface => {
+        if (Number(iface.if_index) !== ifIndex) return iface;
+        return {
+          ...iface,
+          snmp_in_bps: calibration.snmp_in_bps,
+          snmp_out_bps: calibration.snmp_out_bps,
+          calibration: {
+            estimated_sample_rate_in: calibration.estimated_sample_rate_in,
+            estimated_sample_rate_out: calibration.estimated_sample_rate_out,
+            confidence: calibration.confidence,
+            last_calibrated_at: calibration.last_calibrated_at,
+            method: calibration.method,
+            samples_used: calibration.samples_used,
+            snmp_in_bps: calibration.snmp_in_bps,
+            snmp_out_bps: calibration.snmp_out_bps,
+            flow_in_bps: calibration.flow_in_bps,
+            flow_out_bps: calibration.flow_out_bps
+          }
+        };
+      });
+    }
+
+    async function calibrateSampleRate() {
+      if (!currentSensorId) {
+        document.getElementById('interfacesStatus').textContent = 'Salve o sensor antes de calibrar';
+        return;
+      }
+      document.getElementById('interfacesStatus').textContent = 'Calibrando sample rate por SNMP...';
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/interfaces/calibration/run`, { method: 'POST' });
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        items.forEach(mergeInterfaceCalibration);
+        renderInterfaces();
+        const lowConfidence = items.filter(item => item.confidence_low).length;
+        document.getElementById('interfacesStatus').textContent = lowConfidence
+          ? `${formatNumber(items.length)} interfaces calibradas; ${formatNumber(lowConfidence)} com confianca baixa`
+          : `${formatNumber(items.length)} interfaces calibradas`;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Falha na calibracao: ${error.message}`;
+      }
+    }
+
+    async function applyCalibrationFactor(ifIndex) {
+      if (!currentSensorId || !ifIndex) return;
+      document.getElementById('interfacesStatus').textContent = `Aplicando fator da interface ${ifIndex}...`;
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/interfaces/${ifIndex}/calibration/apply`, { method: 'POST' });
+        const updated = payload.interface || {};
+        currentInterfaces = currentInterfaces.map(iface => (
+          Number(iface.if_index) === Number(ifIndex)
+            ? { ...iface, ...updated }
+            : iface
+        ));
+        renderInterfaces();
+        document.getElementById('interfacesStatus').textContent = `Sample rate aplicado na interface ${ifIndex}`;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Nao aplicado: ${error.message}`;
+      }
     }
 
     async function discoverInterfaces() {
@@ -3050,6 +3159,7 @@
     document.getElementById('editInterfaceButton').addEventListener('click', editSelectedInterface);
     document.getElementById('deleteInterfaceButton').addEventListener('click', deleteSelectedInterfaces);
     document.getElementById('manageInterfacesButton').addEventListener('click', () => discoverInterfaces().catch(console.error));
+    document.getElementById('calibrateSampleRateButton').addEventListener('click', () => calibrateSampleRate().catch(console.error));
     document.getElementById('saveInterfaceButton').addEventListener('click', saveInterfaceFromModal);
     document.getElementById('saveSnmpButton').addEventListener('click', saveSnmpOptions);
     document.getElementById('querySnmpButton').addEventListener('click', () => querySnmp().catch(console.error));
@@ -3058,6 +3168,13 @@
       document.querySelectorAll('.interface-select').forEach(input => {
         input.checked = event.target.checked;
       });
+    });
+
+    document.getElementById('interfacesTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const button = target?.closest('.apply-calibration-button');
+      if (!button) return;
+      applyCalibrationFactor(Number(button.dataset.ifIndex)).catch(console.error);
     });
 
     document.querySelectorAll('[data-close-modal]').forEach(button => {
