@@ -207,12 +207,16 @@
     }
 
     .dashboard-controls {
-      max-width: 760px;
+      max-width: 1040px;
     }
 
     .dashboard-controls .form-select {
       width: auto;
-      min-width: 130px;
+      min-width: 170px;
+    }
+
+    #rangeMinutes {
+      min-width: 220px;
     }
 
     #sensor,
@@ -300,9 +304,13 @@
 
     .flow-search-grid {
       display: grid;
-      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      grid-template-columns: repeat(6, minmax(118px, 1fr));
       gap: .5rem;
       align-items: end;
+    }
+
+    .flow-search-grid .btn {
+      align-self: end;
     }
 
     .flow-table {
@@ -693,10 +701,31 @@
             </div>
             <div class="dashboard-controls">
               <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
-                <option value="15">15 min</option>
-                <option value="60" selected>60 min</option>
-                <option value="360">6 h</option>
-                <option value="1440">24 h</option>
+                <option value="5">Ultimos 5 minutos</option>
+                <option value="10">Ultimos 10 minutos</option>
+                <option value="15">Ultimos 15 minutos</option>
+                <option value="30">Ultimos 30 minutos</option>
+                <option value="60" selected>Ultima 1 hora</option>
+                <option value="120">Ultimas 2 horas</option>
+                <option value="240">Ultimas 4 horas</option>
+                <option value="360">Ultimas 6 horas</option>
+                <option value="720">Ultimas 12 horas</option>
+                <option value="1080">Ultimas 18 horas</option>
+                <option value="1440">Ultimas 24 horas</option>
+                <option value="2880">Ultimos 2 dias</option>
+                <option value="4320">Ultimos 3 dias</option>
+                <option value="5760">Ultimos 4 dias</option>
+                <option value="7200">Ultimos 5 dias</option>
+                <option value="8640">Ultimos 6 dias</option>
+                <option value="10080">Ultima semana</option>
+                <option value="20160">Ultimas 2 semanas</option>
+                <option value="30240">Ultimas 3 semanas</option>
+                <option value="43200">Ultimo mes</option>
+                <option value="86400">Ultimos 2 meses</option>
+                <option value="129600">Ultimos 3 meses</option>
+                <option value="129600">Ultimo trimestre</option>
+                <option value="259200">Ultimos 6 meses</option>
+                <option value="custom">Personalizado...</option>
               </select>
               <select id="sensor" class="form-select form-select-sm" aria-label="Sensor">
                 <option value="">Todos os sensores</option>
@@ -798,6 +827,39 @@
           </section>
 
           <section class="row g-3 mt-1">
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Maiores ASNs de Upload</div>
+                  <div id="asnSrcStatus" class="metric-readout">ASN indisponivel</div>
+                </div>
+                <div id="asnSrcChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Nº</th><th>ASN</th><th>Descricao</th><th class="text-end">Bits/s</th><th class="text-end">%</th><th class="text-end">Pacotes</th></tr></thead>
+                    <tbody id="asnSrcTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Maiores ASNs de Download</div>
+                  <div id="asnDstStatus" class="metric-readout">ASN indisponivel</div>
+                </div>
+                <div id="asnDstChart" class="top-chart"></div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Nº</th><th>ASN</th><th>Descricao</th><th class="text-end">Bits/s</th><th class="text-end">%</th><th class="text-end">Pacotes</th></tr></thead>
+                    <tbody id="asnDstTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3 mt-1">
             <div class="col-12">
               <div class="panel p-3">
                 <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
@@ -806,22 +868,78 @@
                     <div id="flowSearchStatus" class="metric-readout">Ultimos flows brutos</div>
                   </div>
                   <div class="flow-search-grid">
-                    <input id="flowIp" class="form-control form-control-sm" placeholder="IP">
-                    <input id="flowPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="Porta">
-                    <select id="flowProto" class="form-select form-select-sm" aria-label="Protocolo">
-                      <option value="">Todos</option>
-                      <option value="1">ICMP</option>
-                      <option value="6">TCP</option>
-                      <option value="17">UDP</option>
-                    </select>
-                    <select id="flowRangeMinutes" class="form-select form-select-sm" aria-label="Janela Flow Search">
-                      <option value="15">15 min</option>
-                      <option value="60" selected>60 min</option>
-                      <option value="360">6 h</option>
-                      <option value="1440">24 h</option>
-                    </select>
+                    <div class="field">
+                      <label for="flowSrcIp">Src IP</label>
+                      <input id="flowSrcIp" class="form-control form-control-sm" placeholder="Origem">
+                    </div>
+                    <div class="field">
+                      <label for="flowDstIp">Dst IP</label>
+                      <input id="flowDstIp" class="form-control form-control-sm" placeholder="Destino">
+                    </div>
+                    <div class="field">
+                      <label for="flowSrcPort">Src porta</label>
+                      <input id="flowSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0-65535">
+                    </div>
+                    <div class="field">
+                      <label for="flowDstPort">Dst porta</label>
+                      <input id="flowDstPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0-65535">
+                    </div>
+                    <div class="field">
+                      <label for="flowProto">Protocolo</label>
+                      <select id="flowProto" class="form-select form-select-sm" aria-label="Protocolo">
+                        <option value="">Todos</option>
+                        <option value="1">ICMP</option>
+                        <option value="6">TCP</option>
+                        <option value="17">UDP</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="flowSensor">Sensor</label>
+                      <select id="flowSensor" class="form-select form-select-sm" aria-label="Sensor Flow Search">
+                        <option value="">Todos os sensores</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="flowInterface">Interface</label>
+                      <select id="flowInterface" class="form-select form-select-sm" aria-label="Interface Flow Search" disabled>
+                        <option value="">Todas as interfaces</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="flowRangeMinutes">Periodo</label>
+                      <select id="flowRangeMinutes" class="form-select form-select-sm" aria-label="Janela Flow Search">
+                        <option value="5">Ultimos 5 minutos</option>
+                        <option value="10">Ultimos 10 minutos</option>
+                        <option value="15">Ultimos 15 minutos</option>
+                        <option value="30">Ultimos 30 minutos</option>
+                        <option value="60" selected>Ultima 1 hora</option>
+                        <option value="120">Ultimas 2 horas</option>
+                        <option value="240">Ultimas 4 horas</option>
+                        <option value="360">Ultimas 6 horas</option>
+                        <option value="720">Ultimas 12 horas</option>
+                        <option value="1080">Ultimas 18 horas</option>
+                        <option value="1440">Ultimas 24 horas</option>
+                        <option value="2880">Ultimos 2 dias</option>
+                        <option value="4320">Ultimos 3 dias</option>
+                        <option value="5760">Ultimos 4 dias</option>
+                        <option value="7200">Ultimos 5 dias</option>
+                        <option value="8640">Ultimos 6 dias</option>
+                        <option value="10080">Ultima semana</option>
+                        <option value="20160">Ultimas 2 semanas</option>
+                        <option value="30240">Ultimas 3 semanas</option>
+                        <option value="43200">Ultimo mes</option>
+                        <option value="86400">Ultimos 2 meses</option>
+                        <option value="129600">Ultimos 3 meses</option>
+                        <option value="129600">Ultimo trimestre</option>
+                        <option value="259200">Ultimos 6 meses</option>
+                        <option value="custom">Personalizado...</option>
+                      </select>
+                    </div>
                     <button id="flowSearchButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="search"></i><span>Buscar</span>
+                    </button>
+                    <button id="flowClearButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="x"></i><span>Limpar</span>
                     </button>
                   </div>
                 </div>
@@ -1315,6 +1433,36 @@
     </div>
   </div>
 
+  <div id="timeRangeModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="timeRangeModalTitle">
+    <div class="gmj-dialog small">
+      <div class="gmj-dialog-header">
+        <h2 id="timeRangeModalTitle" class="view-title">Periodo personalizado</h2>
+        <button type="button" class="icon-button" data-close-modal="timeRangeModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="snmp-form-grid">
+          <div class="field">
+            <label for="customStartTime">Data inicial</label>
+            <input id="customStartTime" type="datetime-local" class="form-control">
+          </div>
+          <div class="field">
+            <label for="customEndTime">Data final</label>
+            <input id="customEndTime" type="datetime-local" class="form-control">
+          </div>
+        </div>
+        <div id="customRangeStatus" class="subtle mt-2"></div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="cancelCustomRange" type="button" class="btn btn-sm btn-outline-secondary">Cancelar</button>
+        <button id="applyCustomRange" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="check"></i><span>Aplicar</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
     const AUTH_TOKEN_KEY = 'gmjFlowAuthToken';
@@ -1327,17 +1475,25 @@
       dstIp: echarts.init(document.getElementById('dstIpChart')),
       ports: echarts.init(document.getElementById('portsChart')),
       protocols: echarts.init(document.getElementById('protocolsChart')),
-      tcpFlags: echarts.init(document.getElementById('tcpFlagsChart'))
+      tcpFlags: echarts.init(document.getElementById('tcpFlagsChart')),
+      asnSrc: echarts.init(document.getElementById('asnSrcChart')),
+      asnDst: echarts.init(document.getElementById('asnDstChart'))
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
     let activeView = 'dashboard';
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
+    let flowInterfaceCache = [];
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
     let editingInterfaceIndex = -1;
+    let activeCustomRangeTarget = null;
+    const customRanges = {
+      dashboard: { start: '', end: '', previous: '60' },
+      flow: { start: '', end: '', previous: '60' }
+    };
 
     function createIcons() {
       if (window.lucide) {
@@ -1526,9 +1682,40 @@
       return value ? Number(value) : null;
     }
 
+    function selectedFlowSensorId() {
+      const value = document.getElementById('flowSensor').value;
+      return value ? Number(value) : null;
+    }
+
+    function selectedFlowInterfaceId() {
+      const value = document.getElementById('flowInterface').value;
+      return value ? Number(value) : null;
+    }
+
+    function localDateTimeForInput(date) {
+      const offsetMs = date.getTimezoneOffset() * 60000;
+      return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+    }
+
+    function dateTimeLocalToApi(value) {
+      if (!value) return '';
+      return new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    }
+
+    function appendRangeParams(query, selectId, rangeKey) {
+      const value = document.getElementById(selectId).value;
+      const custom = customRanges[rangeKey];
+      if (value === 'custom' && custom.start && custom.end) {
+        query.set('start_time', dateTimeLocalToApi(custom.start));
+        query.set('end_time', dateTimeLocalToApi(custom.end));
+      } else {
+        query.set('range_minutes', value === 'custom' ? custom.previous || '60' : value);
+      }
+    }
+
     function dashboardParams({ includeSensorId = true, includeInterfaceId = false } = {}) {
       const query = new URLSearchParams();
-      query.set('range_minutes', document.getElementById('rangeMinutes').value);
+      appendRangeParams(query, 'rangeMinutes', 'dashboard');
       const sensorId = selectedDashboardSensorId();
       const interfaceId = selectedDashboardInterfaceId();
       if (includeSensorId && sensorId) query.set('sensor_id', String(sensorId));
@@ -1587,6 +1774,18 @@
       select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
     }
 
+    function renderFlowSensorSelect() {
+      const select = document.getElementById('flowSensor');
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Todos os sensores</option>',
+        ...dashboardSensorCache.map(sensor => (
+          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
+        ))
+      ].join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
+    }
+
     function renderDashboardInterfaceSelect() {
       const select = document.getElementById('interface');
       const current = select.value;
@@ -1599,6 +1798,20 @@
         ))
       ].join('');
       select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+    }
+
+    function renderFlowInterfaceSelect() {
+      const select = document.getElementById('flowInterface');
+      const current = select.value;
+      const sensorId = selectedFlowSensorId();
+      select.disabled = !sensorId;
+      select.innerHTML = [
+        '<option value="">Todas as interfaces</option>',
+        ...flowInterfaceCache.map(iface => (
+          `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
+        ))
+      ].join('');
+      select.value = flowInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
     async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
@@ -1621,12 +1834,17 @@
         const payload = await apiRequest('/api/dashboard/sensors');
         dashboardSensorCache = Array.isArray(payload.items) ? payload.items : [];
         renderDashboardSensorSelect();
+        renderFlowSensorSelect();
         await loadDashboardInterfaces();
+        await loadFlowInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
         dashboardInterfaceCache = [];
+        flowInterfaceCache = [];
         renderDashboardSensorSelect();
         renderDashboardInterfaceSelect();
+        renderFlowSensorSelect();
+        renderFlowInterfaceSelect();
         console.error('Falha ao carregar sensores do dashboard', error);
       }
     }
@@ -1634,6 +1852,25 @@
     async function handleDashboardSensorChange() {
       await loadDashboardInterfaces();
       await refresh();
+    }
+
+    async function loadFlowInterfaces(sensorId = selectedFlowSensorId()) {
+      flowInterfaceCache = [];
+      document.getElementById('flowInterface').value = '';
+      renderFlowInterfaceSelect();
+      if (!sensorId) return;
+
+      try {
+        const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
+        flowInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
+        renderFlowInterfaceSelect();
+      } catch (error) {
+        console.error('Falha ao carregar interfaces do Flow Search', error);
+      }
+    }
+
+    async function handleFlowSensorChange() {
+      await loadFlowInterfaces();
     }
 
     function formatBps(value) {
@@ -1778,53 +2015,69 @@
       });
     }
 
-    function trafficOption(items, metric, color) {
-      return {
-        animation: false,
-        color: [color],
-        grid: { left: 52, right: 18, top: 22, bottom: 38 },
-        tooltip: {
-          trigger: 'axis',
-          valueFormatter: metric === 'bps' ? formatBps : formatPps
-        },
-        xAxis: {
-          type: 'category',
-          boundaryGap: false,
-          data: items.map(point => new Date(point.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })),
-          axisLabel: { color: '#6b7280' },
-          axisLine: { lineStyle: { color: '#d9dee5' } }
-        },
-        yAxis: {
-          type: 'value',
-          axisLabel: { color: '#6b7280', formatter: metric === 'bps' ? formatBps : formatPps },
-          splitLine: { lineStyle: { color: '#edf0f3' } }
-        },
-        series: [{
-          type: 'line',
-          smooth: true,
-          showSymbol: false,
-          areaStyle: { opacity: .12 },
-          lineStyle: { width: 2 },
-          data: items.map(point => Number(point[metric]) || 0)
-        }]
-      };
-    }
-
     function metricFormatter(metric) {
       return metric === 'bps' ? formatBps : formatPps;
     }
 
     function tooltipValue(value, metric) {
       const pointValue = Array.isArray(value) ? value[1] : value;
-      return metricFormatter(metric)(pointValue);
+      return metricFormatter(metric)(Math.abs(Number(pointValue) || 0));
     }
 
-    function interfaceTrafficOption(items, metric) {
-      const colors = items.map((item, index) => item.color || palette[index % palette.length]);
+    function hexToRgba(hex, alpha) {
+      const value = String(hex || '').replace('#', '');
+      if (value.length !== 6) return `rgba(100, 116, 139, ${alpha})`;
+      const red = parseInt(value.slice(0, 2), 16);
+      const green = parseInt(value.slice(2, 4), 16);
+      const blue = parseInt(value.slice(4, 6), 16);
+      return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+    }
+
+    function seriesLabel(item) {
+      return item.label || item.interface_name || item.sensor || item.key || 'Serie';
+    }
+
+    function directionalTrafficOption(items, metric) {
+      const formatter = metricFormatter(metric);
+      const series = [];
+      let maxMagnitude = 0;
+      items.forEach((item, index) => {
+        const baseColor = item.color || palette[index % palette.length];
+        const label = seriesLabel(item);
+        const downloadData = [];
+        const uploadData = [];
+        (item.points || []).forEach(point => {
+          const download = Number(point[`download_${metric}`]) || 0;
+          const upload = Number(point[`upload_${metric}`]) || 0;
+          maxMagnitude = Math.max(maxMagnitude, Math.abs(download), Math.abs(upload));
+          downloadData.push([point.time, download]);
+          uploadData.push([point.time, -upload]);
+        });
+        series.push({
+          name: `${label} Download`,
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: baseColor },
+          itemStyle: { color: baseColor },
+          areaStyle: { color: hexToRgba(baseColor, .08) },
+          data: downloadData
+        });
+        series.push({
+          name: `${label} Upload`,
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, type: 'dashed', color: hexToRgba(baseColor, .72) },
+          itemStyle: { color: hexToRgba(baseColor, .72) },
+          areaStyle: { color: hexToRgba(baseColor, .05) },
+          data: uploadData
+        });
+      });
+      const axisLimit = maxMagnitude > 0 ? Math.ceil(maxMagnitude * 1.12) : undefined;
       return {
         animation: false,
-        color: colors,
-        grid: { left: 52, right: 18, top: 48, bottom: 38 },
+        grid: { left: 18, right: 18, top: 54, bottom: 38, containLabel: true },
         legend: {
           type: 'scroll',
           top: 0,
@@ -1841,9 +2094,11 @@
             const title = timeValue
               ? new Date(timeValue).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
               : '';
-            const lines = rows.map(row => (
-              `${row.marker}${escapeHtml(row.seriesName)}: ${tooltipValue(row.value, metric)}`
-            ));
+            const lines = rows.map(row => {
+              const direction = row.seriesName.includes('Upload') ? 'Upload' : 'Download';
+              const baseName = row.seriesName.replace(` ${direction}`, '');
+              return `${row.marker}${escapeHtml(baseName)} ${direction}: ${tooltipValue(row.value, metric)}`;
+            });
             return [title, ...lines].filter(Boolean).join('<br>');
           }
         },
@@ -1858,27 +2113,33 @@
         },
         yAxis: {
           type: 'value',
-          axisLabel: { color: '#6b7280', formatter: metricFormatter(metric) },
+          min: axisLimit ? -axisLimit : undefined,
+          max: axisLimit || undefined,
+          axisLabel: {
+            color: '#6b7280',
+            margin: 14,
+            formatter: value => formatter(Math.abs(Number(value) || 0))
+          },
           splitLine: { lineStyle: { color: '#edf0f3' } }
         },
-        series: items.map((item, index) => ({
-          name: item.interface_name || `ifIndex ${item.if_index}`,
-          type: 'line',
-          smooth: true,
-          showSymbol: false,
-          lineStyle: { width: 2, color: colors[index] },
-          itemStyle: { color: colors[index] },
-          data: (item.points || []).map(point => [point.time, Number(point[metric]) || 0])
-        }))
+        series
       };
     }
 
-    function latestInterfaceValue(items, metric) {
-      return items.reduce((total, item) => {
+    function latestDirectionalTotals(items, metric) {
+      return items.reduce((totals, item) => {
         const points = Array.isArray(item.points) ? item.points : [];
         const latest = points.length ? points[points.length - 1] : null;
-        return total + (Number(latest?.[metric]) || 0);
-      }, 0);
+        totals.download += Number(latest?.[`download_${metric}`]) || 0;
+        totals.upload += Number(latest?.[`upload_${metric}`]) || 0;
+        return totals;
+      }, { download: 0, upload: 0 });
+    }
+
+    function directionalReadout(items, metric) {
+      const totals = latestDirectionalTotals(items, metric);
+      const formatter = metricFormatter(metric);
+      return `Download ${formatter(totals.download)} / Upload ${formatter(totals.upload)}`;
     }
 
     function itemLabel(item, type) {
@@ -1894,7 +2155,7 @@
       return {
         animation: false,
         color: palette,
-        grid: { left: 92, right: 16, top: 10, bottom: 22 },
+        grid: { left: 12, right: 16, top: 10, bottom: 22, containLabel: true },
         tooltip: {
           trigger: 'axis',
           axisPointer: { type: 'shadow' },
@@ -1908,7 +2169,7 @@
         yAxis: {
           type: 'category',
           data: top.map(item => itemLabel(item, type)),
-          axisLabel: { color: '#374151', width: 82, overflow: 'truncate' },
+          axisLabel: { color: '#374151', width: 120, overflow: 'truncate' },
           axisLine: { lineStyle: { color: '#d9dee5' } }
         },
         series: [{
@@ -1947,20 +2208,66 @@
       `).join('') || `<tr><td colspan="3" class="text-muted">Sem dados</td></tr>`;
     }
 
+    function asnLabel(item) {
+      return item.asn || 'ASN indisponivel';
+    }
+
+    function asnPieOption(items) {
+      return {
+        animation: false,
+        color: palette,
+        tooltip: { trigger: 'item', valueFormatter: formatBps },
+        series: [{
+          type: 'pie',
+          radius: ['50%', '74%'],
+          center: ['50%', '50%'],
+          label: { formatter: '{b}', color: '#374151' },
+          data: items.map(item => ({ name: asnLabel(item), value: item.bps }))
+        }]
+      };
+    }
+
+    function fillAsnTable(id, items) {
+      const tbody = document.getElementById(id);
+      tbody.innerHTML = items.slice(0, 15).map((item, index) => `
+        <tr>
+          <td>${formatNumber(item.rank || index + 1)}</td>
+          <td>${escapeHtml(asnLabel(item))}</td>
+          <td>${escapeHtml(item.description || '-')}</td>
+          <td class="text-end">${formatBps(item.bps)}</td>
+          <td class="text-end">${Number(item.percent || 0).toFixed(1)}%</td>
+          <td class="text-end">${formatNumber(item.packets)}</td>
+        </tr>
+      `).join('') || `<tr><td colspan="6" class="text-muted">ASN indisponivel</td></tr>`;
+    }
+
+    function renderAsnWidget(chart, tableId, statusId, payload) {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      chart.setOption(asnPieOption(items), true);
+      fillAsnTable(tableId, items);
+      document.getElementById(statusId).textContent = payload.asn_available === false ? 'ASN indisponivel' : `${formatNumber(items.length)} ASNs`;
+    }
+
     function flowSearchParams() {
       const query = new URLSearchParams();
-      query.set('range_minutes', document.getElementById('flowRangeMinutes').value);
+      appendRangeParams(query, 'flowRangeMinutes', 'flow');
       query.set('limit', '200');
 
-      const ip = document.getElementById('flowIp').value.trim();
-      const port = document.getElementById('flowPort').value.trim();
+      const srcIp = document.getElementById('flowSrcIp').value.trim();
+      const dstIp = document.getElementById('flowDstIp').value.trim();
+      const srcPort = document.getElementById('flowSrcPort').value.trim();
+      const dstPort = document.getElementById('flowDstPort').value.trim();
       const proto = document.getElementById('flowProto').value;
-      const sensorId = selectedDashboardSensorId();
+      const sensorId = selectedFlowSensorId();
+      const interfaceId = selectedFlowInterfaceId();
 
-      if (ip) query.set('ip', ip);
-      if (port) query.set('port', port);
+      if (srcIp) query.set('src_ip', srcIp);
+      if (dstIp) query.set('dst_ip', dstIp);
+      if (srcPort) query.set('src_port', srcPort);
+      if (dstPort) query.set('dst_port', dstPort);
       if (proto) query.set('proto', proto);
       if (sensorId) query.set('sensor_id', String(sensorId));
+      if (interfaceId) query.set('interface_id', String(interfaceId));
       return query.toString();
     }
 
@@ -2008,6 +2315,17 @@
       }
     }
 
+    async function clearFlowSearch() {
+      ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort'].forEach(id => setValue(id, ''));
+      setValue('flowProto', '');
+      setValue('flowSensor', '');
+      setValue('flowInterface', '');
+      setValue('flowRangeMinutes', '60');
+      customRanges.flow = { start: '', end: '', previous: '60' };
+      await loadFlowInterfaces(null);
+      await searchFlows();
+    }
+
     async function checkHealth() {
       const dot = document.getElementById('statusDot');
       const text = document.getElementById('statusText');
@@ -2036,14 +2354,17 @@
       const trafficQuery = sensorId
         ? dashboardParams({ includeSensorId: true, includeInterfaceId: true })
         : dashboardParams({ includeSensorId: false });
-      const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags] = await Promise.all([
+      const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
+      const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst] = await Promise.all([
         fetchJSON(sensorId ? '/api/traffic/interface-bps' : '/api/traffic/bps', trafficQuery),
         fetchJSON(sensorId ? '/api/traffic/interface-pps' : '/api/traffic/pps', trafficQuery),
-        fetchJSON('/api/tops/src-ip'),
-        fetchJSON('/api/tops/dst-ip'),
-        fetchJSON('/api/tops/ports'),
-        fetchJSON('/api/tops/protocols'),
-        fetchJSON('/api/tops/tcp-flags')
+        fetchJSON('/api/tops/src-ip', topQuery),
+        fetchJSON('/api/tops/dst-ip', topQuery),
+        fetchJSON('/api/tops/ports', topQuery),
+        fetchJSON('/api/tops/protocols', topQuery),
+        fetchJSON('/api/tops/tcp-flags', topQuery),
+        fetchJSON('/api/tops/asn-src', topQuery),
+        fetchJSON('/api/tops/asn-dst', topQuery)
       ]);
 
       const bpsItems = bps.items;
@@ -2054,28 +2375,19 @@
       const protocolItems = protocols.items;
       const tcpFlagItems = tcpFlags.items;
 
-      if (sensorId) {
-        charts.bps.setOption(interfaceTrafficOption(bpsItems, 'bps'), true);
-        charts.pps.setOption(interfaceTrafficOption(ppsItems, 'pps'), true);
-      } else {
-        charts.bps.setOption(trafficOption(bpsItems, 'bps', '#0f766e'), true);
-        charts.pps.setOption(trafficOption(ppsItems, 'pps', '#b45309'), true);
-      }
+      charts.bps.setOption(directionalTrafficOption(bpsItems, 'bps'), true);
+      charts.pps.setOption(directionalTrafficOption(ppsItems, 'pps'), true);
 
-      const latestBps = sensorId
-        ? latestInterfaceValue(bpsItems, 'bps')
-        : (bpsItems.length ? bpsItems[bpsItems.length - 1].bps : 0);
-      const latestPps = sensorId
-        ? latestInterfaceValue(ppsItems, 'pps')
-        : (ppsItems.length ? ppsItems[ppsItems.length - 1].pps : 0);
-      document.getElementById('bpsReadout').textContent = formatBps(latestBps);
-      document.getElementById('ppsReadout').textContent = formatPps(latestPps);
+      document.getElementById('bpsReadout').textContent = directionalReadout(bpsItems, 'bps');
+      document.getElementById('ppsReadout').textContent = directionalReadout(ppsItems, 'pps');
 
       charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
       charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
       charts.ports.setOption(barOption(portItems, 'port'), true);
       charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
       charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
+      renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', asnSrc);
+      renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', asnDst);
 
       fillTable('srcIpTable', srcIpItems, 'ip');
       fillTable('dstIpTable', dstIpItems, 'ip');
@@ -2430,6 +2742,69 @@
       document.getElementById(id).classList.remove('open');
     }
 
+    function openCustomRange(target) {
+      activeCustomRangeTarget = target;
+      const range = customRanges[target];
+      const now = new Date();
+      const start = new Date(now.getTime() - Number(range.previous || 60) * 60000);
+      setValue('customStartTime', range.start || localDateTimeForInput(start));
+      setValue('customEndTime', range.end || localDateTimeForInput(now));
+      document.getElementById('customRangeStatus').textContent = '';
+      openModal('timeRangeModal');
+    }
+
+    function cancelCustomRange() {
+      const target = activeCustomRangeTarget;
+      if (target) {
+        const selectId = target === 'dashboard' ? 'rangeMinutes' : 'flowRangeMinutes';
+        document.getElementById(selectId).value = customRanges[target].previous || '60';
+      }
+      activeCustomRangeTarget = null;
+      closeModal('timeRangeModal');
+    }
+
+    function applyCustomRange() {
+      const target = activeCustomRangeTarget;
+      if (!target) return;
+      const start = selectValue('customStartTime');
+      const end = selectValue('customEndTime');
+      const status = document.getElementById('customRangeStatus');
+      if (!start || !end) {
+        status.textContent = 'Informe data inicial e data final.';
+        return;
+      }
+      if (new Date(start) >= new Date(end)) {
+        status.textContent = 'Data inicial precisa ser menor que a data final.';
+        return;
+      }
+      customRanges[target].start = start;
+      customRanges[target].end = end;
+      closeModal('timeRangeModal');
+      activeCustomRangeTarget = null;
+      if (target === 'dashboard') {
+        refresh().catch(console.error);
+      } else {
+        searchFlows().catch(console.error);
+      }
+    }
+
+    function handleRangeSelectChange(target) {
+      const selectId = target === 'dashboard' ? 'rangeMinutes' : 'flowRangeMinutes';
+      const value = document.getElementById(selectId).value;
+      if (value === 'custom') {
+        openCustomRange(target);
+        return;
+      }
+      customRanges[target].previous = value;
+      customRanges[target].start = '';
+      customRanges[target].end = '';
+      if (target === 'dashboard') {
+        refresh().catch(console.error);
+      } else {
+        searchFlows().catch(console.error);
+      }
+    }
+
     function openInterfaceModal(index = -1) {
       editingInterfaceIndex = index;
       const iface = index >= 0 ? { ...defaultInterface(), ...currentInterfaces[index] } : defaultInterface();
@@ -2651,15 +3026,20 @@
     document.getElementById('changePasswordForm').addEventListener('submit', event => changePassword(event).catch(console.error));
     document.getElementById('logoutButton').addEventListener('click', () => logout().catch(console.error));
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
-    document.getElementById('flowIp').addEventListener('keydown', event => {
-      if (event.key === 'Enter') searchFlows().catch(console.error);
+    document.getElementById('flowClearButton').addEventListener('click', () => clearFlowSearch().catch(console.error));
+    ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', event => {
+        if (event.key === 'Enter') searchFlows().catch(console.error);
+      });
     });
-    document.getElementById('flowPort').addEventListener('keydown', event => {
-      if (event.key === 'Enter') searchFlows().catch(console.error);
-    });
-    document.getElementById('rangeMinutes').addEventListener('change', () => refresh().catch(console.error));
+    document.getElementById('rangeMinutes').addEventListener('change', () => handleRangeSelectChange('dashboard'));
+    document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
     document.getElementById('interface').addEventListener('change', () => refresh().catch(console.error));
+    document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
+    document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
+    document.getElementById('applyCustomRange').addEventListener('click', applyCustomRange);
+    document.getElementById('cancelCustomRange').addEventListener('click', cancelCustomRange);
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
@@ -2681,12 +3061,23 @@
     });
 
     document.querySelectorAll('[data-close-modal]').forEach(button => {
-      button.addEventListener('click', () => closeModal(button.dataset.closeModal));
+      button.addEventListener('click', () => {
+        if (button.dataset.closeModal === 'timeRangeModal') {
+          cancelCustomRange();
+        } else {
+          closeModal(button.dataset.closeModal);
+        }
+      });
     });
 
     document.querySelectorAll('.gmj-modal').forEach(modal => {
       modal.addEventListener('click', event => {
-        if (event.target === modal) closeModal(modal.id);
+        if (event.target !== modal) return;
+        if (modal.id === 'timeRangeModal') {
+          cancelCustomRange();
+        } else {
+          closeModal(modal.id);
+        }
       });
     });
 

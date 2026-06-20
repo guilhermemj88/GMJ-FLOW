@@ -60,6 +60,19 @@ TCP_FLAG_BITS = (
     (0x80, "CWR"),
 )
 
+DASHBOARD_PALETTE = (
+    "#0f766e",
+    "#2563eb",
+    "#b45309",
+    "#6d28d9",
+    "#15803d",
+    "#b91c1c",
+    "#0891b2",
+    "#a16207",
+    "#7c3aed",
+    "#0e7490",
+)
+
 SNMP_SYSTEM_OIDS = {
     "sys_descr": "1.3.6.1.2.1.1.1.0",
     "sys_object_id": "1.3.6.1.2.1.1.2.0",
@@ -141,6 +154,7 @@ INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
 
 WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
 WHOIS_CACHE: dict[str, dict[str, Any]] = {}
+MAX_RANGE_MINUTES = int(os.getenv("GMJFLOW_MAX_RANGE_MINUTES", "259200"))
 COLLECTORS_DIR = Path(os.getenv("GMJFLOW_COLLECTORS_DIR", "/app/data/collectors"))
 COLLECTORS_RUNTIME_DIR = "/app/data/collectors"
 COLLECTORS_COMPOSE_FILE = "docker-compose.collectors.yml"
@@ -276,20 +290,63 @@ def utc_dt(value: datetime | None) -> datetime | None:
 
 
 def resolve_range(range_minutes: int, start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
+    if range_minutes < 1:
+        raise HTTPException(status_code=400, detail="range_minutes deve ser maior que zero")
+    if range_minutes > MAX_RANGE_MINUTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"range_minutes nao pode exceder {MAX_RANGE_MINUTES} minutos",
+        )
+
     start_dt = utc_dt(start)
     end_dt = utc_dt(end)
+    now = datetime.now(timezone.utc)
+
+    if end_dt is not None and end_dt > now:
+        end_dt = now
 
     if start_dt is None and end_dt is None:
-        end_dt = datetime.now(timezone.utc)
+        end_dt = now
         start_dt = end_dt - timedelta(minutes=range_minutes)
     elif start_dt is None and end_dt is not None:
         start_dt = end_dt - timedelta(minutes=range_minutes)
     elif start_dt is not None and end_dt is None:
         end_dt = start_dt + timedelta(minutes=range_minutes)
+        if end_dt > now:
+            end_dt = now
 
-    if start_dt is None or end_dt is None or start_dt >= end_dt:
+    if start_dt is None or end_dt is None:
         raise HTTPException(status_code=400, detail="Intervalo de tempo invalido")
+    if start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="Data inicial nao pode ser maior que a data final")
+    if start_dt == end_dt:
+        raise HTTPException(status_code=400, detail="Intervalo de tempo precisa ter duracao maior que zero")
+    if (end_dt - start_dt).total_seconds() > MAX_RANGE_MINUTES * 60:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Periodo personalizado nao pode exceder {MAX_RANGE_MINUTES} minutos",
+        )
     return start_dt, end_dt
+
+
+def resolve_requested_range(
+    range_minutes: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    return resolve_range(range_minutes, start_time or start, end_time or end)
+
+
+def range_seconds(start: datetime, end: datetime) -> float:
+    return max((end - start).total_seconds(), 1.0)
+
+
+def flow_time_where(params: dict[str, Any], start: datetime, end: datetime) -> str:
+    params["start"] = start
+    params["end"] = end
+    return "flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}"
 
 
 def floor_minute(value: datetime) -> datetime:
@@ -548,6 +605,14 @@ def interface_dashboard_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = interface_row_to_dict(row)
     item["name"] = interface_display_name(item)
     return item
+
+
+def deterministic_color(key: Any) -> str:
+    text = str(key or "")
+    seed = 0
+    for char in text:
+        seed = (seed * 33 + ord(char)) % 9973
+    return DASHBOARD_PALETTE[seed % len(DASHBOARD_PALETTE)]
 
 
 def sensor_row_to_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_interfaces: bool = True) -> dict[str, Any]:
@@ -1643,7 +1708,7 @@ def label_for_dimension(dimension: str, key: str) -> str:
 
 
 def common_params(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,
     end: datetime | None = None,
     sensor: str | None = None,
@@ -1653,7 +1718,7 @@ def common_params(
 
 @app.get("/health")
 def health(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,
     end: datetime | None = None,
     sensor: str | None = None,
@@ -1861,7 +1926,12 @@ def list_dashboard_sensors():
             ORDER BY name, id
             """
         ).fetchall()
-        return {"items": [dict(row) for row in rows]}
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["color"] = deterministic_color(item["id"])
+            items.append(item)
+        return {"items": items}
 
 
 @app.post("/api/sensors", status_code=201)
@@ -1996,19 +2066,23 @@ def discover_sensor_interfaces(sensor_id: int, payload: SnmpActionPayload | None
 
 
 def raw_flow_where(
-    range_minutes: int,
+    start: datetime,
+    end: datetime,
     sensor: str | None,
     params: dict[str, Any],
     exporter_ip: str | None = None,
+    if_index: int | None = None,
 ) -> str:
-    safe_range_minutes = max(1, min(int(range_minutes), 10080))
-    where = f"flow_time >= now() - INTERVAL {safe_range_minutes} MINUTE"
+    where = flow_time_where(params, start, end)
     if exporter_ip:
         params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
         where += " AND toString(exporter_ip) = {exporter_ip:String}"
     elif sensor:
         params["sensor"] = sensor
         where += " AND sensor = {sensor:String}"
+    if if_index is not None:
+        params["if_index"] = int(if_index)
+        where += " AND (input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})"
     return where
 
 
@@ -2022,43 +2096,88 @@ def sensor_exporter_ip(sensor_id: int) -> str:
     return exporter_ip
 
 
-def traffic_items(metric: str, range_minutes: int, sensor: str | None):
+def traffic_items(
+    metric: str,
+    range_minutes: int,
+    sensor: str | None,
+    sensor_id: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+):
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     params: dict[str, Any] = {}
-    where = raw_flow_where(range_minutes, sensor, params)
-    value_expr = "sum(bytes) * 8 / 60" if metric == "bps" else "sum(packets) / 60"
+    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
+    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    value_field = "bytes" if metric == "bps" else "packets"
+    multiplier = "8" if metric == "bps" else "1"
     result = query_clickhouse(
         f"""
         SELECT
             toStartOfMinute(flow_time) AS time,
-            {value_expr} AS {metric}
+            sensor,
+            sumIf({value_field}, input_if > 0) * {multiplier} / 60 AS download_{metric},
+            sumIf({value_field}, output_if > 0) * {multiplier} / 60 AS upload_{metric}
         FROM flow_raw
         WHERE {where}
-        GROUP BY time
-        ORDER BY time
+        GROUP BY time, sensor
+        ORDER BY time, sensor
         """,
         params,
     )
 
-    items = []
+    series_by_sensor: dict[str, dict[str, Any]] = {}
     for row in rows_as_dicts(result):
-        items.append({"time": iso(row["time"]), metric: round(float(row[metric] or 0), 2)})
-    return {"items": items}
+        sensor_name = str(row["sensor"] or "Sensor desconhecido")
+        item = series_by_sensor.setdefault(
+            sensor_name,
+            {
+                "series_type": "sensor",
+                "key": sensor_name,
+                "label": sensor_name,
+                "sensor": sensor_name,
+                "color": deterministic_color(sensor_name),
+                "points": [],
+            },
+        )
+        download_value = round(float(row[f"download_{metric}"] or 0), 2)
+        upload_value = round(float(row[f"upload_{metric}"] or 0), 2)
+        item["points"].append(
+            {
+                "time": iso(row["time"]),
+                f"download_{metric}": download_value,
+                f"upload_{metric}": upload_value,
+                metric: round(download_value + upload_value, 2),
+            }
+        )
+    return {"start": iso(start_dt), "end": iso(end_dt), "items": list(series_by_sensor.values())}
 
 
 @app.get("/api/traffic/bps")
 def get_bps(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
 ):
-    return traffic_items("bps", range_minutes, sensor)
+    return traffic_items("bps", range_minutes, sensor, sensor_id, start, end, start_time, end_time)
 
 
 @app.get("/api/traffic/pps")
 def get_pps(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
 ):
-    return traffic_items("pps", range_minutes, sensor)
+    return traffic_items("pps", range_minutes, sensor, sensor_id, start, end, start_time, end_time)
 
 
 def monitored_sensor_interfaces(
@@ -2088,13 +2207,44 @@ def monitored_sensor_interfaces(
     return [interface_dashboard_row_to_dict(row) for row in rows]
 
 
+def resolve_dashboard_if_index(
+    sensor_id: int | None,
+    interface_id: int | None,
+    if_index: int | None,
+) -> int | None:
+    if if_index is not None:
+        return int(if_index)
+    if interface_id is None:
+        return None
+    if sensor_id is None:
+        raise HTTPException(status_code=400, detail="sensor_id e obrigatorio ao filtrar por interface_id")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT if_index
+            FROM sensor_interfaces
+            WHERE id = ? AND sensor_id = ?
+            """,
+            (interface_id, sensor_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Interface nao encontrada para o sensor informado")
+    return int(row["if_index"])
+
+
 def interface_traffic_items(
     metric: str,
     sensor_id: int,
     range_minutes: int,
     interface_id: int | None = None,
     if_index: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> dict[str, Any]:
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     ensure_sensor_db()
     with sqlite_connection() as conn:
         sensor = fetch_sensor_without_interfaces(conn, sensor_id)
@@ -2104,21 +2254,23 @@ def interface_traffic_items(
     if not exporter_ip:
         raise HTTPException(status_code=400, detail="Sensor sem exporter_ip configurado")
 
-    value_expr = "sum(bytes) * 8 / 60" if metric == "bps" else "sum(packets) / 60"
-    safe_range_minutes = max(1, min(int(range_minutes), 10080))
+    value_field = "bytes" if metric == "bps" else "packets"
+    multiplier = "8" if metric == "bps" else "1"
     items = []
     for interface in interfaces:
         params: dict[str, Any] = {
             "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
             "if_index": int(interface["if_index"] or 0),
         }
+        where = flow_time_where(params, start_dt, end_dt)
         result = query_clickhouse(
             f"""
             SELECT
                 toStartOfMinute(flow_time) AS time,
-                {value_expr} AS {metric}
+                sumIf({value_field}, input_if = {{if_index:UInt32}}) * {multiplier} / 60 AS download_{metric},
+                sumIf({value_field}, output_if = {{if_index:UInt32}}) * {multiplier} / 60 AS upload_{metric}
             FROM flow_raw
-            WHERE flow_time >= now() - INTERVAL {safe_range_minutes} MINUTE
+            WHERE {where}
               AND toString(exporter_ip) = {{exporter_ip:String}}
               AND (input_if = {{if_index:UInt32}} OR output_if = {{if_index:UInt32}})
             GROUP BY time
@@ -2128,40 +2280,60 @@ def interface_traffic_items(
         )
 
         points = [
-            {"time": iso(row["time"]), metric: round(float(row[metric] or 0), 2)}
+            {
+                "time": iso(row["time"]),
+                f"download_{metric}": round(float(row[f"download_{metric}"] or 0), 2),
+                f"upload_{metric}": round(float(row[f"upload_{metric}"] or 0), 2),
+                metric: round(
+                    float(row[f"download_{metric}"] or 0) + float(row[f"upload_{metric}"] or 0),
+                    2,
+                ),
+            }
             for row in rows_as_dicts(result)
         ]
         items.append(
             {
+                "series_type": "interface",
+                "key": f"if-{interface['if_index']}",
+                "label": interface["name"],
                 "interface_id": interface["id"],
                 "if_index": interface["if_index"],
                 "interface_name": interface["name"],
+                "direction": interface.get("direction") or "Unset",
                 "color": interface["color"] or "#64748b",
                 "points": points,
             }
         )
 
-    return {"items": items}
+    return {"start": iso(start_dt), "end": iso(end_dt), "items": items}
 
 
 @app.get("/api/traffic/interface-bps")
 def get_interface_bps(
     sensor_id: int = Query(..., ge=1),
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
 ):
-    return interface_traffic_items("bps", sensor_id, range_minutes, interface_id, if_index)
+    return interface_traffic_items("bps", sensor_id, range_minutes, interface_id, if_index, start, end, start_time, end_time)
 
 
 @app.get("/api/traffic/interface-pps")
 def get_interface_pps(
     sensor_id: int = Query(..., ge=1),
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
 ):
-    return interface_traffic_items("pps", sensor_id, range_minutes, interface_id, if_index)
+    return interface_traffic_items("pps", sensor_id, range_minutes, interface_id, if_index, start, end, start_time, end_time)
 
 
 def top_dimension(
@@ -2170,11 +2342,19 @@ def top_dimension(
     sensor: str | None,
     sensor_id: int | None,
     limit: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    interface_id: int | None = None,
+    if_index: int | None = None,
 ):
-    seconds = max(range_minutes * 60, 1)
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"limit": limit, "seconds": seconds}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
-    where = raw_flow_where(range_minutes, sensor, params, exporter_ip)
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
 
     if dimension == "src_ip":
         query = f"""
@@ -2276,61 +2456,189 @@ def top_dimension(
 
 @app.get("/api/tops/src-ip")
 def top_src_ip(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit)
+    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
 @app.get("/api/tops/dst-ip")
 def top_dst_ip(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit)
+    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
 @app.get("/api/tops/ports")
 def top_ports(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit)
+    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
 @app.get("/api/tops/protocols")
 def top_protocols(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("proto", range_minutes, sensor, sensor_id, limit)
+    return top_dimension("proto", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
 @app.get("/api/tops/tcp-flags")
 def top_tcp_flags(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit)
+    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+
+
+def top_asn_dimension(
+    dimension: str,
+    range_minutes: int,
+    sensor: str | None,
+    sensor_id: int | None,
+    limit: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    interface_id: int | None = None,
+    if_index: int | None = None,
+):
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    seconds = range_seconds(start_dt, end_dt)
+    params: dict[str, Any] = {"seconds": seconds}
+    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    if resolved_if_index is not None:
+        params["if_index"] = resolved_if_index
+        if dimension == "src":
+            where += " AND output_if = {if_index:UInt32}"
+        else:
+            where += " AND input_if = {if_index:UInt32}"
+
+    result = query_clickhouse(
+        f"""
+        SELECT
+            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
+            sum(packets) AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        """,
+        params,
+    )
+    rows = rows_as_dicts(result)
+    if not rows:
+        return {"start": iso(start_dt), "end": iso(end_dt), "items": []}
+    row = rows[0]
+    bps = round(float(row["bps"] or 0), 2)
+    if bps <= 0:
+        return {"start": iso(start_dt), "end": iso(end_dt), "items": []}
+    item = {
+        "rank": 1,
+        "asn": "ASN indisponivel",
+        "description": "Base ASN local ainda nao configurada",
+        "bps": bps,
+        "packets": int(row["packets"] or 0),
+        "flows": int(row["flows"] or 0),
+        "percent": 100.0,
+    }
+    return {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "asn_available": False,
+        "message": "ASN ainda nao resolvido; configure uma base ASN local para detalhar por prefixo/AS.",
+        "items": [item][:limit],
+    }
+
+
+@app.get("/api/tops/asn-src")
+def top_asn_src(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    limit: int = Query(15, ge=1, le=100),
+):
+    return top_asn_dimension("src", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+
+
+@app.get("/api/tops/asn-dst")
+def top_asn_dst(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    limit: int = Query(15, ge=1, le=100),
+):
+    return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
 @app.get("/api/flows/search")
 def search_flows(
-    range_minutes: int = Query(60, ge=1, le=10080),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,
     end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
     ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
@@ -2341,15 +2649,19 @@ def search_flows(
     tcp_flags: str | None = None,
     limit: int = Query(200, ge=1, le=5000),
 ):
-    start_dt, end_dt = resolve_range(range_minutes, start, end)
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     params: dict[str, Any] = {"start": start_dt, "end": end_dt, "limit": limit}
-    filters = ["flow_time >= {start:DateTime}", "flow_time < {end:DateTime}"]
+    filters = ["flow_time >= {start:DateTime}", "flow_time <= {end:DateTime}"]
     if sensor_id is not None:
         params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
         filters.append("toString(exporter_ip) = {exporter_ip:String}")
     elif sensor:
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    if resolved_if_index is not None:
+        params["if_index"] = resolved_if_index
+        filters.append("(input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})")
     if ip:
         params["ip"] = clickhouse_ip_string_param(ip, "ip")
         filters.append("(toString(src_ip) = {ip:String} OR toString(dst_ip) = {ip:String})")
