@@ -7,6 +7,8 @@ import json
 import logging
 import socket
 import subprocess
+import re
+import shutil
 import threading
 import time
 import urllib.error
@@ -171,10 +173,15 @@ INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
 WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
 WHOIS_CACHE: dict[str, dict[str, Any]] = {}
 MAX_RANGE_MINUTES = int(os.getenv("GMJFLOW_MAX_RANGE_MINUTES", "259200"))
-COLLECTORS_DIR = Path(os.getenv("GMJFLOW_COLLECTORS_DIR", "/app/data/collectors"))
+RUNTIME_DIR = Path(os.getenv("GMJFLOW_RUNTIME_DIR", "/app/runtime"))
+COLLECTORS_DIR = Path(os.getenv("GMJFLOW_COLLECTORS_DIR", str(RUNTIME_DIR / "data" / "collectors")))
 COLLECTORS_RUNTIME_DIR = "/app/data/collectors"
 COLLECTORS_COMPOSE_FILE = "docker-compose.collectors.yml"
-DEFAULT_COLLECTOR_APPLY_SCRIPT = Path("scripts/apply_collectors.sh")
+COLLECTORS_COMPOSE_PATH = Path(
+    os.getenv("GMJFLOW_COLLECTORS_COMPOSE_PATH", str(RUNTIME_DIR / COLLECTORS_COMPOSE_FILE))
+)
+DEFAULT_COLLECTOR_APPLY_SCRIPT = RUNTIME_DIR / "scripts" / "apply_collectors.sh"
+SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AUTH_ALGORITHM = "HS256"
 AUTH_TOKEN_EXPIRE_HOURS = 8
 AUTH_SECRET = os.getenv("GMJFLOW_AUTH_SECRET")
@@ -182,6 +189,15 @@ if not AUTH_SECRET:
     AUTH_SECRET = "gmj-flow-dev-secret-change-me"
     logger.warning("GMJFLOW_AUTH_SECRET nao definido; usando segredo de desenvolvimento.")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+DATABASE_RETENTION_STOP = threading.Event()
+DATABASE_RETENTION_THREAD: threading.Thread | None = None
+SYSTEM_SETTING_DEFAULTS = {
+    "database_retention_enabled": "1",
+    "flow_retention_days": "30",
+    "snmp_retention_days": "90",
+    "database_last_cleanup_at": "",
+    "database_cleanup_hour": "3",
+}
 
 
 class SensorInterfacePayload(BaseModel):
@@ -262,6 +278,23 @@ class ChangePasswordPayload(BaseModel):
     new_password: str
 
 
+class DatabaseRetentionPayload(BaseModel):
+    enabled: bool
+    retention_days: int = Field(..., ge=1, le=3650)
+    snmp_retention_days: int | None = Field(None, ge=1, le=3650)
+    cleanup_hour: int | None = Field(None, ge=0, le=23)
+
+
+class DatabaseCleanupPayload(BaseModel):
+    older_than_days: int = Field(..., ge=1, le=3650)
+    optimize: bool = False
+    confirm: str = ""
+
+
+class DatabaseOptimizePayload(BaseModel):
+    confirm: str = ""
+
+
 def get_client():
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
@@ -287,6 +320,14 @@ def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> An
     client = get_client()
     try:
         return client.query(query, parameters=parameters or {})
+    finally:
+        close_client(client)
+
+
+def command_clickhouse(command: str, parameters: dict[str, Any] | None = None) -> Any:
+    client = get_client()
+    try:
+        return client.command(command, parameters=parameters or {})
     finally:
         close_client(client)
 
@@ -428,6 +469,68 @@ def ensure_sqlite_column(conn: sqlite3.Connection, table: str, column: str, ddl:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    now = utc_now_iso()
+    for key, value in SYSTEM_SETTING_DEFAULTS.items():
+        conn.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            SELECT ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM system_settings WHERE key = ?
+            )
+            """,
+            (key, value, now, key),
+        )
+
+
+def get_system_settings(conn: sqlite3.Connection) -> dict[str, str]:
+    ensure_system_settings_table(conn)
+    rows = conn.execute("SELECT key, value FROM system_settings").fetchall()
+    settings = {key: value for key, value in SYSTEM_SETTING_DEFAULTS.items()}
+    settings.update({row["key"]: row["value"] for row in rows})
+    return settings
+
+
+def set_system_settings(conn: sqlite3.Connection, values: dict[str, Any]) -> None:
+    ensure_system_settings_table(conn)
+    now = utc_now_iso()
+    for key, value in values.items():
+        if key not in SYSTEM_SETTING_DEFAULTS:
+            raise HTTPException(status_code=400, detail=f"Configuracao invalida: {key}")
+        conn.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, str(value), now),
+        )
+
+
+def setting_bool(settings: dict[str, str], key: str) -> bool:
+    return clean_text(settings.get(key)).lower() in {"1", "true", "yes", "on"}
+
+
+def setting_int(settings: dict[str, str], key: str, default: int, minimum: int = 1, maximum: int = 3650) -> int:
+    try:
+        value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -561,6 +664,7 @@ def ensure_sensor_db() -> None:
             )
             """
         )
+        ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
             now = utc_now_iso()
@@ -586,11 +690,13 @@ def ensure_sensor_db() -> None:
 def startup() -> None:
     ensure_sensor_db()
     start_snmp_polling_thread()
+    start_database_retention_thread()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     SNMP_POLL_STOP.set()
+    DATABASE_RETENTION_STOP.set()
 
 
 def clean_text(value: Any) -> str:
@@ -916,7 +1022,7 @@ def collectors_dir() -> Path:
 
 
 def collectors_compose_path() -> Path:
-    return collectors_dir() / COLLECTORS_COMPOSE_FILE
+    return COLLECTORS_COMPOSE_PATH
 
 
 def collector_sensor_runtime_dir(sensor_id: int) -> str:
@@ -932,12 +1038,19 @@ def yaml_quote(value: Any) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def validate_service_name(value: str) -> str:
+    if not SERVICE_NAME_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Nome de servico invalido: {value}")
+    return value
+
+
 def active_collector_sensors(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT id, name, exporter_ip, listener_port, active
+        SELECT id, name, exporter_ip, listener_port, active, flow_collector_enabled
         FROM sensors
         WHERE active = 1
+          AND flow_collector_enabled = 1
         ORDER BY listener_port, id
         """
     ).fetchall()
@@ -994,8 +1107,8 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
     for sensor in sensors:
         sensor_id = int(sensor["id"])
         port = int(sensor["listener_port"])
-        sensor_service = f"pmacct-sensor-{sensor_id}"
-        parser_service = f"pmacct-parser-sensor-{sensor_id}"
+        sensor_service = validate_service_name(f"pmacct-sensor-{sensor_id}")
+        parser_service = validate_service_name(f"pmacct-parser-sensor-{sensor_id}")
         output_file = f"/var/spool/pmacct/sensor-{sensor_id}-{port}.csv"
         config_file = f"{collector_sensor_runtime_dir(sensor_id)}/nfacctd.conf"
         lines.extend(
@@ -1007,7 +1120,7 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
                 "    ports:",
                 f"      - {yaml_quote(f'{port}:{port}/udp')}",
                 "    volumes:",
-                "      - backend_data:/app/data:ro",
+                "      - ./data/collectors:/app/data/collectors:ro",
                 "      - pmacct_spool:/var/spool/pmacct",
                 "    depends_on:",
                 "      clickhouse:",
@@ -1045,7 +1158,6 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
     lines.extend(
         [
             "volumes:",
-            "  backend_data:",
             "  pmacct_spool:",
             "",
         ]
@@ -1054,15 +1166,33 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
 
 
 def apply_collectors_script_path() -> Path | None:
-    configured = clean_text(os.getenv("GMJFLOW_APPLY_COLLECTORS_SCRIPT"))
+    configured = clean_text(
+        os.getenv("GMJFLOW_COLLECTOR_APPLY_SCRIPT")
+        or os.getenv("GMJFLOW_APPLY_COLLECTORS_SCRIPT")
+    )
     if configured:
         return Path(configured)
-    if DEFAULT_COLLECTOR_APPLY_SCRIPT.exists():
-        return DEFAULT_COLLECTOR_APPLY_SCRIPT
-    return None
+    return DEFAULT_COLLECTOR_APPLY_SCRIPT
+
+
+def collector_apply_enabled() -> bool:
+    return clean_text(os.getenv("GMJFLOW_ENABLE_COLLECTOR_APPLY", "false")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def run_apply_collectors_script(compose_path: Path) -> dict[str, Any]:
+    if not collector_apply_enabled():
+        return {
+            "services_updated": False,
+            "message": "Aplicacao automatica desativada; arquivos gerados.",
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+        }
     script = apply_collectors_script_path()
     if script is None:
         return {
@@ -1088,6 +1218,7 @@ def run_apply_collectors_script(compose_path: Path) -> dict[str, Any]:
             text=True,
             timeout=180,
             check=False,
+            cwd=str(RUNTIME_DIR) if RUNTIME_DIR.exists() else None,
         )
     except Exception as exc:
         return {
@@ -1648,6 +1779,211 @@ def start_snmp_polling_thread() -> None:
     SNMP_POLL_THREAD.start()
 
 
+def human_bytes(value: Any) -> str:
+    size = float(value or 0)
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    unit = 0
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024
+        unit += 1
+    decimals = 0 if unit == 0 or size >= 10 else 1
+    return f"{size:.{decimals}f} {units[unit]}"
+
+
+def clickhouse_database_name() -> str:
+    return os.getenv("CLICKHOUSE_DATABASE", "flowdb")
+
+
+def clickhouse_table_sizes() -> list[dict[str, Any]]:
+    result = query_clickhouse(
+        """
+        SELECT
+            table,
+            sum(rows) AS rows,
+            sum(data_compressed_bytes) AS size_bytes
+        FROM system.parts
+        WHERE active = 1
+          AND database = {database:String}
+        GROUP BY table
+        ORDER BY size_bytes DESC
+        """,
+        {"database": clickhouse_database_name()},
+    )
+    items = []
+    for row in rows_as_dicts(result):
+        size_bytes = int(row["size_bytes"] or 0)
+        items.append(
+            {
+                "table": row["table"],
+                "rows": int(row["rows"] or 0),
+                "size_bytes": size_bytes,
+                "size_human": human_bytes(size_bytes),
+            }
+        )
+    return items
+
+
+def clickhouse_flow_summary() -> dict[str, Any]:
+    result = query_clickhouse(
+        """
+        SELECT
+            count() AS flow_count,
+            min(flow_time) AS oldest_flow_time,
+            max(flow_time) AS newest_flow_time
+        FROM flow_raw
+        """
+    )
+    rows = rows_as_dicts(result)
+    if not rows:
+        return {"flow_count": 0, "oldest_flow_time": None, "newest_flow_time": None}
+    row = rows[0]
+    flow_count = int(row["flow_count"] or 0)
+    if flow_count == 0:
+        return {"flow_count": 0, "oldest_flow_time": None, "newest_flow_time": None}
+    return {
+        "flow_count": flow_count,
+        "oldest_flow_time": iso(row["oldest_flow_time"]) if row["oldest_flow_time"] else None,
+        "newest_flow_time": iso(row["newest_flow_time"]) if row["newest_flow_time"] else None,
+    }
+
+
+def clickhouse_size_summary() -> dict[str, int]:
+    result = query_clickhouse(
+        """
+        SELECT
+            sumIf(data_compressed_bytes, table = 'flow_raw') AS flow_raw_size_bytes,
+            sum(data_compressed_bytes) AS clickhouse_database_size_bytes
+        FROM system.parts
+        WHERE active = 1
+          AND database = {database:String}
+        """,
+        {"database": clickhouse_database_name()},
+    )
+    rows = rows_as_dicts(result)
+    row = rows[0] if rows else {}
+    return {
+        "flow_raw_size_bytes": int(row.get("flow_raw_size_bytes") or 0),
+        "clickhouse_database_size_bytes": int(row.get("clickhouse_database_size_bytes") or 0),
+    }
+
+
+def apply_flow_retention_ttl(enabled: bool, days: int) -> str:
+    days = setting_int({"days": str(days)}, "days", 30)
+    if enabled:
+        command = f"ALTER TABLE flow_raw MODIFY TTL toDateTime(flow_time) + INTERVAL {days} DAY DELETE"
+    else:
+        command = "ALTER TABLE flow_raw REMOVE TTL"
+    command_clickhouse(command)
+    return command
+
+
+def cleanup_clickhouse_flows(older_than_days: int, optimize: bool = False) -> dict[str, Any]:
+    days = setting_int({"days": str(older_than_days)}, "days", 90)
+    cutoff_expression = f"now() - INTERVAL {days} DAY"
+    count_result = query_clickhouse(
+        f"""
+        SELECT count() AS count
+        FROM flow_raw
+        WHERE flow_time < {cutoff_expression}
+        """
+    )
+    rows = rows_as_dicts(count_result)
+    approximate_before = int(rows[0]["count"] or 0) if rows else 0
+    command = f"ALTER TABLE flow_raw DELETE WHERE flow_time < {cutoff_expression}"
+    command_clickhouse(command)
+    optimize_command = ""
+    if optimize:
+        optimize_command = "OPTIMIZE TABLE flow_raw FINAL"
+        command_clickhouse(optimize_command)
+    return {
+        "approximate_before": approximate_before,
+        "older_than_days": days,
+        "period_deleted": f"flow_time < {cutoff_expression}",
+        "command_executed": command,
+        "optimize_command": optimize_command,
+        "status": "ok",
+        "note": (
+            "ClickHouse pode liberar espaco fisico depois dos merges."
+            if not optimize
+            else "OPTIMIZE FINAL solicitado; pode consumir recursos em tabelas grandes."
+        ),
+    }
+
+
+def cleanup_sqlite_snmp_samples(older_than_days: int) -> int:
+    days = setting_int({"days": str(older_than_days)}, "days", 90)
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM interface_snmp_samples
+            WHERE sample_time < datetime('now', ?)
+            """,
+            (f"-{days} days",),
+        )
+        deleted = int(cursor.rowcount or 0)
+        conn.commit()
+    return deleted
+
+
+def run_database_cleanup(
+    flow_retention_days: int,
+    snmp_retention_days: int | None = None,
+    optimize: bool = False,
+    source: str = "manual",
+) -> dict[str, Any]:
+    flow_result = cleanup_clickhouse_flows(flow_retention_days, optimize=optimize)
+    snmp_deleted = cleanup_sqlite_snmp_samples(snmp_retention_days) if snmp_retention_days is not None else None
+    cleanup_at = utc_now_iso()
+    with sqlite_connection() as conn:
+        set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
+        conn.commit()
+    return {
+        "ok": True,
+        "source": source,
+        "cleanup_at": cleanup_at,
+        "flow": flow_result,
+        "snmp_deleted": snmp_deleted,
+    }
+
+
+def database_retention_loop() -> None:
+    while not DATABASE_RETENTION_STOP.wait(60):
+        try:
+            ensure_sensor_db()
+            now = datetime.now(timezone.utc)
+            with sqlite_connection() as conn:
+                settings = get_system_settings(conn)
+            if not setting_bool(settings, "database_retention_enabled"):
+                continue
+            cleanup_hour = setting_int(settings, "database_cleanup_hour", 3, 0, 23)
+            if now.hour != cleanup_hour:
+                continue
+            last_cleanup = parse_datetime_text(settings.get("database_last_cleanup_at"))
+            if last_cleanup is not None and last_cleanup.date() == now.date():
+                continue
+            run_database_cleanup(
+                flow_retention_days=setting_int(settings, "flow_retention_days", 30),
+                snmp_retention_days=setting_int(settings, "snmp_retention_days", 90),
+                optimize=False,
+                source="automatic",
+            )
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha na retencao automatica: %s", exc)
+
+
+def start_database_retention_thread() -> None:
+    global DATABASE_RETENTION_THREAD
+    if DATABASE_RETENTION_THREAD is not None and DATABASE_RETENTION_THREAD.is_alive():
+        return
+    DATABASE_RETENTION_STOP.clear()
+    DATABASE_RETENTION_THREAD = threading.Thread(
+        target=database_retention_loop,
+        name="gmj-flow-database-retention",
+        daemon=True,
+    )
+    DATABASE_RETENTION_THREAD.start()
+
+
 def upsert_discovered_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]]) -> None:
     now = utc_now_iso()
     for interface in interfaces:
@@ -2170,6 +2506,7 @@ def apply_collectors(request: Request):
         )
 
     compose_path = collectors_compose_path()
+    compose_path.parent.mkdir(parents=True, exist_ok=True)
     compose_path.write_text(compose_for_collectors(sensors), encoding="utf-8")
     apply_result = run_apply_collectors_script(compose_path)
 
@@ -2181,6 +2518,143 @@ def apply_collectors(request: Request):
         "services_updated": apply_result["services_updated"],
         "apply": apply_result,
         "errors": [] if apply_result["services_updated"] else [apply_result["message"]],
+    }
+
+
+@app.get("/api/database/status")
+def database_status(request: Request):
+    require_admin(request)
+    settings = {key: value for key, value in SYSTEM_SETTING_DEFAULTS.items()}
+    sqlite_ok = False
+    clickhouse_ok = False
+    flow_summary = {"flow_count": 0, "oldest_flow_time": None, "newest_flow_time": None}
+    size_summary = {"flow_raw_size_bytes": 0, "clickhouse_database_size_bytes": 0}
+
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            conn.execute("SELECT 1").fetchone()
+            settings = get_system_settings(conn)
+            sqlite_ok = True
+    except Exception as exc:
+        logger.warning("Falha ao consultar status do SQLite: %s", exc)
+
+    try:
+        clickhouse_ok = ping_clickhouse()
+        if clickhouse_ok:
+            flow_summary = clickhouse_flow_summary()
+            size_summary = clickhouse_size_summary()
+    except Exception as exc:
+        logger.warning("Falha ao consultar status do ClickHouse: %s", exc)
+        clickhouse_ok = False
+
+    db_path = sqlite_path()
+    sqlite_size_bytes = db_path.stat().st_size if db_path.exists() else 0
+    disk_root = db_path.parent if db_path.parent.exists() else Path(".")
+    disk_usage = shutil.disk_usage(disk_root)
+    retention_days = setting_int(settings, "flow_retention_days", 30)
+    snmp_retention_days = setting_int(settings, "snmp_retention_days", 90)
+    return {
+        "clickhouse_ok": clickhouse_ok,
+        "sqlite_ok": sqlite_ok,
+        "flow_count": flow_summary["flow_count"],
+        "oldest_flow_time": flow_summary["oldest_flow_time"],
+        "newest_flow_time": flow_summary["newest_flow_time"],
+        "flow_raw_size_bytes": size_summary["flow_raw_size_bytes"],
+        "flow_raw_size_human": human_bytes(size_summary["flow_raw_size_bytes"]),
+        "clickhouse_database_size_bytes": size_summary["clickhouse_database_size_bytes"],
+        "clickhouse_database_size_human": human_bytes(size_summary["clickhouse_database_size_bytes"]),
+        "sqlite_size_bytes": sqlite_size_bytes,
+        "sqlite_size_human": human_bytes(sqlite_size_bytes),
+        "disk_total_bytes": disk_usage.total,
+        "disk_used_bytes": disk_usage.used,
+        "disk_free_bytes": disk_usage.free,
+        "disk_used_human": human_bytes(disk_usage.used),
+        "disk_free_human": human_bytes(disk_usage.free),
+        "disk_total_human": human_bytes(disk_usage.total),
+        "retention_days": retention_days,
+        "snmp_retention_days": snmp_retention_days,
+        "retention_enabled": setting_bool(settings, "database_retention_enabled"),
+        "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
+        "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+    }
+
+
+@app.get("/api/database/tables")
+def database_tables(request: Request):
+    require_admin(request)
+    try:
+        items = clickhouse_table_sizes()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"ClickHouse indisponivel: {exc}") from exc
+    return {"items": items}
+
+
+@app.post("/api/database/retention")
+def database_retention(request: Request, payload: DatabaseRetentionPayload):
+    require_admin(request)
+    snmp_days = payload.snmp_retention_days or payload.retention_days
+    cleanup_hour = 3 if payload.cleanup_hour is None else payload.cleanup_hour
+    try:
+        ttl_command = apply_flow_retention_ttl(payload.enabled, payload.retention_days)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Falha ao atualizar TTL no ClickHouse: {exc}") from exc
+
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        set_system_settings(
+            conn,
+            {
+                "database_retention_enabled": "1" if payload.enabled else "0",
+                "flow_retention_days": payload.retention_days,
+                "snmp_retention_days": snmp_days,
+                "database_cleanup_hour": cleanup_hour,
+            },
+        )
+        conn.commit()
+        settings = get_system_settings(conn)
+    return {
+        "ok": True,
+        "retention_enabled": setting_bool(settings, "database_retention_enabled"),
+        "retention_days": setting_int(settings, "flow_retention_days", 30),
+        "snmp_retention_days": setting_int(settings, "snmp_retention_days", 90),
+        "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
+        "ttl_command": ttl_command,
+    }
+
+
+@app.post("/api/database/cleanup")
+def database_cleanup(request: Request, payload: DatabaseCleanupPayload):
+    require_admin(request)
+    if payload.confirm != "LIMPAR":
+        raise HTTPException(status_code=400, detail="Digite LIMPAR para confirmar")
+    try:
+        result = run_database_cleanup(
+            flow_retention_days=payload.older_than_days,
+            snmp_retention_days=None,
+            optimize=payload.optimize,
+            source="manual",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Falha na limpeza: {exc}") from exc
+    return result
+
+
+@app.post("/api/database/optimize")
+def database_optimize(request: Request, payload: DatabaseOptimizePayload):
+    require_admin(request)
+    if payload.confirm != "OTIMIZAR":
+        raise HTTPException(status_code=400, detail="Digite OTIMIZAR para confirmar")
+    command = "OPTIMIZE TABLE flow_raw FINAL"
+    try:
+        command_clickhouse(command)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Falha ao executar OPTIMIZE: {exc}") from exc
+    return {
+        "ok": True,
+        "command_executed": command,
+        "status": "ok",
+        "note": "OPTIMIZE FINAL solicitado; acompanhe uso de CPU e disco em tabelas grandes.",
     }
 
 

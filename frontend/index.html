@@ -302,6 +302,42 @@
       font-size: .86rem;
     }
 
+    .database-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
+      gap: .75rem;
+    }
+
+    .metric-card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: .8rem;
+      min-width: 0;
+      background: #ffffff;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: .74rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      margin-top: .25rem;
+      color: #111827;
+      font-size: 1.02rem;
+      font-weight: 750;
+      overflow-wrap: anywhere;
+    }
+
+    .database-actions-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: .5rem;
+      align-items: end;
+    }
+
     .flow-search-grid {
       display: grid;
       grid-template-columns: repeat(6, minmax(118px, 1fr));
@@ -581,7 +617,8 @@
 
       .sensor-form-grid,
       .snmp-form-grid,
-      .interface-form-grid {
+      .interface-form-grid,
+      .database-metrics-grid {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
       }
     }
@@ -603,6 +640,8 @@
       .sensor-form-grid,
       .snmp-form-grid,
       .interface-form-grid,
+      .database-metrics-grid,
+      .database-actions-grid,
       .ip-detail-grid {
         grid-template-columns: 1fr;
       }
@@ -672,6 +711,9 @@
         </button>
         <button type="button" data-nav-view="sensors">
           <i data-lucide="radio-tower"></i><span>Sensores</span>
+        </button>
+        <button id="databaseNavButton" type="button" data-nav-view="database">
+          <i data-lucide="database"></i><span>Banco de Dados</span>
         </button>
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
@@ -1219,6 +1261,174 @@
           </section>
         </section>
 
+        <section id="view-database" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Banco de Dados</h1>
+              <div id="databaseStatusText" class="subtle">Status e manutencao do armazenamento</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshDatabaseButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3">
+            <div class="database-metrics-grid">
+              <div class="metric-card">
+                <div class="metric-label">ClickHouse</div>
+                <div id="dbClickhouseStatus" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">SQLite</div>
+                <div id="dbSqliteStatus" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Total de flows</div>
+                <div id="dbFlowCount" class="metric-value">0</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">flow_raw</div>
+                <div id="dbFlowRawSize" class="metric-value">0 B</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Flow mais antigo</div>
+                <div id="dbOldestFlow" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Flow mais recente</div>
+                <div id="dbNewestFlow" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">ClickHouse total</div>
+                <div id="dbClickhouseSize" class="metric-value">0 B</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">SQLite total</div>
+                <div id="dbSqliteSize" class="metric-value">0 B</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Disco usado</div>
+                <div id="dbDiskUsed" class="metric-value">0 B</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Disco livre</div>
+                <div id="dbDiskFree" class="metric-value">0 B</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Retencao atual</div>
+                <div id="dbRetentionPolicy" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Ultima limpeza</div>
+                <div id="dbLastCleanup" class="metric-value">-</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3 mt-1">
+            <div class="col-12 col-xl-5">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-3">Politica de retencao</div>
+                <div class="sensor-form-grid">
+                  <div class="field">
+                    <label for="databaseRetentionEnabled">Retencao automatica</label>
+                    <select id="databaseRetentionEnabled" class="form-select form-select-sm">
+                      <option value="true">Ativada</option>
+                      <option value="false">Desativada</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="flowRetentionDays">Flows</label>
+                    <select id="flowRetentionDays" class="form-select form-select-sm">
+                      <option value="30">30 dias</option>
+                      <option value="60">60 dias</option>
+                      <option value="90">90 dias</option>
+                      <option value="180">180 dias</option>
+                      <option value="365">365 dias</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="snmpRetentionDays">SNMP</label>
+                    <select id="snmpRetentionDays" class="form-select form-select-sm">
+                      <option value="30">30 dias</option>
+                      <option value="60">60 dias</option>
+                      <option value="90">90 dias</option>
+                      <option value="180">180 dias</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="databaseCleanupHour">Hora UTC</label>
+                    <input id="databaseCleanupHour" type="number" min="0" max="23" class="form-control form-control-sm" value="3">
+                  </div>
+                </div>
+                <div class="toolbar mt-3">
+                  <button id="saveDatabaseRetentionButton" type="button" class="btn btn-sm btn-success">
+                    <i data-lucide="save"></i><span>Salvar politica</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-12 col-xl-7">
+              <div class="panel p-3 h-100">
+                <div class="panel-title mb-3">Limpeza manual</div>
+                <div class="database-actions-grid">
+                  <button type="button" class="btn btn-sm btn-outline-danger database-cleanup-button" data-days="30">
+                    <i data-lucide="trash-2"></i><span>+30 dias</span>
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-danger database-cleanup-button" data-days="60">
+                    <i data-lucide="trash-2"></i><span>+60 dias</span>
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-danger database-cleanup-button" data-days="90">
+                    <i data-lucide="trash-2"></i><span>+90 dias</span>
+                  </button>
+                  <div class="field">
+                    <label for="databaseCustomCleanupDays">Dias</label>
+                    <input id="databaseCustomCleanupDays" type="number" min="1" max="3650" class="form-control form-control-sm" value="90">
+                  </div>
+                  <button id="customDatabaseCleanupButton" type="button" class="btn btn-sm btn-outline-danger">
+                    <i data-lucide="trash"></i><span>Limpar</span>
+                  </button>
+                  <div class="field">
+                    <label for="databaseCleanupConfirm">Confirmacao</label>
+                    <input id="databaseCleanupConfirm" class="form-control form-control-sm" placeholder="LIMPAR">
+                  </div>
+                  <div class="field">
+                    <label for="databaseOptimizeConfirm">Optimize</label>
+                    <input id="databaseOptimizeConfirm" class="form-control form-control-sm" placeholder="OTIMIZAR">
+                  </div>
+                  <div class="field">
+                    <label for="databaseCleanupOptimize">OPTIMIZE apos limpar</label>
+                    <select id="databaseCleanupOptimize" class="form-select form-select-sm">
+                      <option value="false">Nao</option>
+                      <option value="true">Sim</option>
+                    </select>
+                  </div>
+                  <button id="databaseOptimizeButton" type="button" class="btn btn-sm btn-outline-warning">
+                    <i data-lucide="wrench"></i><span>OPTIMIZE</span>
+                  </button>
+                </div>
+                <pre id="databaseActionResult" class="result-box mt-3">Nenhuma acao executada.</pre>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="panel-title">Tabelas ClickHouse</div>
+              <div id="databaseTablesStatus" class="metric-readout">-</div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>Tabela</th><th class="text-end">Linhas</th><th class="text-end">Tamanho</th></tr></thead>
+                <tbody id="databaseTables"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -1575,6 +1785,7 @@
       document.getElementById('loginView').classList.add('auth-hidden');
       document.getElementById('appShell').classList.remove('auth-hidden');
       document.getElementById('applyCollectorsButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('databaseNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
       loadDashboardSensors().then(() => refresh()).catch(console.error);
@@ -1928,6 +2139,139 @@
         '"': '&quot;',
         "'": '&#39;'
       }[char]));
+    }
+
+    function setText(id, value) {
+      document.getElementById(id).textContent = value ?? '-';
+    }
+
+    function formatDateTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString('pt-BR');
+    }
+
+    function renderDatabaseTables(items) {
+      const tbody = document.getElementById('databaseTables');
+      const status = document.getElementById('databaseTablesStatus');
+      if (!Array.isArray(items) || !items.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-muted">Sem tabelas</td></tr>';
+        status.textContent = '0 tabelas';
+        return;
+      }
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${escapeHtml(item.table)}</td>
+          <td class="text-end">${formatNumber(item.rows)}</td>
+          <td class="text-end">${escapeHtml(item.size_human || formatBytes(item.size_bytes))}</td>
+        </tr>
+      `).join('');
+      status.textContent = `${formatNumber(items.length)} tabelas`;
+    }
+
+    function renderDatabaseStatus(payload) {
+      setText('dbClickhouseStatus', payload.clickhouse_ok ? 'OK' : 'Falha');
+      setText('dbSqliteStatus', payload.sqlite_ok ? 'OK' : 'Falha');
+      setText('dbFlowCount', formatNumber(payload.flow_count));
+      setText('dbOldestFlow', formatDateTime(payload.oldest_flow_time));
+      setText('dbNewestFlow', formatDateTime(payload.newest_flow_time));
+      setText('dbFlowRawSize', payload.flow_raw_size_human || formatBytes(payload.flow_raw_size_bytes));
+      setText('dbClickhouseSize', payload.clickhouse_database_size_human || formatBytes(payload.clickhouse_database_size_bytes));
+      setText('dbSqliteSize', payload.sqlite_size_human || formatBytes(payload.sqlite_size_bytes));
+      setText('dbDiskUsed', `${payload.disk_used_human || formatBytes(payload.disk_used_bytes)} / ${payload.disk_total_human || formatBytes(payload.disk_total_bytes)}`);
+      setText('dbDiskFree', payload.disk_free_human || formatBytes(payload.disk_free_bytes));
+      setText(
+        'dbRetentionPolicy',
+        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - flows ${formatNumber(payload.retention_days)}d / SNMP ${formatNumber(payload.snmp_retention_days)}d`
+      );
+      setText('dbLastCleanup', formatDateTime(payload.last_cleanup_at));
+      document.getElementById('databaseRetentionEnabled').value = payload.retention_enabled ? 'true' : 'false';
+      document.getElementById('flowRetentionDays').value = String(payload.retention_days || 90);
+      document.getElementById('snmpRetentionDays').value = String(payload.snmp_retention_days || 90);
+      document.getElementById('databaseCleanupHour').value = String(payload.database_cleanup_hour ?? 3);
+    }
+
+    async function loadDatabaseTables() {
+      try {
+        const payload = await apiRequest('/api/database/tables');
+        renderDatabaseTables(payload.items || []);
+      } catch (error) {
+        document.getElementById('databaseTablesStatus').textContent = 'Falha';
+        document.getElementById('databaseTables').innerHTML = `<tr><td colspan="3" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+      }
+    }
+
+    async function loadDatabaseStatus() {
+      if (currentAuthUser?.role !== 'admin') return;
+      document.getElementById('databaseStatusText').textContent = 'Atualizando...';
+      try {
+        const payload = await apiRequest('/api/database/status');
+        renderDatabaseStatus(payload);
+        document.getElementById('databaseStatusText').textContent = 'Status e manutencao do armazenamento';
+        await loadDatabaseTables();
+      } catch (error) {
+        document.getElementById('databaseStatusText').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function saveDatabaseRetention() {
+      const result = document.getElementById('databaseActionResult');
+      result.textContent = 'Salvando politica...';
+      try {
+        const payload = await apiRequest('/api/database/retention', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: document.getElementById('databaseRetentionEnabled').value === 'true',
+            retention_days: Number(document.getElementById('flowRetentionDays').value),
+            snmp_retention_days: Number(document.getElementById('snmpRetentionDays').value),
+            cleanup_hour: Number(document.getElementById('databaseCleanupHour').value)
+          })
+        });
+        result.textContent = JSON.stringify(payload, null, 2);
+        await loadDatabaseStatus();
+      } catch (error) {
+        result.textContent = `Falha ao salvar politica: ${error.message}`;
+      }
+    }
+
+    async function cleanupDatabase(days) {
+      const result = document.getElementById('databaseActionResult');
+      result.textContent = 'Executando limpeza...';
+      try {
+        const payload = await apiRequest('/api/database/cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            older_than_days: Number(days),
+            optimize: document.getElementById('databaseCleanupOptimize').value === 'true',
+            confirm: document.getElementById('databaseCleanupConfirm').value.trim()
+          })
+        });
+        result.textContent = JSON.stringify(payload, null, 2);
+        await loadDatabaseStatus();
+      } catch (error) {
+        result.textContent = `Falha na limpeza: ${error.message}`;
+      }
+    }
+
+    async function optimizeDatabase() {
+      const result = document.getElementById('databaseActionResult');
+      result.textContent = 'Executando OPTIMIZE...';
+      try {
+        const payload = await apiRequest('/api/database/optimize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            confirm: document.getElementById('databaseOptimizeConfirm').value.trim()
+          })
+        });
+        result.textContent = JSON.stringify(payload, null, 2);
+        await loadDatabaseStatus();
+      } catch (error) {
+        result.textContent = `Falha no OPTIMIZE: ${error.message}`;
+      }
     }
 
     function ipLink(ip) {
@@ -3103,6 +3447,10 @@
         document.getElementById('view-sensors').classList.add('active');
         document.querySelector('[data-nav-view="sensors"]').classList.add('active');
         loadSensors().catch(console.error);
+      } else if (view === 'database') {
+        document.getElementById('view-database').classList.add('active');
+        document.querySelector('[data-nav-view="database"]').classList.add('active');
+        loadDatabaseStatus().catch(console.error);
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
@@ -3149,6 +3497,15 @@
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
     document.getElementById('applyCustomRange').addEventListener('click', applyCustomRange);
     document.getElementById('cancelCustomRange').addEventListener('click', cancelCustomRange);
+    document.getElementById('refreshDatabaseButton').addEventListener('click', () => loadDatabaseStatus().catch(console.error));
+    document.getElementById('saveDatabaseRetentionButton').addEventListener('click', () => saveDatabaseRetention().catch(console.error));
+    document.querySelectorAll('.database-cleanup-button').forEach(button => {
+      button.addEventListener('click', () => cleanupDatabase(Number(button.dataset.days)).catch(console.error));
+    });
+    document.getElementById('customDatabaseCleanupButton').addEventListener('click', () => {
+      cleanupDatabase(Number(document.getElementById('databaseCustomCleanupDays').value || 90)).catch(console.error);
+    });
+    document.getElementById('databaseOptimizeButton').addEventListener('click', () => optimizeDatabase().catch(console.error));
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));

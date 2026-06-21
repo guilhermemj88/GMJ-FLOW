@@ -31,8 +31,10 @@ services:
       API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
       GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
       GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
-      GMJFLOW_COLLECTORS_DIR: "${GMJFLOW_COLLECTORS_DIR-/app/data/collectors}"
-      GMJFLOW_APPLY_COLLECTORS_SCRIPT: "${GMJFLOW_APPLY_COLLECTORS_SCRIPT-}"
+      GMJFLOW_RUNTIME_DIR: "${GMJFLOW_RUNTIME_DIR-/app/runtime}"
+      GMJFLOW_COLLECTORS_DIR: "${GMJFLOW_COLLECTORS_DIR-/app/runtime/data/collectors}"
+      GMJFLOW_COLLECTOR_APPLY_SCRIPT: "${GMJFLOW_COLLECTOR_APPLY_SCRIPT-/app/runtime/scripts/apply_collectors.sh}"
+      GMJFLOW_ENABLE_COLLECTOR_APPLY: "${GMJFLOW_ENABLE_COLLECTOR_APPLY-false}"
       GMJFLOW_SNMP_POLLING_ENABLED: "${GMJFLOW_SNMP_POLLING_ENABLED-1}"
       GMJFLOW_CALIBRATION_MIN_BPS: "${GMJFLOW_CALIBRATION_MIN_BPS-10000}"
       GMJFLOW_CALIBRATION_MIN_CONFIDENCE: "${GMJFLOW_CALIBRATION_MIN_CONFIDENCE-0.6}"
@@ -40,7 +42,9 @@ services:
     ports:
       - "${BACKEND_PORT-8000}:8000"
     volumes:
-      - backend_data:/app/data
+      - ./data/backend:/app/data
+      - ./:/app/runtime
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -114,6 +118,5 @@ services:
         condition: service_healthy
 
 volumes:
-  backend_data:
   clickhouse_data:
   pmacct_spool:
