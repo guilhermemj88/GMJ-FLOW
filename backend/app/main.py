@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
-from ipaddress import IPv4Address, ip_address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -191,6 +191,8 @@ if not AUTH_SECRET:
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DATABASE_RETENTION_STOP = threading.Event()
 DATABASE_RETENTION_THREAD: threading.Thread | None = None
+ANOMALY_DETECTION_STOP = threading.Event()
+ANOMALY_DETECTION_THREAD: threading.Thread | None = None
 SYSTEM_SETTING_DEFAULTS = {
     "database_retention_enabled": "1",
     "flow_retention_days": "30",
@@ -198,6 +200,55 @@ SYSTEM_SETTING_DEFAULTS = {
     "database_last_cleanup_at": "",
     "database_cleanup_hour": "3",
 }
+
+ATTACK_DOMAIN_TYPES = {"any", "internal_ip", "external_ip", "prefix", "sensor", "interface"}
+ATTACK_DIRECTIONS = {"receives", "sends", "both"}
+ATTACK_COMPARISONS = {"over"}
+ATTACK_THRESHOLD_UNITS = {"bits_s", "packets_s", "flows_s"}
+ATTACK_DECODERS = {
+    "IP",
+    "TCP",
+    "TCP+SYN",
+    "TCP+SYNACK",
+    "TCP+ACK",
+    "TCP+RST",
+    "TCP+NULL",
+    "TCP+ALL",
+    "UDP",
+    "ICMP",
+    "DNS",
+    "NTP",
+    "QUIC",
+    "UDP+QUIC",
+    "HTTP",
+    "HTTPS",
+    "MAIL",
+    "SIP",
+    "IPSEC",
+    "FRAGMENT",
+    "NETBIOS",
+    "MEMCACHED",
+    "OTHER",
+    "INVALID",
+    "FLOWS",
+    "FLOW+SYN",
+}
+ATTACK_SEVERITIES = {"info", "warning", "critical"}
+ATTACK_RESPONSE_ACTIONS = {"alert_only", "response_ip", "webhook_future", "ignore"}
+LEARN_DECODER_UNITS = (
+    ("IP", "bits_s"),
+    ("IP", "packets_s"),
+    ("TCP", "bits_s"),
+    ("TCP", "packets_s"),
+    ("TCP+SYN", "packets_s"),
+    ("UDP", "bits_s"),
+    ("UDP", "packets_s"),
+    ("ICMP", "bits_s"),
+    ("ICMP", "packets_s"),
+    ("OTHER", "bits_s"),
+    ("OTHER", "packets_s"),
+    ("FLOWS", "flows_s"),
+)
 
 
 class SensorInterfacePayload(BaseModel):
@@ -293,6 +344,45 @@ class DatabaseCleanupPayload(BaseModel):
 
 class DatabaseOptimizePayload(BaseModel):
     confirm: str = ""
+
+
+class AttackVectorTemplatePayload(BaseModel):
+    name: str
+    description: str = ""
+    enabled: bool = True
+    learn_enabled: bool = True
+    learn_days: int = Field(2, ge=1, le=30)
+    safety_margin_percent: float = Field(20, ge=0, le=500)
+
+
+class AttackVectorPayload(BaseModel):
+    template_id: int = Field(..., ge=1)
+    name: str
+    enabled: bool = True
+    domain_type: str = "any"
+    target_cidr: str | None = None
+    sensor_id: int | None = Field(None, ge=1)
+    interface_if_index: int | None = Field(None, ge=0)
+    direction: str = "receives"
+    decoder: str = "IP"
+    comparison: str = "over"
+    threshold_value: float = Field(..., gt=0)
+    threshold_unit: str = "bits_s"
+    severity: str = "warning"
+    response_action: str = "alert_only"
+    parent_enabled: bool = True
+
+
+class AttackVectorLearnPayload(BaseModel):
+    template_id: int = Field(..., ge=1)
+    days: int = Field(2, ge=1, le=30)
+    margin_percent: float = Field(20, ge=0, le=500)
+    sensor_id: int | None = Field(None, ge=1)
+    target_cidr: str | None = None
+
+
+class AttackVectorSuggestionApplyAllPayload(BaseModel):
+    template_id: int | None = Field(None, ge=1)
 
 
 def get_client():
@@ -539,6 +629,218 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
+def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attack_vector_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            learn_enabled INTEGER NOT NULL DEFAULT 1,
+            learn_days INTEGER NOT NULL DEFAULT 2,
+            safety_margin_percent REAL NOT NULL DEFAULT 20,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attack_vectors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            domain_type TEXT NOT NULL DEFAULT 'any',
+            target_cidr TEXT,
+            sensor_id INTEGER,
+            interface_if_index INTEGER,
+            direction TEXT NOT NULL DEFAULT 'receives',
+            decoder TEXT NOT NULL DEFAULT 'IP',
+            comparison TEXT NOT NULL DEFAULT 'over',
+            threshold_value REAL NOT NULL,
+            threshold_unit TEXT NOT NULL DEFAULT 'bits_s',
+            severity TEXT NOT NULL DEFAULT 'warning',
+            response_action TEXT NOT NULL DEFAULT 'alert_only',
+            parent_enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(template_id) REFERENCES attack_vector_templates(id) ON DELETE CASCADE,
+            FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attack_vector_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            sensor_id INTEGER,
+            domain_type TEXT NOT NULL DEFAULT 'any',
+            target_cidr TEXT,
+            direction TEXT NOT NULL DEFAULT 'receives',
+            decoder TEXT NOT NULL,
+            threshold_value REAL NOT NULL,
+            threshold_unit TEXT NOT NULL,
+            baseline_p95 REAL NOT NULL DEFAULT 0,
+            baseline_p99 REAL NOT NULL DEFAULT 0,
+            baseline_max REAL NOT NULL DEFAULT 0,
+            baseline_average REAL NOT NULL DEFAULT 0,
+            margin_percent REAL NOT NULL DEFAULT 20,
+            confidence REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            applied_at TEXT,
+            FOREIGN KEY(template_id) REFERENCES attack_vector_templates(id) ON DELETE CASCADE,
+            FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anomaly_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attack_vector_id INTEGER,
+            sensor_id INTEGER,
+            interface_if_index INTEGER,
+            target_ip TEXT,
+            target_cidr TEXT,
+            direction TEXT NOT NULL,
+            decoder TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            metric_unit TEXT NOT NULL,
+            threshold_value REAL NOT NULL,
+            observed_value REAL NOT NULL,
+            peak_value REAL NOT NULL,
+            started_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            ended_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            estimated_bytes INTEGER NOT NULL DEFAULT 0,
+            estimated_packets INTEGER NOT NULL DEFAULT 0,
+            flow_count INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            dedupe_key TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(attack_vector_id) REFERENCES attack_vectors(id) ON DELETE SET NULL,
+            FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anomaly_event_flows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            anomaly_event_id INTEGER NOT NULL,
+            flow_time TEXT NOT NULL,
+            sensor TEXT,
+            exporter_ip TEXT,
+            src_ip TEXT,
+            dst_ip TEXT,
+            src_port INTEGER,
+            dst_port INTEGER,
+            proto INTEGER,
+            tcp_flags INTEGER,
+            input_if INTEGER,
+            output_if INTEGER,
+            bytes INTEGER,
+            packets INTEGER,
+            flow_count INTEGER,
+            FOREIGN KEY(anomaly_event_id) REFERENCES anomaly_events(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vector_suggestions_template ON attack_vector_suggestions(template_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_status ON anomaly_events(status, last_seen_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_dedupe ON anomaly_events(dedupe_key, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_event_flows_event ON anomaly_event_flows(anomaly_event_id)")
+    seed_default_attack_vectors(conn)
+
+
+def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+    row = conn.execute(
+        "SELECT id FROM attack_vector_templates WHERE name = ? ORDER BY id LIMIT 1",
+        ("THRESHOLD-PADRAO",),
+    ).fetchone()
+    if row is None:
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vector_templates (
+                name,
+                description,
+                enabled,
+                learn_enabled,
+                learn_days,
+                safety_margin_percent,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "THRESHOLD-PADRAO",
+                "Template inicial conservador. O ideal e rodar aprendizado automatico por 2 dias.",
+                1,
+                1,
+                2,
+                20,
+                now,
+                now,
+            ),
+        )
+        template_id = int(cursor.lastrowid)
+    else:
+        template_id = int(row["id"])
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS count FROM attack_vectors WHERE template_id = ?",
+        (template_id,),
+    ).fetchone()["count"]
+    if int(count or 0) > 0:
+        return
+
+    defaults = [
+        ("Internal IP receives IP packets warning", "internal_ip", "receives", "IP", 5_000_000, "packets_s", "warning"),
+        ("Internal IP receives IP bits critical", "internal_ip", "receives", "IP", 30_000_000_000, "bits_s", "critical"),
+        ("Internal IP receives TCP packets warning", "internal_ip", "receives", "TCP", 2_000_000, "packets_s", "warning"),
+        ("Internal IP receives TCP bits critical", "internal_ip", "receives", "TCP", 10_000_000_000, "bits_s", "critical"),
+        ("Internal IP receives TCP SYN packets warning", "internal_ip", "receives", "TCP+SYN", 1_000_000, "packets_s", "warning"),
+        ("Internal IP receives UDP bits warning", "internal_ip", "receives", "UDP", 5_000_000_000, "bits_s", "warning"),
+        ("Internal IP receives ICMP packets warning", "internal_ip", "receives", "ICMP", 500_000, "packets_s", "warning"),
+        ("Internal IP receives flows warning", "internal_ip", "receives", "FLOWS", 300_000, "flows_s", "warning"),
+    ]
+    for name, domain_type, direction, decoder, value, unit, severity in defaults:
+        conn.execute(
+            """
+            INSERT INTO attack_vectors (
+                template_id,
+                name,
+                enabled,
+                domain_type,
+                target_cidr,
+                sensor_id,
+                interface_if_index,
+                direction,
+                decoder,
+                comparison,
+                threshold_value,
+                threshold_unit,
+                severity,
+                response_action,
+                parent_enabled,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, 1, ?, NULL, NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', 1, ?, ?)
+            """,
+            (template_id, name, domain_type, direction, decoder, value, unit, severity, now, now),
+        )
+
+
 def ensure_sensor_db() -> None:
     with sqlite_connection() as conn:
         conn.execute(
@@ -664,6 +966,7 @@ def ensure_sensor_db() -> None:
             )
             """
         )
+        ensure_attack_vector_db(conn)
         ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
@@ -691,12 +994,14 @@ def startup() -> None:
     ensure_sensor_db()
     start_snmp_polling_thread()
     start_database_retention_thread()
+    start_anomaly_detection_thread()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
+    ANOMALY_DETECTION_STOP.set()
 
 
 def clean_text(value: Any) -> str:
@@ -2469,6 +2774,1649 @@ def auth_change_password(request: Request, payload: ChangePasswordPayload):
         "user": user_row_to_public(updated),
         "token": create_access_token(updated),
     }
+
+
+def sqlite_bool(value: Any) -> bool:
+    return bool(int(value or 0))
+
+
+def normalize_choice(value: Any, allowed: set[str], field_name: str) -> str:
+    text = clean_text(value)
+    if text not in allowed:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+    return text
+
+
+def normalize_target_cidr(value: Any, field_name: str = "target_cidr") -> str | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        if "/" not in text:
+            parsed_ip = ip_address(text)
+            text = f"{parsed_ip}/32" if isinstance(parsed_ip, IPv4Address) else f"{parsed_ip}/128"
+        return str(ip_network(text, strict=False))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+
+
+def clickhouse_cidr_string_param(value: str, field_name: str = "target_cidr") -> str:
+    try:
+        network = ip_network(value, strict=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+    if network.version == 4:
+        return f"::ffff:{network.network_address}/{network.prefixlen + 96}"
+    return str(network)
+
+
+def attack_vector_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "name": row["name"],
+        "description": row["description"],
+        "enabled": sqlite_bool(row["enabled"]),
+        "learn_enabled": sqlite_bool(row["learn_enabled"]),
+        "learn_days": int(row["learn_days"] or 2),
+        "safety_margin_percent": float(row["safety_margin_percent"] or 0),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "vector_count": int(row["vector_count"] or 0) if "vector_count" in row.keys() else 0,
+    }
+
+
+def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "template_id": int(item["template_id"]),
+        "template_name": item.get("template_name", ""),
+        "name": item["name"],
+        "enabled": sqlite_bool(item["enabled"]),
+        "domain_type": item["domain_type"],
+        "target_cidr": item.get("target_cidr"),
+        "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
+        "sensor_name": item.get("sensor_name") or "",
+        "interface_if_index": int(item["interface_if_index"]) if item.get("interface_if_index") is not None else None,
+        "direction": item["direction"],
+        "decoder": item["decoder"],
+        "comparison": item["comparison"],
+        "threshold_value": float(item["threshold_value"] or 0),
+        "threshold_unit": item["threshold_unit"],
+        "severity": item["severity"],
+        "response_action": item["response_action"],
+        "parent_enabled": sqlite_bool(item["parent_enabled"]),
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def attack_vector_suggestion_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "template_id": int(item["template_id"]),
+        "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
+        "domain_type": item["domain_type"],
+        "target_cidr": item.get("target_cidr"),
+        "direction": item["direction"],
+        "decoder": item["decoder"],
+        "threshold_value": round(float(item["threshold_value"] or 0), 2),
+        "threshold_unit": item["threshold_unit"],
+        "baseline_p95": round(float(item["baseline_p95"] or 0), 2),
+        "baseline_p99": round(float(item["baseline_p99"] or 0), 2),
+        "baseline_max": round(float(item["baseline_max"] or 0), 2),
+        "baseline_average": round(float(item.get("baseline_average") or 0), 2),
+        "margin_percent": round(float(item["margin_percent"] or 0), 2),
+        "confidence": round(float(item["confidence"] or 0), 3),
+        "created_at": item["created_at"],
+        "applied_at": item.get("applied_at"),
+    }
+
+
+def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "attack_vector_id": int(item["attack_vector_id"]) if item.get("attack_vector_id") is not None else None,
+        "attack_vector_name": item.get("attack_vector_name") or "",
+        "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
+        "sensor_name": item.get("sensor_name") or "",
+        "interface_if_index": int(item["interface_if_index"]) if item.get("interface_if_index") is not None else None,
+        "target_ip": item.get("target_ip") or "",
+        "target_cidr": item.get("target_cidr") or "",
+        "direction": item["direction"],
+        "decoder": item["decoder"],
+        "severity": item["severity"],
+        "metric_unit": item["metric_unit"],
+        "threshold_value": float(item["threshold_value"] or 0),
+        "observed_value": float(item["observed_value"] or 0),
+        "peak_value": float(item["peak_value"] or 0),
+        "started_at": item["started_at"],
+        "last_seen_at": item["last_seen_at"],
+        "ended_at": item.get("ended_at"),
+        "status": item["status"],
+        "estimated_bytes": int(item["estimated_bytes"] or 0),
+        "estimated_packets": int(item["estimated_packets"] or 0),
+        "flow_count": int(item["flow_count"] or 0),
+        "summary": item["summary"],
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def fetch_attack_vector_template(conn: sqlite3.Connection, template_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT t.*, COUNT(v.id) AS vector_count
+        FROM attack_vector_templates t
+        LEFT JOIN attack_vectors v ON v.template_id = t.id
+        WHERE t.id = ?
+        GROUP BY t.id
+        """,
+        (template_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Template nao encontrado")
+    return attack_vector_template_row_to_dict(row)
+
+
+def fetch_attack_vector(conn: sqlite3.Connection, vector_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            v.*,
+            t.name AS template_name,
+            s.name AS sensor_name
+        FROM attack_vectors v
+        LEFT JOIN attack_vector_templates t ON t.id = v.template_id
+        LEFT JOIN sensors s ON s.id = v.sensor_id
+        WHERE v.id = ?
+        """,
+        (vector_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Vetor de ataque nao encontrado")
+    return attack_vector_row_to_dict(row)
+
+
+def normalize_attack_vector_template_payload(payload: AttackVectorTemplatePayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome do template obrigatorio")
+    return {
+        "name": name,
+        "description": clean_text(data.get("description")),
+        "enabled": 1 if data.get("enabled") else 0,
+        "learn_enabled": 1 if data.get("learn_enabled") else 0,
+        "learn_days": positive_int(data.get("learn_days") or 2, "learn_days"),
+        "safety_margin_percent": float(data.get("safety_margin_percent") or 0),
+    }
+
+
+def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVectorPayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    _ = fetch_attack_vector_template(conn, int(data["template_id"]))
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome do vetor obrigatorio")
+    domain_type = normalize_choice(data.get("domain_type") or "any", ATTACK_DOMAIN_TYPES, "domain_type")
+    direction = normalize_choice(data.get("direction") or "receives", ATTACK_DIRECTIONS, "direction")
+    decoder = clean_text(data.get("decoder") or "IP").upper()
+    if decoder not in ATTACK_DECODERS:
+        raise HTTPException(status_code=400, detail="decoder invalido")
+    comparison = normalize_choice(data.get("comparison") or "over", ATTACK_COMPARISONS, "comparison")
+    threshold_unit = normalize_choice(data.get("threshold_unit") or "bits_s", ATTACK_THRESHOLD_UNITS, "threshold_unit")
+    severity = normalize_choice(data.get("severity") or "warning", ATTACK_SEVERITIES, "severity")
+    response_action = normalize_choice(
+        data.get("response_action") or "alert_only",
+        ATTACK_RESPONSE_ACTIONS,
+        "response_action",
+    )
+    target_cidr = normalize_target_cidr(data.get("target_cidr"))
+    sensor_id = data.get("sensor_id")
+    interface_if_index = data.get("interface_if_index")
+    if domain_type == "prefix" and not target_cidr:
+        raise HTTPException(status_code=400, detail="target_cidr obrigatorio para dominio prefix")
+    if domain_type in {"sensor", "interface"} and sensor_id is None:
+        raise HTTPException(status_code=400, detail="sensor_id obrigatorio para este dominio")
+    if domain_type == "interface" and interface_if_index is None:
+        raise HTTPException(status_code=400, detail="interface_if_index obrigatorio para dominio interface")
+    if sensor_id is not None:
+        _ = fetch_sensor_without_interfaces(conn, int(sensor_id))
+    if interface_if_index is not None:
+        interface_if_index = non_negative_int(interface_if_index, "interface_if_index")
+        if sensor_id is not None:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM sensor_interfaces
+                WHERE sensor_id = ? AND if_index = ?
+                LIMIT 1
+                """,
+                (int(sensor_id), int(interface_if_index)),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Interface nao encontrada para o sensor informado")
+    return {
+        "template_id": int(data["template_id"]),
+        "name": name,
+        "enabled": 1 if data.get("enabled") else 0,
+        "domain_type": domain_type,
+        "target_cidr": target_cidr,
+        "sensor_id": int(sensor_id) if sensor_id is not None else None,
+        "interface_if_index": int(interface_if_index) if interface_if_index is not None else None,
+        "direction": direction,
+        "decoder": decoder,
+        "comparison": comparison,
+        "threshold_value": float(data.get("threshold_value") or 0),
+        "threshold_unit": threshold_unit,
+        "severity": severity,
+        "response_action": response_action,
+        "parent_enabled": 1 if data.get("parent_enabled", True) else 0,
+    }
+
+
+def decoder_clickhouse_condition(decoder: str) -> str:
+    decoder = clean_text(decoder).upper()
+    port = "(src_port IN ({ports}) OR dst_port IN ({ports}))"
+    known_conditions = [
+        "proto IN (1, 58, 50, 51)",
+        "((src_port = 53 OR dst_port = 53) AND proto IN (6, 17))",
+        "((src_port = 123 OR dst_port = 123) AND proto = 17)",
+        "((src_port IN (443, 8443) OR dst_port IN (443, 8443)) AND proto = 17)",
+        "((src_port IN (80, 443, 25, 465, 587, 110, 995, 143, 993, 5060, 5061, 11211, 137, 138, 139) OR dst_port IN (80, 443, 25, 465, 587, 110, 995, 143, 993, 5060, 5061, 11211, 137, 138, 139)) AND proto IN (6, 17))",
+        "((src_port IN (500, 4500) OR dst_port IN (500, 4500)) AND proto = 17)",
+    ]
+    mapping = {
+        "IP": "1 = 1",
+        "FLOWS": "1 = 1",
+        "TCP": "proto = 6",
+        "TCP+ALL": "proto = 6",
+        "TCP+SYN": "proto = 6 AND bitAnd(tcp_flags, 2) != 0",
+        "FLOW+SYN": "proto = 6 AND bitAnd(tcp_flags, 2) != 0",
+        "TCP+SYNACK": "proto = 6 AND bitAnd(tcp_flags, 18) = 18",
+        "TCP+ACK": "proto = 6 AND bitAnd(tcp_flags, 16) != 0",
+        "TCP+RST": "proto = 6 AND bitAnd(tcp_flags, 4) != 0",
+        "TCP+NULL": "proto = 6 AND tcp_flags = 0",
+        "UDP": "proto = 17",
+        "ICMP": "proto IN (1, 58)",
+        "DNS": "proto IN (6, 17) AND (src_port = 53 OR dst_port = 53)",
+        "NTP": "proto = 17 AND (src_port = 123 OR dst_port = 123)",
+        "QUIC": "proto = 17 AND (src_port IN (443, 8443) OR dst_port IN (443, 8443))",
+        "UDP+QUIC": "proto = 17 AND (src_port IN (443, 8443) OR dst_port IN (443, 8443))",
+        "HTTP": "proto = 6 AND (src_port = 80 OR dst_port = 80)",
+        "HTTPS": "proto = 6 AND (src_port = 443 OR dst_port = 443)",
+        "MAIL": f"proto = 6 AND {port.format(ports='25, 465, 587, 110, 995, 143, 993')}",
+        "SIP": "proto IN (6, 17) AND (src_port IN (5060, 5061) OR dst_port IN (5060, 5061))",
+        "IPSEC": "proto IN (50, 51) OR (proto = 17 AND (src_port IN (500, 4500) OR dst_port IN (500, 4500)))",
+        "MEMCACHED": "proto IN (6, 17) AND (src_port = 11211 OR dst_port = 11211)",
+        "NETBIOS": "proto IN (6, 17) AND (src_port IN (137, 138, 139) OR dst_port IN (137, 138, 139))",
+        "FRAGMENT": "0 = 1",
+        "INVALID": "0 = 1",
+        "OTHER": f"NOT ({' OR '.join(known_conditions)} OR proto IN (6, 17))",
+    }
+    return mapping.get(decoder, "0 = 1")
+
+
+def classify_flow_decoder(flow: dict[str, Any]) -> str:
+    """Return the primary GMJ-FLOW decoder label for one normalized flow row."""
+    proto = int(flow.get("proto") or 0)
+    flags = int(flow.get("tcp_flags") or 0)
+    src_port = int(flow.get("src_port") or 0)
+    dst_port = int(flow.get("dst_port") or 0)
+    ports = {src_port, dst_port}
+    if proto in {50, 51} or (proto == 17 and ports & {500, 4500}):
+        return "IPSEC"
+    if proto in {6, 17} and 53 in ports:
+        return "DNS"
+    if proto == 17 and 123 in ports:
+        return "NTP"
+    if proto == 17 and ports & {443, 8443}:
+        return "UDP+QUIC"
+    if proto == 6 and 80 in ports:
+        return "HTTP"
+    if proto == 6 and 443 in ports:
+        return "HTTPS"
+    if proto == 6 and ports & {25, 465, 587, 110, 995, 143, 993}:
+        return "MAIL"
+    if proto in {6, 17} and ports & {5060, 5061}:
+        return "SIP"
+    if proto in {6, 17} and 11211 in ports:
+        return "MEMCACHED"
+    if proto in {6, 17} and ports & {137, 138, 139}:
+        return "NETBIOS"
+    if proto in {1, 58}:
+        return "ICMP"
+    if proto == 6 and flags == 0:
+        return "TCP+NULL"
+    if proto == 6 and flags & 18 == 18:
+        return "TCP+SYNACK"
+    if proto == 6 and flags & 2:
+        return "TCP+SYN"
+    if proto == 6 and flags & 4:
+        return "TCP+RST"
+    if proto == 6 and flags & 16:
+        return "TCP+ACK"
+    if proto == 6:
+        return "TCP"
+    if proto == 17:
+        return "UDP"
+    return "OTHER"
+
+
+def append_attack_vector_filters(
+    vector: dict[str, Any],
+    start: datetime,
+    end: datetime,
+    params: dict[str, Any],
+) -> str:
+    filters = [flow_time_where(params, start, end)]
+    sensor_id = vector.get("sensor_id")
+    if sensor_id is not None:
+        params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(sensor_id)), "exporter_ip")
+        filters.append("toString(exporter_ip) = {exporter_ip:String}")
+
+    if_index = vector.get("interface_if_index")
+    if if_index is not None:
+        params["if_index"] = int(if_index)
+        direction = vector.get("direction")
+        if direction == "receives":
+            filters.append("input_if = {if_index:UInt32}")
+        elif direction == "sends":
+            filters.append("output_if = {if_index:UInt32}")
+        else:
+            filters.append("(input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})")
+
+    target_cidr = clean_text(vector.get("target_cidr"))
+    if target_cidr:
+        params["target_cidr"] = clickhouse_cidr_string_param(target_cidr)
+        direction = vector.get("direction")
+        if direction == "receives":
+            filters.append("isIPAddressInRange(toString(dst_ip), {target_cidr:String})")
+        elif direction == "sends":
+            filters.append("isIPAddressInRange(toString(src_ip), {target_cidr:String})")
+        else:
+            filters.append(
+                "(isIPAddressInRange(toString(src_ip), {target_cidr:String}) "
+                "OR isIPAddressInRange(toString(dst_ip), {target_cidr:String}))"
+            )
+
+    decoder_condition = decoder_clickhouse_condition(vector.get("decoder") or "IP")
+    filters.append(f"({decoder_condition})")
+    return " AND ".join(filters)
+
+
+def target_expression_for_vector(vector: dict[str, Any]) -> str:
+    domain_type = vector.get("domain_type")
+    direction = vector.get("direction")
+    target_cidr = clean_text(vector.get("target_cidr"))
+    if domain_type in {"sensor", "interface", "any"} and not target_cidr:
+        return "''"
+    if direction == "sends":
+        return "toString(src_ip)"
+    if direction == "both":
+        if target_cidr:
+            return "if(isIPAddressInRange(toString(dst_ip), {target_cidr:String}), toString(dst_ip), toString(src_ip))"
+        return "toString(dst_ip)"
+    return "toString(dst_ip)"
+
+
+def is_internal_ip_text(value: str) -> bool:
+    text = clean_ip(value)
+    if not text:
+        return False
+    try:
+        parsed = ip_address(text)
+    except ValueError:
+        return False
+    return bool(parsed.is_private or parsed.is_loopback or parsed.is_link_local)
+
+
+def vector_target_matches_domain(vector: dict[str, Any], target_ip: str) -> bool:
+    domain_type = vector.get("domain_type")
+    if domain_type == "internal_ip" and not clean_text(vector.get("target_cidr")):
+        return is_internal_ip_text(target_ip)
+    if domain_type == "external_ip" and not clean_text(vector.get("target_cidr")):
+        return bool(target_ip) and not is_internal_ip_text(target_ip)
+    return True
+
+
+def percentile(values: list[float], percent: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * percent
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = rank - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def metric_value_from_row(row: dict[str, Any], unit: str) -> float:
+    if unit == "packets_s":
+        return float(row.get("packets_s") or 0)
+    if unit == "flows_s":
+        return float(row.get("flows_s") or 0)
+    return float(row.get("bits_s") or 0)
+
+
+def format_metric(value: Any, unit: str) -> str:
+    number = float(value or 0)
+    if unit == "bits_s":
+        units = ("bps", "Kbps", "Mbps", "Gbps", "Tbps")
+        index = 0
+        while number >= 1000 and index < len(units) - 1:
+            number /= 1000
+            index += 1
+        return f"{number:.1f} {units[index]}" if number < 10 and index else f"{number:.0f} {units[index]}"
+    if unit == "packets_s":
+        units = ("pps", "Kpps", "Mpps", "Gpps")
+    else:
+        units = ("flows/s", "K flows/s", "M flows/s", "G flows/s")
+    index = 0
+    while number >= 1000 and index < len(units) - 1:
+        number /= 1000
+        index += 1
+    return f"{number:.1f} {units[index]}" if number < 10 and index else f"{number:.0f} {units[index]}"
+
+
+def anomaly_summary(vector: dict[str, Any], target_ip: str, observed: float, threshold: float, started_at: str) -> str:
+    target = target_ip or vector.get("target_cidr") or "escopo configurado"
+    direction = {"receives": "recebido", "sends": "enviado", "both": "recebido/enviado"}.get(
+        vector.get("direction"),
+        vector.get("direction"),
+    )
+    metric = format_metric(observed, vector.get("threshold_unit"))
+    limit = format_metric(threshold, vector.get("threshold_unit"))
+    return (
+        f"Possivel anomalia {vector.get('decoder')} detectada em {target}. "
+        f"O trafego {direction} atingiu {metric}, acima do limite configurado de {limit}. "
+        f"Inicio em {started_at}."
+    )
+
+
+def query_learn_series(
+    decoder: str,
+    unit: str,
+    direction: str,
+    payload: AttackVectorLearnPayload,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[float]:
+    params: dict[str, Any] = {}
+    vector_like = {
+        "sensor_id": payload.sensor_id,
+        "interface_if_index": None,
+        "target_cidr": normalize_target_cidr(payload.target_cidr),
+        "direction": direction,
+        "decoder": decoder,
+    }
+    where = append_attack_vector_filters(vector_like, start_dt, end_dt, params)
+    if not vector_like["target_cidr"]:
+        where += " AND input_if > 0" if direction == "receives" else " AND output_if > 0"
+    result = query_clickhouse(
+        f"""
+        SELECT
+            toStartOfMinute(flow_time) AS bucket,
+            sum(bytes) * 8 / 60 AS bits_s,
+            sum(packets) / 60 AS packets_s,
+            sum(flow_count) / 60 AS flows_s
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY bucket
+        ORDER BY bucket
+        """,
+        params,
+    )
+    values = []
+    for row in rows_as_dicts(result):
+        value = metric_value_from_row(row, unit)
+        if value > 0:
+            values.append(value)
+    return values
+
+
+def low_metric_floor(unit: str) -> float:
+    if unit == "bits_s":
+        return 1_000.0
+    return 1.0
+
+
+def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    target_cidr = normalize_target_cidr(payload.target_cidr)
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=payload.days)
+    created: list[dict[str, Any]] = []
+
+    with sqlite_connection() as conn:
+        _ = fetch_attack_vector_template(conn, payload.template_id)
+
+    for direction in ("receives", "sends"):
+        for decoder, unit in LEARN_DECODER_UNITS:
+            try:
+                values = query_learn_series(decoder, unit, direction, payload, start_dt, end_dt)
+            except Exception as exc:
+                logger.warning("Falha ao aprender baseline %s/%s/%s: %s", direction, decoder, unit, exc)
+                continue
+            if not values:
+                continue
+            p95 = percentile(values, 0.95)
+            p99 = percentile(values, 0.99)
+            maximum = max(values)
+            average = sum(values) / len(values)
+            if maximum < low_metric_floor(unit) and average < low_metric_floor(unit):
+                continue
+            base = p99 if maximum > max(p99 * 3, low_metric_floor(unit)) else max(p99, maximum)
+            suggested = max(base * (1 + payload.margin_percent / 100), low_metric_floor(unit))
+            expected_points = max(payload.days * 24 * 60, 1)
+            confidence = min(1.0, max(0.2, len(values) / expected_points))
+            now = utc_now_iso()
+            with sqlite_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO attack_vector_suggestions (
+                        template_id,
+                        sensor_id,
+                        domain_type,
+                        target_cidr,
+                        direction,
+                        decoder,
+                        threshold_value,
+                        threshold_unit,
+                        baseline_p95,
+                        baseline_p99,
+                        baseline_max,
+                        baseline_average,
+                        margin_percent,
+                        confidence,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload.template_id,
+                        payload.sensor_id,
+                        "prefix" if target_cidr else "any",
+                        target_cidr,
+                        direction,
+                        decoder,
+                        suggested,
+                        unit,
+                        p95,
+                        p99,
+                        maximum,
+                        average,
+                        payload.margin_percent,
+                        confidence,
+                        now,
+                    ),
+                )
+                suggestion_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+                conn.commit()
+                row = conn.execute("SELECT * FROM attack_vector_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+                if row is not None:
+                    created.append(attack_vector_suggestion_row_to_dict(row))
+    return created
+
+
+def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT * FROM attack_vector_suggestions WHERE id = ?",
+        (suggestion_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sugestao nao encontrada")
+    suggestion = attack_vector_suggestion_row_to_dict(row)
+    now = utc_now_iso()
+    name = f"Sugestao {suggestion['decoder']} {suggestion['threshold_unit']}"
+    cursor = conn.execute(
+        """
+        INSERT INTO attack_vectors (
+            template_id,
+            name,
+            enabled,
+            domain_type,
+            target_cidr,
+            sensor_id,
+            interface_if_index,
+            direction,
+            decoder,
+            comparison,
+            threshold_value,
+            threshold_unit,
+            severity,
+            response_action,
+            parent_enabled,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?, 'over', ?, ?, 'warning', 'alert_only', 1, ?, ?)
+        """,
+        (
+            suggestion["template_id"],
+            name,
+            suggestion["domain_type"],
+            suggestion["target_cidr"],
+            suggestion["sensor_id"],
+            suggestion["direction"],
+            suggestion["decoder"],
+            suggestion["threshold_value"],
+            suggestion["threshold_unit"],
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        "UPDATE attack_vector_suggestions SET applied_at = ? WHERE id = ?",
+        (now, suggestion_id),
+    )
+    vector_id = int(cursor.lastrowid)
+    return fetch_attack_vector(conn, vector_id)
+
+
+def active_attack_vectors(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            v.*,
+            t.name AS template_name,
+            s.name AS sensor_name
+        FROM attack_vectors v
+        JOIN attack_vector_templates t ON t.id = v.template_id
+        LEFT JOIN sensors s ON s.id = v.sensor_id
+        WHERE v.enabled = 1
+          AND v.parent_enabled = 1
+          AND t.enabled = 1
+        ORDER BY v.id
+        """
+    ).fetchall()
+    return [attack_vector_row_to_dict(row) for row in rows]
+
+
+def query_vector_recent_traffic(vector: dict[str, Any], start_dt: datetime, end_dt: datetime) -> list[dict[str, Any]]:
+    seconds = range_seconds(start_dt, end_dt)
+    params: dict[str, Any] = {"seconds": seconds}
+    where = append_attack_vector_filters(vector, start_dt, end_dt, params)
+    target_expr = target_expression_for_vector(vector)
+    result = query_clickhouse(
+        f"""
+        SELECT
+            {target_expr} AS target_ip,
+            sum(bytes) AS estimated_bytes,
+            sum(packets) AS estimated_packets,
+            sum(flow_count) AS flow_count,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
+            sum(packets) / {{seconds:Float64}} AS packets_s,
+            sum(flow_count) / {{seconds:Float64}} AS flows_s
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY target_ip
+        ORDER BY {vector['threshold_unit']} DESC
+        LIMIT 1000
+        """,
+        params,
+    )
+    items = []
+    for row in rows_as_dicts(result):
+        row["target_ip"] = clean_ip(row.get("target_ip"))
+        if vector_target_matches_domain(vector, row["target_ip"]):
+            items.append(row)
+    return items
+
+
+def anomaly_dedupe_key(vector: dict[str, Any], target_ip: str) -> str:
+    return "|".join(
+        [
+            str(vector.get("id")),
+            target_ip or "",
+            str(vector.get("sensor_id") or ""),
+            str(vector.get("interface_if_index") or ""),
+            vector.get("decoder") or "",
+            vector.get("direction") or "",
+        ]
+    )
+
+
+def sample_flow_where_for_event(
+    vector: dict[str, Any],
+    target_ip: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    params: dict[str, Any],
+) -> str:
+    where = append_attack_vector_filters(vector, start_dt, end_dt, params)
+    if target_ip:
+        params["target_ip"] = clickhouse_ip_string_param(target_ip, "target_ip")
+        direction = vector.get("direction")
+        if direction == "receives":
+            where += " AND toString(dst_ip) = {target_ip:String}"
+        elif direction == "sends":
+            where += " AND toString(src_ip) = {target_ip:String}"
+        else:
+            where += " AND (toString(src_ip) = {target_ip:String} OR toString(dst_ip) = {target_ip:String})"
+    return where
+
+
+def save_anomaly_flow_samples(
+    conn: sqlite3.Connection,
+    event_id: int,
+    vector: dict[str, Any],
+    target_ip: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 20,
+) -> None:
+    if limit <= 0:
+        return
+    params: dict[str, Any] = {"limit": limit}
+    where = sample_flow_where_for_event(vector, target_ip, start_dt, end_dt, params)
+    try:
+        result = query_clickhouse(
+            f"""
+            SELECT
+                flow_time,
+                sensor,
+                toString(exporter_ip) AS exporter_ip,
+                toString(src_ip) AS src_ip,
+                toString(dst_ip) AS dst_ip,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                input_if,
+                output_if,
+                bytes,
+                packets,
+                flow_count
+            FROM flow_raw
+            WHERE {where}
+            ORDER BY bytes DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+    except Exception as exc:
+        logger.warning("Falha ao salvar amostra de flows da anomalia %s: %s", event_id, exc)
+        return
+    for row in rows_as_dicts(result):
+        conn.execute(
+            """
+            INSERT INTO anomaly_event_flows (
+                anomaly_event_id,
+                flow_time,
+                sensor,
+                exporter_ip,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                input_if,
+                output_if,
+                bytes,
+                packets,
+                flow_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                iso(row["flow_time"]),
+                row.get("sensor"),
+                clean_ip(row.get("exporter_ip")),
+                clean_ip(row.get("src_ip")),
+                clean_ip(row.get("dst_ip")),
+                int(row.get("src_port") or 0),
+                int(row.get("dst_port") or 0),
+                int(row.get("proto") or 0),
+                int(row.get("tcp_flags") or 0),
+                int(row.get("input_if") or 0),
+                int(row.get("output_if") or 0),
+                int(row.get("bytes") or 0),
+                int(row.get("packets") or 0),
+                int(row.get("flow_count") or 0),
+            ),
+        )
+
+
+def upsert_anomaly_event(
+    conn: sqlite3.Connection,
+    vector: dict[str, Any],
+    traffic: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> None:
+    if vector.get("response_action") == "ignore":
+        return
+    target_ip = clean_ip(traffic.get("target_ip"))
+    observed = metric_value_from_row(traffic, vector["threshold_unit"])
+    threshold = float(vector["threshold_value"] or 0)
+    now = iso(end_dt)
+    dedupe_key = anomaly_dedupe_key(vector, target_ip)
+    row = conn.execute(
+        """
+        SELECT *
+        FROM anomaly_events
+        WHERE dedupe_key = ? AND status = 'active'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    estimated_bytes = int(traffic.get("estimated_bytes") or 0)
+    estimated_packets = int(traffic.get("estimated_packets") or 0)
+    flow_count = int(traffic.get("flow_count") or 0)
+    if row is None:
+        started_at = now
+        summary = anomaly_summary(vector, target_ip, observed, threshold, started_at)
+        cursor = conn.execute(
+            """
+            INSERT INTO anomaly_events (
+                attack_vector_id,
+                sensor_id,
+                interface_if_index,
+                target_ip,
+                target_cidr,
+                direction,
+                decoder,
+                severity,
+                metric_unit,
+                threshold_value,
+                observed_value,
+                peak_value,
+                started_at,
+                last_seen_at,
+                status,
+                estimated_bytes,
+                estimated_packets,
+                flow_count,
+                summary,
+                dedupe_key,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                vector["id"],
+                vector.get("sensor_id"),
+                vector.get("interface_if_index"),
+                target_ip,
+                vector.get("target_cidr"),
+                vector["direction"],
+                vector["decoder"],
+                vector["severity"],
+                vector["threshold_unit"],
+                threshold,
+                observed,
+                observed,
+                started_at,
+                now,
+                estimated_bytes,
+                estimated_packets,
+                flow_count,
+                summary,
+                dedupe_key,
+                now,
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+    else:
+        event_id = int(row["id"])
+        peak = max(float(row["peak_value"] or 0), observed)
+        summary = anomaly_summary(vector, target_ip, peak, threshold, row["started_at"])
+        conn.execute(
+            """
+            UPDATE anomaly_events
+            SET observed_value = ?,
+                peak_value = ?,
+                last_seen_at = ?,
+                estimated_bytes = estimated_bytes + ?,
+                estimated_packets = estimated_packets + ?,
+                flow_count = flow_count + ?,
+                summary = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (observed, peak, now, estimated_bytes, estimated_packets, flow_count, summary, now, event_id),
+        )
+
+    sample_count = conn.execute(
+        "SELECT COUNT(*) AS count FROM anomaly_event_flows WHERE anomaly_event_id = ?",
+        (event_id,),
+    ).fetchone()["count"]
+    save_anomaly_flow_samples(
+        conn,
+        event_id,
+        vector,
+        target_ip,
+        start_dt,
+        end_dt,
+        max(0, min(20, 100 - int(sample_count or 0))),
+    )
+
+
+def close_stale_anomaly_events(conn: sqlite3.Connection, now: datetime) -> int:
+    close_after = int(os.getenv("GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS", "120"))
+    cutoff = iso(now - timedelta(seconds=max(close_after, 1)))
+    cursor = conn.execute(
+        """
+        UPDATE anomaly_events
+        SET status = 'ended',
+            ended_at = ?,
+            updated_at = ?
+        WHERE status = 'active'
+          AND last_seen_at < ?
+        """,
+        (iso(now), iso(now), cutoff),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def detect_anomalies_once() -> dict[str, Any]:
+    ensure_sensor_db()
+    lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
+    lookback = max(lookback, int(os.getenv("GMJFLOW_ANOMALY_MIN_DURATION_SECONDS", "30")), 1)
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(seconds=lookback)
+    checked = 0
+    triggered = 0
+    errors: list[str] = []
+    with sqlite_connection() as conn:
+        vectors = active_attack_vectors(conn)
+        for vector in vectors:
+            checked += 1
+            try:
+                rows = query_vector_recent_traffic(vector, start_dt, end_dt)
+            except Exception as exc:
+                message = f"vetor {vector['id']}: {exc}"
+                errors.append(message)
+                logger.warning("Falha ao detectar anomalia %s", message)
+                continue
+            for row in rows:
+                observed = metric_value_from_row(row, vector["threshold_unit"])
+                if observed > float(vector["threshold_value"] or 0):
+                    triggered += 1
+                    upsert_anomaly_event(conn, vector, row, start_dt, end_dt)
+        closed = close_stale_anomaly_events(conn, end_dt)
+        conn.commit()
+    return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "errors": errors}
+
+
+def anomaly_detection_enabled() -> bool:
+    return clean_text(os.getenv("GMJFLOW_ANOMALY_DETECTION_ENABLED", "true")).lower() not in {"0", "false", "no", "off"}
+
+
+def anomaly_detection_loop() -> None:
+    interval = int(os.getenv("GMJFLOW_ANOMALY_INTERVAL_SECONDS", "30"))
+    interval = max(interval, 5)
+    while not ANOMALY_DETECTION_STOP.wait(interval):
+        try:
+            detect_anomalies_once()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no worker de anomalias: %s", exc)
+
+
+def start_anomaly_detection_thread() -> None:
+    global ANOMALY_DETECTION_THREAD
+    if not anomaly_detection_enabled():
+        return
+    if ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive():
+        return
+    ANOMALY_DETECTION_STOP.clear()
+    ANOMALY_DETECTION_THREAD = threading.Thread(
+        target=anomaly_detection_loop,
+        name="gmj-flow-anomaly-detector",
+        daemon=True,
+    )
+    ANOMALY_DETECTION_THREAD.start()
+
+
+@app.get("/api/attack-vector-templates")
+def list_attack_vector_templates(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.*, COUNT(v.id) AS vector_count
+            FROM attack_vector_templates t
+            LEFT JOIN attack_vectors v ON v.template_id = t.id
+            GROUP BY t.id
+            ORDER BY t.name
+            """
+        ).fetchall()
+    return {"items": [attack_vector_template_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/attack-vector-templates", status_code=201)
+def create_attack_vector_template(request: Request, payload: AttackVectorTemplatePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    data = normalize_attack_vector_template_payload(payload)
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vector_templates (
+                name,
+                description,
+                enabled,
+                learn_enabled,
+                learn_days,
+                safety_margin_percent,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["name"],
+                data["description"],
+                data["enabled"],
+                data["learn_enabled"],
+                data["learn_days"],
+                data["safety_margin_percent"],
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return fetch_attack_vector_template(conn, int(cursor.lastrowid))
+
+
+@app.put("/api/attack-vector-templates/{template_id}")
+def update_attack_vector_template(request: Request, template_id: int, payload: AttackVectorTemplatePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    data = normalize_attack_vector_template_payload(payload)
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        _ = fetch_attack_vector_template(conn, template_id)
+        conn.execute(
+            """
+            UPDATE attack_vector_templates
+            SET name = ?,
+                description = ?,
+                enabled = ?,
+                learn_enabled = ?,
+                learn_days = ?,
+                safety_margin_percent = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                data["name"],
+                data["description"],
+                data["enabled"],
+                data["learn_enabled"],
+                data["learn_days"],
+                data["safety_margin_percent"],
+                now,
+                template_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE attack_vectors SET parent_enabled = ?, updated_at = ? WHERE template_id = ?",
+            (data["enabled"], now, template_id),
+        )
+        conn.commit()
+        return fetch_attack_vector_template(conn, template_id)
+
+
+@app.delete("/api/attack-vector-templates/{template_id}")
+def delete_attack_vector_template(request: Request, template_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_attack_vector_template(conn, template_id)
+        conn.execute("DELETE FROM attack_vector_templates WHERE id = ?", (template_id,))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/attack-vector-templates/{template_id}/duplicate", status_code=201)
+def duplicate_attack_vector_template(request: Request, template_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        template = fetch_attack_vector_template(conn, template_id)
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vector_templates (
+                name,
+                description,
+                enabled,
+                learn_enabled,
+                learn_days,
+                safety_margin_percent,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{template['name']} (copia)",
+                template["description"],
+                1 if template["enabled"] else 0,
+                1 if template["learn_enabled"] else 0,
+                template["learn_days"],
+                template["safety_margin_percent"],
+                now,
+                now,
+            ),
+        )
+        new_template_id = int(cursor.lastrowid)
+        rows = conn.execute("SELECT * FROM attack_vectors WHERE template_id = ?", (template_id,)).fetchall()
+        for row in rows:
+            vector = attack_vector_row_to_dict(row)
+            conn.execute(
+                """
+                INSERT INTO attack_vectors (
+                    template_id,
+                    name,
+                    enabled,
+                    domain_type,
+                    target_cidr,
+                    sensor_id,
+                    interface_if_index,
+                    direction,
+                    decoder,
+                    comparison,
+                    threshold_value,
+                    threshold_unit,
+                    severity,
+                    response_action,
+                    parent_enabled,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_template_id,
+                    vector["name"],
+                    1 if vector["enabled"] else 0,
+                    vector["domain_type"],
+                    vector["target_cidr"],
+                    vector["sensor_id"],
+                    vector["interface_if_index"],
+                    vector["direction"],
+                    vector["decoder"],
+                    vector["comparison"],
+                    vector["threshold_value"],
+                    vector["threshold_unit"],
+                    vector["severity"],
+                    vector["response_action"],
+                    1 if template["enabled"] else 0,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        return fetch_attack_vector_template(conn, new_template_id)
+
+
+@app.get("/api/attack-vectors")
+def list_attack_vectors(request: Request, template_id: int | None = Query(None, ge=1)):
+    require_admin(request)
+    ensure_sensor_db()
+    filters = []
+    values: list[Any] = []
+    if template_id is not None:
+        filters.append("v.template_id = ?")
+        values.append(template_id)
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                v.*,
+                t.name AS template_name,
+                s.name AS sensor_name
+            FROM attack_vectors v
+            LEFT JOIN attack_vector_templates t ON t.id = v.template_id
+            LEFT JOIN sensors s ON s.id = v.sensor_id
+            {where}
+            ORDER BY v.template_id, v.id
+            """,
+            values,
+        ).fetchall()
+    return {"items": [attack_vector_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/attack-vectors", status_code=201)
+def create_attack_vector(request: Request, payload: AttackVectorPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        data = normalize_attack_vector_payload(conn, payload)
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vectors (
+                template_id,
+                name,
+                enabled,
+                domain_type,
+                target_cidr,
+                sensor_id,
+                interface_if_index,
+                direction,
+                decoder,
+                comparison,
+                threshold_value,
+                threshold_unit,
+                severity,
+                response_action,
+                parent_enabled,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["template_id"],
+                data["name"],
+                data["enabled"],
+                data["domain_type"],
+                data["target_cidr"],
+                data["sensor_id"],
+                data["interface_if_index"],
+                data["direction"],
+                data["decoder"],
+                data["comparison"],
+                data["threshold_value"],
+                data["threshold_unit"],
+                data["severity"],
+                data["response_action"],
+                data["parent_enabled"],
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return fetch_attack_vector(conn, int(cursor.lastrowid))
+
+
+@app.put("/api/attack-vectors/{vector_id}")
+def update_attack_vector(request: Request, vector_id: int, payload: AttackVectorPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        _ = fetch_attack_vector(conn, vector_id)
+        data = normalize_attack_vector_payload(conn, payload)
+        conn.execute(
+            """
+            UPDATE attack_vectors
+            SET template_id = ?,
+                name = ?,
+                enabled = ?,
+                domain_type = ?,
+                target_cidr = ?,
+                sensor_id = ?,
+                interface_if_index = ?,
+                direction = ?,
+                decoder = ?,
+                comparison = ?,
+                threshold_value = ?,
+                threshold_unit = ?,
+                severity = ?,
+                response_action = ?,
+                parent_enabled = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                data["template_id"],
+                data["name"],
+                data["enabled"],
+                data["domain_type"],
+                data["target_cidr"],
+                data["sensor_id"],
+                data["interface_if_index"],
+                data["direction"],
+                data["decoder"],
+                data["comparison"],
+                data["threshold_value"],
+                data["threshold_unit"],
+                data["severity"],
+                data["response_action"],
+                data["parent_enabled"],
+                now,
+                vector_id,
+            ),
+        )
+        conn.commit()
+        return fetch_attack_vector(conn, vector_id)
+
+
+@app.delete("/api/attack-vectors/{vector_id}")
+def delete_attack_vector(request: Request, vector_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_attack_vector(conn, vector_id)
+        conn.execute("DELETE FROM attack_vectors WHERE id = ?", (vector_id,))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/attack-vectors/{vector_id}/duplicate", status_code=201)
+def duplicate_attack_vector(request: Request, vector_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        vector = fetch_attack_vector(conn, vector_id)
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vectors (
+                template_id,
+                name,
+                enabled,
+                domain_type,
+                target_cidr,
+                sensor_id,
+                interface_if_index,
+                direction,
+                decoder,
+                comparison,
+                threshold_value,
+                threshold_unit,
+                severity,
+                response_action,
+                parent_enabled,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                vector["template_id"],
+                f"{vector['name']} (copia)",
+                1 if vector["enabled"] else 0,
+                vector["domain_type"],
+                vector["target_cidr"],
+                vector["sensor_id"],
+                vector["interface_if_index"],
+                vector["direction"],
+                vector["decoder"],
+                vector["comparison"],
+                vector["threshold_value"],
+                vector["threshold_unit"],
+                vector["severity"],
+                vector["response_action"],
+                1 if vector["parent_enabled"] else 0,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return fetch_attack_vector(conn, int(cursor.lastrowid))
+
+
+@app.post("/api/attack-vectors/learn")
+def learn_attack_vectors(request: Request, payload: AttackVectorLearnPayload):
+    require_admin(request)
+    suggestions = learn_attack_vector_suggestions(payload)
+    return {"ok": True, "items": suggestions, "count": len(suggestions)}
+
+
+@app.get("/api/attack-vector-suggestions")
+def list_attack_vector_suggestions(
+    request: Request,
+    template_id: int | None = Query(None, ge=1),
+    unapplied_only: bool = True,
+):
+    require_admin(request)
+    ensure_sensor_db()
+    filters = []
+    values: list[Any] = []
+    if template_id is not None:
+        filters.append("template_id = ?")
+        values.append(template_id)
+    if unapplied_only:
+        filters.append("applied_at IS NULL")
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM attack_vector_suggestions
+            {where}
+            ORDER BY created_at DESC, id DESC
+            LIMIT 500
+            """,
+            values,
+        ).fetchall()
+    return {"items": [attack_vector_suggestion_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/attack-vector-suggestions/apply-all")
+def apply_all_attack_vector_suggestions(
+    request: Request,
+    payload: AttackVectorSuggestionApplyAllPayload | None = None,
+):
+    require_admin(request)
+    ensure_sensor_db()
+    filters = ["applied_at IS NULL"]
+    values: list[Any] = []
+    template_id = payload.template_id if payload is not None else None
+    if template_id is not None:
+        filters.append("template_id = ?")
+        values.append(template_id)
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM attack_vector_suggestions
+            WHERE {' AND '.join(filters)}
+            ORDER BY id
+            """,
+            values,
+        ).fetchall()
+        vectors = [apply_attack_vector_suggestion(conn, int(row["id"])) for row in rows]
+        conn.commit()
+    return {"ok": True, "items": vectors, "count": len(vectors)}
+
+
+@app.post("/api/attack-vector-suggestions/{suggestion_id}/apply")
+def apply_attack_vector_suggestion_endpoint(request: Request, suggestion_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        vector = apply_attack_vector_suggestion(conn, suggestion_id)
+        conn.commit()
+    return vector
+
+
+def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    if status_filter == "active":
+        where = "e.status = 'active'"
+    else:
+        where = "e.status <> 'active'"
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.*,
+                v.name AS attack_vector_name,
+                s.name AS sensor_name
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            LEFT JOIN sensors s ON s.id = e.sensor_id
+            WHERE {where}
+            ORDER BY e.last_seen_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [anomaly_event_row_to_dict(row) for row in rows]
+
+
+@app.get("/api/anomalies/summary")
+def anomaly_summary_endpoint(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS active_count,
+                SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical_count,
+                SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS warning_count
+            FROM anomaly_events
+            WHERE status = 'active'
+            """
+        ).fetchone()
+    return {
+        "active_count": int(row["active_count"] or 0),
+        "critical_count": int(row["critical_count"] or 0),
+        "warning_count": int(row["warning_count"] or 0),
+    }
+
+
+@app.get("/api/anomalies/active")
+def active_anomalies(request: Request, limit: int = Query(200, ge=1, le=1000)):
+    require_admin(request)
+    return {"items": anomaly_list("active", limit)}
+
+
+@app.get("/api/anomalies/history")
+def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000)):
+    require_admin(request)
+    return {"items": anomaly_list("history", limit)}
+
+
+@app.get("/api/anomalies/{event_id}")
+def anomaly_detail(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                e.*,
+                v.name AS attack_vector_name,
+                s.name AS sensor_name
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            LEFT JOIN sensors s ON s.id = e.sensor_id
+            WHERE e.id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        event = anomaly_event_row_to_dict(row)
+        flow_rows = conn.execute(
+            """
+            SELECT *
+            FROM anomaly_event_flows
+            WHERE anomaly_event_id = ?
+            ORDER BY bytes DESC, flow_time DESC
+            LIMIT 200
+            """,
+            (event_id,),
+        ).fetchall()
+    flows = []
+    conversations: dict[str, dict[str, Any]] = {}
+    points_by_minute: dict[str, dict[str, Any]] = {}
+    for row in flow_rows:
+        flow = dict(row)
+        flow["src_ip"] = clean_ip(flow.get("src_ip"))
+        flow["dst_ip"] = clean_ip(flow.get("dst_ip"))
+        flow["exporter_ip"] = clean_ip(flow.get("exporter_ip"))
+        flow["proto_name"] = proto_name(flow.get("proto"))
+        flow["decoder"] = classify_flow_decoder(flow)
+        flows.append(flow)
+        key = f"{flow['src_ip']}:{flow['src_port']} -> {flow['dst_ip']}:{flow['dst_port']} {flow['proto_name']}"
+        item = conversations.setdefault(
+            key,
+            {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0},
+        )
+        item["bytes"] += int(flow.get("bytes") or 0)
+        item["packets"] += int(flow.get("packets") or 0)
+        item["flow_count"] += int(flow.get("flow_count") or 0)
+        minute = clean_text(flow.get("flow_time"))[:16]
+        point = points_by_minute.setdefault(minute, {"time": minute, "bytes": 0, "packets": 0, "flow_count": 0})
+        point["bytes"] += int(flow.get("bytes") or 0)
+        point["packets"] += int(flow.get("packets") or 0)
+        point["flow_count"] += int(flow.get("flow_count") or 0)
+    top_conversations = sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20]
+    metric_points = []
+    for point in sorted(points_by_minute.values(), key=lambda item: item["time"]):
+        metric_points.append(
+            {
+                "time": point["time"],
+                "bits_s": point["bytes"] * 8 / 60,
+                "packets_s": point["packets"] / 60,
+                "flows_s": point["flow_count"] / 60,
+            }
+        )
+    return {
+        "event": event,
+        "flows": flows,
+        "top_conversations": top_conversations,
+        "metric_points": metric_points,
+    }
+
+
+@app.post("/api/anomalies/{event_id}/ack")
+def acknowledge_anomaly(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        conn.execute(
+            """
+            UPDATE anomaly_events
+            SET status = 'acknowledged',
+                ended_at = COALESCE(ended_at, ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, event_id),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.post("/api/anomalies/{event_id}/close")
+def close_anomaly(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        conn.execute(
+            """
+            UPDATE anomaly_events
+            SET status = 'ended',
+                ended_at = COALESCE(ended_at, ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, event_id),
+        )
+        conn.commit()
+    return {"ok": True}
 
 
 @app.post("/api/collectors/apply")

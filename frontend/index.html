@@ -433,6 +433,105 @@
       color: #475569;
     }
 
+    .nav-badge {
+      margin-left: auto;
+      min-width: 22px;
+      height: 22px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      padding: 0 .4rem;
+      background: #b91c1c;
+      color: #fff;
+      font-size: .72rem;
+      font-weight: 800;
+    }
+
+    .nav-badge.active {
+      display: inline-flex;
+      animation: anomalyPulse 1.6s ease-in-out infinite;
+    }
+
+    .side-nav button.has-anomalies {
+      color: #fff;
+      background: #3a2024;
+    }
+
+    @keyframes anomalyPulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(185, 28, 28, .55);
+      }
+      50% {
+        box-shadow: 0 0 0 6px rgba(185, 28, 28, 0);
+      }
+    }
+
+    .attack-layout {
+      display: grid;
+      grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .attack-template-table tr {
+      cursor: pointer;
+    }
+
+    .attack-template-table tr.active td {
+      background: #ecfdf5;
+    }
+
+    .attack-template-grid,
+    .attack-vector-form-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: .75rem;
+    }
+
+    .grid-span-3 {
+      grid-column: span 3;
+    }
+
+    .attack-vector-table,
+    .anomaly-table {
+      font-size: .84rem;
+    }
+
+    .tab-strip {
+      display: inline-flex;
+      gap: .25rem;
+      padding: .2rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .tab-strip button {
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #475569;
+      font-weight: 700;
+      padding: .35rem .75rem;
+    }
+
+    .tab-strip button.active {
+      background: #0f766e;
+      color: #ffffff;
+    }
+
+    .anomaly-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: .75rem;
+    }
+
+    .anomaly-chart {
+      width: 100%;
+      height: 240px;
+    }
+
     .color-swatch {
       display: inline-block;
       width: 18px;
@@ -605,6 +704,10 @@
         grid-template-columns: 1fr;
       }
 
+      .attack-layout {
+        grid-template-columns: 1fr;
+      }
+
       .view-header {
         flex-direction: column;
       }
@@ -618,6 +721,8 @@
       .sensor-form-grid,
       .snmp-form-grid,
       .interface-form-grid,
+      .attack-template-grid,
+      .attack-vector-form-grid,
       .database-metrics-grid {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
       }
@@ -640,10 +745,17 @@
       .sensor-form-grid,
       .snmp-form-grid,
       .interface-form-grid,
+      .attack-template-grid,
+      .attack-vector-form-grid,
+      .anomaly-detail-grid,
       .database-metrics-grid,
       .database-actions-grid,
       .ip-detail-grid {
         grid-template-columns: 1fr;
+      }
+
+      .grid-span-3 {
+        grid-column: span 1;
       }
 
       .side-nav {
@@ -714,6 +826,12 @@
         </button>
         <button id="databaseNavButton" type="button" data-nav-view="database">
           <i data-lucide="database"></i><span>Banco de Dados</span>
+        </button>
+        <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors">
+          <i data-lucide="shield-alert"></i><span>Vetores de Ataque</span>
+        </button>
+        <button id="anomaliesNavButton" type="button" data-nav-view="anomalies">
+          <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
         </button>
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
@@ -1429,6 +1547,230 @@
           </section>
         </section>
 
+        <section id="view-attack-vectors" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Vetores de Ataque</h1>
+              <div id="attackVectorStatus" class="subtle">Thresholds e regras de deteccao automatica</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshAttackVectorsButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+              <button id="newTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="file-plus-2"></i><span>Novo Template</span>
+              </button>
+              <button id="saveTemplateButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="save"></i><span>Salvar</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="attack-layout">
+            <section class="panel p-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="panel-title">Templates</div>
+                <span id="attackTemplateCount" class="badge-soft off">0</span>
+              </div>
+              <div class="table-wrap">
+                <table class="table table-sm table-hover align-middle mb-0 attack-template-table">
+                  <thead><tr><th>Nome</th><th class="text-end">Vetores</th><th>Status</th></tr></thead>
+                  <tbody id="attackTemplateTable"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <div>
+              <section class="panel p-3">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+                  <div class="panel-title">Template selecionado</div>
+                  <div class="toolbar">
+                    <button id="renameTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="pencil"></i><span>Renomear</span>
+                    </button>
+                    <button id="duplicateTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="copy"></i><span>Duplicar</span>
+                    </button>
+                    <button id="deleteTemplateButton" type="button" class="btn btn-sm btn-outline-danger">
+                      <i data-lucide="trash-2"></i><span>Excluir</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="attack-template-grid">
+                  <div class="field">
+                    <label for="avTemplateName">Nome</label>
+                    <input id="avTemplateName" class="form-control form-control-sm" placeholder="THRESHOLD-PADRAO">
+                  </div>
+                  <div class="field">
+                    <label for="avTemplateEnabled">Ativo</label>
+                    <select id="avTemplateEnabled" class="form-select form-select-sm">
+                      <option value="true">Ativo</option>
+                      <option value="false">Desativado</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="avTemplateLearnEnabled">Aprendizado</label>
+                    <select id="avTemplateLearnEnabled" class="form-select form-select-sm">
+                      <option value="true">Ativo</option>
+                      <option value="false">Desativado</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="avTemplateLearnDays">Dias</label>
+                    <input id="avTemplateLearnDays" type="number" min="1" max="30" class="form-control form-control-sm" value="2">
+                  </div>
+                  <div class="field">
+                    <label for="avTemplateSafetyMargin">Margem %</label>
+                    <input id="avTemplateSafetyMargin" type="number" min="0" max="500" class="form-control form-control-sm" value="20">
+                  </div>
+                  <div class="field grid-span-3">
+                    <label for="avTemplateDescription">Descricao</label>
+                    <input id="avTemplateDescription" class="form-control form-control-sm" placeholder="Observacoes do template">
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel p-3 mt-3">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                  <div>
+                    <div class="panel-title">Thresholds / Vetores</div>
+                    <div id="attackVectorTableStatus" class="metric-readout">-</div>
+                  </div>
+                  <div class="toolbar">
+                    <button id="learnAttackVectorsButton" type="button" class="btn btn-sm btn-outline-success">
+                      <i data-lucide="brain-circuit"></i><span>Aprender trafego normal</span>
+                    </button>
+                    <button id="addVectorButton" type="button" class="btn btn-sm btn-success">
+                      <i data-lucide="plus"></i><span>Adicionar vetor</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm table-hover align-middle mb-0 attack-vector-table">
+                    <thead>
+                      <tr>
+                        <th>Ativo</th>
+                        <th>Nome</th>
+                        <th>Dominio</th>
+                        <th>Alvo</th>
+                        <th>Sensor</th>
+                        <th>Interface</th>
+                        <th>Direcao</th>
+                        <th>Comparacao</th>
+                        <th class="text-end">Valor</th>
+                        <th>Unidade</th>
+                        <th>Decoder</th>
+                        <th>Severidade</th>
+                        <th>Resposta</th>
+                        <th>Acoes</th>
+                      </tr>
+                    </thead>
+                    <tbody id="attackVectorTable"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="panel p-3 mt-3">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                  <div>
+                    <div class="panel-title">Sugestoes de aprendizado</div>
+                    <div id="attackSuggestionStatus" class="metric-readout">-</div>
+                  </div>
+                  <button id="applySuggestionsButton" type="button" class="btn btn-sm btn-outline-success">
+                    <i data-lucide="check-check"></i><span>Aplicar sugestoes</span>
+                  </button>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm table-hover align-middle mb-0 attack-vector-table">
+                    <thead>
+                      <tr>
+                        <th>Direcao</th>
+                        <th>Decoder</th>
+                        <th class="text-end">p95</th>
+                        <th class="text-end">p99</th>
+                        <th class="text-end">Max</th>
+                        <th class="text-end">Sugestao</th>
+                        <th>Unidade</th>
+                        <th>Confianca</th>
+                        <th>Acoes</th>
+                      </tr>
+                    </thead>
+                    <tbody id="attackSuggestionTable"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-anomalies" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Anomalias</h1>
+              <div id="anomalyStatus" class="subtle">Eventos detectados pelos vetores ativos</div>
+            </div>
+            <div class="toolbar">
+              <div class="tab-strip" role="tablist" aria-label="Filtro de anomalias">
+                <button id="anomalyTabActive" type="button" class="active">Ativas</button>
+                <button id="anomalyTabHistory" type="button">Historico</button>
+              </div>
+              <button id="refreshAnomaliesButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3">
+            <div class="database-metrics-grid">
+              <div class="metric-card">
+                <div class="metric-label">Ativas</div>
+                <div id="anomalyActiveCount" class="metric-value">0</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Criticas</div>
+                <div id="anomalyCriticalCount" class="metric-value">0</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Avisos</div>
+                <div id="anomalyWarningCount" class="metric-value">0</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Aba</div>
+                <div id="anomalyCurrentTab" class="metric-value">Ativas</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 anomaly-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Severidade</th>
+                    <th>Inicio</th>
+                    <th>Ultima deteccao</th>
+                    <th>Duracao</th>
+                    <th>Sensor</th>
+                    <th>Interface</th>
+                    <th>Alvo</th>
+                    <th>Direcao</th>
+                    <th>Decoder</th>
+                    <th>Metrica</th>
+                    <th class="text-end">Threshold</th>
+                    <th class="text-end">Pico observado</th>
+                    <th class="text-end">Total estimado</th>
+                    <th class="text-end">Flows</th>
+                    <th>Resumo</th>
+                    <th>Acoes</th>
+                  </tr>
+                </thead>
+                <tbody id="anomaliesTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -1438,6 +1780,161 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="attackVectorModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="attackVectorModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="attackVectorModalTitle" class="view-title">Vetor de Ataque</h2>
+        <button type="button" class="icon-button" data-close-modal="attackVectorModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="attack-vector-form-grid">
+          <div class="field">
+            <label for="modalVectorName">Nome</label>
+            <input id="modalVectorName" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalVectorEnabled">Ativo</label>
+            <select id="modalVectorEnabled" class="form-select form-select-sm">
+              <option value="true">Ativo</option>
+              <option value="false">Desativado</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalVectorDomain">Dominio</label>
+            <select id="modalVectorDomain" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorTarget">Alvo CIDR/IP</label>
+            <input id="modalVectorTarget" class="form-control form-control-sm" placeholder="192.168.0.10/32">
+          </div>
+          <div class="field">
+            <label for="modalVectorSensor">Sensor</label>
+            <select id="modalVectorSensor" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorInterface">Interface</label>
+            <select id="modalVectorInterface" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorDirection">Direcao</label>
+            <select id="modalVectorDirection" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorDecoder">Decoder</label>
+            <select id="modalVectorDecoder" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorComparison">Comparacao</label>
+            <select id="modalVectorComparison" class="form-select form-select-sm">
+              <option value="over">over</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="modalVectorValue">Valor</label>
+            <input id="modalVectorValue" type="number" min="0" step="0.01" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalVectorUnit">Unidade</label>
+            <select id="modalVectorUnit" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorSeverity">Severidade</label>
+            <select id="modalVectorSeverity" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorResponse">Resposta</label>
+            <select id="modalVectorResponse" class="form-select form-select-sm"></select>
+          </div>
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="attackVectorModal">Cancelar</button>
+        <button id="saveAttackVectorButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="save"></i><span>Salvar</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="anomalyDetailModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="anomalyDetailModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="anomalyDetailModalTitle" class="view-title">Detalhes da anomalia</h2>
+        <button type="button" class="icon-button" data-close-modal="anomalyDetailModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="anomalyDetailSummary" class="subtle mb-3">Carregando</div>
+        <div class="anomaly-detail-grid mb-3">
+          <div class="metric-card">
+            <div class="metric-label">Status</div>
+            <div id="anomalyDetailStatus" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Pico</div>
+            <div id="anomalyDetailPeak" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Threshold</div>
+            <div id="anomalyDetailThreshold" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Total estimado</div>
+            <div id="anomalyDetailTotal" class="metric-value">-</div>
+          </div>
+        </div>
+        <div id="anomalyMetricChart" class="anomaly-chart"></div>
+        <div class="row g-3 mt-2">
+          <div class="col-12 col-xl-5">
+            <div class="panel p-3 h-100">
+              <div class="panel-title mb-2">Top conversas</div>
+              <div class="table-wrap">
+                <table class="table table-sm align-middle mb-0">
+                  <thead><tr><th>Conversa</th><th class="text-end">Bytes</th><th class="text-end">Pacotes</th></tr></thead>
+                  <tbody id="anomalyConversationTable"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-12 col-xl-7">
+            <div class="panel p-3 h-100">
+              <div class="panel-title mb-2">Flows relacionados</div>
+              <div class="table-wrap">
+                <table class="table table-sm align-middle mb-0 flow-table">
+                  <thead>
+                    <tr>
+                      <th>Tempo</th>
+                      <th>Src IP</th>
+                      <th>Dst IP</th>
+                      <th class="text-end">Src porta</th>
+                      <th class="text-end">Dst porta</th>
+                      <th>Proto</th>
+                      <th class="text-end">Bytes</th>
+                      <th class="text-end">Pacotes</th>
+                    </tr>
+                  </thead>
+                  <tbody id="anomalyFlowTable"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="ackAnomalyButton" type="button" class="btn btn-sm btn-outline-secondary">
+          <i data-lucide="check"></i><span>Reconhecer</span>
+        </button>
+        <button id="closeAnomalyButton" type="button" class="btn btn-sm btn-outline-danger">
+          <i data-lucide="octagon-x"></i><span>Encerrar manualmente</span>
+        </button>
+        <button type="button" class="btn btn-sm btn-success" data-close-modal="anomalyDetailModal">Fechar</button>
+      </div>
     </div>
   </div>
 
@@ -1697,7 +2194,8 @@
       protocols: echarts.init(document.getElementById('protocolsChart')),
       tcpFlags: echarts.init(document.getElementById('tcpFlagsChart')),
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
-      asnDst: echarts.init(document.getElementById('asnDstChart'))
+      asnDst: echarts.init(document.getElementById('asnDstChart')),
+      anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart'))
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
@@ -1709,11 +2207,54 @@
     let currentSensorId = null;
     let currentInterfaces = [];
     let editingInterfaceIndex = -1;
+    let attackTemplates = [];
+    let attackVectors = [];
+    let attackSuggestions = [];
+    let attackSensorCache = [];
+    let currentAttackTemplateId = null;
+    let editingAttackVectorId = null;
+    let anomalyActiveTab = 'active';
+    let currentAnomalyDetailId = null;
     let activeCustomRangeTarget = null;
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' }
     };
+
+    const ATTACK_DOMAIN_OPTIONS = [
+      ['any', 'any'],
+      ['internal_ip', 'internal_ip'],
+      ['external_ip', 'external_ip'],
+      ['prefix', 'prefix'],
+      ['sensor', 'sensor'],
+      ['interface', 'interface']
+    ];
+    const ATTACK_DIRECTION_OPTIONS = [
+      ['receives', 'receives'],
+      ['sends', 'sends'],
+      ['both', 'both']
+    ];
+    const ATTACK_UNIT_OPTIONS = [
+      ['bits_s', 'bits/s'],
+      ['packets_s', 'packets/s'],
+      ['flows_s', 'flows/s']
+    ];
+    const ATTACK_SEVERITY_OPTIONS = [
+      ['info', 'info'],
+      ['warning', 'warning'],
+      ['critical', 'critical']
+    ];
+    const ATTACK_RESPONSE_OPTIONS = [
+      ['alert_only', 'alert_only'],
+      ['response_ip', 'response_ip'],
+      ['webhook_future', 'webhook_future'],
+      ['ignore', 'ignore']
+    ];
+    const ATTACK_DECODER_OPTIONS = [
+      'IP', 'TCP', 'TCP+SYN', 'TCP+SYNACK', 'TCP+ACK', 'TCP+RST', 'TCP+NULL', 'TCP+ALL',
+      'UDP', 'ICMP', 'DNS', 'NTP', 'QUIC', 'UDP+QUIC', 'HTTP', 'HTTPS', 'MAIL', 'SIP',
+      'IPSEC', 'FRAGMENT', 'NETBIOS', 'MEMCACHED', 'OTHER', 'INVALID', 'FLOWS', 'FLOW+SYN'
+    ].map(value => [value, value]);
 
     function createIcons() {
       if (window.lucide) {
@@ -1786,9 +2327,12 @@
       document.getElementById('appShell').classList.remove('auth-hidden');
       document.getElementById('applyCollectorsButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('databaseNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('attackVectorsNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
       loadDashboardSensors().then(() => refresh()).catch(console.error);
+      updateAnomalySummary().catch(console.error);
       createIcons();
     }
 
@@ -2272,6 +2816,523 @@
       } catch (error) {
         result.textContent = `Falha no OPTIMIZE: ${error.message}`;
       }
+    }
+
+    function optionList(options, selected = '') {
+      return options.map(([value, label]) => `
+        <option value="${escapeHtml(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${escapeHtml(label)}</option>
+      `).join('');
+    }
+
+    function unitLabel(unit) {
+      return (ATTACK_UNIT_OPTIONS.find(([value]) => value === unit) || [unit, unit])[1];
+    }
+
+    function formatMetricValue(value, unit) {
+      if (unit === 'bits_s') return formatBps(value);
+      if (unit === 'packets_s') return formatPps(value);
+      return `${formatNumber(value)} flows/s`;
+    }
+
+    function setAttackVectorStatus(message, kind = 'muted') {
+      const status = document.getElementById('attackVectorStatus');
+      status.textContent = message;
+      status.className = kind === 'error' ? 'subtle text-danger' : 'subtle';
+    }
+
+    function selectedAttackTemplate() {
+      return attackTemplates.find(item => Number(item.id) === Number(currentAttackTemplateId)) || null;
+    }
+
+    function renderAttackTemplateList() {
+      const tbody = document.getElementById('attackTemplateTable');
+      document.getElementById('attackTemplateCount').textContent = formatNumber(attackTemplates.length);
+      tbody.innerHTML = attackTemplates.map(template => `
+        <tr data-template-id="${template.id}" class="${Number(template.id) === Number(currentAttackTemplateId) ? 'active' : ''}">
+          <td>${escapeHtml(template.name)}</td>
+          <td class="text-end">${formatNumber(template.vector_count || 0)}</td>
+          <td><span class="badge-soft ${template.enabled ? 'ok' : 'off'}">${template.enabled ? 'Ativo' : 'Off'}</span></td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem templates</td></tr>';
+      tbody.querySelectorAll('tr[data-template-id]').forEach(row => {
+        row.addEventListener('click', () => {
+          currentAttackTemplateId = Number(row.dataset.templateId);
+          loadAttackVectors().catch(console.error);
+        });
+      });
+    }
+
+    function fillAttackTemplateForm(template) {
+      setValue('avTemplateName', template?.name || '');
+      setValue('avTemplateDescription', template?.description || '');
+      setBoolSelect('avTemplateEnabled', template?.enabled ?? true);
+      setBoolSelect('avTemplateLearnEnabled', template?.learn_enabled ?? true);
+      setValue('avTemplateLearnDays', template?.learn_days || 2);
+      setValue('avTemplateSafetyMargin', template?.safety_margin_percent || 20);
+    }
+
+    function collectAttackTemplateForm() {
+      return {
+        name: selectValue('avTemplateName').trim(),
+        description: selectValue('avTemplateDescription').trim(),
+        enabled: boolSelectValue('avTemplateEnabled'),
+        learn_enabled: boolSelectValue('avTemplateLearnEnabled'),
+        learn_days: numberValue('avTemplateLearnDays', 2),
+        safety_margin_percent: numberValue('avTemplateSafetyMargin', 20)
+      };
+    }
+
+    async function loadAttackSensors() {
+      const payload = await apiRequest('/api/sensors');
+      attackSensorCache = Array.isArray(payload.items) ? payload.items : [];
+    }
+
+    async function loadAttackVectors() {
+      setAttackVectorStatus('Carregando vetores...');
+      try {
+        await loadAttackSensors();
+        const templatesPayload = await apiRequest('/api/attack-vector-templates');
+        attackTemplates = Array.isArray(templatesPayload.items) ? templatesPayload.items : [];
+        if (attackTemplates.length && !attackTemplates.some(item => Number(item.id) === Number(currentAttackTemplateId))) {
+          currentAttackTemplateId = Number(attackTemplates[0].id);
+        }
+        renderAttackTemplateList();
+        const template = selectedAttackTemplate();
+        fillAttackTemplateForm(template);
+        if (!template) {
+          attackVectors = [];
+          attackSuggestions = [];
+        } else {
+          const vectorsPayload = await apiRequest(`/api/attack-vectors?template_id=${template.id}`);
+          attackVectors = Array.isArray(vectorsPayload.items) ? vectorsPayload.items : [];
+          const suggestionsPayload = await apiRequest(`/api/attack-vector-suggestions?template_id=${template.id}`);
+          attackSuggestions = Array.isArray(suggestionsPayload.items) ? suggestionsPayload.items : [];
+        }
+        renderAttackVectorTable();
+        renderAttackSuggestionTable();
+        setAttackVectorStatus(template ? `Template ${template.name}` : 'Crie um template para comecar');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao carregar vetores: ${error.message}`, 'error');
+      }
+    }
+
+    function renderAttackVectorTable() {
+      const tbody = document.getElementById('attackVectorTable');
+      document.getElementById('attackVectorTableStatus').textContent = `${formatNumber(attackVectors.length)} vetores`;
+      tbody.innerHTML = attackVectors.map(vector => `
+        <tr>
+          <td><span class="badge-soft ${vector.enabled ? 'ok' : 'off'}">${vector.enabled ? 'Ativo' : 'Off'}</span></td>
+          <td>${escapeHtml(vector.name)}</td>
+          <td>${escapeHtml(vector.domain_type)}</td>
+          <td>${escapeHtml(vector.target_cidr || '-')}</td>
+          <td>${escapeHtml(vector.sensor_name || (vector.sensor_id ? `#${vector.sensor_id}` : '-'))}</td>
+          <td>${vector.interface_if_index ?? '-'}</td>
+          <td>${escapeHtml(vector.direction)}</td>
+          <td>${escapeHtml(vector.comparison)}</td>
+          <td class="text-end">${formatNumber(vector.threshold_value)}</td>
+          <td>${escapeHtml(unitLabel(vector.threshold_unit))}</td>
+          <td>${escapeHtml(vector.decoder)}</td>
+          <td><span class="badge-soft ${vector.severity === 'critical' ? '' : vector.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(vector.severity)}</span></td>
+          <td>${escapeHtml(vector.response_action)}</td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary attack-vector-edit" data-vector-id="${vector.id}" aria-label="Editar vetor"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-outline-secondary attack-vector-duplicate" data-vector-id="${vector.id}" aria-label="Duplicar vetor"><i data-lucide="copy"></i></button>
+              <button type="button" class="btn btn-outline-danger attack-vector-delete" data-vector-id="${vector.id}" aria-label="Excluir vetor"><i data-lucide="trash-2"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="14" class="text-muted">Sem vetores neste template</td></tr>';
+      createIcons();
+    }
+
+    function renderAttackSuggestionTable() {
+      const tbody = document.getElementById('attackSuggestionTable');
+      document.getElementById('attackSuggestionStatus').textContent = `${formatNumber(attackSuggestions.length)} sugestoes pendentes`;
+      tbody.innerHTML = attackSuggestions.map(item => `
+        <tr>
+          <td>${escapeHtml(item.direction)}</td>
+          <td>${escapeHtml(item.decoder)}</td>
+          <td class="text-end">${formatMetricValue(item.baseline_p95, item.threshold_unit)}</td>
+          <td class="text-end">${formatMetricValue(item.baseline_p99, item.threshold_unit)}</td>
+          <td class="text-end">${formatMetricValue(item.baseline_max, item.threshold_unit)}</td>
+          <td class="text-end">${formatMetricValue(item.threshold_value, item.threshold_unit)}</td>
+          <td>${escapeHtml(unitLabel(item.threshold_unit))}</td>
+          <td>${Math.round(Number(item.confidence || 0) * 100)}%</td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-success attack-suggestion-apply" data-suggestion-id="${item.id}">
+              <i data-lucide="check"></i><span>Aplicar sugestao</span>
+            </button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestoes pendentes</td></tr>';
+      createIcons();
+    }
+
+    function newAttackTemplate() {
+      currentAttackTemplateId = null;
+      attackVectors = [];
+      attackSuggestions = [];
+      fillAttackTemplateForm(null);
+      renderAttackTemplateList();
+      renderAttackVectorTable();
+      renderAttackSuggestionTable();
+      setAttackVectorStatus('Novo template');
+    }
+
+    async function saveAttackTemplate() {
+      const payload = collectAttackTemplateForm();
+      if (!payload.name) {
+        setAttackVectorStatus('Nome do template obrigatorio', 'error');
+        return;
+      }
+      const path = currentAttackTemplateId
+        ? `/api/attack-vector-templates/${currentAttackTemplateId}`
+        : '/api/attack-vector-templates';
+      const method = currentAttackTemplateId ? 'PUT' : 'POST';
+      try {
+        const saved = await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        currentAttackTemplateId = saved.id;
+        await loadAttackVectors();
+        setAttackVectorStatus(`Template ${saved.name} salvo`);
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao salvar template: ${error.message}`, 'error');
+      }
+    }
+
+    async function duplicateAttackTemplate() {
+      if (!currentAttackTemplateId) return;
+      try {
+        const saved = await apiRequest(`/api/attack-vector-templates/${currentAttackTemplateId}/duplicate`, { method: 'POST' });
+        currentAttackTemplateId = saved.id;
+        await loadAttackVectors();
+        setAttackVectorStatus(`Template ${saved.name} duplicado`);
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao duplicar template: ${error.message}`, 'error');
+      }
+    }
+
+    async function deleteAttackTemplate() {
+      if (!currentAttackTemplateId) return;
+      if (!window.confirm('Excluir template e todos os vetores?')) return;
+      try {
+        await apiRequest(`/api/attack-vector-templates/${currentAttackTemplateId}`, { method: 'DELETE' });
+        currentAttackTemplateId = null;
+        await loadAttackVectors();
+        setAttackVectorStatus('Template excluido');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao excluir template: ${error.message}`, 'error');
+      }
+    }
+
+    function populateAttackVectorInterfaces(selected = '') {
+      const sensorId = Number(selectValue('modalVectorSensor') || 0);
+      const sensor = attackSensorCache.find(item => Number(item.id) === sensorId);
+      const interfaces = Array.isArray(sensor?.interfaces) ? sensor.interfaces : [];
+      const options = [['', 'Todas']].concat(interfaces.map(iface => [
+        String(iface.if_index),
+        `${iface.if_alias || iface.if_name || 'ifIndex'} (${iface.if_index})`
+      ]));
+      document.getElementById('modalVectorInterface').innerHTML = optionList(options, selected);
+    }
+
+    function populateAttackVectorSelects(vector = {}) {
+      document.getElementById('modalVectorDomain').innerHTML = optionList(ATTACK_DOMAIN_OPTIONS, vector.domain_type || 'any');
+      document.getElementById('modalVectorDirection').innerHTML = optionList(ATTACK_DIRECTION_OPTIONS, vector.direction || 'receives');
+      document.getElementById('modalVectorDecoder').innerHTML = optionList(ATTACK_DECODER_OPTIONS, vector.decoder || 'IP');
+      document.getElementById('modalVectorUnit').innerHTML = optionList(ATTACK_UNIT_OPTIONS, vector.threshold_unit || 'bits_s');
+      document.getElementById('modalVectorSeverity').innerHTML = optionList(ATTACK_SEVERITY_OPTIONS, vector.severity || 'warning');
+      document.getElementById('modalVectorResponse').innerHTML = optionList(ATTACK_RESPONSE_OPTIONS, vector.response_action || 'alert_only');
+      const sensorOptions = [['', 'Todos']].concat(attackSensorCache.map(sensor => [String(sensor.id), sensor.name]));
+      document.getElementById('modalVectorSensor').innerHTML = optionList(sensorOptions, vector.sensor_id || '');
+      populateAttackVectorInterfaces(vector.interface_if_index || '');
+    }
+
+    function openAttackVectorModal(vector = null) {
+      const template = selectedAttackTemplate();
+      if (!template) {
+        setAttackVectorStatus('Selecione ou crie um template antes de adicionar vetores.', 'error');
+        return;
+      }
+      editingAttackVectorId = vector?.id || null;
+      document.getElementById('attackVectorModalTitle').textContent = editingAttackVectorId ? 'Editar vetor' : 'Adicionar vetor';
+      populateAttackVectorSelects(vector || {});
+      setValue('modalVectorName', vector?.name || '');
+      setBoolSelect('modalVectorEnabled', vector?.enabled ?? true);
+      setValue('modalVectorTarget', vector?.target_cidr || '');
+      setValue('modalVectorValue', vector?.threshold_value || '');
+      openModal('attackVectorModal');
+    }
+
+    function collectAttackVectorForm() {
+      const sensorValue = selectValue('modalVectorSensor');
+      const interfaceValue = selectValue('modalVectorInterface');
+      return {
+        template_id: currentAttackTemplateId,
+        name: selectValue('modalVectorName').trim(),
+        enabled: boolSelectValue('modalVectorEnabled'),
+        domain_type: selectValue('modalVectorDomain', 'any'),
+        target_cidr: selectValue('modalVectorTarget').trim() || null,
+        sensor_id: sensorValue ? Number(sensorValue) : null,
+        interface_if_index: interfaceValue ? Number(interfaceValue) : null,
+        direction: selectValue('modalVectorDirection', 'receives'),
+        decoder: selectValue('modalVectorDecoder', 'IP'),
+        comparison: selectValue('modalVectorComparison', 'over'),
+        threshold_value: numberValue('modalVectorValue', 0),
+        threshold_unit: selectValue('modalVectorUnit', 'bits_s'),
+        severity: selectValue('modalVectorSeverity', 'warning'),
+        response_action: selectValue('modalVectorResponse', 'alert_only'),
+        parent_enabled: selectedAttackTemplate()?.enabled ?? true
+      };
+    }
+
+    async function saveAttackVector() {
+      const payload = collectAttackVectorForm();
+      if (!payload.name || payload.threshold_value <= 0) {
+        setAttackVectorStatus('Nome e valor do vetor sao obrigatorios.', 'error');
+        return;
+      }
+      const path = editingAttackVectorId ? `/api/attack-vectors/${editingAttackVectorId}` : '/api/attack-vectors';
+      const method = editingAttackVectorId ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        closeModal('attackVectorModal');
+        await loadAttackVectors();
+        setAttackVectorStatus('Vetor salvo');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao salvar vetor: ${error.message}`, 'error');
+      }
+    }
+
+    async function duplicateAttackVector(vectorId) {
+      try {
+        await apiRequest(`/api/attack-vectors/${vectorId}/duplicate`, { method: 'POST' });
+        await loadAttackVectors();
+        setAttackVectorStatus('Vetor duplicado');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao duplicar vetor: ${error.message}`, 'error');
+      }
+    }
+
+    async function deleteAttackVector(vectorId) {
+      if (!window.confirm('Excluir vetor selecionado?')) return;
+      try {
+        await apiRequest(`/api/attack-vectors/${vectorId}`, { method: 'DELETE' });
+        await loadAttackVectors();
+        setAttackVectorStatus('Vetor excluido');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao excluir vetor: ${error.message}`, 'error');
+      }
+    }
+
+    async function learnAttackVectors() {
+      const template = selectedAttackTemplate();
+      if (!template) return;
+      setAttackVectorStatus('Aprendendo baseline no ClickHouse...');
+      try {
+        const payload = await apiRequest('/api/attack-vectors/learn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            template_id: template.id,
+            days: numberValue('avTemplateLearnDays', 2),
+            margin_percent: numberValue('avTemplateSafetyMargin', 20),
+            sensor_id: null,
+            target_cidr: null
+          })
+        });
+        await loadAttackVectors();
+        setAttackVectorStatus(`${formatNumber(payload.count || 0)} sugestoes geradas`);
+      } catch (error) {
+        setAttackVectorStatus(`Falha no aprendizado: ${error.message}`, 'error');
+      }
+    }
+
+    async function applyAttackSuggestion(suggestionId) {
+      try {
+        await apiRequest(`/api/attack-vector-suggestions/${suggestionId}/apply`, { method: 'POST' });
+        await loadAttackVectors();
+        setAttackVectorStatus('Sugestao aplicada');
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao aplicar sugestao: ${error.message}`, 'error');
+      }
+    }
+
+    async function applyAllAttackSuggestions() {
+      const template = selectedAttackTemplate();
+      if (!template) return;
+      try {
+        const payload = await apiRequest('/api/attack-vector-suggestions/apply-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ template_id: template.id })
+        });
+        await loadAttackVectors();
+        setAttackVectorStatus(`${formatNumber(payload.count || 0)} sugestoes aplicadas`);
+      } catch (error) {
+        setAttackVectorStatus(`Falha ao aplicar sugestoes: ${error.message}`, 'error');
+      }
+    }
+
+    function renderAnomalyBadge(summary) {
+      const count = Number(summary.active_count || 0);
+      const badge = document.getElementById('anomalyNavBadge');
+      const button = document.getElementById('anomaliesNavButton');
+      badge.textContent = formatNumber(count);
+      badge.classList.toggle('active', count > 0);
+      button.classList.toggle('has-anomalies', count > 0);
+      setText('anomalyActiveCount', formatNumber(count));
+      setText('anomalyCriticalCount', formatNumber(summary.critical_count || 0));
+      setText('anomalyWarningCount', formatNumber(summary.warning_count || 0));
+    }
+
+    async function updateAnomalySummary() {
+      if (currentAuthUser?.role !== 'admin') return;
+      const summary = await apiRequest('/api/anomalies/summary');
+      renderAnomalyBadge(summary);
+    }
+
+    function anomalyDuration(event) {
+      const start = new Date(event.started_at);
+      const end = new Date(event.ended_at || event.last_seen_at || Date.now());
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return '-';
+      const seconds = Math.max(0, Math.round((end - start) / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+      return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    }
+
+    function renderAnomalyTable(items) {
+      const tbody = document.getElementById('anomaliesTable');
+      tbody.innerHTML = items.map(event => `
+        <tr>
+          <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
+          <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
+          <td>${formatDateTime(event.started_at)}</td>
+          <td>${formatDateTime(event.last_seen_at)}</td>
+          <td>${anomalyDuration(event)}</td>
+          <td>${escapeHtml(event.sensor_name || (event.sensor_id ? `#${event.sensor_id}` : '-'))}</td>
+          <td>${event.interface_if_index ?? '-'}</td>
+          <td>${escapeHtml(event.target_ip || event.target_cidr || '-')}</td>
+          <td>${escapeHtml(event.direction)}</td>
+          <td>${escapeHtml(event.decoder)}</td>
+          <td>${escapeHtml(unitLabel(event.metric_unit))}</td>
+          <td class="text-end">${formatMetricValue(event.threshold_value, event.metric_unit)}</td>
+          <td class="text-end">${formatMetricValue(event.peak_value, event.metric_unit)}</td>
+          <td class="text-end">${formatBytes(event.estimated_bytes)}</td>
+          <td class="text-end">${formatNumber(event.flow_count)}</td>
+          <td>${escapeHtml(event.summary || '-')}</td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${event.id}">
+                <i data-lucide="eye"></i><span>Ver detalhes</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${event.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${event.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="17" class="text-muted">Sem anomalias</td></tr>';
+      createIcons();
+    }
+
+    async function loadAnomalies(tab = anomalyActiveTab) {
+      anomalyActiveTab = tab;
+      document.getElementById('anomalyTabActive').classList.toggle('active', tab === 'active');
+      document.getElementById('anomalyTabHistory').classList.toggle('active', tab === 'history');
+      setText('anomalyCurrentTab', tab === 'active' ? 'Ativas' : 'Historico');
+      document.getElementById('anomalyStatus').textContent = 'Atualizando anomalias...';
+      try {
+        await updateAnomalySummary();
+        const payload = await apiRequest(tab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
+        renderAnomalyTable(Array.isArray(payload.items) ? payload.items : []);
+        document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Historico de anomalias';
+      } catch (error) {
+        document.getElementById('anomalyStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    function anomalyMetricOption(points, unit) {
+      const valueKey = unit === 'packets_s' ? 'packets_s' : unit === 'flows_s' ? 'flows_s' : 'bits_s';
+      return {
+        color: ['#b91c1c'],
+        tooltip: { trigger: 'axis', valueFormatter: value => formatMetricValue(value, unit) },
+        grid: { left: 46, right: 18, top: 18, bottom: 42 },
+        xAxis: { type: 'category', data: points.map(point => point.time) },
+        yAxis: { type: 'value', axisLabel: { formatter: value => formatMetricValue(value, unit) } },
+        series: [{
+          type: 'line',
+          smooth: true,
+          areaStyle: { opacity: .12 },
+          data: points.map(point => Number(point[valueKey] || 0))
+        }]
+      };
+    }
+
+    async function openAnomalyDetail(anomalyId) {
+      currentAnomalyDetailId = Number(anomalyId);
+      openModal('anomalyDetailModal');
+      document.getElementById('anomalyDetailSummary').textContent = 'Carregando...';
+      try {
+        const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
+        const event = payload.event || {};
+        document.getElementById('anomalyDetailSummary').textContent = event.summary || '-';
+        setText('anomalyDetailStatus', event.status || '-');
+        setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
+        setText('anomalyDetailThreshold', formatMetricValue(event.threshold_value, event.metric_unit));
+        setText('anomalyDetailTotal', formatBytes(event.estimated_bytes));
+        const conversations = Array.isArray(payload.top_conversations) ? payload.top_conversations : [];
+        document.getElementById('anomalyConversationTable').innerHTML = conversations.map(item => `
+          <tr>
+            <td>${escapeHtml(item.conversation)}</td>
+            <td class="text-end">${formatBytes(item.bytes)}</td>
+            <td class="text-end">${formatNumber(item.packets)}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="3" class="text-muted">Sem conversas</td></tr>';
+        const flows = Array.isArray(payload.flows) ? payload.flows : [];
+        document.getElementById('anomalyFlowTable').innerHTML = flows.map(flow => `
+          <tr>
+            <td>${formatDateTime(flow.flow_time)}</td>
+            <td>${escapeHtml(flow.src_ip || '-')}</td>
+            <td>${escapeHtml(flow.dst_ip || '-')}</td>
+            <td class="text-end">${formatNumber(flow.src_port)}</td>
+            <td class="text-end">${formatNumber(flow.dst_port)}</td>
+            <td>${escapeHtml(flow.proto_name || flow.proto || '-')}</td>
+            <td class="text-end">${formatBytes(flow.bytes)}</td>
+            <td class="text-end">${formatNumber(flow.packets)}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="8" class="text-muted">Sem flows amostrados</td></tr>';
+        const points = Array.isArray(payload.metric_points) ? payload.metric_points : [];
+        charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
+        setTimeout(() => charts.anomalyMetric.resize(), 50);
+      } catch (error) {
+        document.getElementById('anomalyDetailSummary').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function ackAnomaly(anomalyId = currentAnomalyDetailId) {
+      if (!anomalyId) return;
+      await apiRequest(`/api/anomalies/${anomalyId}/ack`, { method: 'POST' });
+      await loadAnomalies();
+      await updateAnomalySummary();
+      if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
+    }
+
+    async function closeAnomalyEvent(anomalyId = currentAnomalyDetailId) {
+      if (!anomalyId) return;
+      await apiRequest(`/api/anomalies/${anomalyId}/close`, { method: 'POST' });
+      await loadAnomalies();
+      await updateAnomalySummary();
+      if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
     }
 
     function ipLink(ip) {
@@ -3451,6 +4512,14 @@
         document.getElementById('view-database').classList.add('active');
         document.querySelector('[data-nav-view="database"]').classList.add('active');
         loadDatabaseStatus().catch(console.error);
+      } else if (view === 'attack-vectors') {
+        document.getElementById('view-attack-vectors').classList.add('active');
+        document.querySelector('[data-nav-view="attack-vectors"]').classList.add('active');
+        loadAttackVectors().catch(console.error);
+      } else if (view === 'anomalies') {
+        document.getElementById('view-anomalies').classList.add('active');
+        document.querySelector('[data-nav-view="anomalies"]').classList.add('active');
+        loadAnomalies(anomalyActiveTab).catch(console.error);
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
@@ -3506,6 +4575,58 @@
       cleanupDatabase(Number(document.getElementById('databaseCustomCleanupDays').value || 90)).catch(console.error);
     });
     document.getElementById('databaseOptimizeButton').addEventListener('click', () => optimizeDatabase().catch(console.error));
+    document.getElementById('refreshAttackVectorsButton').addEventListener('click', () => loadAttackVectors().catch(console.error));
+    document.getElementById('newTemplateButton').addEventListener('click', newAttackTemplate);
+    document.getElementById('saveTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
+    document.getElementById('renameTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
+    document.getElementById('duplicateTemplateButton').addEventListener('click', () => duplicateAttackTemplate().catch(console.error));
+    document.getElementById('deleteTemplateButton').addEventListener('click', () => deleteAttackTemplate().catch(console.error));
+    document.getElementById('learnAttackVectorsButton').addEventListener('click', () => learnAttackVectors().catch(console.error));
+    document.getElementById('applySuggestionsButton').addEventListener('click', () => applyAllAttackSuggestions().catch(console.error));
+    document.getElementById('addVectorButton').addEventListener('click', () => openAttackVectorModal());
+    document.getElementById('saveAttackVectorButton').addEventListener('click', () => saveAttackVector().catch(console.error));
+    document.getElementById('modalVectorSensor').addEventListener('change', () => populateAttackVectorInterfaces());
+    document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
+    document.getElementById('anomalyTabActive').addEventListener('click', () => loadAnomalies('active').catch(console.error));
+    document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
+    document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
+    document.getElementById('closeAnomalyButton').addEventListener('click', () => closeAnomalyEvent().catch(console.error));
+
+    document.getElementById('attackVectorTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.attack-vector-edit');
+      const duplicate = target?.closest('.attack-vector-duplicate');
+      const remove = target?.closest('.attack-vector-delete');
+      if (edit) {
+        const vector = attackVectors.find(item => Number(item.id) === Number(edit.dataset.vectorId));
+        openAttackVectorModal(vector);
+      } else if (duplicate) {
+        duplicateAttackVector(Number(duplicate.dataset.vectorId)).catch(console.error);
+      } else if (remove) {
+        deleteAttackVector(Number(remove.dataset.vectorId)).catch(console.error);
+      }
+    });
+
+    document.getElementById('attackSuggestionTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const button = target?.closest('.attack-suggestion-apply');
+      if (!button) return;
+      applyAttackSuggestion(Number(button.dataset.suggestionId)).catch(console.error);
+    });
+
+    document.getElementById('anomaliesTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const detail = target?.closest('.anomaly-detail');
+      const ack = target?.closest('.anomaly-ack');
+      const close = target?.closest('.anomaly-close');
+      if (detail) {
+        openAnomalyDetail(Number(detail.dataset.anomalyId)).catch(console.error);
+      } else if (ack) {
+        ackAnomaly(Number(ack.dataset.anomalyId)).catch(console.error);
+      } else if (close) {
+        closeAnomalyEvent(Number(close.dataset.anomalyId)).catch(console.error);
+      }
+    });
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
@@ -3560,6 +4681,7 @@
     createIcons();
     initAuth().catch(console.error);
     setInterval(() => refresh().catch(console.error), 60000);
+    setInterval(() => updateAnomalySummary().catch(console.error), 30000);
   </script>
 </body>
 </html>
