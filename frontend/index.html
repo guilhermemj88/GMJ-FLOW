@@ -924,6 +924,13 @@
               <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
               </select>
+              <select id="dashboardRefreshInterval" class="form-select form-select-sm" aria-label="Auto-refresh">
+                <option value="0">Auto Off</option>
+                <option value="10000">Auto 10s</option>
+                <option value="30000" selected>Auto 30s</option>
+                <option value="60000">Auto 60s</option>
+                <option value="300000">Auto 5min</option>
+              </select>
               <button id="refresh" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
@@ -2571,6 +2578,9 @@
     let activeCustomRangeTarget = null;
     let flowSort = { column: 'flow_time', direction: 'desc' };
     let topFlowSort = { column: 'bits_s', direction: 'desc' };
+    let dashboardRefreshTimer = null;
+    let dashboardRefreshInFlight = false;
+    let dashboardRefreshFailures = 0;
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' },
@@ -4541,52 +4551,88 @@
 
     async function refresh() {
       if (!authToken()) return;
-      await checkHealth();
+      if (dashboardRefreshInFlight || document.visibilityState !== 'visible') return;
       if (activeView !== 'dashboard') return;
-      const sensorId = selectedDashboardSensorId();
-      const trafficQuery = sensorId
-        ? dashboardParams({ includeSensorId: true, includeInterfaceId: true })
-        : dashboardParams({ includeSensorId: false });
-      const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
-      const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst] = await Promise.all([
-        fetchJSON(sensorId ? '/api/traffic/interface-bps' : '/api/traffic/bps', trafficQuery),
-        fetchJSON(sensorId ? '/api/traffic/interface-pps' : '/api/traffic/pps', trafficQuery),
-        fetchJSON('/api/tops/src-ip', topQuery),
-        fetchJSON('/api/tops/dst-ip', topQuery),
-        fetchJSON('/api/tops/ports', topQuery),
-        fetchJSON('/api/tops/protocols', topQuery),
-        fetchJSON('/api/tops/tcp-flags', topQuery),
-        fetchJSON('/api/tops/asn-src', topQuery),
-        fetchJSON('/api/tops/asn-dst', topQuery)
-      ]);
+      dashboardRefreshInFlight = true;
+      try {
+        await checkHealth();
+        const sensorId = selectedDashboardSensorId();
+        const trafficQuery = sensorId
+          ? dashboardParams({ includeSensorId: true, includeInterfaceId: true })
+          : dashboardParams({ includeSensorId: false });
+        const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
+        const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst] = await Promise.all([
+          fetchJSON(sensorId ? '/api/traffic/interface-bps' : '/api/traffic/bps', trafficQuery),
+          fetchJSON(sensorId ? '/api/traffic/interface-pps' : '/api/traffic/pps', trafficQuery),
+          fetchJSON('/api/tops/src-ip', topQuery),
+          fetchJSON('/api/tops/dst-ip', topQuery),
+          fetchJSON('/api/tops/ports', topQuery),
+          fetchJSON('/api/tops/protocols', topQuery),
+          fetchJSON('/api/tops/tcp-flags', topQuery),
+          fetchJSON('/api/tops/asn-src', topQuery),
+          fetchJSON('/api/tops/asn-dst', topQuery)
+        ]);
 
-      const bpsItems = bps.items;
-      const ppsItems = pps.items;
-      const srcIpItems = srcIp.items;
-      const dstIpItems = dstIp.items;
-      const portItems = ports.items;
-      const protocolItems = protocols.items;
-      const tcpFlagItems = tcpFlags.items;
+        const bpsItems = bps.items;
+        const ppsItems = pps.items;
+        const srcIpItems = srcIp.items;
+        const dstIpItems = dstIp.items;
+        const portItems = ports.items;
+        const protocolItems = protocols.items;
+        const tcpFlagItems = tcpFlags.items;
 
-      charts.bps.setOption(directionalTrafficOption(bpsItems, 'bps'), true);
-      charts.pps.setOption(directionalTrafficOption(ppsItems, 'pps'), true);
+        charts.bps.setOption(directionalTrafficOption(bpsItems, 'bps'), true);
+        charts.pps.setOption(directionalTrafficOption(ppsItems, 'pps'), true);
 
-      document.getElementById('bpsReadout').textContent = directionalReadout(bpsItems, 'bps');
-      document.getElementById('ppsReadout').textContent = directionalReadout(ppsItems, 'pps');
+        document.getElementById('bpsReadout').textContent = directionalReadout(bpsItems, 'bps');
+        document.getElementById('ppsReadout').textContent = directionalReadout(ppsItems, 'pps');
 
-      charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
-      charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
-      charts.ports.setOption(barOption(portItems, 'port'), true);
-      charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
-      charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
-      renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', asnSrc);
-      renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', asnDst);
+        charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
+        charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
+        charts.ports.setOption(barOption(portItems, 'port'), true);
+        charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
+        charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
+        renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', asnSrc);
+        renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', asnDst);
 
-      fillTable('srcIpTable', srcIpItems, 'ip');
-      fillTable('dstIpTable', dstIpItems, 'ip');
-      fillTable('portsTable', portItems, 'port', 'packets');
-      fillTable('protocolsTable', protocolItems, 'proto', 'packets');
-      fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
+        fillTable('srcIpTable', srcIpItems, 'ip');
+        fillTable('dstIpTable', dstIpItems, 'ip');
+        fillTable('portsTable', portItems, 'port', 'packets');
+        fillTable('protocolsTable', protocolItems, 'proto', 'packets');
+        fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
+        dashboardRefreshFailures = 0;
+      } catch (error) {
+        dashboardRefreshFailures += 1;
+        throw error;
+      } finally {
+        dashboardRefreshInFlight = false;
+      }
+    }
+
+    function selectedDashboardRefreshMs() {
+      const configured = Number(document.getElementById('dashboardRefreshInterval')?.value || 30000);
+      if (!configured) return 0;
+      const rangeValue = document.getElementById('rangeMinutes').value;
+      const minutes = Number(rangeValue === 'custom' ? customRanges.dashboard.previous || 60 : rangeValue) || 60;
+      return minutes >= 60 ? Math.max(configured, 60000) : configured;
+    }
+
+    function scheduleDashboardRefresh() {
+      if (dashboardRefreshTimer) {
+        clearTimeout(dashboardRefreshTimer);
+        dashboardRefreshTimer = null;
+      }
+      const interval = selectedDashboardRefreshMs();
+      if (!interval || !authToken() || activeView !== 'dashboard' || dashboardRefreshFailures >= 3) return;
+      dashboardRefreshTimer = setTimeout(async () => {
+        try {
+          await refresh();
+        } catch (error) {
+          console.error('Falha no auto-refresh do dashboard', error);
+        } finally {
+          scheduleDashboardRefresh();
+        }
+      }, interval);
     }
 
     function defaultSensor() {
@@ -5437,6 +5483,7 @@
         const button = Array.from(document.querySelectorAll('.side-nav button')).find(item => item.dataset.placeholderTitle === placeholderTitle);
         if (button) button.classList.add('active');
       }
+      scheduleDashboardRefresh();
     }
 
     document.querySelectorAll('.side-nav button[data-nav-view]').forEach(button => {
@@ -5458,7 +5505,10 @@
       if (params?.name) openIpDetails(params.name).catch(console.error);
     });
 
-    document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
+    document.getElementById('refresh').addEventListener('click', () => {
+      dashboardRefreshFailures = 0;
+      refresh().finally(scheduleDashboardRefresh).catch(console.error);
+    });
     document.getElementById('resolveAsnButton').addEventListener('click', () => resolvePendingAsns().catch(console.error));
     document.getElementById('loginForm').addEventListener('submit', event => login(event).catch(console.error));
     document.getElementById('changePasswordForm').addEventListener('submit', event => changePassword(event).catch(console.error));
@@ -5494,11 +5544,15 @@
         loadTopFlow().catch(console.error);
       });
     });
-    document.getElementById('rangeMinutes').addEventListener('change', () => handleRangeSelectChange('dashboard'));
+    document.getElementById('rangeMinutes').addEventListener('change', () => {
+      handleRangeSelectChange('dashboard');
+      scheduleDashboardRefresh();
+    });
+    document.getElementById('dashboardRefreshInterval').addEventListener('change', scheduleDashboardRefresh);
     document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
-    document.getElementById('interface').addEventListener('change', () => refresh().catch(console.error));
+    document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
     document.getElementById('topFlowSensor').addEventListener('change', () => handleTopFlowSensorChange().catch(console.error));
@@ -5649,10 +5703,10 @@
     });
 
     window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
+    document.addEventListener('visibilitychange', scheduleDashboardRefresh);
 
     createIcons();
-    initAuth().catch(console.error);
-    setInterval(() => refresh().catch(console.error), 60000);
+    initAuth().then(scheduleDashboardRefresh).catch(console.error);
     setInterval(() => updateAnomalySummary().catch(console.error), 30000);
   </script>
 </body>

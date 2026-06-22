@@ -117,6 +117,10 @@ ASN_RESOLVER_INTERVAL_SECONDS = int(os.getenv("GMJFLOW_ASN_RESOLVER_INTERVAL_SEC
 ASN_RESOLVER_MAX_IPS_PER_RUN = int(os.getenv("GMJFLOW_ASN_RESOLVER_MAX_IPS_PER_RUN", "5000"))
 ASN_CACHE_TTL_SECONDS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_SECONDS", "604800"))
 ASN_RESOLVER_STOP = threading.Event()
+SQLITE_MIGRATION_LOCK = threading.Lock()
+SENSOR_DB_READY = False
+DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -511,6 +515,8 @@ def get_client():
         username=os.getenv("CLICKHOUSE_USER", "default"),
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
         database=os.getenv("CLICKHOUSE_DATABASE", "flowdb"),
+        connect_timeout=int(os.getenv("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", "5")),
+        send_receive_timeout=int(os.getenv("CLICKHOUSE_QUERY_TIMEOUT_SECONDS", "30")),
     )
 
 
@@ -527,9 +533,13 @@ def close_client(client: Any) -> None:
 
 def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> Any:
     client = get_client()
+    started = time.monotonic()
     try:
         return client.query(query, parameters=parameters or {})
     finally:
+        elapsed = time.monotonic() - started
+        if elapsed > 2:
+            logger.warning("Query ClickHouse lenta %.2fs: %s", elapsed, " ".join(query.split())[:500])
         close_client(client)
 
 
@@ -684,8 +694,15 @@ def sqlite_path() -> Path:
 def sqlite_connection() -> sqlite3.Connection:
     path = sqlite_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -1146,7 +1163,12 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
 
 
 def ensure_sensor_db() -> None:
-    with sqlite_connection() as conn:
+    global SENSOR_DB_READY
+    if SENSOR_DB_READY:
+        return
+    with SQLITE_MIGRATION_LOCK, sqlite_connection() as conn:
+        if SENSOR_DB_READY:
+            return
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -1300,6 +1322,7 @@ def ensure_sensor_db() -> None:
                 ("admin", hash_password("admin"), "admin", 1, 1, now, now),
             )
         conn.commit()
+        SENSOR_DB_READY = True
 
 
 @app.on_event("startup")
@@ -1780,12 +1803,13 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
                 f"      PMACCT_OUTPUT_FILE: {yaml_quote(output_file)}",
                 "      PMACCT_OUTPUT_FORMAT: csv",
                 "      PMACCT_CSV_DELIMITER: \",\"",
-                "      PMACCT_CSV_FIELDS: src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,src_as,dst_as,timestamp_start,packets,bytes,flows",
+                "      PMACCT_CSV_FIELDS: src_as,dst_as,in_iface,out_iface,src_host,dst_host,src_port,dst_port,tcpflags,proto,timestamp_start,packets,bytes",
                 f"      PMACCT_EXPORTER_IP: {yaml_quote(sensor['exporter_ip'])}",
                 f"      PMACCT_SENSOR: {yaml_quote(sensor['name'])}",
                 "      PMACCT_SAMPLE_RATE: 1",
                 "      PMACCT_PARSER_BATCH_SIZE: ${PMACCT_PARSER_BATCH_SIZE-1000}",
                 "      PMACCT_PARSER_FLUSH_SECONDS: ${PMACCT_PARSER_FLUSH_SECONDS-5}",
+                "      PMACCT_STATE_DIR: ${PMACCT_STATE_DIR-/var/spool/pmacct/state}",
                 "    volumes:",
                 "      - pmacct_spool:/var/spool/pmacct",
                 "    depends_on:",
@@ -3325,12 +3349,17 @@ def health(
 
 @app.post("/api/auth/login")
 def auth_login(payload: LoginPayload):
-    ensure_sensor_db()
     username = clean_text(payload.username)
     if not username:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    with sqlite_connection() as conn:
-        user = fetch_user_by_username(conn, username)
+    try:
+        with sqlite_connection() as conn:
+            user = fetch_user_by_username(conn, username)
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "locked" in message or "no such table" in message:
+            raise HTTPException(status_code=503, detail="Banco local temporariamente indisponivel; tente novamente.") from exc
+        raise
     if user is None or not bool(user["active"]) or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return {
@@ -6496,6 +6525,58 @@ def get_effective_sample_rate(sensor_id: int | None, if_index: int | None, direc
     return effective_sample_rate_from_config(sensor_sample_rate_config(sensor_id), if_index, direction, fallback)
 
 
+def clickhouse_ipv6_literal(value: Any) -> str:
+    ip_text = clean_ip(value)
+    parsed = ip_address(ip_text)
+    if isinstance(parsed, IPv4Address):
+        ip_text = f"::ffff:{parsed}"
+    escaped = ip_text.replace("'", "''")
+    return f"toIPv6('{escaped}')"
+
+
+def sensor_sample_rate_configs() -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensors = conn.execute(
+            """
+            SELECT id, exporter_ip, sample_rate_default_in, sample_rate_default_out, sample_rate_mode
+            FROM sensors
+            WHERE active = 1 AND exporter_ip <> ''
+            """
+        ).fetchall()
+        interface_rows = conn.execute(
+            """
+            SELECT sensor_id, if_index, sample_rate_in, sample_rate_out, sample_rate_override
+            FROM sensor_interfaces
+            WHERE if_index > 0
+            """
+        ).fetchall()
+    interfaces_by_sensor: dict[int, dict[int, dict[str, Any]]] = {}
+    for row in interface_rows:
+        sensor_interfaces = interfaces_by_sensor.setdefault(int(row["sensor_id"]), {})
+        sensor_interfaces[int(row["if_index"])] = {
+            "in": max(1, int(row["sample_rate_in"] or 1)),
+            "out": max(1, int(row["sample_rate_out"] or 1)),
+            "override": bool(row["sample_rate_override"]),
+        }
+    configs = []
+    for sensor in sensors:
+        mode = clean_text(sensor["sample_rate_mode"]) or "sensor_default"
+        if mode not in SAMPLE_RATE_MODES:
+            mode = "sensor_default"
+        configs.append(
+            {
+                "sensor_id": int(sensor["id"]),
+                "exporter_ip": clean_text(sensor["exporter_ip"]),
+                "default_in": max(1, int(sensor["sample_rate_default_in"] or 1)),
+                "default_out": max(1, int(sensor["sample_rate_default_out"] or 1)),
+                "mode": mode,
+                "interfaces": interfaces_by_sensor.get(int(sensor["id"]), {}),
+            }
+        )
+    return configs
+
+
 def sample_rate_literal(value: Any) -> str:
     try:
         number = int(value)
@@ -6511,6 +6592,37 @@ def clickhouse_sample_rate_expr(
 ) -> str:
     fallback = "greatest(toFloat64(sample_rate), 1.0)"
     config = sensor_sample_rate_config(sensor_id)
+    if not config and sensor_id is None:
+        sensor_configs = sensor_sample_rate_configs()
+        conditions: list[str] = []
+        for sensor_config in sensor_configs:
+            try:
+                exporter_condition = f"exporter_ip = {clickhouse_ipv6_literal(sensor_config['exporter_ip'])}"
+            except ValueError:
+                continue
+            interfaces = sensor_config.get("interfaces") if isinstance(sensor_config.get("interfaces"), dict) else {}
+            for index in interfaces:
+                if if_index is not None and int(index) != int(if_index):
+                    continue
+                if direction == "input":
+                    rate = effective_sample_rate_from_config(sensor_config, index, "input")
+                    conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate)}")
+                elif direction == "output":
+                    rate = effective_sample_rate_from_config(sensor_config, index, "output")
+                    conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate)}")
+                else:
+                    rate_in = effective_sample_rate_from_config(sensor_config, index, "input")
+                    rate_out = effective_sample_rate_from_config(sensor_config, index, "output")
+                    conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate_in)}")
+                    conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate_out)}")
+            if direction == "input":
+                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(sensor_config['default_in'])}")
+            elif direction == "output":
+                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(sensor_config['default_out'])}")
+            else:
+                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(sensor_config['default_in'])}")
+                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(sensor_config['default_out'])}")
+        return f"multiIf({', '.join(conditions)}, {fallback})" if conditions else fallback
     if not config:
         return fallback
     conditions: list[str] = []
@@ -6561,6 +6673,19 @@ def traffic_items(
     end_time: datetime | None = None,
 ):
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    cache_key = dashboard_cache_key(
+        f"traffic:{metric}",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor": sensor,
+            "sensor_id": sensor_id,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
     params: dict[str, Any] = {}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
@@ -6607,7 +6732,7 @@ def traffic_items(
                 metric: round(download_value + upload_value, 2),
             }
         )
-    return {"start": iso(start_dt), "end": iso(end_dt), "items": list(series_by_sensor.values())}
+    return dashboard_cache_set(cache_key, {"start": iso(start_dt), "end": iso(end_dt), "items": list(series_by_sensor.values())})
 
 
 @app.get("/api/traffic/bps")
@@ -7084,6 +7209,22 @@ def top_dimension(
     if_index: int | None = None,
 ):
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    cache_key = dashboard_cache_key(
+        f"top:{dimension}",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor": sensor,
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "limit": limit,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
     seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"limit": limit, "seconds": seconds}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
@@ -7188,7 +7329,7 @@ def top_dimension(
             item = {"flags": flags, "bps": bps, "flows": flows, "packets": packets}
         items.append(item)
 
-    return {"items": items}
+    return dashboard_cache_set(cache_key, {"items": items})
 
 
 @app.get("/api/tops/src-ip")
@@ -7642,6 +7783,54 @@ def flow_query_context(
 
 def sort_direction(value: str | None) -> str:
     return "ASC" if clean_text(value).lower() == "asc" else "DESC"
+
+
+def dashboard_cache_ttl(range_minutes: int) -> int:
+    if range_minutes <= 5:
+        return 5
+    if range_minutes <= 60:
+        return 15
+    return 60
+
+
+def dashboard_cache_key(name: str, values: dict[str, Any]) -> str:
+    normalized = []
+    for key in sorted(values):
+        value = values[key]
+        if isinstance(value, datetime):
+            value = iso(value)
+        normalized.append((key, value))
+    return json.dumps([name, normalized], sort_keys=True, default=str)
+
+
+def dashboard_cache_get(key: str, ttl: int) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with DASHBOARD_RESPONSE_CACHE_LOCK:
+        item = DASHBOARD_RESPONSE_CACHE.get(key)
+        if not item:
+            return None
+        created, payload = item
+        age = now - created
+        if age > ttl:
+            DASHBOARD_RESPONSE_CACHE.pop(key, None)
+            return None
+    cached_payload = dict(payload)
+    cached_payload["cached"] = True
+    cached_payload["cache_age_seconds"] = round(age, 2)
+    return cached_payload
+
+
+def dashboard_cache_set(key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    stored = dict(payload)
+    stored["cached"] = False
+    stored["cache_age_seconds"] = 0
+    with DASHBOARD_RESPONSE_CACHE_LOCK:
+        DASHBOARD_RESPONSE_CACHE[key] = (time.monotonic(), stored)
+        if len(DASHBOARD_RESPONSE_CACHE) > 256:
+            oldest = sorted(DASHBOARD_RESPONSE_CACHE, key=lambda cache_key: DASHBOARD_RESPONSE_CACHE[cache_key][0])[:64]
+            for cache_key in oldest:
+                DASHBOARD_RESPONSE_CACHE.pop(cache_key, None)
+    return dict(stored)
 
 
 def search_flows_payload(

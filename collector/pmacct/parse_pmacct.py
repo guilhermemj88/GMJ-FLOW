@@ -247,21 +247,63 @@ def normalize_flow(record: dict[str, Any], sensor: str, exporter_ip: str, sample
 
 
 class Tailer:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, state_path: Path):
         self.path = path
+        self.state_path = state_path
         self.offset = 0
+        self.inode = 0
+        self.pending_offset = 0
+        self.load_state()
+
+    def load_state(self) -> None:
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        if payload.get("file") == str(self.path):
+            self.offset = safe_int(payload.get("offset"), default=0, minimum=0)
+            self.inode = safe_int(payload.get("inode"), default=0, minimum=0)
+
+    def commit(self, last_line_ts: str = "") -> None:
+        if self.pending_offset <= 0:
+            return
+        self.offset = self.pending_offset
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "file": str(self.path),
+            "inode": self.inode,
+            "offset": self.offset,
+            "last_line_ts": last_line_ts,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def read_lines(self) -> list[str]:
         if not self.path.exists():
             return []
-        size = self.path.stat().st_size
+        stat = self.path.stat()
+        size = stat.st_size
+        inode = getattr(stat, "st_ino", 0)
+        if inode and self.inode and inode != self.inode:
+            self.offset = 0
+        self.inode = inode
         if size < self.offset:
             self.offset = 0
-        with self.path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        with self.path.open("rb") as handle:
             handle.seek(self.offset)
-            lines = handle.readlines()
-            self.offset = handle.tell()
-        return lines
+            data = handle.read()
+        if not data:
+            return []
+        if not data.endswith(b"\n"):
+            last_newline = data.rfind(b"\n")
+            if last_newline < 0:
+                self.pending_offset = self.offset
+                return []
+            process = data[: last_newline + 1]
+        else:
+            process = data
+        self.pending_offset = self.offset + len(process)
+        return process.decode("utf-8", errors="ignore").splitlines()
 
 
 def parse_json_line(line: str) -> list[dict[str, Any]]:
@@ -294,8 +336,10 @@ def parse_csv_line(line: str, delimiter: str, fallback_fields: list[str], header
 
     fields = headers if headers else fallback_fields
     if len(row) < len(fields):
-        return [], headers
-    record = dict(zip(fields, row))
+        missing = set(fields[len(row):])
+        if not missing.issubset({"flows", "flow_count", "records"}):
+            return [], headers
+    record = dict(zip(fields[: len(row)], row))
     return [record], headers
 
 
@@ -313,37 +357,57 @@ def main():
     batch_size = env_int("PMACCT_PARSER_BATCH_SIZE", 1000)
     flush_seconds = env_int("PMACCT_PARSER_FLUSH_SECONDS", 5)
     poll_seconds = float(os.getenv("PMACCT_PARSER_POLL_SECONDS", "1"))
+    state_dir = Path(os.getenv("PMACCT_STATE_DIR", "/var/spool/pmacct/state"))
+    state_file = Path(os.getenv("PMACCT_STATE_FILE", state_dir / f"{output_file.name}.offset.json"))
 
     fallback_fields = csv_fields_from_env()
     headers: list[str] | None = None
     batch: list[tuple] = []
     last_flush = time.monotonic()
-    tailer = Tailer(output_file)
+    tailer = Tailer(output_file, state_file)
     client = get_client()
+    lines_read = 0
+    lines_inserted = 0
+    lines_skipped = 0
+    last_line_ts = ""
 
-    print(f"Reading pmacct {output_format} from {output_file}", flush=True)
+    print(f"Reading pmacct {output_format} from {output_file}; state={state_file}; offset={tailer.offset}", flush=True)
     while True:
         for raw_line in tailer.read_lines():
             line = raw_line.strip()
             if not line or line.startswith("!"):
+                lines_skipped += 1
                 continue
+            lines_read += 1
             try:
                 if output_format == "json" or line.startswith("{") or line.startswith("["):
                     records = parse_json_line(line)
                 else:
                     records, headers = parse_csv_line(line, delimiter, fallback_fields, headers)
                 for record in records:
-                    batch.append(normalize_flow(record, sensor, exporter_ip, sample_rate))
+                    flow = normalize_flow(record, sensor, exporter_ip, sample_rate)
+                    batch.append(flow)
+                    last_line_ts = flow[0].isoformat().replace("+00:00", "Z")
+                if not records:
+                    lines_skipped += 1
             except Exception as exc:
+                lines_skipped += 1
                 print(f"Skipping pmacct line: {exc}: {line[:200]}", flush=True)
 
         elapsed = time.monotonic() - last_flush
         if batch and (len(batch) >= batch_size or elapsed >= flush_seconds):
-            rows = batch[:batch_size]
+            rows = batch[:]
             insert_batch(client, rows)
-            del batch[:batch_size]
+            batch.clear()
+            tailer.commit(last_line_ts)
             last_flush = time.monotonic()
-            print(f"Inserted {len(rows)} real flow rows from pmacct", flush=True)
+            lines_inserted += len(rows)
+            print(
+                "pmacct parser stats: "
+                f"file={output_file} read={lines_read} inserted={lines_inserted} "
+                f"skipped={lines_skipped} offset={tailer.offset}",
+                flush=True,
+            )
 
         time.sleep(poll_seconds)
 

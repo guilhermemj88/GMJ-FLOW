@@ -28,6 +28,8 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER-default}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
+      CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: "${CLICKHOUSE_CONNECT_TIMEOUT_SECONDS-5}"
+      CLICKHOUSE_QUERY_TIMEOUT_SECONDS: "${CLICKHOUSE_QUERY_TIMEOUT_SECONDS-30}"
       API_CORS_ORIGINS: "${API_CORS_ORIGINS-*}"
       GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
       GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
@@ -95,10 +97,11 @@ services:
       PMACCT_OUTPUT_FILE: "${PMACCT_OUTPUT_FILE-/var/spool/pmacct/nfacctd.csv}"
       PMACCT_OUTPUT_FORMAT: "${PMACCT_OUTPUT_FORMAT-csv}"
       PMACCT_CSV_DELIMITER: "${PMACCT_CSV_DELIMITER-,}"
-      PMACCT_CSV_FIELDS: "${PMACCT_CSV_FIELDS-src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,src_as,dst_as,timestamp,packets,bytes,flows}"
+      PMACCT_CSV_FIELDS: "${PMACCT_CSV_FIELDS-src_as,dst_as,in_iface,out_iface,src_host,dst_host,src_port,dst_port,tcpflags,proto,timestamp_start,packets,bytes}"
       PMACCT_SAMPLE_RATE: "${PMACCT_SAMPLE_RATE-1}"
       PMACCT_PARSER_BATCH_SIZE: "${PMACCT_PARSER_BATCH_SIZE-1000}"
       PMACCT_PARSER_FLUSH_SECONDS: "${PMACCT_PARSER_FLUSH_SECONDS-5}"
+      PMACCT_STATE_DIR: "${PMACCT_STATE_DIR-/var/spool/pmacct/state}"
     volumes:
       - pmacct_spool:/var/spool/pmacct
     depends_on:
