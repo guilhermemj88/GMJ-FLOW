@@ -4195,16 +4195,21 @@
 
     function fillAsnTable(id, items) {
       const tbody = document.getElementById(id);
+      const header = tbody.closest('table')?.querySelector('thead tr');
+      if (header) {
+        header.innerHTML = '<th>Nº</th><th>ASN</th><th>Descricao</th><th>País</th><th class="text-end">Bits/s</th><th class="text-end">%</th><th class="text-end">Pacotes</th>';
+      }
       tbody.innerHTML = items.slice(0, 15).map((item, index) => `
         <tr>
           <td>${formatNumber(item.rank || index + 1)}</td>
           <td>${escapeHtml(asnLabel(item))}</td>
           <td>${escapeHtml(item.description || '-')}</td>
+          <td>${escapeHtml(item.country || 'N/D')}</td>
           <td class="text-end">${formatBps(item.bps)}</td>
           <td class="text-end">${Number(item.percent || 0).toFixed(1)}%</td>
           <td class="text-end">${formatNumber(item.packets)}</td>
         </tr>
-      `).join('') || `<tr><td colspan="6" class="text-muted">ASN indisponivel</td></tr>`;
+      `).join('') || `<tr><td colspan="7" class="text-muted">ASN indisponivel</td></tr>`;
     }
 
     function renderAsnWidget(chart, tableId, statusId, payload) {
@@ -4216,11 +4221,29 @@
 
     async function resolvePendingAsns() {
       const status = document.getElementById('asnSrcStatus');
-      status.textContent = 'Resolvendo ASNs...';
-      const query = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
+      status.textContent = 'ASNs em resolucao...';
+      const selectedRange = document.getElementById('rangeMinutes').value;
+      const interfaceId = selectedDashboardInterfaceId();
+      const iface = dashboardInterfaceCache.find(item => Number(item.id) === Number(interfaceId));
+      const body = {
+        lookback_minutes: Math.max(1, Number(selectedRange === 'custom' ? customRanges.dashboard.previous || 60 : selectedRange) || 60),
+        limit: 5000,
+        sensor_id: selectedDashboardSensorId(),
+        interface: iface ? Number(iface.if_index) || null : null
+      };
       try {
-        const payload = await apiRequest(`/api/asn/resolve-pending?${query}`, { method: 'POST' });
-        status.textContent = `${formatNumber(payload.resolved_count || 0)} ASNs resolvidos`;
+        const queued = await apiRequest('/api/asn/queue-from-flows', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        status.textContent = `${formatNumber(queued.queued || 0)} IPs enfileirados`;
+        const resolved = await apiRequest('/api/asn/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit: 1000, force: false })
+        });
+        status.textContent = `${formatNumber(queued.queued || 0)} IPs enfileirados; ${formatNumber(resolved.prefixes_inserted || 0)} prefixos atualizados; ${formatNumber(resolved.unresolved || 0)} ainda indisponiveis`;
         await refresh();
       } catch (error) {
         status.textContent = `Falha ASN: ${error.message}`;
@@ -4415,10 +4438,43 @@
       };
     }
 
+    function isTopFlowAsnType() {
+      return ['src_asn', 'dst_asn', 'asn_src', 'asn_dst', 'asn-source', 'asn-destination']
+        .includes(document.getElementById('topFlowType').value);
+    }
+
+    function renderTopFlowHeader(showCountry) {
+      const header = document.getElementById('topFlowTable').closest('table')?.querySelector('thead tr');
+      if (!header) return;
+      header.innerHTML = [
+        '<th class="sortable-header" data-top-flow-sort="key">Chave <span class="sort-indicator"></span></th>',
+        showCountry ? '<th>Descricao</th><th>País</th>' : '',
+        '<th class="sortable-header" data-top-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="packets_s">Packets/s <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="bytes">Bytes <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="packets">Pacotes <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="flows">Flows <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="percent">% total <span class="sort-indicator"></span></th>'
+      ].join('');
+      header.querySelectorAll('[data-top-flow-sort]').forEach(columnHeader => {
+        columnHeader.addEventListener('click', () => {
+          const column = columnHeader.dataset.topFlowSort;
+          topFlowSort = {
+            column,
+            direction: topFlowSort.column === column && topFlowSort.direction === 'desc' ? 'asc' : 'desc'
+          };
+          loadTopFlow().catch(console.error);
+        });
+      });
+      updateSortIndicators('[data-top-flow-sort]', topFlowSort);
+    }
+
     async function loadTopFlow() {
       const status = document.getElementById('topFlowStatus');
       const tbody = document.getElementById('topFlowTable');
       status.textContent = 'Gerando TOP Flow';
+      const showCountry = isTopFlowAsnType();
+      renderTopFlowHeader(showCountry);
       updateSortIndicators('[data-top-flow-sort]', topFlowSort);
       const endpoint = `${API_BASE}/api/flows/top?${topFlowParams()}`;
       try {
@@ -4430,6 +4486,7 @@
         tbody.innerHTML = items.map(item => `
           <tr>
             <td>${escapeHtml(item.key || '-')}</td>
+            ${showCountry ? `<td>${escapeHtml(item.description || '-')}</td><td>${escapeHtml(item.country || 'N/D')}</td>` : ''}
             <td class="numeric">${formatBps(item.bits_s)}</td>
             <td class="numeric">${formatPps(item.packets_s)}</td>
             <td class="numeric">${formatBytes(item.bytes)}</td>
@@ -4437,11 +4494,11 @@
             <td class="numeric">${formatNumber(item.flows)}</td>
             <td class="numeric">${Number(item.percent || 0).toFixed(2)}%</td>
           </tr>
-        `).join('') || '<tr><td colspan="7" class="text-muted">Sem dados no intervalo</td></tr>';
+        `).join('') || `<tr><td colspan="${showCountry ? 9 : 7}" class="text-muted">Sem dados no intervalo</td></tr>`;
         status.textContent = `${formatNumber(items.length)} itens`;
       } catch (error) {
         charts.topFlow.clear();
-        tbody.innerHTML = '<tr><td colspan="7" class="text-danger">Falha ao gerar TOP Flow</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="${showCountry ? 9 : 7}" class="text-danger">Falha ao gerar TOP Flow</td></tr>`;
         status.textContent = 'Falha no TOP Flow';
         console.error('Falha no TOP Flow', endpoint, error);
       }

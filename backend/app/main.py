@@ -82,11 +82,23 @@ TOP_FLOW_TYPES = {
     "conversation",
     "src_port",
     "dst_port",
+    "ports",
     "proto",
     "tcp_flags",
+    "input_if",
+    "output_if",
     "interfaces",
+    "asn_src",
+    "asn_dst",
     "src_asn",
     "dst_asn",
+}
+
+TOP_FLOW_TYPE_ALIASES = {
+    "src_asn": "asn_src",
+    "dst_asn": "asn_dst",
+    "asn_source": "asn_src",
+    "asn_destination": "asn_dst",
 }
 
 TOP_FLOW_SORT_COLUMNS = {
@@ -96,8 +108,15 @@ TOP_FLOW_SORT_COLUMNS = {
     "bytes": "bytes",
     "packets": "packets",
     "flows": "flows",
-    "percent": "percent",
+    "percent": "percent_total",
+    "percent_total": "percent_total",
 }
+
+ASN_RESOLVER_ENABLED = os.getenv("GMJFLOW_ASN_RESOLVER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+ASN_RESOLVER_INTERVAL_SECONDS = int(os.getenv("GMJFLOW_ASN_RESOLVER_INTERVAL_SECONDS", "86400"))
+ASN_RESOLVER_MAX_IPS_PER_RUN = int(os.getenv("GMJFLOW_ASN_RESOLVER_MAX_IPS_PER_RUN", "5000"))
+ASN_CACHE_TTL_SECONDS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_SECONDS", "604800"))
+ASN_RESOLVER_STOP = threading.Event()
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -332,17 +351,32 @@ class InterfaceSampleRatePayload(BaseModel):
 
 class SensorSampleRateApplyPayload(BaseModel):
     inherit: bool = True
+    mode: str | None = None
 
 
 class AsnPrefixPayload(BaseModel):
     prefix: str
     asn: int = Field(..., ge=1)
     as_name: str = ""
+    country: str = ""
     source: str = "manual"
 
 
 class AsnImportPayload(BaseModel):
     items: list[AsnPrefixPayload] = Field(default_factory=list)
+
+
+class AsnQueueFromFlowsPayload(BaseModel):
+    lookback_minutes: int = Field(60, ge=1, le=MAX_RANGE_MINUTES)
+    limit: int = Field(5000, ge=1, le=50000)
+    sensor_id: int | None = Field(None, ge=1)
+    interface: int | None = Field(None, ge=0)
+    if_index: int | None = Field(None, ge=0)
+
+
+class AsnResolvePayload(BaseModel):
+    limit: int = Field(1000, ge=1, le=50000)
+    force: bool = False
 
 
 class SensorPayload(BaseModel):
@@ -911,14 +945,111 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
 
 
 def ensure_asn_db(conn: sqlite3.Connection) -> None:
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(asn_prefixes)").fetchall()}
+    if existing_columns and "id" not in existing_columns:
+        conn.execute("ALTER TABLE asn_prefixes RENAME TO asn_prefixes_legacy")
+        conn.execute(
+            """
+            CREATE TABLE asn_prefixes (
+                id INTEGER PRIMARY KEY,
+                prefix TEXT NOT NULL,
+                ip_version INTEGER NOT NULL,
+                asn INTEGER NOT NULL,
+                as_name TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT,
+                updated_at TEXT,
+                UNIQUE(prefix, asn)
+            )
+            """
+        )
+        now = utc_now_iso()
+        legacy_rows = conn.execute(
+            """
+            SELECT prefix, asn, as_name, source, updated_at
+            FROM asn_prefixes_legacy
+            WHERE COALESCE(asn, 0) > 0
+            """
+        ).fetchall()
+        for row in legacy_rows:
+            try:
+                network = ip_network(clean_text(row["prefix"]), strict=False)
+            except ValueError:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO asn_prefixes (
+                    prefix, ip_version, asn, as_name, country, source, first_seen_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, '', ?, ?, ?)
+                """,
+                (
+                    str(network),
+                    network.version,
+                    int(row["asn"] or 0),
+                    clean_text(row["as_name"]),
+                    clean_text(row["source"]),
+                    clean_text(row["updated_at"]) or now,
+                    clean_text(row["updated_at"]) or now,
+                ),
+            )
+        conn.execute("DROP TABLE asn_prefixes_legacy")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS asn_prefixes (
-            prefix TEXT PRIMARY KEY,
-            asn INTEGER NOT NULL DEFAULT 0,
+            id INTEGER PRIMARY KEY,
+            prefix TEXT NOT NULL,
+            ip_version INTEGER NOT NULL,
+            asn INTEGER NOT NULL,
             as_name TEXT NOT NULL DEFAULT '',
+            country TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
+            first_seen_at TEXT,
+            updated_at TEXT,
+            UNIQUE(prefix, asn)
+        )
+        """
+    )
+    ensure_sqlite_column(conn, "asn_prefixes", "ip_version", "ip_version INTEGER NOT NULL DEFAULT 4")
+    ensure_sqlite_column(conn, "asn_prefixes", "country", "country TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "asn_prefixes", "first_seen_at", "first_seen_at TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asn_info (
+            asn INTEGER PRIMARY KEY,
+            as_name TEXT NOT NULL DEFAULT '',
+            country TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asn_lookup_cache (
+            ip TEXT PRIMARY KEY,
+            ip_version INTEGER NOT NULL,
+            asn INTEGER NOT NULL DEFAULT 0,
+            prefix TEXT NOT NULL DEFAULT '',
+            as_name TEXT NOT NULL DEFAULT '',
+            country TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            resolved_at TEXT,
+            expires_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asn_resolution_queue (
+            ip TEXT PRIMARY KEY,
+            ip_version INTEGER NOT NULL,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            last_error TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -928,6 +1059,9 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
         ON asn_prefixes(asn)
         """
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_prefixes_ip_version ON asn_prefixes(ip_version)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_lookup_cache_expires ON asn_lookup_cache(expires_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_resolution_queue_status ON asn_resolution_queue(status, last_seen_at)")
 
 
 def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
@@ -1178,6 +1312,7 @@ def startup() -> None:
     start_snmp_polling_thread()
     start_database_retention_thread()
     start_anomaly_detection_thread()
+    start_asn_resolver_thread()
 
 
 @app.on_event("shutdown")
@@ -1185,6 +1320,7 @@ def shutdown() -> None:
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
     ANOMALY_DETECTION_STOP.set()
+    ASN_RESOLVER_STOP.set()
 
 
 def clean_text(value: Any) -> str:
@@ -2655,19 +2791,43 @@ def normalize_prefix(value: str) -> str:
         raise HTTPException(status_code=400, detail=f"prefixo ASN invalido: {text}") from None
 
 
-def upsert_asn_prefix(conn: sqlite3.Connection, prefix: str, asn: int, as_name: str, source: str) -> None:
+def upsert_asn_prefix(conn: sqlite3.Connection, prefix: str, asn: int, as_name: str, source: str, country: str = "") -> None:
     normalized_prefix = normalize_prefix(prefix)
+    network = ip_network(normalized_prefix, strict=False)
+    now = utc_now_iso()
     conn.execute(
         """
-        INSERT INTO asn_prefixes (prefix, asn, as_name, source, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(prefix) DO UPDATE SET
-            asn = excluded.asn,
+        INSERT INTO asn_prefixes (prefix, ip_version, asn, as_name, country, source, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(prefix, asn) DO UPDATE SET
+            ip_version = excluded.ip_version,
             as_name = excluded.as_name,
+            country = excluded.country,
             source = excluded.source,
             updated_at = excluded.updated_at
         """,
-        (normalized_prefix, int(asn), clean_text(as_name), clean_text(source), utc_now_iso()),
+        (
+            normalized_prefix,
+            network.version,
+            int(asn),
+            clean_text(as_name),
+            clean_text(country).upper(),
+            clean_text(source),
+            now,
+            now,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO asn_info (asn, as_name, country, source, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(asn) DO UPDATE SET
+            as_name = CASE WHEN excluded.as_name <> '' THEN excluded.as_name ELSE asn_info.as_name END,
+            country = CASE WHEN excluded.country <> '' THEN excluded.country ELSE asn_info.country END,
+            source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE asn_info.source END,
+            updated_at = excluded.updated_at
+        """,
+        (int(asn), clean_text(as_name), clean_text(country).upper(), clean_text(source), now),
     )
 
 
@@ -2690,10 +2850,12 @@ def lookup_asn_prefix(ip: str) -> dict[str, Any] | None:
     with sqlite_connection() as conn:
         rows = conn.execute(
             """
-            SELECT prefix, asn, as_name, source, updated_at
+            SELECT prefix, asn, as_name, country, source, updated_at
             FROM asn_prefixes
-            WHERE asn > 0
+            WHERE asn > 0 AND ip_version = ?
             """
+            ,
+            (parsed.version,),
         ).fetchall()
     best: tuple[int, sqlite3.Row] | None = None
     for row in rows:
@@ -2711,14 +2873,179 @@ def lookup_asn_prefix(ip: str) -> dict[str, Any] | None:
     return {
         "asn": int(row["asn"] or 0),
         "as_name": clean_text(row["as_name"]),
+        "country": clean_text(row["country"]).upper(),
         "source": clean_text(row["source"]),
         "prefix": clean_text(row["prefix"]),
         "updated_at": clean_text(row["updated_at"]),
     }
 
 
+def lookup_asn_cache(ip: str) -> dict[str, Any] | None:
+    ip_text = clean_ip(ip)
+    try:
+        parsed = ip_address(ip_text)
+    except ValueError:
+        return None
+    now = datetime.now(timezone.utc)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT ip, asn, prefix, as_name, country, source, resolved_at, expires_at
+            FROM asn_lookup_cache
+            WHERE ip = ? AND ip_version = ?
+            """,
+            (ip_text, parsed.version),
+        ).fetchone()
+    if row is None:
+        return None
+    expires_at = clean_text(row["expires_at"])
+    if expires_at:
+        try:
+            expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if expires <= now:
+                return None
+        except ValueError:
+            return None
+    asn = int(row["asn"] or 0)
+    if asn <= 0:
+        return None
+    return {
+        "asn": asn,
+        "as_name": clean_text(row["as_name"]),
+        "country": clean_text(row["country"]).upper(),
+        "prefix": clean_text(row["prefix"]),
+        "source": clean_text(row["source"]) or "cache",
+        "resolved_at": clean_text(row["resolved_at"]),
+    }
+
+
+def upsert_asn_lookup_cache(
+    conn: sqlite3.Connection,
+    ip: str,
+    asn: int,
+    prefix: str = "",
+    as_name: str = "",
+    country: str = "",
+    source: str = "",
+) -> None:
+    ip_text = clean_ip(ip)
+    parsed = ip_address(ip_text)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=max(60, ASN_CACHE_TTL_SECONDS))
+    conn.execute(
+        """
+        INSERT INTO asn_lookup_cache (
+            ip, ip_version, asn, prefix, as_name, country, source, resolved_at, expires_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ip) DO UPDATE SET
+            ip_version = excluded.ip_version,
+            asn = excluded.asn,
+            prefix = excluded.prefix,
+            as_name = excluded.as_name,
+            country = excluded.country,
+            source = excluded.source,
+            resolved_at = excluded.resolved_at,
+            expires_at = excluded.expires_at
+        """,
+        (
+            ip_text,
+            parsed.version,
+            int(asn or 0),
+            clean_text(prefix),
+            clean_text(as_name),
+            clean_text(country).upper(),
+            clean_text(source),
+            now.isoformat(),
+            expires.isoformat(),
+        ),
+    )
+
+
+def queue_asn_resolution(conn: sqlite3.Connection, ip: str, status: str = "pending", error: str = "") -> bool:
+    ip_text = clean_ip(ip)
+    parsed = ip_address(ip_text)
+    now = utc_now_iso()
+    cursor = conn.execute(
+        """
+        INSERT INTO asn_resolution_queue (
+            ip, ip_version, first_seen_at, last_seen_at, attempts, status, last_error
+        )
+        VALUES (?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(ip) DO UPDATE SET
+            last_seen_at = excluded.last_seen_at,
+            status = CASE
+                WHEN asn_resolution_queue.status = 'resolved' AND excluded.status = 'pending' THEN asn_resolution_queue.status
+                ELSE excluded.status
+            END,
+            last_error = excluded.last_error
+        """,
+        (ip_text, parsed.version, now, now, clean_text(status) or "pending", clean_text(error)),
+    )
+    return cursor.rowcount > 0
+
+
+def resolve_asn_for_ip(ip: str) -> dict[str, Any]:
+    ip_text = clean_ip(ip)
+    try:
+        parsed = ip_address(ip_text)
+    except ValueError:
+        return {"ip": ip_text, "asn": 0, "as_name": "", "country": "", "prefix": "", "source": "unresolved"}
+    cached = lookup_asn_cache(ip_text)
+    if cached:
+        return {"ip": ip_text, **cached}
+    prefix = lookup_asn_prefix(ip_text)
+    if prefix:
+        with sqlite_connection() as conn:
+            ensure_asn_db(conn)
+            upsert_asn_lookup_cache(
+                conn,
+                ip_text,
+                int(prefix["asn"] or 0),
+                prefix.get("prefix") or "",
+                prefix.get("as_name") or "",
+                prefix.get("country") or "",
+                prefix.get("source") or "local_prefix_db",
+            )
+            conn.commit()
+        return {"ip": ip_text, **prefix, "source": prefix.get("source") or "local_prefix_db"}
+    if parsed.is_global:
+        with sqlite_connection() as conn:
+            ensure_asn_db(conn)
+            queue_asn_resolution(conn, ip_text)
+            conn.commit()
+    return {"ip": ip_text, "asn": 0, "as_name": "", "country": "", "prefix": "", "source": "unresolved"}
+
+
 def asn_label(asn: int) -> str:
     return f"AS{int(asn)}" if int(asn or 0) > 0 else "ASN indisponivel"
+
+
+def lookup_asn_info(asn: int) -> dict[str, Any] | None:
+    number = int(asn or 0)
+    if number <= 0:
+        return None
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        row = conn.execute(
+            """
+            SELECT asn, as_name, country, source, updated_at
+            FROM asn_info
+            WHERE asn = ?
+            """,
+            (number,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "asn": number,
+        "as_name": clean_text(row["as_name"]),
+        "country": clean_text(row["country"]).upper(),
+        "source": clean_text(row["source"]),
+        "updated_at": clean_text(row["updated_at"]),
+    }
 
 
 def cached_whois(ip: str) -> dict[str, Any] | None:
@@ -5390,84 +5717,24 @@ def ip_whois(ip: str = Query(..., min_length=2)):
     return cache_whois(ip_text, rdap_response(ip_text, data, reverse_dns, geo, geo_message))
 
 
-def resolve_asn_for_ip(ip: str) -> dict[str, Any]:
-    ip_text = whois_ip_text(ip)
-    cached = lookup_asn_prefix(ip_text)
-    if cached:
-        return {"ip": ip_text, "ok": True, "cached": True, **cached}
-    if not is_public_ip(ip_text):
-        return {"ip": ip_text, "ok": False, "cached": False, "message": "IP privado/local"}
-
-    payload = ip_whois(ip_text)
-    asn, parsed_name = parse_asn_text(payload.get("asn"))
-    as_name = clean_text(parsed_name) or clean_text(payload.get("organization")) or clean_text(payload.get("rdap_name"))
-    if asn <= 0:
-        return {
-            "ip": ip_text,
-            "ok": False,
-            "cached": False,
-            "message": payload.get("message") or "ASN nao encontrado via WHOIS/RDAP",
-        }
-
-    with sqlite_connection() as conn:
-        ensure_asn_db(conn)
-        upsert_asn_prefix(conn, asn_host_prefix(ip_text), asn, as_name, "whois-cache")
-        conn.commit()
-    resolved = lookup_asn_prefix(ip_text) or {}
-    return {"ip": ip_text, "ok": True, "cached": False, **resolved}
+def resolve_ips_to_asn(ips: list[str]) -> list[dict[str, Any]]:
+    return []
 
 
-@app.get("/api/asn/status")
-def asn_status():
-    ensure_sensor_db()
-    with sqlite_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS prefixes,
-                MAX(updated_at) AS updated_at
-            FROM asn_prefixes
-            """
-        ).fetchone()
-    return {
-        "prefixes": int(row["prefixes"] or 0) if row else 0,
-        "updated_at": row["updated_at"] if row else "",
-        "message": "Base ASN local pronta" if row and int(row["prefixes"] or 0) else "Base ASN local vazia",
-    }
-
-
-@app.post("/api/asn/import")
-def import_asn_prefixes(payload: AsnImportPayload):
-    ensure_sensor_db()
-    if not payload.items:
-        raise HTTPException(status_code=400, detail="Nenhum prefixo informado")
-    with sqlite_connection() as conn:
-        ensure_asn_db(conn)
-        for item in payload.items:
-            upsert_asn_prefix(conn, item.prefix, item.asn, item.as_name, item.source)
-        conn.commit()
-    return {"ok": True, "imported": len(payload.items)}
-
-
-@app.post("/api/asn/resolve-pending")
-def resolve_pending_asns(
-    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
-    start: datetime | None = None,
-    end: datetime | None = None,
-    start_time: datetime | None = None,
-    end_time: datetime | None = None,
-    sensor: str | None = None,
-    sensor_id: int | None = Query(None, ge=1),
-    interface_id: int | None = Query(None, ge=1),
-    if_index: int | None = Query(None, ge=0),
-    limit: int = Query(25, ge=1, le=200),
-):
+def asn_queue_from_flows(
+    lookback_minutes: int,
+    limit: int,
+    sensor_id: int | None = None,
+    interface: int | None = None,
+    if_index: int | None = None,
+) -> dict[str, Any]:
     ensure_clickhouse_schema()
-    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(minutes=lookback_minutes)
+    selected_if_index = if_index if if_index is not None else interface
     params: dict[str, Any] = {"limit": limit}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
-    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
-    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
+    where = raw_flow_where(start_dt, end_dt, None, params, exporter_ip, selected_if_index)
     candidates: list[tuple[str, int]] = []
     for ip_field, asn_field in (("src_ip", "src_asn"), ("dst_ip", "dst_asn")):
         result = query_clickhouse(
@@ -5483,42 +5750,249 @@ def resolve_pending_asns(
         )
         candidates.extend((clean_ip(row["ip"]), int(row["bytes"] or 0)) for row in rows_as_dicts(result))
 
-    seen: set[str] = set()
-    resolved: list[dict[str, Any]] = []
+    queued = 0
     skipped = 0
     errors: list[str] = []
-    for ip_text, _bytes in sorted(candidates, key=lambda item: item[1], reverse=True):
-        if ip_text in seen:
-            continue
-        seen.add(ip_text)
-        if len(resolved) >= limit:
-            break
-        try:
-            if not is_public_ip(ip_text):
-                skipped += 1
+    seen: set[str] = set()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        for ip_text, _bytes in sorted(candidates, key=lambda item: item[1], reverse=True):
+            if ip_text in seen or len(seen) >= limit:
                 continue
-            lookup = lookup_asn_prefix(ip_text)
-            if lookup:
-                resolved.append({"ip": ip_text, "ok": True, "cached": True, **lookup})
-                continue
-            item = resolve_asn_for_ip(ip_text)
-            if item.get("ok"):
-                resolved.append(item)
-            else:
-                skipped += 1
-        except Exception as exc:
-            errors.append(f"{ip_text}: {exc}")
-
+            seen.add(ip_text)
+            try:
+                parsed = ip_address(ip_text)
+                if not parsed.is_global:
+                    skipped += 1
+                    continue
+                if lookup_asn_cache(ip_text) or lookup_asn_prefix(ip_text):
+                    skipped += 1
+                    continue
+                if queue_asn_resolution(conn, ip_text):
+                    queued += 1
+            except Exception as exc:
+                errors.append(f"{ip_text}: {exc}")
+        conn.commit()
     return {
         "ok": True,
         "start": iso(start_dt),
         "end": iso(end_dt),
         "candidates": len(seen),
-        "resolved": resolved,
-        "resolved_count": len(resolved),
+        "queued": queued,
         "skipped": skipped,
         "errors": errors,
     }
+
+
+def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, Any]:
+    now = utc_now_iso()
+    result = {
+        "ok": True,
+        "ips_processed": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "prefixes_inserted": 0,
+        "cache_updated": 0,
+        "errors": [],
+    }
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        statuses = ("pending", "stale") if not force else ("pending", "stale", "resolved", "failed")
+        placeholders = ", ".join("?" for _ in statuses)
+        rows = conn.execute(
+            f"""
+            SELECT ip, attempts
+            FROM asn_resolution_queue
+            WHERE status IN ({placeholders})
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (*statuses, limit),
+        ).fetchall()
+
+        unresolved_ips: list[str] = []
+        for row in rows:
+            ip_text = clean_ip(row["ip"])
+            result["ips_processed"] += 1
+            try:
+                resolved = lookup_asn_cache(ip_text) or lookup_asn_prefix(ip_text)
+                if resolved and int(resolved.get("asn") or 0) > 0:
+                    upsert_asn_lookup_cache(
+                        conn,
+                        ip_text,
+                        int(resolved["asn"]),
+                        resolved.get("prefix") or "",
+                        resolved.get("as_name") or "",
+                        resolved.get("country") or "",
+                        resolved.get("source") or "local_prefix_db",
+                    )
+                    conn.execute(
+                        """
+                        UPDATE asn_resolution_queue
+                        SET status = 'resolved', attempts = attempts + 1, last_seen_at = ?, last_error = ''
+                        WHERE ip = ?
+                        """,
+                        (now, ip_text),
+                    )
+                    result["resolved"] += 1
+                    result["cache_updated"] += 1
+                else:
+                    unresolved_ips.append(ip_text)
+            except Exception as exc:
+                conn.execute(
+                    """
+                    UPDATE asn_resolution_queue
+                    SET status = 'stale', attempts = attempts + 1, last_seen_at = ?, last_error = ?
+                    WHERE ip = ?
+                    """,
+                    (now, clean_text(exc), ip_text),
+                )
+                result["errors"].append(f"{ip_text}: {exc}")
+
+        provider_items = resolve_ips_to_asn(unresolved_ips[:limit])
+        provider_by_ip = {clean_ip(item.get("ip")): item for item in provider_items if clean_text(item.get("ip"))}
+        for ip_text in unresolved_ips:
+            item = provider_by_ip.get(ip_text)
+            if item and int(item.get("asn") or 0) > 0:
+                prefix = clean_text(item.get("prefix")) or asn_host_prefix(ip_text)
+                upsert_asn_prefix(
+                    conn,
+                    prefix,
+                    int(item["asn"]),
+                    clean_text(item.get("as_name")),
+                    clean_text(item.get("source")) or "provider",
+                    clean_text(item.get("country")),
+                )
+                upsert_asn_lookup_cache(
+                    conn,
+                    ip_text,
+                    int(item["asn"]),
+                    prefix,
+                    clean_text(item.get("as_name")),
+                    clean_text(item.get("country")),
+                    clean_text(item.get("source")) or "provider",
+                )
+                conn.execute(
+                    """
+                    UPDATE asn_resolution_queue
+                    SET status = 'resolved', attempts = attempts + 1, last_seen_at = ?, last_error = ''
+                    WHERE ip = ?
+                    """,
+                    (now, ip_text),
+                )
+                result["resolved"] += 1
+                result["prefixes_inserted"] += 1
+                result["cache_updated"] += 1
+            else:
+                conn.execute(
+                    """
+                    UPDATE asn_resolution_queue
+                    SET status = 'stale', attempts = attempts + 1, last_seen_at = ?, last_error = ?
+                    WHERE ip = ?
+                    """,
+                    (now, "ASN ainda nao resolvido por base/cache local", ip_text),
+                )
+                result["unresolved"] += 1
+        conn.commit()
+    return result
+
+
+def asn_resolver_loop() -> None:
+    while not ASN_RESOLVER_STOP.is_set():
+        try:
+            process_asn_resolution_queue(ASN_RESOLVER_MAX_IPS_PER_RUN, False)
+        except Exception as exc:
+            logger.warning("Falha no job de resolucao ASN: %s", exc)
+        ASN_RESOLVER_STOP.wait(max(60, ASN_RESOLVER_INTERVAL_SECONDS))
+
+
+def start_asn_resolver_thread() -> None:
+    if not ASN_RESOLVER_ENABLED:
+        return
+    thread = threading.Thread(target=asn_resolver_loop, name="gmj-flow-asn-resolver", daemon=True)
+    thread.start()
+
+
+@app.get("/api/asn/status")
+def asn_status():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        prefixes = conn.execute("SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM asn_prefixes").fetchone()
+        info = conn.execute("SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM asn_info").fetchone()
+        cache = conn.execute("SELECT COUNT(*) AS count, MAX(resolved_at) AS updated_at FROM asn_lookup_cache").fetchone()
+        pending = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM asn_resolution_queue
+            WHERE status IN ('pending', 'stale')
+            """
+        ).fetchone()
+    last_update = max(
+        clean_text(prefixes["updated_at"] if prefixes else ""),
+        clean_text(info["updated_at"] if info else ""),
+        clean_text(cache["updated_at"] if cache else ""),
+    )
+    return {
+        "total_prefixes": int(prefixes["count"] or 0) if prefixes else 0,
+        "total_asn_info": int(info["count"] or 0) if info else 0,
+        "total_cache": int(cache["count"] or 0) if cache else 0,
+        "total_pending": int(pending["count"] or 0) if pending else 0,
+        "last_update": last_update,
+        "resolver_enabled": ASN_RESOLVER_ENABLED,
+        "resolver_interval_seconds": ASN_RESOLVER_INTERVAL_SECONDS,
+    }
+
+
+@app.post("/api/asn/import")
+def import_asn_prefixes(payload: AsnImportPayload):
+    ensure_sensor_db()
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Nenhum prefixo informado")
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        for item in payload.items:
+            upsert_asn_prefix(conn, item.prefix, item.asn, item.as_name, item.source, item.country)
+        conn.commit()
+    return {"ok": True, "imported": len(payload.items)}
+
+
+@app.post("/api/asn/queue-from-flows")
+def queue_asns_from_flows(payload: AsnQueueFromFlowsPayload):
+    return asn_queue_from_flows(
+        payload.lookback_minutes,
+        payload.limit,
+        payload.sensor_id,
+        payload.interface,
+        payload.if_index,
+    )
+
+
+@app.post("/api/asn/resolve")
+def resolve_asn_queue(payload: AsnResolvePayload | None = None):
+    item = payload or AsnResolvePayload()
+    return process_asn_resolution_queue(item.limit, item.force)
+
+
+@app.post("/api/asn/resolve-pending")
+def resolve_pending_asns(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    limit: int = Query(25, ge=1, le=200),
+):
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    lookback = max(1, int((end_dt - start_dt).total_seconds() / 60))
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    queue_result = asn_queue_from_flows(lookback, limit, sensor_id, resolved_if_index, resolved_if_index)
+    resolve_result = process_asn_resolution_queue(limit, False)
+    return {"ok": True, "queue": queue_result, **resolve_result, "resolved_count": resolve_result["resolved"]}
 
 
 @app.get("/api/sensors")
@@ -5777,7 +6251,8 @@ def apply_sensor_sample_rate_to_interfaces(
     sensor_id: int,
     payload: SensorSampleRateApplyPayload | None = None,
 ):
-    inherit = True if payload is None else bool(payload.inherit)
+    requested_mode = clean_text(payload.mode).lower() if payload is not None else ""
+    inherit = requested_mode != "copy" if requested_mode in {"inherit", "copy"} else (True if payload is None else bool(payload.inherit))
     ensure_sensor_db()
     with sqlite_connection() as conn:
         sensor = fetch_sensor_without_interfaces(conn, sensor_id)
@@ -5821,6 +6296,7 @@ def apply_sensor_sample_rate_to_interfaces(
         "ok": True,
         "sensor_id": sensor_id,
         "inherit": inherit,
+        "mode": "inherit" if inherit else "copy",
         "affected": int(cursor.rowcount or 0),
         "sample_rate_default_in": default_in,
         "sample_rate_default_out": default_out,
@@ -6010,7 +6486,8 @@ def effective_sample_rate_from_config(
     default_rate = max(1, int(config.get(default_key) or 1))
     interfaces = config.get("interfaces") if isinstance(config.get("interfaces"), dict) else {}
     interface = interfaces.get(int(if_index or 0))
-    if interface and interface.get("override"):
+    mode = clean_text(config.get("mode")) or "sensor_default"
+    if interface and (interface.get("override") or mode == "per_interface"):
         return max(1, int(interface.get(direction_key) or default_rate))
     return default_rate
 
@@ -6851,12 +7328,14 @@ def top_asn_dimension(
         asn = int(row["asn"] or 0)
         if asn <= 0:
             continue
+        asn_info = lookup_asn_info(asn) or {}
         items.append(
             {
                 "rank": index,
                 "asn": asn_label(asn),
                 "asn_number": asn,
-                "description": clean_text(row.get("as_name")) or "-",
+                "description": clean_text(row.get("as_name")) or clean_text(asn_info.get("as_name")) or "-",
+                "country": clean_text(asn_info.get("country")).upper() or "N/D",
                 "source": "flow",
                 "bps": round(float(row["bps"] or 0), 2),
                 "packets": int(float(row["packets"] or 0)),
@@ -6864,6 +7343,48 @@ def top_asn_dimension(
                 "percent": 0.0,
             }
         )
+
+    ip_result = query_clickhouse(
+        f"""
+        SELECT
+            toString({ip_col}) AS ip,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where} AND {asn_col} = 0
+        GROUP BY ip
+        ORDER BY bps DESC
+        LIMIT 200
+        """,
+        params,
+    )
+    grouped = {int(item["asn_number"]): item for item in items}
+    for row in rows_as_dicts(ip_result):
+        resolved = resolve_asn_for_ip(clean_ip(row["ip"]))
+        asn = int(resolved.get("asn") or 0)
+        if asn <= 0:
+            continue
+        item = grouped.setdefault(
+            asn,
+            {
+                "asn": asn_label(asn),
+                "asn_number": asn,
+                "description": clean_text(resolved.get("as_name")) or "-",
+                "country": clean_text(resolved.get("country")).upper() or "N/D",
+                "source": clean_text(resolved.get("source")) or "local-cache",
+                "bps": 0.0,
+                "packets": 0,
+                "flows": 0,
+                "percent": 0.0,
+            },
+        )
+        item["bps"] = round(float(item.get("bps") or 0) + float(row["bps"] or 0), 2)
+        item["packets"] = int(item.get("packets") or 0) + int(float(row["packets"] or 0))
+        item["flows"] = int(item.get("flows") or 0) + int(row["flows"] or 0)
+    items = sorted(grouped.values(), key=lambda item: float(item.get("bps") or 0), reverse=True)[:limit]
+    for index, item in enumerate(items, start=1):
+        item["rank"] = index
 
     if not items:
         ip_result = query_clickhouse(
@@ -6899,6 +7420,7 @@ def top_asn_dimension(
                     "asn": asn_label(asn),
                     "asn_number": asn,
                     "description": asn_info.get("as_name") or "-",
+                    "country": clean_text(asn_info.get("country")).upper() or "N/D",
                     "source": asn_info.get("source") or "local-cache",
                     "bps": 0.0,
                     "packets": 0,
@@ -6943,6 +7465,7 @@ def top_asn_dimension(
         "rank": 1,
         "asn": "ASN indisponivel",
         "description": "Sem ASN no flow e sem prefixo correspondente na base local",
+        "country": "N/D",
         "bps": bps,
         "packets": 0,
         "flows": 0,
@@ -7332,7 +7855,6 @@ def search_flows(
 def top_flow_items_from_rows(
     rows: list[dict[str, Any]],
     top_type: str,
-    total_bits_s: float,
 ) -> list[dict[str, Any]]:
     items = []
     for index, row in enumerate(rows, start=1):
@@ -7343,7 +7865,7 @@ def top_flow_items_from_rows(
             key = proto_name(row.get("proto") if "proto" in row else key)
         elif top_type == "tcp_flags":
             key = tcp_flags_name(row.get("tcp_flags") if "tcp_flags" in row else key)
-        elif top_type in {"src_asn", "dst_asn"}:
+        elif top_type in {"asn_src", "asn_dst"}:
             asn = int(row.get("asn") or 0)
             key = asn_label(asn)
         item = {
@@ -7354,19 +7876,21 @@ def top_flow_items_from_rows(
             "bytes": int(float(row.get("bytes") or 0)),
             "packets": int(float(row.get("packets") or 0)),
             "flows": int(row.get("flows") or 0),
-            "percent": 0.0,
+            "percent": round(float(row.get("percent_total") or row.get("percent") or 0), 2),
         }
-        if top_type in {"src_port", "dst_port"}:
+        if top_type in {"src_port", "dst_port", "ports"}:
             item["proto"] = proto_name(row.get("proto"))
             item["port"] = int(row.get("port") or 0)
             item["key"] = f"{item['proto']}/{item['port']}"
         if top_type == "conversation":
             item["src_ip"] = clean_ip(row.get("src_ip"))
             item["dst_ip"] = clean_ip(row.get("dst_ip"))
-        if top_type in {"src_asn", "dst_asn"}:
+        if top_type in {"input_if", "output_if"}:
+            item["if_index"] = int(row.get("if_index") or 0)
+            item["key"] = f"ifIndex {item['if_index']}"
+        if top_type in {"asn_src", "asn_dst"}:
             item["description"] = clean_text(row.get("as_name")) or "-"
-        if total_bits_s > 0:
-            item["percent"] = round(item["bits_s"] * 100 / total_bits_s, 2)
+            item["country"] = clean_text(row.get("country")).upper() or "N/D"
         items.append(item)
     return items
 
@@ -7399,8 +7923,11 @@ def top_flows(
 ):
     ensure_clickhouse_schema()
     top_type = clean_text(top_type).lower().replace("-", "_")
+    top_type = TOP_FLOW_TYPE_ALIASES.get(top_type, top_type)
     if top_type not in TOP_FLOW_TYPES:
         raise HTTPException(status_code=400, detail="top_type invalido")
+    if order_by not in TOP_FLOW_SORT_COLUMNS:
+        order_by = "bits_s"
     context = flow_query_context(
         range_minutes,
         start,
@@ -7427,181 +7954,190 @@ def top_flows(
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
+    direction_sql = sort_direction(order_dir)
+    order_expr = TOP_FLOW_SORT_COLUMNS[order_by]
     factor_expr = clickhouse_sample_rate_expr(
         sensor_id,
         context["rate_direction"],
         context["resolved_if_index"],
     )
-    bytes_sum = corrected_sum_expr("bytes", factor_expr)
-    packets_sum = corrected_sum_expr("packets", factor_expr)
-    order_expr = TOP_FLOW_SORT_COLUMNS.get(order_by, "bits_s")
-    if order_expr == "percent":
-        order_expr = "bits_s"
-    direction_sql = sort_direction(order_dir)
 
-    if top_type == "interfaces":
-        input_factor = clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"])
-        output_factor = clickhouse_sample_rate_expr(sensor_id, "output", context["resolved_if_index"])
-        subqueries = []
-        if clean_text(direction).lower() in {"both", "download", ""}:
-            subqueries.append(
-                f"""
+    def final_top_query(raw_sql: str, select_cols: str, group_by: str) -> str:
+        return f"""
+        WITH
+            base AS (
                 SELECT
-                    concat('Download if ', toString(input_if)) AS key,
-                    {corrected_value_expr('bytes', input_factor)} AS bytes_value,
-                    {corrected_value_expr('packets', input_factor)} AS packets_value,
-                    flow_count
-                FROM flow_raw
-                WHERE {context["where"]} AND input_if > 0
-                """
-            )
-        if clean_text(direction).lower() in {"both", "upload", ""}:
-            subqueries.append(
-                f"""
+                    {select_cols},
+                    sum(bytes_value) AS bytes,
+                    sum(packets_value) AS packets,
+                    sum(flow_count) AS flows
+                FROM (
+                    {raw_sql}
+                )
+                GROUP BY {group_by}
+            ),
+            totals AS (
                 SELECT
-                    concat('Upload if ', toString(output_if)) AS key,
-                    {corrected_value_expr('bytes', output_factor)} AS bytes_value,
-                    {corrected_value_expr('packets', output_factor)} AS packets_value,
-                    flow_count
-                FROM flow_raw
-                WHERE {context["where"]} AND output_if > 0
-                """
+                    sum(bytes) AS total_bytes,
+                    sum(packets) AS total_packets,
+                    sum(flows) AS total_flows
+                FROM base
             )
-        query = f"""
         SELECT
-            key,
-            sum(bytes_value) AS bytes,
-            sum(packets_value) AS packets,
-            sum(flow_count) AS flows,
-            sum(bytes_value) * 8 / {{seconds:Float64}} AS bits_s,
-            sum(packets_value) / {{seconds:Float64}} AS packets_s
-        FROM ({' UNION ALL '.join(subqueries)})
-        GROUP BY key
-        ORDER BY {order_expr} {direction_sql}
-        LIMIT {{limit:UInt32}}
-        """
-    else:
-        if top_type == "src_ip":
-            select_expr = "toString(src_ip) AS key"
-            group_by = "key"
-        elif top_type == "dst_ip":
-            select_expr = "toString(dst_ip) AS key"
-            group_by = "key"
-        elif top_type == "conversation":
-            select_expr = "toString(src_ip) AS src_ip, toString(dst_ip) AS dst_ip, concat(toString(src_ip), ' -> ', toString(dst_ip)) AS key"
-            group_by = "src_ip, dst_ip, key"
-        elif top_type == "src_port":
-            select_expr = "src_port AS port, proto, toString(src_port) AS key"
-            group_by = "port, proto, key"
-        elif top_type == "dst_port":
-            select_expr = "dst_port AS port, proto, toString(dst_port) AS key"
-            group_by = "port, proto, key"
-        elif top_type == "proto":
-            select_expr = "proto, toString(proto) AS key"
-            group_by = "proto, key"
-        elif top_type == "tcp_flags":
-            select_expr = "tcp_flags, toString(tcp_flags) AS key"
-            group_by = "tcp_flags, key"
-        elif top_type == "src_asn":
-            select_expr = "toUInt32(src_asn) AS asn, any(src_as_name) AS as_name, toString(src_asn) AS key"
-            group_by = "asn, key"
-            context["where"] += " AND src_asn > 0"
-        else:
-            select_expr = "toUInt32(dst_asn) AS asn, any(dst_as_name) AS as_name, toString(dst_asn) AS key"
-            group_by = "asn, key"
-            context["where"] += " AND dst_asn > 0"
-
-        query = f"""
-        SELECT
-            {select_expr},
-            {bytes_sum} AS bytes,
-            {packets_sum} AS packets,
-            sum(flow_count) AS flows,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s,
-            {packets_sum} / {{seconds:Float64}} AS packets_s
-        FROM flow_raw
-        WHERE {context["where"]}
-        GROUP BY {group_by}
+            base.*,
+            bytes * 8 / {{seconds:Float64}} AS bits_s,
+            packets / {{seconds:Float64}} AS packets_s,
+            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total
+        FROM base
+        CROSS JOIN totals
         ORDER BY {order_expr} {direction_sql}
         LIMIT {{limit:UInt32}}
         """
 
-    result = query_clickhouse(query, params)
-    result_rows = rows_as_dicts(result)
-    total_where = context["where"]
-    if top_type in {"src_asn", "dst_asn"} and not result_rows:
-        total_where = (
-            context["where"]
-            .replace(" AND src_asn > 0", "")
-            .replace(" AND dst_asn > 0", "")
-        )
-        ip_col = "src_ip" if top_type == "src_asn" else "dst_ip"
-        ip_result = query_clickhouse(
-            f"""
+    def raw_select(dimension_cols: str, rate_expr: str = factor_expr, where: str | None = None) -> str:
+        return f"""
             SELECT
-                toString({ip_col}) AS ip,
-                {bytes_sum} AS bytes,
-                {packets_sum} AS packets,
-                sum(flow_count) AS flows,
-                {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s
+                {dimension_cols},
+                {corrected_value_expr('bytes', rate_expr)} AS bytes_value,
+                {corrected_value_expr('packets', rate_expr)} AS packets_value,
+                flow_count
             FROM flow_raw
-            WHERE {total_where}
-            GROUP BY ip
-            ORDER BY bits_s DESC
-            LIMIT 200
-            """,
-            params,
-        )
+            WHERE {where or context["where"]}
+        """
+
+    if top_type in {"asn_src", "asn_dst"}:
+        ip_col = "src_ip" if top_type == "asn_src" else "dst_ip"
+        asn_col = "src_asn" if top_type == "asn_src" else "dst_asn"
+        as_name_col = "src_as_name" if top_type == "asn_src" else "dst_as_name"
+        params["asn_ip_limit"] = max(200, min(5000, limit * 50))
+        query = final_top_query(
+            raw_select(
+                f"toString({ip_col}) AS ip, toUInt32({asn_col}) AS flow_asn, {as_name_col} AS flow_as_name",
+            ),
+            "ip, flow_asn, any(flow_as_name) AS flow_as_name",
+            "ip, flow_asn",
+        ).replace("LIMIT {limit:UInt32}", "LIMIT {asn_ip_limit:UInt32}")
+        result_rows = rows_as_dicts(query_clickhouse(query, params))
         grouped: dict[int, dict[str, Any]] = {}
-        for row in rows_as_dicts(ip_result):
-            ip_text = clean_ip(row.get("ip"))
-            try:
-                if not is_public_ip(ip_text):
-                    continue
-            except ValueError:
-                continue
-            asn_info = lookup_asn_prefix(ip_text)
-            if not asn_info:
-                continue
-            asn = int(asn_info["asn"] or 0)
-            item = grouped.setdefault(
+        unresolved = {
+            "asn": 0,
+            "key": "0",
+            "as_name": "ASN indisponivel",
+            "country": "N/D",
+            "bytes": 0.0,
+            "packets": 0.0,
+            "flows": 0,
+            "bits_s": 0.0,
+            "packets_s": 0.0,
+            "percent_total": 0.0,
+        }
+        for row in result_rows:
+            asn = int(row.get("flow_asn") or 0)
+            as_name = clean_text(row.get("flow_as_name"))
+            country = ""
+            source = "flow"
+            if asn > 0:
+                info = lookup_asn_info(asn)
+                if info:
+                    as_name = as_name or clean_text(info.get("as_name"))
+                    country = clean_text(info.get("country"))
+                    source = clean_text(info.get("source")) or "flow"
+            else:
+                resolved = resolve_asn_for_ip(clean_ip(row.get("ip")))
+                asn = int(resolved.get("asn") or 0)
+                as_name = clean_text(resolved.get("as_name"))
+                country = clean_text(resolved.get("country"))
+                source = clean_text(resolved.get("source")) or "unresolved"
+            target = unresolved if asn <= 0 else grouped.setdefault(
                 asn,
                 {
                     "asn": asn,
                     "key": str(asn),
-                    "as_name": asn_info.get("as_name") or "",
+                    "as_name": as_name or "-",
+                    "country": country.upper() or "N/D",
+                    "source": source,
                     "bytes": 0.0,
                     "packets": 0.0,
                     "flows": 0,
                     "bits_s": 0.0,
+                    "packets_s": 0.0,
+                    "percent_total": 0.0,
                 },
             )
-            item["bytes"] += float(row.get("bytes") or 0)
-            item["packets"] += float(row.get("packets") or 0)
-            item["flows"] += int(row.get("flows") or 0)
-            item["bits_s"] += float(row.get("bits_s") or 0)
-        result_rows = list(grouped.values())
-        for row in result_rows:
-            row["packets_s"] = float(row.get("packets") or 0) / seconds
+            if target is not unresolved:
+                target["as_name"] = target.get("as_name") or as_name or "-"
+                target["country"] = (target.get("country") if target.get("country") != "N/D" else country.upper()) or "N/D"
+            target["bytes"] += float(row.get("bytes") or 0)
+            target["packets"] += float(row.get("packets") or 0)
+            target["flows"] += int(row.get("flows") or 0)
+            target["bits_s"] += float(row.get("bits_s") or 0)
+            target["packets_s"] += float(row.get("packets_s") or 0)
+            target["percent_total"] += float(row.get("percent_total") or 0)
+        grouped_rows = list(grouped.values())
+        if unresolved["bytes"] > 0:
+            grouped_rows.append(unresolved)
         reverse = direction_sql == "DESC"
-        if order_by in {"key"}:
-            result_rows.sort(key=lambda row: row.get("key") or "", reverse=reverse)
+        if order_by == "key":
+            grouped_rows.sort(key=lambda item: item["key"], reverse=reverse)
         else:
-            result_rows.sort(key=lambda row: float(row.get(order_by) or row.get("bits_s") or 0), reverse=reverse)
-        result_rows = result_rows[:limit]
-    total_result = query_clickhouse(
-        f"""
-        SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s
-        FROM flow_raw
-        WHERE {total_where}
-        """,
-        params,
-    )
-    total_rows = rows_as_dicts(total_result)
-    total_bits_s = float(total_rows[0]["bits_s"] or 0) if total_rows else 0.0
-    items = top_flow_items_from_rows(result_rows, top_type, total_bits_s)
-    if order_by == "percent":
-        items.sort(key=lambda item: item["percent"], reverse=direction_sql == "DESC")
+            grouped_rows.sort(key=lambda item: float(item.get(order_by if order_by != "percent" else "percent_total") or 0), reverse=reverse)
+        result_rows = grouped_rows[:limit]
+    else:
+        if top_type == "src_ip":
+            raw_sql = raw_select("toString(src_ip) AS key")
+            select_expr = "key"
+            group_by = "key"
+        elif top_type == "dst_ip":
+            raw_sql = raw_select("toString(dst_ip) AS key")
+            select_expr = "key"
+            group_by = "key"
+        elif top_type == "conversation":
+            raw_sql = raw_select("toString(src_ip) AS src_ip, toString(dst_ip) AS dst_ip, concat(toString(src_ip), ' -> ', toString(dst_ip)) AS key")
+            select_expr = "src_ip, dst_ip, key"
+            group_by = "src_ip, dst_ip, key"
+        elif top_type == "src_port":
+            raw_sql = raw_select("src_port AS port, proto, toString(src_port) AS key")
+            select_expr = "port, proto, key"
+            group_by = "port, proto, key"
+        elif top_type == "dst_port":
+            raw_sql = raw_select("dst_port AS port, proto, toString(dst_port) AS key")
+            select_expr = "port, proto, key"
+            group_by = "port, proto, key"
+        elif top_type == "ports":
+            raw_sql = f"""
+                {raw_select("src_port AS port, proto, toString(src_port) AS key")}
+                UNION ALL
+                {raw_select("dst_port AS port, proto, toString(dst_port) AS key")}
+            """
+            select_expr = "port, proto, key"
+            group_by = "port, proto, key"
+        elif top_type == "proto":
+            raw_sql = raw_select("proto, toString(proto) AS key")
+            select_expr = "proto, key"
+            group_by = "proto, key"
+        elif top_type == "tcp_flags":
+            raw_sql = raw_select("tcp_flags, toString(tcp_flags) AS key")
+            select_expr = "tcp_flags, key"
+            group_by = "tcp_flags, key"
+        elif top_type == "input_if":
+            raw_sql = raw_select("input_if AS if_index, toString(input_if) AS key")
+            select_expr = "if_index, key"
+            group_by = "if_index, key"
+        elif top_type == "output_if":
+            raw_sql = raw_select("output_if AS if_index, toString(output_if) AS key")
+            select_expr = "if_index, key"
+            group_by = "if_index, key"
+        else:
+            raw_sql = f"""
+                {raw_select("concat('Download if ', toString(input_if)) AS key", clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"]), f"{context['where']} AND input_if > 0")}
+                UNION ALL
+                {raw_select("concat('Upload if ', toString(output_if)) AS key", clickhouse_sample_rate_expr(sensor_id, "output", context["resolved_if_index"]), f"{context['where']} AND output_if > 0")}
+            """
+            select_expr = "key"
+            group_by = "key"
+        result_rows = rows_as_dicts(query_clickhouse(final_top_query(raw_sql, select_expr, group_by), params))
+
+    items = top_flow_items_from_rows(result_rows, top_type)
     return {
         "start": iso(start_dt),
         "end": iso(end_dt),

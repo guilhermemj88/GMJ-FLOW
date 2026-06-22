@@ -55,12 +55,15 @@ O backend agora tenta esta ordem:
 
 1. `src_asn`/`dst_asn` vindo do flow/IPFIX.
 2. Base local `asn_prefixes` por prefixo IP.
-3. Resolucao sob demanda via botao **Resolver ASNs**, que consulta WHOIS/RDAP para IPs agregados e grava cache local por host.
+3. Resolucao sob demanda via botao **Resolver ASNs**, que enfileira IPs sem ASN e processa a fila usando base/cache local.
 
 Endpoints administrativos:
 
 ```text
 GET  /api/asn/status
 POST /api/asn/import
-POST /api/asn/resolve-pending
+POST /api/asn/queue-from-flows
+POST /api/asn/resolve
 ```
+
+Veja tambem `docs/asn-resolution.md`.
