@@ -91,7 +91,7 @@ services:
       PMACCT_OUTPUT_FILE: "${PMACCT_OUTPUT_FILE-/var/spool/pmacct/nfacctd.csv}"
       PMACCT_OUTPUT_FORMAT: "${PMACCT_OUTPUT_FORMAT-csv}"
       PMACCT_CSV_DELIMITER: "${PMACCT_CSV_DELIMITER-,}"
-      PMACCT_CSV_FIELDS: "${PMACCT_CSV_FIELDS-src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,timestamp,packets,bytes,flows}"
+      PMACCT_CSV_FIELDS: "${PMACCT_CSV_FIELDS-src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,src_as,dst_as,timestamp,packets,bytes,flows}"
       PMACCT_SAMPLE_RATE: "${PMACCT_SAMPLE_RATE-1}"
       PMACCT_PARSER_BATCH_SIZE: "${PMACCT_PARSER_BATCH_SIZE-1000}"
       PMACCT_PARSER_FLUSH_SECONDS: "${PMACCT_PARSER_FLUSH_SECONDS-5}"

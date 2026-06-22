@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import asyncio
+import csv
+import io
 import json
 import logging
 import socket
@@ -16,7 +18,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
-from ipaddress import IPv4Address, ip_address, ip_network
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -27,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -52,6 +54,50 @@ PROTO_LABELS = {
 }
 
 PROTO_NUMBERS = {name.lower(): int(number) for number, name in PROTO_LABELS.items()}
+
+FLOW_SEARCH_SORT_COLUMNS = {
+    "flow_time": "flow_time",
+    "sensor": "sensor",
+    "exporter_ip": "exporter_ip",
+    "src_ip": "toString(src_ip)",
+    "src_port": "src_port",
+    "dst_ip": "toString(dst_ip)",
+    "dst_port": "dst_port",
+    "proto": "proto",
+    "tcp_flags": "tcp_flags",
+    "input_if": "input_if",
+    "output_if": "output_if",
+    "bytes": "bytes",
+    "packets": "packets",
+    "flows": "flow_count",
+    "bits_s": "bits_s",
+    "packets_s": "packets_s",
+    "sample_rate": "sample_rate_applied",
+    "flow_type": "flow_type",
+}
+
+TOP_FLOW_TYPES = {
+    "src_ip",
+    "dst_ip",
+    "conversation",
+    "src_port",
+    "dst_port",
+    "proto",
+    "tcp_flags",
+    "interfaces",
+    "src_asn",
+    "dst_asn",
+}
+
+TOP_FLOW_SORT_COLUMNS = {
+    "key": "key",
+    "bits_s": "bits_s",
+    "packets_s": "packets_s",
+    "bytes": "bytes",
+    "packets": "packets",
+    "flows": "flows",
+    "percent": "percent",
+}
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -272,6 +318,22 @@ class SensorInterfacePayload(BaseModel):
     monitor_enabled: bool = True
 
 
+class InterfaceSampleRatePayload(BaseModel):
+    sample_rate_in: int = Field(1, ge=1)
+    sample_rate_out: int = Field(1, ge=1)
+
+
+class AsnPrefixPayload(BaseModel):
+    prefix: str
+    asn: int = Field(..., ge=1)
+    as_name: str = ""
+    source: str = "manual"
+
+
+class AsnImportPayload(BaseModel):
+    items: list[AsnPrefixPayload] = Field(default_factory=list)
+
+
 class SensorPayload(BaseModel):
     name: str
     visibility: str = "show_in_reports"
@@ -429,6 +491,24 @@ def command_clickhouse(command: str, parameters: dict[str, Any] | None = None) -
         return client.command(command, parameters=parameters or {})
     finally:
         close_client(client)
+
+
+CLICKHOUSE_SCHEMA_READY = False
+
+
+def ensure_clickhouse_schema() -> None:
+    global CLICKHOUSE_SCHEMA_READY
+    if CLICKHOUSE_SCHEMA_READY:
+        return
+    commands = (
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_as_name String DEFAULT ''",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_as_name String DEFAULT ''",
+    )
+    for command in commands:
+        command_clickhouse(command)
+    CLICKHOUSE_SCHEMA_READY = True
 
 
 def ping_clickhouse() -> bool:
@@ -816,6 +896,26 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     seed_default_attack_vectors(conn)
 
 
+def ensure_asn_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asn_prefixes (
+            prefix TEXT PRIMARY KEY,
+            asn INTEGER NOT NULL DEFAULT 0,
+            as_name TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_asn_prefixes_asn
+        ON asn_prefixes(asn)
+        """
+    )
+
+
 def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
     now = utc_now_iso()
     row = conn.execute(
@@ -1023,6 +1123,7 @@ def ensure_sensor_db() -> None:
             """
         )
         ensure_attack_vector_db(conn)
+        ensure_asn_db(conn)
         ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
@@ -1048,6 +1149,10 @@ def ensure_sensor_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     ensure_sensor_db()
+    try:
+        ensure_clickhouse_schema()
+    except Exception as exc:
+        logger.warning("Nao foi possivel aplicar migracoes ClickHouse no startup: %s", exc)
     start_snmp_polling_thread()
     start_database_retention_thread()
     start_anomaly_detection_thread()
@@ -1445,7 +1550,7 @@ timestamps_secs: true
 timestamps_utc: true
 
 plugins: print[flows]
-aggregate[flows]: src_host, dst_host, src_port, dst_port, proto, tcpflags, in_iface, out_iface, timestamp_start
+aggregate[flows]: src_host, dst_host, src_port, dst_port, proto, tcpflags, in_iface, out_iface, src_as, dst_as, timestamp_start
 print_output[flows]: csv
 print_output_file[flows]: {output_file}
 print_output_file_append[flows]: true
@@ -1500,7 +1605,7 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
                 f"      PMACCT_OUTPUT_FILE: {yaml_quote(output_file)}",
                 "      PMACCT_OUTPUT_FORMAT: csv",
                 "      PMACCT_CSV_DELIMITER: \",\"",
-                "      PMACCT_CSV_FIELDS: src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,timestamp_start,packets,bytes,flows",
+                "      PMACCT_CSV_FIELDS: src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,src_as,dst_as,timestamp_start,packets,bytes,flows",
                 f"      PMACCT_EXPORTER_IP: {yaml_quote(sensor['exporter_ip'])}",
                 f"      PMACCT_SENSOR: {yaml_quote(sensor['name'])}",
                 "      PMACCT_SAMPLE_RATE: 1",
@@ -2488,6 +2593,93 @@ def is_public_ip(value: str) -> bool:
         or parsed.is_reserved
         or parsed.is_unspecified
     )
+
+
+def parse_asn_text(value: Any) -> tuple[int, str]:
+    text = clean_text(value)
+    if not text:
+        return 0, ""
+    match = re.search(r"\bAS\s*(\d+)\b\s*(.*)", text, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1)), clean_text(match.group(2))
+    try:
+        return int(text), ""
+    except ValueError:
+        return 0, text
+
+
+def normalize_prefix(value: str) -> str:
+    text = clean_text(value)
+    try:
+        return str(ip_network(text, strict=False))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"prefixo ASN invalido: {text}") from None
+
+
+def upsert_asn_prefix(conn: sqlite3.Connection, prefix: str, asn: int, as_name: str, source: str) -> None:
+    normalized_prefix = normalize_prefix(prefix)
+    conn.execute(
+        """
+        INSERT INTO asn_prefixes (prefix, asn, as_name, source, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(prefix) DO UPDATE SET
+            asn = excluded.asn,
+            as_name = excluded.as_name,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+        """,
+        (normalized_prefix, int(asn), clean_text(as_name), clean_text(source), utc_now_iso()),
+    )
+
+
+def asn_host_prefix(ip: str) -> str:
+    parsed = ip_address(ip)
+    if isinstance(parsed, IPv4Address):
+        return f"{parsed}/32"
+    if isinstance(parsed, IPv6Address):
+        return f"{parsed}/128"
+    return f"{ip}/32"
+
+
+def lookup_asn_prefix(ip: str) -> dict[str, Any] | None:
+    ip_text = clean_ip(ip)
+    try:
+        parsed = ip_address(ip_text)
+    except ValueError:
+        return None
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT prefix, asn, as_name, source, updated_at
+            FROM asn_prefixes
+            WHERE asn > 0
+            """
+        ).fetchall()
+    best: tuple[int, sqlite3.Row] | None = None
+    for row in rows:
+        try:
+            network = ip_network(row["prefix"], strict=False)
+        except ValueError:
+            continue
+        if parsed.version != network.version or parsed not in network:
+            continue
+        if best is None or network.prefixlen > best[0]:
+            best = (network.prefixlen, row)
+    if best is None:
+        return None
+    row = best[1]
+    return {
+        "asn": int(row["asn"] or 0),
+        "as_name": clean_text(row["as_name"]),
+        "source": clean_text(row["source"]),
+        "prefix": clean_text(row["prefix"]),
+        "updated_at": clean_text(row["updated_at"]),
+    }
+
+
+def asn_label(asn: int) -> str:
+    return f"AS{int(asn)}" if int(asn or 0) > 0 else "ASN indisponivel"
 
 
 def cached_whois(ip: str) -> dict[str, Any] | None:
@@ -5159,6 +5351,137 @@ def ip_whois(ip: str = Query(..., min_length=2)):
     return cache_whois(ip_text, rdap_response(ip_text, data, reverse_dns, geo, geo_message))
 
 
+def resolve_asn_for_ip(ip: str) -> dict[str, Any]:
+    ip_text = whois_ip_text(ip)
+    cached = lookup_asn_prefix(ip_text)
+    if cached:
+        return {"ip": ip_text, "ok": True, "cached": True, **cached}
+    if not is_public_ip(ip_text):
+        return {"ip": ip_text, "ok": False, "cached": False, "message": "IP privado/local"}
+
+    payload = ip_whois(ip_text)
+    asn, parsed_name = parse_asn_text(payload.get("asn"))
+    as_name = clean_text(parsed_name) or clean_text(payload.get("organization")) or clean_text(payload.get("rdap_name"))
+    if asn <= 0:
+        return {
+            "ip": ip_text,
+            "ok": False,
+            "cached": False,
+            "message": payload.get("message") or "ASN nao encontrado via WHOIS/RDAP",
+        }
+
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        upsert_asn_prefix(conn, asn_host_prefix(ip_text), asn, as_name, "whois-cache")
+        conn.commit()
+    resolved = lookup_asn_prefix(ip_text) or {}
+    return {"ip": ip_text, "ok": True, "cached": False, **resolved}
+
+
+@app.get("/api/asn/status")
+def asn_status():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS prefixes,
+                MAX(updated_at) AS updated_at
+            FROM asn_prefixes
+            """
+        ).fetchone()
+    return {
+        "prefixes": int(row["prefixes"] or 0) if row else 0,
+        "updated_at": row["updated_at"] if row else "",
+        "message": "Base ASN local pronta" if row and int(row["prefixes"] or 0) else "Base ASN local vazia",
+    }
+
+
+@app.post("/api/asn/import")
+def import_asn_prefixes(payload: AsnImportPayload):
+    ensure_sensor_db()
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Nenhum prefixo informado")
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        for item in payload.items:
+            upsert_asn_prefix(conn, item.prefix, item.asn, item.as_name, item.source)
+        conn.commit()
+    return {"ok": True, "imported": len(payload.items)}
+
+
+@app.post("/api/asn/resolve-pending")
+def resolve_pending_asns(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    limit: int = Query(25, ge=1, le=200),
+):
+    ensure_clickhouse_schema()
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    params: dict[str, Any] = {"limit": limit}
+    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
+    candidates: list[tuple[str, int]] = []
+    for ip_field, asn_field in (("src_ip", "src_asn"), ("dst_ip", "dst_asn")):
+        result = query_clickhouse(
+            f"""
+            SELECT toString({ip_field}) AS ip, sum(bytes) AS bytes
+            FROM flow_raw
+            WHERE {where} AND {asn_field} = 0
+            GROUP BY ip
+            ORDER BY bytes DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+        candidates.extend((clean_ip(row["ip"]), int(row["bytes"] or 0)) for row in rows_as_dicts(result))
+
+    seen: set[str] = set()
+    resolved: list[dict[str, Any]] = []
+    skipped = 0
+    errors: list[str] = []
+    for ip_text, _bytes in sorted(candidates, key=lambda item: item[1], reverse=True):
+        if ip_text in seen:
+            continue
+        seen.add(ip_text)
+        if len(resolved) >= limit:
+            break
+        try:
+            if not is_public_ip(ip_text):
+                skipped += 1
+                continue
+            lookup = lookup_asn_prefix(ip_text)
+            if lookup:
+                resolved.append({"ip": ip_text, "ok": True, "cached": True, **lookup})
+                continue
+            item = resolve_asn_for_ip(ip_text)
+            if item.get("ok"):
+                resolved.append(item)
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors.append(f"{ip_text}: {exc}")
+
+    return {
+        "ok": True,
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "candidates": len(seen),
+        "resolved": resolved,
+        "resolved_count": len(resolved),
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 @app.get("/api/sensors")
 def list_sensors():
     ensure_sensor_db()
@@ -5368,6 +5691,132 @@ def apply_calibration_sample_rate(sensor_id: int, if_index: int):
     return apply_interface_calibration(sensor_id, if_index)
 
 
+@app.put("/api/sensors/{sensor_id}/interfaces/{if_index}/sample-rate")
+def update_interface_sample_rate(sensor_id: int, if_index: int, payload: InterfaceSampleRatePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Interface nao encontrada")
+        conn.execute(
+            """
+            UPDATE sensor_interfaces
+            SET sample_rate_in = ?,
+                sample_rate_out = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (payload.sample_rate_in, payload.sample_rate_out, utc_now_iso(), row["id"]),
+        )
+        conn.commit()
+    detail = calibration_detail(sensor_id, if_index)
+    detail["applied"] = True
+    detail["sample_rate_in"] = payload.sample_rate_in
+    detail["sample_rate_out"] = payload.sample_rate_out
+    return detail
+
+
+@app.get("/api/sensors/{sensor_id}/interfaces/{if_index}/diagnostics")
+def interface_diagnostics(sensor_id: int, if_index: int):
+    ensure_sensor_db()
+    now = datetime.now(timezone.utc)
+    start_5m = now - timedelta(minutes=5)
+    start_10m = now - timedelta(minutes=10)
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        interface = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if interface is None:
+            raise HTTPException(status_code=404, detail="Interface nao encontrada")
+        item = enrich_interface_metrics(conn, interface_dashboard_row_to_dict(interface), sensor_id)
+
+    exporter_ip = clean_text(sensor.get("exporter_ip"))
+    if not exporter_ip:
+        raise HTTPException(status_code=400, detail="Sensor sem exporter_ip configurado")
+    params = {
+        "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
+        "if_index": int(if_index),
+        "start_5m": start_5m,
+        "start_10m": start_10m,
+        "end": now,
+    }
+    result = query_clickhouse(
+        """
+        SELECT
+            max(flow_time) AS last_flow_time,
+            countIf(flow_time >= {start_5m:DateTime}) AS flows_5m,
+            countIf(flow_time >= {start_10m:DateTime}) AS flows_10m,
+            min(sample_rate) AS min_sample_rate_detected,
+            max(sample_rate) AS max_sample_rate_detected,
+            any(flow_type) AS flow_type,
+            sumIf(bytes, flow_time >= {start_5m:DateTime} AND input_if = {if_index:UInt32}) * 8 / 300 AS raw_in_bps_5m,
+            sumIf(bytes, flow_time >= {start_5m:DateTime} AND output_if = {if_index:UInt32}) * 8 / 300 AS raw_out_bps_5m
+        FROM flow_raw
+        WHERE flow_time >= {start_10m:DateTime}
+          AND flow_time <= {end:DateTime}
+          AND toString(exporter_ip) = {exporter_ip:String}
+          AND (input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})
+        """,
+        params,
+    )
+    rows = rows_as_dicts(result)
+    row = rows[0] if rows else {}
+    sample_rate_in = max(1, int(item.get("sample_rate_in") or 1))
+    sample_rate_out = max(1, int(item.get("sample_rate_out") or 1))
+    raw_in_bps = float(row.get("raw_in_bps_5m") or 0)
+    raw_out_bps = float(row.get("raw_out_bps_5m") or 0)
+    corrected_in_bps = raw_in_bps * sample_rate_in
+    corrected_out_bps = raw_out_bps * sample_rate_out
+    snmp_in_bps = float(item.get("snmp_in_bps") or 0)
+    snmp_out_bps = float(item.get("snmp_out_bps") or 0)
+    return {
+        "sensor_id": sensor_id,
+        "sensor": sensor.get("name"),
+        "exporter_ip": exporter_ip,
+        "listener_port": sensor.get("listener_port"),
+        "flow_version": sensor.get("flow_version"),
+        "if_index": if_index,
+        "interface": item,
+        "sample_rate_configured": {
+            "in": sample_rate_in,
+            "out": sample_rate_out,
+        },
+        "sample_rate_detected": {
+            "min": int(row.get("min_sample_rate_detected") or 0),
+            "max": int(row.get("max_sample_rate_detected") or 0),
+        },
+        "last_flow_time": iso(row["last_flow_time"]) if row.get("last_flow_time") else "",
+        "flows_5m": int(row.get("flows_5m") or 0),
+        "flows_10m": int(row.get("flows_10m") or 0),
+        "raw_bps_5m": {"in": round(raw_in_bps, 2), "out": round(raw_out_bps, 2)},
+        "corrected_bps_5m": {"in": round(corrected_in_bps, 2), "out": round(corrected_out_bps, 2)},
+        "snmp_bps": {"in": round(snmp_in_bps, 2), "out": round(snmp_out_bps, 2)},
+        "snmp_flow_factor": {
+            "in": round(snmp_in_bps / raw_in_bps, 2) if raw_in_bps > 0 else 0,
+            "out": round(snmp_out_bps / raw_out_bps, 2) if raw_out_bps > 0 else 0,
+        },
+        "confidence": item.get("calibration", {}).get("confidence") if item.get("calibration") else 0,
+        "flow_type": clean_text(row.get("flow_type")),
+    }
+
+
 def raw_flow_where(
     start: datetime,
     end: datetime,
@@ -5399,6 +5848,75 @@ def sensor_exporter_ip(sensor_id: int) -> str:
     return exporter_ip
 
 
+def sensor_interface_sample_rates(sensor_id: int | None) -> dict[int, tuple[int, int]]:
+    if sensor_id is None:
+        return {}
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT if_index, sample_rate_in, sample_rate_out
+            FROM sensor_interfaces
+            WHERE sensor_id = ?
+            """,
+            (sensor_id,),
+        ).fetchall()
+    rates: dict[int, tuple[int, int]] = {}
+    for row in rows:
+        if_index = int(row["if_index"] or 0)
+        if if_index <= 0:
+            continue
+        rates[if_index] = (
+            max(1, int(row["sample_rate_in"] or 1)),
+            max(1, int(row["sample_rate_out"] or 1)),
+        )
+    return rates
+
+
+def sample_rate_literal(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 1
+    return f"toFloat64({max(1, number)})"
+
+
+def clickhouse_sample_rate_expr(
+    sensor_id: int | None,
+    direction: str = "auto",
+    if_index: int | None = None,
+) -> str:
+    fallback = "greatest(toFloat64(sample_rate), 1.0)"
+    rates = sensor_interface_sample_rates(sensor_id)
+    conditions: list[str] = []
+
+    def add_condition(field: str, index: int, rate: int) -> None:
+        conditions.append(f"{field} = {int(index)}, {sample_rate_literal(rate)}")
+
+    for index, (rate_in, rate_out) in rates.items():
+        if if_index is not None and int(index) != int(if_index):
+            continue
+        if direction == "input":
+            add_condition("input_if", index, rate_in)
+        elif direction == "output":
+            add_condition("output_if", index, rate_out)
+        else:
+            add_condition("input_if", index, rate_in)
+            add_condition("output_if", index, rate_out)
+
+    if not conditions:
+        return fallback
+    return f"multiIf({', '.join(conditions)}, {fallback})"
+
+
+def corrected_value_expr(value_field: str, factor_expr: str) -> str:
+    return f"toFloat64({value_field}) * ({factor_expr})"
+
+
+def corrected_sum_expr(value_field: str, factor_expr: str) -> str:
+    return f"sum({corrected_value_expr(value_field, factor_expr)})"
+
+
 def traffic_items(
     metric: str,
     range_minutes: int,
@@ -5415,13 +5933,15 @@ def traffic_items(
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
     value_field = "bytes" if metric == "bps" else "packets"
     multiplier = "8" if metric == "bps" else "1"
+    input_factor = clickhouse_sample_rate_expr(sensor_id, "input")
+    output_factor = clickhouse_sample_rate_expr(sensor_id, "output")
     result = query_clickhouse(
         f"""
         SELECT
             toStartOfMinute(flow_time) AS time,
             sensor,
-            sumIf({value_field}, input_if > 0) * {multiplier} / 60 AS download_{metric},
-            sumIf({value_field}, output_if > 0) * {multiplier} / 60 AS upload_{metric}
+            sumIf({corrected_value_expr(value_field, input_factor)}, input_if > 0) * {multiplier} / 60 AS download_{metric},
+            sumIf({corrected_value_expr(value_field, output_factor)}, output_if > 0) * {multiplier} / 60 AS upload_{metric}
         FROM flow_raw
         WHERE {where}
         GROUP BY time, sensor
@@ -5834,17 +6354,20 @@ def interface_traffic_items(
     multiplier = "8" if metric == "bps" else "1"
     items = []
     for interface in interfaces:
+        selected_if_index = int(interface["if_index"] or 0)
+        input_factor = clickhouse_sample_rate_expr(sensor_id, "input", selected_if_index)
+        output_factor = clickhouse_sample_rate_expr(sensor_id, "output", selected_if_index)
         params: dict[str, Any] = {
             "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
-            "if_index": int(interface["if_index"] or 0),
+            "if_index": selected_if_index,
         }
         where = flow_time_where(params, start_dt, end_dt)
         result = query_clickhouse(
             f"""
             SELECT
                 toStartOfMinute(flow_time) AS time,
-                sumIf({value_field}, input_if = {{if_index:UInt32}}) * {multiplier} / 60 AS download_{metric},
-                sumIf({value_field}, output_if = {{if_index:UInt32}}) * {multiplier} / 60 AS upload_{metric}
+                sumIf({corrected_value_expr(value_field, input_factor)}, input_if = {{if_index:UInt32}}) * {multiplier} / 60 AS download_{metric},
+                sumIf({corrected_value_expr(value_field, output_factor)}, output_if = {{if_index:UInt32}}) * {multiplier} / 60 AS upload_{metric}
             FROM flow_raw
             WHERE {where}
               AND toString(exporter_ip) = {{exporter_ip:String}}
@@ -5931,13 +6454,16 @@ def top_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", resolved_if_index)
+    bytes_sum = corrected_sum_expr("bytes", factor_expr)
+    packets_sum = corrected_sum_expr("packets", factor_expr)
 
     if dimension == "src_ip":
         query = f"""
         SELECT
             toString(src_ip) AS ip,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM flow_raw
         WHERE {where}
@@ -5949,8 +6475,8 @@ def top_dimension(
         query = f"""
         SELECT
             toString(dst_ip) AS ip,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM flow_raw
         WHERE {where}
@@ -5963,8 +6489,8 @@ def top_dimension(
         SELECT
             dst_port AS port,
             proto,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM flow_raw
         WHERE {where}
@@ -5976,8 +6502,8 @@ def top_dimension(
         query = f"""
         SELECT
             proto,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM flow_raw
         WHERE {where}
@@ -5989,8 +6515,8 @@ def top_dimension(
         query = f"""
         SELECT
             tcp_flags,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM flow_raw
         WHERE {where}
@@ -6123,51 +6649,152 @@ def top_asn_dimension(
     interface_id: int | None = None,
     if_index: int | None = None,
 ):
+    ensure_clickhouse_schema()
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     seconds = range_seconds(start_dt, end_dt)
-    params: dict[str, Any] = {"seconds": seconds}
+    params: dict[str, Any] = {"seconds": seconds, "limit": limit}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    rate_direction = "auto"
     if resolved_if_index is not None:
         params["if_index"] = resolved_if_index
         if dimension == "src":
             where += " AND output_if = {if_index:UInt32}"
+            rate_direction = "output"
         else:
             where += " AND input_if = {if_index:UInt32}"
+            rate_direction = "input"
 
+    asn_col = "src_asn" if dimension == "src" else "dst_asn"
+    as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
+    ip_col = "src_ip" if dimension == "src" else "dst_ip"
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, rate_direction, resolved_if_index)
+    bytes_sum = corrected_sum_expr("bytes", factor_expr)
+    packets_sum = corrected_sum_expr("packets", factor_expr)
     result = query_clickhouse(
         f"""
         SELECT
-            sum(bytes) * 8 / {{seconds:Float64}} AS bps,
-            sum(packets) AS packets,
+            toUInt32({asn_col}) AS asn,
+            any({as_name_col}) AS as_name,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
             sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where} AND {asn_col} > 0
+        GROUP BY asn
+        ORDER BY bps DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    items = []
+    for index, row in enumerate(rows_as_dicts(result), start=1):
+        asn = int(row["asn"] or 0)
+        if asn <= 0:
+            continue
+        items.append(
+            {
+                "rank": index,
+                "asn": asn_label(asn),
+                "asn_number": asn,
+                "description": clean_text(row.get("as_name")) or "-",
+                "source": "flow",
+                "bps": round(float(row["bps"] or 0), 2),
+                "packets": int(float(row["packets"] or 0)),
+                "flows": int(row["flows"] or 0),
+                "percent": 0.0,
+            }
+        )
+
+    if not items:
+        ip_result = query_clickhouse(
+            f"""
+            SELECT
+                toString({ip_col}) AS ip,
+                {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+                {packets_sum} AS packets,
+                sum(flow_count) AS flows
+            FROM flow_raw
+            WHERE {where}
+            GROUP BY ip
+            ORDER BY bps DESC
+            LIMIT 200
+            """,
+            params,
+        )
+        grouped: dict[int, dict[str, Any]] = {}
+        for row in rows_as_dicts(ip_result):
+            ip_text = clean_ip(row["ip"])
+            try:
+                if not is_public_ip(ip_text):
+                    continue
+            except ValueError:
+                continue
+            asn_info = lookup_asn_prefix(ip_text)
+            if not asn_info:
+                continue
+            asn = int(asn_info["asn"] or 0)
+            item = grouped.setdefault(
+                asn,
+                {
+                    "asn": asn_label(asn),
+                    "asn_number": asn,
+                    "description": asn_info.get("as_name") or "-",
+                    "source": asn_info.get("source") or "local-cache",
+                    "bps": 0.0,
+                    "packets": 0,
+                    "flows": 0,
+                    "percent": 0.0,
+                },
+            )
+            item["bps"] += float(row["bps"] or 0)
+            item["packets"] += int(float(row["packets"] or 0))
+            item["flows"] += int(row["flows"] or 0)
+        items = sorted(grouped.values(), key=lambda item: item["bps"], reverse=True)[:limit]
+        for index, item in enumerate(items, start=1):
+            item["rank"] = index
+            item["bps"] = round(float(item["bps"] or 0), 2)
+
+    total_result = query_clickhouse(
+        f"""
+        SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bps
         FROM flow_raw
         WHERE {where}
         """,
         params,
     )
-    rows = rows_as_dicts(result)
-    if not rows:
-        return {"start": iso(start_dt), "end": iso(end_dt), "items": []}
-    row = rows[0]
-    bps = round(float(row["bps"] or 0), 2)
+    total_rows = rows_as_dicts(total_result)
+    total_bps = float(total_rows[0]["bps"] or 0) if total_rows else sum(float(item["bps"] or 0) for item in items)
+    for item in items:
+        item["percent"] = round(float(item["bps"] or 0) * 100 / total_bps, 2) if total_bps > 0 else 0.0
+
+    if items:
+        return {
+            "start": iso(start_dt),
+            "end": iso(end_dt),
+            "asn_available": True,
+            "message": "ASN resolvido pelo flow/IPFIX ou pela base ASN local.",
+            "items": items[:limit],
+        }
+
+    bps = round(total_bps, 2)
     if bps <= 0:
-        return {"start": iso(start_dt), "end": iso(end_dt), "items": []}
+        return {"start": iso(start_dt), "end": iso(end_dt), "asn_available": False, "items": []}
     item = {
         "rank": 1,
         "asn": "ASN indisponivel",
-        "description": "Base ASN local ainda nao configurada",
+        "description": "Sem ASN no flow e sem prefixo correspondente na base local",
         "bps": bps,
-        "packets": int(row["packets"] or 0),
-        "flows": int(row["flows"] or 0),
+        "packets": 0,
+        "flows": 0,
         "percent": 100.0,
     }
     return {
         "start": iso(start_dt),
         "end": iso(end_dt),
         "asn_available": False,
-        "message": "ASN ainda nao resolvido; configure uma base ASN local para detalhar por prefixo/AS.",
+        "message": "ASN ausente no flow/IPFIX e nao encontrado na base local. Use Resolver ASNs pendentes ou importe uma base de prefixos.",
         "items": [item][:limit],
     }
 
@@ -6204,8 +6831,7 @@ def top_asn_dst(
     return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
 
 
-@app.get("/api/flows/search")
-def search_flows(
+def flow_query_context(
     range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,
     end: datetime | None = None,
@@ -6223,10 +6849,11 @@ def search_flows(
     dst_port: int | None = Query(None, ge=0, le=65535),
     proto: str | None = None,
     tcp_flags: str | None = None,
-    limit: int = Query(200, ge=1, le=5000),
-):
+    decoder: str | None = None,
+    direction: str = "both",
+) -> dict[str, Any]:
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
-    params: dict[str, Any] = {"start": start_dt, "end": end_dt, "limit": limit}
+    params: dict[str, Any] = {"start": start_dt, "end": end_dt}
     filters = ["flow_time >= {start:DateTime}", "flow_time <= {end:DateTime}"]
     if sensor_id is not None:
         params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
@@ -6235,7 +6862,25 @@ def search_flows(
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
-    if resolved_if_index is not None:
+    direction = clean_text(direction).lower() or "both"
+    if direction not in {"both", "upload", "download"}:
+        raise HTTPException(status_code=400, detail="direction invalida")
+    rate_direction = "auto"
+    if direction == "upload":
+        rate_direction = "output"
+        if resolved_if_index is not None:
+            params["if_index"] = resolved_if_index
+            filters.append("output_if = {if_index:UInt32}")
+        else:
+            filters.append("output_if > 0")
+    elif direction == "download":
+        rate_direction = "input"
+        if resolved_if_index is not None:
+            params["if_index"] = resolved_if_index
+            filters.append("input_if = {if_index:UInt32}")
+        else:
+            filters.append("input_if > 0")
+    elif resolved_if_index is not None:
         params["if_index"] = resolved_if_index
         filters.append("(input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})")
     if ip:
@@ -6256,14 +6901,123 @@ def search_flows(
     if dst_port is not None:
         params["dst_port"] = dst_port
         filters.append("dst_port = {dst_port:UInt16}")
-    proto_value = parse_proto_filter(proto)
+    proto_text = clean_text(proto).lower()
+    proto_value = None if proto_text == "other" else parse_proto_filter(proto)
+    if proto_text == "other":
+        filters.append("proto NOT IN (1, 6, 17, 47, 50, 58)")
+    decoder_text = clean_text(decoder).upper()
+    decoder_proto: int | None = None
+    if decoder_text in {"TCP", "TCP+SYN", "TCP+SYNACK", "TCP+ACK", "TCP+RST", "TCP+NULL", "TCP+ALL", "HTTP", "HTTPS"}:
+        decoder_proto = 6
+    elif decoder_text in {"UDP", "DNS", "NTP", "QUIC", "UDP+QUIC", "SIP", "NETBIOS", "MEMCACHED"}:
+        decoder_proto = 17
+    elif decoder_text == "ICMP":
+        decoder_proto = 1
+    elif decoder_text == "GRE":
+        decoder_proto = 47
+    elif decoder_text in {"ESP", "IPSEC"}:
+        decoder_proto = 50
+    if proto_value is None and decoder_proto is not None:
+        proto_value = decoder_proto
     if proto_value is not None:
         params["proto"] = proto_value
         filters.append("proto = {proto:UInt8}")
     tcp_flags_value = parse_tcp_flags_filter(tcp_flags)
+    if tcp_flags_value is None and decoder_text.startswith("TCP+"):
+        decoder_flag = decoder_text.split("+", 1)[1]
+        if decoder_flag == "SYNACK":
+            tcp_flags_value = 0x12
+        elif decoder_flag == "NULL":
+            tcp_flags_value = 0
+        elif decoder_flag != "ALL":
+            tcp_flags_value = parse_tcp_flags_filter(decoder_flag)
     if tcp_flags_value is not None:
         params["tcp_flags"] = tcp_flags_value
         filters.append("tcp_flags = {tcp_flags:UInt16}")
+    decoder_ports = {
+        "DNS": 53,
+        "NTP": 123,
+        "HTTP": 80,
+        "HTTPS": 443,
+        "QUIC": 443,
+        "UDP+QUIC": 443,
+        "SIP": 5060,
+        "NETBIOS": 137,
+        "MEMCACHED": 11211,
+    }
+    if decoder_text in decoder_ports and port is None and src_port is None and dst_port is None:
+        params["decoder_port"] = decoder_ports[decoder_text]
+        filters.append("(src_port = {decoder_port:UInt16} OR dst_port = {decoder_port:UInt16})")
+
+    return {
+        "start": start_dt,
+        "end": end_dt,
+        "params": params,
+        "where": " AND ".join(filters),
+        "resolved_if_index": resolved_if_index,
+        "rate_direction": rate_direction,
+    }
+
+
+def sort_direction(value: str | None) -> str:
+    return "ASC" if clean_text(value).lower() == "asc" else "DESC"
+
+
+def search_flows_payload(
+    range_minutes: int,
+    start: datetime | None,
+    end: datetime | None,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    sensor: str | None,
+    sensor_id: int | None,
+    interface_id: int | None,
+    if_index: int | None,
+    ip: str | None,
+    src_ip: str | None,
+    dst_ip: str | None,
+    port: int | None,
+    src_port: int | None,
+    dst_port: int | None,
+    proto: str | None,
+    tcp_flags: str | None,
+    decoder: str | None,
+    limit: int,
+    order_by: str,
+    order_dir: str,
+) -> dict[str, Any]:
+    ensure_clickhouse_schema()
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        sensor,
+        sensor_id,
+        interface_id,
+        if_index,
+        ip,
+        src_ip,
+        dst_ip,
+        port,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        decoder,
+        "both",
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    seconds = range_seconds(start_dt, end_dt)
+    params = dict(context["params"])
+    params.update({"limit": limit, "seconds": seconds})
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", context["resolved_if_index"])
+    bytes_value = corrected_value_expr("bytes", factor_expr)
+    packets_value = corrected_value_expr("packets", factor_expr)
+    sort_column = FLOW_SEARCH_SORT_COLUMNS.get(order_by, "flow_time")
+    direction_sql = sort_direction(order_dir)
 
     result = query_clickhouse(
         f"""
@@ -6279,13 +7033,23 @@ def search_flows(
             tcp_flags,
             input_if,
             output_if,
-            bytes,
-            packets,
+            bytes AS raw_bytes,
+            packets AS raw_packets,
+            round({bytes_value}) AS bytes,
+            round({packets_value}) AS packets,
+            flow_count,
+            {bytes_value} * 8 / {{seconds:Float64}} AS bits_s,
+            {packets_value} / {{seconds:Float64}} AS packets_s,
             flow_type,
-            sample_rate
+            sample_rate,
+            {factor_expr} AS sample_rate_applied,
+            src_asn,
+            dst_asn,
+            src_as_name,
+            dst_as_name
         FROM flow_raw
-        WHERE {' AND '.join(filters)}
-        ORDER BY flow_time DESC
+        WHERE {context["where"]}
+        ORDER BY {sort_column} {direction_sql}
         LIMIT {{limit:UInt32}}
         """,
         params,
@@ -6301,11 +7065,391 @@ def search_flows(
         row["tcp_flags_name"] = tcp_flags_name(row["tcp_flags"])
         row["proto_label"] = row["proto_name"]
         row["tcp_flags_label"] = row["tcp_flags_name"]
+        row["bytes"] = int(float(row.get("bytes") or 0))
+        row["packets"] = int(float(row.get("packets") or 0))
+        row["raw_bytes"] = int(row.get("raw_bytes") or 0)
+        row["raw_packets"] = int(row.get("raw_packets") or 0)
+        row["flow_count"] = int(row.get("flow_count") or 0)
+        row["bits_s"] = round(float(row.get("bits_s") or 0), 2)
+        row["packets_s"] = round(float(row.get("packets_s") or 0), 2)
+        row["sample_rate_applied"] = round(float(row.get("sample_rate_applied") or 1), 2)
         items.append(row)
 
     return {
         "start": iso(start_dt),
         "end": iso(end_dt),
         "sensor": sensor,
+        "order_by": order_by,
+        "order_dir": direction_sql.lower(),
+        "items": items,
+    }
+
+
+def flows_csv_response(payload: dict[str, Any]) -> Response:
+    output = io.StringIO()
+    fields = [
+        "flow_time",
+        "sensor",
+        "exporter_ip",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "proto_name",
+        "tcp_flags_name",
+        "input_if",
+        "output_if",
+        "bytes",
+        "packets",
+        "flow_count",
+        "bits_s",
+        "packets_s",
+        "sample_rate_applied",
+        "flow_type",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for item in payload.get("items") or []:
+        writer.writerow(item)
+    return Response(
+        output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=gmj-flow-search.csv"},
+    )
+
+
+@app.get("/api/flows/search")
+def search_flows(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    ip: str | None = None,
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
+    port: int | None = Query(None, ge=0, le=65535),
+    src_port: int | None = Query(None, ge=0, le=65535),
+    dst_port: int | None = Query(None, ge=0, le=65535),
+    proto: str | None = None,
+    tcp_flags: str | None = None,
+    decoder: str | None = None,
+    limit: int = Query(200, ge=1, le=5000),
+    order_by: str = "flow_time",
+    order_dir: str = "desc",
+    format: str | None = None,
+):
+    payload = search_flows_payload(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        sensor,
+        sensor_id,
+        interface_id,
+        if_index,
+        ip,
+        src_ip,
+        dst_ip,
+        port,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        decoder,
+        limit,
+        order_by,
+        order_dir,
+    )
+    if clean_text(format).lower() == "csv":
+        return flows_csv_response(payload)
+    return payload
+
+
+def top_flow_items_from_rows(
+    rows: list[dict[str, Any]],
+    top_type: str,
+    total_bits_s: float,
+) -> list[dict[str, Any]]:
+    items = []
+    for index, row in enumerate(rows, start=1):
+        key = clean_text(row.get("key"))
+        if top_type in {"src_ip", "dst_ip"}:
+            key = clean_ip(key)
+        elif top_type == "proto":
+            key = proto_name(row.get("proto") if "proto" in row else key)
+        elif top_type == "tcp_flags":
+            key = tcp_flags_name(row.get("tcp_flags") if "tcp_flags" in row else key)
+        elif top_type in {"src_asn", "dst_asn"}:
+            asn = int(row.get("asn") or 0)
+            key = asn_label(asn)
+        item = {
+            "rank": index,
+            "key": key,
+            "bits_s": round(float(row.get("bits_s") or 0), 2),
+            "packets_s": round(float(row.get("packets_s") or 0), 2),
+            "bytes": int(float(row.get("bytes") or 0)),
+            "packets": int(float(row.get("packets") or 0)),
+            "flows": int(row.get("flows") or 0),
+            "percent": 0.0,
+        }
+        if top_type in {"src_port", "dst_port"}:
+            item["proto"] = proto_name(row.get("proto"))
+            item["port"] = int(row.get("port") or 0)
+            item["key"] = f"{item['proto']}/{item['port']}"
+        if top_type == "conversation":
+            item["src_ip"] = clean_ip(row.get("src_ip"))
+            item["dst_ip"] = clean_ip(row.get("dst_ip"))
+        if top_type in {"src_asn", "dst_asn"}:
+            item["description"] = clean_text(row.get("as_name")) or "-"
+        if total_bits_s > 0:
+            item["percent"] = round(item["bits_s"] * 100 / total_bits_s, 2)
+        items.append(item)
+    return items
+
+
+@app.get("/api/flows/top")
+def top_flows(
+    top_type: str = Query("src_ip"),
+    direction: str = Query("both"),
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    ip: str | None = None,
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
+    port: int | None = Query(None, ge=0, le=65535),
+    src_port: int | None = Query(None, ge=0, le=65535),
+    dst_port: int | None = Query(None, ge=0, le=65535),
+    proto: str | None = None,
+    tcp_flags: str | None = None,
+    decoder: str | None = None,
+    limit: int = Query(10, ge=1, le=100),
+    order_by: str = "bits_s",
+    order_dir: str = "desc",
+):
+    ensure_clickhouse_schema()
+    top_type = clean_text(top_type).lower().replace("-", "_")
+    if top_type not in TOP_FLOW_TYPES:
+        raise HTTPException(status_code=400, detail="top_type invalido")
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        sensor,
+        sensor_id,
+        interface_id,
+        if_index,
+        ip,
+        src_ip,
+        dst_ip,
+        port,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        decoder,
+        direction,
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    seconds = range_seconds(start_dt, end_dt)
+    params = dict(context["params"])
+    params.update({"seconds": seconds, "limit": limit})
+    factor_expr = clickhouse_sample_rate_expr(
+        sensor_id,
+        context["rate_direction"],
+        context["resolved_if_index"],
+    )
+    bytes_sum = corrected_sum_expr("bytes", factor_expr)
+    packets_sum = corrected_sum_expr("packets", factor_expr)
+    order_expr = TOP_FLOW_SORT_COLUMNS.get(order_by, "bits_s")
+    if order_expr == "percent":
+        order_expr = "bits_s"
+    direction_sql = sort_direction(order_dir)
+
+    if top_type == "interfaces":
+        input_factor = clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"])
+        output_factor = clickhouse_sample_rate_expr(sensor_id, "output", context["resolved_if_index"])
+        subqueries = []
+        if clean_text(direction).lower() in {"both", "download", ""}:
+            subqueries.append(
+                f"""
+                SELECT
+                    concat('Download if ', toString(input_if)) AS key,
+                    {corrected_value_expr('bytes', input_factor)} AS bytes_value,
+                    {corrected_value_expr('packets', input_factor)} AS packets_value,
+                    flow_count
+                FROM flow_raw
+                WHERE {context["where"]} AND input_if > 0
+                """
+            )
+        if clean_text(direction).lower() in {"both", "upload", ""}:
+            subqueries.append(
+                f"""
+                SELECT
+                    concat('Upload if ', toString(output_if)) AS key,
+                    {corrected_value_expr('bytes', output_factor)} AS bytes_value,
+                    {corrected_value_expr('packets', output_factor)} AS packets_value,
+                    flow_count
+                FROM flow_raw
+                WHERE {context["where"]} AND output_if > 0
+                """
+            )
+        query = f"""
+        SELECT
+            key,
+            sum(bytes_value) AS bytes,
+            sum(packets_value) AS packets,
+            sum(flow_count) AS flows,
+            sum(bytes_value) * 8 / {{seconds:Float64}} AS bits_s,
+            sum(packets_value) / {{seconds:Float64}} AS packets_s
+        FROM ({' UNION ALL '.join(subqueries)})
+        GROUP BY key
+        ORDER BY {order_expr} {direction_sql}
+        LIMIT {{limit:UInt32}}
+        """
+    else:
+        if top_type == "src_ip":
+            select_expr = "toString(src_ip) AS key"
+            group_by = "key"
+        elif top_type == "dst_ip":
+            select_expr = "toString(dst_ip) AS key"
+            group_by = "key"
+        elif top_type == "conversation":
+            select_expr = "toString(src_ip) AS src_ip, toString(dst_ip) AS dst_ip, concat(toString(src_ip), ' -> ', toString(dst_ip)) AS key"
+            group_by = "src_ip, dst_ip, key"
+        elif top_type == "src_port":
+            select_expr = "src_port AS port, proto, toString(src_port) AS key"
+            group_by = "port, proto, key"
+        elif top_type == "dst_port":
+            select_expr = "dst_port AS port, proto, toString(dst_port) AS key"
+            group_by = "port, proto, key"
+        elif top_type == "proto":
+            select_expr = "proto, toString(proto) AS key"
+            group_by = "proto, key"
+        elif top_type == "tcp_flags":
+            select_expr = "tcp_flags, toString(tcp_flags) AS key"
+            group_by = "tcp_flags, key"
+        elif top_type == "src_asn":
+            select_expr = "toUInt32(src_asn) AS asn, any(src_as_name) AS as_name, toString(src_asn) AS key"
+            group_by = "asn, key"
+            context["where"] += " AND src_asn > 0"
+        else:
+            select_expr = "toUInt32(dst_asn) AS asn, any(dst_as_name) AS as_name, toString(dst_asn) AS key"
+            group_by = "asn, key"
+            context["where"] += " AND dst_asn > 0"
+
+        query = f"""
+        SELECT
+            {select_expr},
+            {bytes_sum} AS bytes,
+            {packets_sum} AS packets,
+            sum(flow_count) AS flows,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s,
+            {packets_sum} / {{seconds:Float64}} AS packets_s
+        FROM flow_raw
+        WHERE {context["where"]}
+        GROUP BY {group_by}
+        ORDER BY {order_expr} {direction_sql}
+        LIMIT {{limit:UInt32}}
+        """
+
+    result = query_clickhouse(query, params)
+    result_rows = rows_as_dicts(result)
+    total_where = context["where"]
+    if top_type in {"src_asn", "dst_asn"} and not result_rows:
+        total_where = (
+            context["where"]
+            .replace(" AND src_asn > 0", "")
+            .replace(" AND dst_asn > 0", "")
+        )
+        ip_col = "src_ip" if top_type == "src_asn" else "dst_ip"
+        ip_result = query_clickhouse(
+            f"""
+            SELECT
+                toString({ip_col}) AS ip,
+                {bytes_sum} AS bytes,
+                {packets_sum} AS packets,
+                sum(flow_count) AS flows,
+                {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s
+            FROM flow_raw
+            WHERE {total_where}
+            GROUP BY ip
+            ORDER BY bits_s DESC
+            LIMIT 200
+            """,
+            params,
+        )
+        grouped: dict[int, dict[str, Any]] = {}
+        for row in rows_as_dicts(ip_result):
+            ip_text = clean_ip(row.get("ip"))
+            try:
+                if not is_public_ip(ip_text):
+                    continue
+            except ValueError:
+                continue
+            asn_info = lookup_asn_prefix(ip_text)
+            if not asn_info:
+                continue
+            asn = int(asn_info["asn"] or 0)
+            item = grouped.setdefault(
+                asn,
+                {
+                    "asn": asn,
+                    "key": str(asn),
+                    "as_name": asn_info.get("as_name") or "",
+                    "bytes": 0.0,
+                    "packets": 0.0,
+                    "flows": 0,
+                    "bits_s": 0.0,
+                },
+            )
+            item["bytes"] += float(row.get("bytes") or 0)
+            item["packets"] += float(row.get("packets") or 0)
+            item["flows"] += int(row.get("flows") or 0)
+            item["bits_s"] += float(row.get("bits_s") or 0)
+        result_rows = list(grouped.values())
+        for row in result_rows:
+            row["packets_s"] = float(row.get("packets") or 0) / seconds
+        reverse = direction_sql == "DESC"
+        if order_by in {"key"}:
+            result_rows.sort(key=lambda row: row.get("key") or "", reverse=reverse)
+        else:
+            result_rows.sort(key=lambda row: float(row.get(order_by) or row.get("bits_s") or 0), reverse=reverse)
+        result_rows = result_rows[:limit]
+    total_result = query_clickhouse(
+        f"""
+        SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bits_s
+        FROM flow_raw
+        WHERE {total_where}
+        """,
+        params,
+    )
+    total_rows = rows_as_dicts(total_result)
+    total_bits_s = float(total_rows[0]["bits_s"] or 0) if total_rows else 0.0
+    items = top_flow_items_from_rows(result_rows, top_type, total_bits_s)
+    if order_by == "percent":
+        items.sort(key=lambda item: item["percent"], reverse=direction_sql == "DESC")
+    return {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "top_type": top_type,
+        "direction": clean_text(direction).lower() or "both",
+        "order_by": order_by,
+        "order_dir": direction_sql.lower(),
         "items": items,
     }

@@ -69,6 +69,34 @@ O script `scripts/apply_collectors.sh`:
 
 O retorno de `POST /api/collectors/apply` inclui `stdout`, `stderr` e `returncode`.
 
+## ASN no IPFIX/NetFlow
+
+O collector pmacct foi configurado para tentar agregar `src_as` e `dst_as`:
+
+```text
+aggregate[flows]: src_host, dst_host, src_port, dst_port, proto, tcpflags, in_iface, out_iface, src_as, dst_as, timestamp_start
+```
+
+Quando o exportador envia ASN, o parser grava:
+
+- `src_asn`
+- `dst_asn`
+- `src_as_name`
+- `dst_as_name`
+
+No Huawei NE8000, isso depende da exportacao IPFIX incluir origem AS, por exemplo:
+
+```text
+ip netstream export version ipfix origin-as bgp-nexthop
+ipv6 netstream export version ipfix origin-as bgp-nexthop
+```
+
+Se o pmacct da distribuicao nao suportar `src_as`/`dst_as`, remova esses campos do `aggregate` e use a base ASN local pelo GMJ-FLOW.
+
+## Duplicidade de collectors
+
+O GMJ-FLOW contabiliza apenas flows recebidos pelo collector local configurado para o sensor. Se o roteador exportar para outros collectors, isso nao duplica os dados dentro do GMJ-FLOW. Evite apontar o mesmo exportador para duas portas/sensores GMJ-FLOW com o mesmo trafego, pois isso criaria duplicidade local.
+
 ## Seguranca do Docker socket
 
 Montar `/var/run/docker.sock` da ao backend poder para criar, parar e alterar containers no host. Na pratica, isso equivale a acesso administrativo ao Docker do servidor.

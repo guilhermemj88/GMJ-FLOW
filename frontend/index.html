@@ -353,6 +353,37 @@
       font-size: .84rem;
     }
 
+    .flow-table th,
+    .flow-table td {
+      text-align: center;
+      vertical-align: middle;
+    }
+
+    .flow-table .numeric {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sortable-header {
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .sort-indicator {
+      display: inline-block;
+      min-width: 12px;
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .flow-subview {
+      display: none;
+    }
+
+    .flow-subview.active {
+      display: flex;
+    }
+
     .sensor-layout {
       display: grid;
       grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
@@ -818,7 +849,7 @@
         <button type="button" class="active" data-nav-view="dashboard">
           <i data-lucide="layout-dashboard"></i><span>Dashboard</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Flows">
+        <button type="button" data-nav-view="flows">
           <i data-lucide="search"></i><span>Flows</span>
         </button>
         <button type="button" data-nav-view="sensors">
@@ -991,7 +1022,12 @@
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Maiores ASNs de Upload</div>
-                  <div id="asnSrcStatus" class="metric-readout">ASN indisponivel</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <button id="resolveAsnButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="refresh-cw"></i><span>Resolver ASNs</span>
+                    </button>
+                    <div id="asnSrcStatus" class="metric-readout">ASN indisponivel</div>
+                  </div>
                 </div>
                 <div id="asnSrcChart" class="top-chart"></div>
                 <div class="table-wrap">
@@ -1019,13 +1055,27 @@
             </div>
           </section>
 
-          <section class="row g-3 mt-1">
+        </section>
+
+        <section id="view-flows" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Flows</h1>
+              <div id="flowsViewStatus" class="subtle">Busca e rankings de flows corrigidos por sample-rate</div>
+            </div>
+            <div class="tab-strip">
+              <button id="flowTabRecords" type="button" class="active" data-flow-tab="records">Registros de Flow</button>
+              <button id="flowTabTop" type="button" data-flow-tab="top">TOP Flow</button>
+            </div>
+          </div>
+
+          <section id="flowRecordsPanel" class="row g-3 mt-1 flow-subview active">
             <div class="col-12">
               <div class="panel p-3">
                 <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
                   <div>
-                    <div class="panel-title">Flow Search</div>
-                    <div id="flowSearchStatus" class="metric-readout">Ultimos flows brutos</div>
+                    <div class="panel-title">Registros de Flow</div>
+                    <div id="flowSearchStatus" class="metric-readout">Flows corrigidos por sample-rate</div>
                   </div>
                   <div class="flow-search-grid">
                     <div class="field">
@@ -1051,6 +1101,30 @@
                         <option value="1">ICMP</option>
                         <option value="6">TCP</option>
                         <option value="17">UDP</option>
+                        <option value="47">GRE</option>
+                        <option value="50">ESP</option>
+                        <option value="other">Outros</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="flowProtoNumber">Proto num.</label>
+                      <input id="flowProtoNumber" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="0-255">
+                    </div>
+                    <div class="field">
+                      <label for="flowDecoder">Decoder</label>
+                      <select id="flowDecoder" class="form-select form-select-sm" aria-label="Decoder Flow Search">
+                        <option value="">Todos</option>
+                        <option value="IP">IP</option>
+                        <option value="TCP">TCP</option>
+                        <option value="TCP+SYN">TCP+SYN</option>
+                        <option value="UDP">UDP</option>
+                        <option value="ICMP">ICMP</option>
+                        <option value="DNS">DNS</option>
+                        <option value="NTP">NTP</option>
+                        <option value="QUIC">QUIC</option>
+                        <option value="HTTPS">HTTPS</option>
+                        <option value="GRE">GRE</option>
+                        <option value="IPSEC">IPSEC</option>
                       </select>
                     </div>
                     <div class="field">
@@ -1095,8 +1169,20 @@
                         <option value="custom">Personalizado...</option>
                       </select>
                     </div>
+                    <div class="field">
+                      <label for="flowLimit">Limite</label>
+                      <select id="flowLimit" class="form-select form-select-sm" aria-label="Limite Flow Search">
+                        <option value="100">100</option>
+                        <option value="500" selected>500</option>
+                        <option value="1000">1000</option>
+                        <option value="5000">5000</option>
+                      </select>
+                    </div>
                     <button id="flowSearchButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="search"></i><span>Buscar</span>
+                    </button>
+                    <button id="flowExportButton" type="button" class="btn btn-sm btn-outline-success">
+                      <i data-lucide="download"></i><span>CSV</span>
                     </button>
                     <button id="flowClearButton" type="button" class="btn btn-sm btn-outline-secondary">
                       <i data-lucide="x"></i><span>Limpar</span>
@@ -1107,21 +1193,148 @@
                   <table class="table table-sm table-hover align-middle mb-0 flow-table">
                     <thead>
                       <tr>
-                        <th>Horario</th>
-                        <th>Sensor</th>
-                        <th>Src IP</th>
-                        <th class="text-end">Src porta</th>
-                        <th>Dst IP</th>
-                        <th class="text-end">Dst porta</th>
-                        <th>Proto</th>
-                        <th>Flags</th>
-                        <th class="text-end">In if</th>
-                        <th class="text-end">Out if</th>
-                        <th class="text-end">Bytes</th>
-                        <th class="text-end">Pacotes</th>
+                        <th class="sortable-header" data-flow-sort="flow_time">Horario <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="sensor">Sensor <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="exporter_ip">Exporter <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="src_ip">IP origem <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="src_port">Porta origem <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="dst_ip">IP destino <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="dst_port">Porta destino <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="proto">Protocolo <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="tcp_flags">TCP flags <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="input_if">Interface entrada <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="output_if">Interface saida <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="bytes">Bytes <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="packets">Pacotes <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="flows">Flows <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="packets_s">Packets/s <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="sample_rate">Sample rate <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="flow_type">Flow type <span class="sort-indicator"></span></th>
                       </tr>
                     </thead>
                     <tbody id="flowSearchTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="flowTopPanel" class="row g-3 mt-1 flow-subview">
+            <div class="col-12">
+              <div class="panel p-3">
+                <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+                  <div>
+                    <div class="panel-title">TOP Flow</div>
+                    <div id="topFlowStatus" class="metric-readout">Maior Bits/s primeiro</div>
+                  </div>
+                  <div class="flow-search-grid">
+                    <div class="field">
+                      <label for="topFlowType">Tipo</label>
+                      <select id="topFlowType" class="form-select form-select-sm">
+                        <option value="src_ip">Top IP origem</option>
+                        <option value="dst_ip">Top IP destino</option>
+                        <option value="conversation">Top conversas origem/destino</option>
+                        <option value="src_port">Top portas origem</option>
+                        <option value="dst_port">Top portas destino</option>
+                        <option value="proto">Top protocolos</option>
+                        <option value="tcp_flags">Top TCP flags</option>
+                        <option value="interfaces">Top interfaces</option>
+                        <option value="src_asn">Top ASN origem</option>
+                        <option value="dst_asn">Top ASN destino</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowDirection">Direcao</label>
+                      <select id="topFlowDirection" class="form-select form-select-sm">
+                        <option value="both">Ambos</option>
+                        <option value="upload">Upload</option>
+                        <option value="download">Download</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowSensor">Sensor</label>
+                      <select id="topFlowSensor" class="form-select form-select-sm">
+                        <option value="">Todos os sensores</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowInterface">Interface</label>
+                      <select id="topFlowInterface" class="form-select form-select-sm" disabled>
+                        <option value="">Todas as interfaces</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowRangeMinutes">Periodo</label>
+                      <select id="topFlowRangeMinutes" class="form-select form-select-sm">
+                        <option value="5">Ultimos 5 minutos</option>
+                        <option value="10">Ultimos 10 minutos</option>
+                        <option value="15">Ultimos 15 minutos</option>
+                        <option value="30">Ultimos 30 minutos</option>
+                        <option value="60" selected>Ultima 1 hora</option>
+                        <option value="180">Ultimas 3 horas</option>
+                        <option value="360">Ultimas 6 horas</option>
+                        <option value="720">Ultimas 12 horas</option>
+                        <option value="1440">Ultimas 24 horas</option>
+                        <option value="custom">Personalizado...</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowProto">Protocolo</label>
+                      <select id="topFlowProto" class="form-select form-select-sm">
+                        <option value="">Todos</option>
+                        <option value="1">ICMP</option>
+                        <option value="6">TCP</option>
+                        <option value="17">UDP</option>
+                        <option value="47">GRE</option>
+                        <option value="50">ESP</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="topFlowSrcIp">IP origem</label>
+                      <input id="topFlowSrcIp" class="form-control form-control-sm">
+                    </div>
+                    <div class="field">
+                      <label for="topFlowDstIp">IP destino</label>
+                      <input id="topFlowDstIp" class="form-control form-control-sm">
+                    </div>
+                    <div class="field">
+                      <label for="topFlowSrcPort">Porta origem</label>
+                      <input id="topFlowSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm">
+                    </div>
+                    <div class="field">
+                      <label for="topFlowDstPort">Porta destino</label>
+                      <input id="topFlowDstPort" type="number" min="0" max="65535" class="form-control form-control-sm">
+                    </div>
+                    <div class="field">
+                      <label for="topFlowLimit">Limite</label>
+                      <select id="topFlowLimit" class="form-select form-select-sm">
+                        <option value="10" selected>10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                      </select>
+                    </div>
+                    <button id="topFlowSearchButton" type="button" class="btn btn-sm btn-success">
+                      <i data-lucide="bar-chart-3"></i><span>Gerar</span>
+                    </button>
+                  </div>
+                </div>
+                <div id="topFlowChart" class="chart"></div>
+                <div class="table-wrap mt-2">
+                  <table class="table table-sm table-hover align-middle mb-0 flow-table">
+                    <thead>
+                      <tr>
+                        <th class="sortable-header" data-top-flow-sort="key">Chave <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="packets_s">Packets/s <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="bytes">Bytes <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="packets">Pacotes <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="flows">Flows <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-top-flow-sort="percent">% total <span class="sort-indicator"></span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="topFlowTable"></tbody>
                   </table>
                 </div>
               </div>
@@ -2190,6 +2403,14 @@
             <input id="modalSpeedOut" type="number" min="0" class="form-control form-control-sm" value="0">
           </div>
           <div class="field">
+            <label for="modalSampleRateIn">Sample rate IN</label>
+            <input id="modalSampleRateIn" type="number" min="1" class="form-control form-control-sm" value="1">
+          </div>
+          <div class="field">
+            <label for="modalSampleRateOut">Sample rate OUT</label>
+            <input id="modalSampleRateOut" type="number" min="1" class="form-control form-control-sm" value="1">
+          </div>
+          <div class="field">
             <label for="modalIfDescr">ifDescr</label>
             <input id="modalIfDescr" class="form-control form-control-sm">
           </div>
@@ -2281,6 +2502,7 @@
       tcpFlags: echarts.init(document.getElementById('tcpFlagsChart')),
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
       asnDst: echarts.init(document.getElementById('asnDstChart')),
+      topFlow: echarts.init(document.getElementById('topFlowChart')),
       anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart'))
     };
 
@@ -2289,6 +2511,7 @@
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
     let flowInterfaceCache = [];
+    let topFlowInterfaceCache = [];
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -2302,9 +2525,12 @@
     let anomalyActiveTab = 'active';
     let currentAnomalyDetailId = null;
     let activeCustomRangeTarget = null;
+    let flowSort = { column: 'flow_time', direction: 'desc' };
+    let topFlowSort = { column: 'bits_s', direction: 'desc' };
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
-      flow: { start: '', end: '', previous: '60' }
+      flow: { start: '', end: '', previous: '60' },
+      top: { start: '', end: '', previous: '60' }
     };
 
     const ATTACK_DOMAIN_OPTIONS = [
@@ -2543,6 +2769,16 @@
       return value ? Number(value) : null;
     }
 
+    function selectedTopFlowSensorId() {
+      const value = document.getElementById('topFlowSensor').value;
+      return value ? Number(value) : null;
+    }
+
+    function selectedTopFlowInterfaceId() {
+      const value = document.getElementById('topFlowInterface').value;
+      return value ? Number(value) : null;
+    }
+
     function localDateTimeForInput(date) {
       const offsetMs = date.getTimezoneOffset() * 60000;
       return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
@@ -2637,6 +2873,18 @@
       select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
     }
 
+    function renderTopFlowSensorSelect() {
+      const select = document.getElementById('topFlowSensor');
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Todos os sensores</option>',
+        ...dashboardSensorCache.map(sensor => (
+          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
+        ))
+      ].join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
+    }
+
     function renderDashboardInterfaceSelect() {
       const select = document.getElementById('interface');
       const current = select.value;
@@ -2665,6 +2913,20 @@
       select.value = flowInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
+    function renderTopFlowInterfaceSelect() {
+      const select = document.getElementById('topFlowInterface');
+      const current = select.value;
+      const sensorId = selectedTopFlowSensorId();
+      select.disabled = !sensorId;
+      select.innerHTML = [
+        '<option value="">Todas as interfaces</option>',
+        ...topFlowInterfaceCache.map(iface => (
+          `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
+        ))
+      ].join('');
+      select.value = topFlowInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+    }
+
     async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
       dashboardInterfaceCache = [];
       document.getElementById('interface').value = '';
@@ -2686,16 +2948,21 @@
         dashboardSensorCache = Array.isArray(payload.items) ? payload.items : [];
         renderDashboardSensorSelect();
         renderFlowSensorSelect();
+        renderTopFlowSensorSelect();
         await loadDashboardInterfaces();
         await loadFlowInterfaces();
+        await loadTopFlowInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
         dashboardInterfaceCache = [];
         flowInterfaceCache = [];
+        topFlowInterfaceCache = [];
         renderDashboardSensorSelect();
         renderDashboardInterfaceSelect();
         renderFlowSensorSelect();
         renderFlowInterfaceSelect();
+        renderTopFlowSensorSelect();
+        renderTopFlowInterfaceSelect();
         console.error('Falha ao carregar sensores do dashboard', error);
       }
     }
@@ -2722,6 +2989,27 @@
 
     async function handleFlowSensorChange() {
       await loadFlowInterfaces();
+      await searchFlows();
+    }
+
+    async function loadTopFlowInterfaces(sensorId = selectedTopFlowSensorId()) {
+      topFlowInterfaceCache = [];
+      document.getElementById('topFlowInterface').value = '';
+      renderTopFlowInterfaceSelect();
+      if (!sensorId) return;
+
+      try {
+        const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
+        topFlowInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
+        renderTopFlowInterfaceSelect();
+      } catch (error) {
+        console.error('Falha ao carregar interfaces do TOP Flow', error);
+      }
+    }
+
+    async function handleTopFlowSensorChange() {
+      await loadTopFlowInterfaces();
+      await loadTopFlow();
     }
 
     function formatBps(value) {
@@ -3882,16 +4170,34 @@
       document.getElementById(statusId).textContent = payload.asn_available === false ? 'ASN indisponivel' : `${formatNumber(items.length)} ASNs`;
     }
 
+    async function resolvePendingAsns() {
+      const status = document.getElementById('asnSrcStatus');
+      status.textContent = 'Resolvendo ASNs...';
+      const query = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
+      try {
+        const payload = await apiRequest(`/api/asn/resolve-pending?${query}`, { method: 'POST' });
+        status.textContent = `${formatNumber(payload.resolved_count || 0)} ASNs resolvidos`;
+        await refresh();
+      } catch (error) {
+        status.textContent = `Falha ASN: ${error.message}`;
+      }
+    }
+
     function flowSearchParams() {
       const query = new URLSearchParams();
       appendRangeParams(query, 'flowRangeMinutes', 'flow');
-      query.set('limit', '200');
+      query.set('limit', document.getElementById('flowLimit').value || '500');
+      query.set('order_by', flowSort.column);
+      query.set('order_dir', flowSort.direction);
 
       const srcIp = document.getElementById('flowSrcIp').value.trim();
       const dstIp = document.getElementById('flowDstIp').value.trim();
       const srcPort = document.getElementById('flowSrcPort').value.trim();
       const dstPort = document.getElementById('flowDstPort').value.trim();
-      const proto = document.getElementById('flowProto').value;
+      const protoSelect = document.getElementById('flowProto').value;
+      const protoNumber = document.getElementById('flowProtoNumber').value.trim();
+      const decoder = document.getElementById('flowDecoder').value;
+      const proto = protoNumber || protoSelect;
       const sensorId = selectedFlowSensorId();
       const interfaceId = selectedFlowInterfaceId();
 
@@ -3900,15 +4206,26 @@
       if (srcPort) query.set('src_port', srcPort);
       if (dstPort) query.set('dst_port', dstPort);
       if (proto) query.set('proto', proto);
+      if (decoder) query.set('decoder', decoder);
       if (sensorId) query.set('sensor_id', String(sensorId));
       if (interfaceId) query.set('interface_id', String(interfaceId));
       return query.toString();
+    }
+
+    function updateSortIndicators(selector, state) {
+      document.querySelectorAll(selector).forEach(header => {
+        const indicator = header.querySelector('.sort-indicator');
+        if (!indicator) return;
+        const column = header.dataset.flowSort || header.dataset.topFlowSort;
+        indicator.textContent = column === state.column ? (state.direction === 'asc' ? '\u2191' : '\u2193') : '';
+      });
     }
 
     async function searchFlows() {
       const status = document.getElementById('flowSearchStatus');
       const tbody = document.getElementById('flowSearchTable');
       status.textContent = 'Buscando flows';
+      updateSortIndicators('[data-flow-sort]', flowSort);
       const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}`;
       try {
         const response = await authFetch(endpoint);
@@ -3929,35 +4246,176 @@
           <tr>
             <td>${formatDateTime(flow.flow_time)}</td>
             <td>${escapeHtml(flow.sensor)}</td>
+            <td>${escapeHtml(flow.exporter_ip || '-')}</td>
             <td>${ipLink(flow.src_ip)}</td>
-            <td class="text-end">${formatNumber(flow.src_port)}</td>
+            <td class="numeric">${formatNumber(flow.src_port)}</td>
             <td>${ipLink(flow.dst_ip)}</td>
-            <td class="text-end">${formatNumber(flow.dst_port)}</td>
+            <td class="numeric">${formatNumber(flow.dst_port)}</td>
             <td>${escapeHtml(flow.proto_name)}</td>
             <td>${escapeHtml(flow.tcp_flags_name)}</td>
-            <td class="text-end">${formatNumber(flow.input_if)}</td>
-            <td class="text-end">${formatNumber(flow.output_if)}</td>
-            <td class="text-end">${formatBytes(flow.bytes)}</td>
-            <td class="text-end">${formatNumber(flow.packets)}</td>
+            <td class="numeric">${formatNumber(flow.input_if)}</td>
+            <td class="numeric">${formatNumber(flow.output_if)}</td>
+            <td class="numeric">${formatBytes(flow.bytes)}</td>
+            <td class="numeric">${formatNumber(flow.packets)}</td>
+            <td class="numeric">${formatNumber(flow.flow_count)}</td>
+            <td class="numeric">${formatBps(flow.bits_s)}</td>
+            <td class="numeric">${formatPps(flow.packets_s)}</td>
+            <td class="numeric">${formatNumber(flow.sample_rate_applied)}x</td>
+            <td>${escapeHtml(flow.flow_type || '-')}</td>
           </tr>
-        `).join('') || `<tr><td colspan="12" class="text-muted">Sem flows no intervalo</td></tr>`;
-        status.textContent = `${formatNumber(items.length)} flows brutos`;
+        `).join('') || `<tr><td colspan="18" class="text-muted">Sem flows no intervalo</td></tr>`;
+        status.textContent = `${formatNumber(items.length)} flows corrigidos`;
       } catch (error) {
-        tbody.innerHTML = `<tr><td colspan="12" class="text-danger">Falha ao buscar flows</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="18" class="text-danger">Falha ao buscar flows</td></tr>`;
         status.textContent = 'Falha na busca';
         console.error('Falha na chamada da API', endpoint, error);
       }
     }
 
+    async function exportFlowsCsv() {
+      const status = document.getElementById('flowSearchStatus');
+      status.textContent = 'Exportando CSV';
+      const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}&format=csv`;
+      try {
+        const response = await authFetch(endpoint);
+        if (!response.ok) throw new Error(`${endpoint} ${response.status}`);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'gmj-flow-search.csv';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        status.textContent = 'CSV exportado';
+      } catch (error) {
+        status.textContent = 'Falha ao exportar CSV';
+        console.error('Falha ao exportar CSV', error);
+      }
+    }
+
     async function clearFlowSearch() {
-      ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort'].forEach(id => setValue(id, ''));
+      ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort', 'flowProtoNumber'].forEach(id => setValue(id, ''));
       setValue('flowProto', '');
+      setValue('flowDecoder', '');
       setValue('flowSensor', '');
       setValue('flowInterface', '');
       setValue('flowRangeMinutes', '60');
+      setValue('flowLimit', '500');
+      flowSort = { column: 'flow_time', direction: 'desc' };
       customRanges.flow = { start: '', end: '', previous: '60' };
       await loadFlowInterfaces(null);
       await searchFlows();
+    }
+
+    function topFlowParams() {
+      const query = new URLSearchParams();
+      appendRangeParams(query, 'topFlowRangeMinutes', 'top');
+      query.set('top_type', document.getElementById('topFlowType').value || 'src_ip');
+      query.set('direction', document.getElementById('topFlowDirection').value || 'both');
+      query.set('limit', document.getElementById('topFlowLimit').value || '10');
+      query.set('order_by', topFlowSort.column);
+      query.set('order_dir', topFlowSort.direction);
+      const sensorId = selectedTopFlowSensorId();
+      const interfaceId = selectedTopFlowInterfaceId();
+      const proto = document.getElementById('topFlowProto').value;
+      const srcIp = document.getElementById('topFlowSrcIp').value.trim();
+      const dstIp = document.getElementById('topFlowDstIp').value.trim();
+      const srcPort = document.getElementById('topFlowSrcPort').value.trim();
+      const dstPort = document.getElementById('topFlowDstPort').value.trim();
+      if (sensorId) query.set('sensor_id', String(sensorId));
+      if (interfaceId) query.set('interface_id', String(interfaceId));
+      if (proto) query.set('proto', proto);
+      if (srcIp) query.set('src_ip', srcIp);
+      if (dstIp) query.set('dst_ip', dstIp);
+      if (srcPort) query.set('src_port', srcPort);
+      if (dstPort) query.set('dst_port', dstPort);
+      return query.toString();
+    }
+
+    function topFlowBarOption(items) {
+      const data = items.slice(0, 12).reverse();
+      return {
+        animation: false,
+        color: palette,
+        grid: { left: 12, right: 16, top: 12, bottom: 24, containLabel: true },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          formatter(params) {
+            const row = Array.isArray(params) ? params[0] : params;
+            const item = data[row.dataIndex] || {};
+            return [
+              escapeHtml(item.key || '-'),
+              `Bits/s: ${formatBps(item.bits_s)}`,
+              `Packets/s: ${formatPps(item.packets_s)}`,
+              `Bytes: ${formatBytes(item.bytes)}`,
+              `Pacotes: ${formatNumber(item.packets)}`,
+              `Flows: ${formatNumber(item.flows)}`
+            ].join('<br>');
+          }
+        },
+        xAxis: {
+          type: 'value',
+          axisLabel: { color: '#6b7280', formatter: formatBps },
+          splitLine: { lineStyle: { color: '#edf0f3' } }
+        },
+        yAxis: {
+          type: 'category',
+          data: data.map(item => item.key),
+          axisLabel: { color: '#374151', width: 180, overflow: 'truncate' },
+          axisLine: { lineStyle: { color: '#d9dee5' } }
+        },
+        series: [{ type: 'bar', data: data.map(item => item.bits_s), barMaxWidth: 20 }]
+      };
+    }
+
+    async function loadTopFlow() {
+      const status = document.getElementById('topFlowStatus');
+      const tbody = document.getElementById('topFlowTable');
+      status.textContent = 'Gerando TOP Flow';
+      updateSortIndicators('[data-top-flow-sort]', topFlowSort);
+      const endpoint = `${API_BASE}/api/flows/top?${topFlowParams()}`;
+      try {
+        const response = await authFetch(endpoint);
+        if (!response.ok) throw new Error(`${endpoint} ${response.status}`);
+        const payload = await response.json();
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        charts.topFlow.setOption(topFlowBarOption(items), true);
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td>${escapeHtml(item.key || '-')}</td>
+            <td class="numeric">${formatBps(item.bits_s)}</td>
+            <td class="numeric">${formatPps(item.packets_s)}</td>
+            <td class="numeric">${formatBytes(item.bytes)}</td>
+            <td class="numeric">${formatNumber(item.packets)}</td>
+            <td class="numeric">${formatNumber(item.flows)}</td>
+            <td class="numeric">${Number(item.percent || 0).toFixed(2)}%</td>
+          </tr>
+        `).join('') || '<tr><td colspan="7" class="text-muted">Sem dados no intervalo</td></tr>';
+        status.textContent = `${formatNumber(items.length)} itens`;
+      } catch (error) {
+        charts.topFlow.clear();
+        tbody.innerHTML = '<tr><td colspan="7" class="text-danger">Falha ao gerar TOP Flow</td></tr>';
+        status.textContent = 'Falha no TOP Flow';
+        console.error('Falha no TOP Flow', endpoint, error);
+      }
+    }
+
+    function showFlowTab(tab) {
+      const target = tab === 'top' ? 'top' : 'records';
+      document.querySelectorAll('[data-flow-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.flowTab === target);
+      });
+      document.getElementById('flowRecordsPanel').classList.toggle('active', target === 'records');
+      document.getElementById('flowTopPanel').classList.toggle('active', target === 'top');
+      if (target === 'records') {
+        searchFlows().catch(console.error);
+      } else {
+        loadTopFlow().catch(console.error);
+        setTimeout(() => charts.topFlow.resize(), 50);
+      }
     }
 
     async function checkHealth() {
@@ -4028,7 +4486,6 @@
       fillTable('portsTable', portItems, 'port', 'packets');
       fillTable('protocolsTable', protocolItems, 'proto', 'packets');
       fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
-      await searchFlows();
     }
 
     function defaultSensor() {
@@ -4372,9 +4829,17 @@
           <td><span class="color-swatch" style="background:${escapeHtml(iface.color || '#64748b')}"></span></td>
           <td><span class="badge-soft ${iface.monitor_enabled ? 'ok' : 'off'}">${iface.monitor_enabled ? 'Enabled' : 'Disabled'}</span></td>
           <td>
-            <button type="button" class="btn btn-sm btn-outline-secondary apply-calibration-button" data-if-index="${Number(iface.if_index) || 0}">
-              Aplicar fator
-            </button>
+            <div class="d-flex flex-wrap gap-1 justify-content-center">
+              <button type="button" class="btn btn-sm btn-outline-secondary apply-calibration-button" data-if-index="${Number(iface.if_index) || 0}">
+                Fator
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-success sample-rate-1000-button" data-if-index="${Number(iface.if_index) || 0}">
+                1000x
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sample-rate-reset-button" data-if-index="${Number(iface.if_index) || 0}">
+                1x
+              </button>
+            </div>
           </td>
         </tr>
       `).join('') || `<tr><td colspan="16" class="text-muted">Sem interfaces monitoradas</td></tr>`;
@@ -4421,7 +4886,7 @@
     function cancelCustomRange() {
       const target = activeCustomRangeTarget;
       if (target) {
-        const selectId = target === 'dashboard' ? 'rangeMinutes' : 'flowRangeMinutes';
+        const selectId = target === 'dashboard' ? 'rangeMinutes' : target === 'top' ? 'topFlowRangeMinutes' : 'flowRangeMinutes';
         document.getElementById(selectId).value = customRanges[target].previous || '60';
       }
       activeCustomRangeTarget = null;
@@ -4448,13 +4913,15 @@
       activeCustomRangeTarget = null;
       if (target === 'dashboard') {
         refresh().catch(console.error);
+      } else if (target === 'top') {
+        loadTopFlow().catch(console.error);
       } else {
         searchFlows().catch(console.error);
       }
     }
 
     function handleRangeSelectChange(target) {
-      const selectId = target === 'dashboard' ? 'rangeMinutes' : 'flowRangeMinutes';
+      const selectId = target === 'dashboard' ? 'rangeMinutes' : target === 'top' ? 'topFlowRangeMinutes' : 'flowRangeMinutes';
       const value = document.getElementById(selectId).value;
       if (value === 'custom') {
         openCustomRange(target);
@@ -4465,6 +4932,8 @@
       customRanges[target].end = '';
       if (target === 'dashboard') {
         refresh().catch(console.error);
+      } else if (target === 'top') {
+        loadTopFlow().catch(console.error);
       } else {
         searchFlows().catch(console.error);
       }
@@ -4481,6 +4950,8 @@
       setValue('modalStats', iface.stats);
       setValue('modalSpeedIn', iface.speed_in_bps);
       setValue('modalSpeedOut', iface.speed_out_bps);
+      setValue('modalSampleRateIn', iface.sample_rate_in || 1);
+      setValue('modalSampleRateOut', iface.sample_rate_out || 1);
       setValue('modalIfDescr', iface.if_descr);
       setValue('modalIfOperStatus', iface.if_oper_status);
       setValue('modalColor', iface.color || '#d946ef');
@@ -4498,8 +4969,8 @@
         stats: selectValue('modalStats', 'Basic'),
         speed_in_bps: numberValue('modalSpeedIn', 0),
         speed_out_bps: numberValue('modalSpeedOut', 0),
-        sample_rate_in: Number(existing.sample_rate_in) || 1,
-        sample_rate_out: Number(existing.sample_rate_out) || 1,
+        sample_rate_in: Math.max(1, numberValue('modalSampleRateIn', Number(existing.sample_rate_in) || 1)),
+        sample_rate_out: Math.max(1, numberValue('modalSampleRateOut', Number(existing.sample_rate_out) || 1)),
         if_descr: selectValue('modalIfDescr').trim(),
         if_oper_status: selectValue('modalIfOperStatus').trim(),
         color: selectValue('modalColor', '#64748b'),
@@ -4590,6 +5061,31 @@
         currentInterfaces = currentInterfaces.map(iface => (
           Number(iface.if_index) === Number(ifIndex)
             ? { ...iface, ...updated }
+            : iface
+        ));
+        renderInterfaces();
+        document.getElementById('interfacesStatus').textContent = `Sample rate aplicado na interface ${ifIndex}`;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Nao aplicado: ${error.message}`;
+      }
+    }
+
+    async function setInterfaceSampleRate(ifIndex, sampleRateIn, sampleRateOut) {
+      if (!currentSensorId || !ifIndex) return;
+      document.getElementById('interfacesStatus').textContent = `Salvando sample rate da interface ${ifIndex}...`;
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/interfaces/${ifIndex}/sample-rate`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sample_rate_in: Math.max(1, Number(sampleRateIn) || 1),
+            sample_rate_out: Math.max(1, Number(sampleRateOut) || 1)
+          })
+        });
+        const updated = payload.interface || {};
+        currentInterfaces = currentInterfaces.map(iface => (
+          Number(iface.if_index) === Number(ifIndex)
+            ? { ...iface, ...updated, sample_rate_in: payload.sample_rate_in, sample_rate_out: payload.sample_rate_out }
             : iface
         ));
         renderInterfaces();
@@ -4723,6 +5219,18 @@
         document.querySelector('[data-nav-view="dashboard"]').classList.add('active');
         Object.values(charts).forEach(chart => chart.resize());
         loadDashboardSensors().then(() => refresh()).catch(console.error);
+      } else if (view === 'flows') {
+        document.getElementById('view-flows').classList.add('active');
+        document.querySelector('[data-nav-view="flows"]').classList.add('active');
+        charts.topFlow.resize();
+        loadDashboardSensors()
+          .then(() => {
+            if (document.getElementById('flowTopPanel').classList.contains('active')) {
+              return loadTopFlow();
+            }
+            return searchFlows();
+          })
+          .catch(console.error);
       } else if (view === 'sensors') {
         document.getElementById('view-sensors').classList.add('active');
         document.querySelector('[data-nav-view="sensors"]').classList.add('active');
@@ -4767,22 +5275,62 @@
     });
 
     document.getElementById('refresh').addEventListener('click', () => refresh().catch(console.error));
+    document.getElementById('resolveAsnButton').addEventListener('click', () => resolvePendingAsns().catch(console.error));
     document.getElementById('loginForm').addEventListener('submit', event => login(event).catch(console.error));
     document.getElementById('changePasswordForm').addEventListener('submit', event => changePassword(event).catch(console.error));
     document.getElementById('logoutButton').addEventListener('click', () => logout().catch(console.error));
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
+    document.getElementById('flowExportButton').addEventListener('click', () => exportFlowsCsv().catch(console.error));
     document.getElementById('flowClearButton').addEventListener('click', () => clearFlowSearch().catch(console.error));
-    ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort'].forEach(id => {
+    ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort', 'flowProtoNumber'].forEach(id => {
       document.getElementById(id).addEventListener('keydown', event => {
         if (event.key === 'Enter') searchFlows().catch(console.error);
       });
     });
+    document.querySelectorAll('[data-flow-tab]').forEach(button => {
+      button.addEventListener('click', () => showFlowTab(button.dataset.flowTab));
+    });
+    document.querySelectorAll('[data-flow-sort]').forEach(header => {
+      header.addEventListener('click', () => {
+        const column = header.dataset.flowSort;
+        flowSort = {
+          column,
+          direction: flowSort.column === column && flowSort.direction === 'desc' ? 'asc' : 'desc'
+        };
+        searchFlows().catch(console.error);
+      });
+    });
+    document.querySelectorAll('[data-top-flow-sort]').forEach(header => {
+      header.addEventListener('click', () => {
+        const column = header.dataset.topFlowSort;
+        topFlowSort = {
+          column,
+          direction: topFlowSort.column === column && topFlowSort.direction === 'desc' ? 'asc' : 'desc'
+        };
+        loadTopFlow().catch(console.error);
+      });
+    });
     document.getElementById('rangeMinutes').addEventListener('change', () => handleRangeSelectChange('dashboard'));
     document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
+    document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
     document.getElementById('interface').addEventListener('change', () => refresh().catch(console.error));
     document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
+    document.getElementById('topFlowSensor').addEventListener('change', () => handleTopFlowSensorChange().catch(console.error));
+    document.getElementById('topFlowInterface').addEventListener('change', () => loadTopFlow().catch(console.error));
+    [
+      'topFlowType',
+      'topFlowDirection',
+      'topFlowProto',
+      'topFlowLimit'
+    ].forEach(id => document.getElementById(id).addEventListener('change', () => loadTopFlow().catch(console.error)));
+    ['topFlowSrcIp', 'topFlowDstIp', 'topFlowSrcPort', 'topFlowDstPort'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', event => {
+        if (event.key === 'Enter') loadTopFlow().catch(console.error);
+      });
+    });
+    document.getElementById('topFlowSearchButton').addEventListener('click', () => loadTopFlow().catch(console.error));
     document.getElementById('applyCustomRange').addEventListener('click', applyCustomRange);
     document.getElementById('cancelCustomRange').addEventListener('click', cancelCustomRange);
     document.getElementById('refreshDatabaseButton').addEventListener('click', () => loadDatabaseStatus().catch(console.error));
@@ -4876,9 +5424,16 @@
 
     document.getElementById('interfacesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
-      const button = target?.closest('.apply-calibration-button');
-      if (!button) return;
-      applyCalibrationFactor(Number(button.dataset.ifIndex)).catch(console.error);
+      const calibrationButton = target?.closest('.apply-calibration-button');
+      const sample1000Button = target?.closest('.sample-rate-1000-button');
+      const sampleResetButton = target?.closest('.sample-rate-reset-button');
+      if (calibrationButton) {
+        applyCalibrationFactor(Number(calibrationButton.dataset.ifIndex)).catch(console.error);
+      } else if (sample1000Button) {
+        setInterfaceSampleRate(Number(sample1000Button.dataset.ifIndex), 1000, 1000).catch(console.error);
+      } else if (sampleResetButton) {
+        setInterfaceSampleRate(Number(sampleResetButton.dataset.ifIndex), 1, 1).catch(console.error);
+      }
     });
 
     document.querySelectorAll('[data-close-modal]').forEach(button => {

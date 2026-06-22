@@ -43,6 +43,16 @@ O backend usa a mediana dos pontos validos e ignora zeros, valores baixos e outl
 
 A tabela de interfaces tambem guarda `sample_rate_in` e `sample_rate_out`, usados quando o operador aplica uma calibracao confiavel.
 
+O operador tambem pode salvar manualmente `sample_rate_in` e `sample_rate_out` pela tela de interfaces. Para Huawei com `sampler fix-packets 1000`, use `1000` em IN e OUT quando a configuracao do roteador for simetrica.
+
+O GMJ-FLOW aplica o fator nas consultas de Dashboard, Registros de Flow e TOP Flow:
+
+- trafego de entrada usa `sample_rate_in` da interface `input_if`;
+- trafego de saida usa `sample_rate_out` da interface `output_if`;
+- se a interface nao estiver cadastrada, usa `flow_raw.sample_rate`;
+- `bytes` e `packets` sao corrigidos;
+- `flow_count` nao e multiplicado por sample-rate.
+
 ## Endpoints
 
 ```text
@@ -51,6 +61,8 @@ POST /api/sensors/{sensor_id}/interfaces/calibration/run
 POST /api/sensors/{sensor_id}/interfaces/{if_index}/calibration/run
 GET  /api/sensors/{sensor_id}/interfaces/{if_index}/calibration
 POST /api/sensors/{sensor_id}/interfaces/{if_index}/calibration/apply
+PUT  /api/sensors/{sensor_id}/interfaces/{if_index}/sample-rate
+GET  /api/sensors/{sensor_id}/interfaces/{if_index}/diagnostics
 ```
 
 O endpoint de apply nao aplica automaticamente quando a confianca esta abaixo de `GMJFLOW_CALIBRATION_MIN_CONFIDENCE`, padrao `0.6`.

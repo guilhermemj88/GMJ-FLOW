@@ -68,10 +68,10 @@ A configuracao usa o plugin `print` em CSV para compatibilidade com pacotes Debi
 Campos esperados, na ordem de fallback do parser quando nao houver header CSV:
 
 ```text
-src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,timestamp,packets,bytes,flows
+src_host,dst_host,src_port,dst_port,proto,tcpflags,in_iface,out_iface,src_as,dst_as,timestamp,packets,bytes,flows
 ```
 
-O parser tambem aceita header CSV emitido pelo pmacct e tenta reconhecer aliases comuns para esses campos.
+O parser tambem aceita header CSV emitido pelo pmacct e tenta reconhecer aliases comuns para esses campos, incluindo `src_asn`/`dst_asn`.
 
 ## Consultas no ClickHouse
 

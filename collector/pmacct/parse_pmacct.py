@@ -29,6 +29,10 @@ COLUMN_NAMES = [
     "flow_count",
     "flow_type",
     "sample_rate",
+    "src_asn",
+    "dst_asn",
+    "src_as_name",
+    "dst_as_name",
 ]
 
 DEFAULT_CSV_FIELDS = [
@@ -40,6 +44,8 @@ DEFAULT_CSV_FIELDS = [
     "tcpflags",
     "in_iface",
     "out_iface",
+    "src_as",
+    "dst_as",
     "timestamp",
     "packets",
     "bytes",
@@ -60,6 +66,10 @@ ALIASES = {
     "flows": ("flows", "flow_count", "records"),
     "timestamp": ("timestamp", "timestamp_start", "stamp_inserted", "stamp_updated", "first_switched", "flow_start"),
     "sample_rate": ("sample_rate", "sampling_rate", "samplinginterval"),
+    "src_as": ("src_as", "src_asn", "src_as_number", "src_asnum", "peer_src_as"),
+    "dst_as": ("dst_as", "dst_asn", "dst_as_number", "dst_asnum", "peer_dst_as"),
+    "src_as_name": ("src_as_name", "src_as_org", "src_as_description"),
+    "dst_as_name": ("dst_as_name", "dst_as_org", "dst_as_description"),
 }
 
 PROTO_BY_NAME = {
@@ -229,6 +239,10 @@ def normalize_flow(record: dict[str, Any], sensor: str, exporter_ip: str, sample
         flow_count,
         "netflow-v9",
         sample_rate,
+        safe_int(pick(normalized, "src_as", 0), minimum=0),
+        safe_int(pick(normalized, "dst_as", 0), minimum=0),
+        str(pick(normalized, "src_as_name", "") or "")[:255],
+        str(pick(normalized, "dst_as_name", "") or "")[:255],
     )
 
 

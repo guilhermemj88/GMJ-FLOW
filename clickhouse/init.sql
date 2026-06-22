@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS flow_raw
     packets UInt64,
     flow_count UInt64 DEFAULT 1,
     flow_type LowCardinality(String) DEFAULT 'netflow-v9',
-    sample_rate UInt32 DEFAULT 1
+    sample_rate UInt32 DEFAULT 1,
+    src_asn UInt32 DEFAULT 0,
+    dst_asn UInt32 DEFAULT 0,
+    src_as_name String DEFAULT '',
+    dst_as_name String DEFAULT ''
 )
 ENGINE = MergeTree
 PARTITION BY toDate(flow_time)
