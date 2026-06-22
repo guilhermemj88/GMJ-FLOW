@@ -194,6 +194,9 @@ SENSOR_COLUMNS = [
     "snmp_interface_name_mode",
     "snmp_counters_mode",
     "snmp_polling_seconds",
+    "sample_rate_default_in",
+    "sample_rate_default_out",
+    "sample_rate_mode",
 ]
 
 SENSOR_BOOL_COLUMNS = {"exporter_snmp_enabled", "flow_collector_enabled", "active"}
@@ -209,12 +212,14 @@ INTERFACE_COLUMNS = [
     "speed_out_bps",
     "sample_rate_in",
     "sample_rate_out",
+    "sample_rate_override",
     "if_oper_status",
     "color",
     "monitor_enabled",
 ]
 
-INTERFACE_BOOL_COLUMNS = {"monitor_enabled"}
+INTERFACE_BOOL_COLUMNS = {"monitor_enabled", "sample_rate_override"}
+SAMPLE_RATE_MODES = {"sensor_default", "per_interface", "snmp_auto"}
 
 WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
 WHOIS_CACHE: dict[str, dict[str, Any]] = {}
@@ -313,6 +318,7 @@ class SensorInterfacePayload(BaseModel):
     speed_out_bps: int = 0
     sample_rate_in: int = 1
     sample_rate_out: int = 1
+    sample_rate_override: bool = False
     if_oper_status: str = ""
     color: str = "#64748b"
     monitor_enabled: bool = True
@@ -321,6 +327,11 @@ class SensorInterfacePayload(BaseModel):
 class InterfaceSampleRatePayload(BaseModel):
     sample_rate_in: int = Field(1, ge=1)
     sample_rate_out: int = Field(1, ge=1)
+    sample_rate_override: bool = True
+
+
+class SensorSampleRateApplyPayload(BaseModel):
+    inherit: bool = True
 
 
 class AsnPrefixPayload(BaseModel):
@@ -367,6 +378,9 @@ class SensorPayload(BaseModel):
     snmp_interface_name_mode: str = "auto"
     snmp_counters_mode: str = "auto"
     snmp_polling_seconds: int = 60
+    sample_rate_default_in: int = 1
+    sample_rate_default_out: int = 1
+    sample_rate_mode: str = "sensor_default"
     interfaces: list[SensorInterfacePayload] = Field(default_factory=list)
 
 
@@ -1049,11 +1063,17 @@ def ensure_sensor_db() -> None:
                 snmp_interface_name_mode TEXT NOT NULL DEFAULT 'auto',
                 snmp_counters_mode TEXT NOT NULL DEFAULT 'auto',
                 snmp_polling_seconds INTEGER NOT NULL DEFAULT 60,
+                sample_rate_default_in INTEGER NOT NULL DEFAULT 1,
+                sample_rate_default_out INTEGER NOT NULL DEFAULT 1,
+                sample_rate_mode TEXT NOT NULL DEFAULT 'sensor_default',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        ensure_sqlite_column(conn, "sensors", "sample_rate_default_in", "sample_rate_default_in INTEGER NOT NULL DEFAULT 1")
+        ensure_sqlite_column(conn, "sensors", "sample_rate_default_out", "sample_rate_default_out INTEGER NOT NULL DEFAULT 1")
+        ensure_sqlite_column(conn, "sensors", "sample_rate_mode", "sample_rate_mode TEXT NOT NULL DEFAULT 'sensor_default'")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sensor_interfaces (
@@ -1069,6 +1089,7 @@ def ensure_sensor_db() -> None:
                 speed_out_bps INTEGER NOT NULL DEFAULT 0,
                 sample_rate_in INTEGER NOT NULL DEFAULT 1,
                 sample_rate_out INTEGER NOT NULL DEFAULT 1,
+                sample_rate_override INTEGER NOT NULL DEFAULT 0,
                 if_oper_status TEXT NOT NULL DEFAULT '',
                 color TEXT NOT NULL DEFAULT '#64748b',
                 monitor_enabled INTEGER NOT NULL DEFAULT 1,
@@ -1080,6 +1101,7 @@ def ensure_sensor_db() -> None:
         )
         ensure_sqlite_column(conn, "sensor_interfaces", "sample_rate_in", "sample_rate_in INTEGER NOT NULL DEFAULT 1")
         ensure_sqlite_column(conn, "sensor_interfaces", "sample_rate_out", "sample_rate_out INTEGER NOT NULL DEFAULT 1")
+        ensure_sqlite_column(conn, "sensor_interfaces", "sample_rate_override", "sample_rate_override INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS interface_snmp_samples (
@@ -1213,6 +1235,7 @@ def normalize_interface_payload(payload: SensorInterfacePayload) -> dict[str, An
     data["speed_out_bps"] = non_negative_int(data.get("speed_out_bps"), "speed_out_bps")
     data["sample_rate_in"] = positive_int(data.get("sample_rate_in") or 1, "sample_rate_in")
     data["sample_rate_out"] = positive_int(data.get("sample_rate_out") or 1, "sample_rate_out")
+    data["sample_rate_override"] = 1 if data.get("sample_rate_override") else 0
     for field in ("if_name", "if_descr", "if_alias", "direction", "stats", "if_oper_status", "color"):
         data[field] = clean_text(data.get(field))
     data["monitor_enabled"] = 1 if data.get("monitor_enabled") else 0
@@ -1233,11 +1256,23 @@ def normalize_sensor_payload(payload: SensorPayload) -> tuple[dict[str, Any], li
     data["snmp_port"] = bounded_port(data.get("snmp_port"), "snmp_port")
     data["granularity_seconds"] = positive_int(data.get("granularity_seconds"), "granularity_seconds")
     data["snmp_polling_seconds"] = positive_int(data.get("snmp_polling_seconds"), "snmp_polling_seconds")
+    data["sample_rate_default_in"] = positive_int(data.get("sample_rate_default_in") or 1, "sample_rate_default_in")
+    data["sample_rate_default_out"] = positive_int(data.get("sample_rate_default_out") or 1, "sample_rate_default_out")
+    data["sample_rate_mode"] = clean_text(data.get("sample_rate_mode")) or "sensor_default"
+    if data["sample_rate_mode"] not in SAMPLE_RATE_MODES:
+        raise HTTPException(status_code=400, detail="sample_rate_mode invalido")
 
     for field in SENSOR_COLUMNS:
         if field in SENSOR_BOOL_COLUMNS:
             data[field] = 1 if data.get(field) else 0
-        elif field not in {"listener_port", "snmp_port", "granularity_seconds", "snmp_polling_seconds"}:
+        elif field not in {
+            "listener_port",
+            "snmp_port",
+            "granularity_seconds",
+            "snmp_polling_seconds",
+            "sample_rate_default_in",
+            "sample_rate_default_out",
+        }:
             data[field] = clean_text(data.get(field))
 
     interfaces = [
@@ -1250,6 +1285,7 @@ def normalize_sensor_payload(payload: SensorPayload) -> tuple[dict[str, Any], li
 def interface_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["monitor_enabled"] = bool(item["monitor_enabled"])
+    item["sample_rate_override"] = bool(item.get("sample_rate_override"))
     return item
 
 
@@ -1310,6 +1346,9 @@ def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sen
     item["snmp_sample_time"] = sample["sample_time"] if sample else ""
     item["snmp_if_oper_status"] = sample["if_oper_status"] if sample else ""
     item["calibration"] = calibration_row_to_dict(calibration)
+    item["effective_sample_rate_in"] = get_effective_sample_rate(sensor_id, if_index, "input")
+    item["effective_sample_rate_out"] = get_effective_sample_rate(sensor_id, if_index, "output")
+    item["sample_rate_source"] = "interface" if item.get("sample_rate_override") else "sensor"
     return item
 
 
@@ -5712,17 +5751,81 @@ def update_interface_sample_rate(sensor_id: int, if_index: int, payload: Interfa
             UPDATE sensor_interfaces
             SET sample_rate_in = ?,
                 sample_rate_out = ?,
+                sample_rate_override = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (payload.sample_rate_in, payload.sample_rate_out, utc_now_iso(), row["id"]),
+            (
+                payload.sample_rate_in,
+                payload.sample_rate_out,
+                1 if payload.sample_rate_override else 0,
+                utc_now_iso(),
+                row["id"],
+            ),
         )
         conn.commit()
     detail = calibration_detail(sensor_id, if_index)
     detail["applied"] = True
     detail["sample_rate_in"] = payload.sample_rate_in
     detail["sample_rate_out"] = payload.sample_rate_out
+    detail["sample_rate_override"] = payload.sample_rate_override
     return detail
+
+
+@app.post("/api/sensors/{sensor_id}/sample-rate/apply-default-to-interfaces")
+def apply_sensor_sample_rate_to_interfaces(
+    sensor_id: int,
+    payload: SensorSampleRateApplyPayload | None = None,
+):
+    inherit = True if payload is None else bool(payload.inherit)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        default_in = max(1, int(sensor.get("sample_rate_default_in") or 1))
+        default_out = max(1, int(sensor.get("sample_rate_default_out") or 1))
+        now = utc_now_iso()
+        if inherit:
+            cursor = conn.execute(
+                """
+                UPDATE sensor_interfaces
+                SET sample_rate_override = 0,
+                    updated_at = ?
+                WHERE sensor_id = ?
+                """,
+                (now, sensor_id),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE sensor_interfaces
+                SET sample_rate_in = ?,
+                    sample_rate_out = ?,
+                    sample_rate_override = 1,
+                    updated_at = ?
+                WHERE sensor_id = ?
+                """,
+                (default_in, default_out, now, sensor_id),
+            )
+        conn.commit()
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ?
+            ORDER BY if_index, id
+            """,
+            (sensor_id,),
+        ).fetchall()
+        items = [enrich_interface_metrics(conn, interface_dashboard_row_to_dict(row), sensor_id) for row in rows]
+    return {
+        "ok": True,
+        "sensor_id": sensor_id,
+        "inherit": inherit,
+        "affected": int(cursor.rowcount or 0),
+        "sample_rate_default_in": default_in,
+        "sample_rate_default_out": default_out,
+        "items": items,
+    }
 
 
 @app.get("/api/sensors/{sensor_id}/interfaces/{if_index}/diagnostics")
@@ -5778,8 +5881,9 @@ def interface_diagnostics(sensor_id: int, if_index: int):
     )
     rows = rows_as_dicts(result)
     row = rows[0] if rows else {}
-    sample_rate_in = max(1, int(item.get("sample_rate_in") or 1))
-    sample_rate_out = max(1, int(item.get("sample_rate_out") or 1))
+    detected_sample_rate = int(row.get("max_sample_rate_detected") or row.get("min_sample_rate_detected") or 1)
+    sample_rate_in = get_effective_sample_rate(sensor_id, if_index, "input", detected_sample_rate)
+    sample_rate_out = get_effective_sample_rate(sensor_id, if_index, "output", detected_sample_rate)
     raw_in_bps = float(row.get("raw_in_bps_5m") or 0)
     raw_out_bps = float(row.get("raw_out_bps_5m") or 0)
     corrected_in_bps = raw_in_bps * sample_rate_in
@@ -5797,6 +5901,7 @@ def interface_diagnostics(sensor_id: int, if_index: int):
         "sample_rate_configured": {
             "in": sample_rate_in,
             "out": sample_rate_out,
+            "source": item.get("sample_rate_source") or "sensor",
         },
         "sample_rate_detected": {
             "min": int(row.get("min_sample_rate_detected") or 0),
@@ -5848,29 +5953,70 @@ def sensor_exporter_ip(sensor_id: int) -> str:
     return exporter_ip
 
 
-def sensor_interface_sample_rates(sensor_id: int | None) -> dict[int, tuple[int, int]]:
+def sensor_sample_rate_config(sensor_id: int | None) -> dict[str, Any] | None:
     if sensor_id is None:
-        return {}
+        return None
     ensure_sensor_db()
     with sqlite_connection() as conn:
+        sensor = conn.execute(
+            """
+            SELECT sample_rate_default_in, sample_rate_default_out, sample_rate_mode
+            FROM sensors
+            WHERE id = ?
+            """,
+            (sensor_id,),
+        ).fetchone()
+        if sensor is None:
+            return None
         rows = conn.execute(
             """
-            SELECT if_index, sample_rate_in, sample_rate_out
+            SELECT if_index, sample_rate_in, sample_rate_out, sample_rate_override
             FROM sensor_interfaces
             WHERE sensor_id = ?
             """,
             (sensor_id,),
         ).fetchall()
-    rates: dict[int, tuple[int, int]] = {}
+    interfaces: dict[int, dict[str, Any]] = {}
     for row in rows:
         if_index = int(row["if_index"] or 0)
         if if_index <= 0:
             continue
-        rates[if_index] = (
-            max(1, int(row["sample_rate_in"] or 1)),
-            max(1, int(row["sample_rate_out"] or 1)),
-        )
-    return rates
+        interfaces[if_index] = {
+            "in": max(1, int(row["sample_rate_in"] or 1)),
+            "out": max(1, int(row["sample_rate_out"] or 1)),
+            "override": bool(row["sample_rate_override"]),
+        }
+    mode = clean_text(sensor["sample_rate_mode"]) or "sensor_default"
+    if mode not in SAMPLE_RATE_MODES:
+        mode = "sensor_default"
+    return {
+        "default_in": max(1, int(sensor["sample_rate_default_in"] or 1)),
+        "default_out": max(1, int(sensor["sample_rate_default_out"] or 1)),
+        "mode": mode,
+        "interfaces": interfaces,
+    }
+
+
+def effective_sample_rate_from_config(
+    config: dict[str, Any] | None,
+    if_index: int | None,
+    direction: str,
+    fallback: int = 1,
+) -> int:
+    if not config:
+        return max(1, int(fallback or 1))
+    direction_key = "out" if direction == "output" else "in"
+    default_key = "default_out" if direction == "output" else "default_in"
+    default_rate = max(1, int(config.get(default_key) or 1))
+    interfaces = config.get("interfaces") if isinstance(config.get("interfaces"), dict) else {}
+    interface = interfaces.get(int(if_index or 0))
+    if interface and interface.get("override"):
+        return max(1, int(interface.get(direction_key) or default_rate))
+    return default_rate
+
+
+def get_effective_sample_rate(sensor_id: int | None, if_index: int | None, direction: str, fallback: int = 1) -> int:
+    return effective_sample_rate_from_config(sensor_sample_rate_config(sensor_id), if_index, direction, fallback)
 
 
 def sample_rate_literal(value: Any) -> str:
@@ -5887,26 +6033,36 @@ def clickhouse_sample_rate_expr(
     if_index: int | None = None,
 ) -> str:
     fallback = "greatest(toFloat64(sample_rate), 1.0)"
-    rates = sensor_interface_sample_rates(sensor_id)
+    config = sensor_sample_rate_config(sensor_id)
+    if not config:
+        return fallback
     conditions: list[str] = []
 
     def add_condition(field: str, index: int, rate: int) -> None:
         conditions.append(f"{field} = {int(index)}, {sample_rate_literal(rate)}")
 
-    for index, (rate_in, rate_out) in rates.items():
+    interfaces = config.get("interfaces") if isinstance(config.get("interfaces"), dict) else {}
+    for index in interfaces:
         if if_index is not None and int(index) != int(if_index):
             continue
         if direction == "input":
-            add_condition("input_if", index, rate_in)
+            add_condition("input_if", index, effective_sample_rate_from_config(config, index, "input"))
         elif direction == "output":
-            add_condition("output_if", index, rate_out)
+            add_condition("output_if", index, effective_sample_rate_from_config(config, index, "output"))
         else:
-            add_condition("input_if", index, rate_in)
-            add_condition("output_if", index, rate_out)
+            add_condition("input_if", index, effective_sample_rate_from_config(config, index, "input"))
+            add_condition("output_if", index, effective_sample_rate_from_config(config, index, "output"))
 
-    if not conditions:
-        return fallback
-    return f"multiIf({', '.join(conditions)}, {fallback})"
+    if direction == "input":
+        default_fallback = sample_rate_literal(config["default_in"])
+    elif direction == "output":
+        default_fallback = sample_rate_literal(config["default_out"])
+    else:
+        default_fallback = (
+            f"multiIf(input_if > 0, {sample_rate_literal(config['default_in'])}, "
+            f"output_if > 0, {sample_rate_literal(config['default_out'])}, {fallback})"
+        )
+    return f"multiIf({', '.join(conditions)}, {default_fallback})" if conditions else default_fallback
 
 
 def corrected_value_expr(value_field: str, factor_expr: str) -> str:
@@ -6316,6 +6472,7 @@ def apply_interface_calibration(sensor_id: int, if_index: int) -> dict[str, Any]
             UPDATE sensor_interfaces
             SET sample_rate_in = ?,
                 sample_rate_out = ?,
+                sample_rate_override = 1,
                 updated_at = ?
             WHERE sensor_id = ? AND if_index = ?
             """,
@@ -6326,6 +6483,7 @@ def apply_interface_calibration(sensor_id: int, if_index: int) -> dict[str, Any]
     detail["applied"] = True
     detail["sample_rate_in"] = sample_rate_in
     detail["sample_rate_out"] = sample_rate_out
+    detail["sample_rate_override"] = True
     return detail
 
 

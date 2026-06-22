@@ -1515,6 +1515,43 @@
                 </div>
               </div>
 
+              <div class="split-line"></div>
+              <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-2 mb-2">
+                <div class="panel-title">Sample Rate do Sensor</div>
+                <div class="toolbar">
+                  <button id="sensorSampleRate1Button" type="button" class="btn btn-sm btn-outline-secondary">
+                    <i data-lucide="rotate-ccw"></i><span>Aplicar 1x</span>
+                  </button>
+                  <button id="sensorSampleRate1000Button" type="button" class="btn btn-sm btn-outline-success">
+                    <i data-lucide="gauge"></i><span>Aplicar 1000x</span>
+                  </button>
+                  <button id="applySensorRateToInterfacesButton" type="button" class="btn btn-sm btn-outline-primary">
+                    <i data-lucide="copy-check"></i><span>Aplicar para todas as interfaces</span>
+                  </button>
+                  <button id="resetInterfaceRateInheritanceButton" type="button" class="btn btn-sm btn-outline-secondary">
+                    <i data-lucide="git-branch"></i><span>Resetar interfaces para herdar do sensor</span>
+                  </button>
+                </div>
+              </div>
+              <div class="sensor-form-grid">
+                <div class="field">
+                  <label for="sensorSampleRateMode">Modo</label>
+                  <select id="sensorSampleRateMode" class="form-select form-select-sm">
+                    <option value="sensor_default">Padrao do sensor</option>
+                    <option value="per_interface">Por interface</option>
+                    <option value="snmp_auto">Automatico por SNMP</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="sensorSampleRateIn">Default IN</label>
+                  <input id="sensorSampleRateIn" type="number" min="1" class="form-control form-control-sm" value="1">
+                </div>
+                <div class="field">
+                  <label for="sensorSampleRateOut">Default OUT</label>
+                  <input id="sensorSampleRateOut" type="number" min="1" class="form-control form-control-sm" value="1">
+                </div>
+              </div>
+
               <div class="hidden-field" aria-hidden="true">
                 <input id="snmpIp">
                 <input id="snmpPort" value="161">
@@ -2409,6 +2446,13 @@
           <div class="field">
             <label for="modalSampleRateOut">Sample rate OUT</label>
             <input id="modalSampleRateOut" type="number" min="1" class="form-control form-control-sm" value="1">
+          </div>
+          <div class="field">
+            <label for="modalSampleRateOverride">Sample rate source</label>
+            <select id="modalSampleRateOverride" class="form-select form-select-sm">
+              <option value="false">Herdar sensor</option>
+              <option value="true">Override interface</option>
+            </select>
           </div>
           <div class="field">
             <label for="modalIfDescr">ifDescr</label>
@@ -4523,6 +4567,9 @@
         snmp_interface_name_mode: 'auto',
         snmp_counters_mode: 'auto',
         snmp_polling_seconds: 60,
+        sample_rate_default_in: 1,
+        sample_rate_default_out: 1,
+        sample_rate_mode: 'sensor_default',
         interfaces: []
       };
     }
@@ -4577,6 +4624,9 @@
       setValue('granularitySeconds', item.granularity_seconds);
       setValue('timezone', item.timezone);
       setBoolSelect('sensorActive', item.active);
+      setValue('sensorSampleRateMode', item.sample_rate_mode || 'sensor_default');
+      setValue('sensorSampleRateIn', item.sample_rate_default_in || 1);
+      setValue('sensorSampleRateOut', item.sample_rate_default_out || 1);
 
       setValue('snmpIp', item.snmp_ip);
       setValue('snmpPort', item.snmp_port);
@@ -4617,6 +4667,9 @@
         granularity_seconds: numberValue('granularitySeconds', 60),
         timezone: selectValue('timezone', 'local-server'),
         active: boolSelectValue('sensorActive'),
+        sample_rate_default_in: Math.max(1, numberValue('sensorSampleRateIn', 1)),
+        sample_rate_default_out: Math.max(1, numberValue('sensorSampleRateOut', 1)),
+        sample_rate_mode: selectValue('sensorSampleRateMode', 'sensor_default'),
         snmp_ip: selectValue('snmpIp').trim(),
         snmp_port: numberValue('snmpPort', 161),
         snmp_mib: selectValue('snmpMib', 'generic'),
@@ -4642,6 +4695,7 @@
           speed_out_bps: Number(entry.speed_out_bps) || 0,
           sample_rate_in: Number(entry.sample_rate_in) || 1,
           sample_rate_out: Number(entry.sample_rate_out) || 1,
+          sample_rate_override: Boolean(entry.sample_rate_override),
           if_oper_status: entry.if_oper_status || '',
           color: entry.color || '#64748b',
           monitor_enabled: Boolean(entry.monitor_enabled)
@@ -4713,12 +4767,12 @@
       const payload = collectSensorForm();
       if (!payload.name) {
         setSensorStatus('Sensor Name obrigatorio', 'error');
-        return;
+        return null;
       }
       const collectorError = validateSensorCollectorConfig(payload);
       if (collectorError) {
         setSensorStatus(collectorError, 'error');
-        return;
+        return null;
       }
 
       const options = {
@@ -4734,8 +4788,10 @@
         await loadSensors();
         await loadDashboardSensors();
         setSensorStatus(`Sensor ${saved.name} salvo`);
+        return saved;
       } catch (error) {
         setSensorStatus(`Falha ao salvar sensor: ${error.message}`, 'error');
+        return null;
       }
     }
 
@@ -4796,6 +4852,13 @@
       return `${Math.round(number * 100)}%`;
     }
 
+    function interfaceSampleRateLabel(iface) {
+      const sampleIn = Math.max(1, Number(iface.effective_sample_rate_in || iface.sample_rate_in) || 1);
+      const sampleOut = Math.max(1, Number(iface.effective_sample_rate_out || iface.sample_rate_out) || 1);
+      const source = (iface.sample_rate_source === 'interface' || iface.sample_rate_override) ? 'Interface' : 'Sensor';
+      return `IN ${formatNumber(sampleIn)}x / OUT ${formatNumber(sampleOut)}x (${source})`;
+    }
+
     function calibrationForInterface(iface) {
       return iface.calibration || {};
     }
@@ -4825,7 +4888,7 @@
           <td class="text-end">${formatPair(calibrationForInterface(iface).estimated_sample_rate_in, calibrationForInterface(iface).estimated_sample_rate_out, value => `${Number(value || 0).toFixed(2)}x`)}</td>
           <td class="text-end">${calibrationForInterface(iface).last_calibrated_at ? formatConfidence(calibrationForInterface(iface).confidence) : '-'}</td>
           <td>${calibrationForInterface(iface).last_calibrated_at ? formatDateTime(calibrationForInterface(iface).last_calibrated_at) : '-'}</td>
-          <td class="text-end">${formatPair(iface.sample_rate_in || 1, iface.sample_rate_out || 1, value => `${formatNumber(value)}x`)}</td>
+          <td class="text-end">${escapeHtml(interfaceSampleRateLabel(iface))}</td>
           <td><span class="color-swatch" style="background:${escapeHtml(iface.color || '#64748b')}"></span></td>
           <td><span class="badge-soft ${iface.monitor_enabled ? 'ok' : 'off'}">${iface.monitor_enabled ? 'Enabled' : 'Disabled'}</span></td>
           <td>
@@ -4838,6 +4901,9 @@
               </button>
               <button type="button" class="btn btn-sm btn-outline-secondary sample-rate-reset-button" data-if-index="${Number(iface.if_index) || 0}">
                 1x
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sample-rate-inherit-button" data-if-index="${Number(iface.if_index) || 0}">
+                Herdar sensor
               </button>
             </div>
           </td>
@@ -4857,6 +4923,7 @@
         speed_out_bps: 0,
         sample_rate_in: 1,
         sample_rate_out: 1,
+        sample_rate_override: false,
         if_oper_status: '',
         color: '#d946ef',
         monitor_enabled: true
@@ -4952,6 +5019,7 @@
       setValue('modalSpeedOut', iface.speed_out_bps);
       setValue('modalSampleRateIn', iface.sample_rate_in || 1);
       setValue('modalSampleRateOut', iface.sample_rate_out || 1);
+      setBoolSelect('modalSampleRateOverride', iface.sample_rate_override);
       setValue('modalIfDescr', iface.if_descr);
       setValue('modalIfOperStatus', iface.if_oper_status);
       setValue('modalColor', iface.color || '#d946ef');
@@ -4971,12 +5039,16 @@
         speed_out_bps: numberValue('modalSpeedOut', 0),
         sample_rate_in: Math.max(1, numberValue('modalSampleRateIn', Number(existing.sample_rate_in) || 1)),
         sample_rate_out: Math.max(1, numberValue('modalSampleRateOut', Number(existing.sample_rate_out) || 1)),
+        sample_rate_override: boolSelectValue('modalSampleRateOverride'),
         if_descr: selectValue('modalIfDescr').trim(),
         if_oper_status: selectValue('modalIfOperStatus').trim(),
         color: selectValue('modalColor', '#64748b'),
         monitor_enabled: boolSelectValue('modalMonitorEnabled'),
         snmp_in_bps: existing.snmp_in_bps || 0,
         snmp_out_bps: existing.snmp_out_bps || 0,
+        effective_sample_rate_in: existing.effective_sample_rate_in || null,
+        effective_sample_rate_out: existing.effective_sample_rate_out || null,
+        sample_rate_source: existing.sample_rate_source || 'sensor',
         calibration: existing.calibration || null
       };
 
@@ -5070,26 +5142,81 @@
       }
     }
 
-    async function setInterfaceSampleRate(ifIndex, sampleRateIn, sampleRateOut) {
+    function setSensorSampleRateDefaults(sampleRateIn, sampleRateOut, mode = 'sensor_default') {
+      setValue('sensorSampleRateMode', mode);
+      setValue('sensorSampleRateIn', Math.max(1, Number(sampleRateIn) || 1));
+      setValue('sensorSampleRateOut', Math.max(1, Number(sampleRateOut) || 1));
+      setSensorStatus(`Sample rate do sensor ajustado para IN ${formatNumber(sampleRateIn)}x / OUT ${formatNumber(sampleRateOut)}x`);
+      currentInterfaces = currentInterfaces.map(iface => (
+        iface.sample_rate_override
+          ? iface
+          : {
+              ...iface,
+              effective_sample_rate_in: Math.max(1, Number(sampleRateIn) || 1),
+              effective_sample_rate_out: Math.max(1, Number(sampleRateOut) || 1),
+              sample_rate_source: 'sensor'
+            }
+      ));
+      renderInterfaces();
+    }
+
+    async function applySensorSampleRateToInterfaces(inherit) {
+      if (!currentSensorId) {
+        setSensorStatus('Salve o sensor antes de aplicar sample rate nas interfaces', 'error');
+        return;
+      }
+      const saved = await saveSensor();
+      if (!saved) return;
+      document.getElementById('interfacesStatus').textContent = inherit
+        ? 'Resetando interfaces para herdar do sensor...'
+        : 'Aplicando sample rate do sensor nas interfaces...';
+      try {
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/sample-rate/apply-default-to-interfaces`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inherit })
+        });
+        currentInterfaces = Array.isArray(payload.items) ? payload.items : currentInterfaces;
+        renderInterfaces();
+        document.getElementById('interfacesStatus').textContent = inherit
+          ? `${formatNumber(payload.affected || 0)} interfaces herdando do sensor`
+          : `${formatNumber(payload.affected || 0)} interfaces com override do sensor`;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Nao aplicado: ${error.message}`;
+      }
+    }
+
+    async function setInterfaceSampleRate(ifIndex, sampleRateIn, sampleRateOut, override = true) {
       if (!currentSensorId || !ifIndex) return;
-      document.getElementById('interfacesStatus').textContent = `Salvando sample rate da interface ${ifIndex}...`;
+      document.getElementById('interfacesStatus').textContent = override
+        ? `Salvando sample rate da interface ${ifIndex}...`
+        : `Interface ${ifIndex} voltando a herdar do sensor...`;
       try {
         const payload = await apiRequest(`/api/sensors/${currentSensorId}/interfaces/${ifIndex}/sample-rate`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             sample_rate_in: Math.max(1, Number(sampleRateIn) || 1),
-            sample_rate_out: Math.max(1, Number(sampleRateOut) || 1)
+            sample_rate_out: Math.max(1, Number(sampleRateOut) || 1),
+            sample_rate_override: Boolean(override)
           })
         });
         const updated = payload.interface || {};
         currentInterfaces = currentInterfaces.map(iface => (
           Number(iface.if_index) === Number(ifIndex)
-            ? { ...iface, ...updated, sample_rate_in: payload.sample_rate_in, sample_rate_out: payload.sample_rate_out }
+            ? {
+                ...iface,
+                ...updated,
+                sample_rate_in: payload.sample_rate_in,
+                sample_rate_out: payload.sample_rate_out,
+                sample_rate_override: Boolean(payload.sample_rate_override)
+              }
             : iface
         ));
         renderInterfaces();
-        document.getElementById('interfacesStatus').textContent = `Sample rate aplicado na interface ${ifIndex}`;
+        document.getElementById('interfacesStatus').textContent = override
+          ? `Sample rate aplicado na interface ${ifIndex}`
+          : `Interface ${ifIndex} herdando do sensor`;
       } catch (error) {
         document.getElementById('interfacesStatus').textContent = `Nao aplicado: ${error.message}`;
       }
@@ -5407,6 +5534,10 @@
     document.getElementById('applyCollectorsButton').addEventListener('click', () => applyCollectors().catch(console.error));
     document.getElementById('deleteSensorButton').addEventListener('click', () => deleteSensor().catch(console.error));
     document.getElementById('openSnmpButton').addEventListener('click', openSnmpModal);
+    document.getElementById('sensorSampleRate1Button').addEventListener('click', () => setSensorSampleRateDefaults(1, 1));
+    document.getElementById('sensorSampleRate1000Button').addEventListener('click', () => setSensorSampleRateDefaults(1000, 1000));
+    document.getElementById('applySensorRateToInterfacesButton').addEventListener('click', () => applySensorSampleRateToInterfaces(false).catch(console.error));
+    document.getElementById('resetInterfaceRateInheritanceButton').addEventListener('click', () => applySensorSampleRateToInterfaces(true).catch(console.error));
     document.getElementById('addInterfaceButton').addEventListener('click', () => openInterfaceModal());
     document.getElementById('editInterfaceButton').addEventListener('click', editSelectedInterface);
     document.getElementById('deleteInterfaceButton').addEventListener('click', deleteSelectedInterfaces);
@@ -5427,12 +5558,15 @@
       const calibrationButton = target?.closest('.apply-calibration-button');
       const sample1000Button = target?.closest('.sample-rate-1000-button');
       const sampleResetButton = target?.closest('.sample-rate-reset-button');
+      const sampleInheritButton = target?.closest('.sample-rate-inherit-button');
       if (calibrationButton) {
         applyCalibrationFactor(Number(calibrationButton.dataset.ifIndex)).catch(console.error);
       } else if (sample1000Button) {
-        setInterfaceSampleRate(Number(sample1000Button.dataset.ifIndex), 1000, 1000).catch(console.error);
+        setInterfaceSampleRate(Number(sample1000Button.dataset.ifIndex), 1000, 1000, true).catch(console.error);
       } else if (sampleResetButton) {
-        setInterfaceSampleRate(Number(sampleResetButton.dataset.ifIndex), 1, 1).catch(console.error);
+        setInterfaceSampleRate(Number(sampleResetButton.dataset.ifIndex), 1, 1, true).catch(console.error);
+      } else if (sampleInheritButton) {
+        setInterfaceSampleRate(Number(sampleInheritButton.dataset.ifIndex), 1, 1, false).catch(console.error);
       }
     });
 

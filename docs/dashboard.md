@@ -25,7 +25,7 @@ A aba **Flows** tem duas sub-abas:
 - **Registros de Flow**: tabela de registros com ordenacao no backend e exportacao CSV por `format=csv`.
 - **TOP Flow**: agregacoes por IP origem, IP destino, conversa, portas, protocolo, TCP flags, interfaces e ASN.
 
-Os valores de Bits/s, Packets/s, Bytes e Pacotes sao corrigidos por sample-rate quando houver `sample_rate_in/out` cadastrado para a interface. `Flows` permanece bruto.
+Os valores de Bits/s, Packets/s, Bytes e Pacotes sao corrigidos pelo sample-rate efetivo: override da interface quando existir, depois default IN/OUT do sensor, depois `flow_raw.sample_rate` e, por fim, `1`. `Flows` permanece bruto.
 
 ## Upload e download
 

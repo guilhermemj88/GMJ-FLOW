@@ -41,15 +41,23 @@ O backend usa a mediana dos pontos validos e ignora zeros, valores baixos e outl
 - `last_calibrated_at`
 - `method = snmp_vs_flow`
 
-A tabela de interfaces tambem guarda `sample_rate_in` e `sample_rate_out`, usados quando o operador aplica uma calibracao confiavel.
+A tabela `sensors` guarda o padrao do sensor:
 
-O operador tambem pode salvar manualmente `sample_rate_in` e `sample_rate_out` pela tela de interfaces. Para Huawei com `sampler fix-packets 1000`, use `1000` em IN e OUT quando a configuracao do roteador for simetrica.
+- `sample_rate_default_in`
+- `sample_rate_default_out`
+- `sample_rate_mode`
+
+A tabela de interfaces tambem guarda `sample_rate_in`, `sample_rate_out` e `sample_rate_override`. Quando `sample_rate_override=0`, a interface herda o padrao do sensor. Quando `sample_rate_override=1`, a interface usa seu proprio fator.
+
+O operador pode salvar o sample-rate no nivel do sensor pela secao **Sample Rate do Sensor**. Para Huawei com `sampler fix-packets 1000`, use `1000` em IN e OUT no sensor quando a configuracao do roteador for simetrica. Interfaces especificas podem sobrescrever esse valor pela tabela de interfaces, ou voltar para **Herdar sensor**.
 
 O GMJ-FLOW aplica o fator nas consultas de Dashboard, Registros de Flow e TOP Flow:
 
-- trafego de entrada usa `sample_rate_in` da interface `input_if`;
-- trafego de saida usa `sample_rate_out` da interface `output_if`;
-- se a interface nao estiver cadastrada, usa `flow_raw.sample_rate`;
+- trafego de entrada usa o fator efetivo de `input_if`;
+- trafego de saida usa o fator efetivo de `output_if`;
+- o fator efetivo prioriza override da interface, depois padrao do sensor;
+- se o sensor/interface nao existir, usa `flow_raw.sample_rate`;
+- se nada vier informado, usa `1`;
 - `bytes` e `packets` sao corrigidos;
 - `flow_count` nao e multiplicado por sample-rate.
 
@@ -62,6 +70,7 @@ POST /api/sensors/{sensor_id}/interfaces/{if_index}/calibration/run
 GET  /api/sensors/{sensor_id}/interfaces/{if_index}/calibration
 POST /api/sensors/{sensor_id}/interfaces/{if_index}/calibration/apply
 PUT  /api/sensors/{sensor_id}/interfaces/{if_index}/sample-rate
+POST /api/sensors/{sensor_id}/sample-rate/apply-default-to-interfaces
 GET  /api/sensors/{sensor_id}/interfaces/{if_index}/diagnostics
 ```
 
@@ -84,4 +93,4 @@ O polling em background roda dentro do backend e respeita `snmp_polling_seconds`
 - Trafego local, descartado, filtrado ou processado fora do caminho de exportacao pode divergir.
 - sFlow, IPFIX e NetFlow podem ter particularidades por vendor.
 - A primeira amostra SNMP nao gera taxa; e necessario ter pelo menos duas amostras para calcular delta.
-- O fator aplicado fica salvo na interface; ele nao altera automaticamente collectors ou parsers existentes.
+- O fator aplicado no sensor ou interface nao altera automaticamente collectors ou parsers existentes.
