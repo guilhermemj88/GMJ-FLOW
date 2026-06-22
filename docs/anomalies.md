@@ -63,9 +63,21 @@ Exemplo:
 }
 ```
 
-O aprendizado consulta o ClickHouse nos ultimos `N` dias e gera sugestoes por decoder, direcao e unidade. O calculo usa `p95`, `p99`, maximo e media, ignorando periodos sem trafego e valores muito baixos. A sugestao usa `p99` ou maximo com margem de seguranca; se o maximo estiver muito acima do `p99`, o `p99` e preferido para reduzir o risco de aprender um ataque antigo como normal.
+O aprendizado consulta o ClickHouse nos ultimos `N` dias e gera sugestoes por sensor, decoder, direcao e unidade. O calculo usa `p95`, `p99`, maximo e media, ignorando periodos sem trafego e valores muito baixos.
 
-As sugestoes ficam pendentes na tela ate o usuario aplicar uma a uma ou aplicar todas.
+Cada sugestao pendente e unica por:
+
+```text
+template_id + sensor_id + interface_if_index + domain_type + target_cidr + direction + decoder + threshold_unit
+```
+
+Se o aprendizado encontrar uma sugestao pendente com a mesma chave, ele atualiza `p95`, `p99`, maximo, media, threshold sugerido, margem, confianca e datas em vez de criar outra linha. O threshold sugerido e calculado como:
+
+```text
+baseline_max * (1 + margin_percent / 100)
+```
+
+As sugestoes ficam pendentes na tela ate o usuario aplicar uma a uma ou aplicar todas. Ao aplicar, a regra gerada inclui sensor, decoder, direcao e unidade no nome, como `mikrotik-LAB02 ICMP receives packets warning`.
 
 ## Motor de deteccao
 

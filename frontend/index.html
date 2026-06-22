@@ -1680,17 +1680,37 @@
                     <i data-lucide="check-check"></i><span>Aplicar sugestoes</span>
                   </button>
                 </div>
+                <div class="flow-search-grid mb-2">
+                  <div class="field">
+                    <label for="attackSuggestionSensorFilter">Sensor</label>
+                    <select id="attackSuggestionSensorFilter" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="field">
+                    <label for="attackSuggestionDirectionFilter">Direcao</label>
+                    <select id="attackSuggestionDirectionFilter" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="field">
+                    <label for="attackSuggestionDecoderFilter">Decoder</label>
+                    <select id="attackSuggestionDecoderFilter" class="form-select form-select-sm"></select>
+                  </div>
+                  <div class="field">
+                    <label for="attackSuggestionUnitFilter">Unidade</label>
+                    <select id="attackSuggestionUnitFilter" class="form-select form-select-sm"></select>
+                  </div>
+                </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 attack-vector-table">
                     <thead>
                       <tr>
+                        <th>Sensor</th>
                         <th>Direcao</th>
                         <th>Decoder</th>
+                        <th>Unidade</th>
                         <th class="text-end">p95</th>
                         <th class="text-end">p99</th>
                         <th class="text-end">Max</th>
                         <th class="text-end">Sugestao</th>
-                        <th>Unidade</th>
+                        <th class="text-end">Margem</th>
                         <th>Confianca</th>
                         <th>Acoes</th>
                       </tr>
@@ -3013,18 +3033,96 @@
       createIcons();
     }
 
+    function attackSuggestionSensorLabel(item) {
+      return item.sensor_name || (item.sensor_id ? `#${item.sensor_id}` : 'Global');
+    }
+
+    function attackSuggestionSensorFilterValue(item) {
+      return item.sensor_id ? String(item.sensor_id) : '__global__';
+    }
+
+    function attackSuggestionKey(item) {
+      return [
+        item.template_id || currentAttackTemplateId || '',
+        item.sensor_id || '',
+        item.interface_if_index || '',
+        item.domain_type || '',
+        item.target_cidr || '',
+        item.direction || '',
+        item.decoder || '',
+        item.threshold_unit || ''
+      ].join('|');
+    }
+
+    function uniqueAttackSuggestions(items = attackSuggestions) {
+      const byKey = new Map();
+      items.forEach(item => {
+        const key = attackSuggestionKey(item);
+        const previous = byKey.get(key);
+        if (!previous || Number(item.id || 0) > Number(previous.id || 0)) {
+          byKey.set(key, item);
+        }
+      });
+      return Array.from(byKey.values());
+    }
+
+    function renderAttackSuggestionFilters(items) {
+      const sensorFilter = document.getElementById('attackSuggestionSensorFilter');
+      const directionFilter = document.getElementById('attackSuggestionDirectionFilter');
+      const decoderFilter = document.getElementById('attackSuggestionDecoderFilter');
+      const unitFilter = document.getElementById('attackSuggestionUnitFilter');
+      const current = {
+        sensor: sensorFilter.value || '',
+        direction: directionFilter.value || '',
+        decoder: decoderFilter.value || '',
+        unit: unitFilter.value || ''
+      };
+      const sensorOptions = new Map([['', 'Todos']]);
+      const directions = new Set();
+      const decoders = new Set();
+      const units = new Set();
+      items.forEach(item => {
+        sensorOptions.set(attackSuggestionSensorFilterValue(item), attackSuggestionSensorLabel(item));
+        if (item.direction) directions.add(item.direction);
+        if (item.decoder) decoders.add(item.decoder);
+        if (item.threshold_unit) units.add(item.threshold_unit);
+      });
+      sensorFilter.innerHTML = optionList(Array.from(sensorOptions.entries()), current.sensor);
+      directionFilter.innerHTML = optionList([['', 'Todas'], ...Array.from(directions).sort().map(value => [value, value])], current.direction);
+      decoderFilter.innerHTML = optionList([['', 'Todos'], ...Array.from(decoders).sort().map(value => [value, value])], current.decoder);
+      unitFilter.innerHTML = optionList([['', 'Todas'], ...Array.from(units).sort().map(value => [value, unitLabel(value)])], current.unit);
+    }
+
+    function filteredAttackSuggestions(items) {
+      const sensor = selectValue('attackSuggestionSensorFilter');
+      const direction = selectValue('attackSuggestionDirectionFilter');
+      const decoder = selectValue('attackSuggestionDecoderFilter');
+      const unit = selectValue('attackSuggestionUnitFilter');
+      return items.filter(item => (
+        (!sensor || attackSuggestionSensorFilterValue(item) === sensor) &&
+        (!direction || item.direction === direction) &&
+        (!decoder || item.decoder === decoder) &&
+        (!unit || item.threshold_unit === unit)
+      ));
+    }
+
     function renderAttackSuggestionTable() {
       const tbody = document.getElementById('attackSuggestionTable');
-      document.getElementById('attackSuggestionStatus').textContent = `${formatNumber(attackSuggestions.length)} sugestoes pendentes`;
-      tbody.innerHTML = attackSuggestions.map(item => `
+      const uniqueItems = uniqueAttackSuggestions();
+      renderAttackSuggestionFilters(uniqueItems);
+      const items = filteredAttackSuggestions(uniqueItems);
+      document.getElementById('attackSuggestionStatus').textContent = `${formatNumber(items.length)} de ${formatNumber(uniqueItems.length)} sugestoes pendentes`;
+      tbody.innerHTML = items.map(item => `
         <tr>
+          <td>${escapeHtml(attackSuggestionSensorLabel(item))}</td>
           <td>${escapeHtml(item.direction)}</td>
           <td>${escapeHtml(item.decoder)}</td>
+          <td>${escapeHtml(unitLabel(item.threshold_unit))}</td>
           <td class="text-end">${formatMetricValue(item.baseline_p95, item.threshold_unit)}</td>
           <td class="text-end">${formatMetricValue(item.baseline_p99, item.threshold_unit)}</td>
           <td class="text-end">${formatMetricValue(item.baseline_max, item.threshold_unit)}</td>
           <td class="text-end">${formatMetricValue(item.threshold_value, item.threshold_unit)}</td>
-          <td>${escapeHtml(unitLabel(item.threshold_unit))}</td>
+          <td class="text-end">${formatNumber(item.margin_percent || 0)}%</td>
           <td>${Math.round(Number(item.confidence || 0) * 100)}%</td>
           <td>
             <button type="button" class="btn btn-sm btn-outline-success attack-suggestion-apply" data-suggestion-id="${item.id}">
@@ -3032,7 +3130,7 @@
             </button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestoes pendentes</td></tr>';
+      `).join('') || '<tr><td colspan="11" class="text-muted">Sem sugestoes pendentes</td></tr>';
       createIcons();
     }
 
@@ -4704,6 +4802,10 @@
     document.getElementById('deleteTemplateButton').addEventListener('click', () => deleteAttackTemplate().catch(console.error));
     document.getElementById('learnAttackVectorsButton').addEventListener('click', () => learnAttackVectors().catch(console.error));
     document.getElementById('applySuggestionsButton').addEventListener('click', () => applyAllAttackSuggestions().catch(console.error));
+    document.getElementById('attackSuggestionSensorFilter').addEventListener('change', renderAttackSuggestionTable);
+    document.getElementById('attackSuggestionDirectionFilter').addEventListener('change', renderAttackSuggestionTable);
+    document.getElementById('attackSuggestionDecoderFilter').addEventListener('change', renderAttackSuggestionTable);
+    document.getElementById('attackSuggestionUnitFilter').addEventListener('change', renderAttackSuggestionTable);
     document.getElementById('addVectorButton').addEventListener('click', () => openAttackVectorModal());
     document.getElementById('saveAttackVectorButton').addEventListener('click', () => saveAttackVector().catch(console.error));
     document.getElementById('modalVectorSensor').addEventListener('change', () => populateAttackVectorInterfaces());

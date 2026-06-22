@@ -238,13 +238,17 @@ ATTACK_RESPONSE_ACTIONS = {"alert_only", "response_ip", "webhook_future", "ignor
 LEARN_DECODER_UNITS = (
     ("IP", "bits_s"),
     ("IP", "packets_s"),
+    ("IP", "flows_s"),
     ("TCP", "bits_s"),
     ("TCP", "packets_s"),
+    ("TCP", "flows_s"),
     ("TCP+SYN", "packets_s"),
     ("UDP", "bits_s"),
     ("UDP", "packets_s"),
+    ("UDP", "flows_s"),
     ("ICMP", "bits_s"),
     ("ICMP", "packets_s"),
+    ("ICMP", "flows_s"),
     ("OTHER", "bits_s"),
     ("OTHER", "packets_s"),
     ("FLOWS", "flows_s"),
@@ -682,6 +686,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             template_id INTEGER NOT NULL,
             sensor_id INTEGER,
+            interface_if_index INTEGER,
             domain_type TEXT NOT NULL DEFAULT 'any',
             target_cidr TEXT,
             direction TEXT NOT NULL DEFAULT 'receives',
@@ -695,6 +700,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             margin_percent REAL NOT NULL DEFAULT 20,
             confidence REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT '',
             applied_at TEXT,
             FOREIGN KEY(template_id) REFERENCES attack_vector_templates(id) ON DELETE CASCADE,
             FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE SET NULL
@@ -758,7 +764,52 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        UPDATE attack_vector_suggestions
+        SET updated_at = created_at
+        WHERE updated_at = ''
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM attack_vector_suggestions
+        WHERE applied_at IS NULL
+          AND id NOT IN (
+              SELECT MAX(id)
+              FROM attack_vector_suggestions
+              WHERE applied_at IS NULL
+              GROUP BY
+                  template_id,
+                  COALESCE(sensor_id, 0),
+                  COALESCE(interface_if_index, 0),
+                  domain_type,
+                  COALESCE(target_cidr, ''),
+                  direction,
+                  decoder,
+                  threshold_unit
+          )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vector_suggestions_template ON attack_vector_suggestions(template_id)")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attack_vector_suggestions_pending_key
+        ON attack_vector_suggestions (
+            template_id,
+            COALESCE(sensor_id, 0),
+            COALESCE(interface_if_index, 0),
+            domain_type,
+            COALESCE(target_cidr, ''),
+            direction,
+            decoder,
+            threshold_unit
+        )
+        WHERE applied_at IS NULL
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_status ON anomaly_events(status, last_seen_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_dedupe ON anomaly_events(dedupe_key, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_event_flows_event ON anomaly_event_flows(anomaly_event_id)")
@@ -2862,6 +2913,8 @@ def attack_vector_suggestion_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> d
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
         "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
+        "sensor_name": item.get("sensor_name") or "",
+        "interface_if_index": int(item["interface_if_index"]) if item.get("interface_if_index") is not None else None,
         "domain_type": item["domain_type"],
         "target_cidr": item.get("target_cidr"),
         "direction": item["direction"],
@@ -2875,6 +2928,7 @@ def attack_vector_suggestion_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> d
         "margin_percent": round(float(item["margin_percent"] or 0), 2),
         "confidence": round(float(item["confidence"] or 0), 3),
         "created_at": item["created_at"],
+        "updated_at": item.get("updated_at") or item["created_at"],
         "applied_at": item.get("applied_at"),
     }
 
@@ -3302,15 +3356,17 @@ def query_learn_series(
     decoder: str,
     unit: str,
     direction: str,
-    payload: AttackVectorLearnPayload,
+    sensor_id: int | None,
+    interface_if_index: int | None,
+    target_cidr: str | None,
     start_dt: datetime,
     end_dt: datetime,
 ) -> list[float]:
     params: dict[str, Any] = {}
     vector_like = {
-        "sensor_id": payload.sensor_id,
-        "interface_if_index": None,
-        "target_cidr": normalize_target_cidr(payload.target_cidr),
+        "sensor_id": sensor_id,
+        "interface_if_index": interface_if_index,
+        "target_cidr": target_cidr,
         "direction": direction,
         "decoder": decoder,
     }
@@ -3339,10 +3395,160 @@ def query_learn_series(
     return values
 
 
+def learn_sensor_targets(payload: AttackVectorLearnPayload) -> list[dict[str, Any]]:
+    with sqlite_connection() as conn:
+        if payload.sensor_id is not None:
+            sensor = fetch_sensor_without_interfaces(conn, int(payload.sensor_id))
+            return [{"sensor_id": sensor["id"], "sensor_name": sensor["name"]}]
+        rows = conn.execute(
+            """
+            SELECT id, name
+            FROM sensors
+            WHERE active = 1
+              AND flow_collector_enabled = 1
+              AND exporter_ip <> ''
+            ORDER BY name, id
+            """
+        ).fetchall()
+        if rows:
+            return [{"sensor_id": int(row["id"]), "sensor_name": row["name"]} for row in rows]
+    return [{"sensor_id": None, "sensor_name": ""}]
+
+
 def low_metric_floor(unit: str) -> float:
     if unit == "bits_s":
         return 1_000.0
     return 1.0
+
+
+def fetch_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT a.*, s.name AS sensor_name
+        FROM attack_vector_suggestions a
+        LEFT JOIN sensors s ON s.id = a.sensor_id
+        WHERE a.id = ?
+        """,
+        (suggestion_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sugestao nao encontrada")
+    return attack_vector_suggestion_row_to_dict(row)
+
+
+def upsert_attack_vector_suggestion(conn: sqlite3.Connection, suggestion: dict[str, Any]) -> dict[str, Any]:
+    key = (
+        int(suggestion["template_id"]),
+        int(suggestion["sensor_id"] or 0),
+        int(suggestion["interface_if_index"] or 0),
+        suggestion["domain_type"],
+        suggestion["target_cidr"] or "",
+        suggestion["direction"],
+        suggestion["decoder"],
+        suggestion["threshold_unit"],
+    )
+    row = conn.execute(
+        """
+        SELECT id
+        FROM attack_vector_suggestions
+        WHERE applied_at IS NULL
+          AND template_id = ?
+          AND COALESCE(sensor_id, 0) = ?
+          AND COALESCE(interface_if_index, 0) = ?
+          AND domain_type = ?
+          AND COALESCE(target_cidr, '') = ?
+          AND direction = ?
+          AND decoder = ?
+          AND threshold_unit = ?
+        LIMIT 1
+        """,
+        key,
+    ).fetchone()
+    if row is not None:
+        suggestion_id = int(row["id"])
+        conn.execute(
+            """
+            UPDATE attack_vector_suggestions
+            SET threshold_value = ?,
+                baseline_p95 = ?,
+                baseline_p99 = ?,
+                baseline_max = ?,
+                baseline_average = ?,
+                margin_percent = ?,
+                confidence = ?,
+                created_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                suggestion["threshold_value"],
+                suggestion["baseline_p95"],
+                suggestion["baseline_p99"],
+                suggestion["baseline_max"],
+                suggestion["baseline_average"],
+                suggestion["margin_percent"],
+                suggestion["confidence"],
+                suggestion["created_at"],
+                suggestion["updated_at"],
+                suggestion_id,
+            ),
+        )
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO attack_vector_suggestions (
+                template_id,
+                sensor_id,
+                interface_if_index,
+                domain_type,
+                target_cidr,
+                direction,
+                decoder,
+                threshold_value,
+                threshold_unit,
+                baseline_p95,
+                baseline_p99,
+                baseline_max,
+                baseline_average,
+                margin_percent,
+                confidence,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                suggestion["template_id"],
+                suggestion["sensor_id"],
+                suggestion["interface_if_index"],
+                suggestion["domain_type"],
+                suggestion["target_cidr"],
+                suggestion["direction"],
+                suggestion["decoder"],
+                suggestion["threshold_value"],
+                suggestion["threshold_unit"],
+                suggestion["baseline_p95"],
+                suggestion["baseline_p99"],
+                suggestion["baseline_max"],
+                suggestion["baseline_average"],
+                suggestion["margin_percent"],
+                suggestion["confidence"],
+                suggestion["created_at"],
+                suggestion["updated_at"],
+            ),
+        )
+        suggestion_id = int(cursor.lastrowid)
+    return fetch_attack_vector_suggestion(conn, suggestion_id)
+
+
+def threshold_unit_name_token(unit: str) -> str:
+    if unit == "bits_s":
+        return "bits"
+    if unit == "packets_s":
+        return "packets"
+    if unit == "flows_s":
+        return "flows"
+    return clean_text(unit) or "metric"
 
 
 def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[dict[str, Any]]:
@@ -3350,89 +3556,97 @@ def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[d
     target_cidr = normalize_target_cidr(payload.target_cidr)
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(days=payload.days)
-    created: list[dict[str, Any]] = []
+    suggestions: list[dict[str, Any]] = []
 
     with sqlite_connection() as conn:
-        _ = fetch_attack_vector_template(conn, payload.template_id)
+        template = fetch_attack_vector_template(conn, payload.template_id)
+    if not template.get("learn_enabled"):
+        return []
 
-    for direction in ("receives", "sends"):
-        for decoder, unit in LEARN_DECODER_UNITS:
-            try:
-                values = query_learn_series(decoder, unit, direction, payload, start_dt, end_dt)
-            except Exception as exc:
-                logger.warning("Falha ao aprender baseline %s/%s/%s: %s", direction, decoder, unit, exc)
-                continue
-            if not values:
-                continue
-            p95 = percentile(values, 0.95)
-            p99 = percentile(values, 0.99)
-            maximum = max(values)
-            average = sum(values) / len(values)
-            if maximum < low_metric_floor(unit) and average < low_metric_floor(unit):
-                continue
-            base = p99 if maximum > max(p99 * 3, low_metric_floor(unit)) else max(p99, maximum)
-            suggested = max(base * (1 + payload.margin_percent / 100), low_metric_floor(unit))
-            expected_points = max(payload.days * 24 * 60, 1)
-            confidence = min(1.0, max(0.2, len(values) / expected_points))
-            now = utc_now_iso()
-            with sqlite_connection() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO attack_vector_suggestions (
-                        template_id,
-                        sensor_id,
-                        domain_type,
-                        target_cidr,
-                        direction,
+    domain_type = "prefix" if target_cidr else "any"
+    sensor_targets = learn_sensor_targets(payload)
+    for sensor in sensor_targets:
+        sensor_id = sensor["sensor_id"]
+        interface_if_index = None
+        for direction in ("receives", "sends"):
+            for decoder, unit in LEARN_DECODER_UNITS:
+                try:
+                    values = query_learn_series(
                         decoder,
-                        threshold_value,
-                        threshold_unit,
-                        baseline_p95,
-                        baseline_p99,
-                        baseline_max,
-                        baseline_average,
-                        margin_percent,
-                        confidence,
-                        created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        payload.template_id,
-                        payload.sensor_id,
-                        "prefix" if target_cidr else "any",
-                        target_cidr,
-                        direction,
-                        decoder,
-                        suggested,
                         unit,
-                        p95,
-                        p99,
-                        maximum,
-                        average,
-                        payload.margin_percent,
-                        confidence,
-                        now,
-                    ),
-                )
-                suggestion_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
-                conn.commit()
-                row = conn.execute("SELECT * FROM attack_vector_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
-                if row is not None:
-                    created.append(attack_vector_suggestion_row_to_dict(row))
-    return created
+                        direction,
+                        sensor_id,
+                        interface_if_index,
+                        target_cidr,
+                        start_dt,
+                        end_dt,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Falha ao aprender baseline sensor=%s %s/%s/%s: %s",
+                        sensor_id,
+                        direction,
+                        decoder,
+                        unit,
+                        exc,
+                    )
+                    continue
+                if not values:
+                    continue
+                p95 = percentile(values, 0.95)
+                p99 = percentile(values, 0.99)
+                maximum = max(values)
+                average = sum(values) / len(values)
+                if maximum < low_metric_floor(unit) and average < low_metric_floor(unit):
+                    continue
+                suggested = maximum * (1 + payload.margin_percent / 100)
+                expected_points = max(payload.days * 24 * 60, 1)
+                confidence = min(1.0, max(0.2, len(values) / expected_points))
+                now = utc_now_iso()
+                suggestion = {
+                    "template_id": payload.template_id,
+                    "sensor_id": sensor_id,
+                    "interface_if_index": interface_if_index,
+                    "domain_type": domain_type,
+                    "target_cidr": target_cidr,
+                    "direction": direction,
+                    "decoder": decoder,
+                    "threshold_value": suggested,
+                    "threshold_unit": unit,
+                    "baseline_p95": p95,
+                    "baseline_p99": p99,
+                    "baseline_max": maximum,
+                    "baseline_average": average,
+                    "margin_percent": payload.margin_percent,
+                    "confidence": confidence,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                with sqlite_connection() as conn:
+                    suggestions.append(upsert_attack_vector_suggestion(conn, suggestion))
+                    conn.commit()
+    return suggestions
 
 
 def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT * FROM attack_vector_suggestions WHERE id = ?",
+        """
+        SELECT a.*, s.name AS sensor_name
+        FROM attack_vector_suggestions a
+        LEFT JOIN sensors s ON s.id = a.sensor_id
+        WHERE a.id = ?
+        """,
         (suggestion_id,),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Sugestao nao encontrada")
     suggestion = attack_vector_suggestion_row_to_dict(row)
     now = utc_now_iso()
-    name = f"Sugestao {suggestion['decoder']} {suggestion['threshold_unit']}"
+    sensor_label = suggestion.get("sensor_name") or (
+        f"sensor-{suggestion['sensor_id']}" if suggestion.get("sensor_id") is not None else "Global"
+    )
+    unit_token = threshold_unit_name_token(suggestion["threshold_unit"])
+    name = f"{sensor_label} {suggestion['decoder']} {suggestion['direction']} {unit_token} warning"
     cursor = conn.execute(
         """
         INSERT INTO attack_vectors (
@@ -3454,7 +3668,7 @@ def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int)
             created_at,
             updated_at
         )
-        VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?, 'over', ?, ?, 'warning', 'alert_only', 1, ?, ?)
+        VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, 'over', ?, ?, 'warning', 'alert_only', 1, ?, ?)
         """,
         (
             suggestion["template_id"],
@@ -3462,6 +3676,7 @@ def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int)
             suggestion["domain_type"],
             suggestion["target_cidr"],
             suggestion["sensor_id"],
+            suggestion["interface_if_index"],
             suggestion["direction"],
             suggestion["decoder"],
             suggestion["threshold_value"],
@@ -3471,8 +3686,8 @@ def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int)
         ),
     )
     conn.execute(
-        "UPDATE attack_vector_suggestions SET applied_at = ? WHERE id = ?",
-        (now, suggestion_id),
+        "UPDATE attack_vector_suggestions SET applied_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, suggestion_id),
     )
     vector_id = int(cursor.lastrowid)
     return fetch_attack_vector(conn, vector_id)
@@ -4469,10 +4684,11 @@ def list_attack_vector_suggestions(
     with sqlite_connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT *
-            FROM attack_vector_suggestions
+            SELECT a.*, s.name AS sensor_name
+            FROM attack_vector_suggestions a
+            LEFT JOIN sensors s ON s.id = a.sensor_id
             {where}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY a.created_at DESC, a.id DESC
             LIMIT 500
             """,
             values,
