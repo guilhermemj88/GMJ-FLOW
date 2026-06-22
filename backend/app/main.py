@@ -385,6 +385,11 @@ class AttackVectorSuggestionApplyAllPayload(BaseModel):
     template_id: int | None = Field(None, ge=1)
 
 
+class AttackVectorTestPayload(BaseModel):
+    lookback_seconds: int | None = Field(None, ge=1, le=86400)
+    min_duration_seconds: int | None = Field(None, ge=0, le=86400)
+
+
 def get_client():
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
@@ -3204,6 +3209,60 @@ def metric_value_from_row(row: dict[str, Any], unit: str) -> float:
     return float(row.get("bits_s") or 0)
 
 
+def metric_alias_for_unit(unit: str) -> str:
+    if unit == "packets_s":
+        return "packets_s"
+    if unit == "flows_s":
+        return "flows_s"
+    return "bits_s"
+
+
+def comparison_matches(observed: float, threshold: float, comparison: str) -> bool:
+    if comparison == "over":
+        return observed > threshold
+    return False
+
+
+def anomaly_min_duration_seconds(override: int | None = None) -> int:
+    if override is not None:
+        return max(int(override), 0)
+    try:
+        return max(int(os.getenv("GMJFLOW_ANOMALY_MIN_DURATION_SECONDS", "30")), 0)
+    except ValueError:
+        return 30
+
+
+def clickhouse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return utc_dt(value)
+    return parse_datetime_text(value)
+
+
+def min_duration_pending(row: dict[str, Any], end_dt: datetime, min_duration_seconds: int) -> bool:
+    if min_duration_seconds <= 0:
+        return False
+    first_seen = clickhouse_datetime(row.get("first_seen_at"))
+    if first_seen is None:
+        return False
+    return (end_dt - first_seen).total_seconds() < min_duration_seconds
+
+
+def attack_vector_where_summary(vector: dict[str, Any], start_dt: datetime, end_dt: datetime, where: str) -> str:
+    parts = [
+        f"flow_time={iso(start_dt)}..{iso(end_dt)}",
+        f"domain_type={vector.get('domain_type') or 'any'}",
+        f"target_cidr={clean_text(vector.get('target_cidr')) or 'none'}",
+        f"direction={vector.get('direction') or 'receives'}",
+        f"decoder={vector.get('decoder') or 'IP'}",
+        f"where={where}",
+    ]
+    if vector.get("sensor_id") is not None:
+        parts.append(f"sensor_id={vector.get('sensor_id')}")
+    if vector.get("interface_if_index") is not None:
+        parts.append(f"interface_if_index={vector.get('interface_if_index')}")
+    return "; ".join(parts)
+
+
 def format_metric(value: Any, unit: str) -> str:
     number = float(value or 0)
     if unit == "bits_s":
@@ -3438,35 +3497,105 @@ def active_attack_vectors(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [attack_vector_row_to_dict(row) for row in rows]
 
 
-def query_vector_recent_traffic(vector: dict[str, Any], start_dt: datetime, end_dt: datetime) -> list[dict[str, Any]]:
+def query_vector_recent_traffic(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
     seconds = range_seconds(start_dt, end_dt)
-    params: dict[str, Any] = {"seconds": seconds}
+    params: dict[str, Any] = {"seconds": seconds, "limit": max(int(limit), 1)}
     where = append_attack_vector_filters(vector, start_dt, end_dt, params)
     target_expr = target_expression_for_vector(vector)
+    order_metric = metric_alias_for_unit(vector.get("threshold_unit") or "bits_s")
     result = query_clickhouse(
         f"""
         SELECT
             {target_expr} AS target_ip,
-            sum(bytes) AS estimated_bytes,
-            sum(packets) AS estimated_packets,
-            sum(flow_count) AS flow_count,
+            sum(bytes) AS total_bytes,
+            sum(packets) AS total_packets,
+            sum(flow_count) AS total_flows,
+            min(flow_time) AS first_seen_at,
+            max(flow_time) AS last_seen_at,
             sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
             sum(packets) / {{seconds:Float64}} AS packets_s,
             sum(flow_count) / {{seconds:Float64}} AS flows_s
         FROM flow_raw
         WHERE {where}
         GROUP BY target_ip
-        ORDER BY {vector['threshold_unit']} DESC
-        LIMIT 1000
+        ORDER BY {order_metric} DESC
+        LIMIT {{limit:UInt32}}
         """,
         params,
     )
     items = []
     for row in rows_as_dicts(result):
         row["target_ip"] = clean_ip(row.get("target_ip"))
+        row["total_bytes"] = int(row.get("total_bytes") or 0)
+        row["total_packets"] = int(row.get("total_packets") or 0)
+        row["flow_count"] = int(row.get("total_flows") or 0)
+        row["estimated_bytes"] = row["total_bytes"]
+        row["estimated_packets"] = row["total_packets"]
         if vector_target_matches_domain(vector, row["target_ip"]):
             items.append(row)
     return items
+
+
+def query_vector_sample_rows(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    target_ip: str = "",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"limit": max(int(limit), 1)}
+    where = sample_flow_where_for_event(vector, clean_ip(target_ip), start_dt, end_dt, params)
+    result = query_clickhouse(
+        f"""
+        SELECT
+            flow_time,
+            sensor,
+            toString(exporter_ip) AS exporter_ip,
+            toString(src_ip) AS src_ip,
+            toString(dst_ip) AS dst_ip,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            input_if,
+            output_if,
+            bytes,
+            packets,
+            flow_count
+        FROM flow_raw
+        WHERE {where}
+        ORDER BY flow_time DESC, bytes DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    rows = []
+    for row in rows_as_dicts(result):
+        item = {
+            "flow_time": iso(row["flow_time"]) if isinstance(row.get("flow_time"), datetime) else clean_text(row.get("flow_time")),
+            "sensor": row.get("sensor"),
+            "exporter_ip": clean_ip(row.get("exporter_ip")),
+            "src_ip": clean_ip(row.get("src_ip")),
+            "dst_ip": clean_ip(row.get("dst_ip")),
+            "src_port": int(row.get("src_port") or 0),
+            "dst_port": int(row.get("dst_port") or 0),
+            "proto": int(row.get("proto") or 0),
+            "proto_name": proto_name(row.get("proto")),
+            "tcp_flags": int(row.get("tcp_flags") or 0),
+            "input_if": int(row.get("input_if") or 0),
+            "output_if": int(row.get("output_if") or 0),
+            "bytes": int(row.get("bytes") or 0),
+            "packets": int(row.get("packets") or 0),
+            "flow_count": int(row.get("flow_count") or 0),
+        }
+        item["decoder"] = classify_flow_decoder(item)
+        rows.append(item)
+    return rows
 
 
 def anomaly_dedupe_key(vector: dict[str, Any], target_ip: str) -> str:
@@ -3500,6 +3629,63 @@ def sample_flow_where_for_event(
         else:
             where += " AND (toString(src_ip) = {target_ip:String} OR toString(dst_ip) = {target_ip:String})"
     return where
+
+
+def attack_vector_test_result(
+    vector: dict[str, Any],
+    lookback_seconds: int,
+    min_duration_seconds: int,
+    sample_limit: int = 10,
+) -> dict[str, Any]:
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(seconds=max(int(lookback_seconds), 1))
+    summary_params: dict[str, Any] = {"seconds": range_seconds(start_dt, end_dt)}
+    where = append_attack_vector_filters(vector, start_dt, end_dt, summary_params)
+    rows = query_vector_recent_traffic(vector, start_dt, end_dt, limit=1)
+    row = rows[0] if rows else {}
+    threshold = float(vector.get("threshold_value") or 0)
+    unit = vector.get("threshold_unit") or "bits_s"
+    observed = metric_value_from_row(row, unit) if row else 0.0
+    matched = comparison_matches(observed, threshold, vector.get("comparison") or "over")
+    pending_min_duration = bool(row) and matched and min_duration_pending(row, end_dt, min_duration_seconds)
+
+    reason_parts: list[str] = []
+    if not vector.get("enabled"):
+        reason_parts.append("vetor desativado")
+    if not vector.get("parent_enabled"):
+        reason_parts.append("template desativado")
+    if not row:
+        reason_parts.append("nenhum flow encontrado")
+    elif pending_min_duration:
+        reason_parts.append("matched=true, aguardando duracao minima")
+    elif matched:
+        reason_parts.append("observed_value acima do threshold")
+    else:
+        reason_parts.append("observed_value abaixo ou igual ao threshold")
+
+    target_ip = clean_ip(row.get("target_ip")) if row else ""
+    sample_rows = query_vector_sample_rows(vector, start_dt, end_dt, target_ip, sample_limit) if row else []
+    return {
+        "vector_id": int(vector["id"]),
+        "enabled": bool(vector.get("enabled")),
+        "parent_enabled": bool(vector.get("parent_enabled")),
+        "domain_type": vector.get("domain_type"),
+        "target_cidr": vector.get("target_cidr"),
+        "direction": vector.get("direction"),
+        "decoder": vector.get("decoder"),
+        "threshold_value": threshold,
+        "threshold_unit": unit,
+        "lookback_seconds": int(lookback_seconds),
+        "min_duration_seconds": int(min_duration_seconds),
+        "flow_count": int(row.get("flow_count") or 0),
+        "total_bytes": int(row.get("total_bytes") or 0),
+        "total_packets": int(row.get("total_packets") or 0),
+        "observed_value": observed,
+        "matched": matched,
+        "reason": "; ".join(reason_parts),
+        "clickhouse_where_summary": attack_vector_where_summary(vector, start_dt, end_dt, where),
+        "sample_rows": sample_rows,
+    }
 
 
 def save_anomaly_flow_samples(
@@ -3591,9 +3777,10 @@ def upsert_anomaly_event(
     traffic: dict[str, Any],
     start_dt: datetime,
     end_dt: datetime,
-) -> None:
+) -> str:
     if vector.get("response_action") == "ignore":
-        return
+        logger.info("Anomalia ignorada por response_action=ignore vetor=%s", vector.get("id"))
+        return "ignored"
     target_ip = clean_ip(traffic.get("target_ip"))
     observed = metric_value_from_row(traffic, vector["threshold_unit"])
     threshold = float(vector["threshold_value"] or 0)
@@ -3609,8 +3796,8 @@ def upsert_anomaly_event(
         """,
         (dedupe_key,),
     ).fetchone()
-    estimated_bytes = int(traffic.get("estimated_bytes") or 0)
-    estimated_packets = int(traffic.get("estimated_packets") or 0)
+    estimated_bytes = int(traffic.get("total_bytes") or traffic.get("estimated_bytes") or 0)
+    estimated_packets = int(traffic.get("total_packets") or traffic.get("estimated_packets") or 0)
     flow_count = int(traffic.get("flow_count") or 0)
     if row is None:
         started_at = now
@@ -3668,6 +3855,15 @@ def upsert_anomaly_event(
             ),
         )
         event_id = int(cursor.lastrowid)
+        action = "created"
+        logger.info(
+            "Anomalia criada event_id=%s vetor=%s decoder=%s observed_value=%.6f threshold=%.6f",
+            event_id,
+            vector.get("id"),
+            vector.get("decoder"),
+            observed,
+            threshold,
+        )
     else:
         event_id = int(row["id"])
         peak = max(float(row["peak_value"] or 0), observed)
@@ -3687,6 +3883,15 @@ def upsert_anomaly_event(
             """,
             (observed, peak, now, estimated_bytes, estimated_packets, flow_count, summary, now, event_id),
         )
+        action = "updated"
+        logger.info(
+            "Anomalia atualizada event_id=%s vetor=%s decoder=%s observed_value=%.6f threshold=%.6f",
+            event_id,
+            vector.get("id"),
+            vector.get("decoder"),
+            observed,
+            threshold,
+        )
 
     sample_count = conn.execute(
         "SELECT COUNT(*) AS count FROM anomaly_event_flows WHERE anomaly_event_id = ?",
@@ -3701,11 +3906,21 @@ def upsert_anomaly_event(
         end_dt,
         max(0, min(20, 100 - int(sample_count or 0))),
     )
+    return action
 
 
 def close_stale_anomaly_events(conn: sqlite3.Connection, now: datetime) -> int:
     close_after = int(os.getenv("GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS", "120"))
     cutoff = iso(now - timedelta(seconds=max(close_after, 1)))
+    stale_rows = conn.execute(
+        """
+        SELECT id, attack_vector_id, decoder
+        FROM anomaly_events
+        WHERE status = 'active'
+          AND last_seen_at < ?
+        """,
+        (cutoff,),
+    ).fetchall()
     cursor = conn.execute(
         """
         UPDATE anomaly_events
@@ -3717,13 +3932,24 @@ def close_stale_anomaly_events(conn: sqlite3.Connection, now: datetime) -> int:
         """,
         (iso(now), iso(now), cutoff),
     )
-    return int(cursor.rowcount or 0)
+    closed = int(cursor.rowcount or 0)
+    for row in stale_rows:
+        logger.info(
+            "Anomalia encerrada event_id=%s vetor=%s decoder=%s",
+            row["id"],
+            row["attack_vector_id"],
+            row["decoder"],
+        )
+    if closed:
+        logger.info("Anomalias encerradas por inatividade=%s", closed)
+    return closed
 
 
 def detect_anomalies_once() -> dict[str, Any]:
     ensure_sensor_db()
     lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
-    lookback = max(lookback, int(os.getenv("GMJFLOW_ANOMALY_MIN_DURATION_SECONDS", "30")), 1)
+    min_duration = anomaly_min_duration_seconds()
+    lookback = max(lookback, min_duration, 1)
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(seconds=lookback)
     checked = 0
@@ -3731,6 +3957,7 @@ def detect_anomalies_once() -> dict[str, Any]:
     errors: list[str] = []
     with sqlite_connection() as conn:
         vectors = active_attack_vectors(conn)
+        logger.info("Worker de anomalias avaliando %s vetores ativos", len(vectors))
         for vector in vectors:
             checked += 1
             try:
@@ -3742,9 +3969,32 @@ def detect_anomalies_once() -> dict[str, Any]:
                 continue
             for row in rows:
                 observed = metric_value_from_row(row, vector["threshold_unit"])
-                if observed > float(vector["threshold_value"] or 0):
+                threshold = float(vector["threshold_value"] or 0)
+                matched = comparison_matches(observed, threshold, vector.get("comparison") or "over")
+                logger.info(
+                    "Worker anomalias vetor=%s decoder=%s observed_value=%.6f threshold=%.6f matched=%s",
+                    vector.get("id"),
+                    vector.get("decoder"),
+                    observed,
+                    threshold,
+                    matched,
+                )
+                if matched and min_duration_pending(row, end_dt, min_duration):
+                    logger.info(
+                        "Worker anomalias vetor=%s matched=true aguardando duracao minima=%ss",
+                        vector.get("id"),
+                        min_duration,
+                    )
+                    continue
+                if matched:
                     triggered += 1
-                    upsert_anomaly_event(conn, vector, row, start_dt, end_dt)
+                    action = upsert_anomaly_event(conn, vector, row, start_dt, end_dt)
+                    logger.info(
+                        "Worker anomalias vetor=%s decoder=%s anomalia_%s",
+                        vector.get("id"),
+                        vector.get("decoder"),
+                        action,
+                    )
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
     return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "errors": errors}
@@ -4045,6 +4295,34 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
         )
         conn.commit()
         return fetch_attack_vector(conn, int(cursor.lastrowid))
+
+
+@app.post("/api/attack-vectors/{vector_id}/test")
+def test_attack_vector(
+    request: Request,
+    vector_id: int,
+    payload: AttackVectorTestPayload | None = None,
+    lookback_seconds: int | None = Query(None, ge=1, le=86400),
+    min_duration_seconds: int | None = Query(None, ge=0, le=86400),
+):
+    require_admin(request)
+    ensure_sensor_db()
+    payload = payload or AttackVectorTestPayload()
+    try:
+        default_lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
+    except ValueError:
+        default_lookback = 60
+    effective_lookback = lookback_seconds or payload.lookback_seconds or default_lookback
+    effective_min_duration = anomaly_min_duration_seconds(
+        min_duration_seconds if min_duration_seconds is not None else payload.min_duration_seconds
+    )
+    with sqlite_connection() as conn:
+        vector = fetch_attack_vector(conn, vector_id)
+    return attack_vector_test_result(
+        vector,
+        max(int(effective_lookback), 1),
+        effective_min_duration,
+    )
 
 
 @app.put("/api/attack-vectors/{vector_id}")

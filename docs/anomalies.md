@@ -89,11 +89,48 @@ A cada intervalo, o worker:
 6. Salva uma amostra de flows relacionados.
 7. Encerra eventos ativos que nao aparecem novamente dentro de `GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS`.
 
+As metricas sao calculadas na janela avaliada com:
+
+- `bits_s`: `sum(bytes) * 8 / janela_segundos`.
+- `packets_s`: `sum(packets) / janela_segundos`.
+- `flows_s`: `sum(flow_count) / janela_segundos`.
+
 A deduplicacao usa:
 
 ```text
 attack_vector_id + target_ip + sensor_id + interface_if_index + decoder + direction
 ```
+
+## Teste de vetor
+
+Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:
+
+- valor observado;
+- threshold configurado;
+- match sim/nao;
+- motivo;
+- flows encontrados;
+- bytes;
+- pacotes;
+- resumo do filtro ClickHouse;
+- amostras de flows.
+
+O endpoint usado pelo botao tambem pode ser chamado diretamente:
+
+```http
+POST /api/attack-vectors/{id}/test
+```
+
+Corpo opcional:
+
+```json
+{
+  "lookback_seconds": 60,
+  "min_duration_seconds": 0
+}
+```
+
+Use `min_duration_seconds` como `0` ou `5` quando quiser testar sem aguardar toda a duracao minima configurada em `GMJFLOW_ANOMALY_MIN_DURATION_SECONDS`. Se o threshold ja bateu mas a duracao minima ainda estiver pendente, o campo `reason` retorna `matched=true, aguardando duracao minima`.
 
 ## Tela Anomalias
 

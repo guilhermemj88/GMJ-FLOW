@@ -1861,6 +1861,72 @@
     </div>
   </div>
 
+  <div id="attackVectorTestModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="attackVectorTestModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="attackVectorTestModalTitle" class="view-title">Teste do vetor</h2>
+        <button type="button" class="icon-button" data-close-modal="attackVectorTestModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="attackVectorTestSummary" class="subtle mb-3">Carregando</div>
+        <div class="database-metrics-grid mb-3">
+          <div class="metric-card">
+            <div class="metric-label">Valor observado</div>
+            <div id="attackVectorTestObserved" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Threshold</div>
+            <div id="attackVectorTestThreshold" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Match</div>
+            <div id="attackVectorTestMatch" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Flows encontrados</div>
+            <div id="attackVectorTestFlows" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Bytes</div>
+            <div id="attackVectorTestBytes" class="metric-value">-</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Pacotes</div>
+            <div id="attackVectorTestPackets" class="metric-value">-</div>
+          </div>
+        </div>
+        <div class="metric-card mb-3">
+          <div class="metric-label">Motivo</div>
+          <div id="attackVectorTestReason" class="metric-value">-</div>
+        </div>
+        <pre id="attackVectorTestWhere" class="result-box mb-3"></pre>
+        <div class="panel p-3">
+          <div class="panel-title mb-2">Flows de amostra</div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0 flow-table">
+              <thead>
+                <tr>
+                  <th>Tempo</th>
+                  <th>Src IP</th>
+                  <th>Dst IP</th>
+                  <th>Proto</th>
+                  <th class="text-end">Bytes</th>
+                  <th class="text-end">Pacotes</th>
+                </tr>
+              </thead>
+              <tbody id="attackVectorTestSamples"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-success" data-close-modal="attackVectorTestModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <div id="anomalyDetailModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="anomalyDetailModalTitle">
     <div class="gmj-dialog">
       <div class="gmj-dialog-header">
@@ -2937,6 +3003,7 @@
           <td>
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary attack-vector-edit" data-vector-id="${vector.id}" aria-label="Editar vetor"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-outline-secondary attack-vector-test" data-vector-id="${vector.id}" aria-label="Testar vetor"><i data-lucide="play-circle"></i><span>Testar agora</span></button>
               <button type="button" class="btn btn-outline-secondary attack-vector-duplicate" data-vector-id="${vector.id}" aria-label="Duplicar vetor"><i data-lucide="copy"></i></button>
               <button type="button" class="btn btn-outline-danger attack-vector-delete" data-vector-id="${vector.id}" aria-label="Excluir vetor"><i data-lucide="trash-2"></i></button>
             </div>
@@ -3130,6 +3197,60 @@
         setAttackVectorStatus('Vetor excluido');
       } catch (error) {
         setAttackVectorStatus(`Falha ao excluir vetor: ${error.message}`, 'error');
+      }
+    }
+
+    function resetAttackVectorTestModal() {
+      setText('attackVectorTestSummary', 'Carregando...');
+      setText('attackVectorTestObserved', '-');
+      setText('attackVectorTestThreshold', '-');
+      setText('attackVectorTestMatch', '-');
+      setText('attackVectorTestFlows', '-');
+      setText('attackVectorTestBytes', '-');
+      setText('attackVectorTestPackets', '-');
+      setText('attackVectorTestReason', '-');
+      document.getElementById('attackVectorTestWhere').textContent = '';
+      document.getElementById('attackVectorTestSamples').innerHTML = '<tr><td colspan="6" class="text-muted">Carregando</td></tr>';
+    }
+
+    function renderAttackVectorTest(payload) {
+      const unit = payload.threshold_unit || 'bits_s';
+      setText('attackVectorTestSummary', `Vetor #${payload.vector_id} - ${payload.decoder || '-'}`);
+      setText('attackVectorTestObserved', formatMetricValue(payload.observed_value, unit));
+      setText('attackVectorTestThreshold', formatMetricValue(payload.threshold_value, unit));
+      setText('attackVectorTestMatch', payload.matched ? 'Sim' : 'Nao');
+      setText('attackVectorTestFlows', formatNumber(payload.flow_count || 0));
+      setText('attackVectorTestBytes', formatBytes(payload.total_bytes || 0));
+      setText('attackVectorTestPackets', formatNumber(payload.total_packets || 0));
+      setText('attackVectorTestReason', payload.reason || '-');
+      document.getElementById('attackVectorTestWhere').textContent = payload.clickhouse_where_summary || '';
+      const rows = Array.isArray(payload.sample_rows) ? payload.sample_rows : [];
+      document.getElementById('attackVectorTestSamples').innerHTML = rows.map(row => `
+        <tr>
+          <td>${escapeHtml(row.flow_time || '-')}</td>
+          <td>${escapeHtml(row.src_ip || '-')}</td>
+          <td>${escapeHtml(row.dst_ip || '-')}</td>
+          <td>${escapeHtml(row.decoder || row.proto_name || row.proto || '-')}</td>
+          <td class="text-end">${formatBytes(row.bytes || 0)}</td>
+          <td class="text-end">${formatNumber(row.packets || 0)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="6" class="text-muted">Sem flows de amostra</td></tr>';
+    }
+
+    async function testAttackVector(vectorId) {
+      resetAttackVectorTestModal();
+      openModal('attackVectorTestModal');
+      try {
+        const payload = await apiRequest(`/api/attack-vectors/${vectorId}/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lookback_seconds: 60 })
+        });
+        renderAttackVectorTest(payload);
+      } catch (error) {
+        setText('attackVectorTestSummary', `Falha: ${error.message}`);
+        setText('attackVectorTestReason', error.message);
+        document.getElementById('attackVectorTestSamples').innerHTML = '<tr><td colspan="6" class="text-muted">Sem resultado</td></tr>';
       }
     }
 
@@ -4595,11 +4716,14 @@
     document.getElementById('attackVectorTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const edit = target?.closest('.attack-vector-edit');
+      const test = target?.closest('.attack-vector-test');
       const duplicate = target?.closest('.attack-vector-duplicate');
       const remove = target?.closest('.attack-vector-delete');
       if (edit) {
         const vector = attackVectors.find(item => Number(item.id) === Number(edit.dataset.vectorId));
         openAttackVectorModal(vector);
+      } else if (test) {
+        testAttackVector(Number(test.dataset.vectorId)).catch(console.error);
       } else if (duplicate) {
         duplicateAttackVector(Number(duplicate.dataset.vectorId)).catch(console.error);
       } else if (remove) {
