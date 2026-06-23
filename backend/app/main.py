@@ -9479,32 +9479,78 @@ def geo_flows(
     add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
-    bytes_value = corrected_value_expr("bytes", factor_expr)
-    packets_value = corrected_value_expr("packets", factor_expr)
     order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
-    result = query_clickhouse(
-        f"""
-        SELECT
-            toString(src_ip) AS src_ip,
-            toString(dst_ip) AS dst_ip,
-            any(src_asn) AS src_asn,
-            any(dst_asn) AS dst_asn,
-            any(src_as_name) AS src_as_name,
-            any(dst_as_name) AS dst_as_name,
-            topK(1)({decoder_label_expr()})[1] AS top_protocol,
-            sum({bytes_value}) AS bytes,
-            sum({packets_value}) AS packets,
-            sum({bytes_value}) * 8 / {{seconds:Float64}} AS bits_s,
-            sum({packets_value}) / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM flow_raw
-        WHERE {where}
-        GROUP BY src_ip, dst_ip
-        ORDER BY {order_expr} DESC
-        LIMIT {{limit:UInt32}}
-        """,
-        params,
-    )
+    try:
+        result = query_clickhouse(
+            f"""
+            SELECT
+                src_ip,
+                dst_ip,
+                src_asn,
+                dst_asn,
+                src_as_name,
+                dst_as_name,
+                top_protocol,
+                bytes_sum AS bytes,
+                packets_sum AS packets,
+                bytes_sum * 8 / {{seconds:Float64}} AS bits_s,
+                packets_sum / {{seconds:Float64}} AS packets_s,
+                flows
+            FROM (
+                SELECT
+                    src_ip,
+                    dst_ip,
+                    any(src_asn) AS src_asn,
+                    any(dst_asn) AS dst_asn,
+                    any(src_as_name) AS src_as_name,
+                    any(dst_as_name) AS dst_as_name,
+                    topK(1)(top_protocol_raw)[1] AS top_protocol,
+                    sum(corrected_bytes) AS bytes_sum,
+                    sum(corrected_packets) AS packets_sum,
+                    sum(flow_count) AS flows
+                FROM (
+                    SELECT
+                        toString(src_ip) AS src_ip,
+                        toString(dst_ip) AS dst_ip,
+                        src_asn,
+                        dst_asn,
+                        src_as_name,
+                        dst_as_name,
+                        {decoder_label_expr()} AS top_protocol_raw,
+                        {corrected_value_expr("bytes", factor_expr)} AS corrected_bytes,
+                        {corrected_value_expr("packets", factor_expr)} AS corrected_packets,
+                        flow_count
+                    FROM flow_raw
+                    WHERE {where}
+                ) AS raw_flows
+                GROUP BY src_ip, dst_ip
+            ) AS grouped_flows
+            ORDER BY {order_expr} DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+    except Exception as exc:
+        warning = f"Erro ao consultar ClickHouse: {clean_text(exc)}"
+        logger.exception("Falha em /api/geo/flows: %s", warning)
+        return {
+            "start": iso(start_dt),
+            "end": iso(end_dt),
+            "metric": metric,
+            "group_by": group_by,
+            "requested_top_n": top_n,
+            "total_routes": 0,
+            "complete_route_count": 0,
+            "incomplete_route_count": 0,
+            "localized_routes": 0,
+            "unlocalized_routes": 0,
+            "active_countries": 0,
+            "nodes": [],
+            "edges": [],
+            "items": [],
+            "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
+            "warning": warning,
+        }
     edge_groups: dict[tuple[str, str], dict[str, Any]] = {}
     node_groups: dict[str, dict[str, Any]] = {}
     for row in rows_as_dicts(result):
@@ -9646,6 +9692,8 @@ def geo_flows(
         "total_routes": len(edges),
         "complete_route_count": complete_count,
         "incomplete_route_count": max(0, len(edges) - complete_count),
+        "localized_routes": complete_count,
+        "unlocalized_routes": max(0, len(edges) - complete_count),
         "active_countries": len(countries),
         "nodes": nodes,
         "edges": edges,
