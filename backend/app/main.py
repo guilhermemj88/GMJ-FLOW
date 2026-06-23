@@ -95,6 +95,8 @@ TOP_FLOW_TYPES = {
 }
 
 TOP_FLOW_TYPE_ALIASES = {
+    "protocol": "proto",
+    "protocols": "proto",
     "src_asn": "asn_src",
     "dst_asn": "asn_dst",
     "asn_source": "asn_src",
@@ -9112,6 +9114,7 @@ def top_conversations_payload(
 
 
 @app.get("/api/dashboard/top-conversations")
+@app.get("/api/tops/conversations")
 def dashboard_top_conversations(
     range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,
@@ -10531,61 +10534,100 @@ def top_flow_items_from_rows(
     rows: list[dict[str, Any]],
     top_type: str,
 ) -> list[dict[str, Any]]:
+    def safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def row_protocol_label(row: dict[str, Any]) -> str:
+        raw_value = (
+            row.get("protocol")
+            or row.get("proto")
+            or row.get("decoder")
+            or row.get("sample_proto")
+            or "OTHER"
+        )
+        text = clean_text(raw_value)
+        if not text:
+            return "OTHER"
+        if text.lower() in PROTO_NUMBERS:
+            return PROTO_LABELS.get(str(PROTO_NUMBERS[text.lower()]), text.upper())
+        try:
+            proto_number = int(float(text))
+        except ValueError:
+            return text.upper()
+        if proto_number in {1, 6, 17, 47, 50}:
+            return PROTO_LABELS[str(proto_number)]
+        return f"IP{proto_number}" if 0 <= proto_number <= 255 else "OTHER"
+
     items = []
     for index, row in enumerate(rows, start=1):
-        key = clean_text(row.get("key"))
-        if top_type in {"src_ip", "dst_ip"}:
-            key = clean_ip(key)
-        elif top_type == "proto":
-            key = proto_name(row.get("proto") if "proto" in row else key)
-        elif top_type == "tcp_flags":
-            key = tcp_flags_name(row.get("tcp_flags") if "tcp_flags" in row else key)
-        elif top_type in {"asn_src", "asn_dst"}:
-            asn = int(row.get("asn") or 0)
-            key = asn_label(asn)
-        item = {
-            "rank": index,
-            "key": key,
-            "src_ip": clean_ip(row.get("src_ip")) if row.get("src_ip") is not None else "",
-            "dst_ip": clean_ip(row.get("dst_ip")) if row.get("dst_ip") is not None else "",
-            "src_port": int(row.get("src_port") if row.get("src_port") is not None else row.get("sample_src_port") or 0),
-            "dst_port": int(row.get("dst_port") if row.get("dst_port") is not None else row.get("sample_dst_port") or 0),
-            "protocol": protocol_label,
-            "decoder": protocol_label,
-            "bits_s": round(float(row.get("bits_s") or 0), 2),
-            "packets_s": round(float(row.get("packets_s") or 0), 2),
-            "bytes": int(float(row.get("bytes") or 0)),
-            "packets": int(float(row.get("packets") or 0)),
-            "flows": int(row.get("flows") or 0),
-            "percent": round(float(row.get("percent_total") or row.get("percent") or 0), 2),
-            "first_seen": iso(row.get("first_seen")) if row.get("first_seen") else "",
-            "last_seen": iso(row.get("last_seen")) if row.get("last_seen") else "",
-            "duration_seconds": int(row.get("duration_seconds") or 0),
-        }
-        item["duration_human"] = duration_human(item["duration_seconds"])
-        if top_type in {"src_port", "dst_port", "ports"}:
-            item["proto"] = proto_name(row.get("proto"))
-            item["protocol"] = item["proto"]
-            item["decoder"] = item["proto"]
-            item["port"] = int(row.get("port") or 0)
-            item["key"] = f"{item['proto']}/{item['port']}"
-        elif top_type != "conversation":
-            item["src_port"] = 0
-            item["dst_port"] = 0
-        if top_type == "conversation":
-            item["src_ip"] = clean_ip(row.get("src_ip"))
-            item["dst_ip"] = clean_ip(row.get("dst_ip"))
-            item["key"] = (
-                f"{item['src_ip']}:{item['src_port']} -> "
-                f"{item['dst_ip']}:{item['dst_port']}"
-            )
-        if top_type in {"input_if", "output_if"}:
-            item["if_index"] = int(row.get("if_index") or 0)
-            item["key"] = f"ifIndex {item['if_index']}"
-        if top_type in {"asn_src", "asn_dst"}:
-            item["description"] = clean_text(row.get("as_name")) or "-"
-            item["country"] = clean_text(row.get("country")).upper() or "N/D"
-        items.append(item)
+        try:
+            protocol_label = row_protocol_label(row)
+            key = clean_text(row.get("key")) or "N/D"
+            if top_type in {"src_ip", "dst_ip"}:
+                key = clean_ip(key) or "N/D"
+            elif top_type == "proto":
+                key = protocol_label
+            elif top_type == "tcp_flags":
+                key = tcp_flags_name(row.get("tcp_flags") if "tcp_flags" in row else key)
+            elif top_type in {"asn_src", "asn_dst"}:
+                asn = safe_int(row.get("asn"))
+                key = asn_label(asn) if asn > 0 else "N/D"
+            src_port_value = row.get("src_port") if row.get("src_port") is not None else row.get("sample_src_port")
+            dst_port_value = row.get("dst_port") if row.get("dst_port") is not None else row.get("sample_dst_port")
+            item = {
+                "rank": index,
+                "key": key,
+                "src_ip": clean_ip(row.get("src_ip")) if row.get("src_ip") is not None else "",
+                "dst_ip": clean_ip(row.get("dst_ip")) if row.get("dst_ip") is not None else "",
+                "src_port": safe_int(src_port_value),
+                "dst_port": safe_int(dst_port_value),
+                "protocol": protocol_label,
+                "decoder": protocol_label,
+                "bits_s": round(safe_float(row.get("bits_s")), 2),
+                "packets_s": round(safe_float(row.get("packets_s")), 2),
+                "bytes": safe_int(row.get("bytes")),
+                "packets": safe_int(row.get("packets")),
+                "flows": safe_int(row.get("flows")),
+                "percent": round(safe_float(row.get("percent_total") or row.get("percent")), 2),
+                "first_seen": iso(row.get("first_seen")) if row.get("first_seen") else "",
+                "last_seen": iso(row.get("last_seen")) if row.get("last_seen") else "",
+                "duration_seconds": safe_int(row.get("duration_seconds")),
+            }
+            item["duration_human"] = duration_human(item["duration_seconds"])
+            if top_type in {"src_port", "dst_port", "ports"}:
+                item["proto"] = protocol_label
+                item["protocol"] = protocol_label
+                item["decoder"] = protocol_label
+                item["port"] = safe_int(row.get("port"))
+                item["key"] = f"{item['proto']}/{item['port']}"
+            elif top_type != "conversation":
+                item["src_port"] = 0
+                item["dst_port"] = 0
+            if top_type == "conversation":
+                item["src_ip"] = clean_ip(row.get("src_ip")) or "N/D"
+                item["dst_ip"] = clean_ip(row.get("dst_ip")) or "N/D"
+                item["key"] = (
+                    f"{item['src_ip']}:{item['src_port']} -> "
+                    f"{item['dst_ip']}:{item['dst_port']}"
+                )
+            if top_type in {"input_if", "output_if"}:
+                item["if_index"] = safe_int(row.get("if_index"))
+                item["key"] = f"ifIndex {item['if_index']}"
+            if top_type in {"asn_src", "asn_dst"}:
+                item["description"] = clean_text(row.get("as_name")) or "-"
+                item["country"] = clean_text(row.get("country")).upper() or "N/D"
+            items.append(item)
+        except Exception as exc:
+            logger.warning("Ignorando linha invalida em /api/flows/top (%s): %s", top_type, exc)
     return items
 
 
