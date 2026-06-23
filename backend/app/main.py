@@ -8985,11 +8985,22 @@ def top_conversations_payload(
     direction: str,
     proto: str | None,
     limit: int,
+    sort_by: str = "bits_s",
     start: datetime | None = None,
     end: datetime | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
 ) -> dict[str, Any]:
+    sort_by = clean_text(sort_by).lower() or "bits_s"
+    order_columns = {
+        "bits_s": "bits_s",
+        "packets_s": "packets_s",
+        "pps": "packets_s",
+        "flows": "flows",
+        "packets": "packets",
+    }
+    if sort_by not in order_columns:
+        raise HTTPException(status_code=400, detail="sort_by invalido")
     context = flow_query_context(
         range_minutes,
         start,
@@ -9055,7 +9066,7 @@ def top_conversations_payload(
             dateDiff('second', first_seen, last_seen) AS duration_seconds
         FROM base
         CROSS JOIN totals
-        ORDER BY bits_s DESC
+        ORDER BY {order_columns[sort_by]} DESC
         LIMIT {{limit:UInt32}}
         """,
         params,
@@ -9097,7 +9108,7 @@ def top_conversations_payload(
                 "dst_as_name": clean_text(row.get("dst_as_name")) or clean_text((dst_info or {}).get("as_name")),
             }
         )
-    return {"start": iso(start_dt), "end": iso(end_dt), "items": items}
+    return {"start": iso(start_dt), "end": iso(end_dt), "sort_by": sort_by, "items": items}
 
 
 @app.get("/api/dashboard/top-conversations")
@@ -9113,6 +9124,7 @@ def dashboard_top_conversations(
     direction: str = "both",
     protocol: str | None = None,
     proto: str | None = None,
+    sort_by: str = "bits_s",
     limit: int = Query(10, ge=1, le=100),
 ):
     return top_conversations_payload(
@@ -9123,6 +9135,7 @@ def dashboard_top_conversations(
         direction,
         proto or protocol,
         limit,
+        sort_by,
         start,
         end,
         start_time,
@@ -9257,6 +9270,86 @@ def add_geo_filters(
         filters.append("isIPAddressInRange(toString(dst_ip), {geo_dst_cidr:String})")
 
 
+def geo_float(value: Any, minimum: float = -180, maximum: float = 180) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if minimum <= number <= maximum else None
+
+
+def geo_coord_key(lat: float | None, lon: float | None) -> str:
+    if lat is None or lon is None:
+        return "no-coord"
+    return f"{lat:.4f},{lon:.4f}"
+
+
+def geo_city_label(geo: dict[str, Any]) -> str:
+    city = clean_text(geo.get("city"))
+    region = clean_text(geo.get("region"))
+    country_code = clean_text(geo.get("country_code")).upper()
+    country_name = clean_text(geo.get("country_name"))
+    if city and country_code:
+        return f"{city}, {country_code}"
+    if city:
+        return city
+    if region and country_code:
+        return f"{region}, {country_code}"
+    return country_name or country_code or "N/D"
+
+
+def geo_endpoint_identity(
+    group_by: str,
+    ip_text: str,
+    asn: int,
+    as_name: str,
+    geo: dict[str, Any],
+) -> dict[str, Any]:
+    asn_number = int(asn or geo.get("asn") or 0)
+    country_code = clean_text(geo.get("country_code")).upper()
+    country_name = clean_text(geo.get("country_name"))
+    city = clean_text(geo.get("city"))
+    region = clean_text(geo.get("region"))
+    lat = geo_float(geo.get("latitude"), -90, 90)
+    lon = geo_float(geo.get("longitude"), -180, 180)
+    asn_name = asn_display_name(asn_number, as_name, geo.get("as_name"))
+
+    if group_by == "country":
+        country = country_geo(country_code, country_name)
+        lat = geo_float(country.get("latitude"), -90, 90)
+        lon = geo_float(country.get("longitude"), -180, 180)
+        label = clean_text(country.get("country_name")) or country_code or "N/D"
+        identity = f"country:{country_code or label}"
+    elif group_by == "asn":
+        label = asn_name
+        identity = f"asn:{asn_number}" if asn_number > 0 else f"asn:ND:{country_code or clean_ip(ip_text) or geo_coord_key(lat, lon)}"
+    elif group_by == "ip":
+        label = clean_ip(ip_text) or "N/D"
+        identity = f"ip:{label}"
+    else:
+        label = geo_city_label(geo)
+        identity = f"city:{label}:{country_code}:{geo_coord_key(lat, lon)}"
+
+    return {
+        "id": identity,
+        "label": label,
+        "lat": lat,
+        "lon": lon,
+        "ip": clean_ip(ip_text),
+        "asn": asn_number,
+        "asn_label": asn_label(asn_number),
+        "asn_name": "" if asn_name == asn_label(asn_number) else asn_name,
+        "city": city,
+        "region": region,
+        "country": country_name,
+        "country_code": country_code,
+    }
+
+
+def geo_endpoint_country_label(endpoint: dict[str, Any]) -> str:
+    return clean_text(endpoint.get("country")) or clean_text(endpoint.get("country_code")) or "N/D"
+
+
 @app.get("/api/geo/status")
 def geo_status():
     mmdb_path = GEOIP_MMDB_PATH
@@ -9317,12 +9410,16 @@ def geo_flows(
     src_cidr: str | None = None,
     dst_cidr: str | None = None,
     metric: str = "bits_s",
-    top_n: int = Query(100, ge=1, le=500),
+    group_by: str = "city",
+    top_n: int = Query(20, ge=1, le=500),
 ):
     ensure_clickhouse_schema()
     metric = clean_text(metric).lower() or "bits_s"
     if metric not in {"bits_s", "packets_s", "flows"}:
         raise HTTPException(status_code=400, detail="metric invalida")
+    group_by = clean_text(group_by).lower() or "city"
+    if group_by not in {"city", "country", "asn", "ip"}:
+        raise HTTPException(status_code=400, detail="group_by invalido")
     context = flow_query_context(
         range_minutes,
         start,
@@ -9363,6 +9460,7 @@ def geo_flows(
             "src_cidr": src_cidr or "",
             "dst_cidr": dst_cidr or "",
             "metric": metric,
+            "group_by": group_by,
             "top_n": top_n,
         },
     )
@@ -9372,7 +9470,8 @@ def geo_flows(
         return cached
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
-    params.update({"seconds": seconds, "limit": top_n})
+    fetch_limit = min(max(int(top_n) * 10, int(top_n)), 2000)
+    params.update({"seconds": seconds, "limit": fetch_limit})
     filters = [context["where"]]
     add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
     where = " AND ".join(f"({item})" for item in filters if item)
@@ -9390,6 +9489,8 @@ def geo_flows(
             any(src_as_name) AS src_as_name,
             any(dst_as_name) AS dst_as_name,
             topK(1)({decoder_label_expr()})[1] AS top_protocol,
+            sum({bytes_value}) AS bytes,
+            sum({packets_value}) AS packets,
             sum({bytes_value}) * 8 / {{seconds:Float64}} AS bits_s,
             sum({packets_value}) / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
@@ -9410,57 +9511,106 @@ def geo_flows(
         except Exception as exc:
             logger.warning("Falha ao geolocalizar linha de flow: %s", exc)
             continue
-        src_code = clean_text(src_geo.get("country_code")).upper() or "ND"
-        dst_code = clean_text(dst_geo.get("country_code")).upper() or "ND"
-        src_label = clean_text(src_geo.get("country_name")) or src_code
-        dst_label = clean_text(dst_geo.get("country_name")) or dst_code
-        for code, label, geo, side in (
-            (src_code, src_label, src_geo, "src"),
-            (dst_code, dst_label, dst_geo, "dst"),
+        src_asn = int(row.get("src_asn") or 0)
+        dst_asn = int(row.get("dst_asn") or 0)
+        src_endpoint = geo_endpoint_identity(
+            group_by,
+            clean_ip(row.get("src_ip")),
+            src_asn,
+            clean_text(row.get("src_as_name")),
+            src_geo,
+        )
+        dst_endpoint = geo_endpoint_identity(
+            group_by,
+            clean_ip(row.get("dst_ip")),
+            dst_asn,
+            clean_text(row.get("dst_as_name")),
+            dst_geo,
+        )
+        for endpoint, side in (
+            (src_endpoint, "src"),
+            (dst_endpoint, "dst"),
         ):
             node = node_groups.setdefault(
-                code,
+                endpoint["id"],
                 {
-                    "id": code,
-                    "type": "country",
-                    "label": label,
-                    "country_code": "" if code == "ND" else code,
-                    "lat": geo.get("latitude"),
-                    "lon": geo.get("longitude"),
-                    "asn": None,
+                    "id": endpoint["id"],
+                    "type": group_by,
+                    "label": endpoint["label"],
+                    "country_code": endpoint["country_code"],
+                    "country": geo_endpoint_country_label(endpoint),
+                    "city": endpoint["city"],
+                    "region": endpoint["region"],
+                    "lat": endpoint["lat"],
+                    "lon": endpoint["lon"],
+                    "asn": endpoint["asn"] or None,
+                    "asn_label": endpoint["asn_label"],
+                    "asn_name": endpoint["asn_name"],
                     "bits_s": 0.0,
                     "packets_s": 0.0,
+                    "bytes": 0,
+                    "packets": 0,
                     "flows": 0,
                     "sources": 0,
                     "destinations": 0,
                 },
             )
+            if node.get("lat") is None and endpoint.get("lat") is not None:
+                node["lat"] = endpoint["lat"]
+                node["lon"] = endpoint["lon"]
             node["bits_s"] += float(row.get("bits_s") or 0)
             node["packets_s"] += float(row.get("packets_s") or 0)
+            node["bytes"] += int(float(row.get("bytes") or 0))
+            node["packets"] += int(float(row.get("packets") or 0))
             node["flows"] += int(row.get("flows") or 0)
             node["sources" if side == "src" else "destinations"] += 1
-        edge_key = (src_code, dst_code)
+        edge_key = (src_endpoint["id"], dst_endpoint["id"])
+        metric_value = float(row.get(order_expr) or 0)
         edge = edge_groups.setdefault(
             edge_key,
             {
-                "src": src_code,
-                "dst": dst_code,
-                "src_label": src_label,
-                "dst_label": dst_label,
-                "src_lat": src_geo.get("latitude"),
-                "src_lon": src_geo.get("longitude"),
-                "dst_lat": dst_geo.get("latitude"),
-                "dst_lon": dst_geo.get("longitude"),
+                "src": src_endpoint["id"],
+                "dst": dst_endpoint["id"],
+                "src_label": src_endpoint["label"],
+                "dst_label": dst_endpoint["label"],
+                "src_ip": src_endpoint["ip"],
+                "dst_ip": dst_endpoint["ip"],
+                "src_city": src_endpoint["city"],
+                "src_region": src_endpoint["region"],
+                "src_country": geo_endpoint_country_label(src_endpoint),
+                "src_country_code": src_endpoint["country_code"],
+                "dst_city": dst_endpoint["city"],
+                "dst_region": dst_endpoint["region"],
+                "dst_country": geo_endpoint_country_label(dst_endpoint),
+                "dst_country_code": dst_endpoint["country_code"],
+                "src_lat": src_endpoint["lat"],
+                "src_lon": src_endpoint["lon"],
+                "dst_lat": dst_endpoint["lat"],
+                "dst_lon": dst_endpoint["lon"],
                 "bits_s": 0.0,
                 "packets_s": 0.0,
+                "bytes": 0,
+                "packets": 0,
                 "flows": 0,
                 "top_protocol": clean_text(row.get("top_protocol")) or "OTHER",
-                "top_asn_src": int(row.get("src_asn") or 0),
-                "top_asn_dst": int(row.get("dst_asn") or 0),
+                "top_asn_src": src_asn,
+                "top_asn_dst": dst_asn,
+                "top_asn_src_name": src_endpoint["asn_name"],
+                "top_asn_dst_name": dst_endpoint["asn_name"],
+                "_top_metric_value": metric_value,
             },
         )
+        if metric_value > float(edge.get("_top_metric_value") or 0):
+            edge["top_protocol"] = clean_text(row.get("top_protocol")) or "OTHER"
+            edge["top_asn_src"] = src_asn
+            edge["top_asn_dst"] = dst_asn
+            edge["top_asn_src_name"] = src_endpoint["asn_name"]
+            edge["top_asn_dst_name"] = dst_endpoint["asn_name"]
+            edge["_top_metric_value"] = metric_value
         edge["bits_s"] += float(row.get("bits_s") or 0)
         edge["packets_s"] += float(row.get("packets_s") or 0)
+        edge["bytes"] += int(float(row.get("bytes") or 0))
+        edge["packets"] += int(float(row.get("packets") or 0))
         edge["flows"] += int(row.get("flows") or 0)
     nodes = []
     for item in node_groups.values():
@@ -9471,11 +9621,29 @@ def geo_flows(
     for item in sorted(edge_groups.values(), key=lambda edge: float(edge.get(order_expr) or 0), reverse=True)[:top_n]:
         item["bits_s"] = round(float(item["bits_s"]), 2)
         item["packets_s"] = round(float(item["packets_s"]), 2)
+        item["has_coordinates"] = all(
+            item.get(key) is not None
+            for key in ("src_lat", "src_lon", "dst_lat", "dst_lon")
+        )
+        item.pop("_top_metric_value", None)
         edges.append(item)
+    complete_count = sum(1 for edge in edges if edge.get("has_coordinates"))
+    countries = {
+        clean_text(edge.get(key)).upper()
+        for edge in edges
+        for key in ("src_country_code", "dst_country_code")
+        if clean_text(edge.get(key))
+    }
     payload = {
         "start": iso(start_dt),
         "end": iso(end_dt),
         "metric": metric,
+        "group_by": group_by,
+        "requested_top_n": top_n,
+        "total_routes": len(edges),
+        "complete_route_count": complete_count,
+        "incomplete_route_count": max(0, len(edges) - complete_count),
+        "active_countries": len(countries),
         "nodes": nodes,
         "edges": edges,
         "items": edges,

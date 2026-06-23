@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GMJ-FLOW</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/map/js/world.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
@@ -254,7 +256,46 @@
 
     .map-chart {
       width: 100%;
+      min-height: 520px;
       height: 560px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #e8edf2;
+    }
+
+    .map-message {
+      min-height: 32px;
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    .route-color-dot {
+      display: inline-block;
+      width: .65rem;
+      height: .65rem;
+      border-radius: 999px;
+      margin-right: .35rem;
+      vertical-align: middle;
+    }
+
+    .filter-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: .25rem .55rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #ffffff;
+      color: var(--muted);
+      font-size: .82rem;
+      white-space: nowrap;
+    }
+
+    .filter-badge.active {
+      border-color: #0f766e;
+      color: #0f766e;
+      background: #ecfdf5;
     }
 
     .top-chart {
@@ -264,6 +305,54 @@
 
     .dashboard-widget.hidden-widget {
       display: none;
+    }
+
+    .dashboard-widget[data-widget-width="full"] {
+      flex: 0 0 100%;
+      max-width: 100%;
+      width: 100%;
+    }
+
+    @media (min-width: 1200px) {
+      .dashboard-widget[data-widget-width="small"] {
+        flex: 0 0 33.333333%;
+        max-width: 33.333333%;
+        width: 33.333333%;
+      }
+
+      .dashboard-widget[data-widget-width="medium"] {
+        flex: 0 0 50%;
+        max-width: 50%;
+        width: 50%;
+      }
+
+      .dashboard-widget[data-widget-width="large"] {
+        flex: 0 0 66.666667%;
+        max-width: 66.666667%;
+        width: 66.666667%;
+      }
+    }
+
+    .dashboard-widget[data-widget-height="low"] .chart {
+      height: 300px;
+    }
+
+    .dashboard-widget[data-widget-height="medium"] .chart {
+      height: 420px;
+    }
+
+    .dashboard-widget[data-widget-height="high"] .chart {
+      height: 560px;
+    }
+
+    .dashboard-widget[data-widget-height="medium"] .top-chart,
+    .dashboard-widget[data-widget-height="medium"] .table-wrap {
+      min-height: 300px;
+    }
+
+    .dashboard-widget[data-widget-height="high"] .top-chart,
+    .dashboard-widget[data-widget-height="high"] .table-wrap {
+      min-height: 420px;
     }
 
     .widget-actions {
@@ -986,20 +1075,44 @@
           </div>
 
           <section class="row g-3">
-            <div class="col-12 col-xl-6">
+            <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="bps-chart" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Bits/s</div>
-                  <div id="bpsReadout" class="metric-readout">0 bps</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div id="bpsReadout" class="metric-readout">0 bps</div>
+                    <div class="widget-actions">
+                      <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                      <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                      <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                      <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                      <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                      <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                      <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                      <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                    </div>
+                  </div>
                 </div>
                 <div id="bpsChart" class="chart"></div>
               </div>
             </div>
-            <div class="col-12 col-xl-6">
+            <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="pps-chart" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Packets/s</div>
-                  <div id="ppsReadout" class="metric-readout">0 pps</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div id="ppsReadout" class="metric-readout">0 pps</div>
+                    <div class="widget-actions">
+                      <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                      <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                      <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                      <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                      <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                      <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                      <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                      <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                    </div>
+                  </div>
                 </div>
                 <div id="ppsChart" class="chart"></div>
               </div>
@@ -1111,29 +1224,52 @@
           </section>
 
           <section id="dashboardWidgetGrid" class="row g-3 mt-1">
-            <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="top-conversations">
+            <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="top-conversations" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="panel-title">Maior Flow / Conversa</div>
-                  <div class="widget-actions">
-                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
-                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
-                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  <div id="topConversationsTitle" class="panel-title">Maior Flow / Conversa por Bits/s</div>
+                  <div class="d-flex align-items-center gap-2 flex-wrap justify-content-end">
+                    <select id="topConversationsSort" class="form-select form-select-sm" aria-label="Ordenar conversa">
+                      <option value="bits_s" selected>Bits/s</option>
+                      <option value="packets_s">PPS/s</option>
+                      <option value="flows">Flows</option>
+                      <option value="packets">Pacotes</option>
+                    </select>
+                    <select id="topConversationsLimit" class="form-select form-select-sm" aria-label="Limite conversa">
+                      <option value="10" selected>Top 10</option>
+                      <option value="20">Top 20</option>
+                      <option value="50">Top 50</option>
+                    </select>
+                    <div class="widget-actions">
+                      <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                      <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                      <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                      <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                      <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                      <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                      <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                      <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                    </div>
                   </div>
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>Conversa</th><th>Proto</th><th class="text-end">Bits/s</th><th>Duração</th></tr></thead>
+                    <thead><tr><th>Conversa</th><th>Proto</th><th class="text-end">Bits/s</th><th class="text-end">PPS/s</th><th class="text-end">Pacotes</th><th class="text-end">Flows</th><th>Duração</th></tr></thead>
                     <tbody id="topConversationsTable"></tbody>
                   </table>
                 </div>
               </div>
             </div>
-            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-src">
+            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-src" data-widget-width="small" data-widget-height="low">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Top SYN origem</div>
                   <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
                     <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
                     <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
                     <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
@@ -1147,11 +1283,16 @@
                 </div>
               </div>
             </div>
-            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-dst">
+            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-dst" data-widget-width="small" data-widget-height="low">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Top SYN destino</div>
                   <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
                     <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
                     <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
                     <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
@@ -1165,11 +1306,16 @@
                 </div>
               </div>
             </div>
-            <div class="col-12 dashboard-widget hidden-widget" data-widget-id="global-summary">
+            <div class="col-12 dashboard-widget hidden-widget" data-widget-id="global-summary" data-widget-width="full" data-widget-height="low">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Mapa global resumido</div>
                   <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
                     <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
                     <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
                     <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
@@ -1196,8 +1342,8 @@
             <div class="toolbar">
               <select id="mapRangeMinutes" class="form-select form-select-sm" aria-label="Periodo">
                 <option value="5">5 min</option>
-                <option value="15" selected>15 min</option>
-                <option value="30">30 min</option>
+                <option value="15">15 min</option>
+                <option value="30" selected>30 min</option>
                 <option value="60">1 hora</option>
                 <option value="360">6 horas</option>
                 <option value="1440">24 horas</option>
@@ -1225,12 +1371,22 @@
                 <option value="packets_s">packets/s</option>
                 <option value="flows">flows</option>
               </select>
+              <select id="mapGroupBy" class="form-select form-select-sm" aria-label="Agrupar mapa">
+                <option value="city" selected>Cidade</option>
+                <option value="country">Pais</option>
+                <option value="asn">ASN</option>
+                <option value="ip">IP/CIDR</option>
+              </select>
               <select id="mapTopN" class="form-select form-select-sm" aria-label="Top N">
+                <option value="10">Top 10</option>
                 <option value="20" selected>Top 20</option>
                 <option value="50">Top 50</option>
                 <option value="100">Top 100</option>
                 <option value="500">Top 500</option>
               </select>
+              <button id="fitMapButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="scan"></i><span>Ajustar</span>
+              </button>
               <button id="refreshMapButton" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
@@ -1241,39 +1397,57 @@
             <div class="sensor-form-grid mb-3">
               <div class="field">
                 <label for="mapSrcAsn">ASN origem</label>
-                <input id="mapSrcAsn" class="form-control form-control-sm" placeholder="15169">
+                <input id="mapSrcAsn" class="form-control form-control-sm" placeholder="Ex: 15169">
               </div>
               <div class="field">
                 <label for="mapDstAsn">ASN destino</label>
-                <input id="mapDstAsn" class="form-control form-control-sm" placeholder="264948">
+                <input id="mapDstAsn" class="form-control form-control-sm" placeholder="Ex: 264948">
               </div>
               <div class="field">
                 <label for="mapSrcCidr">IP/CIDR origem</label>
-                <input id="mapSrcCidr" class="form-control form-control-sm" placeholder="8.8.8.0/24">
+                <input id="mapSrcCidr" class="form-control form-control-sm" placeholder="Ex: 8.8.8.0/24">
               </div>
               <div class="field">
                 <label for="mapDstCidr">IP/CIDR destino</label>
-                <input id="mapDstCidr" class="form-control form-control-sm" placeholder="179.189.80.0/24">
+                <input id="mapDstCidr" class="form-control form-control-sm" placeholder="Ex: 179.189.80.0/24">
               </div>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap mb-3">
+              <span id="mapFilterBadge" class="filter-badge">Sem filtros avançados</span>
+              <button id="applyMapFiltersButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="filter"></i><span>Aplicar filtros</span>
+              </button>
+              <button id="clearMapFiltersButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="eraser"></i><span>Limpar filtros</span>
+              </button>
             </div>
             <div class="database-metrics-grid mb-3">
               <div class="metric-card"><div class="metric-label">Total bits/s</div><div id="mapTotalBits" class="metric-value">0 bps</div></div>
               <div class="metric-card"><div class="metric-label">Total packets/s</div><div id="mapTotalPackets" class="metric-value">0 pps</div></div>
               <div class="metric-card"><div class="metric-label">Países ativos</div><div id="mapActiveCountries" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Rotas ativas</div><div id="mapActiveRoutes" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Rotas localizadas</div><div id="mapLocatedRoutes" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Sem coordenadas</div><div id="mapMissingRoutes" class="metric-value">0</div></div>
             </div>
             <div class="row g-3">
               <div class="col-12 col-xl-8">
                 <div id="globalMapChart" class="map-chart"></div>
+                <div id="globalMapMessage" class="map-message mt-2"></div>
               </div>
               <div class="col-12 col-xl-4">
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>Rota</th><th>Proto</th><th class="text-end">Volume</th></tr></thead>
+                    <thead><tr><th>Origem</th><th>Destino</th><th>Protocolo</th><th>ASN Origem</th><th>ASN Destino</th><th class="text-end">Bits/s</th><th class="text-end">Packets/s</th><th class="text-end">Flows</th></tr></thead>
                     <tbody id="globalMapRoutesTable"></tbody>
                   </table>
                 </div>
               </div>
+            </div>
+            <div class="table-wrap mt-3">
+              <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>Origem sem localização completa</th><th>Destino</th><th>Protocolo</th><th>ASN Origem</th><th>ASN Destino</th><th class="text-end">Bits/s</th><th class="text-end">Packets/s</th><th class="text-end">Flows</th></tr></thead>
+                <tbody id="globalMapMissingTable"></tbody>
+              </table>
             </div>
           </section>
         </section>
@@ -2863,14 +3037,14 @@
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
       asnDst: echarts.init(document.getElementById('asnDstChart')),
       topFlow: echarts.init(document.getElementById('topFlowChart')),
-      globalMap: echarts.init(document.getElementById('globalMapChart')),
       anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart'))
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
     const protocolPalette = { TCP: '#2563eb', UDP: '#16a34a', ICMP: '#f59e0b', 'TCP+SYN': '#dc2626', OTHER: '#64748b' };
-    const DASHBOARD_LAYOUT_KEY = 'gmjFlowDashboardLayout';
+    const DASHBOARD_LAYOUT_KEY = 'gmjflow_dashboard_layout_v2';
     const DEFAULT_DASHBOARD_HIDDEN_WIDGETS = ['global-summary'];
+    const DEFAULT_DASHBOARD_GRID_ORDER = ['top-conversations', 'syn-src', 'syn-dst', 'global-summary'];
     let activeView = 'dashboard';
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
@@ -2900,6 +3074,9 @@
     let mapAbortController = null;
     let mapDebounceTimer = null;
     let mapBackoffUntil = 0;
+    let globalLeafletMap = null;
+    let globalLeafletLayer = null;
+    let globalLeafletBounds = null;
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' },
@@ -3223,9 +3400,10 @@
 
     function mapParams() {
       const query = new URLSearchParams();
-      query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '15');
+      query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '30');
       query.set('direction', document.getElementById('mapDirection').value || 'both');
       query.set('metric', document.getElementById('mapMetric').value || 'bits_s');
+      query.set('group_by', document.getElementById('mapGroupBy').value || 'city');
       query.set('top_n', document.getElementById('mapTopN').value || '20');
       const sensorId = selectedMapSensorId();
       const interfaceId = selectedMapInterfaceId();
@@ -3244,6 +3422,7 @@
       if (dstAsn) query.set('asn_dst', dstAsn.replace(/^AS/i, ''));
       if (srcCidr) query.set('src_cidr', srcCidr);
       if (dstCidr) query.set('dst_cidr', dstCidr);
+      updateMapFilterBadge();
       return query.toString();
     }
 
@@ -4584,10 +4763,19 @@
       if (!series.length) {
         return emptyChartOption('Sem dados no periodo');
       }
+      const manySeries = series.length > 10;
       return {
         animation: false,
-        grid: { left: 18, right: 18, top: 54, bottom: 38, containLabel: true },
-        legend: { type: 'scroll', top: 0, left: 0, right: 0, textStyle: { color: '#374151' } },
+        grid: {
+          left: 18,
+          right: manySeries ? 190 : 18,
+          top: manySeries ? 18 : 54,
+          bottom: manySeries ? 36 : 42,
+          containLabel: true
+        },
+        legend: manySeries
+          ? { type: 'scroll', orient: 'vertical', right: 0, top: 8, bottom: 8, width: 170, textStyle: { color: '#374151' } }
+          : { type: 'scroll', top: 0, left: 0, right: 0, textStyle: { color: '#374151' } },
         tooltip: {
           trigger: 'axis',
           formatter(params) {
@@ -5269,16 +5457,41 @@
       return `${src} -> ${dst}`;
     }
 
+    function selectedTopConversationSort() {
+      return document.getElementById('topConversationsSort')?.value || 'bits_s';
+    }
+
+    function selectedTopConversationLimit() {
+      return Number(document.getElementById('topConversationsLimit')?.value || 10);
+    }
+
+    function topConversationSortLabel() {
+      const labels = { bits_s: 'Bits/s', packets_s: 'PPS/s', flows: 'Flows', packets: 'Pacotes' };
+      return labels[selectedTopConversationSort()] || 'Bits/s';
+    }
+
+    function conversationPpsLabel(item) {
+      const value = item.packets_s ?? item.pps;
+      return value === null || value === undefined || value === '' ? 'N/D' : formatPps(value);
+    }
+
     function renderTopConversations(items) {
       const tbody = document.getElementById('topConversationsTable');
-      tbody.innerHTML = items.slice(0, 8).map(item => `
+      const table = tbody.closest('table');
+      const limit = selectedTopConversationLimit();
+      document.getElementById('topConversationsTitle').textContent = `Maior Flow / Conversa por ${topConversationSortLabel()}`;
+      table.querySelector('thead').innerHTML = '<tr><th>Conversa</th><th>Proto</th><th class="text-end">Bits/s</th><th class="text-end">PPS/s</th><th class="text-end">Pacotes</th><th class="text-end">Flows</th><th>Duração</th></tr>';
+      tbody.innerHTML = items.slice(0, limit).map(item => `
         <tr>
           <td>${escapeHtml(conversationLabel(item))}</td>
           <td>${escapeHtml(item.protocol || '-')}</td>
           <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td class="text-end">${conversationPpsLabel(item)}</td>
+          <td class="text-end">${formatNumber(item.packets)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
           <td>${escapeHtml(item.duration_human || '-')}</td>
         </tr>
-      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados</td></tr>';
+      `).join('') || '<tr><td colspan="7" class="text-muted">Sem dados</td></tr>';
     }
 
     function renderSynTable(id, items) {
@@ -5310,109 +5523,198 @@
       return formatBps(value);
     }
 
-    function globalMapOption(payload) {
-      const metric = payload.metric || 'bits_s';
-      const edges = Array.isArray(payload.edges) ? payload.edges : [];
-      const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
-      const lineData = edges
-        .filter(edge => edge.src_lat != null && edge.src_lon != null && edge.dst_lat != null && edge.dst_lon != null)
-        .map(edge => ({
-          name: `${edge.src_label} -> ${edge.dst_label}`,
-          coords: [[Number(edge.src_lon), Number(edge.src_lat)], [Number(edge.dst_lon), Number(edge.dst_lat)]],
-          value: Number(edge[metric]) || Number(edge.bits_s) || 0,
-          edge
-        }));
-      const scatterData = nodes
-        .filter(node => node.lat != null && node.lon != null)
-        .map(node => ({
-          name: node.label || node.id,
-          value: [Number(node.lon), Number(node.lat), Number(node[metric]) || Number(node.bits_s) || 0],
-          node
-        }));
-      const maxValue = Math.max(1, ...lineData.map(item => item.value));
-      lineData.forEach(item => {
-        item.lineStyle = { width: Math.max(1, Math.min(8, (item.value / maxValue) * 8)) };
-      });
-      const hasWorldMap = echarts.getMap && echarts.getMap('world');
-      const base = {
-        animation: false,
-        tooltip: {
-          trigger: 'item',
-          formatter(params) {
-            const edge = params.data?.edge;
-            const node = params.data?.node;
-            if (edge) {
-              return [
-                escapeHtml(`${edge.src_label} -> ${edge.dst_label}`),
-                `Bits/s: ${formatBps(edge.bits_s)}`,
-                `Packets/s: ${formatPps(edge.packets_s)}`,
-                `Flows: ${formatNumber(edge.flows)}`,
-                `Protocolo: ${escapeHtml(edge.top_protocol || '-')}`,
-                `ASN: AS${edge.top_asn_src || 0} -> AS${edge.top_asn_dst || 0}`
-              ].join('<br>');
-            }
-            if (node) {
-              return [
-                escapeHtml(node.label || node.id),
-                `Bits/s: ${formatBps(node.bits_s)}`,
-                `Packets/s: ${formatPps(node.packets_s)}`,
-                `Flows: ${formatNumber(node.flows)}`
-              ].join('<br>');
-            }
-            return params.name || '';
-          }
-        },
-        visualMap: {
-          show: false,
-          min: 0,
-          max: maxValue,
-          inRange: { symbolSize: [6, 24] }
-        },
-        series: []
-      };
-      if (hasWorldMap) {
-        base.geo = {
-          map: 'world',
-          roam: true,
-          itemStyle: { areaColor: '#e8edf2', borderColor: '#cbd5e1' },
-          emphasis: { itemStyle: { areaColor: '#dbeafe' }, label: { show: false } }
-        };
-        base.series = [
-          { type: 'lines', coordinateSystem: 'geo', data: lineData, large: true, effect: { show: true, period: 5, trailLength: .18, symbolSize: 3 }, lineStyle: { color: '#0f766e', opacity: .42, curveness: .22 } },
-          { type: 'scatter', coordinateSystem: 'geo', data: scatterData, itemStyle: { color: '#b45309' }, encode: { value: 2 } }
-        ];
-        return base;
+    function updateMapFilterBadge() {
+      const badge = document.getElementById('mapFilterBadge');
+      if (!badge) return;
+      const ids = ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'];
+      const activeCount = ids.filter(id => document.getElementById(id)?.value.trim()).length;
+      badge.classList.toggle('active', activeCount > 0);
+      badge.textContent = activeCount ? `Filtros ativos (${activeCount})` : 'Sem filtros avançados';
+    }
+
+    function routeHasCoordinates(edge) {
+      return ['src_lat', 'src_lon', 'dst_lat', 'dst_lon'].every(key => edge?.[key] !== null && edge?.[key] !== undefined);
+    }
+
+    function routeMetricValue(edge, metric) {
+      return Number(edge?.[metric]) || Number(edge?.bits_s) || 0;
+    }
+
+    function routeLabel(edge) {
+      return `${edge.src_label || edge.src || '-'} -> ${edge.dst_label || edge.dst || '-'}`;
+    }
+
+    function routeAsnText(edge) {
+      const src = edge.top_asn_src ? `AS${edge.top_asn_src}` : '-';
+      const dst = edge.top_asn_dst ? `AS${edge.top_asn_dst}` : '-';
+      return `${src} -> ${dst}`;
+    }
+
+    function routeAsnTooltip(edge) {
+      const src = edge.top_asn_src_name || edge.src_as_name || '';
+      const dst = edge.top_asn_dst_name || edge.dst_as_name || '';
+      return [src, dst].filter(Boolean).join(' -> ');
+    }
+
+    function routeEndpointAsn(edge, side) {
+      const number = Number(edge?.[`top_asn_${side}`] || 0);
+      return number > 0 ? `AS${number}` : '-';
+    }
+
+    function routeEndpointAsnTitle(edge, side) {
+      const name = edge?.[`top_asn_${side}_name`] || edge?.[`${side}_as_name`] || '';
+      const label = routeEndpointAsn(edge, side);
+      return name && label !== '-' ? `${label} ${name}` : name;
+    }
+
+    function routeColor(protocol) {
+      const value = String(protocol || 'OTHER').toUpperCase();
+      if (value.startsWith('TCP')) return protocolPalette.TCP;
+      if (value.startsWith('UDP')) return protocolPalette.UDP;
+      if (value.startsWith('ICMP')) return protocolPalette.ICMP;
+      return protocolPalette.OTHER;
+    }
+
+    function setMapMessage(message = '') {
+      const target = document.getElementById('globalMapMessage');
+      if (target) target.textContent = message;
+    }
+
+    function ensureLeafletMap() {
+      if (!window.L) {
+        setMapMessage('Biblioteca de mapa não carregada.');
+        return false;
       }
-      return {
-        ...base,
-        grid: { left: 35, right: 15, top: 15, bottom: 25 },
-        xAxis: { type: 'value', min: -180, max: 180, axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#edf0f3' } } },
-        yAxis: { type: 'value', min: -60, max: 85, axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#edf0f3' } } },
-        series: [
-          { type: 'lines', coordinateSystem: 'cartesian2d', data: lineData, lineStyle: { color: '#0f766e', opacity: .5, curveness: .18 } },
-          { type: 'scatter', data: scatterData, itemStyle: { color: '#b45309' } }
-        ]
-      };
+      if (globalLeafletMap) return true;
+      globalLeafletMap = L.map('globalMapChart', {
+        worldCopyJump: true,
+        zoomControl: true,
+        preferCanvas: true
+      }).setView([5, -35], 2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 18,
+        attribution: '&copy; OpenStreetMap'
+      }).addTo(globalLeafletMap);
+      globalLeafletLayer = L.layerGroup().addTo(globalLeafletMap);
+      return true;
+    }
+
+    function clearLeafletMap() {
+      if (globalLeafletLayer) globalLeafletLayer.clearLayers();
+      globalLeafletBounds = null;
+      setMapMessage('');
+    }
+
+    function resizeLeafletMap() {
+      if (!globalLeafletMap) return;
+      globalLeafletMap.invalidateSize();
+      if (globalLeafletBounds) {
+        globalLeafletMap.fitBounds(globalLeafletBounds, { padding: [28, 28], maxZoom: 6 });
+      }
+    }
+
+    function fitGlobalMapBounds() {
+      if (!globalLeafletMap || !globalLeafletBounds) return;
+      globalLeafletMap.fitBounds(globalLeafletBounds, { padding: [28, 28], maxZoom: 6 });
+    }
+
+    function routePopup(edge) {
+      return [
+        `<strong>${escapeHtml(routeLabel(edge))}</strong>`,
+        `Bits/s: ${formatBps(edge.bits_s)}`,
+        `PPS/s: ${formatPps(edge.packets_s)}`,
+        `Pacotes: ${formatNumber(edge.packets)}`,
+        `Flows: ${formatNumber(edge.flows)}`,
+        `Protocolo: ${escapeHtml(edge.top_protocol || '-')}`,
+        `ASN: ${escapeHtml(routeAsnText(edge))}`,
+        routeAsnTooltip(edge) ? escapeHtml(routeAsnTooltip(edge)) : ''
+      ].filter(Boolean).join('<br>');
+    }
+
+    function drawGlobalLeafletMap(edges, metric) {
+      clearLeafletMap();
+      if (!ensureLeafletMap()) return;
+      const located = edges.filter(routeHasCoordinates);
+      if (!located.length) {
+        setMapMessage('Nenhuma rota com coordenadas completas para desenhar no mapa.');
+        return;
+      }
+      const maxValue = Math.max(1, ...located.map(edge => Number(edge.bits_s) || 0));
+      const bounds = [];
+      located.forEach(edge => {
+        const src = [Number(edge.src_lat), Number(edge.src_lon)];
+        const dst = [Number(edge.dst_lat), Number(edge.dst_lon)];
+        const color = routeColor(edge.top_protocol);
+        const weight = Math.max(2, Math.min(9, 2 + ((Number(edge.bits_s) || 0) / maxValue) * 7));
+        const samePoint = src[0] === dst[0] && src[1] === dst[1];
+        if (!samePoint) {
+          L.polyline([src, dst], {
+            color,
+            weight,
+            opacity: 0.58,
+            lineCap: 'round'
+          }).bindPopup(routePopup(edge)).addTo(globalLeafletLayer);
+          bounds.push(src, dst);
+        }
+        [src, dst].forEach((point, index) => {
+          const radius = samePoint ? Math.max(6, weight + 2) : 5;
+          L.circleMarker(point, {
+            radius,
+            color,
+            weight: 2,
+            fillColor: index === 0 ? '#ffffff' : color,
+            fillOpacity: index === 0 ? 0.92 : 0.72
+          }).bindPopup(routePopup(edge)).addTo(globalLeafletLayer);
+          bounds.push(point);
+        });
+      });
+      globalLeafletBounds = L.latLngBounds(bounds);
+      fitGlobalMapBounds();
+      setTimeout(resizeLeafletMap, 50);
+    }
+
+    function mapRouteRow(edge) {
+      const color = routeColor(edge.top_protocol);
+      return `
+        <tr>
+          <td><span class="route-color-dot" style="background:${color}"></span>${escapeHtml(edge.src_label || edge.src || '-')}</td>
+          <td>${escapeHtml(edge.dst_label || edge.dst || '-')}</td>
+          <td>${escapeHtml(edge.top_protocol || '-')}</td>
+          <td title="${escapeHtml(routeEndpointAsnTitle(edge, 'src'))}">${escapeHtml(routeEndpointAsn(edge, 'src'))}</td>
+          <td title="${escapeHtml(routeEndpointAsnTitle(edge, 'dst'))}">${escapeHtml(routeEndpointAsn(edge, 'dst'))}</td>
+          <td class="text-end">${formatBps(edge.bits_s)}</td>
+          <td class="text-end">${formatPps(edge.packets_s)}</td>
+          <td class="text-end">${formatNumber(edge.flows)}</td>
+        </tr>
+      `;
+    }
+
+    function renderGlobalMapTables(edges, metric) {
+      const missing = edges.filter(edge => !routeHasCoordinates(edge));
+      document.getElementById('globalMapRoutesTable').innerHTML = edges.map(edge => mapRouteRow(edge, metric)).join('')
+        || '<tr><td colspan="8" class="text-muted">Sem rotas</td></tr>';
+      document.getElementById('globalMapMissingTable').innerHTML = missing.map(edge => mapRouteRow(edge, metric)).join('')
+        || '<tr><td colspan="8" class="text-muted">Todas as rotas retornadas possuem coordenadas</td></tr>';
     }
 
     function renderGlobalMap(payload) {
       const edges = Array.isArray(payload.edges) ? payload.edges : [];
-      const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
       const totalBits = edges.reduce((sum, edge) => sum + Number(edge.bits_s || 0), 0);
       const totalPackets = edges.reduce((sum, edge) => sum + Number(edge.packets_s || 0), 0);
+      const locatedRoutes = payload.complete_route_count ?? edges.filter(routeHasCoordinates).length;
+      const missingRoutes = payload.incomplete_route_count ?? Math.max(0, edges.length - locatedRoutes);
       document.getElementById('mapTotalBits').textContent = formatBps(totalBits);
       document.getElementById('mapTotalPackets').textContent = formatPps(totalPackets);
-      document.getElementById('mapActiveCountries').textContent = formatNumber(nodes.length);
-      document.getElementById('mapActiveRoutes').textContent = formatNumber(edges.length);
-      charts.globalMap.setOption(globalMapOption(payload), true);
+      document.getElementById('mapActiveCountries').textContent = formatNumber(payload.active_countries ?? 0);
+      document.getElementById('mapActiveRoutes').textContent = formatNumber(payload.total_routes ?? edges.length);
+      document.getElementById('mapLocatedRoutes').textContent = formatNumber(locatedRoutes);
+      document.getElementById('mapMissingRoutes').textContent = formatNumber(missingRoutes);
       const metric = payload.metric || 'bits_s';
-      document.getElementById('globalMapRoutesTable').innerHTML = edges.slice(0, 20).map(edge => `
-        <tr>
-          <td>${escapeHtml(`${edge.src_label || edge.src} -> ${edge.dst_label || edge.dst}`)}</td>
-          <td>${escapeHtml(edge.top_protocol || '-')}</td>
-          <td class="text-end">${metricDisplay(edge[metric], metric)}</td>
-        </tr>
-      `).join('') || '<tr><td colspan="3" class="text-muted">Sem rotas</td></tr>';
+      drawGlobalLeafletMap(edges, metric);
+      if (locatedRoutes > 0 && missingRoutes > 0) {
+        setMapMessage(`${formatNumber(missingRoutes)} rota${missingRoutes > 1 ? 's' : ''} sem coordenadas completas.`);
+      }
+      renderGlobalMapTables(edges, metric);
     }
 
     function abortMapRequest() {
@@ -5438,8 +5740,8 @@
     async function loadGlobalMap({ force = false } = {}) {
       if (activeView !== 'global-map') return;
       const status = document.getElementById('globalMapStatus');
-      if (!force && Date.now() < mapBackoffUntil) {
-        status.textContent = 'Mapa em espera apos erro recente';
+      if (Date.now() < mapBackoffUntil) {
+        status.textContent = 'Mapa em espera após erro recente';
         return;
       }
       abortMapRequest();
@@ -5451,14 +5753,22 @@
         if (controller.signal.aborted || activeView !== 'global-map') return;
         renderGlobalMap(payload);
         const warning = payload.warning ? ` - ${payload.warning}` : '';
-        status.textContent = `${formatNumber((payload.edges || []).length)} rotas geograficas${warning}`;
+        const totalRoutes = Number(payload.total_routes ?? (payload.edges || []).length);
+        const requestedTop = Number(payload.requested_top_n || document.getElementById('mapTopN').value || totalRoutes);
+        const locatedRoutes = Number(payload.complete_route_count ?? 0);
+        const missingRoutes = Number(payload.incomplete_route_count ?? Math.max(0, totalRoutes - locatedRoutes));
+        const prefix = totalRoutes < requestedTop
+          ? `Apenas ${formatNumber(totalRoutes)} rotas encontradas para os filtros atuais`
+          : `${formatNumber(totalRoutes)} rotas exibidas de Top ${formatNumber(requestedTop)}`;
+        status.textContent = `${prefix} - ${formatNumber(locatedRoutes)} com coordenadas, ${formatNumber(missingRoutes)} sem localização completa${warning}`;
       } catch (error) {
         if (error.name === 'AbortError') return;
         mapBackoffUntil = Date.now() + 60000;
         console.error('Falha ao carregar Mapa Global', error);
         status.textContent = `Falha no mapa: ${error.message}`;
-        charts.globalMap.clear();
-        renderTableMessage('globalMapRoutesTable', 3, 'Erro ao carregar mapa', true);
+        clearLeafletMap();
+        renderTableMessage('globalMapRoutesTable', 8, 'Erro ao carregar mapa', true);
+        renderTableMessage('globalMapMissingTable', 8, 'Erro ao carregar mapa', true);
       } finally {
         if (mapAbortController === controller) mapAbortController = null;
       }
@@ -5469,16 +5779,57 @@
         const stored = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_KEY) || '{}') || {};
         const hidden = new Set(Array.isArray(stored.hidden) ? stored.hidden : []);
         DEFAULT_DASHBOARD_HIDDEN_WIDGETS.forEach(id => hidden.add(id));
-        return { ...stored, hidden: Array.from(hidden) };
+        return { ...stored, hidden: Array.from(hidden), sizes: stored.sizes || {}, config: stored.config || {} };
       } catch {
-        return { hidden: [...DEFAULT_DASHBOARD_HIDDEN_WIDGETS] };
+        return { hidden: [...DEFAULT_DASHBOARD_HIDDEN_WIDGETS], sizes: {}, config: {} };
       }
     }
 
+    function dashboardWidgets() {
+      return Array.from(document.querySelectorAll('#view-dashboard .dashboard-widget'));
+    }
+
+    function dashboardGridWidgets() {
+      return Array.from(document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget'));
+    }
+
+    function defaultWidgetSize(widget) {
+      const id = widget.dataset.widgetId;
+      const defaults = {
+        'bps-chart': { width: 'medium', height: 'low' },
+        'pps-chart': { width: 'medium', height: 'low' },
+        'top-conversations': { width: 'medium', height: 'low' },
+        'syn-src': { width: 'small', height: 'low' },
+        'syn-dst': { width: 'small', height: 'low' },
+        'global-summary': { width: 'full', height: 'low' }
+      };
+      return defaults[id] || {
+        width: widget.dataset.widgetWidth || '',
+        height: widget.dataset.widgetHeight || ''
+      };
+    }
+
     function saveDashboardLayout() {
-      const widgets = Array.from(document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget'));
+      const widgets = dashboardWidgets();
+      const sizes = {};
+      widgets.forEach(widget => {
+        if (widget.dataset.widgetWidth || widget.dataset.widgetHeight) {
+          sizes[widget.dataset.widgetId] = {
+            width: widget.dataset.widgetWidth || '',
+            height: widget.dataset.widgetHeight || ''
+          };
+        }
+      });
       localStorage.setItem(DASHBOARD_LAYOUT_KEY, JSON.stringify({
-        order: widgets.map(widget => widget.dataset.widgetId),
+        version: 2,
+        order: dashboardGridWidgets().map(widget => widget.dataset.widgetId),
+        sizes,
+        config: {
+          topConversations: {
+            sort_by: selectedTopConversationSort(),
+            limit: selectedTopConversationLimit()
+          }
+        },
         hidden: widgets.filter(widget => widget.classList.contains('hidden-widget')).map(widget => widget.dataset.widgetId)
       }));
     }
@@ -5486,14 +5837,26 @@
     function applyDashboardLayout() {
       const layout = dashboardLayout();
       const grid = document.getElementById('dashboardWidgetGrid');
-      const widgets = Array.from(grid.querySelectorAll('.dashboard-widget'));
-      const byId = Object.fromEntries(widgets.map(widget => [widget.dataset.widgetId, widget]));
+      const gridWidgets = dashboardGridWidgets();
+      const byId = Object.fromEntries(gridWidgets.map(widget => [widget.dataset.widgetId, widget]));
       (layout.order || []).forEach(id => {
         if (byId[id]) grid.appendChild(byId[id]);
       });
-      widgets.forEach(widget => {
+      if (layout.config?.topConversations) {
+        const sort = document.getElementById('topConversationsSort');
+        const limit = document.getElementById('topConversationsLimit');
+        if (sort && layout.config.topConversations.sort_by) sort.value = layout.config.topConversations.sort_by;
+        if (limit && layout.config.topConversations.limit) limit.value = String(layout.config.topConversations.limit);
+      }
+      dashboardWidgets().forEach(widget => {
+        const id = widget.dataset.widgetId;
+        const defaultSize = defaultWidgetSize(widget);
+        const size = layout.sizes?.[id] || defaultSize;
+        if (defaultSize.width || size.width) widget.dataset.widgetWidth = size.width || defaultSize.width;
+        if (defaultSize.height || size.height) widget.dataset.widgetHeight = size.height || defaultSize.height;
         widget.classList.toggle('hidden-widget', (layout.hidden || []).includes(widget.dataset.widgetId));
       });
+      setTimeout(() => Object.values(charts).forEach(chart => chart.resize()), 50);
     }
 
     function toggleDashboardEdit() {
@@ -5505,7 +5868,17 @@
 
     function resetDashboardLayout() {
       localStorage.removeItem(DASHBOARD_LAYOUT_KEY);
-      document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget').forEach(widget => {
+      const grid = document.getElementById('dashboardWidgetGrid');
+      const byId = Object.fromEntries(dashboardGridWidgets().map(widget => [widget.dataset.widgetId, widget]));
+      DEFAULT_DASHBOARD_GRID_ORDER.forEach(id => {
+        if (byId[id]) grid.appendChild(byId[id]);
+      });
+      document.getElementById('topConversationsSort').value = 'bits_s';
+      document.getElementById('topConversationsLimit').value = '10';
+      dashboardWidgets().forEach(widget => {
+        const defaultSize = defaultWidgetSize(widget);
+        if (defaultSize.width) widget.dataset.widgetWidth = defaultSize.width;
+        if (defaultSize.height) widget.dataset.widgetHeight = defaultSize.height;
         widget.classList.toggle('hidden-widget', DEFAULT_DASHBOARD_HIDDEN_WIDGETS.includes(widget.dataset.widgetId));
       });
       applyDashboardLayout();
@@ -5513,8 +5886,21 @@
     }
 
     function isDashboardWidgetVisible(widgetId) {
-      const widget = document.querySelector(`#dashboardWidgetGrid [data-widget-id="${widgetId}"]`);
+      const widget = document.querySelector(`#view-dashboard [data-widget-id="${widgetId}"]`);
       return Boolean(widget && !widget.classList.contains('hidden-widget'));
+    }
+
+    function resizeDashboardCharts() {
+      Object.values(charts).forEach(chart => chart.resize());
+    }
+
+    function shiftWidgetSize(widget, kind, delta) {
+      const values = kind === 'width' ? ['small', 'medium', 'large', 'full'] : ['low', 'medium', 'high'];
+      const key = kind === 'width' ? 'widgetWidth' : 'widgetHeight';
+      const current = widget.dataset[key] || defaultWidgetSize(widget)[kind] || values[1];
+      const index = Math.max(0, values.indexOf(current));
+      widget.dataset[key] = values[Math.max(0, Math.min(values.length - 1, index + delta))];
+      resizeDashboardCharts();
     }
 
     async function loadIngestionStatus() {
@@ -5605,16 +5991,13 @@
           ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)]
         ];
         if (isDashboardWidgetVisible('top-conversations')) {
-          entries.push(['conversations', fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=8`, requestOptions)]);
+          entries.push(['conversations', fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=${selectedTopConversationLimit()}&sort_by=${encodeURIComponent(selectedTopConversationSort())}`, requestOptions)]);
         }
         if (isDashboardWidgetVisible('syn-src')) {
           entries.push(['synSrc', fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=src&limit=8`, requestOptions)]);
         }
         if (isDashboardWidgetVisible('syn-dst')) {
           entries.push(['synDst', fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=dst&limit=8`, requestOptions)]);
-        }
-        if (isDashboardWidgetVisible('global-summary') && Date.now() >= mapBackoffUntil) {
-          entries.push(['geoSummary', fetchJSON('/api/geo/flows', `${topQuery}&top_n=8&metric=bits_s`, requestOptions)]);
         }
         const settled = await Promise.allSettled(entries.map(entry => entry[1]));
         if (controller.signal.aborted || activeView !== 'dashboard') return;
@@ -5627,14 +6010,14 @@
           document.getElementById('bpsReadout').textContent = 'Erro ao carregar widget';
         } else {
           charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
-          document.getElementById('bpsReadout').textContent = stackedReadout(bpsItems, 'bits_s');
+          document.getElementById('bpsReadout').textContent = `${stackedReadout(bpsItems, 'bits_s')}${bpsItems.length > 10 ? ' - Muitas séries selecionadas. Use largura total ou filtre interfaces.' : ''}`;
         }
         if (payloads.pps.__error) {
           renderChartError(charts.pps);
           document.getElementById('ppsReadout').textContent = 'Erro ao carregar widget';
         } else {
           charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
-          document.getElementById('ppsReadout').textContent = stackedReadout(ppsItems, 'packets_s');
+          document.getElementById('ppsReadout').textContent = `${stackedReadout(ppsItems, 'packets_s')}${ppsItems.length > 10 ? ' - Muitas séries selecionadas. Use largura total ou filtre interfaces.' : ''}`;
         }
 
         const srcIpItems = payloadItems(payloads.srcIp);
@@ -5695,7 +6078,7 @@
 
         if (isDashboardWidgetVisible('top-conversations')) {
           payloads.conversations?.__error
-            ? renderTableMessage('topConversationsTable', 4, widgetErrorMessage(payloads.conversations), true)
+            ? renderTableMessage('topConversationsTable', 7, widgetErrorMessage(payloads.conversations), true)
             : renderTopConversations(payloadItems(payloads.conversations));
         }
         if (isDashboardWidgetVisible('syn-src')) {
@@ -5707,14 +6090,6 @@
           payloads.synDst?.__error
             ? renderTableMessage('topSynDstTable', 3, widgetErrorMessage(payloads.synDst), true)
             : renderSynTable('topSynDstTable', payloadItems(payloads.synDst));
-        }
-        if (isDashboardWidgetVisible('global-summary')) {
-          if (payloads.geoSummary?.__error) {
-            mapBackoffUntil = Date.now() + 60000;
-            renderTableMessage('globalSummaryTable', 4, widgetErrorMessage(payloads.geoSummary), true);
-          } else {
-            renderGlobalSummary(payloads.geoSummary ? (payloads.geoSummary.edges || payloadItems(payloads.geoSummary)) : []);
-          }
         }
         dashboardRefreshFailures = 0;
       } catch (error) {
@@ -6597,7 +6972,7 @@
         loadDashboardSensors()
           .then(() => loadMapInterfaces())
           .then(() => loadGlobalMap({ force: true }))
-          .then(() => setTimeout(() => charts.globalMap.resize(), 50))
+          .then(() => setTimeout(resizeLeafletMap, 50))
           .catch(console.error);
       } else if (view === 'sensors') {
         document.getElementById('view-sensors').classList.add('active');
@@ -6635,13 +7010,25 @@
       openIpDetails(target.dataset.ip).catch(console.error);
     });
 
-    document.getElementById('dashboardWidgetGrid').addEventListener('click', event => {
+    document.getElementById('view-dashboard').addEventListener('click', event => {
       const button = event.target.closest('button');
       if (!button || !dashboardEditing) return;
       const widget = button.closest('.dashboard-widget');
       if (!widget) return;
       if (button.classList.contains('widget-hide')) {
         widget.classList.add('hidden-widget');
+      } else if (button.classList.contains('widget-narrower')) {
+        shiftWidgetSize(widget, 'width', -1);
+      } else if (button.classList.contains('widget-wider')) {
+        shiftWidgetSize(widget, 'width', 1);
+      } else if (button.classList.contains('widget-shorter')) {
+        shiftWidgetSize(widget, 'height', -1);
+      } else if (button.classList.contains('widget-taller')) {
+        shiftWidgetSize(widget, 'height', 1);
+      } else if (button.classList.contains('widget-expand')) {
+        widget.dataset.widgetWidth = 'full';
+        widget.dataset.widgetHeight = 'high';
+        resizeDashboardCharts();
       } else if (button.classList.contains('widget-up') && widget.previousElementSibling) {
         widget.parentElement.insertBefore(widget, widget.previousElementSibling);
       } else if (button.classList.contains('widget-down') && widget.nextElementSibling) {
@@ -6702,6 +7089,12 @@
       scheduleDashboardRefresh();
     });
     document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    ['topConversationsSort', 'topConversationsLimit'].forEach(id => {
+      document.getElementById(id).addEventListener('change', () => {
+        saveDashboardLayout();
+        if (activeView === 'dashboard') refresh().finally(scheduleDashboardRefresh).catch(console.error);
+      });
+    });
     document.getElementById('editDashboardButton').addEventListener('click', toggleDashboardEdit);
     document.getElementById('resetDashboardButton').addEventListener('click', resetDashboardLayout);
     document.getElementById('dashboardRefreshInterval').addEventListener('change', scheduleDashboardRefresh);
@@ -6711,14 +7104,24 @@
     document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(() => debounceGlobalMapLoad()).catch(console.error));
     document.getElementById('mapInterface').addEventListener('change', () => debounceGlobalMapLoad());
-    ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapTopN'].forEach(id => {
+    ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => debounceGlobalMapLoad());
     });
     ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'].forEach(id => {
+      document.getElementById(id).addEventListener('input', updateMapFilterBadge);
       document.getElementById(id).addEventListener('keydown', event => {
         if (event.key === 'Enter') loadGlobalMap({ force: true }).catch(console.error);
       });
     });
+    document.getElementById('applyMapFiltersButton').addEventListener('click', () => loadGlobalMap({ force: true }).catch(console.error));
+    document.getElementById('clearMapFiltersButton').addEventListener('click', () => {
+      ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      updateMapFilterBadge();
+      loadGlobalMap({ force: true }).catch(console.error);
+    });
+    document.getElementById('fitMapButton').addEventListener('click', fitGlobalMapBounds);
     document.getElementById('refreshMapButton').addEventListener('click', () => loadGlobalMap({ force: true }).catch(console.error));
     document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
@@ -6870,10 +7273,14 @@
       });
     });
 
-    window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
+    window.addEventListener('resize', () => {
+      Object.values(charts).forEach(chart => chart.resize());
+      resizeLeafletMap();
+    });
     document.addEventListener('visibilitychange', scheduleDashboardRefresh);
 
     applyDashboardLayout();
+    updateMapFilterBadge();
     createIcons();
     initAuth().then(scheduleDashboardRefresh).catch(console.error);
     setInterval(() => {
