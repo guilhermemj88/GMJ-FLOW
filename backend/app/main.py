@@ -279,6 +279,8 @@ ATTACK_DOMAIN_TYPES = {"any", "internal_ip", "external_ip", "prefix", "sensor", 
 ATTACK_DIRECTIONS = {"receives", "sends", "both"}
 ATTACK_COMPARISONS = {"over"}
 ATTACK_THRESHOLD_UNITS = {"bits_s", "packets_s", "flows_s"}
+ATTACK_PROTOCOLS = {"any", "tcp", "udp", "icmp", "icmpv6", "gre", "esp", "other"}
+ATTACK_TCP_FLAGS = {"any", "fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr", "syn+ack", "null", "none"}
 ATTACK_DECODERS = {
     "IP",
     "TCP",
@@ -309,6 +311,80 @@ ATTACK_DECODERS = {
 }
 ATTACK_SEVERITIES = {"info", "warning", "critical"}
 ATTACK_RESPONSE_ACTIONS = {"alert_only", "response_ip", "webhook_future", "ignore"}
+ATTACK_VECTOR_PRESET_TEMPLATES = [
+    {
+        "id": "dns-amplification",
+        "name": "DNS Amplification",
+        "decoder": "DNS",
+        "protocol": "udp",
+        "src_port": "53",
+        "dst_port": "any",
+        "direction": "receives",
+        "threshold_unit": "bits_s",
+        "threshold_value": 1_000_000_000,
+        "tcp_flags": "any",
+    },
+    {
+        "id": "ntp-amplification",
+        "name": "NTP Amplification",
+        "decoder": "NTP",
+        "protocol": "udp",
+        "src_port": "123",
+        "dst_port": "any",
+        "direction": "receives",
+        "threshold_unit": "bits_s",
+        "threshold_value": 1_000_000_000,
+        "tcp_flags": "any",
+    },
+    {
+        "id": "tcp-syn-flood",
+        "name": "TCP SYN Flood",
+        "decoder": "TCP+SYN",
+        "protocol": "tcp",
+        "src_port": "any",
+        "dst_port": "any",
+        "direction": "receives",
+        "threshold_unit": "packets_s",
+        "threshold_value": 500_000,
+        "tcp_flags": "syn",
+    },
+    {
+        "id": "udp-flood",
+        "name": "UDP Flood",
+        "decoder": "UDP",
+        "protocol": "udp",
+        "src_port": "any",
+        "dst_port": "any",
+        "direction": "receives",
+        "threshold_unit": "bits_s",
+        "threshold_value": 2_000_000_000,
+        "tcp_flags": "any",
+    },
+    {
+        "id": "https-flood",
+        "name": "HTTPS Flood",
+        "decoder": "HTTPS",
+        "protocol": "tcp",
+        "src_port": "any",
+        "dst_port": "443",
+        "direction": "receives",
+        "threshold_unit": "packets_s",
+        "threshold_value": 500_000,
+        "tcp_flags": "ack",
+    },
+    {
+        "id": "asn-source-abuse",
+        "name": "ASN Source Abuse",
+        "decoder": "IP",
+        "protocol": "any",
+        "src_port": "any",
+        "dst_port": "any",
+        "direction": "receives",
+        "threshold_unit": "bits_s",
+        "threshold_value": 1_000_000_000,
+        "tcp_flags": "any",
+    },
+]
 LEARN_DECODER_UNITS = (
     ("IP", "bits_s"),
     ("IP", "packets_s"),
@@ -479,6 +555,15 @@ class AttackVectorPayload(BaseModel):
     enabled: bool = True
     domain_type: str = "any"
     target_cidr: str | None = None
+    src_cidr: str | None = None
+    dst_cidr: str | None = None
+    src_port: str = "any"
+    dst_port: str = "any"
+    protocol: str = "any"
+    src_asn: str = ""
+    dst_asn: str = ""
+    tcp_flags: str = "any"
+    window_seconds: int = Field(60, ge=1, le=86400)
     sensor_id: int | None = Field(None, ge=1)
     interface_if_index: int | None = Field(None, ge=0)
     direction: str = "receives"
@@ -808,6 +893,15 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             enabled INTEGER NOT NULL DEFAULT 1,
             domain_type TEXT NOT NULL DEFAULT 'any',
             target_cidr TEXT,
+            src_cidr TEXT,
+            dst_cidr TEXT,
+            src_port TEXT NOT NULL DEFAULT 'any',
+            dst_port TEXT NOT NULL DEFAULT 'any',
+            protocol TEXT NOT NULL DEFAULT 'any',
+            src_asn TEXT NOT NULL DEFAULT '',
+            dst_asn TEXT NOT NULL DEFAULT '',
+            tcp_flags TEXT NOT NULL DEFAULT 'any',
+            window_seconds INTEGER NOT NULL DEFAULT 60,
             sensor_id INTEGER,
             interface_if_index INTEGER,
             direction TEXT NOT NULL DEFAULT 'receives',
@@ -909,6 +1003,15 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
+    ensure_sqlite_column(conn, "attack_vectors", "src_cidr", "src_cidr TEXT")
+    ensure_sqlite_column(conn, "attack_vectors", "dst_cidr", "dst_cidr TEXT")
+    ensure_sqlite_column(conn, "attack_vectors", "src_port", "src_port TEXT NOT NULL DEFAULT 'any'")
+    ensure_sqlite_column(conn, "attack_vectors", "dst_port", "dst_port TEXT NOT NULL DEFAULT 'any'")
+    ensure_sqlite_column(conn, "attack_vectors", "protocol", "protocol TEXT NOT NULL DEFAULT 'any'")
+    ensure_sqlite_column(conn, "attack_vectors", "src_asn", "src_asn TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vectors", "dst_asn", "dst_asn TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vectors", "tcp_flags", "tcp_flags TEXT NOT NULL DEFAULT 'any'")
+    ensure_sqlite_column(conn, "attack_vectors", "window_seconds", "window_seconds INTEGER NOT NULL DEFAULT 60")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     conn.execute(
@@ -1143,6 +1246,15 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
                 enabled,
                 domain_type,
                 target_cidr,
+                src_cidr,
+                dst_cidr,
+                src_port,
+                dst_port,
+                protocol,
+                src_asn,
+                dst_asn,
+                tcp_flags,
+                window_seconds,
                 sensor_id,
                 interface_if_index,
                 direction,
@@ -1156,7 +1268,7 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, 1, ?, NULL, NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', 1, ?, ?)
+            VALUES (?, ?, 1, ?, NULL, NULL, NULL, 'any', 'any', 'any', '', '', 'any', 60, NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', 1, ?, ?)
             """,
             (template_id, name, domain_type, direction, decoder, value, unit, severity, now, now),
         )
@@ -3453,6 +3565,86 @@ def clickhouse_cidr_string_param(value: str, field_name: str = "target_cidr") ->
     return str(network)
 
 
+def normalize_optional_cidr(value: Any, field_name: str) -> str | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        return str(ip_network(text, strict=False))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+
+
+def normalize_attack_port_filter(value: Any, field_name: str) -> str:
+    text = clean_text(value).lower()
+    if not text or text in {"any", "*"}:
+        return "any"
+    normalized: list[str] = []
+    for raw_token in text.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = [part.strip() for part in token.split("-", 1)]
+            if not start_text.isdigit() or not end_text.isdigit():
+                raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+            start = int(start_text)
+            end = int(end_text)
+            if start > end or start < 0 or end > 65535:
+                raise HTTPException(status_code=400, detail=f"{field_name} fora da faixa 0-65535")
+            normalized.append(f"{start}-{end}")
+            continue
+        if not token.isdigit():
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+        port = int(token)
+        if port < 0 or port > 65535:
+            raise HTTPException(status_code=400, detail=f"{field_name} fora da faixa 0-65535")
+        normalized.append(str(port))
+    return ",".join(normalized) if normalized else "any"
+
+
+def normalize_attack_asn_filter(value: Any, field_name: str) -> str:
+    text = clean_text(value).upper().replace(" ", "")
+    if not text:
+        return ""
+    normalized: list[str] = []
+    for raw_token in text.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if token.startswith("AS"):
+            token = token[2:]
+        if not token.isdigit():
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+        asn = int(token)
+        if asn <= 0 or asn > 4294967295:
+            raise HTTPException(status_code=400, detail=f"{field_name} fora da faixa")
+        normalized.append(str(asn))
+    return ",".join(normalized)
+
+
+def normalize_attack_protocol_filter(value: Any) -> str:
+    text = clean_text(value).lower()
+    if not text:
+        return "any"
+    if text in ATTACK_PROTOCOLS:
+        return text
+    proto = parse_proto_filter(text)
+    return str(proto)
+
+
+def normalize_attack_tcp_flags_filter(value: Any) -> str:
+    text = clean_text(value).lower().replace("synack", "syn+ack")
+    if not text or text in {"any", "*"}:
+        return "any"
+    if text in {"none", "null"}:
+        return "null"
+    if text in ATTACK_TCP_FLAGS:
+        return text
+    _ = parse_tcp_flags_filter(text)
+    return text.upper()
+
+
 def attack_vector_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
@@ -3478,6 +3670,15 @@ def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "enabled": sqlite_bool(item["enabled"]),
         "domain_type": item["domain_type"],
         "target_cidr": item.get("target_cidr"),
+        "src_cidr": item.get("src_cidr"),
+        "dst_cidr": item.get("dst_cidr"),
+        "src_port": item.get("src_port") or "any",
+        "dst_port": item.get("dst_port") or "any",
+        "protocol": item.get("protocol") or "any",
+        "src_asn": item.get("src_asn") or "",
+        "dst_asn": item.get("dst_asn") or "",
+        "tcp_flags": item.get("tcp_flags") or "any",
+        "window_seconds": int(item.get("window_seconds") or 60),
         "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
         "sensor_name": item.get("sensor_name") or "",
         "interface_if_index": int(item["interface_if_index"]) if item.get("interface_if_index") is not None else None,
@@ -3621,6 +3822,17 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
         "response_action",
     )
     target_cidr = normalize_target_cidr(data.get("target_cidr"))
+    src_cidr = normalize_optional_cidr(data.get("src_cidr"), "src_cidr")
+    dst_cidr = normalize_optional_cidr(data.get("dst_cidr"), "dst_cidr")
+    src_port = normalize_attack_port_filter(data.get("src_port"), "src_port")
+    dst_port = normalize_attack_port_filter(data.get("dst_port"), "dst_port")
+    protocol = normalize_attack_protocol_filter(data.get("protocol"))
+    src_asn = normalize_attack_asn_filter(data.get("src_asn"), "src_asn")
+    dst_asn = normalize_attack_asn_filter(data.get("dst_asn"), "dst_asn")
+    tcp_flags = normalize_attack_tcp_flags_filter(data.get("tcp_flags"))
+    window_seconds = positive_int(data.get("window_seconds") or 60, "window_seconds")
+    if window_seconds > 86400:
+        raise HTTPException(status_code=400, detail="window_seconds fora da faixa 1-86400")
     sensor_id = data.get("sensor_id")
     interface_if_index = data.get("interface_if_index")
     if domain_type == "prefix" and not target_cidr:
@@ -3651,6 +3863,15 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
         "enabled": 1 if data.get("enabled") else 0,
         "domain_type": domain_type,
         "target_cidr": target_cidr,
+        "src_cidr": src_cidr,
+        "dst_cidr": dst_cidr,
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "protocol": protocol,
+        "src_asn": src_asn,
+        "dst_asn": dst_asn,
+        "tcp_flags": tcp_flags,
+        "window_seconds": window_seconds,
         "sensor_id": int(sensor_id) if sensor_id is not None else None,
         "interface_if_index": int(interface_if_index) if interface_if_index is not None else None,
         "direction": direction,
@@ -3752,6 +3973,85 @@ def classify_flow_decoder(flow: dict[str, Any]) -> str:
     return "OTHER"
 
 
+def append_attack_port_filter(
+    filters: list[str],
+    params: dict[str, Any],
+    column: str,
+    value: Any,
+    prefix: str,
+) -> None:
+    text = normalize_attack_port_filter(value, prefix)
+    if text == "any":
+        return
+    parts: list[str] = []
+    for index, token in enumerate(text.split(",")):
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start_key = f"{prefix}_start_{index}"
+            end_key = f"{prefix}_end_{index}"
+            params[start_key] = int(start_text)
+            params[end_key] = int(end_text)
+            parts.append(f"{column} BETWEEN {{{start_key}:UInt16}} AND {{{end_key}:UInt16}}")
+        else:
+            key = f"{prefix}_{index}"
+            params[key] = int(token)
+            parts.append(f"{column} = {{{key}:UInt16}}")
+    if parts:
+        filters.append(f"({' OR '.join(parts)})")
+
+
+def append_attack_asn_filter(
+    filters: list[str],
+    params: dict[str, Any],
+    column: str,
+    value: Any,
+    prefix: str,
+) -> None:
+    text = normalize_attack_asn_filter(value, prefix)
+    if not text:
+        return
+    parts: list[str] = []
+    for index, token in enumerate(text.split(",")):
+        key = f"{prefix}_{index}"
+        params[key] = int(token)
+        parts.append(f"{column} = {{{key}:UInt32}}")
+    if parts:
+        filters.append(f"({' OR '.join(parts)})")
+
+
+def append_attack_protocol_filter(filters: list[str], params: dict[str, Any], value: Any) -> None:
+    protocol = normalize_attack_protocol_filter(value)
+    if protocol == "any":
+        return
+    if protocol == "other":
+        filters.append("proto NOT IN (1, 6, 17, 47, 50, 58)")
+        return
+    if protocol == "icmp":
+        filters.append("proto IN (1, 58)")
+        return
+    proto = parse_proto_filter(protocol)
+    if proto is not None:
+        params["attack_protocol"] = proto
+        filters.append("proto = {attack_protocol:UInt8}")
+
+
+def append_attack_tcp_flags_filter(filters: list[str], params: dict[str, Any], value: Any) -> None:
+    flags_text = normalize_attack_tcp_flags_filter(value)
+    if flags_text == "any":
+        return
+    if flags_text == "null":
+        filters.append("tcp_flags = 0")
+        return
+    flags = parse_tcp_flags_filter(flags_text)
+    if flags is None:
+        return
+    params["attack_tcp_flags"] = flags
+    if flags == 0:
+        filters.append("tcp_flags = 0")
+    else:
+        filters.append("bitAnd(tcp_flags, {attack_tcp_flags:UInt16}) = {attack_tcp_flags:UInt16}")
+
+
 def append_attack_vector_filters(
     vector: dict[str, Any],
     start: datetime,
@@ -3788,6 +4088,23 @@ def append_attack_vector_filters(
                 "(isIPAddressInRange(toString(src_ip), {target_cidr:String}) "
                 "OR isIPAddressInRange(toString(dst_ip), {target_cidr:String}))"
             )
+
+    src_cidr = clean_text(vector.get("src_cidr"))
+    if src_cidr:
+        params["src_cidr"] = clickhouse_cidr_string_param(src_cidr, "src_cidr")
+        filters.append("isIPAddressInRange(toString(src_ip), {src_cidr:String})")
+
+    dst_cidr = clean_text(vector.get("dst_cidr"))
+    if dst_cidr:
+        params["dst_cidr"] = clickhouse_cidr_string_param(dst_cidr, "dst_cidr")
+        filters.append("isIPAddressInRange(toString(dst_ip), {dst_cidr:String})")
+
+    append_attack_port_filter(filters, params, "src_port", vector.get("src_port"), "src_port")
+    append_attack_port_filter(filters, params, "dst_port", vector.get("dst_port"), "dst_port")
+    append_attack_protocol_filter(filters, params, vector.get("protocol"))
+    append_attack_asn_filter(filters, params, "src_asn", vector.get("src_asn"), "src_asn")
+    append_attack_asn_filter(filters, params, "dst_asn", vector.get("dst_asn"), "dst_asn")
+    append_attack_tcp_flags_filter(filters, params, vector.get("tcp_flags"))
 
     decoder_condition = decoder_clickhouse_condition(vector.get("decoder") or "IP")
     filters.append(f"({decoder_condition})")
@@ -3858,6 +4175,15 @@ def metric_alias_for_unit(unit: str) -> str:
     return "bits_s"
 
 
+def sample_rate_direction_for_vector(vector: dict[str, Any]) -> str:
+    direction = vector.get("direction")
+    if direction == "receives":
+        return "input"
+    if direction == "sends":
+        return "output"
+    return "auto"
+
+
 def comparison_matches(observed: float, threshold: float, comparison: str) -> bool:
     if comparison == "over":
         return observed > threshold
@@ -3893,6 +4219,15 @@ def attack_vector_where_summary(vector: dict[str, Any], start_dt: datetime, end_
         f"flow_time={iso(start_dt)}..{iso(end_dt)}",
         f"domain_type={vector.get('domain_type') or 'any'}",
         f"target_cidr={clean_text(vector.get('target_cidr')) or 'none'}",
+        f"src_cidr={clean_text(vector.get('src_cidr')) or 'none'}",
+        f"dst_cidr={clean_text(vector.get('dst_cidr')) or 'none'}",
+        f"src_port={clean_text(vector.get('src_port')) or 'any'}",
+        f"dst_port={clean_text(vector.get('dst_port')) or 'any'}",
+        f"protocol={clean_text(vector.get('protocol')) or 'any'}",
+        f"src_asn={clean_text(vector.get('src_asn')) or 'none'}",
+        f"dst_asn={clean_text(vector.get('dst_asn')) or 'none'}",
+        f"tcp_flags={clean_text(vector.get('tcp_flags')) or 'any'}",
+        f"window_seconds={int(vector.get('window_seconds') or 60)}",
         f"direction={vector.get('direction') or 'receives'}",
         f"decoder={vector.get('decoder') or 'IP'}",
         f"where={where}",
@@ -3960,12 +4295,13 @@ def query_learn_series(
     where = append_attack_vector_filters(vector_like, start_dt, end_dt, params)
     if not vector_like["target_cidr"]:
         where += " AND input_if > 0" if direction == "receives" else " AND output_if > 0"
+    rate_expr = clickhouse_sample_rate_expr(sensor_id, sample_rate_direction_for_vector(vector_like), interface_if_index)
     result = query_clickhouse(
         f"""
         SELECT
             toStartOfMinute(flow_time) AS bucket,
-            sum(bytes) * 8 / 60 AS bits_s,
-            sum(packets) / 60 AS packets_s,
+            {corrected_sum_expr("bytes", rate_expr)} * 8 / 60 AS bits_s,
+            {corrected_sum_expr("packets", rate_expr)} / 60 AS packets_s,
             sum(flow_count) / 60 AS flows_s
         FROM flow_raw
         WHERE {where}
@@ -4310,17 +4646,23 @@ def query_vector_recent_traffic(
     where = append_attack_vector_filters(vector, start_dt, end_dt, params)
     target_expr = target_expression_for_vector(vector)
     order_metric = metric_alias_for_unit(vector.get("threshold_unit") or "bits_s")
+    if_index = vector.get("interface_if_index")
+    rate_expr = clickhouse_sample_rate_expr(
+        vector.get("sensor_id"),
+        sample_rate_direction_for_vector(vector),
+        int(if_index) if if_index is not None else None,
+    )
     result = query_clickhouse(
         f"""
         SELECT
             {target_expr} AS target_ip,
-            sum(bytes) AS total_bytes,
-            sum(packets) AS total_packets,
+            {corrected_sum_expr("bytes", rate_expr)} AS total_bytes,
+            {corrected_sum_expr("packets", rate_expr)} AS total_packets,
             sum(flow_count) AS total_flows,
             min(flow_time) AS first_seen_at,
             max(flow_time) AS last_seen_at,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
-            sum(packets) / {{seconds:Float64}} AS packets_s,
+            {corrected_sum_expr("bytes", rate_expr)} * 8 / {{seconds:Float64}} AS bits_s,
+            {corrected_sum_expr("packets", rate_expr)} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) / {{seconds:Float64}} AS flows_s
         FROM flow_raw
         WHERE {where}
@@ -4473,6 +4815,15 @@ def attack_vector_test_result(
         "parent_enabled": bool(vector.get("parent_enabled")),
         "domain_type": vector.get("domain_type"),
         "target_cidr": vector.get("target_cidr"),
+        "src_cidr": vector.get("src_cidr"),
+        "dst_cidr": vector.get("dst_cidr"),
+        "src_port": vector.get("src_port"),
+        "dst_port": vector.get("dst_port"),
+        "protocol": vector.get("protocol"),
+        "src_asn": vector.get("src_asn"),
+        "dst_asn": vector.get("dst_asn"),
+        "tcp_flags": vector.get("tcp_flags"),
+        "window_seconds": vector.get("window_seconds"),
         "direction": vector.get("direction"),
         "decoder": vector.get("decoder"),
         "threshold_value": threshold,
@@ -4751,9 +5102,8 @@ def detect_anomalies_once() -> dict[str, Any]:
     ensure_sensor_db()
     lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
     min_duration = anomaly_min_duration_seconds()
-    lookback = max(lookback, min_duration, 1)
+    default_lookback = max(lookback, min_duration, 1)
     end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(seconds=lookback)
     checked = 0
     triggered = 0
     errors: list[str] = []
@@ -4762,6 +5112,8 @@ def detect_anomalies_once() -> dict[str, Any]:
         logger.info("Worker de anomalias avaliando %s vetores ativos", len(vectors))
         for vector in vectors:
             checked += 1
+            vector_window = max(int(vector.get("window_seconds") or default_lookback), min_duration, 1)
+            start_dt = end_dt - timedelta(seconds=vector_window)
             try:
                 rows = query_vector_recent_traffic(vector, start_dt, end_dt)
             except Exception as exc:
@@ -4978,6 +5330,15 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
                     enabled,
                     domain_type,
                     target_cidr,
+                    src_cidr,
+                    dst_cidr,
+                    src_port,
+                    dst_port,
+                    protocol,
+                    src_asn,
+                    dst_asn,
+                    tcp_flags,
+                    window_seconds,
                     sensor_id,
                     interface_if_index,
                     direction,
@@ -4991,7 +5352,7 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_template_id,
@@ -4999,6 +5360,15 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
                     1 if vector["enabled"] else 0,
                     vector["domain_type"],
                     vector["target_cidr"],
+                    vector["src_cidr"],
+                    vector["dst_cidr"],
+                    vector["src_port"],
+                    vector["dst_port"],
+                    vector["protocol"],
+                    vector["src_asn"],
+                    vector["dst_asn"],
+                    vector["tcp_flags"],
+                    vector["window_seconds"],
                     vector["sensor_id"],
                     vector["interface_if_index"],
                     vector["direction"],
@@ -5015,6 +5385,25 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
             )
         conn.commit()
         return fetch_attack_vector_template(conn, new_template_id)
+
+
+@app.get("/api/attack-vectors/templates")
+def list_attack_vector_presets(request: Request):
+    require_admin(request)
+    defaults = {
+        "enabled": True,
+        "domain_type": "any",
+        "target_cidr": None,
+        "src_cidr": None,
+        "dst_cidr": None,
+        "src_asn": "",
+        "dst_asn": "",
+        "comparison": "over",
+        "severity": "warning",
+        "response_action": "alert_only",
+        "window_seconds": 60,
+    }
+    return {"items": [{**defaults, **item} for item in ATTACK_VECTOR_PRESET_TEMPLATES]}
 
 
 @app.get("/api/attack-vectors")
@@ -5060,6 +5449,15 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 enabled,
                 domain_type,
                 target_cidr,
+                src_cidr,
+                dst_cidr,
+                src_port,
+                dst_port,
+                protocol,
+                src_asn,
+                dst_asn,
+                tcp_flags,
+                window_seconds,
                 sensor_id,
                 interface_if_index,
                 direction,
@@ -5073,7 +5471,7 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["template_id"],
@@ -5081,6 +5479,15 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 data["enabled"],
                 data["domain_type"],
                 data["target_cidr"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["src_port"],
+                data["dst_port"],
+                data["protocol"],
+                data["src_asn"],
+                data["dst_asn"],
+                data["tcp_flags"],
+                data["window_seconds"],
                 data["sensor_id"],
                 data["interface_if_index"],
                 data["direction"],
@@ -5114,12 +5521,12 @@ def test_attack_vector(
         default_lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
     except ValueError:
         default_lookback = 60
-    effective_lookback = lookback_seconds or payload.lookback_seconds or default_lookback
     effective_min_duration = anomaly_min_duration_seconds(
         min_duration_seconds if min_duration_seconds is not None else payload.min_duration_seconds
     )
     with sqlite_connection() as conn:
         vector = fetch_attack_vector(conn, vector_id)
+    effective_lookback = lookback_seconds or payload.lookback_seconds or vector.get("window_seconds") or default_lookback
     return attack_vector_test_result(
         vector,
         max(int(effective_lookback), 1),
@@ -5143,6 +5550,15 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 enabled = ?,
                 domain_type = ?,
                 target_cidr = ?,
+                src_cidr = ?,
+                dst_cidr = ?,
+                src_port = ?,
+                dst_port = ?,
+                protocol = ?,
+                src_asn = ?,
+                dst_asn = ?,
+                tcp_flags = ?,
+                window_seconds = ?,
                 sensor_id = ?,
                 interface_if_index = ?,
                 direction = ?,
@@ -5162,6 +5578,15 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 data["enabled"],
                 data["domain_type"],
                 data["target_cidr"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["src_port"],
+                data["dst_port"],
+                data["protocol"],
+                data["src_asn"],
+                data["dst_asn"],
+                data["tcp_flags"],
+                data["window_seconds"],
                 data["sensor_id"],
                 data["interface_if_index"],
                 data["direction"],
@@ -5206,6 +5631,15 @@ def duplicate_attack_vector(request: Request, vector_id: int):
                 enabled,
                 domain_type,
                 target_cidr,
+                src_cidr,
+                dst_cidr,
+                src_port,
+                dst_port,
+                protocol,
+                src_asn,
+                dst_asn,
+                tcp_flags,
+                window_seconds,
                 sensor_id,
                 interface_if_index,
                 direction,
@@ -5219,7 +5653,7 @@ def duplicate_attack_vector(request: Request, vector_id: int):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 vector["template_id"],
@@ -5227,6 +5661,15 @@ def duplicate_attack_vector(request: Request, vector_id: int):
                 1 if vector["enabled"] else 0,
                 vector["domain_type"],
                 vector["target_cidr"],
+                vector["src_cidr"],
+                vector["dst_cidr"],
+                vector["src_port"],
+                vector["dst_port"],
+                vector["protocol"],
+                vector["src_asn"],
+                vector["dst_asn"],
+                vector["tcp_flags"],
+                vector["window_seconds"],
                 vector["sensor_id"],
                 vector["interface_if_index"],
                 vector["direction"],

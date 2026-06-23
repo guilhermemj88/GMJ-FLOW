@@ -524,6 +524,17 @@
       grid-column: span 3;
     }
 
+    .form-section-title {
+      grid-column: 1 / -1;
+      margin-top: .25rem;
+      padding-top: .25rem;
+      border-top: 1px solid #e5e7eb;
+      color: #334155;
+      font-size: .78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
     .attack-vector-table,
     .anomaly-table {
       font-size: .84rem;
@@ -1910,6 +1921,7 @@
                         <th>Nome</th>
                         <th>Dominio</th>
                         <th>Alvo</th>
+                        <th>Filtros</th>
                         <th>Sensor</th>
                         <th>Interface</th>
                         <th>Direcao</th>
@@ -2070,6 +2082,7 @@
       </div>
       <div class="gmj-dialog-body">
         <div class="attack-vector-form-grid">
+          <div class="form-section-title">Identificacao</div>
           <div class="field">
             <label for="modalVectorName">Nome</label>
             <input id="modalVectorName" class="form-control form-control-sm">
@@ -2082,12 +2095,25 @@
             </select>
           </div>
           <div class="field">
+            <label for="modalVectorWindowSeconds">Janela (s)</label>
+            <input id="modalVectorWindowSeconds" type="number" min="1" max="86400" step="1" class="form-control form-control-sm" placeholder="60">
+          </div>
+          <div class="form-section-title">Escopo</div>
+          <div class="field">
             <label for="modalVectorDomain">Dominio</label>
             <select id="modalVectorDomain" class="form-select form-select-sm"></select>
           </div>
           <div class="field">
             <label for="modalVectorTarget">Alvo CIDR/IP</label>
             <input id="modalVectorTarget" class="form-control form-control-sm" placeholder="192.168.0.10/32">
+          </div>
+          <div class="field">
+            <label for="modalVectorSrcCidr">Origem CIDR/IP</label>
+            <input id="modalVectorSrcCidr" class="form-control form-control-sm" placeholder="0.0.0.0/0">
+          </div>
+          <div class="field">
+            <label for="modalVectorDstCidr">Destino CIDR/IP</label>
+            <input id="modalVectorDstCidr" class="form-control form-control-sm" placeholder="192.168.0.10/32">
           </div>
           <div class="field">
             <label for="modalVectorSensor">Sensor</label>
@@ -2101,6 +2127,32 @@
             <label for="modalVectorDirection">Direcao</label>
             <select id="modalVectorDirection" class="form-select form-select-sm"></select>
           </div>
+          <div class="form-section-title">Filtros de trafego</div>
+          <div class="field">
+            <label for="modalVectorProtocol">Protocolo</label>
+            <select id="modalVectorProtocol" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="modalVectorSrcPort">Porta origem</label>
+            <input id="modalVectorSrcPort" class="form-control form-control-sm" placeholder="any, 53, 1000-2000">
+          </div>
+          <div class="field">
+            <label for="modalVectorDstPort">Porta destino</label>
+            <input id="modalVectorDstPort" class="form-control form-control-sm" placeholder="any, 443, 80,8080">
+          </div>
+          <div class="field">
+            <label for="modalVectorSrcAsn">ASN origem</label>
+            <input id="modalVectorSrcAsn" class="form-control form-control-sm" placeholder="AS15169, 32934">
+          </div>
+          <div class="field">
+            <label for="modalVectorDstAsn">ASN destino</label>
+            <input id="modalVectorDstAsn" class="form-control form-control-sm" placeholder="AS13335">
+          </div>
+          <div class="field">
+            <label for="modalVectorTcpFlags">TCP flags</label>
+            <select id="modalVectorTcpFlags" class="form-select form-select-sm"></select>
+          </div>
+          <div class="form-section-title">Condicao</div>
           <div class="field">
             <label for="modalVectorDecoder">Decoder</label>
             <select id="modalVectorDecoder" class="form-select form-select-sm"></select>
@@ -2119,6 +2171,7 @@
             <label for="modalVectorUnit">Unidade</label>
             <select id="modalVectorUnit" class="form-select form-select-sm"></select>
           </div>
+          <div class="form-section-title">Resposta</div>
           <div class="field">
             <label for="modalVectorSeverity">Severidade</label>
             <select id="modalVectorSeverity" class="form-select form-select-sm"></select>
@@ -2599,6 +2652,27 @@
       ['receives', 'receives'],
       ['sends', 'sends'],
       ['both', 'both']
+    ];
+    const ATTACK_PROTOCOL_OPTIONS = [
+      ['any', 'any'],
+      ['tcp', 'TCP'],
+      ['udp', 'UDP'],
+      ['icmp', 'ICMP'],
+      ['icmpv6', 'ICMPv6'],
+      ['gre', 'GRE'],
+      ['esp', 'ESP'],
+      ['other', 'OTHER']
+    ];
+    const ATTACK_TCP_FLAG_OPTIONS = [
+      ['any', 'any'],
+      ['syn', 'SYN'],
+      ['ack', 'ACK'],
+      ['syn+ack', 'SYN+ACK'],
+      ['rst', 'RST'],
+      ['fin', 'FIN'],
+      ['psh', 'PSH'],
+      ['urg', 'URG'],
+      ['null', 'NULL']
     ];
     const ATTACK_UNIT_OPTIONS = [
       ['bits_s', 'bits/s'],
@@ -3262,6 +3336,50 @@
       return `${formatNumber(value)} flows/s`;
     }
 
+    function attackFilterSummary(vector) {
+      const filters = [];
+      if (vector.src_cidr) filters.push(`src ${vector.src_cidr}`);
+      if (vector.dst_cidr) filters.push(`dst ${vector.dst_cidr}`);
+      if (vector.src_port && vector.src_port !== 'any') filters.push(`sport ${vector.src_port}`);
+      if (vector.dst_port && vector.dst_port !== 'any') filters.push(`dport ${vector.dst_port}`);
+      if (vector.protocol && vector.protocol !== 'any') filters.push(vector.protocol);
+      if (vector.src_asn) filters.push(`src AS${vector.src_asn}`);
+      if (vector.dst_asn) filters.push(`dst AS${vector.dst_asn}`);
+      if (vector.tcp_flags && vector.tcp_flags !== 'any') filters.push(`flags ${vector.tcp_flags}`);
+      return filters.join(' | ') || '-';
+    }
+
+    function isValidAttackPortFilter(value) {
+      const text = String(value || '').trim().toLowerCase();
+      if (!text || text === 'any' || text === '*') return true;
+      return text.split(',').every(part => {
+        const token = part.trim();
+        if (!token) return false;
+        if (token.includes('-')) {
+          const [startText, endText] = token.split('-').map(item => item.trim());
+          if (!/^\d+$/.test(startText) || !/^\d+$/.test(endText)) return false;
+          const start = Number(startText);
+          const end = Number(endText);
+          return start >= 0 && end <= 65535 && start <= end;
+        }
+        if (!/^\d+$/.test(token)) return false;
+        const port = Number(token);
+        return port >= 0 && port <= 65535;
+      });
+    }
+
+    function isValidAttackAsnFilter(value) {
+      const text = String(value || '').trim();
+      if (!text) return true;
+      return text.split(',').every(part => /^(AS)?\d+$/i.test(part.trim()));
+    }
+
+    function isValidAttackCidrFilter(value) {
+      const text = String(value || '').trim();
+      if (!text) return true;
+      return /^([0-9a-f:.]+)(\/\d{1,3})?$/i.test(text);
+    }
+
     function setAttackVectorStatus(message, kind = 'muted') {
       const status = document.getElementById('attackVectorStatus');
       status.textContent = message;
@@ -3353,6 +3471,7 @@
           <td>${escapeHtml(vector.name)}</td>
           <td>${escapeHtml(vector.domain_type)}</td>
           <td>${escapeHtml(vector.target_cidr || '-')}</td>
+          <td>${escapeHtml(attackFilterSummary(vector))}</td>
           <td>${escapeHtml(vector.sensor_name || (vector.sensor_id ? `#${vector.sensor_id}` : '-'))}</td>
           <td>${vector.interface_if_index ?? '-'}</td>
           <td>${escapeHtml(vector.direction)}</td>
@@ -3371,7 +3490,7 @@
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="14" class="text-muted">Sem vetores neste template</td></tr>';
+      `).join('') || '<tr><td colspan="15" class="text-muted">Sem vetores neste template</td></tr>';
       createIcons();
     }
 
@@ -3550,6 +3669,8 @@
     function populateAttackVectorSelects(vector = {}) {
       document.getElementById('modalVectorDomain').innerHTML = optionList(ATTACK_DOMAIN_OPTIONS, vector.domain_type || 'any');
       document.getElementById('modalVectorDirection').innerHTML = optionList(ATTACK_DIRECTION_OPTIONS, vector.direction || 'receives');
+      document.getElementById('modalVectorProtocol').innerHTML = optionList(ATTACK_PROTOCOL_OPTIONS, vector.protocol || 'any');
+      document.getElementById('modalVectorTcpFlags').innerHTML = optionList(ATTACK_TCP_FLAG_OPTIONS, vector.tcp_flags || 'any');
       document.getElementById('modalVectorDecoder').innerHTML = optionList(ATTACK_DECODER_OPTIONS, vector.decoder || 'IP');
       document.getElementById('modalVectorUnit').innerHTML = optionList(ATTACK_UNIT_OPTIONS, vector.threshold_unit || 'bits_s');
       document.getElementById('modalVectorSeverity').innerHTML = optionList(ATTACK_SEVERITY_OPTIONS, vector.severity || 'warning');
@@ -3571,6 +3692,13 @@
       setValue('modalVectorName', vector?.name || '');
       setBoolSelect('modalVectorEnabled', vector?.enabled ?? true);
       setValue('modalVectorTarget', vector?.target_cidr || '');
+      setValue('modalVectorSrcCidr', vector?.src_cidr || '');
+      setValue('modalVectorDstCidr', vector?.dst_cidr || '');
+      setValue('modalVectorSrcPort', vector?.src_port || 'any');
+      setValue('modalVectorDstPort', vector?.dst_port || 'any');
+      setValue('modalVectorSrcAsn', vector?.src_asn || '');
+      setValue('modalVectorDstAsn', vector?.dst_asn || '');
+      setValue('modalVectorWindowSeconds', vector?.window_seconds || 60);
       setValue('modalVectorValue', vector?.threshold_value || '');
       openModal('attackVectorModal');
     }
@@ -3584,6 +3712,15 @@
         enabled: boolSelectValue('modalVectorEnabled'),
         domain_type: selectValue('modalVectorDomain', 'any'),
         target_cidr: selectValue('modalVectorTarget').trim() || null,
+        src_cidr: selectValue('modalVectorSrcCidr').trim() || null,
+        dst_cidr: selectValue('modalVectorDstCidr').trim() || null,
+        src_port: selectValue('modalVectorSrcPort').trim() || 'any',
+        dst_port: selectValue('modalVectorDstPort').trim() || 'any',
+        protocol: selectValue('modalVectorProtocol', 'any'),
+        src_asn: selectValue('modalVectorSrcAsn').trim(),
+        dst_asn: selectValue('modalVectorDstAsn').trim(),
+        tcp_flags: selectValue('modalVectorTcpFlags', 'any'),
+        window_seconds: Math.max(1, Math.min(86400, numberValue('modalVectorWindowSeconds', 60))),
         sensor_id: sensorValue ? Number(sensorValue) : null,
         interface_if_index: interfaceValue ? Number(interfaceValue) : null,
         direction: selectValue('modalVectorDirection', 'receives'),
@@ -3601,6 +3738,22 @@
       const payload = collectAttackVectorForm();
       if (!payload.name || payload.threshold_value <= 0) {
         setAttackVectorStatus('Nome e valor do vetor sao obrigatorios.', 'error');
+        return;
+      }
+      if (![payload.target_cidr, payload.src_cidr, payload.dst_cidr].every(isValidAttackCidrFilter)) {
+        setAttackVectorStatus('CIDR/IP invalido no escopo do vetor.', 'error');
+        return;
+      }
+      if (!isValidAttackPortFilter(payload.src_port) || !isValidAttackPortFilter(payload.dst_port)) {
+        setAttackVectorStatus('Porta deve ser any, numero, lista ou intervalo.', 'error');
+        return;
+      }
+      if (!isValidAttackAsnFilter(payload.src_asn) || !isValidAttackAsnFilter(payload.dst_asn)) {
+        setAttackVectorStatus('ASN deve ser numerico, com ou sem prefixo AS.', 'error');
+        return;
+      }
+      if (payload.window_seconds < 1 || payload.window_seconds > 86400) {
+        setAttackVectorStatus('Janela deve ficar entre 1 e 86400 segundos.', 'error');
         return;
       }
       const path = editingAttackVectorId ? `/api/attack-vectors/${editingAttackVectorId}` : '/api/attack-vectors';
