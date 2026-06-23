@@ -6,6 +6,7 @@
   <title>GMJ-FLOW</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/map/js/world.js"></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
@@ -251,9 +252,27 @@
       height: 280px;
     }
 
+    .map-chart {
+      width: 100%;
+      height: 560px;
+    }
+
     .top-chart {
       width: 100%;
       height: 230px;
+    }
+
+    .dashboard-widget.hidden-widget {
+      display: none;
+    }
+
+    .widget-actions {
+      display: none;
+      gap: .25rem;
+    }
+
+    .dashboard-editing .widget-actions {
+      display: inline-flex;
     }
 
     .table-sm td,
@@ -779,6 +798,10 @@
         height: 230px;
       }
 
+      .map-chart {
+        height: 420px;
+      }
+
       .top-chart {
         height: 210px;
       }
@@ -863,6 +886,9 @@
         <button type="button" data-nav-view="flows">
           <i data-lucide="search"></i><span>Flows</span>
         </button>
+        <button type="button" data-nav-view="global-map">
+          <i data-lucide="globe-2"></i><span>Mapa Global</span>
+        </button>
         <button type="button" data-nav-view="sensors">
           <i data-lucide="radio-tower"></i><span>Sensores</span>
         </button>
@@ -935,6 +961,17 @@
               <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
               </select>
+              <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
+                <option value="total" selected>Total</option>
+                <option value="protocol">Por protocolo</option>
+                <option value="interface">Por interface</option>
+              </select>
+              <button id="editDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="layout-template"></i><span>Editar Dashboard</span>
+              </button>
+              <button id="resetDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="rotate-ccw"></i><span>Resetar</span>
+              </button>
               <select id="dashboardRefreshInterval" class="form-select form-select-sm" aria-label="Auto-refresh">
                 <option value="0">Auto Off</option>
                 <option value="10000">Auto 10s</option>
@@ -1073,6 +1110,171 @@
             </div>
           </section>
 
+          <section id="dashboardWidgetGrid" class="row g-3 mt-1">
+            <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="top-conversations">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Maior Flow / Conversa</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Conversa</th><th>Proto</th><th class="text-end">Bits/s</th><th>Duração</th></tr></thead>
+                    <tbody id="topConversationsTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-src">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Top SYN origem</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>IP</th><th class="text-end">Packets/s</th><th class="text-end">%</th></tr></thead>
+                    <tbody id="topSynSrcTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-3 dashboard-widget" data-widget-id="syn-dst">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Top SYN destino</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>IP</th><th class="text-end">Packets/s</th><th class="text-end">%</th></tr></thead>
+                    <tbody id="topSynDstTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="col-12 dashboard-widget" data-widget-id="global-summary">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="panel-title">Mapa global resumido</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Rota</th><th>Protocolo</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
+                    <tbody id="globalSummaryTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+        </section>
+
+        <section id="view-global-map" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Mapa Global</h1>
+              <div id="globalMapStatus" class="subtle">Fluxos geográficos por país, ASN e protocolo</div>
+            </div>
+            <div class="toolbar">
+              <select id="mapRangeMinutes" class="form-select form-select-sm" aria-label="Periodo">
+                <option value="5">5 min</option>
+                <option value="15" selected>15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">1 hora</option>
+                <option value="360">6 horas</option>
+                <option value="1440">24 horas</option>
+              </select>
+              <select id="mapSensor" class="form-select form-select-sm" aria-label="Sensor">
+                <option value="">Todos os sensores</option>
+              </select>
+              <select id="mapInterface" class="form-select form-select-sm" aria-label="Interface" disabled>
+                <option value="">Todas as interfaces</option>
+              </select>
+              <select id="mapDirection" class="form-select form-select-sm" aria-label="Direcao">
+                <option value="both">Bidirecional</option>
+                <option value="download">Download</option>
+                <option value="upload">Upload</option>
+              </select>
+              <select id="mapProtocol" class="form-select form-select-sm" aria-label="Protocolo">
+                <option value="">Any</option>
+                <option value="6">TCP</option>
+                <option value="17">UDP</option>
+                <option value="1">ICMP</option>
+                <option value="TCP+SYN">TCP+SYN</option>
+              </select>
+              <select id="mapMetric" class="form-select form-select-sm" aria-label="Metrica">
+                <option value="bits_s">bits/s</option>
+                <option value="packets_s">packets/s</option>
+                <option value="flows">flows</option>
+              </select>
+              <select id="mapTopN" class="form-select form-select-sm" aria-label="Top N">
+                <option value="50">Top 50</option>
+                <option value="100" selected>Top 100</option>
+                <option value="500">Top 500</option>
+              </select>
+              <button id="refreshMapButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3">
+            <div class="sensor-form-grid mb-3">
+              <div class="field">
+                <label for="mapSrcAsn">ASN origem</label>
+                <input id="mapSrcAsn" class="form-control form-control-sm" placeholder="15169">
+              </div>
+              <div class="field">
+                <label for="mapDstAsn">ASN destino</label>
+                <input id="mapDstAsn" class="form-control form-control-sm" placeholder="264948">
+              </div>
+              <div class="field">
+                <label for="mapSrcCidr">IP/CIDR origem</label>
+                <input id="mapSrcCidr" class="form-control form-control-sm" placeholder="8.8.8.0/24">
+              </div>
+              <div class="field">
+                <label for="mapDstCidr">IP/CIDR destino</label>
+                <input id="mapDstCidr" class="form-control form-control-sm" placeholder="179.189.80.0/24">
+              </div>
+            </div>
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card"><div class="metric-label">Total bits/s</div><div id="mapTotalBits" class="metric-value">0 bps</div></div>
+              <div class="metric-card"><div class="metric-label">Total packets/s</div><div id="mapTotalPackets" class="metric-value">0 pps</div></div>
+              <div class="metric-card"><div class="metric-label">Países ativos</div><div id="mapActiveCountries" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Rotas ativas</div><div id="mapActiveRoutes" class="metric-value">0</div></div>
+            </div>
+            <div class="row g-3">
+              <div class="col-12 col-xl-8">
+                <div id="globalMapChart" class="map-chart"></div>
+              </div>
+              <div class="col-12 col-xl-4">
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Rota</th><th>Proto</th><th class="text-end">Volume</th></tr></thead>
+                    <tbody id="globalMapRoutesTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
         </section>
 
         <section id="view-flows" class="app-view">
@@ -1384,6 +1586,32 @@
               </button>
             </div>
           </div>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="panel-title">Status de ingestão</div>
+              <button id="refreshIngestionButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Sensor</th>
+                    <th>Arquivo</th>
+                    <th class="text-end">Tamanho</th>
+                    <th class="text-end">Offset</th>
+                    <th class="text-end">Lag</th>
+                    <th>Último flow</th>
+                    <th>Último insert</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="ingestionStatusTable"></tbody>
+              </table>
+            </div>
+          </section>
 
           <div class="sensor-layout">
             <section class="panel p-3">
@@ -1726,13 +1954,32 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label for="flowRetentionDays">Flows</label>
-                    <select id="flowRetentionDays" class="form-select form-select-sm">
+                    <label for="flowRawRetentionDays">flow_raw</label>
+                    <select id="flowRawRetentionDays" class="form-select form-select-sm">
+                      <option value="7">7 dias</option>
+                      <option value="15">15 dias</option>
+                      <option value="30">30 dias</option>
+                      <option value="60">60 dias</option>
+                      <option value="90">90 dias</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="flow1mRetentionDays">flow_1m</label>
+                    <select id="flow1mRetentionDays" class="form-select form-select-sm">
+                      <option value="15">15 dias</option>
                       <option value="30">30 dias</option>
                       <option value="60">60 dias</option>
                       <option value="90">90 dias</option>
                       <option value="180">180 dias</option>
-                      <option value="365">365 dias</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="flowTopsRetentionDays">flow_tops_1m</label>
+                    <select id="flowTopsRetentionDays" class="form-select form-select-sm">
+                      <option value="7">7 dias</option>
+                      <option value="15">15 dias</option>
+                      <option value="30">30 dias</option>
+                      <option value="60">60 dias</option>
                     </select>
                   </div>
                   <div class="field">
@@ -1792,6 +2039,14 @@
                       <option value="true">Sim</option>
                     </select>
                   </div>
+                  <div class="field">
+                    <label for="databaseCleanupScope">Escopo</label>
+                    <select id="databaseCleanupScope" class="form-select form-select-sm">
+                      <option value="raw">Somente flow_raw</option>
+                      <option value="raw_aggregates">Raw + agregados</option>
+                      <option value="all">Raw + agregados + SNMP</option>
+                    </select>
+                  </div>
                   <button id="databaseOptimizeButton" type="button" class="btn btn-sm btn-outline-warning">
                     <i data-lucide="wrench"></i><span>OPTIMIZE</span>
                   </button>
@@ -1807,8 +2062,8 @@
               <div id="databaseTablesStatus" class="metric-readout">-</div>
             </div>
             <div class="table-wrap">
-              <table class="table table-sm align-middle mb-0">
-                <thead><tr><th>Tabela</th><th class="text-end">Linhas</th><th class="text-end">Tamanho</th></tr></thead>
+                  <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>Tabela</th><th>Primeiro</th><th>Último</th><th class="text-end">Linhas</th><th class="text-end">Tamanho</th><th class="text-end">Retenção</th><th>Última limpeza</th></tr></thead>
                 <tbody id="databaseTables"></tbody>
               </table>
             </div>
@@ -2607,13 +2862,17 @@
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
       asnDst: echarts.init(document.getElementById('asnDstChart')),
       topFlow: echarts.init(document.getElementById('topFlowChart')),
+      globalMap: echarts.init(document.getElementById('globalMapChart')),
       anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart'))
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
+    const protocolPalette = { TCP: '#2563eb', UDP: '#16a34a', ICMP: '#f59e0b', 'TCP+SYN': '#dc2626', OTHER: '#64748b' };
+    const DASHBOARD_LAYOUT_KEY = 'gmjFlowDashboardLayout';
     let activeView = 'dashboard';
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
+    let mapInterfaceCache = [];
     let flowInterfaceCache = [];
     let topFlowInterfaceCache = [];
     let sensorCache = [];
@@ -2634,6 +2893,7 @@
     let dashboardRefreshTimer = null;
     let dashboardRefreshInFlight = false;
     let dashboardRefreshFailures = 0;
+    let dashboardEditing = false;
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' },
@@ -2907,6 +3167,16 @@
       return value ? Number(value) : null;
     }
 
+    function selectedMapSensorId() {
+      const value = document.getElementById('mapSensor').value;
+      return value ? Number(value) : null;
+    }
+
+    function selectedMapInterfaceId() {
+      const value = document.getElementById('mapInterface').value;
+      return value ? Number(value) : null;
+    }
+
     function localDateTimeForInput(date) {
       const offsetMs = date.getTimezoneOffset() * 60000;
       return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
@@ -2935,6 +3205,40 @@
       const interfaceId = selectedDashboardInterfaceId();
       if (includeSensorId && sensorId) query.set('sensor_id', String(sensorId));
       if (includeInterfaceId && interfaceId) query.set('interface_id', String(interfaceId));
+      return query.toString();
+    }
+
+    function dashboardSeriesParams(metric) {
+      const query = new URLSearchParams(dashboardParams({ includeSensorId: true, includeInterfaceId: true }));
+      query.set('group_by', document.getElementById('dashboardSeriesMode').value || 'total');
+      query.set('metric', metric);
+      query.set('direction', 'both');
+      return query.toString();
+    }
+
+    function mapParams() {
+      const query = new URLSearchParams();
+      query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '15');
+      query.set('direction', document.getElementById('mapDirection').value || 'both');
+      query.set('metric', document.getElementById('mapMetric').value || 'bits_s');
+      query.set('top_n', document.getElementById('mapTopN').value || '100');
+      const sensorId = selectedMapSensorId();
+      const interfaceId = selectedMapInterfaceId();
+      const protocol = document.getElementById('mapProtocol').value;
+      const srcAsn = document.getElementById('mapSrcAsn').value.trim();
+      const dstAsn = document.getElementById('mapDstAsn').value.trim();
+      const srcCidr = document.getElementById('mapSrcCidr').value.trim();
+      const dstCidr = document.getElementById('mapDstCidr').value.trim();
+      if (sensorId) query.set('sensor_id', String(sensorId));
+      if (interfaceId) query.set('interface_id', String(interfaceId));
+      if (protocol) {
+        if (protocol.includes('+')) query.set('decoder', protocol);
+        else query.set('proto', protocol);
+      }
+      if (srcAsn) query.set('asn_src', srcAsn.replace(/^AS/i, ''));
+      if (dstAsn) query.set('asn_dst', dstAsn.replace(/^AS/i, ''));
+      if (srcCidr) query.set('src_cidr', srcCidr);
+      if (dstCidr) query.set('dst_cidr', dstCidr);
       return query.toString();
     }
 
@@ -3013,6 +3317,18 @@
       select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
     }
 
+    function renderMapSensorSelect() {
+      const select = document.getElementById('mapSensor');
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Todos os sensores</option>',
+        ...dashboardSensorCache.map(sensor => (
+          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
+        ))
+      ].join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
+    }
+
     function renderDashboardInterfaceSelect() {
       const select = document.getElementById('interface');
       const current = select.value;
@@ -3020,11 +3336,25 @@
       select.disabled = !sensorId;
       select.innerHTML = [
         '<option value="">Todas as interfaces</option>',
-        ...dashboardInterfaceCache.map(iface => (
+        ...mapInterfaceCache.map(iface => (
           `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
         ))
       ].join('');
-      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+      select.value = mapInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+    }
+
+    async function loadMapInterfaces(sensorId = selectedMapSensorId()) {
+      mapInterfaceCache = [];
+      document.getElementById('mapInterface').value = '';
+      renderMapInterfaceSelect();
+      if (!sensorId) return;
+      try {
+        const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
+        mapInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
+        renderMapInterfaceSelect();
+      } catch (error) {
+        console.error('Falha ao carregar interfaces do mapa', error);
+      }
     }
 
     function renderFlowInterfaceSelect() {
@@ -3055,6 +3385,20 @@
       select.value = topFlowInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
+    function renderMapInterfaceSelect() {
+      const select = document.getElementById('mapInterface');
+      const current = select.value;
+      const sensorId = selectedMapSensorId();
+      select.disabled = !sensorId;
+      select.innerHTML = [
+        '<option value="">Todas as interfaces</option>',
+        ...dashboardInterfaceCache.map(iface => (
+          `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
+        ))
+      ].join('');
+      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+    }
+
     async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
       dashboardInterfaceCache = [];
       document.getElementById('interface').value = '';
@@ -3077,12 +3421,15 @@
         renderDashboardSensorSelect();
         renderFlowSensorSelect();
         renderTopFlowSensorSelect();
+        renderMapSensorSelect();
         await loadDashboardInterfaces();
+        await loadMapInterfaces();
         await loadFlowInterfaces();
         await loadTopFlowInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
         dashboardInterfaceCache = [];
+        mapInterfaceCache = [];
         flowInterfaceCache = [];
         topFlowInterfaceCache = [];
         renderDashboardSensorSelect();
@@ -3091,6 +3438,8 @@
         renderFlowInterfaceSelect();
         renderTopFlowSensorSelect();
         renderTopFlowInterfaceSelect();
+        renderMapSensorSelect();
+        renderMapInterfaceSelect();
         console.error('Falha ao carregar sensores do dashboard', error);
       }
     }
@@ -3202,15 +3551,19 @@
       const tbody = document.getElementById('databaseTables');
       const status = document.getElementById('databaseTablesStatus');
       if (!Array.isArray(items) || !items.length) {
-        tbody.innerHTML = '<tr><td colspan="3" class="text-muted">Sem tabelas</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="text-muted">Sem tabelas</td></tr>';
         status.textContent = '0 tabelas';
         return;
       }
       tbody.innerHTML = items.map(item => `
         <tr>
           <td>${escapeHtml(item.table)}</td>
+          <td>${formatDateTime(item.first_record)}</td>
+          <td>${formatDateTime(item.last_record)}</td>
           <td class="text-end">${formatNumber(item.rows)}</td>
           <td class="text-end">${escapeHtml(item.size_human || formatBytes(item.size_bytes))}</td>
+          <td class="text-end">${item.retention_days ? `${formatNumber(item.retention_days)}d` : '-'}</td>
+          <td>${formatDateTime(item.last_cleanup_at)}</td>
         </tr>
       `).join('');
       status.textContent = `${formatNumber(items.length)} tabelas`;
@@ -3229,11 +3582,13 @@
       setText('dbDiskFree', payload.disk_free_human || formatBytes(payload.disk_free_bytes));
       setText(
         'dbRetentionPolicy',
-        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - flows ${formatNumber(payload.retention_days)}d / SNMP ${formatNumber(payload.snmp_retention_days)}d`
+        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - raw ${formatNumber(payload.flow_raw_retention_days || payload.retention_days)}d / 1m ${formatNumber(payload.flow_1m_retention_days || 30)}d / tops ${formatNumber(payload.flow_tops_1m_retention_days || 15)}d / SNMP ${formatNumber(payload.snmp_retention_days)}d`
       );
       setText('dbLastCleanup', formatDateTime(payload.last_cleanup_at));
       document.getElementById('databaseRetentionEnabled').value = payload.retention_enabled ? 'true' : 'false';
-      document.getElementById('flowRetentionDays').value = String(payload.retention_days || 90);
+      document.getElementById('flowRawRetentionDays').value = String(payload.flow_raw_retention_days || payload.retention_days || 7);
+      document.getElementById('flow1mRetentionDays').value = String(payload.flow_1m_retention_days || 30);
+      document.getElementById('flowTopsRetentionDays').value = String(payload.flow_tops_1m_retention_days || 15);
       document.getElementById('snmpRetentionDays').value = String(payload.snmp_retention_days || 90);
       document.getElementById('databaseCleanupHour').value = String(payload.database_cleanup_hour ?? 3);
     }
@@ -3244,7 +3599,7 @@
         renderDatabaseTables(payload.items || []);
       } catch (error) {
         document.getElementById('databaseTablesStatus').textContent = 'Falha';
-        document.getElementById('databaseTables').innerHTML = `<tr><td colspan="3" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+        document.getElementById('databaseTables').innerHTML = `<tr><td colspan="7" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
       }
     }
 
@@ -3270,7 +3625,10 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: document.getElementById('databaseRetentionEnabled').value === 'true',
-            retention_days: Number(document.getElementById('flowRetentionDays').value),
+            retention_days: Number(document.getElementById('flowRawRetentionDays').value),
+            flow_raw_retention_days: Number(document.getElementById('flowRawRetentionDays').value),
+            flow_1m_retention_days: Number(document.getElementById('flow1mRetentionDays').value),
+            flow_tops_1m_retention_days: Number(document.getElementById('flowTopsRetentionDays').value),
             snmp_retention_days: Number(document.getElementById('snmpRetentionDays').value),
             cleanup_hour: Number(document.getElementById('databaseCleanupHour').value)
           })
@@ -3292,6 +3650,7 @@
           body: JSON.stringify({
             older_than_days: Number(days),
             optimize: document.getElementById('databaseCleanupOptimize').value === 'true',
+            scope: document.getElementById('databaseCleanupScope').value,
             confirm: document.getElementById('databaseCleanupConfirm').value.trim()
           })
         });
@@ -4166,6 +4525,87 @@
       return item.label || item.interface_name || item.sensor || item.key || 'Serie';
     }
 
+    function metricFromApi(metric) {
+      return metric === 'packets_s' ? 'pps' : 'bps';
+    }
+
+    function stackedTrafficOption(items, apiMetric) {
+      const metric = metricFromApi(apiMetric);
+      const formatter = metricFormatter(metric);
+      const series = [];
+      let maxMagnitude = 0;
+      items.forEach((item, index) => {
+        const direction = item.direction || ((item.name || '').toLowerCase().includes('upload') ? 'upload' : 'download');
+        const valueSign = direction === 'upload' ? -1 : 1;
+        const color = item.color || protocolPalette[item.group] || palette[index % palette.length];
+        const data = (item.points || []).map(point => {
+          const value = Number(point.value) || 0;
+          maxMagnitude = Math.max(maxMagnitude, value);
+          return [point.ts, value * valueSign];
+        });
+        series.push({
+          name: item.name || `${item.label || item.group || 'Serie'} ${direction}`,
+          type: 'line',
+          stack: direction,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 1.6, color },
+          itemStyle: { color },
+          areaStyle: { color: hexToRgba(color, .18) },
+          emphasis: { focus: 'series' },
+          data
+        });
+      });
+      const axisLimit = maxMagnitude > 0 ? Math.ceil(maxMagnitude * 1.16) : undefined;
+      return {
+        animation: false,
+        grid: { left: 18, right: 18, top: 54, bottom: 38, containLabel: true },
+        legend: { type: 'scroll', top: 0, left: 0, right: 0, textStyle: { color: '#374151' } },
+        tooltip: {
+          trigger: 'axis',
+          formatter(params) {
+            const rows = Array.isArray(params) ? params : [params];
+            const first = rows[0];
+            const timeValue = Array.isArray(first?.value) ? first.value[0] : first?.axisValue;
+            const title = timeValue
+              ? new Date(timeValue).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+              : '';
+            return [title, ...rows.map(row => `${row.marker}${escapeHtml(row.seriesName)}: ${formatter(Math.abs(Number(row.value?.[1]) || 0))}`)]
+              .filter(Boolean)
+              .join('<br>');
+          }
+        },
+        xAxis: {
+          type: 'time',
+          boundaryGap: false,
+          axisLabel: { color: '#6b7280', formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) },
+          axisLine: { lineStyle: { color: '#d9dee5' } }
+        },
+        yAxis: {
+          type: 'value',
+          min: axisLimit ? -axisLimit : undefined,
+          max: axisLimit || undefined,
+          axisLabel: { color: '#6b7280', margin: 14, formatter: value => formatter(Math.abs(Number(value) || 0)) },
+          splitLine: { lineStyle: { color: '#edf0f3' } }
+        },
+        series
+      };
+    }
+
+    function stackedReadout(items, apiMetric) {
+      const metric = metricFromApi(apiMetric);
+      const formatter = metricFormatter(metric);
+      const totals = items.reduce((acc, item) => {
+        const points = Array.isArray(item.points) ? item.points : [];
+        const latest = points.length ? points[points.length - 1] : null;
+        const value = Number(latest?.value) || 0;
+        if ((item.direction || '').toLowerCase() === 'upload') acc.upload += value;
+        else acc.download += value;
+        return acc;
+      }, { download: 0, upload: 0 });
+      return `Download ${formatter(totals.download)} / Upload ${formatter(totals.upload)}`;
+    }
+
     function directionalTrafficOption(items, metric) {
       const formatter = metricFormatter(metric);
       const series = [];
@@ -4632,12 +5072,66 @@
       updateSortIndicators('[data-top-flow-sort]', topFlowSort);
     }
 
+    function renderTopFlowAdvancedHeader(showCountry) {
+      const header = document.getElementById('topFlowTable').closest('table')?.querySelector('thead tr');
+      if (!header) return;
+      header.innerHTML = [
+        '<th class="sortable-header" data-top-flow-sort="key">Chave <span class="sort-indicator"></span></th>',
+        showCountry ? '<th>Descricao</th><th>Pais</th>' : '',
+        '<th>Protocolo</th>',
+        '<th>Src Port</th>',
+        '<th>Dst Port</th>',
+        '<th class="sortable-header" data-top-flow-sort="duration_seconds">Duracao <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="first_seen">Primeiro <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="last_seen">Ultimo <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="packets_s">Packets/s <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="bytes">Bytes <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="packets">Pacotes <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="flows">Flows <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="percent">% total <span class="sort-indicator"></span></th>'
+      ].join('');
+      header.querySelectorAll('[data-top-flow-sort]').forEach(columnHeader => {
+        columnHeader.addEventListener('click', () => {
+          const column = columnHeader.dataset.topFlowSort;
+          topFlowSort = {
+            column,
+            direction: topFlowSort.column === column && topFlowSort.direction === 'desc' ? 'asc' : 'desc'
+          };
+          loadTopFlow().catch(console.error);
+        });
+      });
+      updateSortIndicators('[data-top-flow-sort]', topFlowSort);
+    }
+
+    function renderTopFlowAdvancedRows(tbody, items, showCountry) {
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${escapeHtml(item.key || '-')}</td>
+          ${showCountry ? `<td>${escapeHtml(item.description || '-')}</td><td>${escapeHtml(item.country || 'N/D')}</td>` : ''}
+          <td>${escapeHtml(item.protocol || item.decoder || '-')}</td>
+          <td class="numeric">${item.src_port ? formatNumber(item.src_port) : 'N/D'}</td>
+          <td class="numeric">${item.dst_port ? formatNumber(item.dst_port) : 'N/D'}</td>
+          <td class="numeric">${escapeHtml(item.duration_human || '-')}</td>
+          <td>${formatDateTime(item.first_seen)}</td>
+          <td>${formatDateTime(item.last_seen)}</td>
+          <td class="numeric">${formatBps(item.bits_s)}</td>
+          <td class="numeric">${formatPps(item.packets_s)}</td>
+          <td class="numeric">${formatBytes(item.bytes)}</td>
+          <td class="numeric">${formatNumber(item.packets)}</td>
+          <td class="numeric">${formatNumber(item.flows)}</td>
+          <td class="numeric">${Number(item.percent || 0).toFixed(2)}%</td>
+        </tr>
+      `).join('') || `<tr><td colspan="${showCountry ? 15 : 13}" class="text-muted">Sem dados no intervalo</td></tr>`;
+    }
+
     async function loadTopFlow() {
       const status = document.getElementById('topFlowStatus');
       const tbody = document.getElementById('topFlowTable');
       status.textContent = 'Gerando TOP Flow';
       const showCountry = isTopFlowAsnType();
       renderTopFlowHeader(showCountry);
+      renderTopFlowAdvancedHeader(showCountry);
       updateSortIndicators('[data-top-flow-sort]', topFlowSort);
       const endpoint = `${API_BASE}/api/flows/top?${topFlowParams()}`;
       try {
@@ -4646,22 +5140,11 @@
         const payload = await response.json();
         const items = Array.isArray(payload.items) ? payload.items : [];
         charts.topFlow.setOption(topFlowBarOption(items), true);
-        tbody.innerHTML = items.map(item => `
-          <tr>
-            <td>${escapeHtml(item.key || '-')}</td>
-            ${showCountry ? `<td>${escapeHtml(item.description || '-')}</td><td>${escapeHtml(item.country || 'N/D')}</td>` : ''}
-            <td class="numeric">${formatBps(item.bits_s)}</td>
-            <td class="numeric">${formatPps(item.packets_s)}</td>
-            <td class="numeric">${formatBytes(item.bytes)}</td>
-            <td class="numeric">${formatNumber(item.packets)}</td>
-            <td class="numeric">${formatNumber(item.flows)}</td>
-            <td class="numeric">${Number(item.percent || 0).toFixed(2)}%</td>
-          </tr>
-        `).join('') || `<tr><td colspan="${showCountry ? 9 : 7}" class="text-muted">Sem dados no intervalo</td></tr>`;
+        renderTopFlowAdvancedRows(tbody, items, showCountry);
         status.textContent = `${formatNumber(items.length)} itens`;
       } catch (error) {
         charts.topFlow.clear();
-        tbody.innerHTML = `<tr><td colspan="${showCountry ? 9 : 7}" class="text-danger">Falha ao gerar TOP Flow</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${showCountry ? 15 : 13}" class="text-danger">Falha ao gerar TOP Flow</td></tr>`;
         status.textContent = 'Falha no TOP Flow';
         console.error('Falha no TOP Flow', endpoint, error);
       }
@@ -4679,6 +5162,237 @@
       } else {
         loadTopFlow().catch(console.error);
         setTimeout(() => charts.topFlow.resize(), 50);
+      }
+    }
+
+    function conversationLabel(item) {
+      const src = `${item.src_ip || '-'}${item.src_port ? `:${item.src_port}` : ''}`;
+      const dst = `${item.dst_ip || '-'}${item.dst_port ? `:${item.dst_port}` : ''}`;
+      return `${src} -> ${dst}`;
+    }
+
+    function renderTopConversations(items) {
+      const tbody = document.getElementById('topConversationsTable');
+      tbody.innerHTML = items.slice(0, 8).map(item => `
+        <tr>
+          <td>${escapeHtml(conversationLabel(item))}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td>${escapeHtml(item.duration_human || '-')}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados</td></tr>';
+    }
+
+    function renderSynTable(id, items) {
+      const tbody = document.getElementById(id);
+      tbody.innerHTML = items.slice(0, 8).map(item => `
+        <tr>
+          <td>${ipLink(item.ip)}</td>
+          <td class="text-end">${formatPps(item.packets_s)}</td>
+          <td class="text-end">${Number(item.percent || 0).toFixed(1)}%</td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem dados</td></tr>';
+    }
+
+    function renderGlobalSummary(items) {
+      const tbody = document.getElementById('globalSummaryTable');
+      tbody.innerHTML = items.slice(0, 8).map(item => `
+        <tr>
+          <td>${escapeHtml(`${item.src_label || item.src} -> ${item.dst_label || item.dst}`)}</td>
+          <td>${escapeHtml(item.top_protocol || '-')}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados geograficos</td></tr>';
+    }
+
+    function metricDisplay(value, metric) {
+      if (metric === 'packets_s') return formatPps(value);
+      if (metric === 'flows') return formatNumber(value);
+      return formatBps(value);
+    }
+
+    function globalMapOption(payload) {
+      const metric = payload.metric || 'bits_s';
+      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      const lineData = edges
+        .filter(edge => edge.src_lat != null && edge.src_lon != null && edge.dst_lat != null && edge.dst_lon != null)
+        .map(edge => ({
+          name: `${edge.src_label} -> ${edge.dst_label}`,
+          coords: [[Number(edge.src_lon), Number(edge.src_lat)], [Number(edge.dst_lon), Number(edge.dst_lat)]],
+          value: Number(edge[metric]) || Number(edge.bits_s) || 0,
+          edge
+        }));
+      const scatterData = nodes
+        .filter(node => node.lat != null && node.lon != null)
+        .map(node => ({
+          name: node.label || node.id,
+          value: [Number(node.lon), Number(node.lat), Number(node[metric]) || Number(node.bits_s) || 0],
+          node
+        }));
+      const maxValue = Math.max(1, ...lineData.map(item => item.value));
+      lineData.forEach(item => {
+        item.lineStyle = { width: Math.max(1, Math.min(8, (item.value / maxValue) * 8)) };
+      });
+      const hasWorldMap = echarts.getMap && echarts.getMap('world');
+      const base = {
+        animation: false,
+        tooltip: {
+          trigger: 'item',
+          formatter(params) {
+            const edge = params.data?.edge;
+            const node = params.data?.node;
+            if (edge) {
+              return [
+                escapeHtml(`${edge.src_label} -> ${edge.dst_label}`),
+                `Bits/s: ${formatBps(edge.bits_s)}`,
+                `Packets/s: ${formatPps(edge.packets_s)}`,
+                `Flows: ${formatNumber(edge.flows)}`,
+                `Protocolo: ${escapeHtml(edge.top_protocol || '-')}`,
+                `ASN: AS${edge.top_asn_src || 0} -> AS${edge.top_asn_dst || 0}`
+              ].join('<br>');
+            }
+            if (node) {
+              return [
+                escapeHtml(node.label || node.id),
+                `Bits/s: ${formatBps(node.bits_s)}`,
+                `Packets/s: ${formatPps(node.packets_s)}`,
+                `Flows: ${formatNumber(node.flows)}`
+              ].join('<br>');
+            }
+            return params.name || '';
+          }
+        },
+        visualMap: {
+          show: false,
+          min: 0,
+          max: maxValue,
+          inRange: { symbolSize: [6, 24] }
+        },
+        series: []
+      };
+      if (hasWorldMap) {
+        base.geo = {
+          map: 'world',
+          roam: true,
+          itemStyle: { areaColor: '#e8edf2', borderColor: '#cbd5e1' },
+          emphasis: { itemStyle: { areaColor: '#dbeafe' }, label: { show: false } }
+        };
+        base.series = [
+          { type: 'lines', coordinateSystem: 'geo', data: lineData, large: true, effect: { show: true, period: 5, trailLength: .18, symbolSize: 3 }, lineStyle: { color: '#0f766e', opacity: .42, curveness: .22 } },
+          { type: 'scatter', coordinateSystem: 'geo', data: scatterData, itemStyle: { color: '#b45309' }, encode: { value: 2 } }
+        ];
+        return base;
+      }
+      return {
+        ...base,
+        grid: { left: 35, right: 15, top: 15, bottom: 25 },
+        xAxis: { type: 'value', min: -180, max: 180, axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        yAxis: { type: 'value', min: -60, max: 85, axisLabel: { color: '#6b7280' }, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        series: [
+          { type: 'lines', coordinateSystem: 'cartesian2d', data: lineData, lineStyle: { color: '#0f766e', opacity: .5, curveness: .18 } },
+          { type: 'scatter', data: scatterData, itemStyle: { color: '#b45309' } }
+        ]
+      };
+    }
+
+    function renderGlobalMap(payload) {
+      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      const totalBits = edges.reduce((sum, edge) => sum + Number(edge.bits_s || 0), 0);
+      const totalPackets = edges.reduce((sum, edge) => sum + Number(edge.packets_s || 0), 0);
+      document.getElementById('mapTotalBits').textContent = formatBps(totalBits);
+      document.getElementById('mapTotalPackets').textContent = formatPps(totalPackets);
+      document.getElementById('mapActiveCountries').textContent = formatNumber(nodes.length);
+      document.getElementById('mapActiveRoutes').textContent = formatNumber(edges.length);
+      charts.globalMap.setOption(globalMapOption(payload), true);
+      const metric = payload.metric || 'bits_s';
+      document.getElementById('globalMapRoutesTable').innerHTML = edges.slice(0, 20).map(edge => `
+        <tr>
+          <td>${escapeHtml(`${edge.src_label || edge.src} -> ${edge.dst_label || edge.dst}`)}</td>
+          <td>${escapeHtml(edge.top_protocol || '-')}</td>
+          <td class="text-end">${metricDisplay(edge[metric], metric)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem rotas</td></tr>';
+    }
+
+    async function loadGlobalMap() {
+      const status = document.getElementById('globalMapStatus');
+      status.textContent = 'Atualizando mapa global...';
+      try {
+        const payload = await apiRequest(`/api/geo/flows?${mapParams()}`);
+        renderGlobalMap(payload);
+        status.textContent = `${formatNumber((payload.edges || []).length)} rotas geograficas`;
+      } catch (error) {
+        status.textContent = `Falha no mapa: ${error.message}`;
+        charts.globalMap.clear();
+      }
+    }
+
+    function dashboardLayout() {
+      try {
+        return JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_KEY) || '{}') || {};
+      } catch {
+        return {};
+      }
+    }
+
+    function saveDashboardLayout() {
+      const widgets = Array.from(document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget'));
+      localStorage.setItem(DASHBOARD_LAYOUT_KEY, JSON.stringify({
+        order: widgets.map(widget => widget.dataset.widgetId),
+        hidden: widgets.filter(widget => widget.classList.contains('hidden-widget')).map(widget => widget.dataset.widgetId)
+      }));
+    }
+
+    function applyDashboardLayout() {
+      const layout = dashboardLayout();
+      const grid = document.getElementById('dashboardWidgetGrid');
+      const widgets = Array.from(grid.querySelectorAll('.dashboard-widget'));
+      const byId = Object.fromEntries(widgets.map(widget => [widget.dataset.widgetId, widget]));
+      (layout.order || []).forEach(id => {
+        if (byId[id]) grid.appendChild(byId[id]);
+      });
+      widgets.forEach(widget => {
+        widget.classList.toggle('hidden-widget', (layout.hidden || []).includes(widget.dataset.widgetId));
+      });
+    }
+
+    function toggleDashboardEdit() {
+      dashboardEditing = !dashboardEditing;
+      document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditing);
+      document.getElementById('editDashboardButton').classList.toggle('btn-success', dashboardEditing);
+      createIcons();
+    }
+
+    function resetDashboardLayout() {
+      localStorage.removeItem(DASHBOARD_LAYOUT_KEY);
+      document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget').forEach(widget => widget.classList.remove('hidden-widget'));
+      applyDashboardLayout();
+      createIcons();
+    }
+
+    async function loadIngestionStatus() {
+      const tbody = document.getElementById('ingestionStatusTable');
+      if (!tbody || currentAuthUser?.role !== 'admin') return;
+      try {
+        const payload = await apiRequest('/api/collectors/ingestion/status');
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        tbody.innerHTML = items.map(item => `
+          <tr>
+            <td>${escapeHtml(item.sensor || '-')}</td>
+            <td>${escapeHtml(item.file || '-')}</td>
+            <td class="text-end">${Number(item.file_size_mb || 0).toFixed(1)} MB</td>
+            <td class="text-end">${formatNumber(item.offset)}</td>
+            <td class="text-end">${formatBytes(item.lag_bytes)}</td>
+            <td>${formatDateTime(item.last_flow_time)}</td>
+            <td>${formatDateTime(item.last_insert_at)}</td>
+            <td>${escapeHtml(item.parser_status || '-')}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="8" class="text-muted">Sem status do parser</td></tr>';
+      } catch (error) {
+        tbody.innerHTML = `<tr><td colspan="8" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
       }
     }
 
@@ -4710,35 +5424,38 @@
       try {
         await checkHealth();
         const sensorId = selectedDashboardSensorId();
-        const trafficQuery = sensorId
-          ? dashboardParams({ includeSensorId: true, includeInterfaceId: true })
-          : dashboardParams({ includeSensorId: false });
+        const bpsSeriesQuery = dashboardSeriesParams('bits_s');
+        const ppsSeriesQuery = dashboardSeriesParams('packets_s');
         const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
-        const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst] = await Promise.all([
-          fetchJSON(sensorId ? '/api/traffic/interface-bps' : '/api/traffic/bps', trafficQuery),
-          fetchJSON(sensorId ? '/api/traffic/interface-pps' : '/api/traffic/pps', trafficQuery),
+        const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst, conversations, synSrc, synDst, geoSummary] = await Promise.all([
+          fetchJSON('/api/dashboard/series', bpsSeriesQuery),
+          fetchJSON('/api/dashboard/series', ppsSeriesQuery),
           fetchJSON('/api/tops/src-ip', topQuery),
           fetchJSON('/api/tops/dst-ip', topQuery),
           fetchJSON('/api/tops/ports', topQuery),
           fetchJSON('/api/tops/protocols', topQuery),
           fetchJSON('/api/tops/tcp-flags', topQuery),
           fetchJSON('/api/tops/asn-src', topQuery),
-          fetchJSON('/api/tops/asn-dst', topQuery)
+          fetchJSON('/api/tops/asn-dst', topQuery),
+          fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=8`),
+          fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=src&limit=8`),
+          fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=dst&limit=8`),
+          fetchJSON('/api/geo/flows', `${topQuery}&top_n=8&metric=bits_s`)
         ]);
 
-        const bpsItems = bps.items;
-        const ppsItems = pps.items;
+        const bpsItems = bps.series || bps.items || [];
+        const ppsItems = pps.series || pps.items || [];
         const srcIpItems = srcIp.items;
         const dstIpItems = dstIp.items;
         const portItems = ports.items;
         const protocolItems = protocols.items;
         const tcpFlagItems = tcpFlags.items;
 
-        charts.bps.setOption(directionalTrafficOption(bpsItems, 'bps'), true);
-        charts.pps.setOption(directionalTrafficOption(ppsItems, 'pps'), true);
+        charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
+        charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
 
-        document.getElementById('bpsReadout').textContent = directionalReadout(bpsItems, 'bps');
-        document.getElementById('ppsReadout').textContent = directionalReadout(ppsItems, 'pps');
+        document.getElementById('bpsReadout').textContent = stackedReadout(bpsItems, 'bits_s');
+        document.getElementById('ppsReadout').textContent = stackedReadout(ppsItems, 'packets_s');
 
         charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
         charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
@@ -4753,6 +5470,10 @@
         fillTable('portsTable', portItems, 'port', 'packets');
         fillTable('protocolsTable', protocolItems, 'proto', 'packets');
         fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
+        renderTopConversations(conversations.items || []);
+        renderSynTable('topSynSrcTable', synSrc.items || []);
+        renderSynTable('topSynDstTable', synDst.items || []);
+        renderGlobalSummary(geoSummary.edges || geoSummary.items || []);
         dashboardRefreshFailures = 0;
       } catch (error) {
         dashboardRefreshFailures += 1;
@@ -5614,10 +6335,17 @@
             return searchFlows();
           })
           .catch(console.error);
+      } else if (view === 'global-map') {
+        document.getElementById('view-global-map').classList.add('active');
+        document.querySelector('[data-nav-view="global-map"]').classList.add('active');
+        loadDashboardSensors()
+          .then(() => loadGlobalMap())
+          .then(() => setTimeout(() => charts.globalMap.resize(), 50))
+          .catch(console.error);
       } else if (view === 'sensors') {
         document.getElementById('view-sensors').classList.add('active');
         document.querySelector('[data-nav-view="sensors"]').classList.add('active');
-        loadSensors().catch(console.error);
+        Promise.all([loadSensors(), loadIngestionStatus()]).catch(console.error);
       } else if (view === 'database') {
         document.getElementById('view-database').classList.add('active');
         document.querySelector('[data-nav-view="database"]').classList.add('active');
@@ -5648,6 +6376,21 @@
       if (!target) return;
       event.preventDefault();
       openIpDetails(target.dataset.ip).catch(console.error);
+    });
+
+    document.getElementById('dashboardWidgetGrid').addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if (!button || !dashboardEditing) return;
+      const widget = button.closest('.dashboard-widget');
+      if (!widget) return;
+      if (button.classList.contains('widget-hide')) {
+        widget.classList.add('hidden-widget');
+      } else if (button.classList.contains('widget-up') && widget.previousElementSibling) {
+        widget.parentElement.insertBefore(widget, widget.previousElementSibling);
+      } else if (button.classList.contains('widget-down') && widget.nextElementSibling) {
+        widget.parentElement.insertBefore(widget.nextElementSibling, widget);
+      }
+      saveDashboardLayout();
     });
 
     charts.srcIp.on('click', params => {
@@ -5701,11 +6444,25 @@
       handleRangeSelectChange('dashboard');
       scheduleDashboardRefresh();
     });
+    document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('editDashboardButton').addEventListener('click', toggleDashboardEdit);
+    document.getElementById('resetDashboardButton').addEventListener('click', resetDashboardLayout);
     document.getElementById('dashboardRefreshInterval').addEventListener('change', scheduleDashboardRefresh);
     document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
     document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(loadGlobalMap).catch(console.error));
+    document.getElementById('mapInterface').addEventListener('change', () => loadGlobalMap().catch(console.error));
+    ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapTopN'].forEach(id => {
+      document.getElementById(id).addEventListener('change', () => loadGlobalMap().catch(console.error));
+    });
+    ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', event => {
+        if (event.key === 'Enter') loadGlobalMap().catch(console.error);
+      });
+    });
+    document.getElementById('refreshMapButton').addEventListener('click', () => loadGlobalMap().catch(console.error));
     document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
     document.getElementById('topFlowSensor').addEventListener('change', () => handleTopFlowSensorChange().catch(console.error));
@@ -5725,6 +6482,7 @@
     document.getElementById('applyCustomRange').addEventListener('click', applyCustomRange);
     document.getElementById('cancelCustomRange').addEventListener('click', cancelCustomRange);
     document.getElementById('refreshDatabaseButton').addEventListener('click', () => loadDatabaseStatus().catch(console.error));
+    document.getElementById('refreshIngestionButton').addEventListener('click', () => loadIngestionStatus().catch(console.error));
     document.getElementById('saveDatabaseRetentionButton').addEventListener('click', () => saveDatabaseRetention().catch(console.error));
     document.querySelectorAll('.database-cleanup-button').forEach(button => {
       button.addEventListener('click', () => cleanupDatabase(Number(button.dataset.days)).catch(console.error));
@@ -5858,6 +6616,7 @@
     window.addEventListener('resize', () => Object.values(charts).forEach(chart => chart.resize()));
     document.addEventListener('visibilitychange', scheduleDashboardRefresh);
 
+    applyDashboardLayout();
     createIcons();
     initAuth().then(scheduleDashboardRefresh).catch(console.error);
     setInterval(() => updateAnomalySummary().catch(console.error), 30000);

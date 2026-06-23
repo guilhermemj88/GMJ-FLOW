@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from ipaddress import ip_address
@@ -102,6 +104,13 @@ def env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_client():
@@ -247,27 +256,40 @@ def normalize_flow(record: dict[str, Any], sensor: str, exporter_ip: str, sample
 
 
 class Tailer:
-    def __init__(self, path: Path, state_path: Path):
+    def __init__(self, path: Path, state_path: Path, start_from_end_if_no_state: bool = False):
         self.path = path
         self.state_path = state_path
         self.offset = 0
         self.inode = 0
         self.pending_offset = 0
-        self.load_state()
+        loaded = self.load_state()
+        if not loaded and start_from_end_if_no_state and self.path.exists():
+            stat = self.path.stat()
+            self.offset = stat.st_size
+            self.pending_offset = self.offset
+            self.inode = getattr(stat, "st_ino", 0)
+            self.commit(force=True)
+            print(
+                f"No parser checkpoint found; starting at EOF for existing file {self.path} offset={self.offset}",
+                flush=True,
+            )
 
-    def load_state(self) -> None:
+    def load_state(self) -> bool:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
+            return False
         if payload.get("file") == str(self.path):
             self.offset = safe_int(payload.get("offset"), default=0, minimum=0)
             self.inode = safe_int(payload.get("inode"), default=0, minimum=0)
+            return True
+        return False
 
-    def commit(self, last_line_ts: str = "") -> None:
-        if self.pending_offset <= 0:
+    def commit(self, last_line_ts: str = "", force: bool = False) -> None:
+        if self.pending_offset <= 0 and not force:
             return
-        self.offset = self.pending_offset
+        if self.pending_offset > 0:
+            self.offset = self.pending_offset
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "file": str(self.path),
@@ -277,6 +299,15 @@ class Tailer:
             "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def reset_for_new_file(self) -> None:
+        self.offset = 0
+        self.pending_offset = 0
+        if self.path.exists():
+            self.inode = getattr(self.path.stat(), "st_ino", 0)
+        else:
+            self.inode = 0
+        self.commit(force=True)
 
     def read_lines(self) -> list[str]:
         if not self.path.exists():
@@ -347,6 +378,52 @@ def insert_batch(client, rows: list[tuple]):
     client.insert("flow_raw", rows, column_names=COLUMN_NAMES)
 
 
+def write_status(status_file: Path, payload: dict[str, Any]) -> None:
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = status_file.with_suffix(status_file.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(status_file)
+
+
+def compress_file(path: Path) -> Path:
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    with path.open("rb") as source, gzip.open(gz_path, "wb") as target:
+        shutil.copyfileobj(source, target)
+    path.unlink(missing_ok=True)
+    return gz_path
+
+
+def cleanup_old_rotations(directory: Path, keep_days: int) -> int:
+    if keep_days <= 0 or not directory.exists():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    deleted = 0
+    for path in directory.glob("*.csv*.gz"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
+def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_days: int) -> dict[str, Any]:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    rotated = output_file.with_name(f"{output_file.stem}-{timestamp}{output_file.suffix}")
+    output_file.rename(rotated)
+    output_file.touch()
+    final_path = compress_file(rotated) if compress else rotated
+    tailer.reset_for_new_file()
+    deleted = cleanup_old_rotations(output_file.parent, keep_days)
+    return {
+        "rotated_to": str(final_path),
+        "compressed": compress,
+        "deleted_old_rotations": deleted,
+        "rotated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
 def main():
     output_file = Path(os.getenv("PMACCT_OUTPUT_FILE", "/var/spool/pmacct/nfacctd.csv"))
     output_format = os.getenv("PMACCT_OUTPUT_FORMAT", "csv").lower()
@@ -359,26 +436,45 @@ def main():
     poll_seconds = float(os.getenv("PMACCT_PARSER_POLL_SECONDS", "1"))
     state_dir = Path(os.getenv("PMACCT_STATE_DIR", "/var/spool/pmacct/state"))
     state_file = Path(os.getenv("PMACCT_STATE_FILE", state_dir / f"{output_file.name}.offset.json"))
+    status_file = Path(os.getenv("PMACCT_STATUS_FILE", state_dir / f"{output_file.name}.status.json"))
+    rotate_enabled = env_bool("GMJFLOW_PMACCT_ROTATE_ENABLED", True)
+    rotate_max_mb = env_int("GMJFLOW_PMACCT_ROTATE_MAX_MB", 100)
+    rotate_keep_days = env_int("GMJFLOW_PMACCT_ROTATE_KEEP_DAYS", 3)
+    rotate_compress = env_bool("GMJFLOW_PMACCT_ROTATE_COMPRESS", True)
+    rotate_check_seconds = env_int("GMJFLOW_PMACCT_ROTATE_CHECK_SECONDS", 30)
+    start_from_end = env_bool("PMACCT_PARSER_START_FROM_END_IF_NO_STATE", True)
 
     fallback_fields = csv_fields_from_env()
     headers: list[str] | None = None
     batch: list[tuple] = []
     last_flush = time.monotonic()
-    tailer = Tailer(output_file, state_file)
+    tailer = Tailer(output_file, state_file, start_from_end_if_no_state=start_from_end)
     client = get_client()
     lines_read = 0
     lines_inserted = 0
     lines_skipped = 0
     last_line_ts = ""
+    last_insert_at = ""
+    last_error = ""
+    last_rotation: dict[str, Any] | None = None
+    last_rotate_check = 0.0
+    rows_read_last_cycle = 0
+    rows_inserted_last_cycle = 0
+    rows_skipped_last_cycle = 0
 
     print(f"Reading pmacct {output_format} from {output_file}; state={state_file}; offset={tailer.offset}", flush=True)
     while True:
+        rows_read_last_cycle = 0
+        rows_inserted_last_cycle = 0
+        rows_skipped_last_cycle = 0
         for raw_line in tailer.read_lines():
             line = raw_line.strip()
             if not line or line.startswith("!"):
                 lines_skipped += 1
+                rows_skipped_last_cycle += 1
                 continue
             lines_read += 1
+            rows_read_last_cycle += 1
             try:
                 if output_format == "json" or line.startswith("{") or line.startswith("["):
                     records = parse_json_line(line)
@@ -390,8 +486,11 @@ def main():
                     last_line_ts = flow[0].isoformat().replace("+00:00", "Z")
                 if not records:
                     lines_skipped += 1
+                    rows_skipped_last_cycle += 1
             except Exception as exc:
                 lines_skipped += 1
+                rows_skipped_last_cycle += 1
+                last_error = str(exc)
                 print(f"Skipping pmacct line: {exc}: {line[:200]}", flush=True)
 
         elapsed = time.monotonic() - last_flush
@@ -402,12 +501,94 @@ def main():
             tailer.commit(last_line_ts)
             last_flush = time.monotonic()
             lines_inserted += len(rows)
+            rows_inserted_last_cycle += len(rows)
+            last_insert_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             print(
                 "pmacct parser stats: "
                 f"file={output_file} read={lines_read} inserted={lines_inserted} "
                 f"skipped={lines_skipped} offset={tailer.offset}",
                 flush=True,
             )
+
+        now_monotonic = time.monotonic()
+        if rotate_enabled and now_monotonic - last_rotate_check >= rotate_check_seconds:
+            last_rotate_check = now_monotonic
+            try:
+                if output_file.exists():
+                    size = output_file.stat().st_size
+                    max_bytes = max(1, rotate_max_mb) * 1024 * 1024
+                    if size >= max_bytes:
+                        for raw_line in tailer.read_lines():
+                            line = raw_line.strip()
+                            if not line or line.startswith("!"):
+                                lines_skipped += 1
+                                rows_skipped_last_cycle += 1
+                                continue
+                            lines_read += 1
+                            rows_read_last_cycle += 1
+                            try:
+                                if output_format == "json" or line.startswith("{") or line.startswith("["):
+                                    records = parse_json_line(line)
+                                else:
+                                    records, headers = parse_csv_line(line, delimiter, fallback_fields, headers)
+                                for record in records:
+                                    flow = normalize_flow(record, sensor, exporter_ip, sample_rate)
+                                    batch.append(flow)
+                                    last_line_ts = flow[0].isoformat().replace("+00:00", "Z")
+                                if not records:
+                                    lines_skipped += 1
+                                    rows_skipped_last_cycle += 1
+                            except Exception as exc:
+                                lines_skipped += 1
+                                rows_skipped_last_cycle += 1
+                                last_error = str(exc)
+                        if batch:
+                            rows = batch[:]
+                            insert_batch(client, rows)
+                            batch.clear()
+                            lines_inserted += len(rows)
+                            rows_inserted_last_cycle += len(rows)
+                            last_insert_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                        tailer.commit(last_line_ts)
+                        current_size = output_file.stat().st_size if output_file.exists() else 0
+                        if tailer.offset >= current_size:
+                            last_rotation = rotate_output_file(output_file, tailer, rotate_compress, rotate_keep_days)
+                            print(f"pmacct spool rotated: {last_rotation}", flush=True)
+            except Exception as exc:
+                last_error = str(exc)
+                print(f"pmacct rotation failed: {exc}", flush=True)
+
+        file_size = output_file.stat().st_size if output_file.exists() else 0
+        lag_bytes = max(0, file_size - tailer.offset)
+        write_status(
+            status_file,
+            {
+                "sensor": sensor,
+                "exporter_ip": exporter_ip,
+                "file": str(output_file),
+                "file_size_mb": round(file_size / 1024 / 1024, 3),
+                "rotate_enabled": rotate_enabled,
+                "rotate_max_mb": rotate_max_mb,
+                "rotate_keep_days": rotate_keep_days,
+                "rotate_compress": rotate_compress,
+                "offset": tailer.offset,
+                "inode": tailer.inode,
+                "lag_bytes": lag_bytes,
+                "last_line_ts": last_line_ts,
+                "last_insert_at": last_insert_at,
+                "last_flow_time": last_line_ts,
+                "rows_read_last_cycle": rows_read_last_cycle,
+                "rows_inserted_last_cycle": rows_inserted_last_cycle,
+                "rows_skipped_last_cycle": rows_skipped_last_cycle,
+                "rows_read_total": lines_read,
+                "rows_inserted_total": lines_inserted,
+                "rows_skipped_total": lines_skipped,
+                "parser_status": "ok" if not last_error else "warning",
+                "last_error": last_error,
+                "last_rotation": last_rotation,
+                "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
 
         time.sleep(poll_seconds)
 

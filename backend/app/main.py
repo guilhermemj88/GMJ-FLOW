@@ -110,17 +110,29 @@ TOP_FLOW_SORT_COLUMNS = {
     "flows": "flows",
     "percent": "percent_total",
     "percent_total": "percent_total",
+    "first_seen": "first_seen",
+    "last_seen": "last_seen",
+    "duration_seconds": "duration_seconds",
 }
 
 ASN_RESOLVER_ENABLED = os.getenv("GMJFLOW_ASN_RESOLVER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-ASN_RESOLVER_INTERVAL_SECONDS = int(os.getenv("GMJFLOW_ASN_RESOLVER_INTERVAL_SECONDS", "86400"))
-ASN_RESOLVER_MAX_IPS_PER_RUN = int(os.getenv("GMJFLOW_ASN_RESOLVER_MAX_IPS_PER_RUN", "5000"))
-ASN_CACHE_TTL_SECONDS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_SECONDS", "604800"))
+ASN_RESOLVER_BATCH_SIZE = int(
+    os.getenv(
+        "GMJFLOW_ASN_RESOLVER_BATCH_SIZE",
+        os.getenv("GMJFLOW_ASN_RESOLVER_MAX_IPS_PER_RUN", "20"),
+    )
+)
+ASN_RESOLVER_INTERVAL_SECONDS = int(os.getenv("GMJFLOW_ASN_RESOLVER_INTERVAL_SECONDS", "30"))
+ASN_RESOLVER_TIMEOUT_SECONDS = int(os.getenv("GMJFLOW_ASN_RESOLVER_TIMEOUT_SECONDS", "10"))
+ASN_RESOLVER_MAX_ATTEMPTS = int(os.getenv("GMJFLOW_ASN_RESOLVER_MAX_ATTEMPTS", "3"))
+ASN_CACHE_TTL_DAYS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_DAYS", "30"))
+ASN_CACHE_TTL_SECONDS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_SECONDS", str(ASN_CACHE_TTL_DAYS * 86400)))
 ASN_RESOLVER_STOP = threading.Event()
 SQLITE_MIGRATION_LOCK = threading.Lock()
 SENSOR_DB_READY = False
 DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
+GEOIP_MMDB_PATH = os.getenv("GMJFLOW_GEOIP_MMDB_PATH", "/app/data/GeoLite2-City.mmdb").strip()
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -145,6 +157,44 @@ DASHBOARD_PALETTE = (
     "#7c3aed",
     "#0e7490",
 )
+
+PROTOCOL_COLORS = {
+    "TCP": "#2563eb",
+    "UDP": "#16a34a",
+    "ICMP": "#f59e0b",
+    "ICMPv6": "#f97316",
+    "TCP+SYN": "#dc2626",
+    "GRE": "#0891b2",
+    "ESP": "#7c3aed",
+    "OTHER": "#64748b",
+}
+
+COUNTRY_CENTROIDS = {
+    "BR": ("Brazil", -14.2350, -51.9253),
+    "US": ("United States", 37.0902, -95.7129),
+    "CA": ("Canada", 56.1304, -106.3468),
+    "MX": ("Mexico", 23.6345, -102.5528),
+    "AR": ("Argentina", -38.4161, -63.6167),
+    "CL": ("Chile", -35.6751, -71.5430),
+    "CO": ("Colombia", 4.5709, -74.2973),
+    "PE": ("Peru", -9.1900, -75.0152),
+    "GB": ("United Kingdom", 55.3781, -3.4360),
+    "DE": ("Germany", 51.1657, 10.4515),
+    "FR": ("France", 46.2276, 2.2137),
+    "ES": ("Spain", 40.4637, -3.7492),
+    "IT": ("Italy", 41.8719, 12.5674),
+    "NL": ("Netherlands", 52.1326, 5.2913),
+    "PT": ("Portugal", 39.3999, -8.2245),
+    "SE": ("Sweden", 60.1282, 18.6435),
+    "RU": ("Russia", 61.5240, 105.3188),
+    "CN": ("China", 35.8617, 104.1954),
+    "JP": ("Japan", 36.2048, 138.2529),
+    "KR": ("South Korea", 35.9078, 127.7669),
+    "IN": ("India", 20.5937, 78.9629),
+    "SG": ("Singapore", 1.3521, 103.8198),
+    "AU": ("Australia", -25.2744, 133.7751),
+    "ZA": ("South Africa", -30.5595, 22.9375),
+}
 
 SNMP_SYSTEM_OIDS = {
     "sys_descr": "1.3.6.1.2.1.1.1.0",
@@ -269,7 +319,10 @@ ANOMALY_DETECTION_STOP = threading.Event()
 ANOMALY_DETECTION_THREAD: threading.Thread | None = None
 SYSTEM_SETTING_DEFAULTS = {
     "database_retention_enabled": "1",
-    "flow_retention_days": "30",
+    "flow_retention_days": "7",
+    "flow_raw_retention_days": "7",
+    "flow_1m_retention_days": "30",
+    "flow_tops_1m_retention_days": "15",
     "snmp_retention_days": "90",
     "database_last_cleanup_at": "",
     "database_cleanup_hour": "3",
@@ -526,6 +579,9 @@ class ChangePasswordPayload(BaseModel):
 class DatabaseRetentionPayload(BaseModel):
     enabled: bool
     retention_days: int = Field(..., ge=1, le=3650)
+    flow_raw_retention_days: int | None = Field(None, ge=1, le=3650)
+    flow_1m_retention_days: int | None = Field(None, ge=1, le=3650)
+    flow_tops_1m_retention_days: int | None = Field(None, ge=1, le=3650)
     snmp_retention_days: int | None = Field(None, ge=1, le=3650)
     cleanup_hour: int | None = Field(None, ge=0, le=23)
 
@@ -534,6 +590,10 @@ class DatabaseCleanupPayload(BaseModel):
     older_than_days: int = Field(..., ge=1, le=3650)
     optimize: bool = False
     confirm: str = ""
+    scope: str = "raw"
+    flow_raw_older_than_days: int | None = Field(None, ge=1, le=3650)
+    flow_1m_older_than_days: int | None = Field(None, ge=1, le=3650)
+    flow_tops_1m_older_than_days: int | None = Field(None, ge=1, le=3650)
 
 
 class DatabaseOptimizePayload(BaseModel):
@@ -1139,12 +1199,22 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS asn_info (
             asn INTEGER PRIMARY KEY,
             as_name TEXT NOT NULL DEFAULT '',
+            org_name TEXT NOT NULL DEFAULT '',
             country TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
-            updated_at TEXT
+            raw_json TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT,
+            updated_at TEXT,
+            expires_at TEXT,
+            last_error TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    ensure_sqlite_column(conn, "asn_info", "org_name", "org_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "asn_info", "raw_json", "raw_json TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "asn_info", "first_seen_at", "first_seen_at TEXT")
+    ensure_sqlite_column(conn, "asn_info", "expires_at", "expires_at TEXT")
+    ensure_sqlite_column(conn, "asn_info", "last_error", "last_error TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS asn_lookup_cache (
@@ -1165,11 +1235,52 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS asn_resolution_queue (
             ip TEXT PRIMARY KEY,
             ip_version INTEGER NOT NULL,
+            asn INTEGER NOT NULL DEFAULT 0,
+            priority INTEGER NOT NULL DEFAULT 100,
             first_seen_at TEXT,
             last_seen_at TEXT,
+            updated_at TEXT,
             attempts INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'pending',
-            last_error TEXT NOT NULL DEFAULT ''
+            status TEXT NOT NULL DEFAULT 'queued',
+            last_error TEXT NOT NULL DEFAULT '',
+            resolved_at TEXT
+        )
+        """
+    )
+    ensure_sqlite_column(conn, "asn_resolution_queue", "asn", "asn INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "asn_resolution_queue", "priority", "priority INTEGER NOT NULL DEFAULT 100")
+    ensure_sqlite_column(conn, "asn_resolution_queue", "updated_at", "updated_at TEXT")
+    ensure_sqlite_column(conn, "asn_resolution_queue", "resolved_at", "resolved_at TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS geo_ip_cache (
+            ip_prefix TEXT PRIMARY KEY,
+            ip_version INTEGER NOT NULL,
+            country_code TEXT NOT NULL DEFAULT '',
+            country_name TEXT NOT NULL DEFAULT '',
+            region TEXT NOT NULL DEFAULT '',
+            city TEXT NOT NULL DEFAULT '',
+            latitude REAL,
+            longitude REAL,
+            asn INTEGER NOT NULL DEFAULT 0,
+            as_name TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            updated_at TEXT,
+            expires_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_layouts (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL DEFAULT 'global',
+            name TEXT NOT NULL DEFAULT 'default',
+            layout_json TEXT NOT NULL DEFAULT '',
+            is_default INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, name)
         )
         """
     )
@@ -1181,7 +1292,9 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_prefixes_ip_version ON asn_prefixes(ip_version)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_lookup_cache_expires ON asn_lookup_cache(expires_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_resolution_queue_status ON asn_resolution_queue(status, last_seen_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_resolution_queue_status ON asn_resolution_queue(status, priority, last_seen_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asn_resolution_queue_asn ON asn_resolution_queue(asn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_geo_ip_cache_expires ON geo_ip_cache(expires_at)")
 
 
 def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
@@ -1922,6 +2035,12 @@ def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
                 "      PMACCT_PARSER_BATCH_SIZE: ${PMACCT_PARSER_BATCH_SIZE-1000}",
                 "      PMACCT_PARSER_FLUSH_SECONDS: ${PMACCT_PARSER_FLUSH_SECONDS-5}",
                 "      PMACCT_STATE_DIR: ${PMACCT_STATE_DIR-/var/spool/pmacct/state}",
+                "      PMACCT_PARSER_START_FROM_END_IF_NO_STATE: ${PMACCT_PARSER_START_FROM_END_IF_NO_STATE-true}",
+                "      GMJFLOW_PMACCT_ROTATE_ENABLED: ${GMJFLOW_PMACCT_ROTATE_ENABLED-true}",
+                "      GMJFLOW_PMACCT_ROTATE_MAX_MB: ${GMJFLOW_PMACCT_ROTATE_MAX_MB-100}",
+                "      GMJFLOW_PMACCT_ROTATE_KEEP_DAYS: ${GMJFLOW_PMACCT_ROTATE_KEEP_DAYS-3}",
+                "      GMJFLOW_PMACCT_ROTATE_COMPRESS: ${GMJFLOW_PMACCT_ROTATE_COMPRESS-true}",
+                "      GMJFLOW_PMACCT_ROTATE_CHECK_SECONDS: ${GMJFLOW_PMACCT_ROTATE_CHECK_SECONDS-30}",
                 "    volumes:",
                 "      - pmacct_spool:/var/spool/pmacct",
                 "    depends_on:",
@@ -2571,6 +2690,26 @@ def clickhouse_database_name() -> str:
     return os.getenv("CLICKHOUSE_DATABASE", "flowdb")
 
 
+FLOW_RETENTION_TABLES = {
+    "flow_raw": {"time_column": "flow_time", "setting": "flow_raw_retention_days", "default": 7},
+    "flow_1m": {"time_column": "minute", "setting": "flow_1m_retention_days", "default": 30},
+    "flow_tops_1m": {"time_column": "minute", "setting": "flow_tops_1m_retention_days", "default": 15},
+}
+
+
+def table_retention_days(settings: dict[str, str], table: str) -> int | None:
+    config = FLOW_RETENTION_TABLES.get(table)
+    if not config:
+        return None
+    if table == "flow_raw":
+        return setting_int(
+            settings,
+            "flow_raw_retention_days",
+            setting_int(settings, "flow_retention_days", int(config["default"])),
+        )
+    return setting_int(settings, str(config["setting"]), int(config["default"]))
+
+
 def clickhouse_table_sizes() -> list[dict[str, Any]]:
     result = query_clickhouse(
         """
@@ -2586,15 +2725,80 @@ def clickhouse_table_sizes() -> list[dict[str, Any]]:
         """,
         {"database": clickhouse_database_name()},
     )
+    settings = {key: value for key, value in SYSTEM_SETTING_DEFAULTS.items()}
+    try:
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
+    except Exception:
+        pass
     items = []
     for row in rows_as_dicts(result):
+        table = clean_text(row["table"])
         size_bytes = int(row["size_bytes"] or 0)
+        first_record = None
+        last_record = None
+        retention_days = table_retention_days(settings, table)
+        config = FLOW_RETENTION_TABLES.get(table)
+        if config:
+            time_column = config["time_column"]
+            try:
+                stats = rows_as_dicts(
+                    query_clickhouse(
+                        f"""
+                        SELECT min({time_column}) AS first_record, max({time_column}) AS last_record
+                        FROM {table}
+                        """
+                    )
+                )
+                stat_row = stats[0] if stats else {}
+                first_record = iso(stat_row.get("first_record")) if stat_row.get("first_record") else None
+                last_record = iso(stat_row.get("last_record")) if stat_row.get("last_record") else None
+            except Exception as exc:
+                logger.debug("Falha ao consultar periodo da tabela %s: %s", table, exc)
         items.append(
             {
-                "table": row["table"],
+                "table": table,
                 "rows": int(row["rows"] or 0),
                 "size_bytes": size_bytes,
                 "size_human": human_bytes(size_bytes),
+                "first_record": first_record,
+                "last_record": last_record,
+                "retention_days": retention_days,
+                "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+            }
+        )
+    existing_tables = {item["table"] for item in items}
+    for table, config in FLOW_RETENTION_TABLES.items():
+        if table in existing_tables:
+            continue
+        first_record = None
+        last_record = None
+        rows_count = 0
+        try:
+            stats = rows_as_dicts(
+                query_clickhouse(
+                    f"""
+                    SELECT count() AS rows, min({config['time_column']}) AS first_record, max({config['time_column']}) AS last_record
+                    FROM {table}
+                    """
+                )
+            )
+            stat_row = stats[0] if stats else {}
+            rows_count = int(stat_row.get("rows") or 0)
+            first_record = iso(stat_row.get("first_record")) if stat_row.get("first_record") else None
+            last_record = iso(stat_row.get("last_record")) if stat_row.get("last_record") else None
+        except Exception:
+            continue
+        items.append(
+            {
+                "table": table,
+                "rows": rows_count,
+                "size_bytes": 0,
+                "size_human": human_bytes(0),
+                "first_record": first_record,
+                "last_record": last_record,
+                "retention_days": table_retention_days(settings, table),
+                "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
             }
         )
     return items
@@ -2629,6 +2833,8 @@ def clickhouse_size_summary() -> dict[str, int]:
         """
         SELECT
             sumIf(data_compressed_bytes, table = 'flow_raw') AS flow_raw_size_bytes,
+            sumIf(data_compressed_bytes, table = 'flow_1m') AS flow_1m_size_bytes,
+            sumIf(data_compressed_bytes, table = 'flow_tops_1m') AS flow_tops_1m_size_bytes,
             sum(data_compressed_bytes) AS clickhouse_database_size_bytes
         FROM system.parts
         WHERE active = 1
@@ -2640,42 +2846,67 @@ def clickhouse_size_summary() -> dict[str, int]:
     row = rows[0] if rows else {}
     return {
         "flow_raw_size_bytes": int(row.get("flow_raw_size_bytes") or 0),
+        "flow_1m_size_bytes": int(row.get("flow_1m_size_bytes") or 0),
+        "flow_tops_1m_size_bytes": int(row.get("flow_tops_1m_size_bytes") or 0),
         "clickhouse_database_size_bytes": int(row.get("clickhouse_database_size_bytes") or 0),
     }
 
 
-def apply_flow_retention_ttl(enabled: bool, days: int) -> str:
+def apply_clickhouse_table_ttl(table: str, time_column: str, enabled: bool, days: int) -> str:
     days = setting_int({"days": str(days)}, "days", 30)
     if enabled:
-        command = f"ALTER TABLE flow_raw MODIFY TTL toDateTime(flow_time) + INTERVAL {days} DAY DELETE"
+        command = f"ALTER TABLE {table} MODIFY TTL toDateTime({time_column}) + INTERVAL {days} DAY DELETE"
     else:
-        command = "ALTER TABLE flow_raw REMOVE TTL"
+        command = f"ALTER TABLE {table} REMOVE TTL"
     command_clickhouse(command)
     return command
 
 
-def cleanup_clickhouse_flows(older_than_days: int, optimize: bool = False) -> dict[str, Any]:
+def apply_flow_retention_ttl(
+    enabled: bool,
+    flow_raw_days: int,
+    flow_1m_days: int | None = None,
+    flow_tops_1m_days: int | None = None,
+) -> dict[str, str]:
+    days_by_table = {
+        "flow_raw": flow_raw_days,
+        "flow_1m": flow_1m_days if flow_1m_days is not None else 30,
+        "flow_tops_1m": flow_tops_1m_days if flow_tops_1m_days is not None else 15,
+    }
+    commands = {}
+    for table, config in FLOW_RETENTION_TABLES.items():
+        commands[table] = apply_clickhouse_table_ttl(
+            table,
+            str(config["time_column"]),
+            enabled,
+            int(days_by_table[table]),
+        )
+    return commands
+
+
+def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int, optimize: bool = False) -> dict[str, Any]:
     days = setting_int({"days": str(older_than_days)}, "days", 90)
     cutoff_expression = f"now() - INTERVAL {days} DAY"
     count_result = query_clickhouse(
         f"""
         SELECT count() AS count
-        FROM flow_raw
-        WHERE flow_time < {cutoff_expression}
+        FROM {table}
+        WHERE {time_column} < {cutoff_expression}
         """
     )
     rows = rows_as_dicts(count_result)
     approximate_before = int(rows[0]["count"] or 0) if rows else 0
-    command = f"ALTER TABLE flow_raw DELETE WHERE flow_time < {cutoff_expression}"
+    command = f"ALTER TABLE {table} DELETE WHERE {time_column} < {cutoff_expression}"
     command_clickhouse(command)
     optimize_command = ""
     if optimize:
-        optimize_command = "OPTIMIZE TABLE flow_raw FINAL"
+        optimize_command = f"OPTIMIZE TABLE {table} FINAL"
         command_clickhouse(optimize_command)
     return {
+        "table": table,
         "approximate_before": approximate_before,
         "older_than_days": days,
-        "period_deleted": f"flow_time < {cutoff_expression}",
+        "period_deleted": f"{time_column} < {cutoff_expression}",
         "command_executed": command,
         "optimize_command": optimize_command,
         "status": "ok",
@@ -2685,6 +2916,10 @@ def cleanup_clickhouse_flows(older_than_days: int, optimize: bool = False) -> di
             else "OPTIMIZE FINAL solicitado; pode consumir recursos em tabelas grandes."
         ),
     }
+
+
+def cleanup_clickhouse_flows(older_than_days: int, optimize: bool = False) -> dict[str, Any]:
+    return cleanup_clickhouse_table("flow_raw", "flow_time", older_than_days, optimize)
 
 
 def cleanup_sqlite_snmp_samples(older_than_days: int) -> int:
@@ -2707,9 +2942,30 @@ def run_database_cleanup(
     snmp_retention_days: int | None = None,
     optimize: bool = False,
     source: str = "manual",
+    scope: str = "raw",
+    flow_1m_retention_days: int | None = None,
+    flow_tops_1m_retention_days: int | None = None,
 ) -> dict[str, Any]:
-    flow_result = cleanup_clickhouse_flows(flow_retention_days, optimize=optimize)
-    snmp_deleted = cleanup_sqlite_snmp_samples(snmp_retention_days) if snmp_retention_days is not None else None
+    scope = clean_text(scope).lower() or "raw"
+    if scope not in {"raw", "raw_aggregates", "all"}:
+        raise HTTPException(status_code=400, detail="scope invalido")
+    clickhouse_results = {
+        "flow_raw": cleanup_clickhouse_table("flow_raw", "flow_time", flow_retention_days, optimize=optimize)
+    }
+    if scope in {"raw_aggregates", "all"}:
+        clickhouse_results["flow_1m"] = cleanup_clickhouse_table(
+            "flow_1m",
+            "minute",
+            flow_1m_retention_days if flow_1m_retention_days is not None else flow_retention_days,
+            optimize=optimize,
+        )
+        clickhouse_results["flow_tops_1m"] = cleanup_clickhouse_table(
+            "flow_tops_1m",
+            "minute",
+            flow_tops_1m_retention_days if flow_tops_1m_retention_days is not None else flow_retention_days,
+            optimize=optimize,
+        )
+    snmp_deleted = cleanup_sqlite_snmp_samples(snmp_retention_days) if scope == "all" and snmp_retention_days is not None else None
     cleanup_at = utc_now_iso()
     with sqlite_connection() as conn:
         set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
@@ -2717,8 +2973,10 @@ def run_database_cleanup(
     return {
         "ok": True,
         "source": source,
+        "scope": scope,
         "cleanup_at": cleanup_at,
-        "flow": flow_result,
+        "flow": clickhouse_results["flow_raw"],
+        "clickhouse": clickhouse_results,
         "snmp_deleted": snmp_deleted,
     }
 
@@ -2739,10 +2997,13 @@ def database_retention_loop() -> None:
             if last_cleanup is not None and last_cleanup.date() == now.date():
                 continue
             run_database_cleanup(
-                flow_retention_days=setting_int(settings, "flow_retention_days", 30),
+                flow_retention_days=table_retention_days(settings, "flow_raw") or 7,
+                flow_1m_retention_days=table_retention_days(settings, "flow_1m") or 30,
+                flow_tops_1m_retention_days=table_retention_days(settings, "flow_tops_1m") or 15,
                 snmp_retention_days=setting_int(settings, "snmp_retention_days", 90),
                 optimize=False,
                 source="automatic",
+                scope="all",
             )
         except Exception as exc:  # pragma: no cover - background resilience.
             logger.warning("Falha na retencao automatica: %s", exc)
@@ -2927,6 +3188,56 @@ def normalize_prefix(value: str) -> str:
         raise HTTPException(status_code=400, detail=f"prefixo ASN invalido: {text}") from None
 
 
+def upsert_asn_info(
+    conn: sqlite3.Connection,
+    asn: int,
+    as_name: str = "",
+    country: str = "",
+    source: str = "",
+    org_name: str = "",
+    raw_json: dict[str, Any] | None = None,
+    last_error: str = "",
+) -> None:
+    number = int(asn or 0)
+    if number <= 0:
+        return
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=max(60, ASN_CACHE_TTL_SECONDS))
+    raw_text = ""
+    if raw_json is not None:
+        raw_text = json.dumps(raw_json, ensure_ascii=False, sort_keys=True)[:20000]
+    conn.execute(
+        """
+        INSERT INTO asn_info (
+            asn, as_name, org_name, country, source, raw_json,
+            first_seen_at, updated_at, expires_at, last_error
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(asn) DO UPDATE SET
+            as_name = CASE WHEN excluded.as_name <> '' THEN excluded.as_name ELSE asn_info.as_name END,
+            org_name = CASE WHEN excluded.org_name <> '' THEN excluded.org_name ELSE asn_info.org_name END,
+            country = CASE WHEN excluded.country <> '' THEN excluded.country ELSE asn_info.country END,
+            source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE asn_info.source END,
+            raw_json = CASE WHEN excluded.raw_json <> '' THEN excluded.raw_json ELSE asn_info.raw_json END,
+            updated_at = excluded.updated_at,
+            expires_at = excluded.expires_at,
+            last_error = excluded.last_error
+        """,
+        (
+            number,
+            clean_text(as_name),
+            clean_text(org_name),
+            clean_text(country).upper(),
+            clean_text(source),
+            raw_text,
+            now.isoformat(),
+            now.isoformat(),
+            expires.isoformat(),
+            clean_text(last_error),
+        ),
+    )
+
+
 def upsert_asn_prefix(conn: sqlite3.Connection, prefix: str, asn: int, as_name: str, source: str, country: str = "") -> None:
     normalized_prefix = normalize_prefix(prefix)
     network = ip_network(normalized_prefix, strict=False)
@@ -2953,18 +3264,7 @@ def upsert_asn_prefix(conn: sqlite3.Connection, prefix: str, asn: int, as_name: 
             now,
         ),
     )
-    conn.execute(
-        """
-        INSERT INTO asn_info (asn, as_name, country, source, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(asn) DO UPDATE SET
-            as_name = CASE WHEN excluded.as_name <> '' THEN excluded.as_name ELSE asn_info.as_name END,
-            country = CASE WHEN excluded.country <> '' THEN excluded.country ELSE asn_info.country END,
-            source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE asn_info.source END,
-            updated_at = excluded.updated_at
-        """,
-        (int(asn), clean_text(as_name), clean_text(country).upper(), clean_text(source), now),
-    )
+    upsert_asn_info(conn, int(asn), as_name, country, source)
 
 
 def asn_host_prefix(ip: str) -> str:
@@ -3099,25 +3399,53 @@ def upsert_asn_lookup_cache(
     )
 
 
-def queue_asn_resolution(conn: sqlite3.Connection, ip: str, status: str = "pending", error: str = "") -> bool:
+def queue_asn_resolution(conn: sqlite3.Connection, ip: str, status: str = "queued", error: str = "") -> bool:
     ip_text = clean_ip(ip)
     parsed = ip_address(ip_text)
     now = utc_now_iso()
     cursor = conn.execute(
         """
         INSERT INTO asn_resolution_queue (
-            ip, ip_version, first_seen_at, last_seen_at, attempts, status, last_error
+            ip, ip_version, asn, priority, first_seen_at, last_seen_at, updated_at, attempts, status, last_error
         )
-        VALUES (?, ?, ?, ?, 0, ?, ?)
+        VALUES (?, ?, 0, 100, ?, ?, ?, 0, ?, ?)
         ON CONFLICT(ip) DO UPDATE SET
             last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at,
             status = CASE
-                WHEN asn_resolution_queue.status = 'resolved' AND excluded.status = 'pending' THEN asn_resolution_queue.status
+                WHEN asn_resolution_queue.status = 'resolved' AND excluded.status IN ('queued', 'pending') THEN asn_resolution_queue.status
                 ELSE excluded.status
             END,
             last_error = excluded.last_error
         """,
-        (ip_text, parsed.version, now, now, clean_text(status) or "pending", clean_text(error)),
+        (ip_text, parsed.version, now, now, now, clean_text(status) or "queued", clean_text(error)),
+    )
+    return cursor.rowcount > 0
+
+
+def queue_asn_info_resolution(conn: sqlite3.Connection, asn: int, priority: int = 50) -> bool:
+    number = int(asn or 0)
+    if number <= 0:
+        return False
+    now = utc_now_iso()
+    key = f"AS{number}"
+    cursor = conn.execute(
+        """
+        INSERT INTO asn_resolution_queue (
+            ip, ip_version, asn, priority, first_seen_at, last_seen_at, updated_at, attempts, status, last_error
+        )
+        VALUES (?, 0, ?, ?, ?, ?, ?, 0, 'queued', '')
+        ON CONFLICT(ip) DO UPDATE SET
+            asn = excluded.asn,
+            priority = MIN(asn_resolution_queue.priority, excluded.priority),
+            last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at,
+            status = CASE
+                WHEN asn_resolution_queue.status = 'resolved' THEN asn_resolution_queue.status
+                ELSE 'queued'
+            END
+        """,
+        (key, number, int(priority), now, now, now),
     )
     return cursor.rowcount > 0
 
@@ -3167,7 +3495,7 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
         ensure_asn_db(conn)
         row = conn.execute(
             """
-            SELECT asn, as_name, country, source, updated_at
+            SELECT asn, as_name, org_name, country, source, updated_at, expires_at, last_error
             FROM asn_info
             WHERE asn = ?
             """,
@@ -3175,13 +3503,204 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
         ).fetchone()
     if row is None:
         return None
+    expires_at = clean_text(row["expires_at"])
+    if expires_at:
+        try:
+            if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+                return None
+        except ValueError:
+            pass
     return {
         "asn": number,
         "as_name": clean_text(row["as_name"]),
+        "org_name": clean_text(row["org_name"]),
         "country": clean_text(row["country"]).upper(),
         "source": clean_text(row["source"]),
         "updated_at": clean_text(row["updated_at"]),
+        "expires_at": expires_at,
+        "last_error": clean_text(row["last_error"]),
     }
+
+
+def queue_missing_asn_info(asn: int, priority: int = 80) -> None:
+    number = int(asn or 0)
+    if number <= 0:
+        return
+    try:
+        with sqlite_connection() as conn:
+            ensure_asn_db(conn)
+            queue_asn_info_resolution(conn, number, priority=priority)
+            conn.commit()
+    except Exception as exc:
+        logger.debug("Falha ao enfileirar AS%s para resolucao: %s", number, exc)
+
+
+def country_geo(country_code: str, fallback_name: str = "") -> dict[str, Any]:
+    code = clean_text(country_code).upper()
+    if code in COUNTRY_CENTROIDS:
+        name, lat, lon = COUNTRY_CENTROIDS[code]
+        return {"country_code": code, "country_name": name, "latitude": lat, "longitude": lon}
+    return {
+        "country_code": code,
+        "country_name": clean_text(fallback_name) or code or "N/D",
+        "latitude": None,
+        "longitude": None,
+    }
+
+
+def lookup_geo_cache(ip: str) -> dict[str, Any] | None:
+    ip_text = clean_ip(ip)
+    try:
+        parsed = ip_address(ip_text)
+    except ValueError:
+        return None
+    prefix = asn_host_prefix(ip_text)
+    now = datetime.now(timezone.utc)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        row = conn.execute(
+            """
+            SELECT *
+            FROM geo_ip_cache
+            WHERE ip_prefix = ? AND ip_version = ?
+            """,
+            (prefix, parsed.version),
+        ).fetchone()
+    if row is None:
+        return None
+    expires_at = clean_text(row["expires_at"])
+    if expires_at:
+        try:
+            if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= now:
+                return None
+        except ValueError:
+            return None
+    return dict(row)
+
+
+def upsert_geo_cache(conn: sqlite3.Connection, ip: str, item: dict[str, Any]) -> None:
+    ip_text = clean_ip(ip)
+    parsed = ip_address(ip_text)
+    prefix = clean_text(item.get("ip_prefix")) or asn_host_prefix(ip_text)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=30)
+    conn.execute(
+        """
+        INSERT INTO geo_ip_cache (
+            ip_prefix, ip_version, country_code, country_name, region, city,
+            latitude, longitude, asn, as_name, source, updated_at, expires_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ip_prefix) DO UPDATE SET
+            ip_version = excluded.ip_version,
+            country_code = excluded.country_code,
+            country_name = excluded.country_name,
+            region = excluded.region,
+            city = excluded.city,
+            latitude = excluded.latitude,
+            longitude = excluded.longitude,
+            asn = excluded.asn,
+            as_name = excluded.as_name,
+            source = excluded.source,
+            updated_at = excluded.updated_at,
+            expires_at = excluded.expires_at
+        """,
+        (
+            prefix,
+            parsed.version,
+            clean_text(item.get("country_code")).upper(),
+            clean_text(item.get("country_name")),
+            clean_text(item.get("region")),
+            clean_text(item.get("city")),
+            item.get("latitude"),
+            item.get("longitude"),
+            int(item.get("asn") or 0),
+            clean_text(item.get("as_name")),
+            clean_text(item.get("source")),
+            now.isoformat(),
+            expires.isoformat(),
+        ),
+    )
+
+
+def maxmind_geo_lookup(ip: str) -> dict[str, Any] | None:
+    if not GEOIP_MMDB_PATH or not Path(GEOIP_MMDB_PATH).exists():
+        return None
+    try:
+        geoip2_database = import_module("geoip2.database")
+    except Exception:
+        return None
+    try:
+        with geoip2_database.Reader(GEOIP_MMDB_PATH) as reader:
+            response = reader.city(ip)
+    except Exception as exc:
+        logger.debug("GeoLite2 sem resposta para %s: %s", ip, exc)
+        return None
+    country_code = clean_text(getattr(response.country, "iso_code", "")).upper()
+    country_name = clean_text(getattr(response.country, "name", ""))
+    return {
+        "country_code": country_code,
+        "country_name": country_name,
+        "region": clean_text(getattr(response.subdivisions.most_specific, "name", "")),
+        "city": clean_text(getattr(response.city, "name", "")),
+        "latitude": getattr(response.location, "latitude", None),
+        "longitude": getattr(response.location, "longitude", None),
+        "source": "maxmind",
+    }
+
+
+def geo_lookup_ip(ip: str, asn: int = 0, as_name: str = "") -> dict[str, Any]:
+    ip_text = clean_ip(ip)
+    try:
+        parsed = ip_address(ip_text)
+    except ValueError:
+        return {
+            "ip": ip_text,
+            "country_code": "",
+            "country_name": "N/D",
+            "latitude": None,
+            "longitude": None,
+            "asn": int(asn or 0),
+            "as_name": clean_text(as_name),
+            "source": "invalid",
+        }
+    cached = lookup_geo_cache(ip_text)
+    if cached:
+        cached["ip"] = ip_text
+        return cached
+    item = maxmind_geo_lookup(ip_text) if parsed.is_global else None
+    resolved_asn = lookup_asn_info(asn) if int(asn or 0) > 0 else None
+    if item is None:
+        if resolved_asn is None and parsed.is_global:
+            resolved = resolve_asn_for_ip(ip_text)
+            if int(resolved.get("asn") or 0) > 0:
+                resolved_asn = lookup_asn_info(int(resolved["asn"])) or resolved
+                asn = int(resolved["asn"])
+                as_name = clean_text(resolved.get("as_name"))
+        country_code = clean_text((resolved_asn or {}).get("country")).upper()
+        geo = country_geo(country_code)
+        protocol_value = row.get("proto") if row.get("proto") is not None else row.get("sample_proto")
+        protocol_label = proto_name(protocol_value) if protocol_value is not None else "-"
+        item = {
+            **geo,
+            "region": "",
+            "city": "",
+            "source": "asn-cache" if country_code else "unresolved",
+        }
+    item["ip"] = ip_text
+    item["asn"] = int(asn or (resolved_asn or {}).get("asn") or 0)
+    item["as_name"] = clean_text(as_name) or clean_text((resolved_asn or {}).get("as_name")) or clean_text((resolved_asn or {}).get("org_name"))
+    if not clean_text(item.get("country_name")) and clean_text(item.get("country_code")):
+        item.update(country_geo(clean_text(item.get("country_code"))))
+    try:
+        with sqlite_connection() as conn:
+            ensure_asn_db(conn)
+            upsert_geo_cache(conn, ip_text, item)
+            conn.commit()
+    except Exception as exc:
+        logger.debug("Falha ao atualizar geo_ip_cache para %s: %s", ip_text, exc)
+    return item
 
 
 def cached_whois(ip: str) -> dict[str, Any] | None:
@@ -5993,6 +6512,101 @@ def apply_collectors(request: Request):
     }
 
 
+def pmacct_state_dir() -> Path:
+    return Path(os.getenv("PMACCT_STATE_DIR", "/var/spool/pmacct/state"))
+
+
+def pmacct_status_for_file(output_file: str) -> dict[str, Any]:
+    status_path = pmacct_state_dir() / f"{Path(output_file).name}.status.json"
+    if not status_path.exists():
+        return {}
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+@app.get("/api/collectors/ingestion/status")
+def collectors_ingestion_status(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    items = []
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, listener_port, exporter_ip
+            FROM sensors
+            WHERE active = 1 AND flow_collector_enabled = 1
+            ORDER BY id
+            """
+        ).fetchall()
+    seen_files = set()
+    for row in rows:
+        output_file = f"/var/spool/pmacct/sensor-{int(row['id'])}-{int(row['listener_port'])}.csv"
+        status = pmacct_status_for_file(output_file)
+        seen_files.add(output_file)
+        file_size_mb = status.get("file_size_mb")
+        offset = int(status.get("offset") or 0)
+        inode = int(status.get("inode") or 0)
+        lag_bytes = int(status.get("lag_bytes") or 0)
+        items.append(
+            {
+                "sensor_id": int(row["id"]),
+                "sensor": row["name"],
+                "exporter_ip": row["exporter_ip"],
+                "file": status.get("file") or output_file,
+                "file_size_mb": file_size_mb if file_size_mb is not None else 0,
+                "rotate_max_mb": status.get("rotate_max_mb"),
+                "offset": offset,
+                "inode": inode,
+                "lag_bytes": lag_bytes,
+                "last_line_ts": status.get("last_line_ts") or "",
+                "last_insert_at": status.get("last_insert_at") or "",
+                "last_flow_time": status.get("last_flow_time") or "",
+                "rows_read_last_cycle": int(status.get("rows_read_last_cycle") or 0),
+                "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
+                "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
+                "parser_status": status.get("parser_status") or "sem status",
+                "last_error": status.get("last_error") or "",
+                "last_rotation": status.get("last_rotation"),
+                "updated_at": status.get("updated_at") or "",
+            }
+        )
+    for status_path in (pmacct_state_dir().glob("*.status.json") if pmacct_state_dir().exists() else []):
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        output_file = clean_text(status.get("file"))
+        if not output_file or output_file in seen_files:
+            continue
+        items.append(
+            {
+                "sensor_id": None,
+                "sensor": status.get("sensor") or Path(output_file).stem,
+                "exporter_ip": status.get("exporter_ip") or "",
+                "file": output_file,
+                "file_size_mb": status.get("file_size_mb") or 0,
+                "rotate_max_mb": status.get("rotate_max_mb"),
+                "offset": int(status.get("offset") or 0),
+                "inode": int(status.get("inode") or 0),
+                "lag_bytes": int(status.get("lag_bytes") or 0),
+                "last_line_ts": status.get("last_line_ts") or "",
+                "last_insert_at": status.get("last_insert_at") or "",
+                "last_flow_time": status.get("last_flow_time") or "",
+                "rows_read_last_cycle": int(status.get("rows_read_last_cycle") or 0),
+                "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
+                "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
+                "parser_status": status.get("parser_status") or "ok",
+                "last_error": status.get("last_error") or "",
+                "last_rotation": status.get("last_rotation"),
+                "updated_at": status.get("updated_at") or "",
+            }
+        )
+    return {"items": items}
+
+
 @app.get("/api/database/status")
 def database_status(request: Request):
     require_admin(request)
@@ -6000,7 +6614,12 @@ def database_status(request: Request):
     sqlite_ok = False
     clickhouse_ok = False
     flow_summary = {"flow_count": 0, "oldest_flow_time": None, "newest_flow_time": None}
-    size_summary = {"flow_raw_size_bytes": 0, "clickhouse_database_size_bytes": 0}
+    size_summary = {
+        "flow_raw_size_bytes": 0,
+        "flow_1m_size_bytes": 0,
+        "flow_tops_1m_size_bytes": 0,
+        "clickhouse_database_size_bytes": 0,
+    }
 
     try:
         ensure_sensor_db()
@@ -6024,7 +6643,10 @@ def database_status(request: Request):
     sqlite_size_bytes = db_path.stat().st_size if db_path.exists() else 0
     disk_root = db_path.parent if db_path.parent.exists() else Path(".")
     disk_usage = shutil.disk_usage(disk_root)
-    retention_days = setting_int(settings, "flow_retention_days", 30)
+    flow_raw_retention_days = table_retention_days(settings, "flow_raw") or 7
+    flow_1m_retention_days = table_retention_days(settings, "flow_1m") or 30
+    flow_tops_1m_retention_days = table_retention_days(settings, "flow_tops_1m") or 15
+    retention_days = flow_raw_retention_days
     snmp_retention_days = setting_int(settings, "snmp_retention_days", 90)
     return {
         "clickhouse_ok": clickhouse_ok,
@@ -6034,6 +6656,10 @@ def database_status(request: Request):
         "newest_flow_time": flow_summary["newest_flow_time"],
         "flow_raw_size_bytes": size_summary["flow_raw_size_bytes"],
         "flow_raw_size_human": human_bytes(size_summary["flow_raw_size_bytes"]),
+        "flow_1m_size_bytes": size_summary["flow_1m_size_bytes"],
+        "flow_1m_size_human": human_bytes(size_summary["flow_1m_size_bytes"]),
+        "flow_tops_1m_size_bytes": size_summary["flow_tops_1m_size_bytes"],
+        "flow_tops_1m_size_human": human_bytes(size_summary["flow_tops_1m_size_bytes"]),
         "clickhouse_database_size_bytes": size_summary["clickhouse_database_size_bytes"],
         "clickhouse_database_size_human": human_bytes(size_summary["clickhouse_database_size_bytes"]),
         "sqlite_size_bytes": sqlite_size_bytes,
@@ -6045,6 +6671,9 @@ def database_status(request: Request):
         "disk_free_human": human_bytes(disk_usage.free),
         "disk_total_human": human_bytes(disk_usage.total),
         "retention_days": retention_days,
+        "flow_raw_retention_days": flow_raw_retention_days,
+        "flow_1m_retention_days": flow_1m_retention_days,
+        "flow_tops_1m_retention_days": flow_tops_1m_retention_days,
         "snmp_retention_days": snmp_retention_days,
         "retention_enabled": setting_bool(settings, "database_retention_enabled"),
         "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
@@ -6065,10 +6694,13 @@ def database_tables(request: Request):
 @app.post("/api/database/retention")
 def database_retention(request: Request, payload: DatabaseRetentionPayload):
     require_admin(request)
-    snmp_days = payload.snmp_retention_days or payload.retention_days
+    flow_raw_days = payload.flow_raw_retention_days or payload.retention_days
+    flow_1m_days = payload.flow_1m_retention_days or 30
+    flow_tops_days = payload.flow_tops_1m_retention_days or 15
+    snmp_days = payload.snmp_retention_days or 90
     cleanup_hour = 3 if payload.cleanup_hour is None else payload.cleanup_hour
     try:
-        ttl_command = apply_flow_retention_ttl(payload.enabled, payload.retention_days)
+        ttl_command = apply_flow_retention_ttl(payload.enabled, flow_raw_days, flow_1m_days, flow_tops_days)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao atualizar TTL no ClickHouse: {exc}") from exc
 
@@ -6078,7 +6710,10 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
             conn,
             {
                 "database_retention_enabled": "1" if payload.enabled else "0",
-                "flow_retention_days": payload.retention_days,
+                "flow_retention_days": flow_raw_days,
+                "flow_raw_retention_days": flow_raw_days,
+                "flow_1m_retention_days": flow_1m_days,
+                "flow_tops_1m_retention_days": flow_tops_days,
                 "snmp_retention_days": snmp_days,
                 "database_cleanup_hour": cleanup_hour,
             },
@@ -6088,7 +6723,10 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
     return {
         "ok": True,
         "retention_enabled": setting_bool(settings, "database_retention_enabled"),
-        "retention_days": setting_int(settings, "flow_retention_days", 30),
+        "retention_days": table_retention_days(settings, "flow_raw") or 7,
+        "flow_raw_retention_days": table_retention_days(settings, "flow_raw") or 7,
+        "flow_1m_retention_days": table_retention_days(settings, "flow_1m") or 30,
+        "flow_tops_1m_retention_days": table_retention_days(settings, "flow_tops_1m") or 15,
         "snmp_retention_days": setting_int(settings, "snmp_retention_days", 90),
         "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
         "ttl_command": ttl_command,
@@ -6102,10 +6740,13 @@ def database_cleanup(request: Request, payload: DatabaseCleanupPayload):
         raise HTTPException(status_code=400, detail="Digite LIMPAR para confirmar")
     try:
         result = run_database_cleanup(
-            flow_retention_days=payload.older_than_days,
-            snmp_retention_days=None,
+            flow_retention_days=payload.flow_raw_older_than_days or payload.older_than_days,
+            flow_1m_retention_days=payload.flow_1m_older_than_days or payload.older_than_days,
+            flow_tops_1m_retention_days=payload.flow_tops_1m_older_than_days or payload.older_than_days,
+            snmp_retention_days=payload.older_than_days if clean_text(payload.scope).lower() == "all" else None,
             optimize=payload.optimize,
             source="manual",
+            scope=payload.scope,
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha na limpeza: {exc}") from exc
@@ -6189,8 +6830,130 @@ def ip_whois(ip: str = Query(..., min_length=2)):
     return cache_whois(ip_text, rdap_response(ip_text, data, reverse_dns, geo, geo_message))
 
 
+def rdap_autnum_urls(asn: int) -> list[str]:
+    number = int(asn)
+    return [
+        f"https://rdap.org/autnum/{number}",
+        f"https://rdap.arin.net/registry/autnum/{number}",
+        f"https://rdap.lacnic.net/rdap/autnum/{number}",
+        f"https://rdap.db.ripe.net/autnum/{number}",
+        f"https://rdap.apnic.net/autnum/{number}",
+        f"https://rdap.afrinic.net/rdap/autnum/{number}",
+    ]
+
+
+def resolve_asn_number(asn: int) -> dict[str, Any] | None:
+    number = int(asn or 0)
+    if number <= 0:
+        return None
+    last_error = ""
+    for url in rdap_autnum_urls(number):
+        try:
+            data = fetch_json_url(url, timeout=ASN_RESOLVER_TIMEOUT_SECONDS)
+        except Exception as exc:
+            last_error = clean_text(exc)
+            continue
+        name = clean_text(data.get("name")) or clean_text(data.get("handle"))
+        entities = rdap_entities(data)
+        org_name = rdap_organization(name, entities)
+        country = clean_text(data.get("country")).upper()
+        if not country:
+            for entity in data.get("entities") or []:
+                if not isinstance(entity, dict):
+                    continue
+                for value in vcard_values(entity, "adr"):
+                    tokens = [token.strip() for token in re.split(r"[,\n]", value) if token.strip()]
+                    if tokens:
+                        maybe_country = tokens[-1]
+                        if 2 <= len(maybe_country) <= 3:
+                            country = maybe_country.upper()
+                            break
+                if country:
+                    break
+        return {
+            "asn": number,
+            "as_name": name or org_name,
+            "org_name": org_name,
+            "country": country,
+            "source": "rdap",
+            "raw_json": data,
+            "last_error": "",
+        }
+    return {
+        "asn": number,
+        "as_name": "",
+        "org_name": "",
+        "country": "",
+        "source": "rdap",
+        "raw_json": None,
+        "last_error": last_error or "ASN nao resolvido via RDAP",
+    }
+
+
+def parse_cymru_response(payload: str) -> list[dict[str, Any]]:
+    items = []
+    for line in payload.splitlines():
+        if "|" not in line or line.strip().lower().startswith("as "):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 7:
+            continue
+        try:
+            asn = int(parts[0])
+        except ValueError:
+            continue
+        ip_text = clean_text(parts[1])
+        prefix = clean_text(parts[2])
+        country = clean_text(parts[3]).upper()
+        registry = clean_text(parts[4])
+        as_name = clean_text(parts[6])
+        if not ip_text or asn <= 0:
+            continue
+        items.append(
+            {
+                "ip": ip_text,
+                "asn": asn,
+                "prefix": prefix,
+                "country": country,
+                "as_name": as_name,
+                "source": f"cymru-{registry}".strip("-"),
+            }
+        )
+    return items
+
+
 def resolve_ips_to_asn(ips: list[str]) -> list[dict[str, Any]]:
-    return []
+    public_ips = []
+    seen = set()
+    for ip_text in ips:
+        cleaned = clean_ip(ip_text)
+        if cleaned in seen:
+            continue
+        try:
+            if not is_public_ip(cleaned):
+                continue
+        except ValueError:
+            continue
+        seen.add(cleaned)
+        public_ips.append(cleaned)
+    if not public_ips:
+        return []
+    query = "begin\nverbose\n" + "\n".join(public_ips) + "\nend\n"
+    try:
+        with socket.create_connection(("whois.cymru.com", 43), timeout=ASN_RESOLVER_TIMEOUT_SECONDS) as sock:
+            sock.settimeout(ASN_RESOLVER_TIMEOUT_SECONDS)
+            sock.sendall(query.encode("ascii", errors="ignore"))
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        payload = b"".join(chunks).decode("utf-8", errors="replace")
+    except Exception as exc:
+        logger.warning("Falha ao resolver ASN em lote via Team Cymru: %s", exc)
+        return []
+    return parse_cymru_response(payload)
 
 
 def asn_queue_from_flows(
@@ -6207,6 +6970,20 @@ def asn_queue_from_flows(
     params: dict[str, Any] = {"limit": limit}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     where = raw_flow_where(start_dt, end_dt, None, params, exporter_ip, selected_if_index)
+    asn_candidates: list[tuple[int, int]] = []
+    for asn_field in ("src_asn", "dst_asn"):
+        result = query_clickhouse(
+            f"""
+            SELECT toUInt32({asn_field}) AS asn, sum(bytes) AS bytes
+            FROM flow_raw
+            WHERE {where} AND {asn_field} > 0
+            GROUP BY asn
+            ORDER BY bytes DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+        asn_candidates.extend((int(row["asn"] or 0), int(row["bytes"] or 0)) for row in rows_as_dicts(result))
     candidates: list[tuple[str, int]] = []
     for ip_field, asn_field in (("src_ip", "src_asn"), ("dst_ip", "dst_asn")):
         result = query_clickhouse(
@@ -6223,11 +7000,31 @@ def asn_queue_from_flows(
         candidates.extend((clean_ip(row["ip"]), int(row["bytes"] or 0)) for row in rows_as_dicts(result))
 
     queued = 0
+    queued_asns = 0
     skipped = 0
+    skipped_asns = 0
     errors: list[str] = []
     seen: set[str] = set()
+    seen_asns: set[int] = set()
     with sqlite_connection() as conn:
         ensure_asn_db(conn)
+        for asn, _bytes in sorted(asn_candidates, key=lambda item: item[1], reverse=True):
+            if asn <= 0 or asn in seen_asns or len(seen_asns) >= limit:
+                continue
+            seen_asns.add(asn)
+            info = conn.execute(
+                """
+                SELECT asn, as_name, org_name, expires_at
+                FROM asn_info
+                WHERE asn = ?
+                """,
+                (asn,),
+            ).fetchone()
+            if info and (clean_text(info["as_name"]) or clean_text(info["org_name"])):
+                skipped_asns += 1
+                continue
+            if queue_asn_info_resolution(conn, asn, priority=20):
+                queued_asns += 1
         for ip_text, _bytes in sorted(candidates, key=lambda item: item[1], reverse=True):
             if ip_text in seen or len(seen) >= limit:
                 continue
@@ -6250,42 +7047,124 @@ def asn_queue_from_flows(
         "start": iso(start_dt),
         "end": iso(end_dt),
         "candidates": len(seen),
+        "asn_candidates": len(seen_asns),
         "queued": queued,
+        "queued_asns": queued_asns,
         "skipped": skipped,
+        "skipped_asns": skipped_asns,
         "errors": errors,
     }
 
 
 def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, Any]:
     now = utc_now_iso()
+    limit = max(1, min(int(limit or ASN_RESOLVER_BATCH_SIZE), 50000))
     result = {
         "ok": True,
+        "items_processed": 0,
         "ips_processed": 0,
+        "asns_processed": 0,
         "resolved": 0,
         "unresolved": 0,
+        "failed": 0,
+        "asn_info_updated": 0,
         "prefixes_inserted": 0,
         "cache_updated": 0,
         "errors": [],
     }
     with sqlite_connection() as conn:
         ensure_asn_db(conn)
-        statuses = ("pending", "stale") if not force else ("pending", "stale", "resolved", "failed")
+        statuses = ("queued", "pending", "stale", "failed") if not force else ("queued", "pending", "stale", "resolved", "failed")
         placeholders = ", ".join("?" for _ in statuses)
         rows = conn.execute(
             f"""
-            SELECT ip, attempts
+            SELECT ip, asn, attempts
             FROM asn_resolution_queue
             WHERE status IN ({placeholders})
-            ORDER BY last_seen_at DESC
+              AND (? = 1 OR attempts < ?)
+            ORDER BY priority ASC, last_seen_at DESC
             LIMIT ?
             """,
-            (*statuses, limit),
+            (*statuses, 1 if force else 0, ASN_RESOLVER_MAX_ATTEMPTS, limit),
         ).fetchall()
 
         unresolved_ips: list[str] = []
         for row in rows:
+            key = clean_text(row["ip"])
+            asn = int(row["asn"] or 0)
+            if asn <= 0:
+                match = re.match(r"^AS(\d+)$", key, flags=re.IGNORECASE)
+                if match:
+                    asn = int(match.group(1))
+            if asn <= 0:
+                continue
+            result["items_processed"] += 1
+            result["asns_processed"] += 1
+            conn.execute(
+                """
+                UPDATE asn_resolution_queue
+                SET status = 'resolving', attempts = attempts + 1, updated_at = ?
+                WHERE ip = ?
+                """,
+                (now, key),
+            )
+            try:
+                resolved_asn = resolve_asn_number(asn)
+                if resolved_asn and (clean_text(resolved_asn.get("as_name")) or clean_text(resolved_asn.get("org_name"))):
+                    upsert_asn_info(
+                        conn,
+                        asn,
+                        clean_text(resolved_asn.get("as_name")),
+                        clean_text(resolved_asn.get("country")),
+                        clean_text(resolved_asn.get("source")) or "rdap",
+                        clean_text(resolved_asn.get("org_name")),
+                        resolved_asn.get("raw_json") if isinstance(resolved_asn.get("raw_json"), dict) else None,
+                    )
+                    conn.execute(
+                        """
+                        UPDATE asn_resolution_queue
+                        SET status = 'resolved', updated_at = ?, resolved_at = ?, last_error = ''
+                        WHERE ip = ?
+                        """,
+                        (now, now, key),
+                    )
+                    result["resolved"] += 1
+                    result["asn_info_updated"] += 1
+                else:
+                    error = clean_text((resolved_asn or {}).get("last_error")) or "ASN sem descricao RDAP"
+                    conn.execute(
+                        """
+                        UPDATE asn_resolution_queue
+                        SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+                            updated_at = ?,
+                            last_error = ?
+                        WHERE ip = ?
+                        """,
+                        (ASN_RESOLVER_MAX_ATTEMPTS, now, error, key),
+                    )
+                    result["failed"] += 1
+                    result["errors"].append(f"AS{asn}: {error}")
+            except Exception as exc:
+                error = clean_text(exc)
+                conn.execute(
+                    """
+                    UPDATE asn_resolution_queue
+                    SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+                        updated_at = ?,
+                        last_error = ?
+                    WHERE ip = ?
+                    """,
+                    (ASN_RESOLVER_MAX_ATTEMPTS, now, error, key),
+                )
+                result["failed"] += 1
+                result["errors"].append(f"AS{asn}: {error}")
+
+        for row in rows:
+            if re.match(r"^AS\d+$", clean_text(row["ip"]), flags=re.IGNORECASE):
+                continue
             ip_text = clean_ip(row["ip"])
             result["ips_processed"] += 1
+            result["items_processed"] += 1
             try:
                 resolved = lookup_asn_cache(ip_text) or lookup_asn_prefix(ip_text)
                 if resolved and int(resolved.get("asn") or 0) > 0:
@@ -6301,10 +7180,10 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
                     conn.execute(
                         """
                         UPDATE asn_resolution_queue
-                        SET status = 'resolved', attempts = attempts + 1, last_seen_at = ?, last_error = ''
+                        SET status = 'resolved', attempts = attempts + 1, updated_at = ?, resolved_at = ?, last_error = ''
                         WHERE ip = ?
                         """,
-                        (now, ip_text),
+                        (now, now, ip_text),
                     )
                     result["resolved"] += 1
                     result["cache_updated"] += 1
@@ -6314,10 +7193,13 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
                 conn.execute(
                     """
                     UPDATE asn_resolution_queue
-                    SET status = 'stale', attempts = attempts + 1, last_seen_at = ?, last_error = ?
+                    SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+                        attempts = attempts + 1,
+                        updated_at = ?,
+                        last_error = ?
                     WHERE ip = ?
                     """,
-                    (now, clean_text(exc), ip_text),
+                    (ASN_RESOLVER_MAX_ATTEMPTS, now, clean_text(exc), ip_text),
                 )
                 result["errors"].append(f"{ip_text}: {exc}")
 
@@ -6335,6 +7217,7 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
                     clean_text(item.get("source")) or "provider",
                     clean_text(item.get("country")),
                 )
+                queue_asn_info_resolution(conn, int(item["asn"]), priority=60)
                 upsert_asn_lookup_cache(
                     conn,
                     ip_text,
@@ -6347,10 +7230,10 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
                 conn.execute(
                     """
                     UPDATE asn_resolution_queue
-                    SET status = 'resolved', attempts = attempts + 1, last_seen_at = ?, last_error = ''
+                    SET status = 'resolved', attempts = attempts + 1, updated_at = ?, resolved_at = ?, last_error = ''
                     WHERE ip = ?
                     """,
-                    (now, ip_text),
+                    (now, now, ip_text),
                 )
                 result["resolved"] += 1
                 result["prefixes_inserted"] += 1
@@ -6359,10 +7242,13 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
                 conn.execute(
                     """
                     UPDATE asn_resolution_queue
-                    SET status = 'stale', attempts = attempts + 1, last_seen_at = ?, last_error = ?
+                    SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+                        attempts = attempts + 1,
+                        updated_at = ?,
+                        last_error = ?
                     WHERE ip = ?
                     """,
-                    (now, "ASN ainda nao resolvido por base/cache local", ip_text),
+                    (ASN_RESOLVER_MAX_ATTEMPTS, now, "ASN ainda nao resolvido por base/cache local", ip_text),
                 )
                 result["unresolved"] += 1
         conn.commit()
@@ -6372,10 +7258,10 @@ def process_asn_resolution_queue(limit: int, force: bool = False) -> dict[str, A
 def asn_resolver_loop() -> None:
     while not ASN_RESOLVER_STOP.is_set():
         try:
-            process_asn_resolution_queue(ASN_RESOLVER_MAX_IPS_PER_RUN, False)
+            process_asn_resolution_queue(ASN_RESOLVER_BATCH_SIZE, False)
         except Exception as exc:
             logger.warning("Falha no job de resolucao ASN: %s", exc)
-        ASN_RESOLVER_STOP.wait(max(60, ASN_RESOLVER_INTERVAL_SECONDS))
+        ASN_RESOLVER_STOP.wait(max(5, ASN_RESOLVER_INTERVAL_SECONDS))
 
 
 def start_asn_resolver_thread() -> None:
@@ -6397,7 +7283,7 @@ def asn_status():
             """
             SELECT COUNT(*) AS count
             FROM asn_resolution_queue
-            WHERE status IN ('pending', 'stale')
+            WHERE status IN ('queued', 'pending', 'stale', 'resolving')
             """
         ).fetchone()
     last_update = max(
@@ -6413,7 +7299,52 @@ def asn_status():
         "last_update": last_update,
         "resolver_enabled": ASN_RESOLVER_ENABLED,
         "resolver_interval_seconds": ASN_RESOLVER_INTERVAL_SECONDS,
+        "resolver_batch_size": ASN_RESOLVER_BATCH_SIZE,
+        "resolver_max_attempts": ASN_RESOLVER_MAX_ATTEMPTS,
+        "cache_ttl_days": ASN_CACHE_TTL_DAYS,
     }
+
+
+@app.get("/api/asn/info")
+def asn_info_endpoint(asns: str = Query(..., min_length=1)):
+    ensure_sensor_db()
+    numbers = []
+    for token in re.split(r"[,;\s]+", clean_text(asns)):
+        if not token:
+            continue
+        number_text = token.upper().removeprefix("AS")
+        try:
+            number = int(number_text)
+        except ValueError:
+            continue
+        if number > 0 and number not in numbers:
+            numbers.append(number)
+    if not numbers:
+        raise HTTPException(status_code=400, detail="Informe ao menos um ASN valido")
+    items = []
+    queued = 0
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        for number in numbers[:500]:
+            info = lookup_asn_info(number)
+            if info:
+                items.append(info)
+                continue
+            if queue_asn_info_resolution(conn, number, priority=20):
+                queued += 1
+            items.append(
+                {
+                    "asn": number,
+                    "as_name": "",
+                    "org_name": "",
+                    "country": "",
+                    "source": "queued",
+                    "updated_at": "",
+                    "last_error": "",
+                }
+            )
+        conn.commit()
+    return {"items": items, "queued": queued}
 
 
 @app.post("/api/asn/import")
@@ -7638,6 +8569,718 @@ def get_interface_pps(
     return interface_traffic_items("pps", sensor_id, range_minutes, interface_id, if_index, start, end, start_time, end_time)
 
 
+def decoder_label_expr() -> str:
+    return (
+        "multiIf("
+        "proto = 6 AND bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0, 'TCP+SYN', "
+        "proto = 6, 'TCP', "
+        "proto = 17, 'UDP', "
+        "proto = 1, 'ICMP', "
+        "proto = 58, 'ICMPv6', "
+        "proto = 47, 'GRE', "
+        "proto = 50, 'ESP', "
+        "'OTHER')"
+    )
+
+
+def dashboard_series_color(group: str, group_by: str, fallback: int = 0) -> str:
+    if group_by == "protocol":
+        return PROTOCOL_COLORS.get(clean_text(group).upper(), PROTOCOL_COLORS["OTHER"])
+    return DASHBOARD_PALETTE[fallback % len(DASHBOARD_PALETTE)]
+
+
+def interface_label_map(sensor_id: int | None) -> dict[int, dict[str, Any]]:
+    if sensor_id is None:
+        return {}
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT if_index, if_name, if_alias, color
+            FROM sensor_interfaces
+            WHERE sensor_id = ?
+            """,
+            (sensor_id,),
+        ).fetchall()
+    mapping = {}
+    for row in rows:
+        label = clean_text(row["if_alias"]) or clean_text(row["if_name"]) or f"ifIndex {int(row['if_index'] or 0)}"
+        mapping[int(row["if_index"] or 0)] = {"label": label, "color": clean_text(row["color"]) or ""}
+    return mapping
+
+
+def dashboard_series_payload(
+    range_minutes: int,
+    sensor_id: int | None,
+    interface_id: int | None,
+    if_index: int | None,
+    direction: str,
+    group_by: str,
+    metric: str,
+    start: datetime | None,
+    end: datetime | None,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    limit: int,
+) -> dict[str, Any]:
+    ensure_clickhouse_schema()
+    group_by = clean_text(group_by).lower() or "total"
+    if group_by not in {"total", "protocol", "interface"}:
+        raise HTTPException(status_code=400, detail="group_by invalido")
+    metric = clean_text(metric).lower() or "bits_s"
+    if metric not in {"bits_s", "packets_s"}:
+        raise HTTPException(status_code=400, detail="metric invalida")
+    direction = clean_text(direction).lower() or "both"
+    if direction not in {"both", "download", "upload"}:
+        raise HTTPException(status_code=400, detail="direction invalida")
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        None,
+        sensor_id,
+        interface_id,
+        if_index,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "both",
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    cache_key = dashboard_cache_key(
+        "dashboard-series",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "direction": direction,
+            "group_by": group_by,
+            "metric": metric,
+            "limit": limit,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
+
+    value_field = "bytes" if metric == "bits_s" else "packets"
+    multiplier = "8" if metric == "bits_s" else "1"
+    input_factor = clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"])
+    output_factor = clickhouse_sample_rate_expr(sensor_id, "output", context["resolved_if_index"])
+    params = dict(context["params"])
+    resolved_if_index = context["resolved_if_index"]
+    input_condition = "input_if > 0"
+    output_condition = "output_if > 0"
+    if resolved_if_index is not None:
+        params["series_if_index"] = int(resolved_if_index)
+        input_condition = "input_if = {series_if_index:UInt32}"
+        output_condition = "output_if = {series_if_index:UInt32}"
+
+    if group_by == "protocol":
+        input_group = decoder_label_expr()
+        output_group = decoder_label_expr()
+    elif group_by == "interface":
+        input_group = "toString(input_if)"
+        output_group = "toString(output_if)"
+    else:
+        input_group = "'Total'"
+        output_group = "'Total'"
+
+    selects = []
+    if direction in {"both", "download"}:
+        selects.append(
+            f"""
+            SELECT
+                toStartOfMinute(flow_time) AS ts,
+                {input_group} AS group_key,
+                'download' AS flow_direction,
+                sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
+            FROM flow_raw
+            WHERE {context["where"]} AND {input_condition}
+            GROUP BY ts, group_key
+            """
+        )
+    if direction in {"both", "upload"}:
+        selects.append(
+            f"""
+            SELECT
+                toStartOfMinute(flow_time) AS ts,
+                {output_group} AS group_key,
+                'upload' AS flow_direction,
+                sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
+            FROM flow_raw
+            WHERE {context["where"]} AND {output_condition}
+            GROUP BY ts, group_key
+            """
+        )
+    result = query_clickhouse(" UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
+    rows = rows_as_dicts(result)
+    totals: dict[str, float] = {}
+    for row in rows:
+        totals[clean_text(row["group_key"])] = totals.get(clean_text(row["group_key"]), 0.0) + float(row["value"] or 0)
+    allowed_groups = {
+        group
+        for group, _value in sorted(totals.items(), key=lambda item: item[1], reverse=True)[: max(1, limit)]
+    }
+    if group_by == "total":
+        allowed_groups = set(totals)
+    interface_map = interface_label_map(sensor_id)
+    series_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        group = clean_text(row["group_key"]) or "N/D"
+        if group not in allowed_groups:
+            group = "Outras"
+        flow_direction = clean_text(row["flow_direction"])
+        key = (group, flow_direction)
+        index = len(series_by_key)
+        label = group
+        color = dashboard_series_color(group, group_by, index)
+        if group_by == "interface" and group.isdigit():
+            iface = interface_map.get(int(group), {})
+            label = clean_text(iface.get("label")) or f"ifIndex {group}"
+            color = clean_text(iface.get("color")) or deterministic_color(group)
+        item = series_by_key.setdefault(
+            key,
+            {
+                "name": f"{label} {'Download' if flow_direction == 'download' else 'Upload'}",
+                "group": group,
+                "label": label,
+                "direction": flow_direction,
+                "color": color,
+                "points": [],
+            },
+        )
+        item["points"].append({"ts": iso(row["ts"]), "value": round(float(row["value"] or 0), 2)})
+    payload = {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "metric": metric,
+        "group_by": group_by,
+        "direction": direction,
+        "series": list(series_by_key.values()),
+        "items": list(series_by_key.values()),
+    }
+    return dashboard_cache_set(cache_key, payload)
+
+
+@app.get("/api/dashboard/series")
+def dashboard_series(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    direction: str = "both",
+    group_by: str = "total",
+    metric: str = "bits_s",
+    limit: int = Query(12, ge=1, le=50),
+):
+    return dashboard_series_payload(
+        range_minutes,
+        sensor_id,
+        interface_id,
+        if_index,
+        direction,
+        group_by,
+        metric,
+        start,
+        end,
+        start_time,
+        end_time,
+        limit,
+    )
+
+
+def duration_human(seconds: int) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def top_conversations_payload(
+    range_minutes: int,
+    sensor_id: int | None,
+    interface_id: int | None,
+    if_index: int | None,
+    direction: str,
+    proto: str | None,
+    limit: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> dict[str, Any]:
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        None,
+        sensor_id,
+        interface_id,
+        if_index,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        proto,
+        None,
+        None,
+        direction,
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    seconds = range_seconds(start_dt, end_dt)
+    params = dict(context["params"])
+    params.update({"seconds": seconds, "limit": limit})
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    bytes_value = corrected_value_expr("bytes", factor_expr)
+    packets_value = corrected_value_expr("packets", factor_expr)
+    result = query_clickhouse(
+        f"""
+        WITH
+            base AS (
+                SELECT
+                    toString(src_ip) AS src_ip,
+                    toString(dst_ip) AS dst_ip,
+                    src_port,
+                    dst_port,
+                    proto,
+                    any(src_asn) AS src_asn,
+                    any(dst_asn) AS dst_asn,
+                    any(src_as_name) AS src_as_name,
+                    any(dst_as_name) AS dst_as_name,
+                    sum({bytes_value}) AS bytes,
+                    sum({packets_value}) AS packets,
+                    sum(flow_count) AS flows,
+                    min(flow_time) AS first_seen,
+                    max(flow_time) AS last_seen
+                FROM flow_raw
+                WHERE {context["where"]}
+                GROUP BY src_ip, dst_ip, src_port, dst_port, proto
+            ),
+            totals AS (
+                SELECT sum(bytes) AS total_bytes
+                FROM base
+            )
+        SELECT
+            base.*,
+            concat(src_ip, ':', toString(src_port), ' -> ', dst_ip, ':', toString(dst_port)) AS key,
+            bytes * 8 / {{seconds:Float64}} AS bits_s,
+            packets / {{seconds:Float64}} AS packets_s,
+            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total,
+            dateDiff('second', first_seen, last_seen) AS duration_seconds
+        FROM base
+        CROSS JOIN totals
+        ORDER BY bits_s DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    items = []
+    for index, row in enumerate(rows_as_dicts(result), start=1):
+        src_asn = int(row.get("src_asn") or 0)
+        dst_asn = int(row.get("dst_asn") or 0)
+        src_info = lookup_asn_info(src_asn) if src_asn > 0 else None
+        dst_info = lookup_asn_info(dst_asn) if dst_asn > 0 else None
+        if src_asn > 0 and not src_info:
+            queue_missing_asn_info(src_asn)
+        if dst_asn > 0 and not dst_info:
+            queue_missing_asn_info(dst_asn)
+        duration = int(row.get("duration_seconds") or 0)
+        items.append(
+            {
+                "rank": index,
+                "key": clean_text(row.get("key")),
+                "src_ip": clean_ip(row.get("src_ip")),
+                "dst_ip": clean_ip(row.get("dst_ip")),
+                "src_port": int(row.get("src_port") or 0),
+                "dst_port": int(row.get("dst_port") or 0),
+                "protocol": proto_name(row.get("proto")),
+                "decoder": proto_name(row.get("proto")),
+                "bits_s": round(float(row.get("bits_s") or 0), 2),
+                "packets_s": round(float(row.get("packets_s") or 0), 2),
+                "bytes": int(float(row.get("bytes") or 0)),
+                "packets": int(float(row.get("packets") or 0)),
+                "flows": int(row.get("flows") or 0),
+                "percent": round(float(row.get("percent_total") or 0), 2),
+                "first_seen": iso(row.get("first_seen")),
+                "last_seen": iso(row.get("last_seen")),
+                "duration_seconds": duration,
+                "duration_human": duration_human(duration),
+                "src_asn": asn_label(src_asn),
+                "dst_asn": asn_label(dst_asn),
+                "src_as_name": clean_text(row.get("src_as_name")) or clean_text((src_info or {}).get("as_name")),
+                "dst_as_name": clean_text(row.get("dst_as_name")) or clean_text((dst_info or {}).get("as_name")),
+            }
+        )
+    return {"start": iso(start_dt), "end": iso(end_dt), "items": items}
+
+
+@app.get("/api/dashboard/top-conversations")
+def dashboard_top_conversations(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    direction: str = "both",
+    protocol: str | None = None,
+    proto: str | None = None,
+    limit: int = Query(10, ge=1, le=100),
+):
+    return top_conversations_payload(
+        range_minutes,
+        sensor_id,
+        interface_id,
+        if_index,
+        direction,
+        proto or protocol,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+    )
+
+
+@app.get("/api/dashboard/top-syn")
+def dashboard_top_syn(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    direction: str = "both",
+    mode: str = "src",
+    limit: int = Query(10, ge=1, le=100),
+):
+    mode = clean_text(mode).lower()
+    if mode not in {"src", "dst"}:
+        raise HTTPException(status_code=400, detail="mode invalido")
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        None,
+        sensor_id,
+        interface_id,
+        if_index,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "6",
+        None,
+        None,
+        direction,
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    seconds = range_seconds(start_dt, end_dt)
+    params = dict(context["params"])
+    params.update({"seconds": seconds, "limit": limit})
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    ip_col = "src_ip" if mode == "src" else "dst_ip"
+    asn_col = "src_asn" if mode == "src" else "dst_asn"
+    as_name_col = "src_as_name" if mode == "src" else "dst_as_name"
+    bytes_value = corrected_value_expr("bytes", factor_expr)
+    packets_value = corrected_value_expr("packets", factor_expr)
+    result = query_clickhouse(
+        f"""
+        WITH
+            base AS (
+                SELECT
+                    toString({ip_col}) AS ip,
+                    any({asn_col}) AS asn,
+                    any({as_name_col}) AS as_name,
+                    sum({bytes_value}) AS bytes,
+                    sum({packets_value}) AS packets,
+                    sum(flow_count) AS flows
+                FROM flow_raw
+                WHERE {context["where"]}
+                  AND bitAnd(tcp_flags, 2) != 0
+                  AND bitAnd(tcp_flags, 16) = 0
+                GROUP BY ip
+            ),
+            totals AS (SELECT sum(packets) AS total_packets FROM base)
+        SELECT
+            base.*,
+            bytes * 8 / {{seconds:Float64}} AS bits_s,
+            packets / {{seconds:Float64}} AS packets_s,
+            if(total_packets > 0, packets / total_packets * 100, 0) AS percent_total
+        FROM base
+        CROSS JOIN totals
+        ORDER BY packets_s DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    items = []
+    for index, row in enumerate(rows_as_dicts(result), start=1):
+        asn = int(row.get("asn") or 0)
+        info = lookup_asn_info(asn) if asn > 0 else None
+        if asn > 0 and not info:
+            queue_missing_asn_info(asn)
+        country = clean_text((info or {}).get("country")).upper() or "N/D"
+        items.append(
+            {
+                "rank": index,
+                "ip": clean_ip(row.get("ip")),
+                "asn": asn_label(asn),
+                "asn_number": asn,
+                "as_name": clean_text(row.get("as_name")) or clean_text((info or {}).get("as_name")) or "-",
+                "country": country,
+                "packets_s": round(float(row.get("packets_s") or 0), 2),
+                "packets": int(float(row.get("packets") or 0)),
+                "bits_s": round(float(row.get("bits_s") or 0), 2),
+                "bytes": int(float(row.get("bytes") or 0)),
+                "flows": int(row.get("flows") or 0),
+                "percent": round(float(row.get("percent_total") or 0), 2),
+            }
+        )
+    return {"start": iso(start_dt), "end": iso(end_dt), "mode": mode, "items": items}
+
+
+def add_geo_filters(
+    filters: list[str],
+    params: dict[str, Any],
+    src_asn: int | None,
+    dst_asn: int | None,
+    src_cidr: str | None,
+    dst_cidr: str | None,
+) -> None:
+    if src_asn is not None:
+        params["geo_src_asn"] = int(src_asn)
+        filters.append("src_asn = {geo_src_asn:UInt32}")
+    if dst_asn is not None:
+        params["geo_dst_asn"] = int(dst_asn)
+        filters.append("dst_asn = {geo_dst_asn:UInt32}")
+    if clean_text(src_cidr):
+        params["geo_src_cidr"] = clean_text(src_cidr)
+        filters.append("isIPAddressInRange(toString(src_ip), {geo_src_cidr:String})")
+    if clean_text(dst_cidr):
+        params["geo_dst_cidr"] = clean_text(dst_cidr)
+        filters.append("isIPAddressInRange(toString(dst_ip), {geo_dst_cidr:String})")
+
+
+@app.get("/api/geo/flows")
+def geo_flows(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    direction: str = "both",
+    protocol: str | None = None,
+    proto: str | None = None,
+    decoder: str | None = None,
+    asn_src: int | None = Query(None, ge=1),
+    asn_dst: int | None = Query(None, ge=1),
+    src_asn: int | None = Query(None, ge=1),
+    dst_asn: int | None = Query(None, ge=1),
+    src_cidr: str | None = None,
+    dst_cidr: str | None = None,
+    metric: str = "bits_s",
+    top_n: int = Query(100, ge=1, le=500),
+):
+    ensure_clickhouse_schema()
+    metric = clean_text(metric).lower() or "bits_s"
+    if metric not in {"bits_s", "packets_s", "flows"}:
+        raise HTTPException(status_code=400, detail="metric invalida")
+    context = flow_query_context(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        None,
+        sensor_id,
+        interface_id,
+        if_index,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        proto or protocol,
+        None,
+        decoder,
+        direction,
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    cache_key = dashboard_cache_key(
+        "geo-flows",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "direction": direction,
+            "protocol": proto or protocol or "",
+            "decoder": decoder or "",
+            "asn_src": asn_src or src_asn or "",
+            "asn_dst": asn_dst or dst_asn or "",
+            "src_cidr": src_cidr or "",
+            "dst_cidr": dst_cidr or "",
+            "metric": metric,
+            "top_n": top_n,
+        },
+    )
+    ttl = 10 if range_minutes <= 15 else 30 if range_minutes <= 60 else 60
+    cached = dashboard_cache_get(cache_key, ttl)
+    if cached:
+        return cached
+    seconds = range_seconds(start_dt, end_dt)
+    params = dict(context["params"])
+    params.update({"seconds": seconds, "limit": top_n})
+    filters = [context["where"]]
+    add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
+    where = " AND ".join(f"({item})" for item in filters if item)
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    bytes_value = corrected_value_expr("bytes", factor_expr)
+    packets_value = corrected_value_expr("packets", factor_expr)
+    order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
+    result = query_clickhouse(
+        f"""
+        SELECT
+            toString(src_ip) AS src_ip,
+            toString(dst_ip) AS dst_ip,
+            any(src_asn) AS src_asn,
+            any(dst_asn) AS dst_asn,
+            any(src_as_name) AS src_as_name,
+            any(dst_as_name) AS dst_as_name,
+            topK(1)({decoder_label_expr()})[1] AS top_protocol,
+            sum({bytes_value}) * 8 / {{seconds:Float64}} AS bits_s,
+            sum({packets_value}) / {{seconds:Float64}} AS packets_s,
+            sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE {where}
+        GROUP BY src_ip, dst_ip
+        ORDER BY {order_expr} DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    edge_groups: dict[tuple[str, str], dict[str, Any]] = {}
+    node_groups: dict[str, dict[str, Any]] = {}
+    for row in rows_as_dicts(result):
+        src_geo = geo_lookup_ip(row["src_ip"], int(row.get("src_asn") or 0), clean_text(row.get("src_as_name")))
+        dst_geo = geo_lookup_ip(row["dst_ip"], int(row.get("dst_asn") or 0), clean_text(row.get("dst_as_name")))
+        src_code = clean_text(src_geo.get("country_code")).upper() or "ND"
+        dst_code = clean_text(dst_geo.get("country_code")).upper() or "ND"
+        src_label = clean_text(src_geo.get("country_name")) or src_code
+        dst_label = clean_text(dst_geo.get("country_name")) or dst_code
+        for code, label, geo, side in (
+            (src_code, src_label, src_geo, "src"),
+            (dst_code, dst_label, dst_geo, "dst"),
+        ):
+            node = node_groups.setdefault(
+                code,
+                {
+                    "id": code,
+                    "type": "country",
+                    "label": label,
+                    "country_code": "" if code == "ND" else code,
+                    "lat": geo.get("latitude"),
+                    "lon": geo.get("longitude"),
+                    "asn": None,
+                    "bits_s": 0.0,
+                    "packets_s": 0.0,
+                    "flows": 0,
+                    "sources": 0,
+                    "destinations": 0,
+                },
+            )
+            node["bits_s"] += float(row.get("bits_s") or 0)
+            node["packets_s"] += float(row.get("packets_s") or 0)
+            node["flows"] += int(row.get("flows") or 0)
+            node["sources" if side == "src" else "destinations"] += 1
+        edge_key = (src_code, dst_code)
+        edge = edge_groups.setdefault(
+            edge_key,
+            {
+                "src": src_code,
+                "dst": dst_code,
+                "src_label": src_label,
+                "dst_label": dst_label,
+                "src_lat": src_geo.get("latitude"),
+                "src_lon": src_geo.get("longitude"),
+                "dst_lat": dst_geo.get("latitude"),
+                "dst_lon": dst_geo.get("longitude"),
+                "bits_s": 0.0,
+                "packets_s": 0.0,
+                "flows": 0,
+                "top_protocol": clean_text(row.get("top_protocol")) or "OTHER",
+                "top_asn_src": int(row.get("src_asn") or 0),
+                "top_asn_dst": int(row.get("dst_asn") or 0),
+            },
+        )
+        edge["bits_s"] += float(row.get("bits_s") or 0)
+        edge["packets_s"] += float(row.get("packets_s") or 0)
+        edge["flows"] += int(row.get("flows") or 0)
+    nodes = []
+    for item in node_groups.values():
+        item["bits_s"] = round(float(item["bits_s"]), 2)
+        item["packets_s"] = round(float(item["packets_s"]), 2)
+        nodes.append(item)
+    edges = []
+    for item in sorted(edge_groups.values(), key=lambda edge: float(edge.get(order_expr) or 0), reverse=True)[:top_n]:
+        item["bits_s"] = round(float(item["bits_s"]), 2)
+        item["packets_s"] = round(float(item["packets_s"]), 2)
+        edges.append(item)
+    payload = {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "metric": metric,
+        "nodes": nodes,
+        "edges": edges,
+        "items": edges,
+        "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
+    }
+    return dashboard_cache_set(cache_key, payload)
+
+
 def top_dimension(
     dimension: str,
     range_minutes: int,
@@ -7913,6 +9556,8 @@ def top_asn_dimension(
         if asn <= 0:
             continue
         asn_info = lookup_asn_info(asn) or {}
+        if not asn_info:
+            queue_missing_asn_info(asn)
         items.append(
             {
                 "rank": index,
@@ -8503,20 +10148,39 @@ def top_flow_items_from_rows(
         item = {
             "rank": index,
             "key": key,
+            "src_ip": clean_ip(row.get("src_ip")) if row.get("src_ip") is not None else "",
+            "dst_ip": clean_ip(row.get("dst_ip")) if row.get("dst_ip") is not None else "",
+            "src_port": int(row.get("src_port") if row.get("src_port") is not None else row.get("sample_src_port") or 0),
+            "dst_port": int(row.get("dst_port") if row.get("dst_port") is not None else row.get("sample_dst_port") or 0),
+            "protocol": protocol_label,
+            "decoder": protocol_label,
             "bits_s": round(float(row.get("bits_s") or 0), 2),
             "packets_s": round(float(row.get("packets_s") or 0), 2),
             "bytes": int(float(row.get("bytes") or 0)),
             "packets": int(float(row.get("packets") or 0)),
             "flows": int(row.get("flows") or 0),
             "percent": round(float(row.get("percent_total") or row.get("percent") or 0), 2),
+            "first_seen": iso(row.get("first_seen")) if row.get("first_seen") else "",
+            "last_seen": iso(row.get("last_seen")) if row.get("last_seen") else "",
+            "duration_seconds": int(row.get("duration_seconds") or 0),
         }
+        item["duration_human"] = duration_human(item["duration_seconds"])
         if top_type in {"src_port", "dst_port", "ports"}:
             item["proto"] = proto_name(row.get("proto"))
+            item["protocol"] = item["proto"]
+            item["decoder"] = item["proto"]
             item["port"] = int(row.get("port") or 0)
             item["key"] = f"{item['proto']}/{item['port']}"
+        elif top_type != "conversation":
+            item["src_port"] = 0
+            item["dst_port"] = 0
         if top_type == "conversation":
             item["src_ip"] = clean_ip(row.get("src_ip"))
             item["dst_ip"] = clean_ip(row.get("dst_ip"))
+            item["key"] = (
+                f"{item['src_ip']}:{item['src_port']} -> "
+                f"{item['dst_ip']}:{item['dst_port']}"
+            )
         if top_type in {"input_if", "output_if"}:
             item["if_index"] = int(row.get("if_index") or 0)
             item["key"] = f"ifIndex {item['if_index']}"
@@ -8600,6 +10264,11 @@ def top_flows(
             base AS (
                 SELECT
                     {select_cols},
+                    any(raw_proto) AS sample_proto,
+                    any(raw_src_port) AS sample_src_port,
+                    any(raw_dst_port) AS sample_dst_port,
+                    min(flow_time) AS first_seen,
+                    max(flow_time) AS last_seen,
                     sum(bytes_value) AS bytes,
                     sum(packets_value) AS packets,
                     sum(flow_count) AS flows
@@ -8619,7 +10288,8 @@ def top_flows(
             base.*,
             bytes * 8 / {{seconds:Float64}} AS bits_s,
             packets / {{seconds:Float64}} AS packets_s,
-            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total
+            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total,
+            dateDiff('second', first_seen, last_seen) AS duration_seconds
         FROM base
         CROSS JOIN totals
         ORDER BY {order_expr} {direction_sql}
@@ -8632,7 +10302,11 @@ def top_flows(
                 {dimension_cols},
                 {corrected_value_expr('bytes', rate_expr)} AS bytes_value,
                 {corrected_value_expr('packets', rate_expr)} AS packets_value,
-                flow_count
+                flow_count,
+                flow_time,
+                src_port AS raw_src_port,
+                dst_port AS raw_dst_port,
+                proto AS raw_proto
             FROM flow_raw
             WHERE {where or context["where"]}
         """
@@ -8674,6 +10348,8 @@ def top_flows(
                     as_name = as_name or clean_text(info.get("as_name"))
                     country = clean_text(info.get("country"))
                     source = clean_text(info.get("source")) or "flow"
+                elif not as_name:
+                    queue_missing_asn_info(asn)
             else:
                 resolved = resolve_asn_for_ip(clean_ip(row.get("ip")))
                 asn = int(resolved.get("asn") or 0)
@@ -8724,9 +10400,13 @@ def top_flows(
             select_expr = "key"
             group_by = "key"
         elif top_type == "conversation":
-            raw_sql = raw_select("toString(src_ip) AS src_ip, toString(dst_ip) AS dst_ip, concat(toString(src_ip), ' -> ', toString(dst_ip)) AS key")
-            select_expr = "src_ip, dst_ip, key"
-            group_by = "src_ip, dst_ip, key"
+            raw_sql = raw_select(
+                "toString(src_ip) AS src_ip, toString(dst_ip) AS dst_ip, "
+                "src_port, dst_port, proto, "
+                "concat(toString(src_ip), ':', toString(src_port), ' -> ', toString(dst_ip), ':', toString(dst_port)) AS key"
+            )
+            select_expr = "src_ip, dst_ip, src_port, dst_port, proto, key"
+            group_by = "src_ip, dst_ip, src_port, dst_port, proto, key"
         elif top_type == "src_port":
             raw_sql = raw_select("src_port AS port, proto, toString(src_port) AS key")
             select_expr = "port, proto, key"

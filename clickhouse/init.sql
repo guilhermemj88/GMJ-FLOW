@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS flow_raw
 ENGINE = MergeTree
 PARTITION BY toDate(flow_time)
 ORDER BY (sensor, flow_time, src_ip, dst_ip, proto, dst_port)
-TTL toDateTime(flow_time) + INTERVAL 30 DAY DELETE
+TTL toDateTime(flow_time) + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS flow_1m
@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS flow_1m
 )
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
-ORDER BY (sensor, minute, exporter_ip, input_if, output_if, proto);
+ORDER BY (sensor, minute, exporter_ip, input_if, output_if, proto)
+TTL toDateTime(minute) + INTERVAL 30 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS flow_tops_1m
 (
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS flow_tops_1m
 )
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
-ORDER BY (dimension, sensor, minute, key);
+ORDER BY (dimension, sensor, minute, key)
+TTL toDateTime(minute) + INTERVAL 15 DAY DELETE;
 
 CREATE TABLE IF NOT EXISTS prefix_traffic_1m
 (
@@ -228,12 +230,16 @@ WHERE proto = 6
 GROUP BY minute, sensor, key;
 
 INSERT INTO retention_settings (table_name, retention_days)
-SELECT 'flow_raw', 30
+SELECT 'flow_raw', 7
 WHERE NOT EXISTS (SELECT 1 FROM retention_settings WHERE table_name = 'flow_raw');
 
 INSERT INTO retention_settings (table_name, retention_days)
-SELECT 'flow_1m', 180
+SELECT 'flow_1m', 30
 WHERE NOT EXISTS (SELECT 1 FROM retention_settings WHERE table_name = 'flow_1m');
+
+INSERT INTO retention_settings (table_name, retention_days)
+SELECT 'flow_tops_1m', 15
+WHERE NOT EXISTS (SELECT 1 FROM retention_settings WHERE table_name = 'flow_tops_1m');
 
 INSERT INTO sensors (sensor, description, exporter_ip)
 SELECT 'edge-01', 'Sensor fake inicial', toIPv6('192.0.2.10')
