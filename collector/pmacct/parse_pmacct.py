@@ -411,13 +411,15 @@ def cleanup_old_rotations(directory: Path, keep_days: int) -> int:
 def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_days: int) -> dict[str, Any]:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     rotated = output_file.with_name(f"{output_file.stem}-{timestamp}{output_file.suffix}")
-    output_file.rename(rotated)
-    output_file.touch()
+    shutil.copy2(output_file, rotated)
+    with output_file.open("w", encoding="utf-8"):
+        pass
     final_path = compress_file(rotated) if compress else rotated
     tailer.reset_for_new_file()
     deleted = cleanup_old_rotations(output_file.parent, keep_days)
     return {
         "rotated_to": str(final_path),
+        "method": "copytruncate",
         "compressed": compress,
         "deleted_old_rotations": deleted,
         "rotated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),

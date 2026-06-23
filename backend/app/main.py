@@ -133,6 +133,7 @@ SENSOR_DB_READY = False
 DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
 GEOIP_MMDB_PATH = os.getenv("GMJFLOW_GEOIP_MMDB_PATH", "/app/data/GeoLite2-City.mmdb").strip()
+GEOIP_LAST_ERROR = ""
 
 TCP_FLAG_BITS = (
     (0x01, "FIN"),
@@ -2937,6 +2938,48 @@ def cleanup_sqlite_snmp_samples(older_than_days: int) -> int:
     return deleted
 
 
+def sqlite_older_than_expr(column: str) -> str:
+    return f"julianday(replace(replace({column}, 'T', ' '), 'Z', '')) < julianday('now', ?)"
+
+
+def cleanup_sqlite_learning_anomalies(older_than_days: int) -> dict[str, int]:
+    days = setting_int({"days": str(older_than_days)}, "days", 90)
+    cutoff = f"-{days} days"
+    with sqlite_connection() as conn:
+        ensure_attack_vector_db(conn)
+        flows_cursor = conn.execute(
+            f"""
+            DELETE FROM anomaly_event_flows
+            WHERE anomaly_event_id IN (
+                SELECT id FROM anomaly_events
+                WHERE {sqlite_older_than_expr('last_seen_at')}
+            )
+            """,
+            (cutoff,),
+        )
+        events_cursor = conn.execute(
+            f"""
+            DELETE FROM anomaly_events
+            WHERE {sqlite_older_than_expr('last_seen_at')}
+            """,
+            (cutoff,),
+        )
+        suggestions_cursor = conn.execute(
+            f"""
+            DELETE FROM attack_vector_suggestions
+            WHERE COALESCE(applied_at, '') = ''
+              AND {sqlite_older_than_expr('updated_at')}
+            """,
+            (cutoff,),
+        )
+        conn.commit()
+    return {
+        "anomaly_event_flows": int(flows_cursor.rowcount or 0),
+        "anomaly_events": int(events_cursor.rowcount or 0),
+        "attack_vector_suggestions": int(suggestions_cursor.rowcount or 0),
+    }
+
+
 def run_database_cleanup(
     flow_retention_days: int,
     snmp_retention_days: int | None = None,
@@ -2966,6 +3009,11 @@ def run_database_cleanup(
             optimize=optimize,
         )
     snmp_deleted = cleanup_sqlite_snmp_samples(snmp_retention_days) if scope == "all" and snmp_retention_days is not None else None
+    learning_anomaly_deleted = (
+        cleanup_sqlite_learning_anomalies(snmp_retention_days or flow_retention_days)
+        if scope == "all"
+        else None
+    )
     cleanup_at = utc_now_iso()
     with sqlite_connection() as conn:
         set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
@@ -2978,6 +3026,7 @@ def run_database_cleanup(
         "flow": clickhouse_results["flow_raw"],
         "clickhouse": clickhouse_results,
         "snmp_deleted": snmp_deleted,
+        "learning_anomaly_deleted": learning_anomaly_deleted,
     }
 
 
@@ -3486,6 +3535,31 @@ def asn_label(asn: int) -> str:
     return f"AS{int(asn)}" if int(asn or 0) > 0 else "ASN indisponivel"
 
 
+def usable_asn_name(value: Any, asn: int = 0) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    upper = text.upper().replace(" ", "")
+    number = int(asn or 0)
+    bad_values = {"-", "N/D", "ND", "ASN", "AS", "ASNINDISPONIVEL", "ASNINDISPONIVEL"}
+    if upper in bad_values:
+        return ""
+    if number > 0 and upper in {f"AS{number}", f"ASN{number}"}:
+        return ""
+    if re.fullmatch(r"ASN?\d+", upper):
+        return ""
+    return text
+
+
+def asn_display_name(asn: int, *values: Any) -> str:
+    number = int(asn or 0)
+    for value in values:
+        name = usable_asn_name(value, number)
+        if name:
+            return name
+    return asn_label(number)
+
+
 def lookup_asn_info(asn: int) -> dict[str, Any] | None:
     number = int(asn or 0)
     if number <= 0:
@@ -3625,18 +3699,23 @@ def upsert_geo_cache(conn: sqlite3.Connection, ip: str, item: dict[str, Any]) ->
 
 
 def maxmind_geo_lookup(ip: str) -> dict[str, Any] | None:
+    global GEOIP_LAST_ERROR
     if not GEOIP_MMDB_PATH or not Path(GEOIP_MMDB_PATH).exists():
+        GEOIP_LAST_ERROR = "GeoIP database not configured"
         return None
     try:
         geoip2_database = import_module("geoip2.database")
-    except Exception:
+    except Exception as exc:
+        GEOIP_LAST_ERROR = f"geoip2 unavailable: {exc}"
         return None
     try:
         with geoip2_database.Reader(GEOIP_MMDB_PATH) as reader:
             response = reader.city(ip)
     except Exception as exc:
+        GEOIP_LAST_ERROR = clean_text(exc)
         logger.debug("GeoLite2 sem resposta para %s: %s", ip, exc)
         return None
+    GEOIP_LAST_ERROR = ""
     country_code = clean_text(getattr(response.country, "iso_code", "")).upper()
     country_name = clean_text(getattr(response.country, "name", ""))
     return {
@@ -3665,23 +3744,35 @@ def geo_lookup_ip(ip: str, asn: int = 0, as_name: str = "") -> dict[str, Any]:
             "as_name": clean_text(as_name),
             "source": "invalid",
         }
-    cached = lookup_geo_cache(ip_text)
+    try:
+        cached = lookup_geo_cache(ip_text)
+    except Exception as exc:
+        logger.debug("Falha ao consultar geo_ip_cache para %s: %s", ip_text, exc)
+        cached = None
     if cached:
         cached["ip"] = ip_text
         return cached
     item = maxmind_geo_lookup(ip_text) if parsed.is_global else None
-    resolved_asn = lookup_asn_info(asn) if int(asn or 0) > 0 else None
+    try:
+        resolved_asn = lookup_asn_info(asn) if int(asn or 0) > 0 else None
+    except Exception as exc:
+        logger.debug("Falha ao consultar ASN %s para GeoIP: %s", asn, exc)
+        resolved_asn = None
     if item is None:
         if resolved_asn is None and parsed.is_global:
-            resolved = resolve_asn_for_ip(ip_text)
-            if int(resolved.get("asn") or 0) > 0:
-                resolved_asn = lookup_asn_info(int(resolved["asn"])) or resolved
-                asn = int(resolved["asn"])
-                as_name = clean_text(resolved.get("as_name"))
+            try:
+                resolved = resolve_asn_for_ip(ip_text)
+                if int(resolved.get("asn") or 0) > 0:
+                    try:
+                        resolved_asn = lookup_asn_info(int(resolved["asn"])) or resolved
+                    except Exception:
+                        resolved_asn = resolved
+                    asn = int(resolved["asn"])
+                    as_name = clean_text(resolved.get("as_name"))
+            except Exception as exc:
+                logger.debug("Falha ao resolver ASN para GeoIP %s: %s", ip_text, exc)
         country_code = clean_text((resolved_asn or {}).get("country")).upper()
         geo = country_geo(country_code)
-        protocol_value = row.get("proto") if row.get("proto") is not None else row.get("sample_proto")
-        protocol_label = proto_name(protocol_value) if protocol_value is not None else "-"
         item = {
             **geo,
             "region": "",
@@ -6516,15 +6607,58 @@ def pmacct_state_dir() -> Path:
     return Path(os.getenv("PMACCT_STATE_DIR", "/var/spool/pmacct/state"))
 
 
-def pmacct_status_for_file(output_file: str) -> dict[str, Any]:
-    status_path = pmacct_state_dir() / f"{Path(output_file).name}.status.json"
-    if not status_path.exists():
-        return {}
+def pmacct_spool_dir() -> Path:
+    return Path(os.getenv("PMACCT_SPOOL_DIR", "/var/spool/pmacct"))
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(status_path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def pmacct_status_for_file(output_file: str) -> dict[str, Any]:
+    output_path = Path(output_file)
+    state_dir = pmacct_state_dir()
+    status_path = state_dir / f"{output_path.name}.status.json"
+    offset_path = state_dir / f"{output_path.name}.offset.json"
+    status = read_json_object(status_path)
+    checkpoint = read_json_object(offset_path)
+    payload = {**checkpoint, **status}
+    payload["file"] = clean_text(payload.get("file")) or str(output_path)
+    status_issue = ""
+    if output_path.exists():
+        try:
+            stat = output_path.stat()
+            offset = int(payload.get("offset") or 0)
+            payload["file_size_mb"] = round(stat.st_size / 1024 / 1024, 3)
+            payload["inode"] = getattr(stat, "st_ino", 0)
+            payload["lag_bytes"] = max(0, stat.st_size - offset)
+        except OSError as exc:
+            status_issue = f"spool stat failed: {exc}"
+    elif not pmacct_spool_dir().exists():
+        status_issue = "spool volume not mounted in backend"
+    else:
+        status_issue = "spool csv not found in backend"
+    if not status and checkpoint:
+        payload["parser_status"] = "checkpoint sem status"
+    elif not status and not checkpoint:
+        payload["parser_status"] = status_issue or "sem status"
+    if status_issue:
+        payload["status_issue"] = status_issue
+        payload["last_error"] = clean_text(payload.get("last_error")) or status_issue
+    return payload
+
+
+def pmacct_output_file_from_state_name(path: Path) -> str:
+    name = path.name
+    if name.endswith(".status.json"):
+        name = name[: -len(".status.json")]
+    elif name.endswith(".offset.json"):
+        name = name[: -len(".offset.json")]
+    return str(pmacct_spool_dir() / name)
 
 
 @app.get("/api/collectors/ingestion/status")
@@ -6568,19 +6702,22 @@ def collectors_ingestion_status(request: Request):
                 "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
                 "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
                 "parser_status": status.get("parser_status") or "sem status",
+                "status_issue": status.get("status_issue") or "",
                 "last_error": status.get("last_error") or "",
                 "last_rotation": status.get("last_rotation"),
                 "updated_at": status.get("updated_at") or "",
             }
         )
-    for status_path in (pmacct_state_dir().glob("*.status.json") if pmacct_state_dir().exists() else []):
-        try:
-            status = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        output_file = clean_text(status.get("file"))
+    state_paths = []
+    if pmacct_state_dir().exists():
+        state_paths.extend(pmacct_state_dir().glob("*.status.json"))
+        state_paths.extend(pmacct_state_dir().glob("*.offset.json"))
+    for status_path in state_paths:
+        output_file = pmacct_output_file_from_state_name(status_path)
         if not output_file or output_file in seen_files:
             continue
+        seen_files.add(output_file)
+        status = pmacct_status_for_file(output_file)
         items.append(
             {
                 "sensor_id": None,
@@ -6599,6 +6736,7 @@ def collectors_ingestion_status(request: Request):
                 "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
                 "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
                 "parser_status": status.get("parser_status") or "ok",
+                "status_issue": status.get("status_issue") or "",
                 "last_error": status.get("last_error") or "",
                 "last_rotation": status.get("last_rotation"),
                 "updated_at": status.get("updated_at") or "",
@@ -7286,6 +7424,23 @@ def asn_status():
             WHERE status IN ('queued', 'pending', 'stale', 'resolving')
             """
         ).fetchone()
+        queue_rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM asn_resolution_queue
+            GROUP BY status
+            """
+        ).fetchall()
+        error_row = conn.execute(
+            """
+            SELECT last_error
+            FROM asn_resolution_queue
+            WHERE last_error <> ''
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    queue_counts = {clean_text(row["status"]): int(row["count"] or 0) for row in queue_rows}
     last_update = max(
         clean_text(prefixes["updated_at"] if prefixes else ""),
         clean_text(info["updated_at"] if info else ""),
@@ -7296,7 +7451,12 @@ def asn_status():
         "total_asn_info": int(info["count"] or 0) if info else 0,
         "total_cache": int(cache["count"] or 0) if cache else 0,
         "total_pending": int(pending["count"] or 0) if pending else 0,
+        "queued": queue_counts.get("queued", 0) + queue_counts.get("pending", 0) + queue_counts.get("stale", 0),
+        "resolving": queue_counts.get("resolving", 0),
+        "resolved": queue_counts.get("resolved", 0),
+        "failed": queue_counts.get("failed", 0),
         "last_update": last_update,
+        "last_error": clean_text(error_row["last_error"] if error_row else ""),
         "resolver_enabled": ASN_RESOLVER_ENABLED,
         "resolver_interval_seconds": ASN_RESOLVER_INTERVAL_SECONDS,
         "resolver_batch_size": ASN_RESOLVER_BATCH_SIZE,
@@ -9097,6 +9257,45 @@ def add_geo_filters(
         filters.append("isIPAddressInRange(toString(dst_ip), {geo_dst_cidr:String})")
 
 
+@app.get("/api/geo/status")
+def geo_status():
+    mmdb_path = GEOIP_MMDB_PATH
+    mmdb_found = bool(mmdb_path and Path(mmdb_path).exists())
+    cached_ips = 0
+    cached_prefixes = 0
+    last_update_at = ""
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            ensure_asn_db(conn)
+            geo_row = conn.execute(
+                "SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM geo_ip_cache"
+            ).fetchone()
+            prefix_row = conn.execute(
+                "SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM asn_prefixes"
+            ).fetchone()
+            cached_ips = int(geo_row["count"] or 0) if geo_row else 0
+            cached_prefixes = int(prefix_row["count"] or 0) if prefix_row else 0
+            last_update_at = max(
+                clean_text(geo_row["updated_at"] if geo_row else ""),
+                clean_text(prefix_row["updated_at"] if prefix_row else ""),
+            )
+    except Exception as exc:
+        logger.debug("Falha ao montar geo/status: %s", exc)
+        last_error = clean_text(exc)
+    else:
+        last_error = (GEOIP_LAST_ERROR or "GeoIP database not configured") if not mmdb_found else ""
+    return {
+        "enabled": mmdb_found or cached_ips > 0 or cached_prefixes > 0,
+        "mmdb_found": mmdb_found,
+        "mmdb_path": mmdb_path,
+        "cached_ips": cached_ips,
+        "cached_prefixes": cached_prefixes,
+        "last_error": last_error,
+        "last_update_at": last_update_at,
+    }
+
+
 @app.get("/api/geo/flows")
 def geo_flows(
     range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
@@ -9205,8 +9404,12 @@ def geo_flows(
     edge_groups: dict[tuple[str, str], dict[str, Any]] = {}
     node_groups: dict[str, dict[str, Any]] = {}
     for row in rows_as_dicts(result):
-        src_geo = geo_lookup_ip(row["src_ip"], int(row.get("src_asn") or 0), clean_text(row.get("src_as_name")))
-        dst_geo = geo_lookup_ip(row["dst_ip"], int(row.get("dst_asn") or 0), clean_text(row.get("dst_as_name")))
+        try:
+            src_geo = geo_lookup_ip(row["src_ip"], int(row.get("src_asn") or 0), clean_text(row.get("src_as_name")))
+            dst_geo = geo_lookup_ip(row["dst_ip"], int(row.get("dst_asn") or 0), clean_text(row.get("dst_as_name")))
+        except Exception as exc:
+            logger.warning("Falha ao geolocalizar linha de flow: %s", exc)
+            continue
         src_code = clean_text(src_geo.get("country_code")).upper() or "ND"
         dst_code = clean_text(dst_geo.get("country_code")).upper() or "ND"
         src_label = clean_text(src_geo.get("country_name")) or src_code
@@ -9277,6 +9480,7 @@ def geo_flows(
         "edges": edges,
         "items": edges,
         "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
+        "warning": "" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "GeoIP database not configured",
     }
     return dashboard_cache_set(cache_key, payload)
 
@@ -9558,12 +9762,20 @@ def top_asn_dimension(
         asn_info = lookup_asn_info(asn) or {}
         if not asn_info:
             queue_missing_asn_info(asn)
+        display_name = asn_display_name(
+            asn,
+            asn_info.get("as_name"),
+            asn_info.get("org_name"),
+            row.get("as_name"),
+        )
         items.append(
             {
                 "rank": index,
                 "asn": asn_label(asn),
                 "asn_number": asn,
-                "description": clean_text(row.get("as_name")) or clean_text(asn_info.get("as_name")) or "-",
+                "display_name": display_name,
+                "description": display_name if display_name != asn_label(asn) else "-",
+                "org_name": clean_text(asn_info.get("org_name")),
                 "country": clean_text(asn_info.get("country")).upper() or "N/D",
                 "source": "flow",
                 "bps": round(float(row["bps"] or 0), 2),
@@ -9594,13 +9806,22 @@ def top_asn_dimension(
         asn = int(resolved.get("asn") or 0)
         if asn <= 0:
             continue
+        asn_info = lookup_asn_info(asn) or {}
+        display_name = asn_display_name(
+            asn,
+            asn_info.get("as_name"),
+            asn_info.get("org_name"),
+            resolved.get("as_name"),
+        )
         item = grouped.setdefault(
             asn,
             {
                 "asn": asn_label(asn),
                 "asn_number": asn,
-                "description": clean_text(resolved.get("as_name")) or "-",
-                "country": clean_text(resolved.get("country")).upper() or "N/D",
+                "display_name": display_name,
+                "description": display_name if display_name != asn_label(asn) else "-",
+                "org_name": clean_text(asn_info.get("org_name")),
+                "country": clean_text(asn_info.get("country")).upper() or clean_text(resolved.get("country")).upper() or "N/D",
                 "source": clean_text(resolved.get("source")) or "local-cache",
                 "bps": 0.0,
                 "packets": 0,
@@ -9643,13 +9864,22 @@ def top_asn_dimension(
             if not asn_info:
                 continue
             asn = int(asn_info["asn"] or 0)
+            resolved_info = lookup_asn_info(asn) or {}
+            display_name = asn_display_name(
+                asn,
+                resolved_info.get("as_name"),
+                resolved_info.get("org_name"),
+                asn_info.get("as_name"),
+            )
             item = grouped.setdefault(
                 asn,
                 {
                     "asn": asn_label(asn),
                     "asn_number": asn,
-                    "description": asn_info.get("as_name") or "-",
-                    "country": clean_text(asn_info.get("country")).upper() or "N/D",
+                    "display_name": display_name,
+                    "description": display_name if display_name != asn_label(asn) else "-",
+                    "org_name": clean_text(resolved_info.get("org_name")),
+                    "country": clean_text(resolved_info.get("country")).upper() or clean_text(asn_info.get("country")).upper() or "N/D",
                     "source": asn_info.get("source") or "local-cache",
                     "bps": 0.0,
                     "packets": 0,

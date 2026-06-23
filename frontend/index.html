@@ -930,10 +930,10 @@
             <div class="dashboard-controls">
               <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
                 <option value="5">Ultimos 5 minutos</option>
-                <option value="10">Ultimos 10 minutos</option>
+                <option value="10" selected>Ultimos 10 minutos</option>
                 <option value="15">Ultimos 15 minutos</option>
                 <option value="30">Ultimos 30 minutos</option>
-                <option value="60" selected>Ultima 1 hora</option>
+                <option value="60">Ultima 1 hora</option>
                 <option value="120">Ultimas 2 horas</option>
                 <option value="240">Ultimas 4 horas</option>
                 <option value="360">Ultimas 6 horas</option>
@@ -1165,7 +1165,7 @@
                 </div>
               </div>
             </div>
-            <div class="col-12 dashboard-widget" data-widget-id="global-summary">
+            <div class="col-12 dashboard-widget hidden-widget" data-widget-id="global-summary">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                   <div class="panel-title">Mapa global resumido</div>
@@ -1226,8 +1226,9 @@
                 <option value="flows">flows</option>
               </select>
               <select id="mapTopN" class="form-select form-select-sm" aria-label="Top N">
+                <option value="20" selected>Top 20</option>
                 <option value="50">Top 50</option>
-                <option value="100" selected>Top 100</option>
+                <option value="100">Top 100</option>
                 <option value="500">Top 500</option>
               </select>
               <button id="refreshMapButton" type="button" class="btn btn-sm btn-success">
@@ -2044,7 +2045,7 @@
                     <select id="databaseCleanupScope" class="form-select form-select-sm">
                       <option value="raw">Somente flow_raw</option>
                       <option value="raw_aggregates">Raw + agregados</option>
-                      <option value="all">Raw + agregados + SNMP</option>
+                      <option value="all">Raw + agregados + SNMP + anomalias</option>
                     </select>
                   </div>
                   <button id="databaseOptimizeButton" type="button" class="btn btn-sm btn-outline-warning">
@@ -2869,6 +2870,7 @@
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
     const protocolPalette = { TCP: '#2563eb', UDP: '#16a34a', ICMP: '#f59e0b', 'TCP+SYN': '#dc2626', OTHER: '#64748b' };
     const DASHBOARD_LAYOUT_KEY = 'gmjFlowDashboardLayout';
+    const DEFAULT_DASHBOARD_HIDDEN_WIDGETS = ['global-summary'];
     let activeView = 'dashboard';
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
@@ -2894,6 +2896,10 @@
     let dashboardRefreshInFlight = false;
     let dashboardRefreshFailures = 0;
     let dashboardEditing = false;
+    let dashboardAbortController = null;
+    let mapAbortController = null;
+    let mapDebounceTimer = null;
+    let mapBackoffUntil = 0;
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' },
@@ -3032,7 +3038,6 @@
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
       loadDashboardSensors().then(() => refresh()).catch(console.error);
-      updateAnomalySummary().catch(console.error);
       createIcons();
     }
 
@@ -3221,7 +3226,7 @@
       query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '15');
       query.set('direction', document.getElementById('mapDirection').value || 'both');
       query.set('metric', document.getElementById('mapMetric').value || 'bits_s');
-      query.set('top_n', document.getElementById('mapTopN').value || '100');
+      query.set('top_n', document.getElementById('mapTopN').value || '20');
       const sensorId = selectedMapSensorId();
       const interfaceId = selectedMapInterfaceId();
       const protocol = document.getElementById('mapProtocol').value;
@@ -3246,23 +3251,45 @@
       return `${API_BASE}${path}`;
     }
 
-    async function fetchJSON(path, queryString = dashboardParams()) {
+    async function fetchJSON(path, queryString = dashboardParams(), options = {}) {
       const endpoint = `${API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
-      const response = await authFetch(endpoint);
+      const response = await authFetch(endpoint, options);
       if (!response.ok) {
         console.error('Falha na chamada da API', endpoint, response.status);
         throw new Error(`${endpoint} ${response.status}`);
       }
       const payload = await response.json();
-      if (!Array.isArray(payload.items)) {
-        console.warn('Endpoint sem items array', endpoint, payload);
-        return { items: [] };
+      if (Array.isArray(payload)) {
+        return { items: payload };
       }
-      console.info('Endpoint retornou itens', endpoint, payload.items.length);
-      if (payload.items.length === 0) {
+      if (!Array.isArray(payload.items) && !Array.isArray(payload.series)) {
+        console.warn('Endpoint sem items/series array', endpoint, payload);
+      }
+      const count = Array.isArray(payload.items) ? payload.items.length : (Array.isArray(payload.series) ? payload.series.length : 0);
+      if (count === 0) {
         console.warn('Endpoint retornou vazio', endpoint);
       }
-      return payload;
+      return payload || {};
+    }
+
+    function payloadItems(payload) {
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload?.items)) return payload.items;
+      if (Array.isArray(payload?.series)) return payload.series;
+      return [];
+    }
+
+    function payloadSeries(payload) {
+      const series = Array.isArray(payload?.series)
+        ? payload.series
+        : (Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : []));
+      return series.map(item => ({
+        ...item,
+        points: (Array.isArray(item.points) ? item.points : [])
+          .filter(point => point && point.ts != null)
+          .map(point => ({ ...point, value: Number(point.value) || 0 }))
+          .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+      }));
     }
 
     async function apiRequest(path, options = {}) {
@@ -3336,11 +3363,11 @@
       select.disabled = !sensorId;
       select.innerHTML = [
         '<option value="">Todas as interfaces</option>',
-        ...mapInterfaceCache.map(iface => (
+        ...dashboardInterfaceCache.map(iface => (
           `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
         ))
       ].join('');
-      select.value = mapInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
     async function loadMapInterfaces(sensorId = selectedMapSensorId()) {
@@ -3392,11 +3419,11 @@
       select.disabled = !sensorId;
       select.innerHTML = [
         '<option value="">Todas as interfaces</option>',
-        ...dashboardInterfaceCache.map(iface => (
+        ...mapInterfaceCache.map(iface => (
           `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
         ))
       ].join('');
-      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+      select.value = mapInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
     async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
@@ -3423,9 +3450,6 @@
         renderTopFlowSensorSelect();
         renderMapSensorSelect();
         await loadDashboardInterfaces();
-        await loadMapInterfaces();
-        await loadFlowInterfaces();
-        await loadTopFlowInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
         dashboardInterfaceCache = [];
@@ -4557,6 +4581,9 @@
         });
       });
       const axisLimit = maxMagnitude > 0 ? Math.ceil(maxMagnitude * 1.16) : undefined;
+      if (!series.length) {
+        return emptyChartOption('Sem dados no periodo');
+      }
       return {
         animation: false,
         grid: { left: 18, right: 18, top: 54, bottom: 38, containLabel: true },
@@ -4590,6 +4617,33 @@
         },
         series
       };
+    }
+
+    function emptyChartOption(message = 'Sem dados no periodo', danger = false) {
+      return {
+        animation: false,
+        title: {
+          text: message,
+          left: 'center',
+          top: 'middle',
+          textStyle: { color: danger ? '#b91c1c' : '#6b7280', fontSize: 13, fontWeight: 500 }
+        },
+        xAxis: { show: false },
+        yAxis: { show: false },
+        series: []
+      };
+    }
+
+    function renderChartError(chart, message = 'Erro ao carregar widget') {
+      console.error(message);
+      chart.clear();
+      chart.setOption(emptyChartOption(message, true), true);
+    }
+
+    function renderTableMessage(id, colspan, message, danger = false) {
+      const tbody = document.getElementById(id);
+      if (!tbody) return;
+      tbody.innerHTML = `<tr><td colspan="${colspan}" class="${danger ? 'text-danger' : 'text-muted'}">${escapeHtml(message)}</td></tr>`;
     }
 
     function stackedReadout(items, apiMetric) {
@@ -4720,6 +4774,9 @@
     }
 
     function barOption(items, type, valueKey = 'bps') {
+      if (!Array.isArray(items) || !items.length) {
+        return emptyChartOption('Sem dados no periodo');
+      }
       const top = items.slice(0, 8).reverse();
       return {
         animation: false,
@@ -4750,6 +4807,9 @@
     }
 
     function pieOption(items, type) {
+      if (!Array.isArray(items) || !items.length) {
+        return emptyChartOption('Sem dados no periodo');
+      }
       return {
         animation: false,
         color: palette,
@@ -4777,21 +4837,58 @@
       `).join('') || `<tr><td colspan="3" class="text-muted">Sem dados</td></tr>`;
     }
 
-    function asnLabel(item) {
-      return item.asn || 'ASN indisponivel';
+    function asnCode(item) {
+      const number = Number(item.asn_number || 0);
+      return item.asn || (number > 0 ? `AS${number}` : 'ASN indisponivel');
+    }
+
+    function isBadAsnName(value, item) {
+      const text = String(value || '').trim();
+      if (!text || text === '-' || text.toUpperCase() === 'N/D') return true;
+      const normalized = text.toUpperCase().replace(/\s+/g, '');
+      const number = Number(item.asn_number || 0);
+      if (number > 0 && (normalized === `AS${number}` || normalized === `ASN${number}`)) return true;
+      return /^ASN?\d+$/.test(normalized);
+    }
+
+    function asnDisplayName(item) {
+      for (const field of ['display_name', 'as_name', 'org_name', 'description']) {
+        const value = item[field];
+        if (!isBadAsnName(value, item)) return String(value).trim();
+      }
+      return asnCode(item);
+    }
+
+    function truncateLabel(value, limit = 22) {
+      const text = String(value || '');
+      return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
     }
 
     function asnPieOption(items) {
+      if (!Array.isArray(items) || !items.length) {
+        return emptyChartOption('Sem dados no periodo');
+      }
       return {
         animation: false,
         color: palette,
-        tooltip: { trigger: 'item', valueFormatter: formatBps },
+        tooltip: {
+          trigger: 'item',
+          formatter(params) {
+            const item = params.data?.item || {};
+            const percent = Number(params.percent || item.percent || 0).toFixed(1);
+            return `${escapeHtml(asnDisplayName(item))} - ${escapeHtml(asnCode(item))} - ${formatBps(params.value)} - ${percent}%`;
+          }
+        },
         series: [{
           type: 'pie',
           radius: ['50%', '74%'],
           center: ['50%', '50%'],
           label: { formatter: '{b}', color: '#374151' },
-          data: items.map(item => ({ name: asnLabel(item), value: item.bps }))
+          data: items.map(item => ({
+            name: truncateLabel(asnDisplayName(item), 22),
+            value: item.bps,
+            item
+          }))
         }]
       };
     }
@@ -4805,8 +4902,8 @@
       tbody.innerHTML = items.slice(0, 15).map((item, index) => `
         <tr>
           <td>${formatNumber(item.rank || index + 1)}</td>
-          <td>${escapeHtml(asnLabel(item))}</td>
-          <td>${escapeHtml(item.description || '-')}</td>
+          <td>${escapeHtml(asnCode(item))}</td>
+          <td title="${escapeHtml(asnDisplayName(item))}">${escapeHtml(asnDisplayName(item))}</td>
           <td>${escapeHtml(item.country || 'N/D')}</td>
           <td class="text-end">${formatBps(item.bps)}</td>
           <td class="text-end">${Number(item.percent || 0).toFixed(1)}%</td>
@@ -4844,9 +4941,10 @@
         const resolved = await apiRequest('/api/asn/resolve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ limit: 1000, force: false })
+          body: JSON.stringify({ limit: 100, force: false })
         });
-        status.textContent = `${formatNumber(queued.queued || 0)} IPs enfileirados; ${formatNumber(resolved.prefixes_inserted || 0)} prefixos atualizados; ${formatNumber(resolved.unresolved || 0)} ainda indisponiveis`;
+        const queueStatus = await apiRequest('/api/asn/status');
+        status.textContent = `${formatNumber(queued.queued_asns || 0)} ASNs e ${formatNumber(queued.queued || 0)} IPs enfileirados; ${formatNumber(resolved.resolved || 0)} resolvidos; fila ${formatNumber(queueStatus.queued || 0)}`;
         await refresh();
       } catch (error) {
         status.textContent = `Falha ASN: ${error.message}`;
@@ -5317,24 +5415,63 @@
       `).join('') || '<tr><td colspan="3" class="text-muted">Sem rotas</td></tr>';
     }
 
-    async function loadGlobalMap() {
+    function abortMapRequest() {
+      if (mapAbortController) {
+        mapAbortController.abort();
+        mapAbortController = null;
+      }
+      if (mapDebounceTimer) {
+        clearTimeout(mapDebounceTimer);
+        mapDebounceTimer = null;
+      }
+    }
+
+    function debounceGlobalMapLoad(delay = 400) {
+      if (activeView !== 'global-map') return;
+      if (mapDebounceTimer) clearTimeout(mapDebounceTimer);
+      mapDebounceTimer = setTimeout(() => {
+        mapDebounceTimer = null;
+        loadGlobalMap().catch(console.error);
+      }, delay);
+    }
+
+    async function loadGlobalMap({ force = false } = {}) {
+      if (activeView !== 'global-map') return;
       const status = document.getElementById('globalMapStatus');
+      if (!force && Date.now() < mapBackoffUntil) {
+        status.textContent = 'Mapa em espera apos erro recente';
+        return;
+      }
+      abortMapRequest();
+      const controller = new AbortController();
+      mapAbortController = controller;
       status.textContent = 'Atualizando mapa global...';
       try {
-        const payload = await apiRequest(`/api/geo/flows?${mapParams()}`);
+        const payload = await apiRequest(`/api/geo/flows?${mapParams()}`, { signal: controller.signal });
+        if (controller.signal.aborted || activeView !== 'global-map') return;
         renderGlobalMap(payload);
-        status.textContent = `${formatNumber((payload.edges || []).length)} rotas geograficas`;
+        const warning = payload.warning ? ` - ${payload.warning}` : '';
+        status.textContent = `${formatNumber((payload.edges || []).length)} rotas geograficas${warning}`;
       } catch (error) {
+        if (error.name === 'AbortError') return;
+        mapBackoffUntil = Date.now() + 60000;
+        console.error('Falha ao carregar Mapa Global', error);
         status.textContent = `Falha no mapa: ${error.message}`;
         charts.globalMap.clear();
+        renderTableMessage('globalMapRoutesTable', 3, 'Erro ao carregar mapa', true);
+      } finally {
+        if (mapAbortController === controller) mapAbortController = null;
       }
     }
 
     function dashboardLayout() {
       try {
-        return JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_KEY) || '{}') || {};
+        const stored = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_KEY) || '{}') || {};
+        const hidden = new Set(Array.isArray(stored.hidden) ? stored.hidden : []);
+        DEFAULT_DASHBOARD_HIDDEN_WIDGETS.forEach(id => hidden.add(id));
+        return { ...stored, hidden: Array.from(hidden) };
       } catch {
-        return {};
+        return { hidden: [...DEFAULT_DASHBOARD_HIDDEN_WIDGETS] };
       }
     }
 
@@ -5368,9 +5505,16 @@
 
     function resetDashboardLayout() {
       localStorage.removeItem(DASHBOARD_LAYOUT_KEY);
-      document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget').forEach(widget => widget.classList.remove('hidden-widget'));
+      document.querySelectorAll('#dashboardWidgetGrid .dashboard-widget').forEach(widget => {
+        widget.classList.toggle('hidden-widget', DEFAULT_DASHBOARD_HIDDEN_WIDGETS.includes(widget.dataset.widgetId));
+      });
       applyDashboardLayout();
       createIcons();
+    }
+
+    function isDashboardWidgetVisible(widgetId) {
+      const widget = document.querySelector(`#dashboardWidgetGrid [data-widget-id="${widgetId}"]`);
+      return Boolean(widget && !widget.classList.contains('hidden-widget'));
     }
 
     async function loadIngestionStatus() {
@@ -5388,7 +5532,7 @@
             <td class="text-end">${formatBytes(item.lag_bytes)}</td>
             <td>${formatDateTime(item.last_flow_time)}</td>
             <td>${formatDateTime(item.last_insert_at)}</td>
-            <td>${escapeHtml(item.parser_status || '-')}</td>
+            <td title="${escapeHtml(item.status_issue || item.last_error || '')}">${escapeHtml(item.status_issue || item.parser_status || '-')}</td>
           </tr>
         `).join('') || '<tr><td colspan="8" class="text-muted">Sem status do parser</td></tr>';
       } catch (error) {
@@ -5416,70 +5560,170 @@
       }
     }
 
+    function abortDashboardRequest() {
+      if (dashboardAbortController) {
+        dashboardAbortController.abort();
+        dashboardAbortController = null;
+      }
+    }
+
+    function settledDashboardPayload(name, result) {
+      if (result.status === 'fulfilled') return result.value || {};
+      if (result.reason?.name === 'AbortError') return { __aborted: true };
+      console.error(`Erro ao carregar widget do Dashboard: ${name}`, result.reason);
+      return { __error: result.reason || new Error('Falha desconhecida') };
+    }
+
+    function widgetErrorMessage(payload) {
+      return payload?.__error ? 'Erro ao carregar widget' : '';
+    }
+
     async function refresh() {
       if (!authToken()) return;
       if (dashboardRefreshInFlight || document.visibilityState !== 'visible') return;
       if (activeView !== 'dashboard') return;
       dashboardRefreshInFlight = true;
+      abortDashboardRequest();
+      const controller = new AbortController();
+      dashboardAbortController = controller;
       try {
-        await checkHealth();
+        await checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
         const bpsSeriesQuery = dashboardSeriesParams('bits_s');
         const ppsSeriesQuery = dashboardSeriesParams('packets_s');
         const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
-        const [bps, pps, srcIp, dstIp, ports, protocols, tcpFlags, asnSrc, asnDst, conversations, synSrc, synDst, geoSummary] = await Promise.all([
-          fetchJSON('/api/dashboard/series', bpsSeriesQuery),
-          fetchJSON('/api/dashboard/series', ppsSeriesQuery),
-          fetchJSON('/api/tops/src-ip', topQuery),
-          fetchJSON('/api/tops/dst-ip', topQuery),
-          fetchJSON('/api/tops/ports', topQuery),
-          fetchJSON('/api/tops/protocols', topQuery),
-          fetchJSON('/api/tops/tcp-flags', topQuery),
-          fetchJSON('/api/tops/asn-src', topQuery),
-          fetchJSON('/api/tops/asn-dst', topQuery),
-          fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=8`),
-          fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=src&limit=8`),
-          fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=dst&limit=8`),
-          fetchJSON('/api/geo/flows', `${topQuery}&top_n=8&metric=bits_s`)
-        ]);
+        const requestOptions = { signal: controller.signal };
+        const entries = [
+          ['bps', fetchJSON('/api/dashboard/series', bpsSeriesQuery, requestOptions)],
+          ['pps', fetchJSON('/api/dashboard/series', ppsSeriesQuery, requestOptions)],
+          ['srcIp', fetchJSON('/api/tops/src-ip', topQuery, requestOptions)],
+          ['dstIp', fetchJSON('/api/tops/dst-ip', topQuery, requestOptions)],
+          ['ports', fetchJSON('/api/tops/ports', topQuery, requestOptions)],
+          ['protocols', fetchJSON('/api/tops/protocols', topQuery, requestOptions)],
+          ['tcpFlags', fetchJSON('/api/tops/tcp-flags', topQuery, requestOptions)],
+          ['asnSrc', fetchJSON('/api/tops/asn-src', topQuery, requestOptions)],
+          ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)]
+        ];
+        if (isDashboardWidgetVisible('top-conversations')) {
+          entries.push(['conversations', fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=8`, requestOptions)]);
+        }
+        if (isDashboardWidgetVisible('syn-src')) {
+          entries.push(['synSrc', fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=src&limit=8`, requestOptions)]);
+        }
+        if (isDashboardWidgetVisible('syn-dst')) {
+          entries.push(['synDst', fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=dst&limit=8`, requestOptions)]);
+        }
+        if (isDashboardWidgetVisible('global-summary') && Date.now() >= mapBackoffUntil) {
+          entries.push(['geoSummary', fetchJSON('/api/geo/flows', `${topQuery}&top_n=8&metric=bits_s`, requestOptions)]);
+        }
+        const settled = await Promise.allSettled(entries.map(entry => entry[1]));
+        if (controller.signal.aborted || activeView !== 'dashboard') return;
+        const payloads = Object.fromEntries(entries.map((entry, index) => [entry[0], settledDashboardPayload(entry[0], settled[index])]));
 
-        const bpsItems = bps.series || bps.items || [];
-        const ppsItems = pps.series || pps.items || [];
-        const srcIpItems = srcIp.items;
-        const dstIpItems = dstIp.items;
-        const portItems = ports.items;
-        const protocolItems = protocols.items;
-        const tcpFlagItems = tcpFlags.items;
+        const bpsItems = payloadSeries(payloads.bps);
+        const ppsItems = payloadSeries(payloads.pps);
+        if (payloads.bps.__error) {
+          renderChartError(charts.bps);
+          document.getElementById('bpsReadout').textContent = 'Erro ao carregar widget';
+        } else {
+          charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
+          document.getElementById('bpsReadout').textContent = stackedReadout(bpsItems, 'bits_s');
+        }
+        if (payloads.pps.__error) {
+          renderChartError(charts.pps);
+          document.getElementById('ppsReadout').textContent = 'Erro ao carregar widget';
+        } else {
+          charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
+          document.getElementById('ppsReadout').textContent = stackedReadout(ppsItems, 'packets_s');
+        }
 
-        charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
-        charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
+        const srcIpItems = payloadItems(payloads.srcIp);
+        const dstIpItems = payloadItems(payloads.dstIp);
+        const portItems = payloadItems(payloads.ports);
+        const protocolItems = payloadItems(payloads.protocols);
+        const tcpFlagItems = payloadItems(payloads.tcpFlags);
 
-        document.getElementById('bpsReadout').textContent = stackedReadout(bpsItems, 'bits_s');
-        document.getElementById('ppsReadout').textContent = stackedReadout(ppsItems, 'packets_s');
+        if (payloads.srcIp.__error) {
+          renderChartError(charts.srcIp);
+          renderTableMessage('srcIpTable', 3, widgetErrorMessage(payloads.srcIp), true);
+        } else {
+          charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
+          fillTable('srcIpTable', srcIpItems, 'ip');
+        }
+        if (payloads.dstIp.__error) {
+          renderChartError(charts.dstIp);
+          renderTableMessage('dstIpTable', 3, widgetErrorMessage(payloads.dstIp), true);
+        } else {
+          charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
+          fillTable('dstIpTable', dstIpItems, 'ip');
+        }
+        if (payloads.ports.__error) {
+          renderChartError(charts.ports);
+          renderTableMessage('portsTable', 3, widgetErrorMessage(payloads.ports), true);
+        } else {
+          charts.ports.setOption(barOption(portItems, 'port'), true);
+          fillTable('portsTable', portItems, 'port', 'packets');
+        }
+        if (payloads.protocols.__error) {
+          renderChartError(charts.protocols);
+          renderTableMessage('protocolsTable', 3, widgetErrorMessage(payloads.protocols), true);
+        } else {
+          charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
+          fillTable('protocolsTable', protocolItems, 'proto', 'packets');
+        }
+        if (payloads.tcpFlags.__error) {
+          renderChartError(charts.tcpFlags);
+          renderTableMessage('tcpFlagsTable', 3, widgetErrorMessage(payloads.tcpFlags), true);
+        } else {
+          charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
+          fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
+        }
+        if (payloads.asnSrc.__error) {
+          renderChartError(charts.asnSrc);
+          renderTableMessage('asnSrcTable', 7, widgetErrorMessage(payloads.asnSrc), true);
+          document.getElementById('asnSrcStatus').textContent = 'Erro ao carregar widget';
+        } else {
+          renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', payloads.asnSrc);
+        }
+        if (payloads.asnDst.__error) {
+          renderChartError(charts.asnDst);
+          renderTableMessage('asnDstTable', 7, widgetErrorMessage(payloads.asnDst), true);
+          document.getElementById('asnDstStatus').textContent = 'Erro ao carregar widget';
+        } else {
+          renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', payloads.asnDst);
+        }
 
-        charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
-        charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
-        charts.ports.setOption(barOption(portItems, 'port'), true);
-        charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
-        charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
-        renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', asnSrc);
-        renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', asnDst);
-
-        fillTable('srcIpTable', srcIpItems, 'ip');
-        fillTable('dstIpTable', dstIpItems, 'ip');
-        fillTable('portsTable', portItems, 'port', 'packets');
-        fillTable('protocolsTable', protocolItems, 'proto', 'packets');
-        fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
-        renderTopConversations(conversations.items || []);
-        renderSynTable('topSynSrcTable', synSrc.items || []);
-        renderSynTable('topSynDstTable', synDst.items || []);
-        renderGlobalSummary(geoSummary.edges || geoSummary.items || []);
+        if (isDashboardWidgetVisible('top-conversations')) {
+          payloads.conversations?.__error
+            ? renderTableMessage('topConversationsTable', 4, widgetErrorMessage(payloads.conversations), true)
+            : renderTopConversations(payloadItems(payloads.conversations));
+        }
+        if (isDashboardWidgetVisible('syn-src')) {
+          payloads.synSrc?.__error
+            ? renderTableMessage('topSynSrcTable', 3, widgetErrorMessage(payloads.synSrc), true)
+            : renderSynTable('topSynSrcTable', payloadItems(payloads.synSrc));
+        }
+        if (isDashboardWidgetVisible('syn-dst')) {
+          payloads.synDst?.__error
+            ? renderTableMessage('topSynDstTable', 3, widgetErrorMessage(payloads.synDst), true)
+            : renderSynTable('topSynDstTable', payloadItems(payloads.synDst));
+        }
+        if (isDashboardWidgetVisible('global-summary')) {
+          if (payloads.geoSummary?.__error) {
+            mapBackoffUntil = Date.now() + 60000;
+            renderTableMessage('globalSummaryTable', 4, widgetErrorMessage(payloads.geoSummary), true);
+          } else {
+            renderGlobalSummary(payloads.geoSummary ? (payloads.geoSummary.edges || payloadItems(payloads.geoSummary)) : []);
+          }
+        }
         dashboardRefreshFailures = 0;
       } catch (error) {
+        if (error.name === 'AbortError') return;
         dashboardRefreshFailures += 1;
         throw error;
       } finally {
         dashboardRefreshInFlight = false;
+        if (dashboardAbortController === controller) dashboardAbortController = null;
       }
     }
 
@@ -5497,7 +5741,7 @@
         dashboardRefreshTimer = null;
       }
       const interval = selectedDashboardRefreshMs();
-      if (!interval || !authToken() || activeView !== 'dashboard' || dashboardRefreshFailures >= 3) return;
+      if (!interval || !authToken() || activeView !== 'dashboard' || document.visibilityState !== 'visible' || dashboardRefreshFailures >= 3) return;
       dashboardRefreshTimer = setTimeout(async () => {
         try {
           await refresh();
@@ -6314,6 +6558,17 @@
     }
 
     function showView(view, placeholderTitle = '') {
+      if (view !== 'dashboard') {
+        if (dashboardRefreshTimer) {
+          clearTimeout(dashboardRefreshTimer);
+          dashboardRefreshTimer = null;
+        }
+        abortDashboardRequest();
+        dashboardRefreshInFlight = false;
+      }
+      if (view !== 'global-map') {
+        abortMapRequest();
+      }
       activeView = view === 'placeholder' ? 'placeholder' : view;
       document.querySelectorAll('.app-view').forEach(section => section.classList.remove('active'));
       document.querySelectorAll('.side-nav button').forEach(button => button.classList.remove('active'));
@@ -6328,6 +6583,7 @@
         document.querySelector('[data-nav-view="flows"]').classList.add('active');
         charts.topFlow.resize();
         loadDashboardSensors()
+          .then(() => Promise.all([loadFlowInterfaces(), loadTopFlowInterfaces()]))
           .then(() => {
             if (document.getElementById('flowTopPanel').classList.contains('active')) {
               return loadTopFlow();
@@ -6339,7 +6595,8 @@
         document.getElementById('view-global-map').classList.add('active');
         document.querySelector('[data-nav-view="global-map"]').classList.add('active');
         loadDashboardSensors()
-          .then(() => loadGlobalMap())
+          .then(() => loadMapInterfaces())
+          .then(() => loadGlobalMap({ force: true }))
           .then(() => setTimeout(() => charts.globalMap.resize(), 50))
           .catch(console.error);
       } else if (view === 'sensors') {
@@ -6452,17 +6709,17 @@
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
     document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
-    document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(loadGlobalMap).catch(console.error));
-    document.getElementById('mapInterface').addEventListener('change', () => loadGlobalMap().catch(console.error));
+    document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(() => debounceGlobalMapLoad()).catch(console.error));
+    document.getElementById('mapInterface').addEventListener('change', () => debounceGlobalMapLoad());
     ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapTopN'].forEach(id => {
-      document.getElementById(id).addEventListener('change', () => loadGlobalMap().catch(console.error));
+      document.getElementById(id).addEventListener('change', () => debounceGlobalMapLoad());
     });
     ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'].forEach(id => {
       document.getElementById(id).addEventListener('keydown', event => {
-        if (event.key === 'Enter') loadGlobalMap().catch(console.error);
+        if (event.key === 'Enter') loadGlobalMap({ force: true }).catch(console.error);
       });
     });
-    document.getElementById('refreshMapButton').addEventListener('click', () => loadGlobalMap().catch(console.error));
+    document.getElementById('refreshMapButton').addEventListener('click', () => loadGlobalMap({ force: true }).catch(console.error));
     document.getElementById('flowSensor').addEventListener('change', () => handleFlowSensorChange().catch(console.error));
     document.getElementById('flowInterface').addEventListener('change', () => searchFlows().catch(console.error));
     document.getElementById('topFlowSensor').addEventListener('change', () => handleTopFlowSensorChange().catch(console.error));
@@ -6619,7 +6876,11 @@
     applyDashboardLayout();
     createIcons();
     initAuth().then(scheduleDashboardRefresh).catch(console.error);
-    setInterval(() => updateAnomalySummary().catch(console.error), 30000);
+    setInterval(() => {
+      if (activeView === 'anomalies') {
+        updateAnomalySummary().catch(console.error);
+      }
+    }, 30000);
   </script>
 </body>
 </html>
