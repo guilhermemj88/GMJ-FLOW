@@ -1055,6 +1055,13 @@
                 <option value="protocol">Por protocolo</option>
                 <option value="interface">Por interface</option>
               </select>
+              <select id="dashboardSeriesLimit" class="form-select form-select-sm" aria-label="Limite de series">
+                <option value="5">Top 5</option>
+                <option value="8" selected>Top 8</option>
+                <option value="10">Top 10</option>
+                <option value="20">Top 20</option>
+                <option value="all">Todas</option>
+              </select>
               <button id="editDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">
                 <i data-lucide="layout-template"></i><span>Editar Dashboard</span>
               </button>
@@ -3398,6 +3405,12 @@
       return query.toString();
     }
 
+    function selectedDashboardSeriesLimit() {
+      const value = document.getElementById('dashboardSeriesLimit')?.value || '8';
+      if (value === 'all') return Infinity;
+      return Math.max(1, Number(value) || 8);
+    }
+
     function mapParams() {
       const query = new URLSearchParams();
       query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '30');
@@ -3458,6 +3471,35 @@
       return [];
     }
 
+    function pointTimestamp(point) {
+      const raw = point?.ts ?? point?.time ?? point?.timestamp;
+      if (raw === null || raw === undefined || raw === '') return null;
+      if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+      const parsed = new Date(raw).getTime();
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function normalizeSeriesPoint(point) {
+      const ts = pointTimestamp(point);
+      if (ts === null) return null;
+      return { ...point, ts, value: Number(point.value) || 0 };
+    }
+
+    function seriesPeakAbs(item) {
+      return (Array.isArray(item.points) ? item.points : []).reduce((peak, point) => {
+        const value = Math.abs(Number(point.value) || 0);
+        return Math.max(peak, value);
+      }, 0);
+    }
+
+    function limitDashboardSeries(items) {
+      const mode = document.getElementById('dashboardSeriesMode')?.value || 'total';
+      if (!['interface', 'protocol'].includes(mode)) return items;
+      const limit = selectedDashboardSeriesLimit();
+      const sorted = [...items].sort((a, b) => (b.peak_abs || 0) - (a.peak_abs || 0));
+      return Number.isFinite(limit) ? sorted.slice(0, limit) : sorted;
+    }
+
     function payloadSeries(payload) {
       const series = Array.isArray(payload?.series)
         ? payload.series
@@ -3465,10 +3507,13 @@
       return series.map(item => ({
         ...item,
         points: (Array.isArray(item.points) ? item.points : [])
-          .filter(point => point && point.ts != null)
-          .map(point => ({ ...point, value: Number(point.value) || 0 }))
-          .sort((a, b) => new Date(a.ts) - new Date(b.ts))
-      }));
+          .map(normalizeSeriesPoint)
+          .filter(Boolean)
+          .sort((a, b) => a.ts - b.ts)
+      })).map(item => ({
+        ...item,
+        peak_abs: seriesPeakAbs(item)
+      })).sort((a, b) => (b.peak_abs || 0) - (a.peak_abs || 0));
     }
 
     async function apiRequest(path, options = {}) {
@@ -4749,7 +4794,6 @@
         series.push({
           name: item.name || `${item.label || item.group || 'Serie'} ${direction}`,
           type: 'line',
-          stack: direction,
           smooth: true,
           showSymbol: false,
           lineStyle: { width: 1.6, color },
@@ -4759,7 +4803,6 @@
           data
         });
       });
-      const axisLimit = maxMagnitude > 0 ? Math.ceil(maxMagnitude * 1.16) : undefined;
       if (!series.length) {
         return emptyChartOption('Sem dados no periodo');
       }
@@ -4798,8 +4841,14 @@
         },
         yAxis: {
           type: 'value',
-          min: axisLimit ? -axisLimit : undefined,
-          max: axisLimit || undefined,
+          min(value) {
+            const limit = Math.max(Math.abs(Number(value.min) || 0), Math.abs(Number(value.max) || 0));
+            return limit ? -Math.ceil(limit * 1.08) : 0;
+          },
+          max(value) {
+            const limit = Math.max(Math.abs(Number(value.min) || 0), Math.abs(Number(value.max) || 0));
+            return limit ? Math.ceil(limit * 1.08) : 0;
+          },
           axisLabel: { color: '#6b7280', margin: 14, formatter: value => formatter(Math.abs(Number(value) || 0)) },
           splitLine: { lineStyle: { color: '#edf0f3' } }
         },
@@ -4857,12 +4906,16 @@
         const label = seriesLabel(item);
         const downloadData = [];
         const uploadData = [];
-        (item.points || []).forEach(point => {
+        (item.points || [])
+          .map(point => ({ ...point, ts: pointTimestamp(point) }))
+          .filter(point => point.ts !== null)
+          .sort((a, b) => a.ts - b.ts)
+          .forEach(point => {
           const download = Number(point[`download_${metric}`]) || 0;
           const upload = Number(point[`upload_${metric}`]) || 0;
           maxMagnitude = Math.max(maxMagnitude, Math.abs(download), Math.abs(upload));
-          downloadData.push([point.time, download]);
-          uploadData.push([point.time, -upload]);
+          downloadData.push([point.ts, download]);
+          uploadData.push([point.ts, -upload]);
         });
         series.push({
           name: `${label} Download`,
@@ -4885,7 +4938,6 @@
           data: uploadData
         });
       });
-      const axisLimit = maxMagnitude > 0 ? Math.ceil(maxMagnitude * 1.12) : undefined;
       return {
         animation: false,
         grid: { left: 18, right: 18, top: 54, bottom: 38, containLabel: true },
@@ -4924,8 +4976,14 @@
         },
         yAxis: {
           type: 'value',
-          min: axisLimit ? -axisLimit : undefined,
-          max: axisLimit || undefined,
+          min(value) {
+            const limit = Math.max(Math.abs(Number(value.min) || 0), Math.abs(Number(value.max) || 0));
+            return limit ? -Math.ceil(limit * 1.08) : 0;
+          },
+          max(value) {
+            const limit = Math.max(Math.abs(Number(value.min) || 0), Math.abs(Number(value.max) || 0));
+            return limit ? Math.ceil(limit * 1.08) : 0;
+          },
           axisLabel: {
             color: '#6b7280',
             margin: 14,
@@ -6003,21 +6061,27 @@
         if (controller.signal.aborted || activeView !== 'dashboard') return;
         const payloads = Object.fromEntries(entries.map((entry, index) => [entry[0], settledDashboardPayload(entry[0], settled[index])]));
 
-        const bpsItems = payloadSeries(payloads.bps);
-        const ppsItems = payloadSeries(payloads.pps);
+        const bpsAllItems = payloadSeries(payloads.bps);
+        const ppsAllItems = payloadSeries(payloads.pps);
+        const bpsItems = limitDashboardSeries(bpsAllItems);
+        const ppsItems = limitDashboardSeries(ppsAllItems);
         if (payloads.bps.__error) {
           renderChartError(charts.bps);
           document.getElementById('bpsReadout').textContent = 'Erro ao carregar widget';
         } else {
+          charts.bps.clear();
           charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
-          document.getElementById('bpsReadout').textContent = `${stackedReadout(bpsItems, 'bits_s')}${bpsItems.length > 10 ? ' - Muitas séries selecionadas. Use largura total ou filtre interfaces.' : ''}`;
+          const hiddenCount = Math.max(0, bpsAllItems.length - bpsItems.length);
+          document.getElementById('bpsReadout').textContent = `${stackedReadout(bpsItems, 'bits_s')}${hiddenCount ? ` - Top ${bpsItems.length} de ${bpsAllItems.length} series por pico.` : ''}${bpsAllItems.length > 10 ? ' Use largura total ou filtre interfaces.' : ''}`;
         }
         if (payloads.pps.__error) {
           renderChartError(charts.pps);
           document.getElementById('ppsReadout').textContent = 'Erro ao carregar widget';
         } else {
+          charts.pps.clear();
           charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
-          document.getElementById('ppsReadout').textContent = `${stackedReadout(ppsItems, 'packets_s')}${ppsItems.length > 10 ? ' - Muitas séries selecionadas. Use largura total ou filtre interfaces.' : ''}`;
+          const hiddenCount = Math.max(0, ppsAllItems.length - ppsItems.length);
+          document.getElementById('ppsReadout').textContent = `${stackedReadout(ppsItems, 'packets_s')}${hiddenCount ? ` - Top ${ppsItems.length} de ${ppsAllItems.length} series por pico.` : ''}${ppsAllItems.length > 10 ? ' Use largura total ou filtre interfaces.' : ''}`;
         }
 
         const srcIpItems = payloadItems(payloads.srcIp);
@@ -7089,6 +7153,7 @@
       scheduleDashboardRefresh();
     });
     document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('dashboardSeriesLimit').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     ['topConversationsSort', 'topConversationsLimit'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => {
         saveDashboardLayout();
