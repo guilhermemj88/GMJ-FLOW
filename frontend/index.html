@@ -1064,13 +1064,13 @@
               <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
               </select>
-              <select id="dashboardZone" class="form-select form-select-sm" aria-label="IP Zone">
-                <option value="">Todas as IP Zones</option>
+              <select id="dashboardZone" class="form-select form-select-sm" aria-label="Grupo de Prefixos / Cliente">
+                <option value="">Grupo de Prefixos / Cliente</option>
               </select>
               <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone">
-                <option value="both">Envolvendo a zona</option>
                 <option value="out">Saindo da zona</option>
                 <option value="in">Entrando na zona</option>
+                <option value="both" selected>Envolvendo a zona</option>
               </select>
               <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
                 <option value="total" selected>Total</option>
@@ -1383,13 +1383,13 @@
               <select id="mapInterface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
               </select>
-              <select id="mapZone" class="form-select form-select-sm" aria-label="IP Zone">
-                <option value="">Todas as IP Zones</option>
+              <select id="mapZone" class="form-select form-select-sm" aria-label="Grupo de Prefixos / Cliente">
+                <option value="">Grupo de Prefixos / Cliente</option>
               </select>
               <select id="mapZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone no mapa">
-                <option value="both">Envolvendo a zona</option>
                 <option value="out">Saindo da zona</option>
                 <option value="in">Entrando na zona</option>
+                <option value="both" selected>Envolvendo a zona</option>
               </select>
               <select id="mapDirection" class="form-select form-select-sm" aria-label="Direcao">
                 <option value="both">Bidirecional</option>
@@ -2286,7 +2286,7 @@
           <div class="view-header">
             <div>
               <h1 class="view-title">Clientes/Prefixos</h1>
-              <div id="ipZoneStatus" class="subtle">IP Zones, templates de deteccao e whitelist informativa</div>
+              <div id="ipZoneStatus" class="subtle">IP Zone: grupo de prefixos de um cliente, rede ou servico monitorado.</div>
             </div>
             <div class="toolbar">
               <button id="refreshIpZonesButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -2326,7 +2326,7 @@
                 <div class="panel-title mb-3">Zona selecionada</div>
                 <div class="ip-zone-form-grid">
                   <div class="field">
-                    <label for="ipZoneName">Nome</label>
+                    <label for="ipZoneName">Nome da zona/cliente</label>
                     <input id="ipZoneName" class="form-control form-control-sm" placeholder="Clientes Publicos FIBINET">
                   </div>
                   <div class="field">
@@ -2337,14 +2337,26 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label for="ipZoneTemplate">Detection Template</label>
+                    <label for="ipZoneTemplate">Grupo de Vetores associado</label>
                     <select id="ipZoneTemplate" class="form-select form-select-sm">
-                      <option value="">Sem template</option>
+                      <option value="">Sem grupo associado</option>
                     </select>
+                    <div class="subtle">Conjunto de regras/thresholds aplicado a esta zona.</div>
                   </div>
                   <div class="field grid-span-3">
                     <label for="ipZoneDescription">Descricao</label>
                     <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observacoes da zona">
+                  </div>
+                </div>
+                <div class="panel p-3 mt-3">
+                  <div class="d-flex justify-content-between align-items-center gap-2">
+                    <div>
+                      <div class="panel-title">Grupo associado</div>
+                      <div id="ipZoneTemplateSummary" class="metric-readout">Sem grupo associado</div>
+                    </div>
+                    <button id="editAssociatedTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="external-link"></i><span>Editar grupo em Vetores de Ataque</span>
+                    </button>
                   </div>
                 </div>
               </section>
@@ -2407,22 +2419,22 @@
             </div>
           </div>
 
-          <section class="panel p-3 mt-3">
+          <section id="detectionTemplateSection" class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">Detection Templates</div>
-                <div id="detectionTemplateStatus" class="metric-readout">Template CLIENTES-PUBLICOS-DEFAULT sera exibido aqui</div>
+                <div class="panel-title">Grupos de Vetores</div>
+                <div id="detectionTemplateStatus" class="metric-readout">CLIENTES-PUBLICOS-DEFAULT sera exibido aqui</div>
               </div>
               <div class="toolbar">
                 <span id="detectionTemplateCount" class="badge-soft off">0</span>
                 <button id="newDetectionTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
-                  <i data-lucide="file-plus-2"></i><span>Novo template</span>
+                  <i data-lucide="file-plus-2"></i><span>Novo grupo de vetores</span>
                 </button>
                 <button id="saveDetectionTemplateButton" type="button" class="btn btn-sm btn-success">
-                  <i data-lucide="save"></i><span>Salvar template</span>
+                  <i data-lucide="save"></i><span>Salvar grupo</span>
                 </button>
                 <button id="disableDetectionTemplateButton" type="button" class="btn btn-sm btn-outline-danger">
-                  <i data-lucide="ban"></i><span>Desativar template</span>
+                  <i data-lucide="ban"></i><span>Desativar grupo</span>
                 </button>
               </div>
             </div>
@@ -2451,6 +2463,7 @@
                     <input id="detectionTemplateDescription" class="form-control form-control-sm" placeholder="Descricao do template">
                   </div>
                 </div>
+                <div class="subtle mb-3">Grupo de Vetores: conjunto de regras/thresholds aplicado a uma ou mais zonas de prefixos.</div>
                 <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
                   <div>
                     <div class="panel-title">Regras / Vetores</div>
@@ -2473,16 +2486,17 @@
                   <div class="field">
                     <label for="detectionRuleDomain">Domain</label>
                     <select id="detectionRuleDomain" class="form-select form-select-sm">
-                      <option value="internal_ip">internal_ip</option>
-                      <option value="subnet">subnet</option>
+                      <option value="internal_ip">Internal IP (/32 dentro da zona)</option>
+                      <option value="subnet">Subnet (prefixo agregado)</option>
                     </select>
+                    <div class="subtle">Internal IP analisa cada IP /32; Subnet analisa o prefixo inteiro agregado.</div>
                   </div>
                   <div class="field">
                     <label for="detectionRuleDirection">Direction</label>
                     <select id="detectionRuleDirection" class="form-select form-select-sm">
-                      <option value="transmits">transmits</option>
-                      <option value="receives">receives</option>
-                      <option value="both">both</option>
+                      <option value="transmits">Saindo da zona</option>
+                      <option value="receives">Entrando na zona</option>
+                      <option value="both">Entrada ou saida</option>
                     </select>
                   </div>
                   <div class="field">
@@ -2644,16 +2658,15 @@
                   <option value="1">Sensor #1</option>
                 </select>
                 <input id="candidateRangeMinutes" type="number" min="1" max="259200" step="1" class="form-control form-control-sm" value="120" style="width: 110px;" aria-label="Range minutos">
-                <select id="candidateCreateAnomalies" class="form-select form-select-sm" aria-label="Criar anomalias">
-                  <option value="false">Sem criar anomalias</option>
-                  <option value="true">Criar informativas</option>
-                </select>
-                <button id="refreshSecurityAnomaliesButton" type="button" class="btn btn-sm btn-outline-secondary">
-                  <i data-lucide="siren"></i><span>Atualizar anomalias</span>
+                <button id="runZoneDetectionButton" type="button" class="btn btn-sm btn-outline-success">
+                  <i data-lucide="play-circle"></i><span>Testar deteccao agora</span>
+                </button>
+                <button id="createSecurityAnomaliesButton" type="button" class="btn btn-sm btn-success">
+                  <i data-lucide="siren"></i><span>Gerar anomalias informativas</span>
                 </button>
               </div>
             </div>
-            <div class="database-metrics-grid mb-3">
+            <div class="database-metrics-grid mb-3 d-none">
               <div class="metric-card"><div class="metric-label">Ativas</div><div id="securityAnomalyActiveCount" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Criticas</div><div id="securityAnomalyCriticalCount" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Avisos</div><div id="securityAnomalyWarningCount" class="metric-value">0</div></div>
@@ -2663,16 +2676,15 @@
               <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
                 <thead>
                   <tr>
-                    <th>Zona</th><th>Prefixo</th><th>Vetor</th><th>Domain</th><th>Origem /32</th><th>Destino</th><th>Protocolo</th>
+                    <th>Vetor</th><th>Severidade</th><th>Prefixo</th><th>Origem /32</th><th>Destino</th><th>Protocolo</th>
                     <th class="text-end">packets/s</th><th class="text-end">bits/s</th><th class="text-end">flows/s</th><th class="text-end">flows</th>
-                    <th class="text-end">unique_dst_ips</th><th class="text-end">unique_dst_ports</th><th class="text-end">unique_src_ports</th>
-                    <th>Severidade</th><th>Response</th>
+                    <th>Response</th>
                   </tr>
                 </thead>
                 <tbody id="securityCandidateTable"></tbody>
               </table>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap d-none">
               <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
                 <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Acoes</th></tr></thead>
                 <tbody id="securityAnomalyTable"></tbody>
@@ -2685,7 +2697,7 @@
           <div class="view-header">
             <div>
               <h1 class="view-title">Vetores de Ataque</h1>
-              <div id="attackVectorStatus" class="subtle">Thresholds e regras de deteccao automatica</div>
+              <div id="attackVectorStatus" class="subtle">Grupos/templates de vetores, thresholds e regras de deteccao</div>
             </div>
             <div class="toolbar">
               <button id="refreshAttackVectorsButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -2699,6 +2711,8 @@
               </button>
             </div>
           </div>
+
+          <div id="attackDetectionTemplateMount"></div>
 
           <div class="attack-layout">
             <section class="panel p-3">
@@ -2921,6 +2935,42 @@
                   </tr>
                 </thead>
                 <tbody id="anomaliesTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Deteccoes IP Zone</div>
+                <div id="securityAnomaliesMainStatus" class="metric-readout">Eventos informativos baseados em clientes/prefixos</div>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
+                <thead>
+                  <tr>
+                    <th>Horario</th>
+                    <th>Zona/Cliente</th>
+                    <th>Prefixo</th>
+                    <th>Domain</th>
+                    <th>Vector</th>
+                    <th>Origem /32</th>
+                    <th>Destino</th>
+                    <th>Protocolo</th>
+                    <th class="text-end">packets/s</th>
+                    <th class="text-end">bits/s</th>
+                    <th class="text-end">flows/s</th>
+                    <th class="text-end">flows</th>
+                    <th>Severidade</th>
+                    <th>Status</th>
+                    <th>Response</th>
+                    <th>Mensagem</th>
+                    <th>Acao recomendada</th>
+                    <th>Acoes</th>
+                  </tr>
+                </thead>
+                <tbody id="securityAnomaliesMainTable"></tbody>
               </table>
             </div>
           </section>
@@ -4077,8 +4127,8 @@
     }
 
     function renderDashboardZoneSelects() {
-      renderZoneSelect('dashboardZone', 'Todas as IP Zones', true);
-      renderZoneSelect('mapZone', 'Todas as IP Zones', true);
+      renderZoneSelect('dashboardZone', 'Grupo de Prefixos / Cliente', true);
+      renderZoneSelect('mapZone', 'Grupo de Prefixos / Cliente', true);
       renderZoneSelect('detectionWhitelistZone', 'Todas', false);
     }
 
@@ -4087,12 +4137,13 @@
       if (!select) return;
       const current = select.value;
       select.innerHTML = [
-        '<option value="">Sem template</option>',
+        '<option value="">Sem grupo associado</option>',
         ...detectionTemplates.map(template => (
           `<option value="${template.id}">${escapeHtml(template.name)}${template.active ? '' : ' (off)'}</option>`
         ))
       ].join('');
       select.value = detectionTemplates.some(template => String(template.id) === current) ? current : '';
+      renderIpZoneTemplateSummary();
     }
 
     async function loadIpZoneFilters() {
@@ -4500,12 +4551,57 @@
       return String(value || 'DETECTION_ONLY') === 'DETECTION_ONLY' ? 'Deteccao apenas informativa' : String(value || '-');
     }
 
+    function detectionDomainLabel(value) {
+      const labels = {
+        internal_ip: 'Internal IP (/32 dentro da zona)',
+        subnet: 'Subnet (prefixo agregado)'
+      };
+      return labels[value] || value || '-';
+    }
+
+    function detectionDirectionLabel(value) {
+      const labels = {
+        transmits: 'Saindo da zona',
+        receives: 'Entrando na zona',
+        both: 'Entrada ou saida'
+      };
+      return labels[value] || value || '-';
+    }
+
+    function mountDetectionTemplateSection() {
+      const section = document.getElementById('detectionTemplateSection');
+      const mount = document.getElementById('attackDetectionTemplateMount');
+      if (section && mount && section.parentElement !== mount) {
+        mount.appendChild(section);
+      }
+    }
+
+    function renderIpZoneTemplateSummary() {
+      const summary = document.getElementById('ipZoneTemplateSummary');
+      if (!summary) return;
+      const templateId = selectValue('ipZoneTemplate');
+      const template = detectionTemplates.find(item => Number(item.id) === Number(templateId));
+      if (!template) {
+        summary.textContent = 'Sem grupo associado';
+        return;
+      }
+      const rules = Number(template.rule_count || (template.rules || []).length || 0);
+      summary.textContent = `${template.name} - ${formatNumber(rules)} regras`;
+    }
+
+    function editAssociatedDetectionTemplate() {
+      const templateId = selectValue('ipZoneTemplate');
+      if (templateId) currentDetectionTemplateId = Number(templateId);
+      showView('attack-vectors');
+    }
+
     function fillIpZoneForm(zone = null) {
       currentIpZoneId = zone?.id || null;
       setValue('ipZoneName', zone?.name || '');
       setValue('ipZoneDescription', zone?.description || '');
       setBoolSelect('ipZoneActive', zone?.active ?? true);
       setValue('ipZoneTemplate', zone?.detection_template_id || '');
+      renderIpZoneTemplateSummary();
       renderIpZoneList();
       renderIpZonePrefixTable(zone?.prefixes || []);
       resetIpZonePrefixForm();
@@ -4735,7 +4831,7 @@
         fillDetectionTemplateForm(template);
         renderDetectionRuleTable();
         resetDetectionRuleForm();
-        document.getElementById('detectionTemplateStatus').textContent = `Template ${template.name}`;
+        document.getElementById('detectionTemplateStatus').textContent = `Grupo ${template.name}`;
       } catch (error) {
         document.getElementById('detectionTemplateStatus').textContent = `Falha: ${error.message}`;
       }
@@ -4763,13 +4859,13 @@
       fillDetectionTemplateForm(null);
       renderDetectionRuleTable();
       resetDetectionRuleForm();
-      document.getElementById('detectionTemplateStatus').textContent = 'Novo template';
+      document.getElementById('detectionTemplateStatus').textContent = 'Novo grupo de vetores';
     }
 
     async function saveDetectionTemplate() {
       const payload = collectDetectionTemplateForm();
       if (!payload.name) {
-        document.getElementById('detectionTemplateStatus').textContent = 'Nome do template obrigatorio.';
+        document.getElementById('detectionTemplateStatus').textContent = 'Nome do grupo obrigatorio.';
         return;
       }
       const path = currentDetectionTemplateId ? `/api/detection/templates/${currentDetectionTemplateId}` : '/api/detection/templates';
@@ -4782,9 +4878,9 @@
         });
         currentDetectionTemplateId = template.id;
         await loadDetectionTemplates();
-        document.getElementById('detectionTemplateStatus').textContent = 'Template salvo';
+        document.getElementById('detectionTemplateStatus').textContent = 'Grupo salvo';
       } catch (error) {
-        document.getElementById('detectionTemplateStatus').textContent = `Falha ao salvar template: ${error.message}`;
+        document.getElementById('detectionTemplateStatus').textContent = `Falha ao salvar grupo: ${error.message}`;
       }
     }
 
@@ -4793,9 +4889,9 @@
       try {
         await apiRequest(`/api/detection/templates/${currentDetectionTemplateId}`, { method: 'DELETE' });
         await loadDetectionTemplates();
-        document.getElementById('detectionTemplateStatus').textContent = 'Template desativado';
+        document.getElementById('detectionTemplateStatus').textContent = 'Grupo desativado';
       } catch (error) {
-        document.getElementById('detectionTemplateStatus').textContent = `Falha ao desativar template: ${error.message}`;
+        document.getElementById('detectionTemplateStatus').textContent = `Falha ao desativar grupo: ${error.message}`;
       }
     }
 
@@ -4842,8 +4938,8 @@
       tbody.innerHTML = detectionRules.map(rule => `
         <tr>
           <td>${escapeHtml(rule.vector)}</td>
-          <td>${escapeHtml(rule.domain)}</td>
-          <td>${escapeHtml(rule.direction)}</td>
+          <td>${escapeHtml(detectionDomainLabel(rule.domain))}</td>
+          <td>${escapeHtml(detectionDirectionLabel(rule.direction))}</td>
           <td>${escapeHtml(rule.protocol || 'ALL')}</td>
           <td>${escapeHtml(DETECTION_METRIC_LABELS[rule.metric] || rule.metric)}</td>
           <td class="text-end">${rule.warning_value === null || rule.warning_value === undefined ? '-' : detectionMetricDisplay(rule.warning_value, rule.metric)}</td>
@@ -5003,10 +5099,9 @@
       if (!tbody) return;
       tbody.innerHTML = items.map(item => `
         <tr>
-          <td>${escapeHtml(item.zone_name || '-')}</td>
-          <td>${escapeHtml(item.prefix_cidr || '-')}</td>
           <td>${escapeHtml(item.vector || '-')}</td>
-          <td>${escapeHtml(item.domain || '-')}</td>
+          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td>${escapeHtml(item.prefix_cidr || '-')}</td>
           <td>${ipLink(item.src_ip || item.internal_ip)}</td>
           <td>${ipLink(item.dst_ip)}</td>
           <td>${escapeHtml(item.protocol || '-')}</td>
@@ -5014,17 +5109,13 @@
           <td class="text-end">${formatBps(item.bits_s)}</td>
           <td class="text-end">${formatNumber(item.flows_s)}</td>
           <td class="text-end">${formatNumber(item.flows)}</td>
-          <td class="text-end">${formatNumber(item.unique_dst_ips)}</td>
-          <td class="text-end">${formatNumber(item.unique_dst_ports)}</td>
-          <td class="text-end">${formatNumber(item.unique_src_ports)}</td>
-          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
           <td>${escapeHtml(detectionResponseLabel(item.response))}</td>
         </tr>
-      `).join('') || '<tr><td colspan="16" class="text-muted">Sem candidatos no periodo</td></tr>';
+      `).join('') || '<tr><td colspan="11" class="text-muted">Sem candidatos no periodo</td></tr>';
       createIcons();
     }
 
-    async function testIpZoneDetection() {
+    async function testIpZoneDetection(createAnomalies = false) {
       if (!currentIpZoneId) {
         setIpZoneStatus('Selecione uma IP Zone antes do teste.', 'error');
         return;
@@ -5033,7 +5124,7 @@
       query.set('range_minutes', String(Math.max(1, numberValue('candidateRangeMinutes', 120))));
       query.set('sensor_id', String(numberValue('candidateSensor', 1)));
       query.set('zone_id', String(currentIpZoneId));
-      query.set('create_anomalies', selectValue('candidateCreateAnomalies') === 'true' ? 'true' : 'false');
+      query.set('create_anomalies', createAnomalies ? 'true' : 'false');
       document.getElementById('securityCandidateStatus').textContent = 'Executando deteccao informativa...';
       try {
         const payload = await apiRequest(`/api/security/vectors/candidates?${query.toString()}`);
@@ -5043,6 +5134,9 @@
         const anomalyText = payload.anomalies ? ` - anomalias: ${formatNumber(payload.anomalies.created || 0)} novas, ${formatNumber(payload.anomalies.updated || 0)} atualizadas` : '';
         document.getElementById('securityCandidateStatus').textContent = `${formatNumber(securityCandidates.length)} candidatos${anomalyText}${warnings}`;
         await loadSecurityAnomalies();
+        if (activeView === 'ip-zones' && createAnomalies) {
+          setIpZoneStatus('Anomalias informativas geradas. Veja a aba Anomalias.');
+        }
       } catch (error) {
         document.getElementById('securityCandidateStatus').textContent = `Falha no teste: ${error.message}`;
         renderSecurityCandidates([]);
@@ -5081,6 +5175,39 @@
       createIcons();
     }
 
+    function renderSecurityAnomaliesMain(items) {
+      const tbody = document.getElementById('securityAnomaliesMainTable');
+      if (!tbody) return;
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${formatDateTime(item.last_seen || item.updated_at || item.created_at)}</td>
+          <td>${escapeHtml(item.zone_name || '-')}</td>
+          <td>${escapeHtml(item.prefix_cidr || '-')}</td>
+          <td>${escapeHtml(detectionDomainLabel(item.domain))}</td>
+          <td>${escapeHtml(item.vector || '-')}</td>
+          <td>${ipLink(item.src_ip)}</td>
+          <td>${ipLink(item.dst_ip)}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td class="text-end">${formatPps(item.packets_s)}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td class="text-end">${formatNumber(item.flows_s)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td><span class="badge-soft ${item.status === 'active' ? 'ok' : 'off'}">${escapeHtml(item.status || '-')}</span></td>
+          <td>${escapeHtml(detectionResponseLabel(item.response))}</td>
+          <td>${escapeHtml(item.message || '-')}</td>
+          <td>${escapeHtml(item.recommended_action || '-')}</td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary security-anomaly-ack" data-anomaly-id="${item.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="18" class="text-muted">Sem deteccoes IP Zone</td></tr>';
+      createIcons();
+    }
+
     async function loadSecurityAnomalies() {
       try {
         const summary = await apiRequest('/api/security/anomalies/summary');
@@ -5095,11 +5222,31 @@
       }
     }
 
+    async function loadSecurityAnomaliesForAnomalyView(tab = anomalyActiveTab) {
+      const status = document.getElementById('securityAnomaliesMainStatus');
+      if (!status) return;
+      status.textContent = 'Atualizando deteccoes IP Zone...';
+      try {
+        const path = tab === 'history' ? '/api/security/anomalies/history' : '/api/security/anomalies/active';
+        const payload = await apiRequest(path);
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        renderSecurityAnomaliesMain(items);
+        status.textContent = `${formatNumber(items.length)} eventos IP Zone ${tab === 'history' ? 'no historico' : 'ativos'}`;
+      } catch (error) {
+        status.textContent = `Falha IP Zone: ${error.message}`;
+        renderSecurityAnomaliesMain([]);
+      }
+    }
+
     async function updateSecurityAnomalyStatus(anomalyId, action) {
       if (!anomalyId) return;
       try {
         await apiRequest(`/api/security/anomalies/${anomalyId}/${action}`, { method: 'POST' });
-        await loadSecurityAnomalies();
+        if (activeView === 'anomalies') {
+          await loadAnomalies(anomalyActiveTab);
+        } else {
+          await loadSecurityAnomalies();
+        }
       } catch (error) {
         document.getElementById('securityCandidateStatus').textContent = `Falha ao atualizar anomalia: ${error.message}`;
       }
@@ -5114,6 +5261,8 @@
         loadDetectionWhitelist()
       ]);
       renderDashboardZoneSelects();
+      renderDetectionTemplateSelect();
+      renderIpZoneTemplateSummary();
       renderCandidateSensorSelect();
       await loadSecurityAnomalies();
       setIpZoneStatus(currentIpZoneId ? `IP Zone ${selectedIpZone()?.name || currentIpZoneId}` : 'Crie uma IP Zone para comecar');
@@ -5768,6 +5917,7 @@
         await updateAnomalySummary();
         const payload = await apiRequest(tab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
         renderAnomalyTable(Array.isArray(payload.items) ? payload.items : []);
+        await loadSecurityAnomaliesForAnomalyView(tab);
         document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Historico de anomalias';
       } catch (error) {
         document.getElementById('anomalyStatus').textContent = `Falha: ${error.message}`;
@@ -8245,7 +8395,8 @@
       } else if (view === 'attack-vectors') {
         document.getElementById('view-attack-vectors').classList.add('active');
         document.querySelector('[data-nav-view="attack-vectors"]').classList.add('active');
-        loadAttackVectors().catch(console.error);
+        mountDetectionTemplateSection();
+        Promise.all([loadAttackVectors(), loadDetectionTemplates(), loadIpZoneFilters()]).catch(console.error);
       } else if (view === 'anomalies') {
         document.getElementById('view-anomalies').classList.add('active');
         document.querySelector('[data-nav-view="anomalies"]').classList.add('active');
@@ -8418,7 +8569,9 @@
     document.getElementById('newIpZoneButton').addEventListener('click', newIpZone);
     document.getElementById('saveIpZoneButton').addEventListener('click', () => saveIpZone().catch(console.error));
     document.getElementById('disableIpZoneButton').addEventListener('click', () => disableIpZone().catch(console.error));
-    document.getElementById('testIpZoneDetectionButton').addEventListener('click', () => testIpZoneDetection().catch(console.error));
+    document.getElementById('testIpZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
+    document.getElementById('editAssociatedTemplateButton').addEventListener('click', editAssociatedDetectionTemplate);
+    document.getElementById('ipZoneTemplate').addEventListener('change', renderIpZoneTemplateSummary);
     document.getElementById('newIpZonePrefixButton').addEventListener('click', () => resetIpZonePrefixForm());
     document.getElementById('saveIpZonePrefixButton').addEventListener('click', () => saveIpZonePrefix().catch(console.error));
     document.getElementById('newDetectionTemplateButton').addEventListener('click', newDetectionTemplate);
@@ -8428,8 +8581,11 @@
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
     document.getElementById('newDetectionWhitelistButton').addEventListener('click', () => resetDetectionWhitelistForm());
     document.getElementById('saveDetectionWhitelistButton').addEventListener('click', () => saveDetectionWhitelist().catch(console.error));
-    document.getElementById('refreshSecurityAnomaliesButton').addEventListener('click', () => loadSecurityAnomalies().catch(console.error));
-    document.getElementById('refreshAttackVectorsButton').addEventListener('click', () => loadAttackVectors().catch(console.error));
+    document.getElementById('runZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
+    document.getElementById('createSecurityAnomaliesButton').addEventListener('click', () => testIpZoneDetection(true).catch(console.error));
+    document.getElementById('refreshAttackVectorsButton').addEventListener('click', () => {
+      Promise.all([loadAttackVectors(), loadDetectionTemplates()]).catch(console.error);
+    });
     document.getElementById('newTemplateButton').addEventListener('click', newAttackTemplate);
     document.getElementById('saveTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
     document.getElementById('renameTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
@@ -8501,6 +8657,17 @@
     });
 
     document.getElementById('securityAnomalyTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const ack = target?.closest('.security-anomaly-ack');
+      const close = target?.closest('.security-anomaly-close');
+      if (ack) {
+        updateSecurityAnomalyStatus(Number(ack.dataset.anomalyId), 'ack').catch(console.error);
+      } else if (close) {
+        updateSecurityAnomalyStatus(Number(close.dataset.anomalyId), 'close').catch(console.error);
+      }
+    });
+
+    document.getElementById('securityAnomaliesMainTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const ack = target?.closest('.security-anomaly-ack');
       const close = target?.closest('.security-anomaly-close');
@@ -8618,6 +8785,7 @@
     });
     document.addEventListener('visibilitychange', scheduleDashboardRefresh);
 
+    mountDetectionTemplateSection();
     applyDashboardLayout();
     updateMapFilterBadge();
     createIcons();
