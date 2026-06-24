@@ -460,6 +460,36 @@ LEARN_DECODER_UNITS = (
     ("FLOWS", "flows_s"),
 )
 
+IP_ZONE_PREFIX_TYPES = {"client", "public_cgnat", "infrastructure", "server", "cache", "transit", "other"}
+DETECTION_DOMAINS = {"internal_ip", "subnet"}
+DETECTION_DIRECTIONS = {"transmits", "receives", "both"}
+DETECTION_METRICS = {
+    "packets_s",
+    "bits_s",
+    "flows_s",
+    "flows",
+    "unique_dst_ips",
+    "unique_dst_ports",
+    "unique_src_ports",
+}
+DETECTION_COMPARISONS = {"over"}
+DETECTION_RESPONSES = {"DETECTION_ONLY"}
+DETECTION_WHITELIST_TYPES = {"source", "destination", "source_destination"}
+DETECTION_PROTOCOLS = {
+    "ALL",
+    "IP/ALL",
+    "IP",
+    "UDP",
+    "TCP",
+    "TCP+SYN",
+    "ICMP",
+    "GRE",
+    "DNS",
+    "CLDAP",
+    "UDP-QUIC",
+    "OTHER",
+}
+
 
 class SensorInterfacePayload(BaseModel):
     id: int | None = None
@@ -654,6 +684,55 @@ class AttackVectorSuggestionApplyAllPayload(BaseModel):
 class AttackVectorTestPayload(BaseModel):
     lookback_seconds: int | None = Field(None, ge=1, le=86400)
     min_duration_seconds: int | None = Field(None, ge=0, le=86400)
+
+
+class IpZonePayload(BaseModel):
+    name: str
+    description: str = ""
+    active: bool = True
+    detection_template_id: int | None = Field(None, ge=1)
+
+
+class IpZonePrefixPayload(BaseModel):
+    cidr: str
+    name: str = ""
+    description: str = ""
+    prefix_type: str = "client"
+    active: bool = True
+
+
+class DetectionTemplatePayload(BaseModel):
+    name: str
+    description: str = ""
+    active: bool = True
+
+
+class DetectionRulePayload(BaseModel):
+    vector: str
+    domain: str = "internal_ip"
+    direction: str = "transmits"
+    protocol: str = "ALL"
+    metric: str = "packets_s"
+    comparison: str = "over"
+    warning_value: float | None = Field(None, ge=0)
+    critical_value: float | None = Field(None, ge=0)
+    window_seconds: int = Field(60, ge=1, le=86400)
+    consecutive_windows: int = Field(1, ge=1, le=1000)
+    cooldown_minutes: int = Field(5, ge=0, le=1440)
+    enabled: bool = True
+    response: str = "DETECTION_ONLY"
+
+
+class DetectionWhitelistPayload(BaseModel):
+    name: str
+    description: str = ""
+    active: bool = True
+    type: str
+    src_cidr: str | None = None
+    dst_cidr: str | None = None
+    protocol: str | None = None
+    vector: str | None = None
+    zone_id: int | None = Field(None, ge=1)
 
 
 def get_client():
@@ -1390,6 +1469,208 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
         )
 
 
+def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_template_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER NOT NULL,
+            vector TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            protocol TEXT,
+            metric TEXT NOT NULL,
+            comparison TEXT NOT NULL DEFAULT 'over',
+            warning_value REAL,
+            critical_value REAL,
+            window_seconds INTEGER NOT NULL DEFAULT 60,
+            consecutive_windows INTEGER NOT NULL DEFAULT 1,
+            cooldown_minutes INTEGER NOT NULL DEFAULT 5,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            response TEXT NOT NULL DEFAULT 'DETECTION_ONLY',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(template_id) REFERENCES detection_templates(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ip_zones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            detection_template_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(detection_template_id) REFERENCES detection_templates(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ip_zone_prefixes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            zone_id INTEGER NOT NULL,
+            cidr TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            prefix_type TEXT NOT NULL DEFAULT 'client',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(zone_id) REFERENCES ip_zones(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_whitelist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            type TEXT NOT NULL,
+            src_cidr TEXT,
+            dst_cidr TEXT,
+            protocol TEXT,
+            vector TEXT,
+            zone_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(zone_id) REFERENCES ip_zones(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_anomalies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vector TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            zone_id INTEGER,
+            zone_name TEXT,
+            template_id INTEGER,
+            template_name TEXT,
+            rule_id INTEGER,
+            prefix_id INTEGER,
+            prefix_cidr TEXT,
+            domain TEXT,
+            direction TEXT,
+            src_ip TEXT,
+            dst_ip TEXT,
+            protocol TEXT,
+            packets_s REAL,
+            bits_s REAL,
+            flows REAL,
+            flows_s REAL,
+            packets REAL,
+            bytes REAL,
+            unique_dst_ips INTEGER,
+            unique_dst_ports INTEGER,
+            unique_src_ports INTEGER,
+            first_seen TEXT,
+            last_seen TEXT,
+            message TEXT,
+            recommended_action TEXT,
+            response TEXT NOT NULL DEFAULT 'DETECTION_ONLY',
+            dedupe_key TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    ensure_sqlite_column(conn, "security_anomalies", "dedupe_key", "dedupe_key TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zone_prefixes_zone ON ip_zone_prefixes(zone_id, active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zones_active ON ip_zones(active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_detection_template_rules_template ON detection_template_rules(template_id, enabled)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_detection_whitelist_active ON detection_whitelist(active, zone_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_security_anomalies_status ON security_anomalies(status, last_seen)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_security_anomalies_dedupe ON security_anomalies(dedupe_key, status)")
+    seed_default_detection_template(conn)
+
+
+def seed_default_detection_template(conn: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+    row = conn.execute(
+        "SELECT id FROM detection_templates WHERE name = ? ORDER BY id LIMIT 1",
+        ("CLIENTES-PUBLICOS-DEFAULT",),
+    ).fetchone()
+    if row is None:
+        cursor = conn.execute(
+            """
+            INSERT INTO detection_templates (name, description, active, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            """,
+            (
+                "CLIENTES-PUBLICOS-DEFAULT",
+                "Template default para deteccao informativa de IPs /32 dentro de prefixos publicos monitorados.",
+                now,
+                now,
+            ),
+        )
+        template_id = int(cursor.lastrowid)
+    else:
+        template_id = int(row["id"])
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS count FROM detection_template_rules WHERE template_id = ?",
+        (template_id,),
+    ).fetchone()["count"]
+    if int(count or 0) > 0:
+        return
+
+    defaults = [
+        ("PREFIX_INTERNAL_IP_HIGH_UDP_PPS", "internal_ip", "transmits", "UDP", "packets_s", 80_000, 150_000),
+        ("PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS", "internal_ip", "transmits", "UDP", "packets_s", 50_000, 120_000),
+        ("PREFIX_INTERNAL_IP_HIGH_FLOW_RATE", "internal_ip", "transmits", "ALL", "flows_s", 500, 1_500),
+        ("PREFIX_INTERNAL_IP_TO_DST_HIGH_FLOW_RATE", "internal_ip", "transmits", "ALL", "flows_s", 200, 800),
+        ("PREFIX_SUBNET_HIGH_PPS", "subnet", "transmits", "ALL", "packets_s", 1_000_000, 3_000_000),
+        ("DNS_INTERNAL_IP_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 10_000, 30_000),
+        ("DNS_INTERNAL_IP_HIGH_BITS", "internal_ip", "transmits", "DNS", "bits_s", 20_000_000, 50_000_000),
+        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 5_000, 15_000),
+    ]
+    for vector, domain, direction, protocol, metric, warning, critical in defaults:
+        conn.execute(
+            """
+            INSERT INTO detection_template_rules (
+                template_id,
+                vector,
+                domain,
+                direction,
+                protocol,
+                metric,
+                comparison,
+                warning_value,
+                critical_value,
+                window_seconds,
+                consecutive_windows,
+                cooldown_minutes,
+                enabled,
+                response,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'over', ?, ?, 60, 1, 5, 1, 'DETECTION_ONLY', ?, ?)
+            """,
+            (template_id, vector, domain, direction, protocol, metric, warning, critical, now, now),
+        )
+
+
 def ensure_sensor_db() -> None:
     global SENSOR_DB_READY
     if SENSOR_DB_READY:
@@ -1529,6 +1810,7 @@ def ensure_sensor_db() -> None:
             """
         )
         ensure_attack_vector_db(conn)
+        ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
@@ -4185,6 +4467,1694 @@ def normalize_optional_cidr(value: Any, field_name: str) -> str | None:
         return str(ip_network(text, strict=False))
     except ValueError:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+
+
+def normalize_required_cidr(value: Any, field_name: str = "cidr") -> str:
+    text = clean_text(value)
+    if not text:
+        raise HTTPException(status_code=400, detail=f"{field_name} obrigatorio")
+    try:
+        return str(ip_network(text, strict=False))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+
+
+def normalize_detection_protocol(value: Any, allow_empty: bool = False) -> str:
+    text = clean_text(value).upper().replace("_", "-")
+    if not text:
+        return "" if allow_empty else "ALL"
+    aliases = {
+        "*": "ALL",
+        "ANY": "ALL",
+        "IP": "ALL",
+        "IP/ALL": "ALL",
+        "TCP-SYN": "TCP+SYN",
+        "QUIC": "UDP-QUIC",
+        "UDP+QUIC": "UDP-QUIC",
+    }
+    normalized = aliases.get(text, text)
+    if normalized not in DETECTION_PROTOCOLS and normalized != "ALL":
+        raise HTTPException(status_code=400, detail="protocol invalido")
+    return normalized
+
+
+def normalize_detection_vector(value: Any) -> str:
+    vector = clean_text(value).upper().replace(" ", "_")
+    if not vector:
+        raise HTTPException(status_code=400, detail="vector obrigatorio")
+    return vector
+
+
+def fetch_detection_template_row(conn: sqlite3.Connection, template_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM detection_templates WHERE id = ?", (template_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Template de deteccao nao encontrado")
+    return row
+
+
+def fetch_ip_zone_row(conn: sqlite3.Connection, zone_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM ip_zones WHERE id = ?", (zone_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="IP Zone nao encontrada")
+    return row
+
+
+def fetch_ip_zone_prefix_row(conn: sqlite3.Connection, zone_id: int, prefix_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM ip_zone_prefixes
+        WHERE id = ? AND zone_id = ?
+        """,
+        (prefix_id, zone_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Prefixo da IP Zone nao encontrado")
+    return row
+
+
+def fetch_detection_rule_row(conn: sqlite3.Connection, template_id: int, rule_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM detection_template_rules
+        WHERE id = ? AND template_id = ?
+        """,
+        (rule_id, template_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Regra de deteccao nao encontrada")
+    return row
+
+
+def fetch_detection_whitelist_row(conn: sqlite3.Connection, whitelist_id: int) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM detection_whitelist WHERE id = ?", (whitelist_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Whitelist de deteccao nao encontrada")
+    return row
+
+
+def detection_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "name": item["name"],
+        "description": item.get("description") or "",
+        "active": sqlite_bool(item.get("active")),
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+        "rule_count": int(item.get("rule_count") or 0),
+        "zone_count": int(item.get("zone_count") or 0),
+    }
+
+
+def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "template_id": int(item["template_id"]),
+        "vector": item["vector"],
+        "domain": item["domain"],
+        "direction": item["direction"],
+        "protocol": item.get("protocol") or "ALL",
+        "metric": item["metric"],
+        "comparison": item["comparison"],
+        "warning_value": float(item["warning_value"]) if item.get("warning_value") is not None else None,
+        "critical_value": float(item["critical_value"]) if item.get("critical_value") is not None else None,
+        "window_seconds": int(item.get("window_seconds") or 60),
+        "consecutive_windows": int(item.get("consecutive_windows") or 1),
+        "cooldown_minutes": int(item.get("cooldown_minutes") or 5),
+        "enabled": sqlite_bool(item.get("enabled")),
+        "response": item.get("response") or "DETECTION_ONLY",
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def ip_zone_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "name": item["name"],
+        "description": item.get("description") or "",
+        "active": sqlite_bool(item.get("active")),
+        "detection_template_id": int(item["detection_template_id"]) if item.get("detection_template_id") is not None else None,
+        "detection_template_name": item.get("detection_template_name") or item.get("template_name") or "",
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+        "prefix_count": int(item.get("prefix_count") or 0),
+    }
+
+
+def ip_zone_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "zone_id": int(item["zone_id"]),
+        "zone_name": item.get("zone_name") or "",
+        "cidr": item["cidr"],
+        "name": item.get("name") or "",
+        "description": item.get("description") or "",
+        "prefix_type": item.get("prefix_type") or "client",
+        "active": sqlite_bool(item.get("active")),
+        "detection_template_id": int(item["detection_template_id"]) if item.get("detection_template_id") is not None else None,
+        "detection_template_name": item.get("detection_template_name") or "",
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def detection_whitelist_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "name": item["name"],
+        "description": item.get("description") or "",
+        "active": sqlite_bool(item.get("active")),
+        "type": item["type"],
+        "src_cidr": item.get("src_cidr") or "",
+        "dst_cidr": item.get("dst_cidr") or "",
+        "protocol": item.get("protocol") or "",
+        "vector": item.get("vector") or "",
+        "zone_id": int(item["zone_id"]) if item.get("zone_id") is not None else None,
+        "zone_name": item.get("zone_name") or "",
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def normalize_ip_zone_payload(conn: sqlite3.Connection, payload: IpZonePayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome da IP Zone obrigatorio")
+    template_id = data.get("detection_template_id")
+    if template_id is not None:
+        _ = fetch_detection_template_row(conn, int(template_id))
+    return {
+        "name": name,
+        "description": clean_text(data.get("description")),
+        "active": 1 if data.get("active") else 0,
+        "detection_template_id": int(template_id) if template_id is not None else None,
+    }
+
+
+def normalize_ip_zone_prefix_payload(payload: IpZonePrefixPayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    prefix_type = clean_text(data.get("prefix_type") or "client").lower()
+    if prefix_type not in IP_ZONE_PREFIX_TYPES:
+        raise HTTPException(status_code=400, detail="prefix_type invalido")
+    return {
+        "cidr": normalize_required_cidr(data.get("cidr")),
+        "name": clean_text(data.get("name")),
+        "description": clean_text(data.get("description")),
+        "prefix_type": prefix_type,
+        "active": 1 if data.get("active") else 0,
+    }
+
+
+def normalize_detection_template_payload(payload: DetectionTemplatePayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome do template obrigatorio")
+    return {
+        "name": name,
+        "description": clean_text(data.get("description")),
+        "active": 1 if data.get("active") else 0,
+    }
+
+
+def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    domain = normalize_choice(clean_text(data.get("domain")).lower() or "internal_ip", DETECTION_DOMAINS, "domain")
+    direction = normalize_choice(clean_text(data.get("direction")).lower() or "transmits", DETECTION_DIRECTIONS, "direction")
+    metric = normalize_choice(clean_text(data.get("metric")).lower() or "packets_s", DETECTION_METRICS, "metric")
+    comparison = normalize_choice(clean_text(data.get("comparison")).lower() or "over", DETECTION_COMPARISONS, "comparison")
+    response = normalize_choice(clean_text(data.get("response")).upper() or "DETECTION_ONLY", DETECTION_RESPONSES, "response")
+    warning_value = data.get("warning_value")
+    critical_value = data.get("critical_value")
+    if warning_value is None and critical_value is None:
+        raise HTTPException(status_code=400, detail="warning_value ou critical_value obrigatorio")
+    if warning_value is not None and critical_value is not None and float(critical_value) < float(warning_value):
+        raise HTTPException(status_code=400, detail="critical_value deve ser maior ou igual ao warning_value")
+    return {
+        "vector": normalize_detection_vector(data.get("vector")),
+        "domain": domain,
+        "direction": direction,
+        "protocol": normalize_detection_protocol(data.get("protocol")),
+        "metric": metric,
+        "comparison": comparison,
+        "warning_value": float(warning_value) if warning_value is not None else None,
+        "critical_value": float(critical_value) if critical_value is not None else None,
+        "window_seconds": positive_int(data.get("window_seconds") or 60, "window_seconds"),
+        "consecutive_windows": positive_int(data.get("consecutive_windows") or 1, "consecutive_windows"),
+        "cooldown_minutes": non_negative_int(data.get("cooldown_minutes") or 0, "cooldown_minutes"),
+        "enabled": 1 if data.get("enabled") else 0,
+        "response": response,
+    }
+
+
+def normalize_detection_whitelist_payload(conn: sqlite3.Connection, payload: DetectionWhitelistPayload) -> dict[str, Any]:
+    data = dump_model(payload)
+    name = clean_text(data.get("name"))
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome da whitelist obrigatorio")
+    whitelist_type = normalize_choice(clean_text(data.get("type")).lower(), DETECTION_WHITELIST_TYPES, "type")
+    src_cidr = normalize_optional_cidr(data.get("src_cidr"), "src_cidr")
+    dst_cidr = normalize_optional_cidr(data.get("dst_cidr"), "dst_cidr")
+    if whitelist_type == "source" and not src_cidr:
+        raise HTTPException(status_code=400, detail="src_cidr obrigatorio para whitelist source")
+    if whitelist_type == "destination" and not dst_cidr:
+        raise HTTPException(status_code=400, detail="dst_cidr obrigatorio para whitelist destination")
+    if whitelist_type == "source_destination" and (not src_cidr or not dst_cidr):
+        raise HTTPException(status_code=400, detail="src_cidr e dst_cidr obrigatorios para whitelist source_destination")
+    zone_id = data.get("zone_id")
+    if zone_id is not None:
+        _ = fetch_ip_zone_row(conn, int(zone_id))
+    protocol = normalize_detection_protocol(data.get("protocol"), allow_empty=True)
+    return {
+        "name": name,
+        "description": clean_text(data.get("description")),
+        "active": 1 if data.get("active") else 0,
+        "type": whitelist_type,
+        "src_cidr": src_cidr,
+        "dst_cidr": dst_cidr,
+        "protocol": protocol or None,
+        "vector": normalize_detection_vector(data.get("vector")) if clean_text(data.get("vector")) else None,
+        "zone_id": int(zone_id) if zone_id is not None else None,
+    }
+
+
+def fetch_ip_zone(conn: sqlite3.Connection, zone_id: int, include_prefixes: bool = False) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            z.*,
+            t.name AS detection_template_name,
+            COUNT(p.id) AS prefix_count
+        FROM ip_zones z
+        LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+        LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
+        WHERE z.id = ?
+        GROUP BY z.id
+        """,
+        (zone_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="IP Zone nao encontrada")
+    item = ip_zone_row_to_dict(row)
+    if include_prefixes:
+        prefix_rows = conn.execute(
+            """
+            SELECT
+                p.*,
+                z.name AS zone_name,
+                z.detection_template_id,
+                t.name AS detection_template_name
+            FROM ip_zone_prefixes p
+            JOIN ip_zones z ON z.id = p.zone_id
+            LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            WHERE p.zone_id = ?
+            ORDER BY p.active DESC, p.cidr, p.id
+            """,
+            (zone_id,),
+        ).fetchall()
+        item["prefixes"] = [ip_zone_prefix_row_to_dict(prefix_row) for prefix_row in prefix_rows]
+    return item
+
+
+def fetch_detection_template(conn: sqlite3.Connection, template_id: int, include_rules: bool = False) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            t.*,
+            COUNT(DISTINCT r.id) AS rule_count,
+            COUNT(DISTINCT z.id) AS zone_count
+        FROM detection_templates t
+        LEFT JOIN detection_template_rules r ON r.template_id = t.id
+        LEFT JOIN ip_zones z ON z.detection_template_id = t.id
+        WHERE t.id = ?
+        GROUP BY t.id
+        """,
+        (template_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Template de deteccao nao encontrado")
+    item = detection_template_row_to_dict(row)
+    if include_rules:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM detection_template_rules
+            WHERE template_id = ?
+            ORDER BY enabled DESC, vector, id
+            """,
+            (template_id,),
+        ).fetchall()
+        item["rules"] = [detection_rule_row_to_dict(rule_row) for rule_row in rows]
+    return item
+
+
+@app.get("/api/ip-zones")
+def list_ip_zones():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                z.*,
+                t.name AS detection_template_name,
+                COUNT(p.id) AS prefix_count
+            FROM ip_zones z
+            LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
+            GROUP BY z.id
+            ORDER BY z.active DESC, z.name, z.id
+            """
+        ).fetchall()
+        return {"items": [ip_zone_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/ip-zones", status_code=201)
+def create_ip_zone(payload: IpZonePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        data = normalize_ip_zone_payload(conn, payload)
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO ip_zones (name, description, active, detection_template_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (data["name"], data["description"], data["active"], data["detection_template_id"], now, now),
+        )
+        conn.commit()
+        return fetch_ip_zone(conn, int(cursor.lastrowid), include_prefixes=True)
+
+
+@app.get("/api/ip-zones/{zone_id}")
+def get_ip_zone(zone_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return fetch_ip_zone(conn, zone_id, include_prefixes=True)
+
+
+@app.put("/api/ip-zones/{zone_id}")
+def update_ip_zone(zone_id: int, payload: IpZonePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_row(conn, zone_id)
+        data = normalize_ip_zone_payload(conn, payload)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE ip_zones
+            SET name = ?,
+                description = ?,
+                active = ?,
+                detection_template_id = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (data["name"], data["description"], data["active"], data["detection_template_id"], now, zone_id),
+        )
+        conn.commit()
+        return fetch_ip_zone(conn, zone_id, include_prefixes=True)
+
+
+@app.delete("/api/ip-zones/{zone_id}")
+def delete_ip_zone(zone_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_row(conn, zone_id)
+        now = utc_now_iso()
+        conn.execute("UPDATE ip_zones SET active = 0, updated_at = ? WHERE id = ?", (now, zone_id))
+        conn.execute("UPDATE ip_zone_prefixes SET active = 0, updated_at = ? WHERE zone_id = ?", (now, zone_id))
+        conn.commit()
+        return {"status": "disabled", "id": zone_id}
+
+
+@app.get("/api/ip-zones/{zone_id}/prefixes")
+def list_ip_zone_prefixes(zone_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_row(conn, zone_id)
+        rows = conn.execute(
+            """
+            SELECT
+                p.*,
+                z.name AS zone_name,
+                z.detection_template_id,
+                t.name AS detection_template_name
+            FROM ip_zone_prefixes p
+            JOIN ip_zones z ON z.id = p.zone_id
+            LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            WHERE p.zone_id = ?
+            ORDER BY p.active DESC, p.cidr, p.id
+            """,
+            (zone_id,),
+        ).fetchall()
+        return {"items": [ip_zone_prefix_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/ip-zones/{zone_id}/prefixes", status_code=201)
+def create_ip_zone_prefix(zone_id: int, payload: IpZonePrefixPayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_row(conn, zone_id)
+        data = normalize_ip_zone_prefix_payload(payload)
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO ip_zone_prefixes (
+                zone_id, cidr, name, description, prefix_type, active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (zone_id, data["cidr"], data["name"], data["description"], data["prefix_type"], data["active"], now, now),
+        )
+        conn.commit()
+        return ip_zone_prefix_row_to_dict(
+            conn.execute(
+                """
+                SELECT
+                    p.*,
+                    z.name AS zone_name,
+                    z.detection_template_id,
+                    t.name AS detection_template_name
+                FROM ip_zone_prefixes p
+                JOIN ip_zones z ON z.id = p.zone_id
+                LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+                WHERE p.id = ?
+                """,
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        )
+
+
+@app.put("/api/ip-zones/{zone_id}/prefixes/{prefix_id}")
+def update_ip_zone_prefix(zone_id: int, prefix_id: int, payload: IpZonePrefixPayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_prefix_row(conn, zone_id, prefix_id)
+        data = normalize_ip_zone_prefix_payload(payload)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE ip_zone_prefixes
+            SET cidr = ?,
+                name = ?,
+                description = ?,
+                prefix_type = ?,
+                active = ?,
+                updated_at = ?
+            WHERE id = ? AND zone_id = ?
+            """,
+            (data["cidr"], data["name"], data["description"], data["prefix_type"], data["active"], now, prefix_id, zone_id),
+        )
+        conn.commit()
+        return ip_zone_prefix_row_to_dict(
+            conn.execute(
+                """
+                SELECT
+                    p.*,
+                    z.name AS zone_name,
+                    z.detection_template_id,
+                    t.name AS detection_template_name
+                FROM ip_zone_prefixes p
+                JOIN ip_zones z ON z.id = p.zone_id
+                LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+                WHERE p.id = ?
+                """,
+                (prefix_id,),
+            ).fetchone()
+        )
+
+
+@app.delete("/api/ip-zones/{zone_id}/prefixes/{prefix_id}")
+def delete_ip_zone_prefix(zone_id: int, prefix_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_prefix_row(conn, zone_id, prefix_id)
+        conn.execute(
+            "UPDATE ip_zone_prefixes SET active = 0, updated_at = ? WHERE id = ? AND zone_id = ?",
+            (utc_now_iso(), prefix_id, zone_id),
+        )
+        conn.commit()
+        return {"status": "disabled", "id": prefix_id}
+
+
+@app.get("/api/detection/templates")
+def list_detection_templates():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                t.*,
+                COUNT(DISTINCT r.id) AS rule_count,
+                COUNT(DISTINCT z.id) AS zone_count
+            FROM detection_templates t
+            LEFT JOIN detection_template_rules r ON r.template_id = t.id
+            LEFT JOIN ip_zones z ON z.detection_template_id = t.id
+            GROUP BY t.id
+            ORDER BY t.active DESC, t.name, t.id
+            """
+        ).fetchall()
+        return {"items": [detection_template_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/detection/templates", status_code=201)
+def create_detection_template(payload: DetectionTemplatePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        data = normalize_detection_template_payload(payload)
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO detection_templates (name, description, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (data["name"], data["description"], data["active"], now, now),
+        )
+        conn.commit()
+        return fetch_detection_template(conn, int(cursor.lastrowid), include_rules=True)
+
+
+@app.get("/api/detection/templates/{template_id}")
+def get_detection_template(template_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return fetch_detection_template(conn, template_id, include_rules=True)
+
+
+@app.put("/api/detection/templates/{template_id}")
+def update_detection_template(template_id: int, payload: DetectionTemplatePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_template_row(conn, template_id)
+        data = normalize_detection_template_payload(payload)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE detection_templates
+            SET name = ?,
+                description = ?,
+                active = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (data["name"], data["description"], data["active"], now, template_id),
+        )
+        conn.commit()
+        return fetch_detection_template(conn, template_id, include_rules=True)
+
+
+@app.delete("/api/detection/templates/{template_id}")
+def delete_detection_template(template_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_template_row(conn, template_id)
+        conn.execute(
+            "UPDATE detection_templates SET active = 0, updated_at = ? WHERE id = ?",
+            (utc_now_iso(), template_id),
+        )
+        conn.commit()
+        return {"status": "disabled", "id": template_id}
+
+
+@app.get("/api/detection/templates/{template_id}/rules")
+def list_detection_rules(template_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_template_row(conn, template_id)
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM detection_template_rules
+            WHERE template_id = ?
+            ORDER BY enabled DESC, vector, id
+            """,
+            (template_id,),
+        ).fetchall()
+        return {"items": [detection_rule_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/detection/templates/{template_id}/rules", status_code=201)
+def create_detection_rule(template_id: int, payload: DetectionRulePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_template_row(conn, template_id)
+        data = normalize_detection_rule_payload(payload)
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO detection_template_rules (
+                template_id,
+                vector,
+                domain,
+                direction,
+                protocol,
+                metric,
+                comparison,
+                warning_value,
+                critical_value,
+                window_seconds,
+                consecutive_windows,
+                cooldown_minutes,
+                enabled,
+                response,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                template_id,
+                data["vector"],
+                data["domain"],
+                data["direction"],
+                data["protocol"],
+                data["metric"],
+                data["comparison"],
+                data["warning_value"],
+                data["critical_value"],
+                data["window_seconds"],
+                data["consecutive_windows"],
+                data["cooldown_minutes"],
+                data["enabled"],
+                data["response"],
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, int(cursor.lastrowid)))
+
+
+@app.put("/api/detection/templates/{template_id}/rules/{rule_id}")
+def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRulePayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_rule_row(conn, template_id, rule_id)
+        data = normalize_detection_rule_payload(payload)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE detection_template_rules
+            SET vector = ?,
+                domain = ?,
+                direction = ?,
+                protocol = ?,
+                metric = ?,
+                comparison = ?,
+                warning_value = ?,
+                critical_value = ?,
+                window_seconds = ?,
+                consecutive_windows = ?,
+                cooldown_minutes = ?,
+                enabled = ?,
+                response = ?,
+                updated_at = ?
+            WHERE id = ? AND template_id = ?
+            """,
+            (
+                data["vector"],
+                data["domain"],
+                data["direction"],
+                data["protocol"],
+                data["metric"],
+                data["comparison"],
+                data["warning_value"],
+                data["critical_value"],
+                data["window_seconds"],
+                data["consecutive_windows"],
+                data["cooldown_minutes"],
+                data["enabled"],
+                data["response"],
+                now,
+                rule_id,
+                template_id,
+            ),
+        )
+        conn.commit()
+        return detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, rule_id))
+
+
+@app.delete("/api/detection/templates/{template_id}/rules/{rule_id}")
+def delete_detection_rule(template_id: int, rule_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_rule_row(conn, template_id, rule_id)
+        conn.execute(
+            "UPDATE detection_template_rules SET enabled = 0, updated_at = ? WHERE id = ? AND template_id = ?",
+            (utc_now_iso(), rule_id, template_id),
+        )
+        conn.commit()
+        return {"status": "disabled", "id": rule_id}
+
+
+@app.get("/api/detection/whitelist")
+def list_detection_whitelist():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT w.*, z.name AS zone_name
+            FROM detection_whitelist w
+            LEFT JOIN ip_zones z ON z.id = w.zone_id
+            ORDER BY w.active DESC, w.name, w.id
+            """
+        ).fetchall()
+        return {"items": [detection_whitelist_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/detection/whitelist", status_code=201)
+def create_detection_whitelist(payload: DetectionWhitelistPayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        data = normalize_detection_whitelist_payload(conn, payload)
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO detection_whitelist (
+                name,
+                description,
+                active,
+                type,
+                src_cidr,
+                dst_cidr,
+                protocol,
+                vector,
+                zone_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["name"],
+                data["description"],
+                data["active"],
+                data["type"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["protocol"],
+                data["vector"],
+                data["zone_id"],
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT w.*, z.name AS zone_name
+            FROM detection_whitelist w
+            LEFT JOIN ip_zones z ON z.id = w.zone_id
+            WHERE w.id = ?
+            """,
+            (int(cursor.lastrowid),),
+        ).fetchone()
+        return detection_whitelist_row_to_dict(row)
+
+
+@app.put("/api/detection/whitelist/{whitelist_id}")
+def update_detection_whitelist(whitelist_id: int, payload: DetectionWhitelistPayload):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_whitelist_row(conn, whitelist_id)
+        data = normalize_detection_whitelist_payload(conn, payload)
+        now = utc_now_iso()
+        conn.execute(
+            """
+            UPDATE detection_whitelist
+            SET name = ?,
+                description = ?,
+                active = ?,
+                type = ?,
+                src_cidr = ?,
+                dst_cidr = ?,
+                protocol = ?,
+                vector = ?,
+                zone_id = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                data["name"],
+                data["description"],
+                data["active"],
+                data["type"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["protocol"],
+                data["vector"],
+                data["zone_id"],
+                now,
+                whitelist_id,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT w.*, z.name AS zone_name
+            FROM detection_whitelist w
+            LEFT JOIN ip_zones z ON z.id = w.zone_id
+            WHERE w.id = ?
+            """,
+            (whitelist_id,),
+        ).fetchone()
+        return detection_whitelist_row_to_dict(row)
+
+
+@app.delete("/api/detection/whitelist/{whitelist_id}")
+def delete_detection_whitelist(whitelist_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_detection_whitelist_row(conn, whitelist_id)
+        conn.execute(
+            "UPDATE detection_whitelist SET active = 0, updated_at = ? WHERE id = ?",
+            (utc_now_iso(), whitelist_id),
+        )
+        conn.commit()
+        return {"status": "disabled", "id": whitelist_id}
+
+
+def detection_protocol_condition(protocol: str) -> str:
+    protocol = normalize_detection_protocol(protocol)
+    mapping = {
+        "ALL": "1 = 1",
+        "UDP": "proto = 17",
+        "TCP": "proto = 6",
+        "TCP+SYN": "proto = 6 AND bitAnd(tcp_flags, 2) != 0",
+        "ICMP": "proto IN (1, 58)",
+        "GRE": "proto = 47",
+        "DNS": "proto IN (6, 17) AND (src_port = 53 OR dst_port = 53)",
+        "CLDAP": "proto = 17 AND (src_port = 389 OR dst_port = 389)",
+        "UDP-QUIC": "proto = 17 AND (src_port IN (443, 8443) OR dst_port IN (443, 8443))",
+        "OTHER": decoder_clickhouse_condition("OTHER"),
+    }
+    return mapping.get(protocol, "1 = 1")
+
+
+def detection_protocol_label_expr(protocol: str) -> str:
+    protocol = normalize_detection_protocol(protocol)
+    if protocol == "ALL":
+        return decoder_label_expr()
+    return f"'{protocol}'"
+
+
+def detection_rule_grouping(rule: dict[str, Any]) -> str:
+    vector = clean_text(rule.get("vector")).upper()
+    if rule.get("domain") == "internal_ip" and "_TO_DST_" in vector:
+        return "internal_ip_to_dst"
+    return clean_text(rule.get("domain")) or "internal_ip"
+
+
+def detection_direction_sql(direction: str, prefix_param: str) -> tuple[str, str, str, str]:
+    src_match = f"isIPAddressInRange(toString(src_ip), {{{prefix_param}:String}})"
+    dst_match = f"isIPAddressInRange(toString(dst_ip), {{{prefix_param}:String}})"
+    direction = clean_text(direction).lower() or "transmits"
+    if direction == "receives":
+        return dst_match, "''", "toString(dst_ip)", "toString(dst_ip)"
+    if direction == "both":
+        return f"({src_match} OR {dst_match})", "toString(src_ip)", "toString(dst_ip)", f"if({src_match}, toString(src_ip), toString(dst_ip))"
+    return src_match, "toString(src_ip)", "''", "toString(src_ip)"
+
+
+def normalize_zone_direction(value: Any) -> str:
+    text = clean_text(value).lower()
+    aliases = {
+        "out": "transmits",
+        "upload": "transmits",
+        "sends": "transmits",
+        "saindo": "transmits",
+        "in": "receives",
+        "download": "receives",
+        "entrando": "receives",
+        "envolving": "both",
+        "envolvendo": "both",
+        "all": "both",
+    }
+    normalized = aliases.get(text, text or "both")
+    if normalized not in DETECTION_DIRECTIONS:
+        raise HTTPException(status_code=400, detail="zone_direction invalida")
+    return normalized
+
+
+def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
+    if zone_id is None:
+        return ""
+    direction = normalize_zone_direction(zone_direction)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        zone = conn.execute("SELECT id FROM ip_zones WHERE id = ? AND active = 1", (zone_id,)).fetchone()
+        if zone is None:
+            raise HTTPException(status_code=404, detail="IP Zone ativa nao encontrada")
+        rows = conn.execute(
+            """
+            SELECT cidr
+            FROM ip_zone_prefixes
+            WHERE zone_id = ?
+              AND active = 1
+            ORDER BY id
+            """,
+            (zone_id,),
+        ).fetchall()
+    parts = []
+    for index, row in enumerate(rows):
+        key = f"{prefix}_cidr_{index}"
+        params[key] = clickhouse_cidr_string_param(row["cidr"], "cidr")
+        src = f"isIPAddressInRange(toString(src_ip), {{{key}:String}})"
+        dst = f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})"
+        if direction == "transmits":
+            parts.append(src)
+        elif direction == "receives":
+            parts.append(dst)
+        else:
+            parts.append(f"({src} OR {dst})")
+    return f"({' OR '.join(parts)})" if parts else "0 = 1"
+
+
+def metric_expression_for_detection(metric: str) -> str:
+    mapping = {
+        "packets_s": "packets_s",
+        "bits_s": "bits_s",
+        "flows_s": "flows_s",
+        "flows": "flows",
+        "unique_dst_ips": "unique_dst_ips",
+        "unique_dst_ports": "unique_dst_ports",
+        "unique_src_ports": "unique_src_ports",
+    }
+    return mapping.get(metric, "packets_s")
+
+
+def active_detection_whitelist(conn: sqlite3.Connection, zone_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT w.*, z.name AS zone_name
+        FROM detection_whitelist w
+        LEFT JOIN ip_zones z ON z.id = w.zone_id
+        WHERE w.active = 1
+          AND (w.zone_id IS NULL OR w.zone_id = ?)
+        ORDER BY w.zone_id DESC, w.id
+        """,
+        (zone_id,),
+    ).fetchall()
+    return [detection_whitelist_row_to_dict(row) for row in rows]
+
+
+def cidr_contains_ip(cidr: str, ip_text: str) -> bool:
+    cidr_text = clean_text(cidr)
+    ip_clean = clean_ip(ip_text)
+    if not cidr_text or not ip_clean:
+        return False
+    try:
+        parsed_ip = ip_address(ip_clean)
+        parsed_network = ip_network(cidr_text, strict=False)
+    except ValueError:
+        return False
+    return parsed_ip in parsed_network
+
+
+def candidate_matches_whitelist(candidate: dict[str, Any], whitelist: dict[str, Any]) -> bool:
+    wl_protocol = normalize_detection_protocol(whitelist.get("protocol"), allow_empty=True)
+    if wl_protocol and wl_protocol != "ALL" and wl_protocol != normalize_detection_protocol(candidate.get("protocol")):
+        return False
+    wl_vector = clean_text(whitelist.get("vector")).upper()
+    if wl_vector and wl_vector != clean_text(candidate.get("vector")).upper():
+        return False
+    wl_zone_id = whitelist.get("zone_id")
+    if wl_zone_id is not None and int(wl_zone_id) != int(candidate.get("zone_id") or 0):
+        return False
+    whitelist_type = whitelist.get("type")
+    if whitelist_type == "source":
+        return cidr_contains_ip(whitelist.get("src_cidr") or "", candidate.get("src_ip") or candidate.get("internal_ip") or "")
+    if whitelist_type == "destination":
+        return cidr_contains_ip(whitelist.get("dst_cidr") or "", candidate.get("dst_ip") or "")
+    if whitelist_type == "source_destination":
+        return (
+            cidr_contains_ip(whitelist.get("src_cidr") or "", candidate.get("src_ip") or candidate.get("internal_ip") or "")
+            and cidr_contains_ip(whitelist.get("dst_cidr") or "", candidate.get("dst_ip") or "")
+        )
+    return False
+
+
+def apply_detection_whitelist(items: list[dict[str, Any]], whitelist: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filtered = []
+    for item in items:
+        if any(candidate_matches_whitelist(item, entry) for entry in whitelist):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def query_detection_rule_candidates(
+    zone: dict[str, Any],
+    template: dict[str, Any],
+    rule: dict[str, Any],
+    prefix: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    sensor_id: int | None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    warning = rule.get("warning_value")
+    critical = rule.get("critical_value")
+    warning_threshold = float(warning if warning is not None else critical or 0)
+    if warning_threshold <= 0:
+        return []
+
+    prefix_param = "prefix_cidr"
+    membership_filter, src_expr, dst_expr, internal_expr = detection_direction_sql(rule["direction"], prefix_param)
+    grouping = detection_rule_grouping(rule)
+    if grouping == "subnet":
+        src_expr = "''"
+        dst_expr = "''"
+        internal_expr = "''"
+    elif grouping == "internal_ip_to_dst" and rule["direction"] == "transmits":
+        dst_expr = "toString(dst_ip)"
+
+    window_seconds = max(1, int(rule.get("window_seconds") or 60))
+    protocol_expr = detection_protocol_label_expr(rule.get("protocol") or "ALL")
+    protocol_filter = detection_protocol_condition(rule.get("protocol") or "ALL")
+    params: dict[str, Any] = {
+        prefix_param: clickhouse_cidr_string_param(prefix["cidr"], "cidr"),
+        "start": start_dt,
+        "end": end_dt,
+        "limit": max(1, int(limit)),
+    }
+    filters = [
+        "flow_time >= {start:DateTime}",
+        "flow_time <= {end:DateTime}",
+        membership_filter,
+        protocol_filter,
+    ]
+    if sensor_id is not None:
+        params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(sensor_id)), "exporter_ip")
+        filters.append("toString(exporter_ip) = {exporter_ip:String}")
+    where = " AND ".join(f"({item})" for item in filters if item)
+    factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto")
+    metric_alias = metric_expression_for_detection(rule["metric"])
+    group_columns = "bucket, src_ip, dst_ip, internal_ip, protocol"
+    result = query_clickhouse(
+        f"""
+        WITH grouped AS (
+            SELECT
+                toStartOfInterval(flow_time, INTERVAL {window_seconds} SECOND) AS bucket,
+                {src_expr} AS src_ip,
+                {dst_expr} AS dst_ip,
+                {internal_expr} AS internal_ip,
+                {protocol_expr} AS protocol,
+                {corrected_sum_expr("bytes", factor_expr)} AS bytes,
+                {corrected_sum_expr("packets", factor_expr)} AS packets,
+                sum(flow_count) AS flows,
+                uniqExact(toString(dst_ip)) AS unique_dst_ips,
+                uniqExact(dst_port) AS unique_dst_ports,
+                uniqExact(src_port) AS unique_src_ports,
+                min(flow_time) AS first_seen,
+                max(flow_time) AS last_seen
+            FROM flow_raw
+            WHERE {where}
+            GROUP BY {group_columns}
+        )
+        SELECT
+            src_ip,
+            dst_ip,
+            internal_ip,
+            protocol,
+            bytes,
+            packets,
+            flows,
+            bytes * 8 / {float(window_seconds)} AS bits_s,
+            packets / {float(window_seconds)} AS packets_s,
+            flows / {float(window_seconds)} AS flows_s,
+            unique_dst_ips,
+            unique_dst_ports,
+            unique_src_ports,
+            first_seen,
+            last_seen,
+            {metric_alias} AS metric_value
+        FROM grouped
+        ORDER BY metric_value DESC
+        LIMIT {{limit:UInt32}}
+        """,
+        params,
+    )
+    items = []
+    for row in rows_as_dicts(result):
+        metric_value = float(row.get("metric_value") or 0)
+        if not comparison_matches(metric_value, warning_threshold, rule.get("comparison") or "over"):
+            continue
+        severity = "critical" if critical is not None and comparison_matches(metric_value, float(critical), rule.get("comparison") or "over") else "warning"
+        first_seen = row.get("first_seen")
+        last_seen = row.get("last_seen")
+        item = {
+            "zone_id": int(zone["id"]),
+            "zone_name": zone["name"],
+            "template_id": int(template["id"]),
+            "template_name": template["name"],
+            "rule_id": int(rule["id"]),
+            "prefix_id": int(prefix["id"]),
+            "prefix_cidr": prefix["cidr"],
+            "domain": rule["domain"],
+            "direction": rule["direction"],
+            "vector": rule["vector"],
+            "severity": severity,
+            "src_ip": clean_ip(row.get("src_ip")),
+            "dst_ip": clean_ip(row.get("dst_ip")),
+            "internal_ip": clean_ip(row.get("internal_ip")),
+            "protocol": clean_text(row.get("protocol")) or normalize_detection_protocol(rule.get("protocol")),
+            "packets_s": round(float(row.get("packets_s") or 0), 2),
+            "bits_s": round(float(row.get("bits_s") or 0), 2),
+            "flows": int(row.get("flows") or 0),
+            "flows_s": round(float(row.get("flows_s") or 0), 2),
+            "packets": int(float(row.get("packets") or 0)),
+            "bytes": int(float(row.get("bytes") or 0)),
+            "unique_dst_ips": int(row.get("unique_dst_ips") or 0),
+            "unique_dst_ports": int(row.get("unique_dst_ports") or 0),
+            "unique_src_ports": int(row.get("unique_src_ports") or 0),
+            "first_seen": iso(first_seen) if isinstance(first_seen, datetime) else clean_text(first_seen),
+            "last_seen": iso(last_seen) if isinstance(last_seen, datetime) else clean_text(last_seen),
+            "threshold_warning": float(warning_threshold),
+            "threshold_critical": float(critical) if critical is not None else None,
+            "metric": rule["metric"],
+            "metric_value": round(metric_value, 2),
+            "response": rule.get("response") or "DETECTION_ONLY",
+        }
+        items.append(item)
+    return items
+
+
+def security_anomaly_dedupe_key(candidate: dict[str, Any]) -> str:
+    if candidate.get("domain") == "subnet":
+        target = str(candidate.get("prefix_id") or "")
+    elif candidate.get("dst_ip"):
+        target = f"{candidate.get('src_ip') or candidate.get('internal_ip') or ''}>{candidate.get('dst_ip') or ''}"
+    else:
+        target = candidate.get("src_ip") or candidate.get("dst_ip") or candidate.get("internal_ip") or ""
+    return "|".join(
+        [
+            clean_text(candidate.get("vector")),
+            str(candidate.get("zone_id") or ""),
+            target,
+            clean_text(candidate.get("protocol")),
+        ]
+    )
+
+
+def security_anomaly_message(candidate: dict[str, Any]) -> str:
+    src_ip = candidate.get("src_ip") or candidate.get("internal_ip") or "N/D"
+    packets_s = format_metric(candidate.get("packets_s") or 0, "packets_s")
+    bits_s = format_metric(candidate.get("bits_s") or 0, "bits_s")
+    protocol = candidate.get("protocol") or "ALL"
+    if "DNS" in clean_text(candidate.get("vector")).upper() or protocol == "DNS":
+        return (
+            f"Possivel abuso DNS detectado: o IP {src_ip}, pertencente a zona {candidate.get('zone_name')}, "
+            f"transmitiu {packets_s} ou {bits_s} em trafego DNS."
+        )
+    if candidate.get("domain") == "subnet":
+        return (
+            f"O prefixo {candidate.get('prefix_cidr')}, pertencente a zona {candidate.get('zone_name')}, "
+            f"transmitiu {packets_s} em {protocol}, acima do limite configurado."
+        )
+    if candidate.get("dst_ip"):
+        return (
+            f"O IP {src_ip}, pertencente a zona {candidate.get('zone_name')} e ao prefixo {candidate.get('prefix_cidr')}, "
+            f"transmitiu {packets_s} para {candidate.get('dst_ip')} em {protocol}, acima do limite configurado."
+        )
+    return (
+        f"O IP {src_ip}, pertencente a zona {candidate.get('zone_name')} e ao prefixo {candidate.get('prefix_cidr')}, "
+        f"transmitiu {packets_s} em {protocol}, acima do limite configurado."
+    )
+
+
+def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any]) -> str:
+    now = utc_now_iso()
+    dedupe_key = security_anomaly_dedupe_key(candidate)
+    existing = conn.execute(
+        """
+        SELECT *
+        FROM security_anomalies
+        WHERE dedupe_key = ?
+          AND status = 'active'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    message = security_anomaly_message(candidate)
+    recommended_action = "Verificar origem, cliente e destino. Nenhum bloqueio automatico foi aplicado."
+    values = (
+        candidate["vector"],
+        candidate["severity"],
+        candidate["zone_id"],
+        candidate["zone_name"],
+        candidate["template_id"],
+        candidate["template_name"],
+        candidate["rule_id"],
+        candidate["prefix_id"],
+        candidate["prefix_cidr"],
+        candidate["domain"],
+        candidate["direction"],
+        candidate.get("src_ip") or candidate.get("internal_ip") or "",
+        candidate.get("dst_ip") or "",
+        candidate.get("protocol") or "",
+        candidate.get("packets_s") or 0,
+        candidate.get("bits_s") or 0,
+        candidate.get("flows") or 0,
+        candidate.get("flows_s") or 0,
+        candidate.get("packets") or 0,
+        candidate.get("bytes") or 0,
+        candidate.get("unique_dst_ips") or 0,
+        candidate.get("unique_dst_ports") or 0,
+        candidate.get("unique_src_ports") or 0,
+        candidate.get("first_seen") or now,
+        candidate.get("last_seen") or now,
+        message,
+        recommended_action,
+        candidate.get("response") or "DETECTION_ONLY",
+        dedupe_key,
+    )
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO security_anomalies (
+                vector,
+                severity,
+                zone_id,
+                zone_name,
+                template_id,
+                template_name,
+                rule_id,
+                prefix_id,
+                prefix_cidr,
+                domain,
+                direction,
+                src_ip,
+                dst_ip,
+                protocol,
+                packets_s,
+                bits_s,
+                flows,
+                flows_s,
+                packets,
+                bytes,
+                unique_dst_ips,
+                unique_dst_ports,
+                unique_src_ports,
+                first_seen,
+                last_seen,
+                message,
+                recommended_action,
+                response,
+                dedupe_key,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (*values, now, now),
+        )
+        return "created"
+    conn.execute(
+        """
+        UPDATE security_anomalies
+        SET vector = ?,
+            severity = ?,
+            zone_id = ?,
+            zone_name = ?,
+            template_id = ?,
+            template_name = ?,
+            rule_id = ?,
+            prefix_id = ?,
+            prefix_cidr = ?,
+            domain = ?,
+            direction = ?,
+            src_ip = ?,
+            dst_ip = ?,
+            protocol = ?,
+            packets_s = ?,
+            bits_s = ?,
+            flows = ?,
+            flows_s = ?,
+            packets = ?,
+            bytes = ?,
+            unique_dst_ips = ?,
+            unique_dst_ports = ?,
+            unique_src_ports = ?,
+            first_seen = ?,
+            last_seen = ?,
+            message = ?,
+            recommended_action = ?,
+            response = ?,
+            dedupe_key = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (*values, now, int(existing["id"])),
+    )
+    return "updated"
+
+
+def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "vector": item["vector"],
+        "severity": item["severity"],
+        "status": item.get("status") or "active",
+        "zone_id": int(item["zone_id"]) if item.get("zone_id") is not None else None,
+        "zone_name": item.get("zone_name") or "",
+        "template_id": int(item["template_id"]) if item.get("template_id") is not None else None,
+        "template_name": item.get("template_name") or "",
+        "rule_id": int(item["rule_id"]) if item.get("rule_id") is not None else None,
+        "prefix_id": int(item["prefix_id"]) if item.get("prefix_id") is not None else None,
+        "prefix_cidr": item.get("prefix_cidr") or "",
+        "domain": item.get("domain") or "",
+        "direction": item.get("direction") or "",
+        "src_ip": item.get("src_ip") or "",
+        "dst_ip": item.get("dst_ip") or "",
+        "protocol": item.get("protocol") or "",
+        "packets_s": float(item.get("packets_s") or 0),
+        "bits_s": float(item.get("bits_s") or 0),
+        "flows": float(item.get("flows") or 0),
+        "flows_s": float(item.get("flows_s") or 0),
+        "packets": float(item.get("packets") or 0),
+        "bytes": float(item.get("bytes") or 0),
+        "unique_dst_ips": int(item.get("unique_dst_ips") or 0),
+        "unique_dst_ports": int(item.get("unique_dst_ports") or 0),
+        "unique_src_ports": int(item.get("unique_src_ports") or 0),
+        "first_seen": item.get("first_seen") or "",
+        "last_seen": item.get("last_seen") or "",
+        "message": item.get("message") or "",
+        "recommended_action": item.get("recommended_action") or "",
+        "response": item.get("response") or "DETECTION_ONLY",
+        "created_at": item.get("created_at") or "",
+        "updated_at": item.get("updated_at") or "",
+    }
+
+
+def detection_candidates_payload(
+    range_minutes: int,
+    sensor_id: int | None,
+    zone_id: int,
+    vector_filter: set[str] | None = None,
+    create_anomalies: bool = False,
+) -> dict[str, Any]:
+    ensure_sensor_db()
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(minutes=max(1, int(range_minutes)))
+    warnings: list[str] = []
+    anomaly_actions: dict[str, int] = {"created": 0, "updated": 0}
+    with sqlite_connection() as conn:
+        zone_row = conn.execute(
+            """
+            SELECT z.*, t.name AS detection_template_name
+            FROM ip_zones z
+            LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            WHERE z.id = ? AND z.active = 1
+            """,
+            (zone_id,),
+        ).fetchone()
+        if zone_row is None:
+            raise HTTPException(status_code=404, detail="IP Zone ativa nao encontrada")
+        zone = ip_zone_row_to_dict(zone_row)
+        prefix_rows = conn.execute(
+            """
+            SELECT
+                p.*,
+                z.name AS zone_name,
+                z.detection_template_id,
+                t.name AS detection_template_name
+            FROM ip_zone_prefixes p
+            JOIN ip_zones z ON z.id = p.zone_id
+            LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            WHERE p.zone_id = ?
+              AND p.active = 1
+            ORDER BY p.cidr, p.id
+            """,
+            (zone_id,),
+        ).fetchall()
+        prefixes = [ip_zone_prefix_row_to_dict(row) for row in prefix_rows]
+        if not prefixes:
+            return {"items": [], "warnings": ["IP Zone sem prefixos ativos"], "start": iso(start_dt), "end": iso(end_dt)}
+        template_id = zone.get("detection_template_id")
+        if template_id is None:
+            return {"items": [], "warnings": ["IP Zone sem template vinculado"], "start": iso(start_dt), "end": iso(end_dt)}
+        template_row = conn.execute(
+            "SELECT * FROM detection_templates WHERE id = ? AND active = 1",
+            (int(template_id),),
+        ).fetchone()
+        if template_row is None:
+            return {"items": [], "warnings": ["Template vinculado esta inativo ou nao existe"], "start": iso(start_dt), "end": iso(end_dt)}
+        template = detection_template_row_to_dict(template_row)
+        rule_rows = conn.execute(
+            """
+            SELECT *
+            FROM detection_template_rules
+            WHERE template_id = ?
+              AND enabled = 1
+            ORDER BY id
+            """,
+            (int(template_id),),
+        ).fetchall()
+        rules = [detection_rule_row_to_dict(row) for row in rule_rows]
+        if vector_filter:
+            rules = [rule for rule in rules if rule["vector"].lower() in vector_filter]
+        whitelist = active_detection_whitelist(conn, zone_id)
+
+    items: list[dict[str, Any]] = []
+    for prefix in prefixes:
+        for rule in rules:
+            try:
+                items.extend(query_detection_rule_candidates(zone, template, rule, prefix, start_dt, end_dt, sensor_id))
+            except Exception as exc:
+                warning = f"Falha ao executar {rule['vector']} em {prefix['cidr']}: {clean_text(exc)}"
+                logger.warning(warning)
+                warnings.append(warning)
+    items = apply_detection_whitelist(items, whitelist)
+    items = sorted(items, key=lambda item: float(item.get("metric_value") or 0), reverse=True)
+
+    if create_anomalies and items:
+        with sqlite_connection() as conn:
+            for item in items:
+                action = upsert_security_anomaly(conn, item)
+                anomaly_actions[action] = anomaly_actions.get(action, 0) + 1
+            conn.commit()
+
+    return {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "zone_id": zone_id,
+        "sensor_id": sensor_id,
+        "items": items,
+        "warnings": warnings,
+        "anomalies": anomaly_actions if create_anomalies else None,
+    }
+
+
+@app.get("/api/security/vectors/candidates")
+def security_vector_candidates(
+    range_minutes: int = Query(30, ge=1, le=MAX_RANGE_MINUTES),
+    sensor_id: int | None = Query(None, ge=1),
+    zone_id: int = Query(..., ge=1),
+    create_anomalies: bool = False,
+):
+    return detection_candidates_payload(range_minutes, sensor_id, zone_id, create_anomalies=create_anomalies)
+
+
+@app.get("/api/security/vectors/prefix-internal-ip-high-pps/candidates")
+def security_vector_prefix_internal_ip_high_pps_candidates(
+    range_minutes: int = Query(30, ge=1, le=MAX_RANGE_MINUTES),
+    sensor_id: int | None = Query(None, ge=1),
+    zone_id: int = Query(..., ge=1),
+    create_anomalies: bool = False,
+):
+    return detection_candidates_payload(
+        range_minutes,
+        sensor_id,
+        zone_id,
+        vector_filter={"prefix_internal_ip_high_udp_pps"},
+        create_anomalies=create_anomalies,
+    )
+
+
+@app.get("/api/security/vectors/prefix-internal-ip-to-dst-high-pps/candidates")
+def security_vector_prefix_internal_ip_to_dst_high_pps_candidates(
+    range_minutes: int = Query(30, ge=1, le=MAX_RANGE_MINUTES),
+    sensor_id: int | None = Query(None, ge=1),
+    zone_id: int = Query(..., ge=1),
+    create_anomalies: bool = False,
+):
+    return detection_candidates_payload(
+        range_minutes,
+        sensor_id,
+        zone_id,
+        vector_filter={"prefix_internal_ip_to_dst_high_udp_pps"},
+        create_anomalies=create_anomalies,
+    )
+
+
+@app.get("/api/security/vectors/dns-internal-ip-high-pps/candidates")
+def security_vector_dns_internal_ip_high_pps_candidates(
+    range_minutes: int = Query(30, ge=1, le=MAX_RANGE_MINUTES),
+    sensor_id: int | None = Query(None, ge=1),
+    zone_id: int = Query(..., ge=1),
+    create_anomalies: bool = False,
+):
+    return detection_candidates_payload(
+        range_minutes,
+        sensor_id,
+        zone_id,
+        vector_filter={"dns_internal_ip_high_pps"},
+        create_anomalies=create_anomalies,
+    )
+
+
+def security_anomaly_filters(
+    zone_id: int | None,
+    prefix_id: int | None,
+    vector: str | None,
+    severity: str | None,
+    protocol: str | None,
+    src_ip: str | None,
+    dst_ip: str | None,
+) -> tuple[str, list[Any]]:
+    filters: list[str] = []
+    values: list[Any] = []
+    if zone_id is not None:
+        filters.append("zone_id = ?")
+        values.append(zone_id)
+    if prefix_id is not None:
+        filters.append("prefix_id = ?")
+        values.append(prefix_id)
+    if clean_text(vector):
+        filters.append("vector = ?")
+        values.append(normalize_detection_vector(vector))
+    if clean_text(severity):
+        filters.append("severity = ?")
+        values.append(clean_text(severity).lower())
+    if clean_text(protocol):
+        filters.append("protocol = ?")
+        values.append(normalize_detection_protocol(protocol))
+    if clean_text(src_ip):
+        filters.append("src_ip = ?")
+        values.append(clean_ip(src_ip))
+    if clean_text(dst_ip):
+        filters.append("dst_ip = ?")
+        values.append(clean_ip(dst_ip))
+    return (" AND " + " AND ".join(filters)) if filters else "", values
+
+
+@app.get("/api/security/anomalies/summary")
+def security_anomalies_summary():
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS active_count,
+                SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical_count,
+                SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS warning_count
+            FROM security_anomalies
+            WHERE status = 'active'
+            """
+        ).fetchone()
+    return {
+        "active_count": int(row["active_count"] or 0) if row else 0,
+        "critical_count": int(row["critical_count"] or 0) if row else 0,
+        "warning_count": int(row["warning_count"] or 0) if row else 0,
+    }
+
+
+@app.get("/api/security/anomalies/active")
+def list_security_anomalies_active(
+    zone_id: int | None = Query(None, ge=1),
+    prefix_id: int | None = Query(None, ge=1),
+    vector: str | None = None,
+    severity: str | None = None,
+    protocol: str | None = None,
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    return list_security_anomalies("active", zone_id, prefix_id, vector, severity, protocol, src_ip, dst_ip, limit)
+
+
+@app.get("/api/security/anomalies/history")
+def list_security_anomalies_history(
+    zone_id: int | None = Query(None, ge=1),
+    prefix_id: int | None = Query(None, ge=1),
+    vector: str | None = None,
+    severity: str | None = None,
+    protocol: str | None = None,
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    return list_security_anomalies("history", zone_id, prefix_id, vector, severity, protocol, src_ip, dst_ip, limit)
+
+
+def list_security_anomalies(
+    status_group: str,
+    zone_id: int | None,
+    prefix_id: int | None,
+    vector: str | None,
+    severity: str | None,
+    protocol: str | None,
+    src_ip: str | None,
+    dst_ip: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    ensure_sensor_db()
+    extra_where, values = security_anomaly_filters(zone_id, prefix_id, vector, severity, protocol, src_ip, dst_ip)
+    status_where = "status = 'active'" if status_group == "active" else "status <> 'active'"
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM security_anomalies
+            WHERE {status_where}
+              {extra_where}
+            ORDER BY last_seen DESC, id DESC
+            LIMIT ?
+            """,
+            [*values, limit],
+        ).fetchall()
+    return {"items": [security_anomaly_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/security/anomalies/{anomaly_id}/ack")
+def acknowledge_security_anomaly(anomaly_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM security_anomalies WHERE id = ?", (anomaly_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        conn.execute(
+            "UPDATE security_anomalies SET status = 'acknowledged', updated_at = ? WHERE id = ?",
+            (utc_now_iso(), anomaly_id),
+        )
+        conn.commit()
+    return {"status": "acknowledged", "id": anomaly_id}
+
+
+@app.post("/api/security/anomalies/{anomaly_id}/close")
+def close_security_anomaly(anomaly_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM security_anomalies WHERE id = ?", (anomaly_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        conn.execute(
+            "UPDATE security_anomalies SET status = 'closed', updated_at = ? WHERE id = ?",
+            (utc_now_iso(), anomaly_id),
+        )
+        conn.commit()
+    return {"status": "closed", "id": anomaly_id}
 
 
 def normalize_attack_port_filter(value: Any, field_name: str) -> str:
@@ -8784,6 +10754,8 @@ def dashboard_series_payload(
     start_time: datetime | None,
     end_time: datetime | None,
     limit: int,
+    zone_id: int | None = None,
+    zone_direction: str = "both",
 ) -> dict[str, Any]:
     ensure_clickhouse_schema()
     group_by = clean_text(group_by).lower() or "total"
@@ -8831,6 +10803,8 @@ def dashboard_series_payload(
             "group_by": group_by,
             "metric": metric,
             "limit": limit,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -8861,6 +10835,8 @@ def dashboard_series_payload(
         output_group = "'Total'"
 
     selects = []
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "series_zone")
+    base_where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
     if direction in {"both", "download"}:
         selects.append(
             f"""
@@ -8870,7 +10846,7 @@ def dashboard_series_payload(
                 'download' AS flow_direction,
                 sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
             FROM flow_raw
-            WHERE {context["where"]} AND {input_condition}
+            WHERE {base_where} AND {input_condition}
             GROUP BY ts, group_key
             """
         )
@@ -8883,7 +10859,7 @@ def dashboard_series_payload(
                 'upload' AS flow_direction,
                 sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
             FROM flow_raw
-            WHERE {context["where"]} AND {output_condition}
+            WHERE {base_where} AND {output_condition}
             GROUP BY ts, group_key
             """
         )
@@ -8951,6 +10927,8 @@ def dashboard_series(
     group_by: str = "total",
     metric: str = "bits_s",
     limit: int = Query(12, ge=1, le=50),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
     return dashboard_series_payload(
         range_minutes,
@@ -8965,6 +10943,8 @@ def dashboard_series(
         start_time,
         end_time,
         limit,
+        zone_id,
+        zone_direction,
     )
 
 
@@ -8992,6 +10972,8 @@ def top_conversations_payload(
     end: datetime | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    zone_id: int | None = None,
+    zone_direction: str = "both",
 ) -> dict[str, Any]:
     sort_by = clean_text(sort_by).lower() or "bits_s"
     order_columns = {
@@ -9029,6 +11011,8 @@ def top_conversations_payload(
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "conversation_zone")
+    where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     bytes_value = corrected_value_expr("bytes", factor_expr)
     packets_value = corrected_value_expr("packets", factor_expr)
@@ -9052,7 +11036,7 @@ def top_conversations_payload(
                     min(flow_time) AS first_seen,
                     max(flow_time) AS last_seen
                 FROM flow_raw
-                WHERE {context["where"]}
+                WHERE {where}
                 GROUP BY src_ip, dst_ip, src_port, dst_port, proto
             ),
             totals AS (
@@ -9129,6 +11113,8 @@ def dashboard_top_conversations(
     proto: str | None = None,
     sort_by: str = "bits_s",
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
     return top_conversations_payload(
         range_minutes,
@@ -9143,6 +11129,8 @@ def dashboard_top_conversations(
         end,
         start_time,
         end_time,
+        zone_id,
+        zone_direction,
     )
 
 
@@ -9159,6 +11147,8 @@ def dashboard_top_syn(
     direction: str = "both",
     mode: str = "src",
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
     mode = clean_text(mode).lower()
     if mode not in {"src", "dst"}:
@@ -9189,6 +11179,8 @@ def dashboard_top_syn(
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "syn_zone")
+    where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     ip_col = "src_ip" if mode == "src" else "dst_ip"
     asn_col = "src_asn" if mode == "src" else "dst_asn"
@@ -9207,7 +11199,7 @@ def dashboard_top_syn(
                     sum({packets_value}) AS packets,
                     sum(flow_count) AS flows
                 FROM flow_raw
-                WHERE {context["where"]}
+                WHERE {where}
                   AND bitAnd(tcp_flags, 2) != 0
                   AND bitAnd(tcp_flags, 16) = 0
                 GROUP BY ip
@@ -9415,6 +11407,8 @@ def geo_flows(
     metric: str = "bits_s",
     group_by: str = "city",
     top_n: int = Query(20, ge=1, le=500),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
     ensure_clickhouse_schema()
     metric = clean_text(metric).lower() or "bits_s"
@@ -9465,6 +11459,8 @@ def geo_flows(
             "metric": metric,
             "group_by": group_by,
             "top_n": top_n,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
         },
     )
     ttl = 10 if range_minutes <= 15 else 30 if range_minutes <= 60 else 60
@@ -9477,6 +11473,9 @@ def geo_flows(
     params.update({"seconds": seconds, "limit": fetch_limit})
     filters = [context["where"]]
     add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "geo_zone")
+    if zone_filter:
+        filters.append(zone_filter)
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
@@ -9716,6 +11715,8 @@ def top_dimension(
     end_time: datetime | None = None,
     interface_id: int | None = None,
     if_index: int | None = None,
+    zone_id: int | None = None,
+    zone_direction: str = "both",
 ):
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
@@ -9729,6 +11730,8 @@ def top_dimension(
             "interface_id": interface_id,
             "if_index": if_index,
             "limit": limit,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -9739,6 +11742,9 @@ def top_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "top_zone")
+    if zone_filter:
+        where += f" AND {zone_filter}"
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", resolved_if_index)
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
@@ -9853,8 +11859,10 @@ def top_src_ip(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 @app.get("/api/tops/dst-ip")
@@ -9869,8 +11877,10 @@ def top_dst_ip(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 @app.get("/api/tops/ports")
@@ -9885,8 +11895,10 @@ def top_ports(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 @app.get("/api/tops/protocols")
@@ -9901,8 +11913,10 @@ def top_protocols(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_dimension("proto", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_dimension("proto", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 @app.get("/api/tops/tcp-flags")
@@ -9917,8 +11931,10 @@ def top_tcp_flags(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 def top_asn_dimension(
@@ -9933,6 +11949,8 @@ def top_asn_dimension(
     end_time: datetime | None = None,
     interface_id: int | None = None,
     if_index: int | None = None,
+    zone_id: int | None = None,
+    zone_direction: str = "both",
 ):
     ensure_clickhouse_schema()
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
@@ -9941,6 +11959,9 @@ def top_asn_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "asn_zone")
+    if zone_filter:
+        where += f" AND {zone_filter}"
     rate_direction = "auto"
     if resolved_if_index is not None:
         params["if_index"] = resolved_if_index
@@ -10170,8 +12191,10 @@ def top_asn_src(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(15, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_asn_dimension("src", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_asn_dimension("src", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 @app.get("/api/tops/asn-dst")
@@ -10186,8 +12209,10 @@ def top_asn_dst(
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(15, ge=1, le=100),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
 ):
-    return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index)
+    return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
 def flow_query_context(

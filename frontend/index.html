@@ -606,23 +606,30 @@
       }
     }
 
-    .attack-layout {
+    .attack-layout,
+    .ip-zone-layout {
       display: grid;
       grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
       gap: 14px;
       align-items: start;
     }
 
-    .attack-template-table tr {
+    .attack-template-table tr,
+    .ip-zone-table tr,
+    .detection-template-table tr {
       cursor: pointer;
     }
 
-    .attack-template-table tr.active td {
+    .attack-template-table tr.active td,
+    .ip-zone-table tr.active td,
+    .detection-template-table tr.active td {
       background: #ecfdf5;
     }
 
     .attack-template-grid,
-    .attack-vector-form-grid {
+    .attack-vector-form-grid,
+    .ip-zone-form-grid,
+    .detection-rule-form-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(150px, 1fr));
       gap: .75rem;
@@ -644,7 +651,9 @@
     }
 
     .attack-vector-table,
-    .anomaly-table {
+    .anomaly-table,
+    .ip-zone-data-table,
+    .detection-candidate-table {
       font-size: .84rem;
     }
 
@@ -854,7 +863,8 @@
         grid-template-columns: 1fr;
       }
 
-      .attack-layout {
+      .attack-layout,
+      .ip-zone-layout {
         grid-template-columns: 1fr;
       }
 
@@ -873,6 +883,8 @@
       .interface-form-grid,
       .attack-template-grid,
       .attack-vector-form-grid,
+      .ip-zone-form-grid,
+      .detection-rule-form-grid,
       .database-metrics-grid {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
       }
@@ -901,6 +913,8 @@
       .interface-form-grid,
       .attack-template-grid,
       .attack-vector-form-grid,
+      .ip-zone-form-grid,
+      .detection-rule-form-grid,
       .anomaly-detail-grid,
       .database-metrics-grid,
       .database-actions-grid,
@@ -993,7 +1007,7 @@
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Clientes/Prefixos">
+        <button type="button" data-nav-view="ip-zones">
           <i data-lucide="network"></i><span>Clientes/Prefixos</span>
         </button>
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas">
@@ -1049,6 +1063,14 @@
               </select>
               <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
+              </select>
+              <select id="dashboardZone" class="form-select form-select-sm" aria-label="IP Zone">
+                <option value="">Todas as IP Zones</option>
+              </select>
+              <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone">
+                <option value="both">Envolvendo a zona</option>
+                <option value="out">Saindo da zona</option>
+                <option value="in">Entrando na zona</option>
               </select>
               <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
                 <option value="total" selected>Total</option>
@@ -1360,6 +1382,14 @@
               </select>
               <select id="mapInterface" class="form-select form-select-sm" aria-label="Interface" disabled>
                 <option value="">Todas as interfaces</option>
+              </select>
+              <select id="mapZone" class="form-select form-select-sm" aria-label="IP Zone">
+                <option value="">Todas as IP Zones</option>
+              </select>
+              <select id="mapZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone no mapa">
+                <option value="both">Envolvendo a zona</option>
+                <option value="out">Saindo da zona</option>
+                <option value="in">Entrando na zona</option>
               </select>
               <select id="mapDirection" class="form-select form-select-sm" aria-label="Direcao">
                 <option value="both">Bidirecional</option>
@@ -2252,6 +2282,405 @@
           </section>
         </section>
 
+        <section id="view-ip-zones" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Clientes/Prefixos</h1>
+              <div id="ipZoneStatus" class="subtle">IP Zones, templates de deteccao e whitelist informativa</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshIpZonesButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+              <button id="newIpZoneButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="file-plus-2"></i><span>Nova zona</span>
+              </button>
+              <button id="saveIpZoneButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="save"></i><span>Salvar zona</span>
+              </button>
+              <button id="disableIpZoneButton" type="button" class="btn btn-sm btn-outline-danger">
+                <i data-lucide="ban"></i><span>Desativar</span>
+              </button>
+              <button id="testIpZoneDetectionButton" type="button" class="btn btn-sm btn-outline-success">
+                <i data-lucide="play-circle"></i><span>Testar deteccao agora</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="ip-zone-layout">
+            <section class="panel p-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="panel-title">IP Zones</div>
+                <span id="ipZoneCount" class="badge-soft off">0</span>
+              </div>
+              <div class="table-wrap">
+                <table class="table table-sm table-hover align-middle mb-0 ip-zone-table">
+                  <thead><tr><th>Nome</th><th class="text-end">Prefixos</th><th>Status</th></tr></thead>
+                  <tbody id="ipZoneTable"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <div>
+              <section class="panel p-3">
+                <div class="panel-title mb-3">Zona selecionada</div>
+                <div class="ip-zone-form-grid">
+                  <div class="field">
+                    <label for="ipZoneName">Nome</label>
+                    <input id="ipZoneName" class="form-control form-control-sm" placeholder="Clientes Publicos FIBINET">
+                  </div>
+                  <div class="field">
+                    <label for="ipZoneActive">Status</label>
+                    <select id="ipZoneActive" class="form-select form-select-sm">
+                      <option value="true">Ativa</option>
+                      <option value="false">Desativada</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="ipZoneTemplate">Detection Template</label>
+                    <select id="ipZoneTemplate" class="form-select form-select-sm">
+                      <option value="">Sem template</option>
+                    </select>
+                  </div>
+                  <div class="field grid-span-3">
+                    <label for="ipZoneDescription">Descricao</label>
+                    <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observacoes da zona">
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel p-3 mt-3">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                  <div>
+                    <div class="panel-title">Prefixos da zona</div>
+                    <div id="ipZonePrefixStatus" class="metric-readout">Selecione uma IP Zone</div>
+                  </div>
+                  <div class="toolbar">
+                    <button id="newIpZonePrefixButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="plus"></i><span>Novo prefixo</span>
+                    </button>
+                    <button id="saveIpZonePrefixButton" type="button" class="btn btn-sm btn-success">
+                      <i data-lucide="save"></i><span>Salvar prefixo</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="ip-zone-form-grid mb-3">
+                  <div class="field">
+                    <label for="ipZonePrefixCidr">CIDR</label>
+                    <input id="ipZonePrefixCidr" class="form-control form-control-sm" placeholder="168.232.196.0/23">
+                  </div>
+                  <div class="field">
+                    <label for="ipZonePrefixName">Nome</label>
+                    <input id="ipZonePrefixName" class="form-control form-control-sm" placeholder="Cliente / bloco">
+                  </div>
+                  <div class="field">
+                    <label for="ipZonePrefixType">Tipo</label>
+                    <select id="ipZonePrefixType" class="form-select form-select-sm">
+                      <option value="client">client</option>
+                      <option value="public_cgnat">public_cgnat</option>
+                      <option value="infrastructure">infrastructure</option>
+                      <option value="server">server</option>
+                      <option value="cache">cache</option>
+                      <option value="transit">transit</option>
+                      <option value="other">other</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="ipZonePrefixActive">Status</label>
+                    <select id="ipZonePrefixActive" class="form-select form-select-sm">
+                      <option value="true">Ativo</option>
+                      <option value="false">Desativado</option>
+                    </select>
+                  </div>
+                  <div class="field grid-span-3">
+                    <label for="ipZonePrefixDescription">Descricao</label>
+                    <input id="ipZonePrefixDescription" class="form-control form-control-sm" placeholder="Observacoes do prefixo">
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
+                    <thead><tr><th>CIDR</th><th>Nome</th><th>Tipo</th><th>Status</th><th>Acoes</th></tr></thead>
+                    <tbody id="ipZonePrefixTable"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Detection Templates</div>
+                <div id="detectionTemplateStatus" class="metric-readout">Template CLIENTES-PUBLICOS-DEFAULT sera exibido aqui</div>
+              </div>
+              <div class="toolbar">
+                <span id="detectionTemplateCount" class="badge-soft off">0</span>
+                <button id="newDetectionTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="file-plus-2"></i><span>Novo template</span>
+                </button>
+                <button id="saveDetectionTemplateButton" type="button" class="btn btn-sm btn-success">
+                  <i data-lucide="save"></i><span>Salvar template</span>
+                </button>
+                <button id="disableDetectionTemplateButton" type="button" class="btn btn-sm btn-outline-danger">
+                  <i data-lucide="ban"></i><span>Desativar template</span>
+                </button>
+              </div>
+            </div>
+            <div class="ip-zone-layout">
+              <div class="table-wrap">
+                <table class="table table-sm table-hover align-middle mb-0 detection-template-table">
+                  <thead><tr><th>Nome</th><th class="text-end">Regras</th><th>Status</th></tr></thead>
+                  <tbody id="detectionTemplateTable"></tbody>
+                </table>
+              </div>
+              <div>
+                <div class="ip-zone-form-grid mb-3">
+                  <div class="field">
+                    <label for="detectionTemplateName">Nome</label>
+                    <input id="detectionTemplateName" class="form-control form-control-sm" placeholder="CLIENTES-PUBLICOS-DEFAULT">
+                  </div>
+                  <div class="field">
+                    <label for="detectionTemplateActive">Status</label>
+                    <select id="detectionTemplateActive" class="form-select form-select-sm">
+                      <option value="true">Ativo</option>
+                      <option value="false">Desativado</option>
+                    </select>
+                  </div>
+                  <div class="field grid-span-3">
+                    <label for="detectionTemplateDescription">Descricao</label>
+                    <input id="detectionTemplateDescription" class="form-control form-control-sm" placeholder="Descricao do template">
+                  </div>
+                </div>
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                  <div>
+                    <div class="panel-title">Regras / Vetores</div>
+                    <div id="detectionRuleStatus" class="metric-readout">Selecione um template</div>
+                  </div>
+                  <div class="toolbar">
+                    <button id="newDetectionRuleButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="plus"></i><span>Nova regra</span>
+                    </button>
+                    <button id="saveDetectionRuleButton" type="button" class="btn btn-sm btn-success">
+                      <i data-lucide="save"></i><span>Salvar regra</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="detection-rule-form-grid mb-3">
+                  <div class="field">
+                    <label for="detectionRuleVector">Vector</label>
+                    <input id="detectionRuleVector" class="form-control form-control-sm" placeholder="PREFIX_INTERNAL_IP_HIGH_UDP_PPS">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleDomain">Domain</label>
+                    <select id="detectionRuleDomain" class="form-select form-select-sm">
+                      <option value="internal_ip">internal_ip</option>
+                      <option value="subnet">subnet</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleDirection">Direction</label>
+                    <select id="detectionRuleDirection" class="form-select form-select-sm">
+                      <option value="transmits">transmits</option>
+                      <option value="receives">receives</option>
+                      <option value="both">both</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleProtocol">Protocol</label>
+                    <select id="detectionRuleProtocol" class="form-select form-select-sm">
+                      <option value="ALL">ALL</option>
+                      <option value="UDP">UDP</option>
+                      <option value="TCP">TCP</option>
+                      <option value="TCP+SYN">TCP+SYN</option>
+                      <option value="ICMP">ICMP</option>
+                      <option value="GRE">GRE</option>
+                      <option value="DNS">DNS</option>
+                      <option value="CLDAP">CLDAP</option>
+                      <option value="UDP-QUIC">UDP-QUIC</option>
+                      <option value="OTHER">OTHER</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleMetric">Metric</label>
+                    <select id="detectionRuleMetric" class="form-select form-select-sm">
+                      <option value="packets_s">packets_s</option>
+                      <option value="bits_s">bits_s</option>
+                      <option value="flows_s">flows_s</option>
+                      <option value="flows">flows</option>
+                      <option value="unique_dst_ips">unique_dst_ips</option>
+                      <option value="unique_dst_ports">unique_dst_ports</option>
+                      <option value="unique_src_ports">unique_src_ports</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleWarning">Warning</label>
+                    <input id="detectionRuleWarning" type="number" min="0" step="1" class="form-control form-control-sm">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleCritical">Critical</label>
+                    <input id="detectionRuleCritical" type="number" min="0" step="1" class="form-control form-control-sm">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleWindow">Window (s)</label>
+                    <input id="detectionRuleWindow" type="number" min="1" max="86400" step="1" class="form-control form-control-sm" value="60">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleConsecutive">Consecutive</label>
+                    <input id="detectionRuleConsecutive" type="number" min="1" max="1000" step="1" class="form-control form-control-sm" value="1">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleCooldown">Cooldown (min)</label>
+                    <input id="detectionRuleCooldown" type="number" min="0" max="1440" step="1" class="form-control form-control-sm" value="5">
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleEnabled">Status</label>
+                    <select id="detectionRuleEnabled" class="form-select form-select-sm">
+                      <option value="true">Ativa</option>
+                      <option value="false">Desativada</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="detectionRuleResponse">Response</label>
+                    <input id="detectionRuleResponse" class="form-control form-control-sm" value="DETECTION_ONLY" disabled>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
+                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th class="text-end">Warning</th><th class="text-end">Critical</th><th>Status</th><th>Acoes</th></tr></thead>
+                    <tbody id="detectionRuleTable"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Whitelist de deteccao</div>
+                <div id="detectionWhitelistStatus" class="metric-readout">Regras de excecao informativa</div>
+              </div>
+              <div class="toolbar">
+                <button id="newDetectionWhitelistButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="plus"></i><span>Nova whitelist</span>
+                </button>
+                <button id="saveDetectionWhitelistButton" type="button" class="btn btn-sm btn-success">
+                  <i data-lucide="save"></i><span>Salvar whitelist</span>
+                </button>
+              </div>
+            </div>
+            <div class="ip-zone-form-grid mb-3">
+              <div class="field">
+                <label for="detectionWhitelistName">Nome</label>
+                <input id="detectionWhitelistName" class="form-control form-control-sm" placeholder="Destino permitido">
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistType">Tipo</label>
+                <select id="detectionWhitelistType" class="form-select form-select-sm">
+                  <option value="source">source</option>
+                  <option value="destination">destination</option>
+                  <option value="source_destination">source_destination</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistSrcCidr">src_cidr</label>
+                <input id="detectionWhitelistSrcCidr" class="form-control form-control-sm" placeholder="Opcional">
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistDstCidr">dst_cidr</label>
+                <input id="detectionWhitelistDstCidr" class="form-control form-control-sm" placeholder="Opcional">
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistProtocol">Protocol</label>
+                <select id="detectionWhitelistProtocol" class="form-select form-select-sm">
+                  <option value="">Opcional</option>
+                  <option value="ALL">ALL</option>
+                  <option value="UDP">UDP</option>
+                  <option value="TCP">TCP</option>
+                  <option value="TCP+SYN">TCP+SYN</option>
+                  <option value="DNS">DNS</option>
+                  <option value="CLDAP">CLDAP</option>
+                  <option value="UDP-QUIC">UDP-QUIC</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistVector">Vector</label>
+                <input id="detectionWhitelistVector" class="form-control form-control-sm" placeholder="Opcional">
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistZone">IP Zone</label>
+                <select id="detectionWhitelistZone" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="detectionWhitelistActive">Status</label>
+                <select id="detectionWhitelistActive" class="form-select form-select-sm">
+                  <option value="true">Ativa</option>
+                  <option value="false">Desativada</option>
+                </select>
+              </div>
+              <div class="field grid-span-3">
+                <label for="detectionWhitelistDescription">Descricao</label>
+                <input id="detectionWhitelistDescription" class="form-control form-control-sm" placeholder="Observacoes da whitelist">
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
+                <thead><tr><th>Nome</th><th>Tipo</th><th>Origem</th><th>Destino</th><th>Protocol</th><th>Vector</th><th>Zona</th><th>Status</th><th>Acoes</th></tr></thead>
+                <tbody id="detectionWhitelistTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Candidatos e anomalias informativas</div>
+                <div id="securityCandidateStatus" class="metric-readout">Nenhum teste executado</div>
+              </div>
+              <div class="toolbar">
+                <select id="candidateSensor" class="form-select form-select-sm" aria-label="Sensor candidatos">
+                  <option value="1">Sensor #1</option>
+                </select>
+                <input id="candidateRangeMinutes" type="number" min="1" max="259200" step="1" class="form-control form-control-sm" value="120" style="width: 110px;" aria-label="Range minutos">
+                <select id="candidateCreateAnomalies" class="form-select form-select-sm" aria-label="Criar anomalias">
+                  <option value="false">Sem criar anomalias</option>
+                  <option value="true">Criar informativas</option>
+                </select>
+                <button id="refreshSecurityAnomaliesButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="siren"></i><span>Atualizar anomalias</span>
+                </button>
+              </div>
+            </div>
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card"><div class="metric-label">Ativas</div><div id="securityAnomalyActiveCount" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Criticas</div><div id="securityAnomalyCriticalCount" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Avisos</div><div id="securityAnomalyWarningCount" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Resposta</div><div class="metric-value">Info</div></div>
+            </div>
+            <div class="table-wrap mb-3">
+              <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
+                <thead>
+                  <tr>
+                    <th>Zona</th><th>Prefixo</th><th>Vetor</th><th>Domain</th><th>Origem /32</th><th>Destino</th><th>Protocolo</th>
+                    <th class="text-end">packets/s</th><th class="text-end">bits/s</th><th class="text-end">flows/s</th><th class="text-end">flows</th>
+                    <th class="text-end">unique_dst_ips</th><th class="text-end">unique_dst_ports</th><th class="text-end">unique_src_ports</th>
+                    <th>Severidade</th><th>Response</th>
+                  </tr>
+                </thead>
+                <tbody id="securityCandidateTable"></tbody>
+              </table>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
+                <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Acoes</th></tr></thead>
+                <tbody id="securityAnomalyTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-attack-vectors" class="app-view">
           <div class="view-header">
             <div>
@@ -3055,6 +3484,17 @@
     let activeView = 'dashboard';
     let dashboardSensorCache = [];
     let dashboardInterfaceCache = [];
+    let ipZones = [];
+    let detectionTemplates = [];
+    let detectionRules = [];
+    let detectionWhitelist = [];
+    let securityCandidates = [];
+    let securityAnomalies = [];
+    let currentIpZoneId = null;
+    let currentDetectionTemplateId = null;
+    let editingIpZonePrefixId = null;
+    let editingDetectionRuleId = null;
+    let editingDetectionWhitelistId = null;
     let mapInterfaceCache = [];
     let flowInterfaceCache = [];
     let topFlowInterfaceCache = [];
@@ -3145,6 +3585,15 @@
       'UDP', 'ICMP', 'DNS', 'NTP', 'QUIC', 'UDP+QUIC', 'HTTP', 'HTTPS', 'MAIL', 'SIP',
       'IPSEC', 'FRAGMENT', 'NETBIOS', 'MEMCACHED', 'OTHER', 'INVALID', 'FLOWS', 'FLOW+SYN'
     ].map(value => [value, value]);
+    const DETECTION_METRIC_LABELS = {
+      bits_s: 'bits/s',
+      packets_s: 'packets/s',
+      flows_s: 'flows/s',
+      flows: 'flows',
+      unique_dst_ips: 'unique_dst_ips',
+      unique_dst_ports: 'unique_dst_ports',
+      unique_src_ports: 'unique_src_ports'
+    };
 
     function createIcons() {
       if (window.lucide) {
@@ -3221,7 +3670,9 @@
       document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
-      loadDashboardSensors().then(() => refresh()).catch(console.error);
+      Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
+        .then(() => refresh())
+        .catch(console.error);
       createIcons();
     }
 
@@ -3336,6 +3787,11 @@
       return value ? Number(value) : null;
     }
 
+    function selectedDashboardZoneId() {
+      const value = document.getElementById('dashboardZone')?.value || '';
+      return value ? Number(value) : null;
+    }
+
     function selectedFlowSensorId() {
       const value = document.getElementById('flowSensor').value;
       return value ? Number(value) : null;
@@ -3366,6 +3822,11 @@
       return value ? Number(value) : null;
     }
 
+    function selectedMapZoneId() {
+      const value = document.getElementById('mapZone')?.value || '';
+      return value ? Number(value) : null;
+    }
+
     function localDateTimeForInput(date) {
       const offsetMs = date.getTimezoneOffset() * 60000;
       return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
@@ -3392,8 +3853,13 @@
       appendRangeParams(query, 'rangeMinutes', 'dashboard');
       const sensorId = selectedDashboardSensorId();
       const interfaceId = selectedDashboardInterfaceId();
+      const zoneId = selectedDashboardZoneId();
       if (includeSensorId && sensorId) query.set('sensor_id', String(sensorId));
       if (includeInterfaceId && interfaceId) query.set('interface_id', String(interfaceId));
+      if (zoneId) {
+        query.set('zone_id', String(zoneId));
+        query.set('zone_direction', document.getElementById('dashboardZoneDirection')?.value || 'both');
+      }
       return query.toString();
     }
 
@@ -3420,6 +3886,7 @@
       query.set('top_n', document.getElementById('mapTopN').value || '20');
       const sensorId = selectedMapSensorId();
       const interfaceId = selectedMapInterfaceId();
+      const zoneId = selectedMapZoneId();
       const protocol = document.getElementById('mapProtocol').value;
       const srcAsn = document.getElementById('mapSrcAsn').value.trim();
       const dstAsn = document.getElementById('mapDstAsn').value.trim();
@@ -3427,6 +3894,10 @@
       const dstCidr = document.getElementById('mapDstCidr').value.trim();
       if (sensorId) query.set('sensor_id', String(sensorId));
       if (interfaceId) query.set('interface_id', String(interfaceId));
+      if (zoneId) {
+        query.set('zone_id', String(zoneId));
+        query.set('zone_direction', document.getElementById('mapZoneDirection')?.value || 'both');
+      }
       if (protocol) {
         if (protocol.includes('+')) query.set('decoder', protocol);
         else query.set('proto', protocol);
@@ -3580,6 +4051,64 @@
       select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
     }
 
+    function renderCandidateSensorSelect() {
+      const select = document.getElementById('candidateSensor');
+      if (!select) return;
+      const current = select.value || '1';
+      const options = dashboardSensorCache.length
+        ? dashboardSensorCache.map(sensor => `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`)
+        : ['<option value="1">Sensor #1</option>'];
+      select.innerHTML = options.join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : (dashboardSensorCache[0]?.id || '1');
+    }
+
+    function renderZoneSelect(selectId, placeholder, activeOnly = false) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const current = select.value;
+      const zones = activeOnly ? ipZones.filter(zone => zone.active) : ipZones;
+      select.innerHTML = [
+        `<option value="">${escapeHtml(placeholder)}</option>`,
+        ...zones.map(zone => (
+          `<option value="${zone.id}">${escapeHtml(zone.name)}${zone.active ? '' : ' (off)'}</option>`
+        ))
+      ].join('');
+      select.value = zones.some(zone => String(zone.id) === current) ? current : '';
+    }
+
+    function renderDashboardZoneSelects() {
+      renderZoneSelect('dashboardZone', 'Todas as IP Zones', true);
+      renderZoneSelect('mapZone', 'Todas as IP Zones', true);
+      renderZoneSelect('detectionWhitelistZone', 'Todas', false);
+    }
+
+    function renderDetectionTemplateSelect() {
+      const select = document.getElementById('ipZoneTemplate');
+      if (!select) return;
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Sem template</option>',
+        ...detectionTemplates.map(template => (
+          `<option value="${template.id}">${escapeHtml(template.name)}${template.active ? '' : ' (off)'}</option>`
+        ))
+      ].join('');
+      select.value = detectionTemplates.some(template => String(template.id) === current) ? current : '';
+    }
+
+    async function loadIpZoneFilters() {
+      try {
+        const payload = await apiRequest('/api/ip-zones');
+        ipZones = Array.isArray(payload.items) ? payload.items : [];
+        renderDashboardZoneSelects();
+        return ipZones;
+      } catch (error) {
+        ipZones = [];
+        renderDashboardZoneSelects();
+        console.error('Falha ao carregar IP Zones', error);
+        return [];
+      }
+    }
+
     function renderDashboardInterfaceSelect() {
       const select = document.getElementById('interface');
       const current = select.value;
@@ -3673,6 +4202,7 @@
         renderFlowSensorSelect();
         renderTopFlowSensorSelect();
         renderMapSensorSelect();
+        renderCandidateSensorSelect();
         await loadDashboardInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
@@ -3688,6 +4218,7 @@
         renderTopFlowInterfaceSelect();
         renderMapSensorSelect();
         renderMapInterfaceSelect();
+        renderCandidateSensorSelect();
         console.error('Falha ao carregar sensores do dashboard', error);
       }
     }
@@ -3925,6 +4456,667 @@
       } catch (error) {
         result.textContent = `Falha no OPTIMIZE: ${error.message}`;
       }
+    }
+
+    function setIpZoneStatus(message, kind = 'muted') {
+      const status = document.getElementById('ipZoneStatus');
+      if (!status) return;
+      status.textContent = message || '';
+      status.className = kind === 'error' ? 'subtle text-danger' : 'subtle';
+    }
+
+    function selectedIpZone() {
+      return ipZones.find(zone => Number(zone.id) === Number(currentIpZoneId)) || null;
+    }
+
+    function selectedDetectionTemplate() {
+      return detectionTemplates.find(template => Number(template.id) === Number(currentDetectionTemplateId)) || null;
+    }
+
+    function isValidCidr(value, allowEmpty = false) {
+      const text = String(value || '').trim();
+      if (!text) return allowEmpty;
+      const [ip, prefixText] = text.includes('/') ? text.split('/', 2) : [text, ''];
+      const prefix = prefixText === '' ? null : Number(prefixText);
+      if (prefixText && (!Number.isInteger(prefix) || prefix < 0)) return false;
+      if (ip.includes(':')) {
+        if (prefix !== null && prefix > 128) return false;
+        return /^[0-9a-fA-F:.]+$/.test(ip) && ip.includes(':');
+      }
+      const parts = ip.split('.');
+      if (parts.length !== 4) return false;
+      if (prefix !== null && prefix > 32) return false;
+      return parts.every(part => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
+    }
+
+    function detectionMetricDisplay(value, metric) {
+      if (metric === 'bits_s') return formatBps(value);
+      if (metric === 'packets_s') return formatPps(value);
+      if (metric === 'flows_s') return `${formatNumber(value)} flows/s`;
+      return formatNumber(value);
+    }
+
+    function detectionResponseLabel(value) {
+      return String(value || 'DETECTION_ONLY') === 'DETECTION_ONLY' ? 'Deteccao apenas informativa' : String(value || '-');
+    }
+
+    function fillIpZoneForm(zone = null) {
+      currentIpZoneId = zone?.id || null;
+      setValue('ipZoneName', zone?.name || '');
+      setValue('ipZoneDescription', zone?.description || '');
+      setBoolSelect('ipZoneActive', zone?.active ?? true);
+      setValue('ipZoneTemplate', zone?.detection_template_id || '');
+      renderIpZoneList();
+      renderIpZonePrefixTable(zone?.prefixes || []);
+      resetIpZonePrefixForm();
+    }
+
+    function collectIpZoneForm() {
+      const templateId = selectValue('ipZoneTemplate');
+      return {
+        name: selectValue('ipZoneName').trim(),
+        description: selectValue('ipZoneDescription').trim(),
+        active: boolSelectValue('ipZoneActive'),
+        detection_template_id: templateId ? Number(templateId) : null
+      };
+    }
+
+    function renderIpZoneList() {
+      const tbody = document.getElementById('ipZoneTable');
+      if (!tbody) return;
+      document.getElementById('ipZoneCount').textContent = formatNumber(ipZones.length);
+      tbody.innerHTML = ipZones.map(zone => `
+        <tr data-zone-id="${zone.id}" class="${Number(zone.id) === Number(currentIpZoneId) ? 'active' : ''}">
+          <td>
+            <div class="fw-semibold">${escapeHtml(zone.name)}</div>
+            <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')}</div>
+          </td>
+          <td class="text-end">${formatNumber(zone.prefix_count || (zone.prefixes || []).length)}</td>
+          <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Off'}</span></td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem IP Zones</td></tr>';
+    }
+
+    async function selectIpZone(zoneId) {
+      if (!zoneId) {
+        fillIpZoneForm(null);
+        return;
+      }
+      currentIpZoneId = Number(zoneId);
+      try {
+        const zone = await apiRequest(`/api/ip-zones/${currentIpZoneId}`);
+        const index = ipZones.findIndex(item => Number(item.id) === Number(zone.id));
+        if (index >= 0) ipZones[index] = zone;
+        else ipZones.push(zone);
+        fillIpZoneForm(zone);
+        setIpZoneStatus(`IP Zone ${zone.name}`);
+      } catch (error) {
+        setIpZoneStatus(`Falha ao carregar zona: ${error.message}`, 'error');
+      }
+    }
+
+    async function loadIpZones() {
+      await loadIpZoneFilters();
+      renderIpZoneList();
+      const selected = ipZones.find(zone => Number(zone.id) === Number(currentIpZoneId)) || ipZones[0] || null;
+      if (selected) await selectIpZone(selected.id);
+      else fillIpZoneForm(null);
+    }
+
+    function newIpZone() {
+      currentIpZoneId = null;
+      fillIpZoneForm(null);
+      setIpZoneStatus('Nova IP Zone');
+    }
+
+    async function saveIpZone() {
+      const payload = collectIpZoneForm();
+      if (!payload.name) {
+        setIpZoneStatus('Nome da IP Zone obrigatorio.', 'error');
+        return;
+      }
+      const path = currentIpZoneId ? `/api/ip-zones/${currentIpZoneId}` : '/api/ip-zones';
+      const method = currentIpZoneId ? 'PUT' : 'POST';
+      try {
+        const zone = await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        currentIpZoneId = zone.id;
+        await loadIpZones();
+        renderDashboardZoneSelects();
+        setIpZoneStatus('IP Zone salva');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao salvar IP Zone: ${error.message}`, 'error');
+      }
+    }
+
+    async function disableIpZone() {
+      if (!currentIpZoneId) return;
+      if (!confirm('Desativar esta IP Zone e seus prefixos?')) return;
+      try {
+        await apiRequest(`/api/ip-zones/${currentIpZoneId}`, { method: 'DELETE' });
+        await loadIpZones();
+        setIpZoneStatus('IP Zone desativada');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao desativar IP Zone: ${error.message}`, 'error');
+      }
+    }
+
+    function resetIpZonePrefixForm(prefix = null) {
+      editingIpZonePrefixId = prefix?.id || null;
+      setValue('ipZonePrefixCidr', prefix?.cidr || '');
+      setValue('ipZonePrefixName', prefix?.name || '');
+      setValue('ipZonePrefixType', prefix?.prefix_type || 'client');
+      setBoolSelect('ipZonePrefixActive', prefix?.active ?? true);
+      setValue('ipZonePrefixDescription', prefix?.description || '');
+    }
+
+    function collectIpZonePrefixForm() {
+      return {
+        cidr: selectValue('ipZonePrefixCidr').trim(),
+        name: selectValue('ipZonePrefixName').trim(),
+        description: selectValue('ipZonePrefixDescription').trim(),
+        prefix_type: selectValue('ipZonePrefixType', 'client'),
+        active: boolSelectValue('ipZonePrefixActive')
+      };
+    }
+
+    function renderIpZonePrefixTable(prefixes) {
+      const tbody = document.getElementById('ipZonePrefixTable');
+      if (!tbody) return;
+      document.getElementById('ipZonePrefixStatus').textContent = currentIpZoneId ? `${formatNumber(prefixes.length)} prefixos` : 'Selecione uma IP Zone';
+      tbody.innerHTML = prefixes.map(prefix => `
+        <tr>
+          <td>${escapeHtml(prefix.cidr)}</td>
+          <td>${escapeHtml(prefix.name || '-')}</td>
+          <td>${escapeHtml(prefix.prefix_type || 'client')}</td>
+          <td><span class="badge-soft ${prefix.active ? 'ok' : 'off'}">${prefix.active ? 'Ativo' : 'Off'}</span></td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary ip-zone-prefix-edit" data-prefix-id="${prefix.id}" aria-label="Editar prefixo"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-outline-danger ip-zone-prefix-disable" data-prefix-id="${prefix.id}" aria-label="Desativar prefixo"><i data-lucide="ban"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="5" class="text-muted">Sem prefixos</td></tr>';
+      createIcons();
+    }
+
+    async function saveIpZonePrefix() {
+      if (!currentIpZoneId) {
+        setIpZoneStatus('Selecione uma IP Zone antes de salvar prefixos.', 'error');
+        return;
+      }
+      const payload = collectIpZonePrefixForm();
+      if (!isValidCidr(payload.cidr)) {
+        setIpZoneStatus('CIDR invalido no prefixo.', 'error');
+        return;
+      }
+      const path = editingIpZonePrefixId
+        ? `/api/ip-zones/${currentIpZoneId}/prefixes/${editingIpZonePrefixId}`
+        : `/api/ip-zones/${currentIpZoneId}/prefixes`;
+      const method = editingIpZonePrefixId ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        await loadIpZoneFilters();
+        await selectIpZone(currentIpZoneId);
+        setIpZoneStatus('Prefixo salvo');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao salvar prefixo: ${error.message}`, 'error');
+      }
+    }
+
+    async function disableIpZonePrefix(prefixId) {
+      if (!currentIpZoneId || !prefixId) return;
+      try {
+        await apiRequest(`/api/ip-zones/${currentIpZoneId}/prefixes/${prefixId}`, { method: 'DELETE' });
+        await loadIpZoneFilters();
+        await selectIpZone(currentIpZoneId);
+        setIpZoneStatus('Prefixo desativado');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao desativar prefixo: ${error.message}`, 'error');
+      }
+    }
+
+    function fillDetectionTemplateForm(template = null) {
+      currentDetectionTemplateId = template?.id || null;
+      setValue('detectionTemplateName', template?.name || '');
+      setValue('detectionTemplateDescription', template?.description || '');
+      setBoolSelect('detectionTemplateActive', template?.active ?? true);
+      renderDetectionTemplateList();
+    }
+
+    function collectDetectionTemplateForm() {
+      return {
+        name: selectValue('detectionTemplateName').trim(),
+        description: selectValue('detectionTemplateDescription').trim(),
+        active: boolSelectValue('detectionTemplateActive')
+      };
+    }
+
+    function renderDetectionTemplateList() {
+      const tbody = document.getElementById('detectionTemplateTable');
+      if (!tbody) return;
+      document.getElementById('detectionTemplateCount').textContent = formatNumber(detectionTemplates.length);
+      tbody.innerHTML = detectionTemplates.map(template => `
+        <tr data-template-id="${template.id}" class="${Number(template.id) === Number(currentDetectionTemplateId) ? 'active' : ''}">
+          <td>
+            <div class="fw-semibold">${escapeHtml(template.name)}</div>
+            <div class="subtle">${escapeHtml(template.description || '-')}</div>
+          </td>
+          <td class="text-end">${formatNumber(template.rule_count || (template.rules || []).length)}</td>
+          <td><span class="badge-soft ${template.active ? 'ok' : 'off'}">${template.active ? 'Ativo' : 'Off'}</span></td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem templates</td></tr>';
+      renderDetectionTemplateSelect();
+    }
+
+    async function selectDetectionTemplate(templateId) {
+      if (!templateId) {
+        detectionRules = [];
+        fillDetectionTemplateForm(null);
+        renderDetectionRuleTable();
+        resetDetectionRuleForm();
+        return;
+      }
+      currentDetectionTemplateId = Number(templateId);
+      try {
+        const template = await apiRequest(`/api/detection/templates/${currentDetectionTemplateId}`);
+        const index = detectionTemplates.findIndex(item => Number(item.id) === Number(template.id));
+        if (index >= 0) detectionTemplates[index] = template;
+        else detectionTemplates.push(template);
+        detectionRules = Array.isArray(template.rules) ? template.rules : [];
+        fillDetectionTemplateForm(template);
+        renderDetectionRuleTable();
+        resetDetectionRuleForm();
+        document.getElementById('detectionTemplateStatus').textContent = `Template ${template.name}`;
+      } catch (error) {
+        document.getElementById('detectionTemplateStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function loadDetectionTemplates() {
+      try {
+        const payload = await apiRequest('/api/detection/templates');
+        detectionTemplates = Array.isArray(payload.items) ? payload.items : [];
+        renderDetectionTemplateList();
+        const selected = detectionTemplates.find(item => Number(item.id) === Number(currentDetectionTemplateId))
+          || detectionTemplates.find(item => item.name === 'CLIENTES-PUBLICOS-DEFAULT')
+          || detectionTemplates[0]
+          || null;
+        if (selected) await selectDetectionTemplate(selected.id);
+        else await selectDetectionTemplate(null);
+      } catch (error) {
+        document.getElementById('detectionTemplateStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    function newDetectionTemplate() {
+      currentDetectionTemplateId = null;
+      detectionRules = [];
+      fillDetectionTemplateForm(null);
+      renderDetectionRuleTable();
+      resetDetectionRuleForm();
+      document.getElementById('detectionTemplateStatus').textContent = 'Novo template';
+    }
+
+    async function saveDetectionTemplate() {
+      const payload = collectDetectionTemplateForm();
+      if (!payload.name) {
+        document.getElementById('detectionTemplateStatus').textContent = 'Nome do template obrigatorio.';
+        return;
+      }
+      const path = currentDetectionTemplateId ? `/api/detection/templates/${currentDetectionTemplateId}` : '/api/detection/templates';
+      const method = currentDetectionTemplateId ? 'PUT' : 'POST';
+      try {
+        const template = await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        currentDetectionTemplateId = template.id;
+        await loadDetectionTemplates();
+        document.getElementById('detectionTemplateStatus').textContent = 'Template salvo';
+      } catch (error) {
+        document.getElementById('detectionTemplateStatus').textContent = `Falha ao salvar template: ${error.message}`;
+      }
+    }
+
+    async function disableDetectionTemplate() {
+      if (!currentDetectionTemplateId) return;
+      try {
+        await apiRequest(`/api/detection/templates/${currentDetectionTemplateId}`, { method: 'DELETE' });
+        await loadDetectionTemplates();
+        document.getElementById('detectionTemplateStatus').textContent = 'Template desativado';
+      } catch (error) {
+        document.getElementById('detectionTemplateStatus').textContent = `Falha ao desativar template: ${error.message}`;
+      }
+    }
+
+    function resetDetectionRuleForm(rule = null) {
+      editingDetectionRuleId = rule?.id || null;
+      setValue('detectionRuleVector', rule?.vector || '');
+      setValue('detectionRuleDomain', rule?.domain || 'internal_ip');
+      setValue('detectionRuleDirection', rule?.direction || 'transmits');
+      setValue('detectionRuleProtocol', rule?.protocol || 'ALL');
+      setValue('detectionRuleMetric', rule?.metric || 'packets_s');
+      setValue('detectionRuleWarning', rule?.warning_value ?? '');
+      setValue('detectionRuleCritical', rule?.critical_value ?? '');
+      setValue('detectionRuleWindow', rule?.window_seconds || 60);
+      setValue('detectionRuleConsecutive', rule?.consecutive_windows || 1);
+      setValue('detectionRuleCooldown', rule?.cooldown_minutes ?? 5);
+      setBoolSelect('detectionRuleEnabled', rule?.enabled ?? true);
+      setValue('detectionRuleResponse', 'DETECTION_ONLY');
+    }
+
+    function collectDetectionRuleForm() {
+      const warningText = selectValue('detectionRuleWarning').trim();
+      const criticalText = selectValue('detectionRuleCritical').trim();
+      return {
+        vector: selectValue('detectionRuleVector').trim(),
+        domain: selectValue('detectionRuleDomain', 'internal_ip'),
+        direction: selectValue('detectionRuleDirection', 'transmits'),
+        protocol: selectValue('detectionRuleProtocol', 'ALL'),
+        metric: selectValue('detectionRuleMetric', 'packets_s'),
+        comparison: 'over',
+        warning_value: warningText === '' ? null : Number(warningText),
+        critical_value: criticalText === '' ? null : Number(criticalText),
+        window_seconds: numberValue('detectionRuleWindow', 60),
+        consecutive_windows: numberValue('detectionRuleConsecutive', 1),
+        cooldown_minutes: numberValue('detectionRuleCooldown', 5),
+        enabled: boolSelectValue('detectionRuleEnabled'),
+        response: 'DETECTION_ONLY'
+      };
+    }
+
+    function renderDetectionRuleTable() {
+      const tbody = document.getElementById('detectionRuleTable');
+      if (!tbody) return;
+      document.getElementById('detectionRuleStatus').textContent = currentDetectionTemplateId ? `${formatNumber(detectionRules.length)} regras` : 'Selecione um template';
+      tbody.innerHTML = detectionRules.map(rule => `
+        <tr>
+          <td>${escapeHtml(rule.vector)}</td>
+          <td>${escapeHtml(rule.domain)}</td>
+          <td>${escapeHtml(rule.direction)}</td>
+          <td>${escapeHtml(rule.protocol || 'ALL')}</td>
+          <td>${escapeHtml(DETECTION_METRIC_LABELS[rule.metric] || rule.metric)}</td>
+          <td class="text-end">${rule.warning_value === null || rule.warning_value === undefined ? '-' : detectionMetricDisplay(rule.warning_value, rule.metric)}</td>
+          <td class="text-end">${rule.critical_value === null || rule.critical_value === undefined ? '-' : detectionMetricDisplay(rule.critical_value, rule.metric)}</td>
+          <td><span class="badge-soft ${rule.enabled ? 'ok' : 'off'}">${rule.enabled ? 'Ativa' : 'Off'}</span></td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary detection-rule-edit" data-rule-id="${rule.id}" aria-label="Editar regra"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-outline-danger detection-rule-disable" data-rule-id="${rule.id}" aria-label="Desativar regra"><i data-lucide="ban"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem regras</td></tr>';
+      createIcons();
+    }
+
+    async function saveDetectionRule() {
+      if (!currentDetectionTemplateId) {
+        document.getElementById('detectionRuleStatus').textContent = 'Selecione um template antes de salvar regras.';
+        return;
+      }
+      const payload = collectDetectionRuleForm();
+      if (!payload.vector || (payload.warning_value === null && payload.critical_value === null)) {
+        document.getElementById('detectionRuleStatus').textContent = 'Vector e pelo menos um threshold sao obrigatorios.';
+        return;
+      }
+      const path = editingDetectionRuleId
+        ? `/api/detection/templates/${currentDetectionTemplateId}/rules/${editingDetectionRuleId}`
+        : `/api/detection/templates/${currentDetectionTemplateId}/rules`;
+      const method = editingDetectionRuleId ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        await selectDetectionTemplate(currentDetectionTemplateId);
+        document.getElementById('detectionRuleStatus').textContent = 'Regra salva';
+      } catch (error) {
+        document.getElementById('detectionRuleStatus').textContent = `Falha ao salvar regra: ${error.message}`;
+      }
+    }
+
+    async function disableDetectionRule(ruleId) {
+      if (!currentDetectionTemplateId || !ruleId) return;
+      try {
+        await apiRequest(`/api/detection/templates/${currentDetectionTemplateId}/rules/${ruleId}`, { method: 'DELETE' });
+        await selectDetectionTemplate(currentDetectionTemplateId);
+        document.getElementById('detectionRuleStatus').textContent = 'Regra desativada';
+      } catch (error) {
+        document.getElementById('detectionRuleStatus').textContent = `Falha ao desativar regra: ${error.message}`;
+      }
+    }
+
+    function resetDetectionWhitelistForm(item = null) {
+      editingDetectionWhitelistId = item?.id || null;
+      setValue('detectionWhitelistName', item?.name || '');
+      setValue('detectionWhitelistType', item?.type || 'destination');
+      setValue('detectionWhitelistSrcCidr', item?.src_cidr || '');
+      setValue('detectionWhitelistDstCidr', item?.dst_cidr || '');
+      setValue('detectionWhitelistProtocol', item?.protocol || '');
+      setValue('detectionWhitelistVector', item?.vector || '');
+      setValue('detectionWhitelistZone', item?.zone_id || '');
+      setBoolSelect('detectionWhitelistActive', item?.active ?? true);
+      setValue('detectionWhitelistDescription', item?.description || '');
+    }
+
+    function collectDetectionWhitelistForm() {
+      const zoneId = selectValue('detectionWhitelistZone');
+      return {
+        name: selectValue('detectionWhitelistName').trim(),
+        description: selectValue('detectionWhitelistDescription').trim(),
+        active: boolSelectValue('detectionWhitelistActive'),
+        type: selectValue('detectionWhitelistType', 'destination'),
+        src_cidr: selectValue('detectionWhitelistSrcCidr').trim() || null,
+        dst_cidr: selectValue('detectionWhitelistDstCidr').trim() || null,
+        protocol: selectValue('detectionWhitelistProtocol') || null,
+        vector: selectValue('detectionWhitelistVector').trim() || null,
+        zone_id: zoneId ? Number(zoneId) : null
+      };
+    }
+
+    function renderDetectionWhitelistTable() {
+      const tbody = document.getElementById('detectionWhitelistTable');
+      if (!tbody) return;
+      document.getElementById('detectionWhitelistStatus').textContent = `${formatNumber(detectionWhitelist.length)} whitelists`;
+      tbody.innerHTML = detectionWhitelist.map(item => `
+        <tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.type)}</td>
+          <td>${escapeHtml(item.src_cidr || '-')}</td>
+          <td>${escapeHtml(item.dst_cidr || '-')}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td>${escapeHtml(item.vector || '-')}</td>
+          <td>${escapeHtml(item.zone_name || (item.zone_id ? `#${item.zone_id}` : 'Todas'))}</td>
+          <td><span class="badge-soft ${item.active ? 'ok' : 'off'}">${item.active ? 'Ativa' : 'Off'}</span></td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary detection-whitelist-edit" data-whitelist-id="${item.id}" aria-label="Editar whitelist"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-outline-danger detection-whitelist-disable" data-whitelist-id="${item.id}" aria-label="Desativar whitelist"><i data-lucide="ban"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem whitelist</td></tr>';
+      createIcons();
+    }
+
+    async function loadDetectionWhitelist() {
+      try {
+        const payload = await apiRequest('/api/detection/whitelist');
+        detectionWhitelist = Array.isArray(payload.items) ? payload.items : [];
+        renderDetectionWhitelistTable();
+        resetDetectionWhitelistForm();
+      } catch (error) {
+        document.getElementById('detectionWhitelistStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function saveDetectionWhitelist() {
+      const payload = collectDetectionWhitelistForm();
+      if (!payload.name) {
+        document.getElementById('detectionWhitelistStatus').textContent = 'Nome da whitelist obrigatorio.';
+        return;
+      }
+      if (!isValidCidr(payload.src_cidr, true) || !isValidCidr(payload.dst_cidr, true)) {
+        document.getElementById('detectionWhitelistStatus').textContent = 'CIDR invalido na whitelist.';
+        return;
+      }
+      const path = editingDetectionWhitelistId ? `/api/detection/whitelist/${editingDetectionWhitelistId}` : '/api/detection/whitelist';
+      const method = editingDetectionWhitelistId ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        await loadDetectionWhitelist();
+        document.getElementById('detectionWhitelistStatus').textContent = 'Whitelist salva';
+      } catch (error) {
+        document.getElementById('detectionWhitelistStatus').textContent = `Falha ao salvar whitelist: ${error.message}`;
+      }
+    }
+
+    async function disableDetectionWhitelist(whitelistId) {
+      if (!whitelistId) return;
+      try {
+        await apiRequest(`/api/detection/whitelist/${whitelistId}`, { method: 'DELETE' });
+        await loadDetectionWhitelist();
+        document.getElementById('detectionWhitelistStatus').textContent = 'Whitelist desativada';
+      } catch (error) {
+        document.getElementById('detectionWhitelistStatus').textContent = `Falha ao desativar whitelist: ${error.message}`;
+      }
+    }
+
+    function renderSecurityCandidates(items) {
+      const tbody = document.getElementById('securityCandidateTable');
+      if (!tbody) return;
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${escapeHtml(item.zone_name || '-')}</td>
+          <td>${escapeHtml(item.prefix_cidr || '-')}</td>
+          <td>${escapeHtml(item.vector || '-')}</td>
+          <td>${escapeHtml(item.domain || '-')}</td>
+          <td>${ipLink(item.src_ip || item.internal_ip)}</td>
+          <td>${ipLink(item.dst_ip)}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td class="text-end">${formatPps(item.packets_s)}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td class="text-end">${formatNumber(item.flows_s)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+          <td class="text-end">${formatNumber(item.unique_dst_ips)}</td>
+          <td class="text-end">${formatNumber(item.unique_dst_ports)}</td>
+          <td class="text-end">${formatNumber(item.unique_src_ports)}</td>
+          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td>${escapeHtml(detectionResponseLabel(item.response))}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="16" class="text-muted">Sem candidatos no periodo</td></tr>';
+      createIcons();
+    }
+
+    async function testIpZoneDetection() {
+      if (!currentIpZoneId) {
+        setIpZoneStatus('Selecione uma IP Zone antes do teste.', 'error');
+        return;
+      }
+      const query = new URLSearchParams();
+      query.set('range_minutes', String(Math.max(1, numberValue('candidateRangeMinutes', 120))));
+      query.set('sensor_id', String(numberValue('candidateSensor', 1)));
+      query.set('zone_id', String(currentIpZoneId));
+      query.set('create_anomalies', selectValue('candidateCreateAnomalies') === 'true' ? 'true' : 'false');
+      document.getElementById('securityCandidateStatus').textContent = 'Executando deteccao informativa...';
+      try {
+        const payload = await apiRequest(`/api/security/vectors/candidates?${query.toString()}`);
+        securityCandidates = Array.isArray(payload.items) ? payload.items : [];
+        renderSecurityCandidates(securityCandidates);
+        const warnings = Array.isArray(payload.warnings) && payload.warnings.length ? ` - ${payload.warnings.join(' | ')}` : '';
+        const anomalyText = payload.anomalies ? ` - anomalias: ${formatNumber(payload.anomalies.created || 0)} novas, ${formatNumber(payload.anomalies.updated || 0)} atualizadas` : '';
+        document.getElementById('securityCandidateStatus').textContent = `${formatNumber(securityCandidates.length)} candidatos${anomalyText}${warnings}`;
+        await loadSecurityAnomalies();
+      } catch (error) {
+        document.getElementById('securityCandidateStatus').textContent = `Falha no teste: ${error.message}`;
+        renderSecurityCandidates([]);
+      }
+    }
+
+    function renderSecurityAnomalySummary(summary) {
+      setText('securityAnomalyActiveCount', formatNumber(summary.active_count || 0));
+      setText('securityAnomalyCriticalCount', formatNumber(summary.critical_count || 0));
+      setText('securityAnomalyWarningCount', formatNumber(summary.warning_count || 0));
+    }
+
+    function renderSecurityAnomalies(items) {
+      const tbody = document.getElementById('securityAnomalyTable');
+      if (!tbody) return;
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td><span class="badge-soft ${item.status === 'active' ? 'ok' : 'off'}">${escapeHtml(item.status || '-')}</span></td>
+          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td>${escapeHtml(item.zone_name || '-')}</td>
+          <td>${escapeHtml(item.vector || '-')}</td>
+          <td>${ipLink(item.src_ip)}</td>
+          <td>${ipLink(item.dst_ip)}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td class="text-end">${formatPps(item.packets_s)}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td>${escapeHtml(item.message || '-')}</td>
+          <td>
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-secondary security-anomaly-ack" data-anomaly-id="${item.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="11" class="text-muted">Sem anomalias informativas ativas</td></tr>';
+      createIcons();
+    }
+
+    async function loadSecurityAnomalies() {
+      try {
+        const summary = await apiRequest('/api/security/anomalies/summary');
+        renderSecurityAnomalySummary(summary);
+        const query = new URLSearchParams();
+        if (currentIpZoneId) query.set('zone_id', String(currentIpZoneId));
+        const payload = await apiRequest(`/api/security/anomalies/active${query.toString() ? `?${query.toString()}` : ''}`);
+        securityAnomalies = Array.isArray(payload.items) ? payload.items : [];
+        renderSecurityAnomalies(securityAnomalies);
+      } catch (error) {
+        document.getElementById('securityCandidateStatus').textContent = `Falha ao carregar anomalias: ${error.message}`;
+      }
+    }
+
+    async function updateSecurityAnomalyStatus(anomalyId, action) {
+      if (!anomalyId) return;
+      try {
+        await apiRequest(`/api/security/anomalies/${anomalyId}/${action}`, { method: 'POST' });
+        await loadSecurityAnomalies();
+      } catch (error) {
+        document.getElementById('securityCandidateStatus').textContent = `Falha ao atualizar anomalia: ${error.message}`;
+      }
+    }
+
+    async function loadIpZoneWorkspace() {
+      setIpZoneStatus('Carregando IP Zones...');
+      await Promise.all([
+        loadDashboardSensors(),
+        loadDetectionTemplates(),
+        loadIpZones(),
+        loadDetectionWhitelist()
+      ]);
+      renderDashboardZoneSelects();
+      renderCandidateSensorSelect();
+      await loadSecurityAnomalies();
+      setIpZoneStatus(currentIpZoneId ? `IP Zone ${selectedIpZone()?.name || currentIpZoneId}` : 'Crie uma IP Zone para comecar');
     }
 
     function optionList(options, selected = '') {
@@ -7016,7 +8208,7 @@
         document.getElementById('view-dashboard').classList.add('active');
         document.querySelector('[data-nav-view="dashboard"]').classList.add('active');
         Object.values(charts).forEach(chart => chart.resize());
-        loadDashboardSensors().then(() => refresh()).catch(console.error);
+        Promise.all([loadDashboardSensors(), loadIpZoneFilters()]).then(() => refresh()).catch(console.error);
       } else if (view === 'flows') {
         document.getElementById('view-flows').classList.add('active');
         document.querySelector('[data-nav-view="flows"]').classList.add('active');
@@ -7046,6 +8238,10 @@
         document.getElementById('view-database').classList.add('active');
         document.querySelector('[data-nav-view="database"]').classList.add('active');
         loadDatabaseStatus().catch(console.error);
+      } else if (view === 'ip-zones') {
+        document.getElementById('view-ip-zones').classList.add('active');
+        document.querySelector('[data-nav-view="ip-zones"]').classList.add('active');
+        loadIpZoneWorkspace().catch(console.error);
       } else if (view === 'attack-vectors') {
         document.getElementById('view-attack-vectors').classList.add('active');
         document.querySelector('[data-nav-view="attack-vectors"]').classList.add('active');
@@ -7154,6 +8350,8 @@
     });
     document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('dashboardSeriesLimit').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('dashboardZone').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('dashboardZoneDirection').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     ['topConversationsSort', 'topConversationsLimit'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => {
         saveDashboardLayout();
@@ -7169,7 +8367,7 @@
     document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(() => debounceGlobalMapLoad()).catch(console.error));
     document.getElementById('mapInterface').addEventListener('change', () => debounceGlobalMapLoad());
-    ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN'].forEach(id => {
+    ['mapRangeMinutes', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN', 'mapZone', 'mapZoneDirection'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => debounceGlobalMapLoad());
     });
     ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr'].forEach(id => {
@@ -7216,6 +8414,21 @@
       cleanupDatabase(Number(document.getElementById('databaseCustomCleanupDays').value || 90)).catch(console.error);
     });
     document.getElementById('databaseOptimizeButton').addEventListener('click', () => optimizeDatabase().catch(console.error));
+    document.getElementById('refreshIpZonesButton').addEventListener('click', () => loadIpZoneWorkspace().catch(console.error));
+    document.getElementById('newIpZoneButton').addEventListener('click', newIpZone);
+    document.getElementById('saveIpZoneButton').addEventListener('click', () => saveIpZone().catch(console.error));
+    document.getElementById('disableIpZoneButton').addEventListener('click', () => disableIpZone().catch(console.error));
+    document.getElementById('testIpZoneDetectionButton').addEventListener('click', () => testIpZoneDetection().catch(console.error));
+    document.getElementById('newIpZonePrefixButton').addEventListener('click', () => resetIpZonePrefixForm());
+    document.getElementById('saveIpZonePrefixButton').addEventListener('click', () => saveIpZonePrefix().catch(console.error));
+    document.getElementById('newDetectionTemplateButton').addEventListener('click', newDetectionTemplate);
+    document.getElementById('saveDetectionTemplateButton').addEventListener('click', () => saveDetectionTemplate().catch(console.error));
+    document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
+    document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
+    document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
+    document.getElementById('newDetectionWhitelistButton').addEventListener('click', () => resetDetectionWhitelistForm());
+    document.getElementById('saveDetectionWhitelistButton').addEventListener('click', () => saveDetectionWhitelist().catch(console.error));
+    document.getElementById('refreshSecurityAnomaliesButton').addEventListener('click', () => loadSecurityAnomalies().catch(console.error));
     document.getElementById('refreshAttackVectorsButton').addEventListener('click', () => loadAttackVectors().catch(console.error));
     document.getElementById('newTemplateButton').addEventListener('click', newAttackTemplate);
     document.getElementById('saveTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
@@ -7236,6 +8449,67 @@
     document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
     document.getElementById('closeAnomalyButton').addEventListener('click', () => closeAnomalyEvent().catch(console.error));
+
+    document.getElementById('ipZoneTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const row = target?.closest('tr[data-zone-id]');
+      if (!row) return;
+      selectIpZone(Number(row.dataset.zoneId)).catch(console.error);
+    });
+
+    document.getElementById('ipZonePrefixTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.ip-zone-prefix-edit');
+      const disable = target?.closest('.ip-zone-prefix-disable');
+      if (edit) {
+        const prefix = (selectedIpZone()?.prefixes || []).find(item => Number(item.id) === Number(edit.dataset.prefixId));
+        resetIpZonePrefixForm(prefix || null);
+      } else if (disable) {
+        disableIpZonePrefix(Number(disable.dataset.prefixId)).catch(console.error);
+      }
+    });
+
+    document.getElementById('detectionTemplateTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const row = target?.closest('tr[data-template-id]');
+      if (!row) return;
+      selectDetectionTemplate(Number(row.dataset.templateId)).catch(console.error);
+    });
+
+    document.getElementById('detectionRuleTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.detection-rule-edit');
+      const disable = target?.closest('.detection-rule-disable');
+      if (edit) {
+        const rule = detectionRules.find(item => Number(item.id) === Number(edit.dataset.ruleId));
+        resetDetectionRuleForm(rule || null);
+      } else if (disable) {
+        disableDetectionRule(Number(disable.dataset.ruleId)).catch(console.error);
+      }
+    });
+
+    document.getElementById('detectionWhitelistTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.detection-whitelist-edit');
+      const disable = target?.closest('.detection-whitelist-disable');
+      if (edit) {
+        const item = detectionWhitelist.find(entry => Number(entry.id) === Number(edit.dataset.whitelistId));
+        resetDetectionWhitelistForm(item || null);
+      } else if (disable) {
+        disableDetectionWhitelist(Number(disable.dataset.whitelistId)).catch(console.error);
+      }
+    });
+
+    document.getElementById('securityAnomalyTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const ack = target?.closest('.security-anomaly-ack');
+      const close = target?.closest('.security-anomaly-close');
+      if (ack) {
+        updateSecurityAnomalyStatus(Number(ack.dataset.anomalyId), 'ack').catch(console.error);
+      } else if (close) {
+        updateSecurityAnomalyStatus(Number(close.dataset.anomalyId), 'close').catch(console.error);
+      }
+    });
 
     document.getElementById('attackVectorTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
