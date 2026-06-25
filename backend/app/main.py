@@ -4593,6 +4593,8 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
 
 def ip_zone_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    prefix_count = int(item.get("prefix_count") or 0)
+    total_prefix_count = int(item.get("total_prefix_count") or prefix_count)
     return {
         "id": int(item["id"]),
         "name": item["name"],
@@ -4602,7 +4604,9 @@ def ip_zone_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "detection_template_name": item.get("detection_template_name") or item.get("template_name") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
-        "prefix_count": int(item.get("prefix_count") or 0),
+        "prefix_count": prefix_count,
+        "active_prefix_count": int(item.get("active_prefix_count") or prefix_count),
+        "total_prefix_count": total_prefix_count,
     }
 
 
@@ -4746,13 +4750,20 @@ def normalize_detection_whitelist_payload(conn: sqlite3.Connection, payload: Det
     }
 
 
-def fetch_ip_zone(conn: sqlite3.Connection, zone_id: int, include_prefixes: bool = False) -> dict[str, Any]:
+def fetch_ip_zone(
+    conn: sqlite3.Connection,
+    zone_id: int,
+    include_prefixes: bool = False,
+    include_inactive_prefixes: bool = False,
+) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT
             z.*,
             t.name AS detection_template_name,
-            COUNT(p.id) AS prefix_count
+            COUNT(CASE WHEN p.active = 1 THEN p.id END) AS prefix_count,
+            COUNT(CASE WHEN p.active = 1 THEN p.id END) AS active_prefix_count,
+            COUNT(p.id) AS total_prefix_count
         FROM ip_zones z
         LEFT JOIN detection_templates t ON t.id = z.detection_template_id
         LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
@@ -4765,8 +4776,9 @@ def fetch_ip_zone(conn: sqlite3.Connection, zone_id: int, include_prefixes: bool
         raise HTTPException(status_code=404, detail="IP Zone nao encontrada")
     item = ip_zone_row_to_dict(row)
     if include_prefixes:
+        active_filter = "" if include_inactive_prefixes else "AND p.active = 1"
         prefix_rows = conn.execute(
-            """
+            f"""
             SELECT
                 p.*,
                 z.name AS zone_name,
@@ -4776,6 +4788,7 @@ def fetch_ip_zone(conn: sqlite3.Connection, zone_id: int, include_prefixes: bool
             JOIN ip_zones z ON z.id = p.zone_id
             LEFT JOIN detection_templates t ON t.id = z.detection_template_id
             WHERE p.zone_id = ?
+              {active_filter}
             ORDER BY p.active DESC, p.cidr, p.id
             """,
             (zone_id,),
@@ -4825,7 +4838,9 @@ def list_ip_zones():
             SELECT
                 z.*,
                 t.name AS detection_template_name,
-                COUNT(p.id) AS prefix_count
+                COUNT(CASE WHEN p.active = 1 THEN p.id END) AS prefix_count,
+                COUNT(CASE WHEN p.active = 1 THEN p.id END) AS active_prefix_count,
+                COUNT(p.id) AS total_prefix_count
             FROM ip_zones z
             LEFT JOIN detection_templates t ON t.id = z.detection_template_id
             LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
@@ -4854,10 +4869,10 @@ def create_ip_zone(payload: IpZonePayload):
 
 
 @app.get("/api/ip-zones/{zone_id}")
-def get_ip_zone(zone_id: int):
+def get_ip_zone(zone_id: int, include_inactive: bool = False):
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        return fetch_ip_zone(conn, zone_id, include_prefixes=True)
+        return fetch_ip_zone(conn, zone_id, include_prefixes=True, include_inactive_prefixes=include_inactive)
 
 
 @app.put("/api/ip-zones/{zone_id}")
@@ -4896,12 +4911,13 @@ def delete_ip_zone(zone_id: int):
 
 
 @app.get("/api/ip-zones/{zone_id}/prefixes")
-def list_ip_zone_prefixes(zone_id: int):
+def list_ip_zone_prefixes(zone_id: int, include_inactive: bool = False):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         _ = fetch_ip_zone_row(conn, zone_id)
+        active_filter = "" if include_inactive else "AND p.active = 1"
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 p.*,
                 z.name AS zone_name,
@@ -4911,6 +4927,7 @@ def list_ip_zone_prefixes(zone_id: int):
             JOIN ip_zones z ON z.id = p.zone_id
             LEFT JOIN detection_templates t ON t.id = z.detection_template_id
             WHERE p.zone_id = ?
+              {active_filter}
             ORDER BY p.active DESC, p.cidr, p.id
             """,
             (zone_id,),
@@ -5003,6 +5020,34 @@ def delete_ip_zone_prefix(zone_id: int, prefix_id: int):
         )
         conn.commit()
         return {"status": "disabled", "id": prefix_id}
+
+
+@app.post("/api/ip-zones/{zone_id}/prefixes/{prefix_id}/activate")
+def activate_ip_zone_prefix(zone_id: int, prefix_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_prefix_row(conn, zone_id, prefix_id)
+        conn.execute(
+            "UPDATE ip_zone_prefixes SET active = 1, updated_at = ? WHERE id = ? AND zone_id = ?",
+            (utc_now_iso(), prefix_id, zone_id),
+        )
+        conn.commit()
+        return ip_zone_prefix_row_to_dict(
+            conn.execute(
+                """
+                SELECT
+                    p.*,
+                    z.name AS zone_name,
+                    z.detection_template_id,
+                    t.name AS detection_template_name
+                FROM ip_zone_prefixes p
+                JOIN ip_zones z ON z.id = p.zone_id
+                LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+                WHERE p.id = ?
+                """,
+                (prefix_id,),
+            ).fetchone()
+        )
 
 
 @app.get("/api/detection/templates")
@@ -5404,10 +5449,9 @@ def normalize_zone_direction(value: Any) -> str:
     return normalized
 
 
-def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
+def ip_zone_clickhouse_membership_filters(zone_id: int | None, params: dict[str, Any], prefix: str) -> tuple[str, str]:
     if zone_id is None:
-        return ""
-    direction = normalize_zone_direction(zone_direction)
+        return "", ""
     ensure_sensor_db()
     with sqlite_connection() as conn:
         zone = conn.execute("SELECT id FROM ip_zones WHERE id = ? AND active = 1", (zone_id,)).fetchone()
@@ -5423,19 +5467,28 @@ def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: 
             """,
             (zone_id,),
         ).fetchall()
-    parts = []
+    src_parts = []
+    dst_parts = []
     for index, row in enumerate(rows):
         key = f"{prefix}_cidr_{index}"
         params[key] = clickhouse_cidr_string_param(row["cidr"], "cidr")
-        src = f"isIPAddressInRange(toString(src_ip), {{{key}:String}})"
-        dst = f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})"
-        if direction == "transmits":
-            parts.append(src)
-        elif direction == "receives":
-            parts.append(dst)
-        else:
-            parts.append(f"({src} OR {dst})")
-    return f"({' OR '.join(parts)})" if parts else "0 = 1"
+        src_parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
+        dst_parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
+    src_filter = f"({' OR '.join(src_parts)})" if src_parts else "0 = 1"
+    dst_filter = f"({' OR '.join(dst_parts)})" if dst_parts else "0 = 1"
+    return src_filter, dst_filter
+
+
+def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
+    if zone_id is None:
+        return ""
+    direction = normalize_zone_direction(zone_direction)
+    src_filter, dst_filter = ip_zone_clickhouse_membership_filters(zone_id, params, prefix)
+    if direction == "transmits":
+        return src_filter
+    if direction == "receives":
+        return dst_filter
+    return f"({src_filter} OR {dst_filter})"
 
 
 def metric_expression_for_detection(metric: str) -> str:
@@ -5862,6 +5915,8 @@ def detection_candidates_payload(
     sensor_id: int | None,
     zone_id: int,
     vector_filter: set[str] | None = None,
+    rule_id: int | None = None,
+    template_id: int | None = None,
     create_anomalies: bool = False,
 ) -> dict[str, Any]:
     ensure_sensor_db()
@@ -5900,26 +5955,71 @@ def detection_candidates_payload(
         ).fetchall()
         prefixes = [ip_zone_prefix_row_to_dict(row) for row in prefix_rows]
         if not prefixes:
-            return {"items": [], "warnings": ["IP Zone sem prefixos ativos"], "start": iso(start_dt), "end": iso(end_dt)}
-        template_id = zone.get("detection_template_id")
-        if template_id is None:
-            return {"items": [], "warnings": ["IP Zone sem template vinculado"], "start": iso(start_dt), "end": iso(end_dt)}
+            return {
+                "items": [],
+                "warnings": ["IP Zone sem prefixos ativos"],
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "zone_id": zone_id,
+                "zone": zone,
+                "prefixes": [],
+                "rules": [],
+            }
+        zone_template_id = zone.get("detection_template_id")
+        if zone_template_id is None:
+            return {
+                "items": [],
+                "warnings": ["IP Zone sem template vinculado"],
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "zone_id": zone_id,
+                "zone": zone,
+                "prefixes": prefixes,
+                "rules": [],
+            }
+        if template_id is not None and int(template_id) != int(zone_template_id):
+            return {
+                "items": [],
+                "warnings": ["Template filtrado nao esta associado a IP Zone selecionada"],
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "zone_id": zone_id,
+                "zone": zone,
+                "prefixes": prefixes,
+                "rules": [],
+                "filters": {"template_id": template_id, "rule_id": rule_id, "vector": sorted(vector_filter or [])},
+            }
         template_row = conn.execute(
             "SELECT * FROM detection_templates WHERE id = ? AND active = 1",
-            (int(template_id),),
+            (int(zone_template_id),),
         ).fetchone()
         if template_row is None:
-            return {"items": [], "warnings": ["Template vinculado esta inativo ou nao existe"], "start": iso(start_dt), "end": iso(end_dt)}
+            return {
+                "items": [],
+                "warnings": ["Template vinculado esta inativo ou nao existe"],
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "zone_id": zone_id,
+                "zone": zone,
+                "prefixes": prefixes,
+                "rules": [],
+            }
         template = detection_template_row_to_dict(template_row)
+        rule_filters = ["template_id = ?"]
+        rule_values: list[Any] = [int(zone_template_id)]
+        if rule_id is not None:
+            rule_filters.append("id = ?")
+            rule_values.append(int(rule_id))
+        else:
+            rule_filters.append("enabled = 1")
         rule_rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM detection_template_rules
-            WHERE template_id = ?
-              AND enabled = 1
+            WHERE {' AND '.join(rule_filters)}
             ORDER BY id
             """,
-            (int(template_id),),
+            rule_values,
         ).fetchall()
         rules = [detection_rule_row_to_dict(row) for row in rule_rows]
         if vector_filter:
@@ -5950,6 +6050,15 @@ def detection_candidates_payload(
         "end": iso(end_dt),
         "zone_id": zone_id,
         "sensor_id": sensor_id,
+        "zone": zone,
+        "template": template,
+        "prefixes": prefixes,
+        "rules": rules,
+        "filters": {
+            "template_id": template_id,
+            "rule_id": rule_id,
+            "vector": sorted(vector_filter or []),
+        },
         "items": items,
         "warnings": warnings,
         "anomalies": anomaly_actions if create_anomalies else None,
@@ -5961,9 +6070,21 @@ def security_vector_candidates(
     range_minutes: int = Query(30, ge=1, le=MAX_RANGE_MINUTES),
     sensor_id: int | None = Query(None, ge=1),
     zone_id: int = Query(..., ge=1),
+    rule_id: int | None = Query(None, ge=1),
+    vector: str | None = None,
+    template_id: int | None = Query(None, ge=1),
     create_anomalies: bool = False,
 ):
-    return detection_candidates_payload(range_minutes, sensor_id, zone_id, create_anomalies=create_anomalies)
+    vector_filter = {normalize_detection_vector(vector).lower()} if clean_text(vector) else None
+    return detection_candidates_payload(
+        range_minutes,
+        sensor_id,
+        zone_id,
+        vector_filter=vector_filter,
+        rule_id=rule_id,
+        template_id=template_id,
+        create_anomalies=create_anomalies,
+    )
 
 
 @app.get("/api/security/vectors/prefix-internal-ip-high-pps/candidates")
@@ -10835,33 +10956,80 @@ def dashboard_series_payload(
         output_group = "'Total'"
 
     selects = []
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "series_zone")
-    base_where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
-    if direction in {"both", "download"}:
-        selects.append(
-            f"""
-            SELECT
-                toStartOfMinute(flow_time) AS ts,
-                {input_group} AS group_key,
-                'download' AS flow_direction,
-                sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
-            FROM flow_raw
-            WHERE {base_where} AND {input_condition}
-            GROUP BY ts, group_key
-            """
-        )
-    if direction in {"both", "upload"}:
-        selects.append(
-            f"""
-            SELECT
-                toStartOfMinute(flow_time) AS ts,
-                {output_group} AS group_key,
-                'upload' AS flow_direction,
-                sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
-            FROM flow_raw
-            WHERE {base_where} AND {output_condition}
-            GROUP BY ts, group_key
-            """
+    base_where = context["where"]
+    if zone_id is not None:
+        zone_direction_normalized = normalize_zone_direction(zone_direction)
+        zone_src_filter, zone_dst_filter = ip_zone_clickhouse_membership_filters(zone_id, params, "series_zone")
+        zone_input_group = input_group
+        zone_output_group = output_group
+        if group_by == "interface":
+            zone_input_group = "toString(input_if)"
+            zone_output_group = "toString(output_if)"
+        if zone_direction_normalized in {"both", "receives"}:
+            selects.append(
+                f"""
+                SELECT
+                    toStartOfMinute(flow_time) AS ts,
+                    {zone_input_group} AS group_key,
+                    'download' AS flow_direction,
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
+                FROM flow_raw
+                WHERE {base_where} AND {zone_dst_filter} AND {input_condition}
+                GROUP BY ts, group_key
+                """
+            )
+        if zone_direction_normalized in {"both", "transmits"}:
+            selects.append(
+                f"""
+                SELECT
+                    toStartOfMinute(flow_time) AS ts,
+                    {zone_output_group} AS group_key,
+                    'upload' AS flow_direction,
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
+                FROM flow_raw
+                WHERE {base_where} AND {zone_src_filter} AND {output_condition}
+                GROUP BY ts, group_key
+                """
+            )
+    else:
+        if direction in {"both", "download"}:
+            selects.append(
+                f"""
+                SELECT
+                    toStartOfMinute(flow_time) AS ts,
+                    {input_group} AS group_key,
+                    'download' AS flow_direction,
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
+                FROM flow_raw
+                WHERE {base_where} AND {input_condition}
+                GROUP BY ts, group_key
+                """
+            )
+        if direction in {"both", "upload"}:
+            selects.append(
+                f"""
+                SELECT
+                    toStartOfMinute(flow_time) AS ts,
+                    {output_group} AS group_key,
+                    'upload' AS flow_direction,
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
+                FROM flow_raw
+                WHERE {base_where} AND {output_condition}
+                GROUP BY ts, group_key
+                """
+            )
+    if not selects:
+        return dashboard_cache_set(
+            cache_key,
+            {
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "metric": metric,
+                "group_by": group_by,
+                "direction": direction,
+                "series": [],
+                "items": [],
+            },
         )
     result = query_clickhouse(" UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
     rows = rows_as_dicts(result)
@@ -10889,10 +11057,16 @@ def dashboard_series_payload(
             iface = interface_map.get(int(group), {})
             label = clean_text(iface.get("label")) or f"ifIndex {group}"
             color = clean_text(iface.get("color")) or deterministic_color(group)
+        direction_label = (
+            "Entrada da zona" if zone_id is not None and flow_direction == "download"
+            else "Saida da zona" if zone_id is not None and flow_direction == "upload"
+            else "Download" if flow_direction == "download"
+            else "Upload"
+        )
         item = series_by_key.setdefault(
             key,
             {
-                "name": f"{label} {'Download' if flow_direction == 'download' else 'Upload'}",
+                "name": f"{label} {direction_label}",
                 "group": group,
                 "label": label,
                 "direction": flow_direction,

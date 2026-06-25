@@ -657,6 +657,44 @@
       font-size: .84rem;
     }
 
+    .legacy-section {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #ffffff;
+    }
+
+    .legacy-section > summary {
+      cursor: pointer;
+      padding: .85rem 1rem;
+      color: #334155;
+      font-weight: 800;
+    }
+
+    .legacy-section-body {
+      border-top: 1px solid var(--line);
+      padding: 1rem;
+    }
+
+    .legacy-note {
+      margin-bottom: .75rem;
+      color: #64748b;
+      font-size: .9rem;
+    }
+
+    .inline-check {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      margin: 0;
+      color: #475569;
+      font-size: .86rem;
+      font-weight: 700;
+    }
+
+    .inline-check input {
+      margin: 0;
+    }
+
     .tab-strip {
       display: inline-flex;
       gap: .25rem;
@@ -795,6 +833,10 @@
 
     .gmj-dialog.small {
       width: min(760px, 100%);
+    }
+
+    .gmj-dialog.wide {
+      width: min(1280px, 100%);
     }
 
     .gmj-dialog-header,
@@ -1151,7 +1193,7 @@
           <section class="row g-3 mt-1">
             <div class="col-12 col-xl-4">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-2">Top IP origem</div>
+                <div id="srcIpTitle" class="panel-title mb-2">Top IP origem</div>
                 <div id="srcIpChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -1163,7 +1205,7 @@
             </div>
             <div class="col-12 col-xl-4">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-2">Top IP destino</div>
+                <div id="dstIpTitle" class="panel-title mb-2">Top IP destino</div>
                 <div id="dstIpChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -2310,7 +2352,7 @@
           <div class="ip-zone-layout">
             <section class="panel p-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
-                <div class="panel-title">IP Zones</div>
+                <div class="panel-title">Cliente / Grupo de Prefixos</div>
                 <span id="ipZoneCount" class="badge-soft off">0</span>
               </div>
               <div class="table-wrap">
@@ -2337,7 +2379,7 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label for="ipZoneTemplate">Grupo de Vetores associado</label>
+                    <label for="ipZoneTemplate">Grupo de Vetores / Template associado</label>
                     <select id="ipZoneTemplate" class="form-select form-select-sm">
                       <option value="">Sem grupo associado</option>
                     </select>
@@ -2374,6 +2416,10 @@
                     <button id="saveIpZonePrefixButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="save"></i><span>Salvar prefixo</span>
                     </button>
+                    <label class="inline-check" title="Exibir prefixos desativados para edicao ou reativacao">
+                      <input id="showInactivePrefixes" type="checkbox">
+                      <span>Mostrar prefixos inativos</span>
+                    </label>
                   </div>
                 </div>
                 <div class="ip-zone-form-grid mb-3">
@@ -2422,7 +2468,7 @@
           <section id="detectionTemplateSection" class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">Grupos de Vetores</div>
+                <div class="panel-title">Grupo de Vetores / Template</div>
                 <div id="detectionTemplateStatus" class="metric-readout">CLIENTES-PUBLICOS-DEFAULT sera exibido aqui</div>
               </div>
               <div class="toolbar">
@@ -2463,7 +2509,7 @@
                     <input id="detectionTemplateDescription" class="form-control form-control-sm" placeholder="Descricao do template">
                   </div>
                 </div>
-                <div class="subtle mb-3">Grupo de Vetores: conjunto de regras/thresholds aplicado a uma ou mais zonas de prefixos.</div>
+                <div class="subtle mb-3">Grupo de Vetores / Template: conjunto de regras/thresholds aplicado a uma ou mais zonas de prefixos.</div>
                 <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
                   <div>
                     <div class="panel-title">Regras / Vetores</div>
@@ -2496,7 +2542,7 @@
                     <select id="detectionRuleDirection" class="form-select form-select-sm">
                       <option value="transmits">Saindo da zona</option>
                       <option value="receives">Entrando na zona</option>
-                      <option value="both">Entrada ou saida</option>
+                      <option value="both">Envolvendo a zona</option>
                     </select>
                   </div>
                   <div class="field">
@@ -2703,18 +2749,26 @@
               <button id="refreshAttackVectorsButton" type="button" class="btn btn-sm btn-outline-secondary">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
-              <button id="newTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
-                <i data-lucide="file-plus-2"></i><span>Novo Template</span>
-              </button>
-              <button id="saveTemplateButton" type="button" class="btn btn-sm btn-success">
-                <i data-lucide="save"></i><span>Salvar</span>
-              </button>
             </div>
           </div>
 
           <div id="attackDetectionTemplateMount"></div>
 
-          <div class="attack-layout">
+          <details id="legacyAttackVectorDetails" class="legacy-section mt-3">
+            <summary>Vetores classicos / legado</summary>
+            <div class="legacy-section-body">
+              <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-2">
+                <div class="legacy-note">Modelo legado mantido por compatibilidade. Para novas deteccoes por prefixo, use Clientes/Prefixos + Grupo de Vetores / Template.</div>
+                <div class="toolbar">
+                  <button id="newTemplateButton" type="button" class="btn btn-sm btn-outline-secondary">
+                    <i data-lucide="file-plus-2"></i><span>Novo Template</span>
+                  </button>
+                  <button id="saveTemplateButton" type="button" class="btn btn-sm btn-success">
+                    <i data-lucide="save"></i><span>Salvar</span>
+                  </button>
+                </div>
+              </div>
+          <div class="attack-layout mt-2">
             <section class="panel p-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <div class="panel-title">Templates</div>
@@ -2870,6 +2924,8 @@
               </section>
             </div>
           </div>
+            </div>
+          </details>
         </section>
 
         <section id="view-anomalies" class="app-view">
@@ -3169,6 +3225,99 @@
       </div>
       <div class="gmj-dialog-footer">
         <button type="button" class="btn btn-sm btn-success" data-close-modal="attackVectorTestModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detectionRuleTestModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="detectionRuleTestModalTitle">
+    <div class="gmj-dialog wide">
+      <div class="gmj-dialog-header">
+        <div>
+          <h2 id="detectionRuleTestModalTitle" class="view-title">Teste da regra</h2>
+          <div id="detectionRuleTestSummary" class="subtle">Selecione zona, sensor e range para testar a regra.</div>
+        </div>
+        <button type="button" class="icon-button" data-close-modal="detectionRuleTestModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="ip-zone-form-grid mb-3">
+          <div class="field">
+            <label for="detectionRuleTestZone">Cliente / Grupo de Prefixos</label>
+            <select id="detectionRuleTestZone" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="detectionRuleTestSensor">Sensor</label>
+            <select id="detectionRuleTestSensor" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="detectionRuleTestRange">Range (min)</label>
+            <input id="detectionRuleTestRange" type="number" min="1" max="259200" step="1" class="form-control form-control-sm" value="120">
+          </div>
+          <div class="field">
+            <label>Response</label>
+            <input class="form-control form-control-sm" value="DETECTION_ONLY" disabled>
+          </div>
+        </div>
+        <div class="database-metrics-grid mb-3">
+          <div class="metric-card"><div class="metric-label">Grupo</div><div id="detectionRuleTestGroup" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Regra / Vetor</div><div id="detectionRuleTestRule" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">IP Zone testada</div><div id="detectionRuleTestZoneName" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Prefixos ativos</div><div id="detectionRuleTestPrefixes" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Sensor</div><div id="detectionRuleTestSensorName" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Range usado</div><div id="detectionRuleTestRangeUsed" class="metric-value">120 min</div></div>
+          <div class="metric-card"><div class="metric-label">Valor observado</div><div id="detectionRuleTestObserved" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Threshold warning</div><div id="detectionRuleTestWarning" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Threshold critical</div><div id="detectionRuleTestCritical" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Match</div><div id="detectionRuleTestMatch" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Severidade</div><div id="detectionRuleTestSeverity" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Candidatos</div><div id="detectionRuleTestCandidates" class="metric-value">0</div></div>
+          <div class="metric-card"><div class="metric-label">Bytes</div><div id="detectionRuleTestBytes" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Pacotes</div><div id="detectionRuleTestPackets" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Packets/s</div><div id="detectionRuleTestPacketsS" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Bits/s</div><div id="detectionRuleTestBitsS" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Flows/s</div><div id="detectionRuleTestFlowsS" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Flows</div><div id="detectionRuleTestFlows" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Motivo</div><div id="detectionRuleTestReason" class="metric-value">-</div></div>
+          <div class="metric-card"><div class="metric-label">Response</div><div id="detectionRuleTestResponse" class="metric-value">DETECTION_ONLY</div></div>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
+            <thead>
+              <tr>
+                <th>first_seen</th>
+                <th>last_seen</th>
+                <th>prefix_cidr</th>
+                <th>src_ip</th>
+                <th>dst_ip</th>
+                <th>protocol</th>
+                <th class="text-end">packets_s</th>
+                <th class="text-end">bits_s</th>
+                <th class="text-end">flows_s</th>
+                <th class="text-end">flows</th>
+                <th class="text-end">packets</th>
+                <th class="text-end">bytes</th>
+                <th class="text-end">unique_dst_ips</th>
+                <th class="text-end">unique_dst_ports</th>
+                <th class="text-end">unique_src_ports</th>
+                <th>severity</th>
+              </tr>
+            </thead>
+            <tbody id="detectionRuleTestSamples"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="openDetectionAnomaliesButton" type="button" class="btn btn-sm btn-outline-secondary">
+          <i data-lucide="external-link"></i><span>Abrir Anomalias</span>
+        </button>
+        <button id="generateDetectionRuleAnomaliesButton" type="button" class="btn btn-sm btn-outline-success">
+          <i data-lucide="siren"></i><span>Gerar anomalias informativas</span>
+        </button>
+        <button id="runDetectionRuleTestButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="play-circle"></i><span>Executar teste</span>
+        </button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="detectionRuleTestModal">Fechar</button>
       </div>
     </div>
   </div>
@@ -3544,6 +3693,7 @@
     let currentDetectionTemplateId = null;
     let editingIpZonePrefixId = null;
     let editingDetectionRuleId = null;
+    let testingDetectionRuleId = null;
     let editingDetectionWhitelistId = null;
     let mapInterfaceCache = [];
     let flowInterfaceCache = [];
@@ -3919,6 +4069,26 @@
       query.set('metric', metric);
       query.set('direction', 'both');
       return query.toString();
+    }
+
+    function updateDashboardZoneLabels() {
+      const zoneId = selectedDashboardZoneId();
+      const direction = document.getElementById('dashboardZoneDirection')?.value || 'both';
+      if (!zoneId) {
+        setText('srcIpTitle', 'Top IP origem');
+        setText('dstIpTitle', 'Top IP destino');
+        return;
+      }
+      if (direction === 'out') {
+        setText('srcIpTitle', 'Top IP origem da zona');
+        setText('dstIpTitle', 'Top IP destino externo');
+      } else if (direction === 'in') {
+        setText('srcIpTitle', 'Top IP origem externa');
+        setText('dstIpTitle', 'Top IP destino da zona');
+      } else {
+        setText('srcIpTitle', 'Top IP origem (envolvendo a zona)');
+        setText('dstIpTitle', 'Top IP destino (envolvendo a zona)');
+      }
     }
 
     function selectedDashboardSeriesLimit() {
@@ -4563,7 +4733,7 @@
       const labels = {
         transmits: 'Saindo da zona',
         receives: 'Entrando na zona',
-        both: 'Entrada ou saida'
+        both: 'Envolvendo a zona'
       };
       return labels[value] || value || '-';
     }
@@ -4627,8 +4797,8 @@
             <div class="fw-semibold">${escapeHtml(zone.name)}</div>
             <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')}</div>
           </td>
-          <td class="text-end">${formatNumber(zone.prefix_count || (zone.prefixes || []).length)}</td>
-          <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Off'}</span></td>
+          <td class="text-end">${formatNumber(zone.active_prefix_count ?? zone.prefix_count ?? 0)} / ${formatNumber(zone.total_prefix_count ?? zone.prefix_count ?? (zone.prefixes || []).length)}</td>
+          <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Desativada'}</span></td>
         </tr>
       `).join('') || '<tr><td colspan="3" class="text-muted">Sem IP Zones</td></tr>';
     }
@@ -4640,7 +4810,7 @@
       }
       currentIpZoneId = Number(zoneId);
       try {
-        const zone = await apiRequest(`/api/ip-zones/${currentIpZoneId}`);
+        const zone = await apiRequest(`/api/ip-zones/${currentIpZoneId}?include_inactive=true`);
         const index = ipZones.findIndex(item => Number(item.id) === Number(zone.id));
         if (index >= 0) ipZones[index] = zone;
         else ipZones.push(zone);
@@ -4722,21 +4892,29 @@
     function renderIpZonePrefixTable(prefixes) {
       const tbody = document.getElementById('ipZonePrefixTable');
       if (!tbody) return;
-      document.getElementById('ipZonePrefixStatus').textContent = currentIpZoneId ? `${formatNumber(prefixes.length)} prefixos` : 'Selecione uma IP Zone';
-      tbody.innerHTML = prefixes.map(prefix => `
+      const allPrefixes = Array.isArray(prefixes) ? prefixes : [];
+      const showInactive = Boolean(document.getElementById('showInactivePrefixes')?.checked);
+      const activeCount = allPrefixes.filter(prefix => prefix.active).length;
+      const visiblePrefixes = showInactive ? allPrefixes : allPrefixes.filter(prefix => prefix.active);
+      document.getElementById('ipZonePrefixStatus').textContent = currentIpZoneId
+        ? `${formatNumber(activeCount)} ativos / ${formatNumber(allPrefixes.length)} total`
+        : 'Selecione uma IP Zone';
+      tbody.innerHTML = visiblePrefixes.map(prefix => `
         <tr>
           <td>${escapeHtml(prefix.cidr)}</td>
           <td>${escapeHtml(prefix.name || '-')}</td>
           <td>${escapeHtml(prefix.prefix_type || 'client')}</td>
-          <td><span class="badge-soft ${prefix.active ? 'ok' : 'off'}">${prefix.active ? 'Ativo' : 'Off'}</span></td>
+          <td><span class="badge-soft ${prefix.active ? 'ok' : 'off'}">${prefix.active ? 'Ativo' : 'Desativado'}</span></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary ip-zone-prefix-edit" data-prefix-id="${prefix.id}" aria-label="Editar prefixo"><i data-lucide="pencil"></i></button>
-              <button type="button" class="btn btn-outline-danger ip-zone-prefix-disable" data-prefix-id="${prefix.id}" aria-label="Desativar prefixo"><i data-lucide="ban"></i></button>
+              ${prefix.active
+                ? `<button type="button" class="btn btn-outline-danger ip-zone-prefix-disable" data-prefix-id="${prefix.id}" aria-label="Desativar prefixo"><i data-lucide="ban"></i><span>Desativar</span></button>`
+                : `<button type="button" class="btn btn-outline-success ip-zone-prefix-activate" data-prefix-id="${prefix.id}" aria-label="Reativar prefixo"><i data-lucide="rotate-ccw"></i><span>Reativar</span></button>`}
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="5" class="text-muted">Sem prefixos</td></tr>';
+      `).join('') || `<tr><td colspan="5" class="text-muted">${showInactive ? 'Sem prefixos' : 'Sem prefixos ativos'}</td></tr>`;
       createIcons();
     }
 
@@ -4770,6 +4948,7 @@
 
     async function disableIpZonePrefix(prefixId) {
       if (!currentIpZoneId || !prefixId) return;
+      if (!confirm('Desativar este prefixo? Ele ficara oculto por padrao.')) return;
       try {
         await apiRequest(`/api/ip-zones/${currentIpZoneId}/prefixes/${prefixId}`, { method: 'DELETE' });
         await loadIpZoneFilters();
@@ -4777,6 +4956,18 @@
         setIpZoneStatus('Prefixo desativado');
       } catch (error) {
         setIpZoneStatus(`Falha ao desativar prefixo: ${error.message}`, 'error');
+      }
+    }
+
+    async function activateIpZonePrefix(prefixId) {
+      if (!currentIpZoneId || !prefixId) return;
+      try {
+        await apiRequest(`/api/ip-zones/${currentIpZoneId}/prefixes/${prefixId}/activate`, { method: 'POST' });
+        await loadIpZoneFilters();
+        await selectIpZone(currentIpZoneId);
+        setIpZoneStatus('Prefixo reativado');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao reativar prefixo: ${error.message}`, 'error');
       }
     }
 
@@ -4947,8 +5138,9 @@
           <td><span class="badge-soft ${rule.enabled ? 'ok' : 'off'}">${rule.enabled ? 'Ativa' : 'Off'}</span></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
-              <button type="button" class="btn btn-outline-secondary detection-rule-edit" data-rule-id="${rule.id}" aria-label="Editar regra"><i data-lucide="pencil"></i></button>
-              <button type="button" class="btn btn-outline-danger detection-rule-disable" data-rule-id="${rule.id}" aria-label="Desativar regra"><i data-lucide="ban"></i></button>
+              <button type="button" class="btn btn-outline-secondary detection-rule-edit" data-rule-id="${rule.id}" aria-label="Editar regra"><i data-lucide="pencil"></i><span>Editar</span></button>
+              <button type="button" class="btn btn-outline-success detection-rule-test" data-rule-id="${rule.id}" aria-label="Testar regra agora"><i data-lucide="play-circle"></i><span>Testar agora</span></button>
+              <button type="button" class="btn btn-outline-danger detection-rule-disable" data-rule-id="${rule.id}" aria-label="Desativar regra"><i data-lucide="ban"></i><span>Desativar</span></button>
             </div>
           </td>
         </tr>
@@ -4991,6 +5183,184 @@
         document.getElementById('detectionRuleStatus').textContent = 'Regra desativada';
       } catch (error) {
         document.getElementById('detectionRuleStatus').textContent = `Falha ao desativar regra: ${error.message}`;
+      }
+    }
+
+    function detectionRuleById(ruleId = testingDetectionRuleId) {
+      return detectionRules.find(item => Number(item.id) === Number(ruleId)) || null;
+    }
+
+    function renderDetectionRuleTestZoneSelect() {
+      const select = document.getElementById('detectionRuleTestZone');
+      if (!select) return;
+      const activeZones = ipZones.filter(zone => zone.active);
+      const preferred = currentIpZoneId && activeZones.some(zone => Number(zone.id) === Number(currentIpZoneId))
+        ? String(currentIpZoneId)
+        : activeZones.length === 1
+          ? String(activeZones[0].id)
+          : '';
+      select.innerHTML = [
+        '<option value="">Selecione uma IP Zone</option>',
+        ...activeZones.map(zone => `<option value="${zone.id}">${escapeHtml(zone.name)}</option>`)
+      ].join('');
+      select.value = preferred;
+    }
+
+    function renderDetectionRuleTestSensorSelect() {
+      const select = document.getElementById('detectionRuleTestSensor');
+      if (!select) return;
+      const current = select.value || document.getElementById('candidateSensor')?.value || '';
+      const options = dashboardSensorCache.length
+        ? dashboardSensorCache.map(sensor => `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`)
+        : ['<option value="1">Sensor #1</option>'];
+      select.innerHTML = options.join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === String(current))
+        ? current
+        : String(dashboardSensorCache[0]?.id || '1');
+    }
+
+    function resetDetectionRuleTestResult() {
+      [
+        'detectionRuleTestObserved',
+        'detectionRuleTestWarning',
+        'detectionRuleTestCritical',
+        'detectionRuleTestMatch',
+        'detectionRuleTestSeverity',
+        'detectionRuleTestBytes',
+        'detectionRuleTestPackets',
+        'detectionRuleTestPacketsS',
+        'detectionRuleTestBitsS',
+        'detectionRuleTestFlowsS',
+        'detectionRuleTestFlows',
+        'detectionRuleTestReason'
+      ].forEach(id => setText(id, '-'));
+      setText('detectionRuleTestCandidates', '0');
+      setText('detectionRuleTestResponse', 'DETECTION_ONLY');
+      document.getElementById('detectionRuleTestSamples').innerHTML = '<tr><td colspan="16" class="text-muted">Execute o teste para ver candidatos</td></tr>';
+    }
+
+    async function openDetectionRuleTestModal(ruleId) {
+      const rule = detectionRuleById(ruleId);
+      if (!rule) return;
+      testingDetectionRuleId = Number(ruleId);
+      await Promise.all([loadIpZoneFilters(), loadDashboardSensors().catch(() => [])]);
+      renderDetectionRuleTestZoneSelect();
+      renderDetectionRuleTestSensorSelect();
+      setValue('detectionRuleTestRange', 120);
+      const template = selectedDetectionTemplate();
+      setText('detectionRuleTestSummary', `${template?.name || 'Grupo'} - ${rule.vector}`);
+      setText('detectionRuleTestGroup', template?.name || '-');
+      setText('detectionRuleTestRule', rule.vector || '-');
+      setText('detectionRuleTestZoneName', '-');
+      setText('detectionRuleTestPrefixes', '-');
+      setText('detectionRuleTestSensorName', '-');
+      setText('detectionRuleTestRangeUsed', '120 min');
+      resetDetectionRuleTestResult();
+      setText('detectionRuleTestWarning', rule.warning_value === null || rule.warning_value === undefined ? '-' : detectionMetricDisplay(rule.warning_value, rule.metric));
+      setText('detectionRuleTestCritical', rule.critical_value === null || rule.critical_value === undefined ? '-' : detectionMetricDisplay(rule.critical_value, rule.metric));
+      setText('detectionRuleTestResponse', detectionResponseLabel(rule.response));
+      openModal('detectionRuleTestModal');
+    }
+
+    function aggregateDetectionCandidates(items) {
+      return items.reduce((acc, item) => {
+        acc.bytes += Number(item.bytes || 0);
+        acc.packets += Number(item.packets || 0);
+        acc.flows += Number(item.flows || 0);
+        acc.packets_s += Number(item.packets_s || 0);
+        acc.bits_s += Number(item.bits_s || 0);
+        acc.flows_s += Number(item.flows_s || 0);
+        acc.observed = Math.max(acc.observed, Number(item.metric_value || 0));
+        if (item.severity === 'critical') acc.severity = 'critical';
+        else if (item.severity === 'warning' && acc.severity !== 'critical') acc.severity = 'warning';
+        return acc;
+      }, { bytes: 0, packets: 0, flows: 0, packets_s: 0, bits_s: 0, flows_s: 0, observed: 0, severity: '-' });
+    }
+
+    function renderDetectionRuleTest(payload, createAnomalies = false) {
+      const rule = detectionRuleById();
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const zone = payload.zone || {};
+      const template = payload.template || selectedDetectionTemplate() || {};
+      const prefixes = Array.isArray(payload.prefixes) ? payload.prefixes : [];
+      const aggregate = aggregateDetectionCandidates(items);
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+      const sensorId = selectValue('detectionRuleTestSensor');
+      const sensor = dashboardSensorCache.find(item => String(item.id) === String(sensorId));
+      const range = Math.max(1, numberValue('detectionRuleTestRange', 120));
+      const anomalyText = payload.anomalies
+        ? ` Anomalias: ${formatNumber(payload.anomalies.created || 0)} novas, ${formatNumber(payload.anomalies.updated || 0)} atualizadas.`
+        : '';
+      setText('detectionRuleTestSummary', `${formatNumber(items.length)} candidatos encontrados.${anomalyText}${warnings.length ? ` Avisos: ${warnings.join(' | ')}` : ''}`);
+      setText('detectionRuleTestGroup', template.name || '-');
+      setText('detectionRuleTestRule', rule?.vector || items[0]?.vector || '-');
+      setText('detectionRuleTestZoneName', zone.name || '-');
+      setText('detectionRuleTestPrefixes', prefixes.map(prefix => prefix.cidr).join(', ') || '-');
+      setText('detectionRuleTestSensorName', sensor?.name || (sensorId ? `Sensor #${sensorId}` : 'Todos'));
+      setText('detectionRuleTestRangeUsed', `${formatNumber(range)} min`);
+      setText('detectionRuleTestObserved', rule ? detectionMetricDisplay(aggregate.observed, rule.metric) : formatNumber(aggregate.observed));
+      setText('detectionRuleTestWarning', rule?.warning_value === null || rule?.warning_value === undefined ? '-' : detectionMetricDisplay(rule.warning_value, rule.metric));
+      setText('detectionRuleTestCritical', rule?.critical_value === null || rule?.critical_value === undefined ? '-' : detectionMetricDisplay(rule.critical_value, rule.metric));
+      setText('detectionRuleTestMatch', items.length ? 'Sim' : 'Nao');
+      setText('detectionRuleTestSeverity', aggregate.severity);
+      setText('detectionRuleTestCandidates', formatNumber(items.length));
+      setText('detectionRuleTestBytes', formatBytes(aggregate.bytes));
+      setText('detectionRuleTestPackets', formatNumber(aggregate.packets));
+      setText('detectionRuleTestPacketsS', formatPps(aggregate.packets_s));
+      setText('detectionRuleTestBitsS', formatBps(aggregate.bits_s));
+      setText('detectionRuleTestFlowsS', `${formatNumber(aggregate.flows_s)} flows/s`);
+      setText('detectionRuleTestFlows', formatNumber(aggregate.flows));
+      setText('detectionRuleTestReason', items.length ? 'Candidato acima do threshold warning.' : (warnings[0] || 'Nenhum candidato acima do threshold warning.'));
+      setText('detectionRuleTestResponse', detectionResponseLabel(items[0]?.response || rule?.response || 'DETECTION_ONLY'));
+      document.getElementById('detectionRuleTestSamples').innerHTML = items.map(item => `
+        <tr>
+          <td>${formatDateTime(item.first_seen)}</td>
+          <td>${formatDateTime(item.last_seen)}</td>
+          <td>${escapeHtml(item.prefix_cidr || '-')}</td>
+          <td>${ipLink(item.src_ip || item.internal_ip)}</td>
+          <td>${ipLink(item.dst_ip)}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td class="text-end">${formatPps(item.packets_s)}</td>
+          <td class="text-end">${formatBps(item.bits_s)}</td>
+          <td class="text-end">${formatNumber(item.flows_s)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+          <td class="text-end">${formatNumber(item.packets)}</td>
+          <td class="text-end">${formatBytes(item.bytes)}</td>
+          <td class="text-end">${formatNumber(item.unique_dst_ips)}</td>
+          <td class="text-end">${formatNumber(item.unique_dst_ports)}</td>
+          <td class="text-end">${formatNumber(item.unique_src_ports)}</td>
+          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+        </tr>
+      `).join('') || '<tr><td colspan="16" class="text-muted">Sem candidatos no periodo</td></tr>';
+      createIcons();
+      if (createAnomalies) {
+        loadSecurityAnomalies().catch(console.error);
+        updateAnomalySummary().catch(console.error);
+      }
+    }
+
+    async function runDetectionRuleTest(createAnomalies = false) {
+      const rule = detectionRuleById();
+      const zoneId = selectValue('detectionRuleTestZone');
+      if (!rule || !zoneId) {
+        setText('detectionRuleTestSummary', 'Selecione uma IP Zone antes de executar o teste.');
+        return;
+      }
+      const query = new URLSearchParams();
+      query.set('range_minutes', String(Math.max(1, numberValue('detectionRuleTestRange', 120))));
+      query.set('zone_id', zoneId);
+      query.set('rule_id', String(rule.id));
+      query.set('template_id', String(currentDetectionTemplateId));
+      query.set('create_anomalies', createAnomalies ? 'true' : 'false');
+      const sensorId = selectValue('detectionRuleTestSensor');
+      if (sensorId) query.set('sensor_id', sensorId);
+      setText('detectionRuleTestSummary', createAnomalies ? 'Gerando anomalias informativas...' : 'Executando teste...');
+      try {
+        const payload = await apiRequest(`/api/security/vectors/candidates?${query.toString()}`);
+        renderDetectionRuleTest(payload, createAnomalies);
+      } catch (error) {
+        setText('detectionRuleTestSummary', `Falha no teste: ${error.message}`);
+        document.getElementById('detectionRuleTestSamples').innerHTML = '<tr><td colspan="16" class="text-muted">Sem resultado</td></tr>';
       }
     }
 
@@ -6236,6 +6606,9 @@
         else acc.download += value;
         return acc;
       }, { download: 0, upload: 0 });
+      if (selectedDashboardZoneId()) {
+        return `Entrada ${formatter(totals.download)} / Saida ${formatter(totals.upload)}`;
+      }
       return `Download ${formatter(totals.download)} / Upload ${formatter(totals.upload)}`;
     }
 
@@ -7373,6 +7746,7 @@
       const controller = new AbortController();
       dashboardAbortController = controller;
       try {
+        updateDashboardZoneLabels();
         await checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
         const bpsSeriesQuery = dashboardSeriesParams('bits_s');
@@ -8396,7 +8770,7 @@
         document.getElementById('view-attack-vectors').classList.add('active');
         document.querySelector('[data-nav-view="attack-vectors"]').classList.add('active');
         mountDetectionTemplateSection();
-        Promise.all([loadAttackVectors(), loadDetectionTemplates(), loadIpZoneFilters()]).catch(console.error);
+        Promise.all([loadAttackVectors(), loadDetectionTemplates(), loadIpZoneFilters(), loadDashboardSensors()]).catch(console.error);
       } else if (view === 'anomalies') {
         document.getElementById('view-anomalies').classList.add('active');
         document.querySelector('[data-nav-view="anomalies"]').classList.add('active');
@@ -8501,8 +8875,14 @@
     });
     document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('dashboardSeriesLimit').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
-    document.getElementById('dashboardZone').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
-    document.getElementById('dashboardZoneDirection').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('dashboardZone').addEventListener('change', () => {
+      updateDashboardZoneLabels();
+      refresh().finally(scheduleDashboardRefresh).catch(console.error);
+    });
+    document.getElementById('dashboardZoneDirection').addEventListener('change', () => {
+      updateDashboardZoneLabels();
+      refresh().finally(scheduleDashboardRefresh).catch(console.error);
+    });
     ['topConversationsSort', 'topConversationsLimit'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => {
         saveDashboardLayout();
@@ -8574,6 +8954,7 @@
     document.getElementById('ipZoneTemplate').addEventListener('change', renderIpZoneTemplateSummary);
     document.getElementById('newIpZonePrefixButton').addEventListener('click', () => resetIpZonePrefixForm());
     document.getElementById('saveIpZonePrefixButton').addEventListener('click', () => saveIpZonePrefix().catch(console.error));
+    document.getElementById('showInactivePrefixes').addEventListener('change', () => renderIpZonePrefixTable(selectedIpZone()?.prefixes || []));
     document.getElementById('newDetectionTemplateButton').addEventListener('click', newDetectionTemplate);
     document.getElementById('saveDetectionTemplateButton').addEventListener('click', () => saveDetectionTemplate().catch(console.error));
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
@@ -8583,8 +8964,14 @@
     document.getElementById('saveDetectionWhitelistButton').addEventListener('click', () => saveDetectionWhitelist().catch(console.error));
     document.getElementById('runZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
     document.getElementById('createSecurityAnomaliesButton').addEventListener('click', () => testIpZoneDetection(true).catch(console.error));
+    document.getElementById('runDetectionRuleTestButton').addEventListener('click', () => runDetectionRuleTest(false).catch(console.error));
+    document.getElementById('generateDetectionRuleAnomaliesButton').addEventListener('click', () => runDetectionRuleTest(true).catch(console.error));
+    document.getElementById('openDetectionAnomaliesButton').addEventListener('click', () => {
+      closeModal('detectionRuleTestModal');
+      showView('anomalies');
+    });
     document.getElementById('refreshAttackVectorsButton').addEventListener('click', () => {
-      Promise.all([loadAttackVectors(), loadDetectionTemplates()]).catch(console.error);
+      Promise.all([loadAttackVectors(), loadDetectionTemplates(), loadIpZoneFilters(), loadDashboardSensors()]).catch(console.error);
     });
     document.getElementById('newTemplateButton').addEventListener('click', newAttackTemplate);
     document.getElementById('saveTemplateButton').addEventListener('click', () => saveAttackTemplate().catch(console.error));
@@ -8617,11 +9004,14 @@
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const edit = target?.closest('.ip-zone-prefix-edit');
       const disable = target?.closest('.ip-zone-prefix-disable');
+      const activate = target?.closest('.ip-zone-prefix-activate');
       if (edit) {
         const prefix = (selectedIpZone()?.prefixes || []).find(item => Number(item.id) === Number(edit.dataset.prefixId));
         resetIpZonePrefixForm(prefix || null);
       } else if (disable) {
         disableIpZonePrefix(Number(disable.dataset.prefixId)).catch(console.error);
+      } else if (activate) {
+        activateIpZonePrefix(Number(activate.dataset.prefixId)).catch(console.error);
       }
     });
 
@@ -8635,10 +9025,13 @@
     document.getElementById('detectionRuleTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const edit = target?.closest('.detection-rule-edit');
+      const test = target?.closest('.detection-rule-test');
       const disable = target?.closest('.detection-rule-disable');
       if (edit) {
         const rule = detectionRules.find(item => Number(item.id) === Number(edit.dataset.ruleId));
         resetDetectionRuleForm(rule || null);
+      } else if (test) {
+        openDetectionRuleTestModal(Number(test.dataset.ruleId)).catch(console.error);
       } else if (disable) {
         disableDetectionRule(Number(disable.dataset.ruleId)).catch(console.error);
       }
