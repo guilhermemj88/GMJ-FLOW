@@ -5198,9 +5198,23 @@ def ip_zone_flow_coverage(
     active_prefixes = [ip_zone_prefix_row_to_dict(row) for row in prefix_rows]
     params: dict[str, Any] = {"start": start_dt, "end": end_dt, "seconds": seconds}
     filters = ["flow_time >= {start:DateTime}", "flow_time <= {end:DateTime}"]
+    sensor_name = ""
+    exporter_ip = ""
     if sensor_id is not None:
-        params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
-        filters.append("toString(exporter_ip) = {exporter_ip:String}")
+        with sqlite_connection() as conn:
+            sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        sensor_name = clean_text(sensor.get("name"))
+        exporter_ip = clean_text(sensor.get("exporter_ip"))
+        sensor_filters = []
+        if sensor_name:
+            params["sensor_name"] = sensor_name
+            sensor_filters.append("sensor = {sensor_name:String}")
+        if exporter_ip:
+            params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
+            sensor_filters.append("toString(exporter_ip) = {exporter_ip:String}")
+        if not sensor_filters:
+            raise HTTPException(status_code=400, detail="Sensor sem nome ou exporter_ip configurado")
+        filters.append(f"({' OR '.join(sensor_filters)})")
     base_where = " AND ".join(filters)
     src_filter, dst_filter = cidr_membership_filters_for_clickhouse(
         [prefix["cidr"] for prefix in active_prefixes],
@@ -5210,29 +5224,40 @@ def ip_zone_flow_coverage(
     input_factor = clickhouse_sample_rate_expr(sensor_id, "input", None)
     output_factor = clickhouse_sample_rate_expr(sensor_id, "output", None)
     auto_factor = clickhouse_sample_rate_expr(sensor_id, "auto", None)
-    src_bytes = corrected_value_expr("bytes", output_factor)
-    src_packets = corrected_value_expr("packets", output_factor)
-    dst_bytes = corrected_value_expr("bytes", input_factor)
-    dst_packets = corrected_value_expr("packets", input_factor)
-    auto_bytes = corrected_value_expr("bytes", auto_factor)
-    auto_packets = corrected_value_expr("packets", auto_factor)
+    src_row_bytes_expr = corrected_value_expr("bytes", output_factor)
+    src_row_packets_expr = corrected_value_expr("packets", output_factor)
+    dst_row_bytes_expr = corrected_value_expr("bytes", input_factor)
+    dst_row_packets_expr = corrected_value_expr("packets", input_factor)
+    auto_row_bytes_expr = corrected_value_expr("bytes", auto_factor)
+    auto_row_packets_expr = corrected_value_expr("packets", auto_factor)
 
-    summary_rows = rows_as_dicts(query_clickhouse(
+    def coverage_query(sql: str) -> list[dict[str, Any]]:
+        try:
+            return rows_as_dicts(query_clickhouse(sql, params))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Falha em /api/ip-zones/%s/flow-coverage", zone_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Falha ao consultar cobertura de flow no ClickHouse: {exc}",
+            ) from exc
+
+    summary_rows = coverage_query(
         f"""
         SELECT
-            sumIf({src_bytes}, {src_filter}) AS bytes_src_in_zone,
-            sumIf({dst_bytes}, {dst_filter}) AS bytes_dst_in_zone,
-            sumIf({src_packets}, {src_filter}) AS packets_src_in_zone,
-            sumIf({dst_packets}, {dst_filter}) AS packets_dst_in_zone,
+            sumIf({src_row_bytes_expr}, {src_filter}) AS bytes_src_in_zone,
+            sumIf({dst_row_bytes_expr}, {dst_filter}) AS bytes_dst_in_zone,
+            sumIf({src_row_packets_expr}, {src_filter}) AS packets_src_in_zone,
+            sumIf({dst_row_packets_expr}, {dst_filter}) AS packets_dst_in_zone,
             sumIf(flow_count, {src_filter}) AS total_flows_src_in_zone,
             sumIf(flow_count, {dst_filter}) AS total_flows_dst_in_zone,
-            sumIf({src_bytes}, {src_filter}) * 8 / {{seconds:Float64}} AS total_bps_src_in_zone,
-            sumIf({dst_bytes}, {dst_filter}) * 8 / {{seconds:Float64}} AS total_bps_dst_in_zone
+            sumIf({src_row_bytes_expr}, {src_filter}) * 8 / {{seconds:Float64}} AS total_bps_src_in_zone,
+            sumIf({dst_row_bytes_expr}, {dst_filter}) * 8 / {{seconds:Float64}} AS total_bps_dst_in_zone
         FROM flow_raw
         WHERE {base_where}
-        """,
-        params,
-    ))
+        """
+    )
     summary = summary_rows[0] if summary_rows else {}
 
     def numeric_row_items(result_rows: list[dict[str, Any]], include_ip: bool = False) -> list[dict[str, Any]]:
@@ -5240,8 +5265,8 @@ def ip_zone_flow_coverage(
         for row in result_rows:
             item = {
                 "bps": round(float(row.get("bps") or 0), 2),
-                "bytes": int(float(row.get("bytes") or 0)),
-                "packets": int(float(row.get("packets") or 0)),
+                "bytes": int(float(row.get("total_bytes") if row.get("total_bytes") is not None else row.get("bytes") or 0)),
+                "packets": int(float(row.get("total_packets") if row.get("total_packets") is not None else row.get("packets") or 0)),
                 "flows": int(row.get("flows") or 0),
             }
             if include_ip:
@@ -5252,43 +5277,41 @@ def ip_zone_flow_coverage(
             items.append(item)
         return items
 
-    def top_input_output(where_filter: str, bytes_expr: str, packets_expr: str) -> list[dict[str, Any]]:
-        rows = rows_as_dicts(query_clickhouse(
+    def top_input_output(where_filter: str, row_bytes_expr: str, row_packets_expr: str) -> list[dict[str, Any]]:
+        rows = coverage_query(
             f"""
             SELECT
                 input_if,
                 output_if,
-                sum({bytes_expr}) AS bytes,
-                sum({packets_expr}) AS packets,
+                sum({row_bytes_expr}) AS total_bytes,
+                sum({row_packets_expr}) AS total_packets,
                 sum(flow_count) AS flows,
-                sum({bytes_expr}) * 8 / {{seconds:Float64}} AS bps
+                sum({row_bytes_expr}) * 8 / {{seconds:Float64}} AS bps
             FROM flow_raw
             WHERE {base_where} AND {where_filter}
             GROUP BY input_if, output_if
             ORDER BY bps DESC
             LIMIT 10
-            """,
-            params,
-        ))
+            """
+        )
         return numeric_row_items(rows)
 
-    def top_ips(column: str, where_filter: str, bytes_expr: str, packets_expr: str) -> list[dict[str, Any]]:
-        rows = rows_as_dicts(query_clickhouse(
+    def top_ips(column: str, where_filter: str, row_bytes_expr: str, row_packets_expr: str) -> list[dict[str, Any]]:
+        rows = coverage_query(
             f"""
             SELECT
                 toString({column}) AS ip,
-                sum({bytes_expr}) AS bytes,
-                sum({packets_expr}) AS packets,
+                sum({row_bytes_expr}) AS total_bytes,
+                sum({row_packets_expr}) AS total_packets,
                 sum(flow_count) AS flows,
-                sum({bytes_expr}) * 8 / {{seconds:Float64}} AS bps
+                sum({row_bytes_expr}) * 8 / {{seconds:Float64}} AS bps
             FROM flow_raw
             WHERE {base_where} AND {where_filter}
             GROUP BY ip
             ORDER BY bps DESC
             LIMIT 10
-            """,
-            params,
-        ))
+            """
+        )
         return numeric_row_items(rows, include_ip=True)
 
     src_bps = round(float(summary.get("total_bps_src_in_zone") or 0), 2)
@@ -5311,6 +5334,8 @@ def ip_zone_flow_coverage(
         "zone_name": clean_text(zone_row["name"]),
         "zone_active": bool(zone_row["active"]),
         "sensor_id": sensor_id,
+        "sensor": sensor_name,
+        "exporter_ip": exporter_ip,
         "start": iso(start_dt),
         "end": iso(end_dt),
         "range_minutes": range_minutes,
@@ -5323,11 +5348,11 @@ def ip_zone_flow_coverage(
         "total_packets_dst_in_zone": int(float(summary.get("packets_dst_in_zone") or 0)),
         "total_flows_src_in_zone": int(summary.get("total_flows_src_in_zone") or 0),
         "total_flows_dst_in_zone": int(summary.get("total_flows_dst_in_zone") or 0),
-        "top_input_output_general": top_input_output("1 = 1", auto_bytes, auto_packets),
-        "top_input_output_when_src_in_zone": top_input_output(src_filter, src_bytes, src_packets),
-        "top_input_output_when_dst_in_zone": top_input_output(dst_filter, dst_bytes, dst_packets),
-        "top_src_ips_in_zone": top_ips("src_ip", src_filter, src_bytes, src_packets),
-        "top_dst_ips_in_zone": top_ips("dst_ip", dst_filter, dst_bytes, dst_packets),
+        "top_input_output_general": top_input_output("1 = 1", auto_row_bytes_expr, auto_row_packets_expr),
+        "top_input_output_when_src_in_zone": top_input_output(src_filter, src_row_bytes_expr, src_row_packets_expr),
+        "top_input_output_when_dst_in_zone": top_input_output(dst_filter, dst_row_bytes_expr, dst_row_packets_expr),
+        "top_src_ips_in_zone": top_ips("src_ip", src_filter, src_row_bytes_expr, src_row_packets_expr),
+        "top_dst_ips_in_zone": top_ips("dst_ip", dst_filter, dst_row_bytes_expr, dst_row_packets_expr),
         "warnings": warnings,
     }
 
