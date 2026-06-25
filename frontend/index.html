@@ -1554,19 +1554,19 @@
                   <div class="flow-search-grid">
                     <div class="field">
                       <label for="flowSrcIp">Src IP</label>
-                      <input id="flowSrcIp" class="form-control form-control-sm" placeholder="Origem">
+                      <input id="flowSrcIp" class="form-control form-control-sm" placeholder="IP ou CIDR origem">
                     </div>
                     <div class="field">
                       <label for="flowDstIp">Dst IP</label>
-                      <input id="flowDstIp" class="form-control form-control-sm" placeholder="Destino">
+                      <input id="flowDstIp" class="form-control form-control-sm" placeholder="IP ou CIDR destino">
                     </div>
                     <div class="field">
                       <label for="flowSrcPort">Src porta</label>
-                      <input id="flowSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0-65535">
+                      <input id="flowSrcPort" class="form-control form-control-sm" placeholder="Ex: 80 ou 3000-4000">
                     </div>
                     <div class="field">
                       <label for="flowDstPort">Dst porta</label>
-                      <input id="flowDstPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0-65535">
+                      <input id="flowDstPort" class="form-control form-control-sm" placeholder="Ex: 443 ou 3000-4000">
                     </div>
                     <div class="field">
                       <label for="flowProto">Protocolo</label>
@@ -1766,19 +1766,19 @@
                     </div>
                     <div class="field">
                       <label for="topFlowSrcIp">IP origem</label>
-                      <input id="topFlowSrcIp" class="form-control form-control-sm">
+                      <input id="topFlowSrcIp" class="form-control form-control-sm" placeholder="IP ou CIDR origem">
                     </div>
                     <div class="field">
                       <label for="topFlowDstIp">IP destino</label>
-                      <input id="topFlowDstIp" class="form-control form-control-sm">
+                      <input id="topFlowDstIp" class="form-control form-control-sm" placeholder="IP ou CIDR destino">
                     </div>
                     <div class="field">
                       <label for="topFlowSrcPort">Porta origem</label>
-                      <input id="topFlowSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm">
+                      <input id="topFlowSrcPort" class="form-control form-control-sm" placeholder="Ex: 80 ou 3000-4000">
                     </div>
                     <div class="field">
                       <label for="topFlowDstPort">Porta destino</label>
-                      <input id="topFlowDstPort" type="number" min="0" max="65535" class="form-control form-control-sm">
+                      <input id="topFlowDstPort" class="form-control form-control-sm" placeholder="Ex: 443 ou 3000-4000">
                     </div>
                     <div class="field">
                       <label for="topFlowLimit">Limite</label>
@@ -2421,6 +2421,111 @@
                   <button id="purgeIpZoneButton" type="button" class="btn btn-sm btn-outline-danger">
                     <i data-lucide="trash-2"></i><span>Excluir definitivamente</span>
                   </button>
+                </div>
+              </section>
+
+              <section class="panel p-3 mt-3">
+                <div class="d-flex flex-column flex-xl-row justify-content-between gap-2">
+                  <div>
+                    <div class="panel-title">Diagnostico de cobertura de flow</div>
+                    <div id="ipZoneCoverageStatus" class="metric-readout">Compare trafego por prefixo com input_if/output_if.</div>
+                  </div>
+                  <div class="toolbar">
+                    <select id="ipZoneCoverageRange" class="form-select form-select-sm" aria-label="Periodo do diagnostico">
+                      <option value="30">30 minutos</option>
+                      <option value="60">1 hora</option>
+                      <option value="120" selected>2 horas</option>
+                      <option value="240">4 horas</option>
+                      <option value="720">12 horas</option>
+                      <option value="1440">24 horas</option>
+                    </select>
+                    <select id="ipZoneCoverageSensor" class="form-select form-select-sm" aria-label="Sensor do diagnostico">
+                      <option value="">Todos os sensores</option>
+                    </select>
+                    <button id="ipZoneCoverageButton" type="button" class="btn btn-sm btn-outline-primary">
+                      <i data-lucide="activity"></i><span>Diagnostico de cobertura de flow</span>
+                    </button>
+                  </div>
+                </div>
+                <div id="ipZoneCoverageResult" class="mt-3 d-none">
+                  <div class="row g-2 mb-3">
+                    <div class="col-md-3">
+                      <div class="metric-card">
+                        <div class="metric-label">Saida por prefixo</div>
+                        <div id="coverageSrcBps" class="metric-value">0 bps</div>
+                        <div id="coverageSrcFlows" class="metric-subtle">0 flows</div>
+                      </div>
+                    </div>
+                    <div class="col-md-3">
+                      <div class="metric-card">
+                        <div class="metric-label">Entrada por prefixo</div>
+                        <div id="coverageDstBps" class="metric-value">0 bps</div>
+                        <div id="coverageDstFlows" class="metric-subtle">0 flows</div>
+                      </div>
+                    </div>
+                    <div class="col-md-3">
+                      <div class="metric-card">
+                        <div class="metric-label">Prefixos ativos</div>
+                        <div id="coveragePrefixCount" class="metric-value">0</div>
+                        <div id="coverageRangeLabel" class="metric-subtle">-</div>
+                      </div>
+                    </div>
+                    <div class="col-md-3">
+                      <div class="metric-card">
+                        <div class="metric-label">Alertas</div>
+                        <div id="coverageWarningCount" class="metric-value">0</div>
+                        <div class="metric-subtle">diferenca src/dst</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="ipZoneCoverageWarnings" class="subtle text-danger mb-2"></div>
+                  <div class="row g-3">
+                    <div class="col-xl-4">
+                      <div class="panel-title mb-2">Top input_if/output_if - Saida</div>
+                      <div class="table-wrap">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>input_if</th><th>output_if</th><th class="text-end">bits/s</th><th class="text-end">flows</th></tr></thead>
+                          <tbody id="coverageSrcPairs"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="col-xl-4">
+                      <div class="panel-title mb-2">Top input_if/output_if - Entrada</div>
+                      <div class="table-wrap">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>input_if</th><th>output_if</th><th class="text-end">bits/s</th><th class="text-end">flows</th></tr></thead>
+                          <tbody id="coverageDstPairs"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="col-xl-4">
+                      <div class="panel-title mb-2">Top input_if/output_if - Geral</div>
+                      <div class="table-wrap">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>input_if</th><th>output_if</th><th class="text-end">bits/s</th><th class="text-end">flows</th></tr></thead>
+                          <tbody id="coverageGeneralPairs"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="col-xl-6">
+                      <div class="panel-title mb-2">Top src_ip dentro da zona</div>
+                      <div class="table-wrap">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>IP</th><th class="text-end">bits/s</th><th class="text-end">flows</th></tr></thead>
+                          <tbody id="coverageSrcIps"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="col-xl-6">
+                      <div class="panel-title mb-2">Top dst_ip dentro da zona</div>
+                      <div class="table-wrap">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>IP</th><th class="text-end">bits/s</th><th class="text-end">flows</th></tr></thead>
+                          <tbody id="coverageDstIps"></tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </section>
 
@@ -4155,12 +4260,26 @@
       return `${API_BASE}${path}`;
     }
 
+    function apiDetailMessage(detail) {
+      if (!detail) return '';
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail)) {
+        return detail.map(item => item?.msg || item?.message || JSON.stringify(item)).join('; ');
+      }
+      return detail.message || JSON.stringify(detail);
+    }
+
+    async function responseErrorMessage(response, endpoint) {
+      const payload = await response.clone().json().catch(() => ({}));
+      return apiDetailMessage(payload.detail) || payload.message || `${endpoint} ${response.status}`;
+    }
+
     async function fetchJSON(path, queryString = dashboardParams(), options = {}) {
       const endpoint = `${API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
       const response = await authFetch(endpoint, options);
       if (!response.ok) {
         console.error('Falha na chamada da API', endpoint, response.status);
-        throw new Error(`${endpoint} ${response.status}`);
+        throw new Error(await responseErrorMessage(response, endpoint));
       }
       const payload = await response.json();
       if (Array.isArray(payload)) {
@@ -4233,7 +4352,7 @@
       const response = await authFetch(endpoint, options);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const message = payload.detail || `${endpoint} ${response.status}`;
+        const message = apiDetailMessage(payload.detail) || payload.message || `${endpoint} ${response.status}`;
         throw new Error(message);
       }
       return payload;
@@ -4301,6 +4420,19 @@
         : ['<option value="1">Sensor #1</option>'];
       select.innerHTML = options.join('');
       select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : (dashboardSensorCache[0]?.id || '1');
+    }
+
+    function renderIpZoneCoverageSensorSelect() {
+      const select = document.getElementById('ipZoneCoverageSensor');
+      if (!select) return;
+      const current = select.value;
+      select.innerHTML = [
+        '<option value="">Todos os sensores</option>',
+        ...dashboardSensorCache.map(sensor => (
+          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
+        ))
+      ].join('');
+      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
     }
 
     function renderZoneSelect(selectId, placeholder, activeOnly = false) {
@@ -4445,6 +4577,7 @@
         renderTopFlowSensorSelect();
         renderMapSensorSelect();
         renderCandidateSensorSelect();
+        renderIpZoneCoverageSensorSelect();
         await loadDashboardInterfaces();
       } catch (error) {
         dashboardSensorCache = [];
@@ -4461,6 +4594,7 @@
         renderMapSensorSelect();
         renderMapInterfaceSelect();
         renderCandidateSensorSelect();
+        renderIpZoneCoverageSensorSelect();
         console.error('Falha ao carregar sensores do dashboard', error);
       }
     }
@@ -4805,6 +4939,7 @@
       renderIpZonePrefixTable(zone?.prefixes || []);
       resetIpZonePrefixForm();
       syncIpZoneActionButtons(zone);
+      resetIpZoneCoverage(zone?.id ? 'Diagnostico pronto para executar.' : 'Selecione uma IP Zone para diagnosticar.');
     }
 
     function collectIpZoneForm() {
@@ -4858,6 +4993,15 @@
           ? 'Exclusao definitiva remove a zona e seus prefixos quando nao ha historico vinculado.'
           : 'Selecione uma zona antes de usar acoes avancadas.'
       );
+    }
+
+    function resetIpZoneCoverage(message = 'Compare trafego por prefixo com input_if/output_if.') {
+      setText('ipZoneCoverageStatus', message);
+      document.getElementById('ipZoneCoverageResult')?.classList.add('d-none');
+      ['coverageSrcPairs', 'coverageDstPairs', 'coverageGeneralPairs', 'coverageSrcIps', 'coverageDstIps'].forEach(id => {
+        const tbody = document.getElementById(id);
+        if (tbody) tbody.innerHTML = '';
+      });
     }
 
     async function selectIpZone(zoneId) {
@@ -5088,6 +5232,74 @@
         setIpZoneStatus('Prefixo excluido definitivamente');
       } catch (error) {
         setIpZoneStatus(`Falha ao excluir definitivamente prefixo: ${error.message}`, 'error');
+      }
+    }
+
+    function renderCoveragePairRows(tbodyId, rows) {
+      const tbody = document.getElementById(tbodyId);
+      if (!tbody) return;
+      const items = Array.isArray(rows) ? rows : [];
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${formatNumber(item.input_if)}</td>
+          <td>${formatNumber(item.output_if)}</td>
+          <td class="text-end">${formatBps(item.bps)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados</td></tr>';
+    }
+
+    function renderCoverageIpRows(tbodyId, rows) {
+      const tbody = document.getElementById(tbodyId);
+      if (!tbody) return;
+      const items = Array.isArray(rows) ? rows : [];
+      tbody.innerHTML = items.map(item => `
+        <tr>
+          <td>${ipLink(item.ip || '-')}</td>
+          <td class="text-end">${formatBps(item.bps)}</td>
+          <td class="text-end">${formatNumber(item.flows)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="3" class="text-muted">Sem dados</td></tr>';
+    }
+
+    function renderIpZoneFlowCoverage(payload) {
+      document.getElementById('ipZoneCoverageResult')?.classList.remove('d-none');
+      setText('coverageSrcBps', formatBps(payload.total_bps_src_in_zone));
+      setText('coverageSrcFlows', `${formatNumber(payload.total_flows_src_in_zone)} flows`);
+      setText('coverageDstBps', formatBps(payload.total_bps_dst_in_zone));
+      setText('coverageDstFlows', `${formatNumber(payload.total_flows_dst_in_zone)} flows`);
+      setText('coveragePrefixCount', formatNumber((payload.active_prefixes || []).length));
+      setText('coverageRangeLabel', `${formatDateTime(payload.start)} - ${formatDateTime(payload.end)}`);
+      setText('coverageWarningCount', formatNumber((payload.warnings || []).length));
+      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+      document.getElementById('ipZoneCoverageWarnings').innerHTML = warnings
+        .map(item => `<div>${escapeHtml(item)}</div>`)
+        .join('');
+      renderCoveragePairRows('coverageSrcPairs', payload.top_input_output_when_src_in_zone);
+      renderCoveragePairRows('coverageDstPairs', payload.top_input_output_when_dst_in_zone);
+      renderCoveragePairRows('coverageGeneralPairs', payload.top_input_output_general);
+      renderCoverageIpRows('coverageSrcIps', payload.top_src_ips_in_zone);
+      renderCoverageIpRows('coverageDstIps', payload.top_dst_ips_in_zone);
+    }
+
+    async function loadIpZoneFlowCoverage() {
+      const zone = selectedIpZone();
+      if (!zone?.id) {
+        resetIpZoneCoverage('Selecione uma IP Zone para diagnosticar.');
+        return;
+      }
+      const query = new URLSearchParams();
+      query.set('range_minutes', document.getElementById('ipZoneCoverageRange')?.value || '120');
+      const sensorId = document.getElementById('ipZoneCoverageSensor')?.value || '';
+      if (sensorId) query.set('sensor_id', sensorId);
+      setText('ipZoneCoverageStatus', 'Calculando cobertura de flow...');
+      try {
+        const payload = await apiRequest(`/api/ip-zones/${zone.id}/flow-coverage?${query.toString()}`);
+        renderIpZoneFlowCoverage(payload);
+        setText('ipZoneCoverageStatus', `Diagnostico de ${payload.zone_name || zone.name}`);
+      } catch (error) {
+        setText('ipZoneCoverageStatus', `Falha no diagnostico: ${error.message}`);
+        document.getElementById('ipZoneCoverageResult')?.classList.add('d-none');
       }
     }
 
@@ -5754,6 +5966,7 @@
       renderDetectionTemplateSelect();
       renderIpZoneTemplateSummary();
       renderCandidateSensorSelect();
+      renderIpZoneCoverageSensorSelect();
       await loadSecurityAnomalies();
       setIpZoneStatus(currentIpZoneId ? `IP Zone ${selectedIpZone()?.name || currentIpZoneId}` : 'Crie uma IP Zone para comecar');
     }
@@ -7080,7 +7293,7 @@
         const response = await authFetch(endpoint);
         if (!response.ok) {
           console.error('Falha na chamada da API', endpoint, response.status);
-          throw new Error(`${endpoint} ${response.status}`);
+          throw new Error(await responseErrorMessage(response, endpoint));
         }
         const payload = await response.json();
         if (!Array.isArray(payload.items)) {
@@ -7115,8 +7328,8 @@
         `).join('') || `<tr><td colspan="18" class="text-muted">Sem flows no intervalo</td></tr>`;
         status.textContent = `${formatNumber(items.length)} flows corrigidos`;
       } catch (error) {
-        tbody.innerHTML = `<tr><td colspan="18" class="text-danger">Falha ao buscar flows</td></tr>`;
-        status.textContent = 'Falha na busca';
+        tbody.innerHTML = `<tr><td colspan="18" class="text-danger">${escapeHtml(error.message || 'Falha ao buscar flows')}</td></tr>`;
+        status.textContent = error.message || 'Falha na busca';
         console.error('Falha na chamada da API', endpoint, error);
       }
     }
@@ -7127,7 +7340,7 @@
       const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}&format=csv`;
       try {
         const response = await authFetch(endpoint);
-        if (!response.ok) throw new Error(`${endpoint} ${response.status}`);
+        if (!response.ok) throw new Error(await responseErrorMessage(response, endpoint));
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -7139,7 +7352,7 @@
         URL.revokeObjectURL(url);
         status.textContent = 'CSV exportado';
       } catch (error) {
-        status.textContent = 'Falha ao exportar CSV';
+        status.textContent = `Falha ao exportar CSV: ${error.message}`;
         console.error('Falha ao exportar CSV', error);
       }
     }
@@ -7315,7 +7528,7 @@
       const endpoint = `${API_BASE}/api/flows/top?${topFlowParams()}`;
       try {
         const response = await authFetch(endpoint);
-        if (!response.ok) throw new Error(`${endpoint} ${response.status}`);
+        if (!response.ok) throw new Error(await responseErrorMessage(response, endpoint));
         const payload = await response.json();
         const items = Array.isArray(payload.items) ? payload.items : [];
         charts.topFlow.setOption(topFlowBarOption(items), true);
@@ -7323,8 +7536,8 @@
         status.textContent = `${formatNumber(items.length)} itens`;
       } catch (error) {
         charts.topFlow.clear();
-        tbody.innerHTML = `<tr><td colspan="${showCountry ? 15 : 13}" class="text-danger">Falha ao gerar TOP Flow</td></tr>`;
-        status.textContent = 'Falha no TOP Flow';
+        tbody.innerHTML = `<tr><td colspan="${showCountry ? 15 : 13}" class="text-danger">${escapeHtml(error.message || 'Falha ao gerar TOP Flow')}</td></tr>`;
+        status.textContent = error.message || 'Falha no TOP Flow';
         console.error('Falha no TOP Flow', endpoint, error);
       }
     }
@@ -9071,6 +9284,7 @@
     document.getElementById('disableIpZoneButton').addEventListener('click', () => disableIpZone().catch(console.error));
     document.getElementById('activateIpZoneButton').addEventListener('click', () => activateIpZone().catch(console.error));
     document.getElementById('purgeIpZoneButton').addEventListener('click', () => purgeIpZone().catch(console.error));
+    document.getElementById('ipZoneCoverageButton').addEventListener('click', () => loadIpZoneFlowCoverage().catch(console.error));
     document.getElementById('testIpZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
     document.getElementById('editAssociatedTemplateButton').addEventListener('click', editAssociatedDetectionTemplate);
     document.getElementById('ipZoneTemplate').addEventListener('change', renderIpZoneTemplateSummary);

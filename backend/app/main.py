@@ -4459,6 +4459,86 @@ def clickhouse_cidr_string_param(value: str, field_name: str = "target_cidr") ->
     return str(network)
 
 
+def normalize_ip_filter_for_clickhouse(value: Any, field_name: str) -> str | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        if "/" in text:
+            network = ip_network(text, strict=False)
+        else:
+            parsed_ip = ip_address(text)
+            suffix = 32 if isinstance(parsed_ip, IPv4Address) else 128
+            network = ip_network(f"{parsed_ip}/{suffix}", strict=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido. Use IP ou CIDR valido.") from None
+    return clickhouse_cidr_string_param(str(network), field_name)
+
+
+def build_ip_condition(column: str, value: Any, params: dict[str, Any], key: str, field_name: str) -> str:
+    cidr = normalize_ip_filter_for_clickhouse(value, field_name)
+    if not cidr:
+        return ""
+    params[key] = cidr
+    return f"isIPAddressInRange(toString({column}), {{{key}:String}})"
+
+
+def parse_port_filter(value: Any, field_name: str) -> tuple[str, int, int | None] | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    if text == "*" or text.lower() == "any":
+        return None
+    if "-" in text:
+        parts = text.split("-", 1)
+        if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+            raise HTTPException(status_code=400, detail=f"{field_name} invalida. Use porta unica ou range, ex: 80 ou 3000-4000.")
+        start = int(parts[0].strip())
+        end = int(parts[1].strip())
+        if start < 0 or end > 65535:
+            raise HTTPException(status_code=400, detail=f"{field_name} invalida. A porta deve estar entre 0 e 65535.")
+        if start > end:
+            raise HTTPException(status_code=400, detail=f"{field_name} invalida. O inicio do range deve ser menor ou igual ao fim.")
+        if start == 0 and end == 65535:
+            return None
+        return ("range", start, end)
+    if not text.isdigit():
+        raise HTTPException(status_code=400, detail=f"{field_name} invalida. Use porta unica ou range, ex: 80 ou 3000-4000.")
+    port = int(text)
+    if port < 0 or port > 65535:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalida. A porta deve estar entre 0 e 65535.")
+    return ("single", port, None)
+
+
+def build_port_condition(column: str, value: Any, params: dict[str, Any], key: str, field_name: str) -> str:
+    parsed = parse_port_filter(value, field_name)
+    if parsed is None:
+        return ""
+    kind, start, end = parsed
+    if kind == "single":
+        params[key] = start
+        return f"{column} = {{{key}:UInt16}}"
+    params[f"{key}_start"] = start
+    params[f"{key}_end"] = int(end or start)
+    return f"({column} >= {{{key}_start:UInt16}} AND {column} <= {{{key}_end:UInt16}})"
+
+
+def build_any_port_condition(value: Any, params: dict[str, Any], key: str, field_name: str) -> str:
+    parsed = parse_port_filter(value, field_name)
+    if parsed is None:
+        return ""
+    kind, start, end = parsed
+    if kind == "single":
+        params[key] = start
+        return f"(src_port = {{{key}:UInt16}} OR dst_port = {{{key}:UInt16}})"
+    params[f"{key}_start"] = start
+    params[f"{key}_end"] = int(end or start)
+    return (
+        f"((src_port >= {{{key}_start:UInt16}} AND src_port <= {{{key}_end:UInt16}}) "
+        f"OR (dst_port >= {{{key}_start:UInt16}} AND dst_port <= {{{key}_end:UInt16}}))"
+    )
+
+
 def normalize_optional_cidr(value: Any, field_name: str) -> str | None:
     text = clean_text(value)
     if not text:
@@ -5089,6 +5169,169 @@ def purge_ip_zone_prefix(zone_id: int, prefix_id: int):
         return {"status": "purged", "id": prefix_id, "cidr": prefix["cidr"], "zone_id": zone_id}
 
 
+@app.get("/api/ip-zones/{zone_id}/flow-coverage")
+def ip_zone_flow_coverage(
+    zone_id: int,
+    range_minutes: int = Query(120, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+):
+    ensure_sensor_db()
+    ensure_clickhouse_schema()
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    seconds = range_seconds(start_dt, end_dt)
+    with sqlite_connection() as conn:
+        zone_row = fetch_ip_zone_row(conn, zone_id)
+        prefix_rows = conn.execute(
+            """
+            SELECT *
+            FROM ip_zone_prefixes
+            WHERE zone_id = ?
+              AND active = 1
+            ORDER BY cidr, id
+            """,
+            (zone_id,),
+        ).fetchall()
+    active_prefixes = [ip_zone_prefix_row_to_dict(row) for row in prefix_rows]
+    params: dict[str, Any] = {"start": start_dt, "end": end_dt, "seconds": seconds}
+    filters = ["flow_time >= {start:DateTime}", "flow_time <= {end:DateTime}"]
+    if sensor_id is not None:
+        params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
+        filters.append("toString(exporter_ip) = {exporter_ip:String}")
+    base_where = " AND ".join(filters)
+    src_filter, dst_filter = cidr_membership_filters_for_clickhouse(
+        [prefix["cidr"] for prefix in active_prefixes],
+        params,
+        "coverage_zone",
+    )
+    input_factor = clickhouse_sample_rate_expr(sensor_id, "input", None)
+    output_factor = clickhouse_sample_rate_expr(sensor_id, "output", None)
+    auto_factor = clickhouse_sample_rate_expr(sensor_id, "auto", None)
+    src_bytes = corrected_value_expr("bytes", output_factor)
+    src_packets = corrected_value_expr("packets", output_factor)
+    dst_bytes = corrected_value_expr("bytes", input_factor)
+    dst_packets = corrected_value_expr("packets", input_factor)
+    auto_bytes = corrected_value_expr("bytes", auto_factor)
+    auto_packets = corrected_value_expr("packets", auto_factor)
+
+    summary_rows = rows_as_dicts(query_clickhouse(
+        f"""
+        SELECT
+            sumIf({src_bytes}, {src_filter}) AS bytes_src_in_zone,
+            sumIf({dst_bytes}, {dst_filter}) AS bytes_dst_in_zone,
+            sumIf({src_packets}, {src_filter}) AS packets_src_in_zone,
+            sumIf({dst_packets}, {dst_filter}) AS packets_dst_in_zone,
+            sumIf(flow_count, {src_filter}) AS total_flows_src_in_zone,
+            sumIf(flow_count, {dst_filter}) AS total_flows_dst_in_zone,
+            sumIf({src_bytes}, {src_filter}) * 8 / {{seconds:Float64}} AS total_bps_src_in_zone,
+            sumIf({dst_bytes}, {dst_filter}) * 8 / {{seconds:Float64}} AS total_bps_dst_in_zone
+        FROM flow_raw
+        WHERE {base_where}
+        """,
+        params,
+    ))
+    summary = summary_rows[0] if summary_rows else {}
+
+    def numeric_row_items(result_rows: list[dict[str, Any]], include_ip: bool = False) -> list[dict[str, Any]]:
+        items = []
+        for row in result_rows:
+            item = {
+                "bps": round(float(row.get("bps") or 0), 2),
+                "bytes": int(float(row.get("bytes") or 0)),
+                "packets": int(float(row.get("packets") or 0)),
+                "flows": int(row.get("flows") or 0),
+            }
+            if include_ip:
+                item["ip"] = clean_ip(row.get("ip"))
+            else:
+                item["input_if"] = int(row.get("input_if") or 0)
+                item["output_if"] = int(row.get("output_if") or 0)
+            items.append(item)
+        return items
+
+    def top_input_output(where_filter: str, bytes_expr: str, packets_expr: str) -> list[dict[str, Any]]:
+        rows = rows_as_dicts(query_clickhouse(
+            f"""
+            SELECT
+                input_if,
+                output_if,
+                sum({bytes_expr}) AS bytes,
+                sum({packets_expr}) AS packets,
+                sum(flow_count) AS flows,
+                sum({bytes_expr}) * 8 / {{seconds:Float64}} AS bps
+            FROM flow_raw
+            WHERE {base_where} AND {where_filter}
+            GROUP BY input_if, output_if
+            ORDER BY bps DESC
+            LIMIT 10
+            """,
+            params,
+        ))
+        return numeric_row_items(rows)
+
+    def top_ips(column: str, where_filter: str, bytes_expr: str, packets_expr: str) -> list[dict[str, Any]]:
+        rows = rows_as_dicts(query_clickhouse(
+            f"""
+            SELECT
+                toString({column}) AS ip,
+                sum({bytes_expr}) AS bytes,
+                sum({packets_expr}) AS packets,
+                sum(flow_count) AS flows,
+                sum({bytes_expr}) * 8 / {{seconds:Float64}} AS bps
+            FROM flow_raw
+            WHERE {base_where} AND {where_filter}
+            GROUP BY ip
+            ORDER BY bps DESC
+            LIMIT 10
+            """,
+            params,
+        ))
+        return numeric_row_items(rows, include_ip=True)
+
+    src_bps = round(float(summary.get("total_bps_src_in_zone") or 0), 2)
+    dst_bps = round(float(summary.get("total_bps_dst_in_zone") or 0), 2)
+    warnings: list[str] = []
+    if not active_prefixes:
+        warnings.append("Esta zona nao possui prefixos ativos para diagnosticar.")
+    if dst_bps > 0 and src_bps < dst_bps * 0.01:
+        warnings.append(
+            "A coleta esta vendo muito mais trafego entrando na zona do que saindo, considerando os prefixos cadastrados. "
+            "Se outro sistema mostra upload, verifique se ele calcula por interface, por outro bloco/pool ou por outro ponto de coleta."
+        )
+    if src_bps > 0 and dst_bps < src_bps * 0.01:
+        warnings.append(
+            "A coleta esta vendo muito mais trafego saindo da zona do que entrando, considerando os prefixos cadastrados."
+        )
+
+    return {
+        "zone_id": zone_id,
+        "zone_name": clean_text(zone_row["name"]),
+        "zone_active": bool(zone_row["active"]),
+        "sensor_id": sensor_id,
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "range_minutes": range_minutes,
+        "active_prefixes": active_prefixes,
+        "total_bps_src_in_zone": src_bps,
+        "total_bps_dst_in_zone": dst_bps,
+        "total_bytes_src_in_zone": int(float(summary.get("bytes_src_in_zone") or 0)),
+        "total_bytes_dst_in_zone": int(float(summary.get("bytes_dst_in_zone") or 0)),
+        "total_packets_src_in_zone": int(float(summary.get("packets_src_in_zone") or 0)),
+        "total_packets_dst_in_zone": int(float(summary.get("packets_dst_in_zone") or 0)),
+        "total_flows_src_in_zone": int(summary.get("total_flows_src_in_zone") or 0),
+        "total_flows_dst_in_zone": int(summary.get("total_flows_dst_in_zone") or 0),
+        "top_input_output_general": top_input_output("1 = 1", auto_bytes, auto_packets),
+        "top_input_output_when_src_in_zone": top_input_output(src_filter, src_bytes, src_packets),
+        "top_input_output_when_dst_in_zone": top_input_output(dst_filter, dst_bytes, dst_packets),
+        "top_src_ips_in_zone": top_ips("src_ip", src_filter, src_bytes, src_packets),
+        "top_dst_ips_in_zone": top_ips("dst_ip", dst_filter, dst_bytes, dst_packets),
+        "warnings": warnings,
+    }
+
+
 @app.get("/api/detection/templates")
 def list_detection_templates():
     ensure_sensor_db()
@@ -5488,6 +5731,19 @@ def normalize_zone_direction(value: Any) -> str:
     return normalized
 
 
+def cidr_membership_filters_for_clickhouse(cidrs: list[str], params: dict[str, Any], prefix: str) -> tuple[str, str]:
+    src_parts = []
+    dst_parts = []
+    for index, cidr in enumerate(cidrs):
+        key = f"{prefix}_cidr_{index}"
+        params[key] = clickhouse_cidr_string_param(cidr, "cidr")
+        src_parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
+        dst_parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
+    src_filter = f"({' OR '.join(src_parts)})" if src_parts else "0 = 1"
+    dst_filter = f"({' OR '.join(dst_parts)})" if dst_parts else "0 = 1"
+    return src_filter, dst_filter
+
+
 def ip_zone_clickhouse_membership_filters(zone_id: int | None, params: dict[str, Any], prefix: str) -> tuple[str, str]:
     if zone_id is None:
         return "", ""
@@ -5506,16 +5762,7 @@ def ip_zone_clickhouse_membership_filters(zone_id: int | None, params: dict[str,
             """,
             (zone_id,),
         ).fetchall()
-    src_parts = []
-    dst_parts = []
-    for index, row in enumerate(rows):
-        key = f"{prefix}_cidr_{index}"
-        params[key] = clickhouse_cidr_string_param(row["cidr"], "cidr")
-        src_parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
-        dst_parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
-    src_filter = f"({' OR '.join(src_parts)})" if src_parts else "0 = 1"
-    dst_filter = f"({' OR '.join(dst_parts)})" if dst_parts else "0 = 1"
-    return src_filter, dst_filter
+    return cidr_membership_filters_for_clickhouse([row["cidr"] for row in rows], params, prefix)
 
 
 def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
@@ -12467,9 +12714,9 @@ def flow_query_context(
     ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
-    port: int | None = Query(None, ge=0, le=65535),
-    src_port: int | None = Query(None, ge=0, le=65535),
-    dst_port: int | None = Query(None, ge=0, le=65535),
+    port: Any | None = None,
+    src_port: Any | None = None,
+    dst_port: Any | None = None,
     proto: str | None = None,
     tcp_flags: str | None = None,
     decoder: str | None = None,
@@ -12507,23 +12754,22 @@ def flow_query_context(
         params["if_index"] = resolved_if_index
         filters.append("(input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})")
     if ip:
-        params["ip"] = clickhouse_ip_string_param(ip, "ip")
-        filters.append("(toString(src_ip) = {ip:String} OR toString(dst_ip) = {ip:String})")
+        src_ip_condition = build_ip_condition("src_ip", ip, params, "ip_src", "IP")
+        dst_ip_condition = build_ip_condition("dst_ip", ip, params, "ip_dst", "IP")
+        filters.append(f"({src_ip_condition} OR {dst_ip_condition})")
     if src_ip:
-        params["src_ip"] = clickhouse_ip_string_param(src_ip, "src_ip")
-        filters.append("toString(src_ip) = {src_ip:String}")
+        filters.append(build_ip_condition("src_ip", src_ip, params, "src_ip", "SRC IP"))
     if dst_ip:
-        params["dst_ip"] = clickhouse_ip_string_param(dst_ip, "dst_ip")
-        filters.append("toString(dst_ip) = {dst_ip:String}")
-    if port is not None:
-        params["port"] = port
-        filters.append("(src_port = {port:UInt16} OR dst_port = {port:UInt16})")
-    if src_port is not None:
-        params["src_port"] = src_port
-        filters.append("src_port = {src_port:UInt16}")
-    if dst_port is not None:
-        params["dst_port"] = dst_port
-        filters.append("dst_port = {dst_port:UInt16}")
+        filters.append(build_ip_condition("dst_ip", dst_ip, params, "dst_ip", "DST IP"))
+    port_condition = build_any_port_condition(port, params, "port", "Porta")
+    if port_condition:
+        filters.append(port_condition)
+    src_port_condition = build_port_condition("src_port", src_port, params, "src_port", "SRC porta")
+    if src_port_condition:
+        filters.append(src_port_condition)
+    dst_port_condition = build_port_condition("dst_port", dst_port, params, "dst_port", "DST porta")
+    if dst_port_condition:
+        filters.append(dst_port_condition)
     proto_text = clean_text(proto).lower()
     proto_value = None if proto_text == "other" else parse_proto_filter(proto)
     if proto_text == "other":
@@ -12647,9 +12893,9 @@ def search_flows_payload(
     ip: str | None,
     src_ip: str | None,
     dst_ip: str | None,
-    port: int | None,
-    src_port: int | None,
-    dst_port: int | None,
+    port: Any | None,
+    src_port: Any | None,
+    dst_port: Any | None,
     proto: str | None,
     tcp_flags: str | None,
     decoder: str | None,
@@ -12803,9 +13049,9 @@ def search_flows(
     ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
-    port: int | None = Query(None, ge=0, le=65535),
-    src_port: int | None = Query(None, ge=0, le=65535),
-    dst_port: int | None = Query(None, ge=0, le=65535),
+    port: str | None = None,
+    src_port: str | None = None,
+    dst_port: str | None = None,
     proto: str | None = None,
     tcp_flags: str | None = None,
     decoder: str | None = None,
@@ -12959,9 +13205,9 @@ def top_flows(
     ip: str | None = None,
     src_ip: str | None = None,
     dst_ip: str | None = None,
-    port: int | None = Query(None, ge=0, le=65535),
-    src_port: int | None = Query(None, ge=0, le=65535),
-    dst_port: int | None = Query(None, ge=0, le=65535),
+    port: str | None = None,
+    src_port: str | None = None,
+    dst_port: str | None = None,
     proto: str | None = None,
     tcp_flags: str | None = None,
     decoder: str | None = None,
