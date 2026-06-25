@@ -1110,8 +1110,8 @@
                 <option value="">Grupo de Prefixos / Cliente</option>
               </select>
               <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone">
-                <option value="out">Saindo da zona</option>
-                <option value="in">Entrando na zona</option>
+                <option value="transmits">Saindo da zona</option>
+                <option value="receives">Entrando na zona</option>
                 <option value="both" selected>Envolvendo a zona</option>
               </select>
               <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
@@ -1429,8 +1429,8 @@
                 <option value="">Grupo de Prefixos / Cliente</option>
               </select>
               <select id="mapZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone no mapa">
-                <option value="out">Saindo da zona</option>
-                <option value="in">Entrando na zona</option>
+                <option value="transmits">Saindo da zona</option>
+                <option value="receives">Entrando na zona</option>
                 <option value="both" selected>Envolvendo a zona</option>
               </select>
               <select id="mapDirection" class="form-select form-select-sm" aria-label="Direcao">
@@ -4100,10 +4100,10 @@
         setText('dstIpTitle', 'Top IP destino');
         return;
       }
-      if (direction === 'out') {
+      if (direction === 'transmits' || direction === 'out') {
         setText('srcIpTitle', 'Top IP origem da zona');
         setText('dstIpTitle', 'Top IP destino externo');
-      } else if (direction === 'in') {
+      } else if (direction === 'receives' || direction === 'in') {
         setText('srcIpTitle', 'Top IP origem externa');
         setText('dstIpTitle', 'Top IP destino da zona');
       } else {
@@ -5002,11 +5002,16 @@
           <td>${escapeHtml(prefix.prefix_type || 'client')}</td>
           <td><span class="badge-soft ${prefix.active ? 'ok' : 'off'}">${prefix.active ? 'Ativo' : 'Desativado'}</span></td>
           <td>
-            <div class="btn-group btn-group-sm" role="group">
-              <button type="button" class="btn btn-outline-secondary ip-zone-prefix-edit" data-prefix-id="${prefix.id}" aria-label="Editar prefixo"><i data-lucide="pencil"></i></button>
-              ${prefix.active
-                ? `<button type="button" class="btn btn-outline-danger ip-zone-prefix-disable" data-prefix-id="${prefix.id}" aria-label="Desativar prefixo"><i data-lucide="ban"></i><span>Desativar</span></button>`
-                : `<button type="button" class="btn btn-outline-success ip-zone-prefix-activate" data-prefix-id="${prefix.id}" aria-label="Reativar prefixo"><i data-lucide="rotate-ccw"></i><span>Reativar</span></button>`}
+            <div class="d-flex flex-wrap gap-1 justify-content-end">
+              <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-secondary ip-zone-prefix-edit" data-prefix-id="${prefix.id}" aria-label="Editar prefixo"><i data-lucide="pencil"></i></button>
+                ${prefix.active
+                  ? `<button type="button" class="btn btn-outline-danger ip-zone-prefix-disable" data-prefix-id="${prefix.id}" aria-label="Desativar prefixo"><i data-lucide="ban"></i><span>Desativar</span></button>`
+                  : `<button type="button" class="btn btn-outline-success ip-zone-prefix-activate" data-prefix-id="${prefix.id}" aria-label="Reativar prefixo"><i data-lucide="rotate-ccw"></i><span>Reativar</span></button>`}
+              </div>
+              <button type="button" class="btn btn-sm btn-outline-dark ip-zone-prefix-purge" data-prefix-id="${prefix.id}" aria-label="Excluir definitivamente prefixo">
+                <i data-lucide="trash-2"></i><span>Excluir definitivamente</span>
+              </button>
             </div>
           </td>
         </tr>
@@ -5064,6 +5069,25 @@
         setIpZoneStatus('Prefixo reativado');
       } catch (error) {
         setIpZoneStatus(`Falha ao reativar prefixo: ${error.message}`, 'error');
+      }
+    }
+
+    async function purgeIpZonePrefix(prefixId) {
+      if (!currentIpZoneId || !prefixId) return;
+      if (!confirm('Tem certeza que deseja excluir definitivamente este prefixo?')) return;
+      const typed = prompt('Digite EXCLUIR para confirmar.');
+      if (typed !== 'EXCLUIR') {
+        setIpZoneStatus('Exclusao definitiva de prefixo cancelada.');
+        return;
+      }
+      try {
+        await apiRequest(`/api/ip-zones/${currentIpZoneId}/prefixes/${prefixId}/purge`, { method: 'DELETE' });
+        if (Number(editingIpZonePrefixId) === Number(prefixId)) resetIpZonePrefixForm();
+        await loadIpZoneFilters();
+        await selectIpZone(currentIpZoneId);
+        setIpZoneStatus('Prefixo excluido definitivamente');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao excluir definitivamente prefixo: ${error.message}`, 'error');
       }
     }
 
@@ -9104,6 +9128,7 @@
       const edit = target?.closest('.ip-zone-prefix-edit');
       const disable = target?.closest('.ip-zone-prefix-disable');
       const activate = target?.closest('.ip-zone-prefix-activate');
+      const purge = target?.closest('.ip-zone-prefix-purge');
       if (edit) {
         const prefix = (selectedIpZone()?.prefixes || []).find(item => Number(item.id) === Number(edit.dataset.prefixId));
         resetIpZonePrefixForm(prefix || null);
@@ -9111,6 +9136,8 @@
         disableIpZonePrefix(Number(disable.dataset.prefixId)).catch(console.error);
       } else if (activate) {
         activateIpZonePrefix(Number(activate.dataset.prefixId)).catch(console.error);
+      } else if (purge) {
+        purgeIpZonePrefix(Number(purge.dataset.prefixId)).catch(console.error);
       }
     });
 

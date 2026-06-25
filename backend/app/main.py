@@ -4931,10 +4931,7 @@ def purge_ip_zone(zone_id: int):
         if int(anomaly_count or 0) > 0:
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    "Esta zona possui historico/anomalias. Excluir pode remover o vinculo visual. "
-                    "Recomenda-se desativar."
-                ),
+                detail="Esta zona possui historico/anomalias. Para preservar o historico, desative a zona em vez de excluir.",
             )
         conn.execute("DELETE FROM ip_zone_prefixes WHERE zone_id = ?", (zone_id,))
         conn.execute("DELETE FROM ip_zones WHERE id = ?", (zone_id,))
@@ -5080,6 +5077,16 @@ def activate_ip_zone_prefix(zone_id: int, prefix_id: int):
                 (prefix_id,),
             ).fetchone()
         )
+
+
+@app.delete("/api/ip-zones/{zone_id}/prefixes/{prefix_id}/purge")
+def purge_ip_zone_prefix(zone_id: int, prefix_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        prefix = fetch_ip_zone_prefix_row(conn, zone_id, prefix_id)
+        conn.execute("DELETE FROM ip_zone_prefixes WHERE id = ? AND zone_id = ?", (prefix_id, zone_id))
+        conn.commit()
+        return {"status": "purged", "id": prefix_id, "cidr": prefix["cidr"], "zone_id": zone_id}
 
 
 @app.get("/api/detection/templates")
@@ -5521,6 +5528,10 @@ def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: 
     if direction == "receives":
         return dst_filter
     return f"({src_filter} OR {dst_filter})"
+
+
+def build_zone_flow_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
+    return ip_zone_clickhouse_filter(zone_id, zone_direction, params, prefix)
 
 
 def metric_expression_for_detection(metric: str) -> str:
@@ -11107,6 +11118,28 @@ def dashboard_series_payload(
             },
         )
         item["points"].append({"ts": iso(row["ts"]), "value": round(float(row["value"] or 0), 2)})
+    if zone_id is not None and group_by == "total":
+        expected_zone_directions = {
+            "both": ("download", "upload"),
+            "receives": ("download",),
+            "transmits": ("upload",),
+        }[normalize_zone_direction(zone_direction)]
+        for flow_direction in expected_zone_directions:
+            key = ("Total", flow_direction)
+            if key in series_by_key:
+                continue
+            direction_label = "Entrada da zona" if flow_direction == "download" else "Saida da zona"
+            series_by_key[key] = {
+                "name": f"Total {direction_label}",
+                "group": "Total",
+                "label": "Total",
+                "direction": flow_direction,
+                "color": dashboard_series_color("Total", group_by, len(series_by_key)),
+                "points": [
+                    {"ts": iso(start_dt), "value": 0.0},
+                    {"ts": iso(end_dt), "value": 0.0},
+                ],
+            }
     payload = {
         "start": iso(start_dt),
         "end": iso(end_dt),
@@ -11217,7 +11250,7 @@ def top_conversations_payload(
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "conversation_zone")
+    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "conversation_zone")
     where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     bytes_value = corrected_value_expr("bytes", factor_expr)
@@ -11385,7 +11418,7 @@ def dashboard_top_syn(
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "syn_zone")
+    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "syn_zone")
     where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     ip_col = "src_ip" if mode == "src" else "dst_ip"
@@ -11679,7 +11712,7 @@ def geo_flows(
     params.update({"seconds": seconds, "limit": fetch_limit})
     filters = [context["where"]]
     add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "geo_zone")
+    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "geo_zone")
     if zone_filter:
         filters.append(zone_filter)
     where = " AND ".join(f"({item})" for item in filters if item)
@@ -11948,7 +11981,7 @@ def top_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "top_zone")
+    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", resolved_if_index)
@@ -12165,7 +12198,7 @@ def top_asn_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
-    zone_filter = ip_zone_clickhouse_filter(zone_id, zone_direction, params, "asn_zone")
+    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "asn_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
     rate_direction = "auto"
