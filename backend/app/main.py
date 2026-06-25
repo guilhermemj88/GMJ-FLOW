@@ -4905,9 +4905,41 @@ def delete_ip_zone(zone_id: int):
         _ = fetch_ip_zone_row(conn, zone_id)
         now = utc_now_iso()
         conn.execute("UPDATE ip_zones SET active = 0, updated_at = ? WHERE id = ?", (now, zone_id))
-        conn.execute("UPDATE ip_zone_prefixes SET active = 0, updated_at = ? WHERE zone_id = ?", (now, zone_id))
         conn.commit()
         return {"status": "disabled", "id": zone_id}
+
+
+@app.post("/api/ip-zones/{zone_id}/activate")
+def activate_ip_zone(zone_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _ = fetch_ip_zone_row(conn, zone_id)
+        conn.execute("UPDATE ip_zones SET active = 1, updated_at = ? WHERE id = ?", (utc_now_iso(), zone_id))
+        conn.commit()
+        return fetch_ip_zone(conn, zone_id, include_prefixes=True)
+
+
+@app.delete("/api/ip-zones/{zone_id}/purge")
+def purge_ip_zone(zone_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        zone = fetch_ip_zone_row(conn, zone_id)
+        anomaly_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM security_anomalies WHERE zone_id = ?",
+            (zone_id,),
+        ).fetchone()["count"]
+        if int(anomaly_count or 0) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Esta zona possui historico/anomalias. Excluir pode remover o vinculo visual. "
+                    "Recomenda-se desativar."
+                ),
+            )
+        conn.execute("DELETE FROM ip_zone_prefixes WHERE zone_id = ?", (zone_id,))
+        conn.execute("DELETE FROM ip_zones WHERE id = ?", (zone_id,))
+        conn.commit()
+        return {"status": "purged", "id": zone_id, "name": zone["name"]}
 
 
 @app.get("/api/ip-zones/{zone_id}/prefixes")

@@ -2341,7 +2341,10 @@
                 <i data-lucide="save"></i><span>Salvar zona</span>
               </button>
               <button id="disableIpZoneButton" type="button" class="btn btn-sm btn-outline-danger">
-                <i data-lucide="ban"></i><span>Desativar</span>
+                <i data-lucide="ban"></i><span>Desativar zona</span>
+              </button>
+              <button id="activateIpZoneButton" type="button" class="btn btn-sm btn-outline-success d-none">
+                <i data-lucide="rotate-ccw"></i><span>Reativar zona</span>
               </button>
               <button id="testIpZoneDetectionButton" type="button" class="btn btn-sm btn-outline-success">
                 <i data-lucide="play-circle"></i><span>Testar deteccao agora</span>
@@ -2353,7 +2356,13 @@
             <section class="panel p-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <div class="panel-title">Cliente / Grupo de Prefixos</div>
-                <span id="ipZoneCount" class="badge-soft off">0</span>
+                <div class="toolbar">
+                  <label class="inline-check" title="Exibir IP Zones desativadas na lista">
+                    <input id="showInactiveZones" type="checkbox">
+                    <span>Mostrar zonas inativas</span>
+                  </label>
+                  <span id="ipZoneCount" class="badge-soft off">0</span>
+                </div>
               </div>
               <div class="table-wrap">
                 <table class="table table-sm table-hover align-middle mb-0 ip-zone-table">
@@ -2400,6 +2409,18 @@
                       <i data-lucide="external-link"></i><span>Editar grupo em Vetores de Ataque</span>
                     </button>
                   </div>
+                </div>
+              </section>
+
+              <section class="panel p-3 mt-3">
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                  <div>
+                    <div class="panel-title">Acoes avancadas da zona</div>
+                    <div id="ipZoneAdvancedStatus" class="metric-readout">Exclusao definitiva remove a zona e seus prefixos quando nao ha historico vinculado.</div>
+                  </div>
+                  <button id="purgeIpZoneButton" type="button" class="btn btn-sm btn-outline-danger">
+                    <i data-lucide="trash-2"></i><span>Excluir definitivamente</span>
+                  </button>
                 </div>
               </section>
 
@@ -4690,6 +4711,14 @@
       return ipZones.find(zone => Number(zone.id) === Number(currentIpZoneId)) || null;
     }
 
+    function showInactiveIpZones() {
+      return Boolean(document.getElementById('showInactiveZones')?.checked);
+    }
+
+    function visibleIpZones() {
+      return showInactiveIpZones() ? ipZones : ipZones.filter(zone => zone.active);
+    }
+
     function selectedDetectionTemplate() {
       return detectionTemplates.find(template => Number(template.id) === Number(currentDetectionTemplateId)) || null;
     }
@@ -4775,6 +4804,7 @@
       renderIpZoneList();
       renderIpZonePrefixTable(zone?.prefixes || []);
       resetIpZonePrefixForm();
+      syncIpZoneActionButtons(zone);
     }
 
     function collectIpZoneForm() {
@@ -4790,8 +4820,10 @@
     function renderIpZoneList() {
       const tbody = document.getElementById('ipZoneTable');
       if (!tbody) return;
-      document.getElementById('ipZoneCount').textContent = formatNumber(ipZones.length);
-      tbody.innerHTML = ipZones.map(zone => `
+      const activeCount = ipZones.filter(zone => zone.active).length;
+      const visibleZones = visibleIpZones();
+      document.getElementById('ipZoneCount').textContent = `${formatNumber(activeCount)} / ${formatNumber(ipZones.length)}`;
+      tbody.innerHTML = visibleZones.map(zone => `
         <tr data-zone-id="${zone.id}" class="${Number(zone.id) === Number(currentIpZoneId) ? 'active' : ''}">
           <td>
             <div class="fw-semibold">${escapeHtml(zone.name)}</div>
@@ -4800,7 +4832,32 @@
           <td class="text-end">${formatNumber(zone.active_prefix_count ?? zone.prefix_count ?? 0)} / ${formatNumber(zone.total_prefix_count ?? zone.prefix_count ?? (zone.prefixes || []).length)}</td>
           <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Desativada'}</span></td>
         </tr>
-      `).join('') || '<tr><td colspan="3" class="text-muted">Sem IP Zones</td></tr>';
+      `).join('') || `<tr><td colspan="3" class="text-muted">${showInactiveIpZones() ? 'Sem IP Zones' : 'Sem IP Zones ativas'}</td></tr>`;
+    }
+
+    function syncIpZoneActionButtons(zone = selectedIpZone()) {
+      const hasZone = Boolean(zone?.id);
+      const isActive = Boolean(zone?.active);
+      const disableButton = document.getElementById('disableIpZoneButton');
+      const activateButton = document.getElementById('activateIpZoneButton');
+      const purgeButton = document.getElementById('purgeIpZoneButton');
+      const testButton = document.getElementById('testIpZoneDetectionButton');
+      if (disableButton) {
+        disableButton.classList.toggle('d-none', !hasZone || !isActive);
+        disableButton.disabled = !hasZone || !isActive;
+      }
+      if (activateButton) {
+        activateButton.classList.toggle('d-none', !hasZone || isActive);
+        activateButton.disabled = !hasZone || isActive;
+      }
+      if (purgeButton) purgeButton.disabled = !hasZone;
+      if (testButton) testButton.disabled = !hasZone || !isActive;
+      setText(
+        'ipZoneAdvancedStatus',
+        hasZone
+          ? 'Exclusao definitiva remove a zona e seus prefixos quando nao ha historico vinculado.'
+          : 'Selecione uma zona antes de usar acoes avancadas.'
+      );
     }
 
     async function selectIpZone(zoneId) {
@@ -4824,7 +4881,11 @@
     async function loadIpZones() {
       await loadIpZoneFilters();
       renderIpZoneList();
-      const selected = ipZones.find(zone => Number(zone.id) === Number(currentIpZoneId)) || ipZones[0] || null;
+      const zones = visibleIpZones();
+      const selected = zones.find(zone => Number(zone.id) === Number(currentIpZoneId))
+        || zones.find(zone => zone.active)
+        || zones[0]
+        || null;
       if (selected) await selectIpZone(selected.id);
       else fillIpZoneForm(null);
     }
@@ -4860,13 +4921,48 @@
 
     async function disableIpZone() {
       if (!currentIpZoneId) return;
-      if (!confirm('Desativar esta IP Zone e seus prefixos?')) return;
+      if (!confirm('Desativar esta IP Zone? Os prefixos e historico serao mantidos.')) return;
       try {
         await apiRequest(`/api/ip-zones/${currentIpZoneId}`, { method: 'DELETE' });
         await loadIpZones();
+        renderDashboardZoneSelects();
         setIpZoneStatus('IP Zone desativada');
       } catch (error) {
         setIpZoneStatus(`Falha ao desativar IP Zone: ${error.message}`, 'error');
+      }
+    }
+
+    async function activateIpZone() {
+      if (!currentIpZoneId) return;
+      try {
+        const zone = await apiRequest(`/api/ip-zones/${currentIpZoneId}/activate`, { method: 'POST' });
+        currentIpZoneId = zone.id;
+        await loadIpZones();
+        renderDashboardZoneSelects();
+        setIpZoneStatus('IP Zone reativada');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao reativar IP Zone: ${error.message}`, 'error');
+      }
+    }
+
+    async function purgeIpZone() {
+      const zone = selectedIpZone();
+      if (!zone?.id) return;
+      if (!confirm('Tem certeza que deseja excluir definitivamente esta zona?')) return;
+      const typed = prompt('Digite EXCLUIR para confirmar.');
+      if (typed !== 'EXCLUIR') {
+        setIpZoneStatus('Exclusao definitiva cancelada.');
+        return;
+      }
+      try {
+        await apiRequest(`/api/ip-zones/${zone.id}/purge`, { method: 'DELETE' });
+        currentIpZoneId = null;
+        await loadIpZones();
+        renderDashboardZoneSelects();
+        setIpZoneStatus('IP Zone excluida definitivamente');
+      } catch (error) {
+        setIpZoneStatus(`Falha ao excluir definitivamente: ${error.message}`, 'error');
+        setText('ipZoneAdvancedStatus', error.message);
       }
     }
 
@@ -8949,9 +9045,12 @@
     document.getElementById('newIpZoneButton').addEventListener('click', newIpZone);
     document.getElementById('saveIpZoneButton').addEventListener('click', () => saveIpZone().catch(console.error));
     document.getElementById('disableIpZoneButton').addEventListener('click', () => disableIpZone().catch(console.error));
+    document.getElementById('activateIpZoneButton').addEventListener('click', () => activateIpZone().catch(console.error));
+    document.getElementById('purgeIpZoneButton').addEventListener('click', () => purgeIpZone().catch(console.error));
     document.getElementById('testIpZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
     document.getElementById('editAssociatedTemplateButton').addEventListener('click', editAssociatedDetectionTemplate);
     document.getElementById('ipZoneTemplate').addEventListener('change', renderIpZoneTemplateSummary);
+    document.getElementById('showInactiveZones').addEventListener('change', () => loadIpZones().catch(console.error));
     document.getElementById('newIpZonePrefixButton').addEventListener('click', () => resetIpZonePrefixForm());
     document.getElementById('saveIpZonePrefixButton').addEventListener('click', () => saveIpZonePrefix().catch(console.error));
     document.getElementById('showInactivePrefixes').addEventListener('change', () => renderIpZonePrefixTable(selectedIpZone()?.prefixes || []));
