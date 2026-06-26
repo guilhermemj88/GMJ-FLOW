@@ -5790,16 +5790,24 @@ def ip_zone_clickhouse_membership_filters(zone_id: int | None, params: dict[str,
     return cidr_membership_filters_for_clickhouse([row["cidr"] for row in rows], params, prefix)
 
 
+def zone_edge_filters(src_filter: str, dst_filter: str) -> tuple[str, str, str]:
+    transmits_filter = f"(({src_filter}) AND NOT ({dst_filter}))"
+    receives_filter = f"(({dst_filter}) AND NOT ({src_filter}))"
+    both_filter = f"({transmits_filter} OR {receives_filter})"
+    return transmits_filter, receives_filter, both_filter
+
+
 def ip_zone_clickhouse_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
     if zone_id is None:
         return ""
     direction = normalize_zone_direction(zone_direction)
     src_filter, dst_filter = ip_zone_clickhouse_membership_filters(zone_id, params, prefix)
+    transmits_filter, receives_filter, both_filter = zone_edge_filters(src_filter, dst_filter)
     if direction == "transmits":
-        return src_filter
+        return transmits_filter
     if direction == "receives":
-        return dst_filter
-    return f"({src_filter} OR {dst_filter})"
+        return receives_filter
+    return both_filter
 
 
 def build_zone_flow_filter(zone_id: int | None, zone_direction: str, params: dict[str, Any], prefix: str) -> str:
@@ -11275,6 +11283,7 @@ def dashboard_series_payload(
     if zone_id is not None:
         zone_direction_normalized = normalize_zone_direction(zone_direction)
         zone_src_filter, zone_dst_filter = ip_zone_clickhouse_membership_filters(zone_id, params, "series_zone")
+        zone_upload_filter, zone_download_filter, _zone_both_filter = zone_edge_filters(zone_src_filter, zone_dst_filter)
         zone_input_group = input_group
         zone_output_group = output_group
         if group_by == "interface":
@@ -11289,7 +11298,7 @@ def dashboard_series_payload(
                     'download' AS flow_direction,
                     sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
                 FROM flow_raw
-                WHERE {base_where} AND {zone_dst_filter} AND {input_condition}
+                WHERE {base_where} AND {zone_download_filter} AND {input_condition}
                 GROUP BY ts, group_key
                 """
             )
@@ -11302,7 +11311,7 @@ def dashboard_series_payload(
                     'upload' AS flow_direction,
                     sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
                 FROM flow_raw
-                WHERE {base_where} AND {zone_src_filter} AND {output_condition}
+                WHERE {base_where} AND {zone_upload_filter} AND {output_condition}
                 GROUP BY ts, group_key
                 """
             )
@@ -12470,22 +12479,45 @@ def top_asn_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
-    zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "asn_zone")
-    if zone_filter:
-        where += f" AND {zone_filter}"
     rate_direction = "auto"
-    if resolved_if_index is not None:
-        params["if_index"] = resolved_if_index
-        if dimension == "src":
-            where += " AND output_if = {if_index:UInt32}"
-            rate_direction = "output"
+    if zone_id is not None:
+        requested_zone_direction = normalize_zone_direction(zone_direction)
+        if requested_zone_direction == "both":
+            asn_zone_direction = "transmits" if dimension == "src" else "receives"
         else:
-            where += " AND input_if = {if_index:UInt32}"
+            asn_zone_direction = requested_zone_direction
+        zone_filter = build_zone_flow_filter(zone_id, asn_zone_direction, params, "asn_zone")
+        if zone_filter:
+            where += f" AND {zone_filter}"
+        if asn_zone_direction == "transmits":
+            asn_col = "dst_asn"
+            as_name_col = "dst_as_name"
+            ip_col = "dst_ip"
+            rate_direction = "output"
+            if resolved_if_index is not None:
+                params["if_index"] = resolved_if_index
+                where += " AND output_if = {if_index:UInt32}"
+        else:
+            asn_col = "src_asn"
+            as_name_col = "src_as_name"
+            ip_col = "src_ip"
             rate_direction = "input"
+            if resolved_if_index is not None:
+                params["if_index"] = resolved_if_index
+                where += " AND input_if = {if_index:UInt32}"
+    else:
+        if resolved_if_index is not None:
+            params["if_index"] = resolved_if_index
+            if dimension == "src":
+                where += " AND output_if = {if_index:UInt32}"
+                rate_direction = "output"
+            else:
+                where += " AND input_if = {if_index:UInt32}"
+                rate_direction = "input"
+        asn_col = "src_asn" if dimension == "src" else "dst_asn"
+        as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
+        ip_col = "src_ip" if dimension == "src" else "dst_ip"
 
-    asn_col = "src_asn" if dimension == "src" else "dst_asn"
-    as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
-    ip_col = "src_ip" if dimension == "src" else "dst_ip"
     factor_expr = clickhouse_sample_rate_expr(sensor_id, rate_direction, resolved_if_index)
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
