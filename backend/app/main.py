@@ -12531,6 +12531,9 @@ def geo_flows(
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
+    top_order_expr = {"bits_s": "total_bytes", "packets_s": "total_packets", "flows": "total_flows"}[metric]
+    row_bytes_expr = corrected_value_expr("bytes", factor_expr)
+    row_packets_expr = corrected_value_expr("packets", factor_expr)
     has_strong_filter = any(
         [
             src_filter,
@@ -12584,23 +12587,37 @@ def geo_flows(
         result = query_clickhouse(
             f"""
             SELECT
-                toString(src_ip) AS src_ip,
-                toString(dst_ip) AS dst_ip,
-                toUInt32(src_asn) AS src_asn,
-                toUInt32(dst_asn) AS dst_asn,
-                any(src_as_name) AS src_as_name,
-                any(dst_as_name) AS dst_as_name,
-                {decoder_label_expr()} AS top_protocol,
-                {corrected_sum_expr("bytes", factor_expr)} AS bytes,
-                {corrected_sum_expr("packets", factor_expr)} AS packets,
-                {corrected_sum_expr("bytes", factor_expr)} * 8 / {{seconds:Float64}} AS bits_s,
-                {corrected_sum_expr("packets", factor_expr)} / {{seconds:Float64}} AS packets_s,
-                sum(flow_count) AS flows
-            FROM flow_raw
-            WHERE {where}
-            GROUP BY src_ip, dst_ip, src_asn, dst_asn, top_protocol
+                src_ip,
+                dst_ip,
+                src_asn,
+                dst_asn,
+                src_as_name,
+                dst_as_name,
+                top_protocol,
+                total_bytes AS bytes,
+                total_packets AS packets,
+                total_bytes * 8 / {{seconds:Float64}} AS bits_s,
+                total_packets / {{seconds:Float64}} AS packets_s,
+                total_flows AS flows
+            FROM (
+                SELECT
+                    toString(src_ip) AS src_ip,
+                    toString(dst_ip) AS dst_ip,
+                    toUInt32(src_asn) AS src_asn,
+                    toUInt32(dst_asn) AS dst_asn,
+                    {decoder_label_expr()} AS top_protocol,
+                    sum({row_bytes_expr}) AS total_bytes,
+                    sum({row_packets_expr}) AS total_packets,
+                    sum(flow_count) AS total_flows,
+                    any(src_as_name) AS src_as_name,
+                    any(dst_as_name) AS dst_as_name
+                FROM flow_raw
+                WHERE {where}
+                GROUP BY src_ip, dst_ip, src_asn, dst_asn, top_protocol
+                ORDER BY {top_order_expr} DESC
+                LIMIT {{limit:UInt32}}
+            ) AS top_candidates
             ORDER BY {order_expr} DESC
-            LIMIT {{limit:UInt32}}
             """,
             params,
         )
