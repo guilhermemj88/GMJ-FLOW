@@ -3172,6 +3172,7 @@ def apply_flow_retention_ttl(
 def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int, optimize: bool = False) -> dict[str, Any]:
     days = setting_int({"days": str(older_than_days)}, "days", 90)
     cutoff_expression = f"now() - INTERVAL {days} DAY"
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
     count_result = query_clickhouse(
         f"""
         SELECT count() AS count
@@ -3190,10 +3191,14 @@ def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int,
     return {
         "table": table,
         "approximate_before": approximate_before,
+        "approximate_deleted": approximate_before,
         "older_than_days": days,
+        "period_start": None,
+        "period_end": iso(cutoff_dt),
         "period_deleted": f"{time_column} < {cutoff_expression}",
         "command_executed": command,
         "optimize_command": optimize_command,
+        "optimize_executed": bool(optimize_command),
         "status": "ok",
         "note": (
             "ClickHouse pode liberar espaco fisico depois dos merges."
@@ -3307,6 +3312,10 @@ def run_database_cleanup(
         "source": source,
         "scope": scope,
         "cleanup_at": cleanup_at,
+        "older_than_days": flow_retention_days,
+        "period_end": clickhouse_results["flow_raw"].get("period_end"),
+        "optimize_executed": any(bool(item.get("optimize_command")) for item in clickhouse_results.values()),
+        "tables": list(clickhouse_results.values()),
         "flow": clickhouse_results["flow_raw"],
         "clickhouse": clickhouse_results,
         "snmp_deleted": snmp_deleted,
@@ -9290,8 +9299,8 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
 @app.post("/api/database/cleanup")
 def database_cleanup(request: Request, payload: DatabaseCleanupPayload):
     require_admin(request)
-    if payload.confirm != "LIMPAR":
-        raise HTTPException(status_code=400, detail="Digite LIMPAR para confirmar")
+    if clean_text(payload.confirm).strip() != "LIMPAR":
+        raise HTTPException(status_code=400, detail="Digite LIMPAR no campo de confirmacao para executar a limpeza.")
     try:
         result = run_database_cleanup(
             flow_retention_days=payload.flow_raw_older_than_days or payload.older_than_days,
@@ -11777,12 +11786,12 @@ def add_geo_filters(
     if dst_asn is not None:
         params["geo_dst_asn"] = int(dst_asn)
         filters.append("dst_asn = {geo_dst_asn:UInt32}")
-    if clean_text(src_cidr):
-        params["geo_src_cidr"] = clean_text(src_cidr)
-        filters.append("isIPAddressInRange(toString(src_ip), {geo_src_cidr:String})")
-    if clean_text(dst_cidr):
-        params["geo_dst_cidr"] = clean_text(dst_cidr)
-        filters.append("isIPAddressInRange(toString(dst_ip), {geo_dst_cidr:String})")
+    src_condition = build_ip_condition("src_ip", src_cidr, params, "geo_src_cidr", "IP/CIDR origem")
+    if src_condition:
+        filters.append(src_condition)
+    dst_condition = build_ip_condition("dst_ip", dst_cidr, params, "geo_dst_cidr", "IP/CIDR destino")
+    if dst_condition:
+        filters.append(dst_condition)
 
 
 def geo_float(value: Any, minimum: float = -180, maximum: float = 180) -> float | None:
@@ -11863,6 +11872,315 @@ def geo_endpoint_identity(
 
 def geo_endpoint_country_label(endpoint: dict[str, Any]) -> str:
     return clean_text(endpoint.get("country")) or clean_text(endpoint.get("country_code")) or "N/D"
+
+
+def ip_matches_filter(ip_text: str, value: Any) -> bool:
+    cidr = normalize_ip_filter_for_clickhouse(value, "IP/CIDR")
+    if not cidr:
+        return True
+    try:
+        parsed_ip = ip_address(clean_ip(ip_text))
+        network = ip_network(cidr, strict=False)
+        if parsed_ip.version == 4 and network.version == 6 and str(network.network_address).startswith("::ffff:"):
+            parsed_ip = ip_address(f"::ffff:{parsed_ip}")
+        return parsed_ip in network
+    except ValueError:
+        return False
+
+
+def geo_anomaly_time(row: dict[str, Any]) -> datetime | None:
+    return parse_datetime_text(row.get("last_seen")) or parse_datetime_text(row.get("updated_at")) or parse_datetime_text(row.get("created_at"))
+
+
+def anomaly_ip_asn(ip_text: str) -> tuple[int, str]:
+    if not clean_text(ip_text):
+        return 0, ""
+    resolved = resolve_asn_for_ip(clean_ip(ip_text))
+    asn = int(resolved.get("asn") or 0)
+    return asn, clean_text(resolved.get("as_name"))
+
+
+def anomaly_matches_geo_filters(
+    anomaly: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    src_cidr: str | None,
+    dst_cidr: str | None,
+    src_asn: int | None,
+    dst_asn: int | None,
+) -> tuple[bool, int, str, int, str]:
+    seen_at = geo_anomaly_time(anomaly)
+    if seen_at is not None and (seen_at < start_dt or seen_at > end_dt):
+        return False, 0, "", 0, ""
+    if clean_text(src_cidr) and not ip_matches_filter(anomaly.get("src_ip") or "", src_cidr):
+        return False, 0, "", 0, ""
+    if clean_text(dst_cidr) and not ip_matches_filter(anomaly.get("dst_ip") or "", dst_cidr):
+        return False, 0, "", 0, ""
+    src_asn_number, src_as_name = anomaly_ip_asn(anomaly.get("src_ip") or "")
+    dst_asn_number, dst_as_name = anomaly_ip_asn(anomaly.get("dst_ip") or "")
+    if src_asn is not None and src_asn_number != int(src_asn):
+        return False, src_asn_number, src_as_name, dst_asn_number, dst_as_name
+    if dst_asn is not None and dst_asn_number != int(dst_asn):
+        return False, src_asn_number, src_as_name, dst_asn_number, dst_as_name
+    return True, src_asn_number, src_as_name, dst_asn_number, dst_as_name
+
+
+@app.get("/api/geo/anomalies")
+def geo_anomalies(
+    mode: str = "active",
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    zone_id: int | None = Query(None, ge=1),
+    zone_direction: str = "both",
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
+    src_cidr: str | None = None,
+    dst_cidr: str | None = None,
+    src_asn: int | None = Query(None, ge=1),
+    dst_asn: int | None = Query(None, ge=1),
+    asn_src: int | None = Query(None, ge=1),
+    asn_dst: int | None = Query(None, ge=1),
+    proto: str | None = None,
+    protocol: str | None = None,
+    src_port: int | None = Query(None, ge=0, le=65535),
+    dst_port: int | None = Query(None, ge=0, le=65535),
+    severity: str | None = None,
+    vector: str | None = None,
+    status: str | None = None,
+    metric: str = "bits_s",
+    group_by: str = "city",
+    limit: int = Query(20, ge=1, le=500),
+    top_n: int | None = Query(None, ge=1, le=500),
+):
+    _ = sensor_id, src_port, dst_port
+    ensure_sensor_db()
+    mode = clean_text(mode).lower() or "active"
+    if mode not in {"active", "history"}:
+        raise HTTPException(status_code=400, detail="mode invalido")
+    metric = clean_text(metric).lower() or "bits_s"
+    if metric == "flows":
+        metric = "flows_s"
+    if metric not in {"bits_s", "packets_s", "flows_s"}:
+        raise HTTPException(status_code=400, detail="metric invalida")
+    group_by = clean_text(group_by).lower() or "city"
+    if group_by not in {"city", "country", "asn", "ip"}:
+        raise HTTPException(status_code=400, detail="group_by invalido")
+    requested_limit = int(top_n or limit)
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    filters: list[str] = []
+    values: list[Any] = []
+    if mode == "active":
+        filters.append("status = 'active'")
+    else:
+        if clean_text(status):
+            filters.append("status = ?")
+            values.append(clean_text(status).lower())
+        else:
+            filters.append("status <> 'active'")
+    if zone_id is not None:
+        filters.append("zone_id = ?")
+        values.append(zone_id)
+    requested_zone_direction = normalize_zone_direction(zone_direction)
+    if requested_zone_direction != "both":
+        filters.append("direction = ?")
+        values.append(requested_zone_direction)
+    if clean_text(severity):
+        filters.append("severity = ?")
+        values.append(clean_text(severity).lower())
+    if clean_text(vector):
+        filters.append("vector = ?")
+        values.append(clean_text(vector))
+    protocol_filter = normalize_detection_protocol(proto or protocol, allow_empty=True)
+    if protocol_filter and protocol_filter != "ALL":
+        filters.append("protocol = ?")
+        values.append(protocol_filter)
+    source_filter = clean_text(src_cidr or src_ip)
+    destination_filter = clean_text(dst_cidr or dst_ip)
+    where = " AND ".join(filters) if filters else "1 = 1"
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM security_anomalies
+            WHERE {where}
+            ORDER BY last_seen DESC, updated_at DESC, id DESC
+            """,
+            values,
+        ).fetchall()
+
+    edge_groups: dict[tuple[str, str], dict[str, Any]] = {}
+    node_groups: dict[str, dict[str, Any]] = {}
+    total_anomalies = 0
+    total_bits_s = 0.0
+    total_packets_s = 0.0
+    total_flows_s = 0.0
+    for row in rows:
+        anomaly = security_anomaly_row_to_dict(row)
+        matches, src_asn_number, src_as_name, dst_asn_number, dst_as_name = anomaly_matches_geo_filters(
+            anomaly,
+            start_dt,
+            end_dt,
+            source_filter,
+            destination_filter,
+            asn_src or src_asn,
+            asn_dst or dst_asn,
+        )
+        if not matches:
+            continue
+        total_anomalies += 1
+        bits_s = float(anomaly.get("bits_s") or 0)
+        packets_s = float(anomaly.get("packets_s") or 0)
+        flows_s = float(anomaly.get("flows_s") or anomaly.get("flows") or 0)
+        total_bits_s += bits_s
+        total_packets_s += packets_s
+        total_flows_s += flows_s
+        src_geo = geo_lookup_ip(anomaly.get("src_ip") or "", src_asn_number, src_as_name)
+        dst_geo = geo_lookup_ip(anomaly.get("dst_ip") or "", dst_asn_number, dst_as_name)
+        src_endpoint = geo_endpoint_identity(group_by, anomaly.get("src_ip") or "", src_asn_number, src_as_name, src_geo)
+        dst_endpoint = geo_endpoint_identity(group_by, anomaly.get("dst_ip") or "", dst_asn_number, dst_as_name, dst_geo)
+        for endpoint, side in ((src_endpoint, "src"), (dst_endpoint, "dst")):
+            node = node_groups.setdefault(
+                endpoint["id"],
+                {
+                    "id": endpoint["id"],
+                    "type": group_by,
+                    "label": endpoint["label"],
+                    "country_code": endpoint["country_code"],
+                    "country": geo_endpoint_country_label(endpoint),
+                    "city": endpoint["city"],
+                    "region": endpoint["region"],
+                    "lat": endpoint["lat"],
+                    "lon": endpoint["lon"],
+                    "asn": endpoint["asn"] or None,
+                    "asn_label": endpoint["asn_label"],
+                    "asn_name": endpoint["asn_name"],
+                    "bits_s": 0.0,
+                    "packets_s": 0.0,
+                    "flows_s": 0.0,
+                    "flows": 0,
+                    "sources": 0,
+                    "destinations": 0,
+                },
+            )
+            node["bits_s"] += bits_s
+            node["packets_s"] += packets_s
+            node["flows_s"] += flows_s
+            node["flows"] += int(round(flows_s))
+            node["sources" if side == "src" else "destinations"] += 1
+        edge_key = (src_endpoint["id"], dst_endpoint["id"])
+        metric_value = {"bits_s": bits_s, "packets_s": packets_s, "flows_s": flows_s}[metric]
+        edge = edge_groups.setdefault(
+            edge_key,
+            {
+                "src": src_endpoint["id"],
+                "dst": dst_endpoint["id"],
+                "src_label": src_endpoint["label"],
+                "dst_label": dst_endpoint["label"],
+                "src_ip": src_endpoint["ip"],
+                "dst_ip": dst_endpoint["ip"],
+                "src_city": src_endpoint["city"],
+                "src_region": src_endpoint["region"],
+                "src_country": geo_endpoint_country_label(src_endpoint),
+                "src_country_code": src_endpoint["country_code"],
+                "dst_city": dst_endpoint["city"],
+                "dst_region": dst_endpoint["region"],
+                "dst_country": geo_endpoint_country_label(dst_endpoint),
+                "dst_country_code": dst_endpoint["country_code"],
+                "src_lat": src_endpoint["lat"],
+                "src_lon": src_endpoint["lon"],
+                "dst_lat": dst_endpoint["lat"],
+                "dst_lon": dst_endpoint["lon"],
+                "severity": anomaly.get("severity") or "",
+                "vector": anomaly.get("vector") or "",
+                "rule": anomaly.get("template_name") or anomaly.get("vector") or "",
+                "status": anomaly.get("status") or "",
+                "bits_s": 0.0,
+                "packets_s": 0.0,
+                "flows_s": 0.0,
+                "flows": 0,
+                "packets": 0,
+                "bytes": 0,
+                "top_protocol": anomaly.get("protocol") or "ALL",
+                "src_port": 0,
+                "dst_port": 0,
+                "top_asn_src": src_asn_number,
+                "top_asn_dst": dst_asn_number,
+                "top_asn_src_name": src_endpoint["asn_name"] or src_as_name,
+                "top_asn_dst_name": dst_endpoint["asn_name"] or dst_as_name,
+                "_top_metric_value": metric_value,
+            },
+        )
+        if metric_value > float(edge.get("_top_metric_value") or 0):
+            edge["severity"] = anomaly.get("severity") or ""
+            edge["vector"] = anomaly.get("vector") or ""
+            edge["rule"] = anomaly.get("template_name") or anomaly.get("vector") or ""
+            edge["status"] = anomaly.get("status") or ""
+            edge["top_protocol"] = anomaly.get("protocol") or "ALL"
+            edge["_top_metric_value"] = metric_value
+        edge["bits_s"] += bits_s
+        edge["packets_s"] += packets_s
+        edge["flows_s"] += flows_s
+        edge["flows"] += int(round(flows_s))
+        edge["packets"] += int(float(anomaly.get("packets") or 0))
+        edge["bytes"] += int(float(anomaly.get("bytes") or 0))
+
+    nodes = []
+    for item in node_groups.values():
+        item["bits_s"] = round(float(item["bits_s"]), 2)
+        item["packets_s"] = round(float(item["packets_s"]), 2)
+        item["flows_s"] = round(float(item["flows_s"]), 2)
+        nodes.append(item)
+    edges = []
+    for item in sorted(edge_groups.values(), key=lambda edge: float(edge.get(metric) or 0), reverse=True)[:requested_limit]:
+        item["bits_s"] = round(float(item["bits_s"]), 2)
+        item["packets_s"] = round(float(item["packets_s"]), 2)
+        item["flows_s"] = round(float(item["flows_s"]), 2)
+        item["has_coordinates"] = all(item.get(key) is not None for key in ("src_lat", "src_lon", "dst_lat", "dst_lon"))
+        item.pop("_top_metric_value", None)
+        edges.append(item)
+    complete_count = sum(1 for edge in edges if edge.get("has_coordinates"))
+    countries = {
+        clean_text(edge.get(key)).upper()
+        for edge in edges
+        for key in ("src_country_code", "dst_country_code")
+        if clean_text(edge.get(key))
+    }
+    missing_geo = max(0, len(edges) - complete_count)
+    summary = {
+        "total_bits_s": round(total_bits_s, 2),
+        "total_packets_s": round(total_packets_s, 2),
+        "total_flows_s": round(total_flows_s, 2),
+        "total_anomalies": total_anomalies,
+        "countries_active": len(countries),
+        "routes_active": len(edges),
+        "routes_located": complete_count,
+        "missing_geo": missing_geo,
+    }
+    return {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "mode": mode,
+        "source": "anomalies",
+        "metric": "flows" if metric == "flows_s" else metric,
+        "group_by": group_by,
+        "requested_top_n": requested_limit,
+        "summary": summary,
+        "total_routes": len(edges),
+        "complete_route_count": complete_count,
+        "incomplete_route_count": missing_geo,
+        "localized_routes": complete_count,
+        "unlocalized_routes": missing_geo,
+        "active_countries": len(countries),
+        "nodes": nodes,
+        "edges": edges,
+        "items": edges,
+        "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
+        "warning": "" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "GeoIP database not configured",
+    }
 
 
 @app.get("/api/geo/status")
@@ -12202,12 +12520,24 @@ def geo_flows(
         for key in ("src_country_code", "dst_country_code")
         if clean_text(edge.get(key))
     }
+    summary = {
+        "total_bits_s": round(sum(float(edge.get("bits_s") or 0) for edge in edges), 2),
+        "total_packets_s": round(sum(float(edge.get("packets_s") or 0) for edge in edges), 2),
+        "total_flows_s": round(sum(float(edge.get("flows") or 0) for edge in edges) / seconds, 2) if seconds > 0 else 0.0,
+        "total_anomalies": 0,
+        "countries_active": len(countries),
+        "routes_active": len(edges),
+        "routes_located": complete_count,
+        "missing_geo": max(0, len(edges) - complete_count),
+    }
     payload = {
         "start": iso(start_dt),
         "end": iso(end_dt),
+        "source": "flows",
         "metric": metric,
         "group_by": group_by,
         "requested_top_n": top_n,
+        "summary": summary,
         "total_routes": len(edges),
         "complete_route_count": complete_count,
         "incomplete_route_count": max(0, len(edges) - complete_count),
