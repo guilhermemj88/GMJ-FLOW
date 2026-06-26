@@ -1046,6 +1046,9 @@
         <button id="anomaliesNavButton" type="button" data-nav-view="anomalies">
           <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
         </button>
+        <button id="bgpNavButton" type="button" data-nav-view="bgp">
+          <i data-lucide="shield-check"></i><span>BGP / Mitigacao</span>
+        </button>
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
         </button>
@@ -3184,6 +3187,102 @@
           </section>
         </section>
 
+        <section id="view-bgp" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">BGP / Mitigacao</h1>
+              <div id="bgpStatus" class="subtle">Fase 1: configuracao, validacao e dry-run</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshBgpButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3">
+            <div class="panel-title mb-2">Conectores</div>
+            <div class="flow-search-grid mb-2">
+              <input id="bgpConnectorId" type="hidden">
+              <div class="field"><label for="bgpConnectorName">Nome</label><input id="bgpConnectorName" class="form-control form-control-sm" placeholder="EDGE-RTBH-DRYRUN"></div>
+              <div class="field"><label for="bgpConnectorRole">Role</label><select id="bgpConnectorRole" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorBackend">Backend</label><select id="bgpConnectorBackend" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorMode">Modo</label><select id="bgpConnectorMode" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorLocalAsn">Local ASN</label><input id="bgpConnectorLocalAsn" type="number" min="1" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorPeerAsn">Peer ASN</label><input id="bgpConnectorPeerAsn" type="number" min="1" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorPeerIp">Peer IP</label><input id="bgpConnectorPeerIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorNextHop">Next-hop default</label><input id="bgpConnectorNextHop" class="form-control form-control-sm" placeholder="10.66.66.66"></div>
+              <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="268568:666"></div>
+              <div class="field"><label for="bgpConnectorEnabled">Ativo</label><select id="bgpConnectorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="saveBgpConnectorButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar conector</span></button>
+              <button id="clearBgpConnectorButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Role</th><th>Backend</th><th>Modo</th><th>Peer</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpConnectorsTable"></tbody></table></div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Response Profiles</div>
+            <div class="flow-search-grid mb-2">
+              <input id="bgpProfileId" type="hidden">
+              <div class="field"><label for="bgpProfileName">Nome</label><input id="bgpProfileName" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProfileConnector">Conector</label><select id="bgpProfileConnector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileType">Tipo</label><select id="bgpProfileType" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileApproval">Aprovacao</label><select id="bgpProfileApproval" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileAction">Acao</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileTarget">Alvo</label><select id="bgpProfileTarget" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileProtocol">Protocolo</label><select id="bgpProfileProtocol" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileDstPortSelector">Porta destino</label><select id="bgpProfileDstPortSelector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileDstPortValue">Valor porta</label><input id="bgpProfileDstPortValue" class="form-control form-control-sm" placeholder="53"></div>
+              <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileDuration">Duracao padrao (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpProfileEnabled">Ativo</label><select id="bgpProfileEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="saveBgpProfileButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar profile</span></button>
+              <button id="clearBgpProfileButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Acao</th><th>Alvo</th><th>Filtro</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Prefixos Protegidos</div>
+            <div class="flow-search-grid mb-2">
+              <input id="bgpProtectedId" type="hidden">
+              <div class="field"><label for="bgpProtectedCidr">CIDR</label><input id="bgpProtectedCidr" class="form-control form-control-sm" placeholder="168.232.197.0/24"></div>
+              <div class="field"><label for="bgpProtectedName">Nome</label><input id="bgpProtectedName" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProtectedReason">Motivo</label><input id="bgpProtectedReason" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProtectedEnabled">Ativo</label><select id="bgpProtectedEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="saveBgpProtectedButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar prefixo</span></button>
+              <button id="clearBgpProtectedButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>CIDR</th><th>Nome</th><th>Motivo</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpProtectedTable"></tbody></table></div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Dry-run Manual</div>
+            <div class="flow-search-grid mb-2">
+              <div class="field"><label for="bgpDryProfile">Profile</label><select id="bgpDryProfile" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpDrySrcIp">Src IP/CIDR</label><input id="bgpDrySrcIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryDstIp">Dst IP/CIDR</label><input id="bgpDryDstIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
+              <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryDuration">Duracao (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+            </div>
+            <button id="runBgpDryRunButton" type="button" class="btn btn-sm btn-success mb-2"><i data-lucide="play"></i><span>Gerar dry-run</span></button>
+            <pre id="bgpDryRunOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:90px;"></pre>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Announcements / Dry-runs</div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Profile</th><th>Tipo</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpAnnouncementsTable"></tbody></table></div>
+          </section>
+        </section>
+
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -3551,6 +3650,32 @@
     </div>
   </div>
 
+  <div id="bgpMitigationModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="bgpMitigationModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="bgpMitigationModalTitle" class="view-title">Dry-run BGP</h2>
+        <button type="button" class="icon-button" data-close-modal="bgpMitigationModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="bgpMitigationSummary" class="subtle mb-2">-</div>
+        <div class="flow-search-grid mb-2">
+          <div class="field"><label for="bgpMitigationProfile">Profile</label><select id="bgpMitigationProfile" class="form-select form-select-sm"></select></div>
+          <div class="field"><label for="bgpMitigationConnector">Conector</label><select id="bgpMitigationConnector" class="form-select form-select-sm"></select></div>
+          <div class="field"><label for="bgpMitigationDuration">Duracao (s)</label><input id="bgpMitigationDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+        </div>
+        <button id="runBgpAnomalyDryRunButton" type="button" class="btn btn-sm btn-success mb-2">
+          <i data-lucide="play"></i><span>Gerar dry-run</span>
+        </button>
+        <pre id="bgpMitigationOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:120px;"></pre>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="bgpMitigationModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <div id="snmpModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="snmpModalTitle">
     <div class="gmj-dialog">
       <div class="gmj-dialog-header">
@@ -3862,6 +3987,11 @@
     let editingAttackVectorId = null;
     let anomalyActiveTab = 'active';
     let currentAnomalyDetailId = null;
+    let currentBgpMitigationAnomalyId = null;
+    let bgpConnectors = [];
+    let bgpProfiles = [];
+    let bgpProtectedPrefixes = [];
+    let bgpAnnouncements = [];
     let activeCustomRangeTarget = null;
     let flowSort = { column: 'flow_time', direction: 'desc' };
     let topFlowSort = { column: 'bits_s', direction: 'desc' };
@@ -3937,6 +4067,67 @@
       'UDP', 'ICMP', 'DNS', 'NTP', 'QUIC', 'UDP+QUIC', 'HTTP', 'HTTPS', 'MAIL', 'SIP',
       'IPSEC', 'FRAGMENT', 'NETBIOS', 'MEMCACHED', 'OTHER', 'INVALID', 'FLOWS', 'FLOW+SYN'
     ].map(value => [value, value]);
+    const BGP_ROLE_OPTIONS = [
+      ['generic_bgp', 'generic_bgp'],
+      ['flowspec_mitigation', 'flowspec_mitigation'],
+      ['rtbh_blackhole', 'rtbh_blackhole'],
+      ['diversion_mitigation', 'diversion_mitigation']
+    ];
+    const BGP_BACKEND_OPTIONS = [
+      ['dry_run', 'dry_run'],
+      ['manual_export', 'manual_export'],
+      ['exabgp', 'exabgp'],
+      ['gobgp', 'gobgp'],
+      ['frr', 'frr']
+    ];
+    const BGP_MODE_OPTIONS = [
+      ['dry_run', 'dry_run'],
+      ['manual_approval', 'manual_approval'],
+      ['detection_only', 'detection_only'],
+      ['automatic', 'automatic']
+    ];
+    const BGP_TYPE_OPTIONS = [
+      ['flowspec', 'flowspec'],
+      ['rtbh', 'rtbh'],
+      ['diversion', 'diversion'],
+      ['detection_only', 'detection_only']
+    ];
+    const BGP_ACTION_OPTIONS = [
+      ['discard', 'discard'],
+      ['rate_limit', 'rate_limit'],
+      ['redirect', 'redirect'],
+      ['announce_route', 'announce_route']
+    ];
+    const BGP_TARGET_OPTIONS = [
+      ['src_ip', 'src_ip'],
+      ['dst_ip', 'dst_ip'],
+      ['src_and_dst_ip', 'src_and_dst_ip'],
+      ['target_ip', 'target_ip'],
+      ['target_cidr', 'target_cidr'],
+      ['anomaly_src_ip', 'anomaly_src_ip'],
+      ['anomaly_dst_ip', 'anomaly_dst_ip']
+    ];
+    const BGP_PROTOCOL_SELECTOR_OPTIONS = [
+      ['anomaly_protocol', 'anomaly_protocol'],
+      ['manual', 'manual'],
+      ['any', 'any'],
+      ['tcp', 'tcp'],
+      ['udp', 'udp'],
+      ['icmp', 'icmp']
+    ];
+    const BGP_PORT_SELECTOR_OPTIONS = [
+      ['any', 'any'],
+      ['manual', 'manual'],
+      ['fixed', 'fixed'],
+      ['anomaly_src_port', 'anomaly_src_port'],
+      ['anomaly_dst_port', 'anomaly_dst_port']
+    ];
+    const BGP_TCP_FLAGS_SELECTOR_OPTIONS = [
+      ['any', 'any'],
+      ['manual', 'manual'],
+      ['syn', 'syn'],
+      ['syn_ack', 'syn_ack']
+    ];
     const DETECTION_METRIC_LABELS = {
       bits_s: 'bits/s',
       packets_s: 'packets/s',
@@ -4020,6 +4211,7 @@
       document.getElementById('databaseNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('attackVectorsNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('bgpNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
       Object.values(charts).forEach(chart => chart.resize());
       Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
@@ -6035,6 +6227,322 @@
       `).join('');
     }
 
+    function bgpConnectorOptions(selected = '') {
+      return optionList([['', 'Selecionar']], selected) + optionList(bgpConnectors.map(item => [item.id, item.name]), selected);
+    }
+
+    function bgpProfileOptions(selected = '') {
+      return optionList([['', 'Selecionar']], selected) + optionList(bgpProfiles.filter(item => item.enabled).map(item => [item.id, item.name]), selected);
+    }
+
+    function renderBgpSelects() {
+      document.getElementById('bgpConnectorRole').innerHTML = optionList(BGP_ROLE_OPTIONS, selectValue('bgpConnectorRole') || 'generic_bgp');
+      document.getElementById('bgpConnectorBackend').innerHTML = optionList(BGP_BACKEND_OPTIONS, selectValue('bgpConnectorBackend') || 'dry_run');
+      document.getElementById('bgpConnectorMode').innerHTML = optionList(BGP_MODE_OPTIONS, selectValue('bgpConnectorMode') || 'dry_run');
+      document.getElementById('bgpProfileConnector').innerHTML = bgpConnectorOptions(selectValue('bgpProfileConnector'));
+      document.getElementById('bgpProfileType').innerHTML = optionList(BGP_TYPE_OPTIONS, selectValue('bgpProfileType') || 'flowspec');
+      document.getElementById('bgpProfileApproval').innerHTML = optionList(BGP_MODE_OPTIONS, selectValue('bgpProfileApproval') || 'manual_approval');
+      document.getElementById('bgpProfileAction').innerHTML = optionList(BGP_ACTION_OPTIONS, selectValue('bgpProfileAction') || 'discard');
+      document.getElementById('bgpProfileTarget').innerHTML = optionList(BGP_TARGET_OPTIONS, selectValue('bgpProfileTarget') || 'src_ip');
+      document.getElementById('bgpProfileProtocol').innerHTML = optionList(BGP_PROTOCOL_SELECTOR_OPTIONS, selectValue('bgpProfileProtocol') || 'anomaly_protocol');
+      document.getElementById('bgpProfileDstPortSelector').innerHTML = optionList(BGP_PORT_SELECTOR_OPTIONS, selectValue('bgpProfileDstPortSelector') || 'any');
+      document.getElementById('bgpProfileTcpFlags').innerHTML = optionList(BGP_TCP_FLAGS_SELECTOR_OPTIONS, selectValue('bgpProfileTcpFlags') || 'any');
+      document.getElementById('bgpDryProfile').innerHTML = bgpProfileOptions(selectValue('bgpDryProfile'));
+      document.getElementById('bgpDryConnector').innerHTML = bgpConnectorOptions(selectValue('bgpDryConnector'));
+      document.getElementById('bgpMitigationProfile').innerHTML = bgpProfileOptions(selectValue('bgpMitigationProfile'));
+      document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
+    }
+
+    function renderBgpConnectors() {
+      document.getElementById('bgpConnectorsTable').innerHTML = bgpConnectors.map(item => `
+        <tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.role)}</td>
+          <td>${escapeHtml(item.backend_type)}</td>
+          <td>${escapeHtml(item.mode)}</td>
+          <td>${escapeHtml(item.peer_ip || '-')} ${item.peer_asn ? `(AS${escapeHtml(item.peer_asn)})` : ''}</td>
+          <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-connector-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-connector-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="7" class="text-muted">Sem conectores</td></tr>';
+    }
+
+    function renderBgpProfiles() {
+      document.getElementById('bgpProfilesTable').innerHTML = bgpProfiles.map(item => {
+        const connector = bgpConnectors.find(connector => Number(connector.id) === Number(item.connector_id));
+        const filter = [item.protocol_selector, item.dst_port_selector !== 'any' ? `dst:${item.dst_port_selector}${item.dst_port_value ? `=${item.dst_port_value}` : ''}` : '', item.tcp_flags_selector !== 'any' ? item.tcp_flags_selector : ''].filter(Boolean).join(' / ');
+        return `
+          <tr>
+            <td>${escapeHtml(item.name)}</td>
+            <td>${escapeHtml(item.response_type)}</td>
+            <td>${escapeHtml(connector?.name || '-')}</td>
+            <td>${escapeHtml(item.action)}</td>
+            <td>${escapeHtml(item.target_selector)}</td>
+            <td>${escapeHtml(filter || '-')}</td>
+            <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
+            <td>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-danger bgp-profile-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
+            </td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="8" class="text-muted">Sem profiles</td></tr>';
+    }
+
+    function renderBgpProtected() {
+      document.getElementById('bgpProtectedTable').innerHTML = bgpProtectedPrefixes.map(item => `
+        <tr>
+          <td>${escapeHtml(item.cidr)}</td>
+          <td>${escapeHtml(item.name || '-')}</td>
+          <td>${escapeHtml(item.reason || '-')}</td>
+          <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-protected-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-protected-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="5" class="text-muted">Sem prefixos protegidos</td></tr>';
+    }
+
+    function renderBgpAnnouncements() {
+      document.getElementById('bgpAnnouncementsTable').innerHTML = bgpAnnouncements.map(item => `
+        <tr>
+          <td>#${item.id}</td>
+          <td><span class="badge-soft ${item.validation_errors?.length ? '' : item.status === 'dry_run' ? 'off' : 'ok'}">${escapeHtml(item.status)}</span></td>
+          <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
+          <td>${escapeHtml(item.response_type)}</td>
+          <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
+          <td><pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(item.rendered_command || '-')}</pre></td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-approve" data-id="${item.id}"><i data-lucide="check"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="7" class="text-muted">Sem dry-runs</td></tr>';
+    }
+
+    function renderBgpWorkspace() {
+      renderBgpSelects();
+      renderBgpConnectors();
+      renderBgpProfiles();
+      renderBgpProtected();
+      renderBgpAnnouncements();
+      createIcons();
+    }
+
+    async function loadBgpView() {
+      setText('bgpStatus', 'Carregando BGP / Mitigacao...');
+      const [connectors, profiles, protectedPrefixes, announcements] = await Promise.all([
+        apiRequest('/api/bgp/connectors?include_disabled=true'),
+        apiRequest('/api/bgp/response-profiles?include_disabled=true'),
+        apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
+        apiRequest('/api/bgp/announcements?limit=200')
+      ]);
+      bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
+      bgpProfiles = Array.isArray(profiles.items) ? profiles.items : [];
+      bgpProtectedPrefixes = Array.isArray(protectedPrefixes.items) ? protectedPrefixes.items : [];
+      bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
+      renderBgpWorkspace();
+      setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Dry-runs: ${bgpAnnouncements.length}`);
+    }
+
+    function clearBgpConnectorForm() {
+      setValue('bgpConnectorId', '');
+      setValue('bgpConnectorName', '');
+      setValue('bgpConnectorLocalAsn', '');
+      setValue('bgpConnectorPeerAsn', '');
+      setValue('bgpConnectorPeerIp', '');
+      setValue('bgpConnectorNextHop', '');
+      setValue('bgpConnectorCommunity', '');
+      setValue('bgpConnectorRole', 'generic_bgp');
+      setValue('bgpConnectorBackend', 'dry_run');
+      setValue('bgpConnectorMode', 'dry_run');
+      setBoolSelect('bgpConnectorEnabled', true);
+    }
+
+    function editBgpConnector(id) {
+      const item = bgpConnectors.find(connector => Number(connector.id) === Number(id));
+      if (!item) return;
+      setValue('bgpConnectorId', item.id);
+      setValue('bgpConnectorName', item.name);
+      setValue('bgpConnectorRole', item.role);
+      setValue('bgpConnectorBackend', item.backend_type);
+      setValue('bgpConnectorMode', item.mode);
+      setValue('bgpConnectorLocalAsn', item.local_asn || '');
+      setValue('bgpConnectorPeerAsn', item.peer_asn || '');
+      setValue('bgpConnectorPeerIp', item.peer_ip || '');
+      setValue('bgpConnectorNextHop', item.default_next_hop || '');
+      setValue('bgpConnectorCommunity', item.default_community || '');
+      setBoolSelect('bgpConnectorEnabled', item.enabled);
+      renderBgpSelects();
+    }
+
+    async function saveBgpConnector() {
+      const id = selectValue('bgpConnectorId');
+      const payload = {
+        name: selectValue('bgpConnectorName').trim(),
+        role: selectValue('bgpConnectorRole', 'generic_bgp'),
+        backend_type: selectValue('bgpConnectorBackend', 'dry_run'),
+        mode: selectValue('bgpConnectorMode', 'dry_run'),
+        local_asn: selectValue('bgpConnectorLocalAsn') ? numberValue('bgpConnectorLocalAsn', 0) : null,
+        peer_asn: selectValue('bgpConnectorPeerAsn') ? numberValue('bgpConnectorPeerAsn', 0) : null,
+        peer_ip: selectValue('bgpConnectorPeerIp').trim(),
+        default_next_hop: selectValue('bgpConnectorNextHop').trim(),
+        default_community: selectValue('bgpConnectorCommunity').trim(),
+        enabled: boolSelectValue('bgpConnectorEnabled')
+      };
+      await apiRequest(id ? `/api/bgp/connectors/${id}` : '/api/bgp/connectors', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      clearBgpConnectorForm();
+      await loadBgpView();
+    }
+
+    function clearBgpProfileForm() {
+      setValue('bgpProfileId', '');
+      setValue('bgpProfileName', '');
+      setValue('bgpProfileConnector', '');
+      setValue('bgpProfileType', 'flowspec');
+      setValue('bgpProfileApproval', 'manual_approval');
+      setValue('bgpProfileAction', 'discard');
+      setValue('bgpProfileTarget', 'src_ip');
+      setValue('bgpProfileProtocol', 'anomaly_protocol');
+      setValue('bgpProfileDstPortSelector', 'any');
+      setValue('bgpProfileDstPortValue', '');
+      setValue('bgpProfileTcpFlags', 'any');
+      setValue('bgpProfileDuration', 1800);
+      setBoolSelect('bgpProfileEnabled', true);
+    }
+
+    function editBgpProfile(id) {
+      const item = bgpProfiles.find(profile => Number(profile.id) === Number(id));
+      if (!item) return;
+      setValue('bgpProfileId', item.id);
+      setValue('bgpProfileName', item.name);
+      setValue('bgpProfileConnector', item.connector_id || '');
+      setValue('bgpProfileType', item.response_type);
+      setValue('bgpProfileApproval', item.approval_mode);
+      setValue('bgpProfileAction', item.action);
+      setValue('bgpProfileTarget', item.target_selector);
+      setValue('bgpProfileProtocol', item.protocol_selector);
+      setValue('bgpProfileDstPortSelector', item.dst_port_selector);
+      setValue('bgpProfileDstPortValue', item.dst_port_value || '');
+      setValue('bgpProfileTcpFlags', item.tcp_flags_selector);
+      setValue('bgpProfileDuration', item.default_duration_seconds || 1800);
+      setBoolSelect('bgpProfileEnabled', item.enabled);
+      renderBgpSelects();
+    }
+
+    async function saveBgpProfile() {
+      const id = selectValue('bgpProfileId');
+      const payload = {
+        name: selectValue('bgpProfileName').trim(),
+        enabled: boolSelectValue('bgpProfileEnabled'),
+        response_type: selectValue('bgpProfileType', 'flowspec'),
+        connector_id: selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null,
+        approval_mode: selectValue('bgpProfileApproval', 'manual_approval'),
+        action: selectValue('bgpProfileAction', 'discard'),
+        target_selector: selectValue('bgpProfileTarget', 'src_ip'),
+        protocol_selector: selectValue('bgpProfileProtocol', 'anomaly_protocol'),
+        dst_port_selector: selectValue('bgpProfileDstPortSelector', 'any'),
+        dst_port_value: selectValue('bgpProfileDstPortValue').trim(),
+        tcp_flags_selector: selectValue('bgpProfileTcpFlags', 'any'),
+        default_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800)),
+        max_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800))
+      };
+      await apiRequest(id ? `/api/bgp/response-profiles/${id}` : '/api/bgp/response-profiles', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      clearBgpProfileForm();
+      await loadBgpView();
+    }
+
+    function clearBgpProtectedForm() {
+      setValue('bgpProtectedId', '');
+      setValue('bgpProtectedCidr', '');
+      setValue('bgpProtectedName', '');
+      setValue('bgpProtectedReason', '');
+      setBoolSelect('bgpProtectedEnabled', true);
+    }
+
+    function editBgpProtected(id) {
+      const item = bgpProtectedPrefixes.find(prefix => Number(prefix.id) === Number(id));
+      if (!item) return;
+      setValue('bgpProtectedId', item.id);
+      setValue('bgpProtectedCidr', item.cidr);
+      setValue('bgpProtectedName', item.name || '');
+      setValue('bgpProtectedReason', item.reason || '');
+      setBoolSelect('bgpProtectedEnabled', item.enabled);
+    }
+
+    async function saveBgpProtected() {
+      const id = selectValue('bgpProtectedId');
+      const payload = {
+        cidr: selectValue('bgpProtectedCidr').trim(),
+        name: selectValue('bgpProtectedName').trim(),
+        reason: selectValue('bgpProtectedReason').trim(),
+        enabled: boolSelectValue('bgpProtectedEnabled'),
+        block_rtbh: true,
+        block_flowspec: true,
+        block_diversion: false
+      };
+      await apiRequest(id ? `/api/bgp/protected-prefixes/${id}` : '/api/bgp/protected-prefixes', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      clearBgpProtectedForm();
+      await loadBgpView();
+    }
+
+    function bgpDryRunText(item) {
+      const errors = (item.validation_errors || []).map(value => `ERRO: ${value}`).join('\n');
+      const warnings = (item.validation_warnings || []).map(value => `AVISO: ${value}`).join('\n');
+      return [`#${item.id} ${item.status}`, errors, warnings, item.rendered_command || ''].filter(Boolean).join('\n\n');
+    }
+
+    async function runBgpDryRun() {
+      document.getElementById('bgpDryRunOutput').textContent = 'Gerando dry-run...';
+      const payload = {
+        response_profile_id: Number(selectValue('bgpDryProfile')),
+        connector_id: selectValue('bgpDryConnector') ? Number(selectValue('bgpDryConnector')) : null,
+        src_ip: selectValue('bgpDrySrcIp').trim() || null,
+        dst_ip: selectValue('bgpDryDstIp').trim() || null,
+        protocol: selectValue('bgpDryProtocol').trim() || null,
+        dst_port: selectValue('bgpDryDstPort') ? numberValue('bgpDryDstPort', 0) : null,
+        duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800))
+      };
+      const item = await apiRequest('/api/bgp/announcements/dry-run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
+      await loadBgpView();
+    }
+
+    async function openBgpMitigationModal(anomalyId) {
+      currentBgpMitigationAnomalyId = Number(anomalyId);
+      await loadBgpView();
+      setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
+      setValue('bgpMitigationProfile', bgpProfiles.find(item => item.enabled)?.id || '');
+      setValue('bgpMitigationConnector', bgpConnectors.find(item => item.enabled)?.id || '');
+      setValue('bgpMitigationDuration', 1800);
+      document.getElementById('bgpMitigationOutput').textContent = '';
+      renderBgpSelects();
+      openModal('bgpMitigationModal');
+    }
+
+    async function runBgpAnomalyDryRun() {
+      if (!currentBgpMitigationAnomalyId) return;
+      document.getElementById('bgpMitigationOutput').textContent = 'Gerando dry-run...';
+      const payload = {
+        response_profile_id: Number(selectValue('bgpMitigationProfile')),
+        connector_id: selectValue('bgpMitigationConnector') ? Number(selectValue('bgpMitigationConnector')) : null,
+        duration_seconds: Math.max(60, numberValue('bgpMitigationDuration', 1800))
+      };
+      const item = await apiRequest(`/api/bgp/announcements/from-anomaly/${currentBgpMitigationAnomalyId}/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(item);
+      await loadBgpView();
+    }
+
+    async function updateBgpAnnouncement(id, action) {
+      await apiRequest(`/api/bgp/announcements/${id}/${action}`, { method: 'POST' });
+      await loadBgpView();
+    }
+
     function unitLabel(unit) {
       return (ATTACK_UNIT_OPTIONS.find(([value]) => value === unit) || [unit, unit])[1];
     }
@@ -6658,6 +7166,9 @@
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${event.id}">
                 <i data-lucide="eye"></i><span>Ver detalhes</span>
+              </button>
+              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${event.id}">
+                <i data-lucide="shield-check"></i><span>Mitigar</span>
               </button>
               <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${event.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
               <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${event.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
@@ -9173,6 +9684,10 @@
         document.getElementById('view-anomalies').classList.add('active');
         document.querySelector('[data-nav-view="anomalies"]').classList.add('active');
         loadAnomalies(anomalyActiveTab).catch(console.error);
+      } else if (view === 'bgp') {
+        document.getElementById('view-bgp').classList.add('active');
+        document.querySelector('[data-nav-view="bgp"]').classList.add('active');
+        loadBgpView().catch(console.error);
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
@@ -9506,15 +10021,58 @@
     document.getElementById('anomaliesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const detail = target?.closest('.anomaly-detail');
+      const mitigate = target?.closest('.anomaly-mitigate');
       const ack = target?.closest('.anomaly-ack');
       const close = target?.closest('.anomaly-close');
       if (detail) {
         openAnomalyDetail(Number(detail.dataset.anomalyId)).catch(console.error);
+      } else if (mitigate) {
+        openBgpMitigationModal(Number(mitigate.dataset.anomalyId)).catch(console.error);
       } else if (ack) {
         ackAnomaly(Number(ack.dataset.anomalyId)).catch(console.error);
       } else if (close) {
         closeAnomalyEvent(Number(close.dataset.anomalyId)).catch(console.error);
       }
+    });
+
+    document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
+    document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpStatus', `Falha ao salvar conector: ${error.message}`)));
+    document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
+    document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
+    document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
+    document.getElementById('saveBgpProtectedButton').addEventListener('click', () => saveBgpProtected().catch(error => setText('bgpStatus', `Falha ao salvar prefixo: ${error.message}`)));
+    document.getElementById('clearBgpProtectedButton').addEventListener('click', clearBgpProtectedForm);
+    document.getElementById('runBgpDryRunButton').addEventListener('click', () => runBgpDryRun().catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('runBgpAnomalyDryRunButton').addEventListener('click', () => runBgpAnomalyDryRun().catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('bgpConnectorsTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.bgp-connector-edit');
+      const remove = target?.closest('.bgp-connector-delete');
+      if (edit) editBgpConnector(Number(edit.dataset.id));
+      if (remove) apiRequest(`/api/bgp/connectors/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover conector: ${error.message}`));
+    });
+    document.getElementById('bgpProfilesTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.bgp-profile-edit');
+      const remove = target?.closest('.bgp-profile-delete');
+      if (edit) editBgpProfile(Number(edit.dataset.id));
+      if (remove) apiRequest(`/api/bgp/response-profiles/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover profile: ${error.message}`));
+    });
+    document.getElementById('bgpProtectedTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.bgp-protected-edit');
+      const remove = target?.closest('.bgp-protected-delete');
+      if (edit) editBgpProtected(Number(edit.dataset.id));
+      if (remove) apiRequest(`/api/bgp/protected-prefixes/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover prefixo: ${error.message}`));
+    });
+    document.getElementById('bgpAnnouncementsTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const approve = target?.closest('.bgp-ann-approve');
+      const reject = target?.closest('.bgp-ann-reject');
+      const withdraw = target?.closest('.bgp-ann-withdraw');
+      if (approve) updateBgpAnnouncement(approve.dataset.id, 'approve').catch(error => setText('bgpStatus', `Falha ao aprovar: ${error.message}`));
+      if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
+      if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
     });
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
