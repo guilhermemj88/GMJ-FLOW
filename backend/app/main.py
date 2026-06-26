@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
@@ -8799,6 +8800,117 @@ def apply_attack_vector_suggestion_endpoint(request: Request, suggestion_id: int
     return vector
 
 
+def severity_rank(value: Any) -> int:
+    return {"info": 0, "warning": 1, "critical": 2}.get(clean_text(value).lower(), 0)
+
+
+def consolidated_security_anomaly_id(key: tuple[Any, ...]) -> int:
+    text = "|".join(clean_text(item) for item in key)
+    return -int(zlib.crc32(text.encode("utf-8")) % 2_000_000_000 + 1)
+
+
+def security_consolidation_key(item: dict[str, Any], include_status: bool = False) -> tuple[Any, ...]:
+    key: tuple[Any, ...] = (
+        item.get("zone_id") or 0,
+        item.get("template_id") or 0,
+        item.get("rule_id") or 0,
+        clean_text(item.get("protocol") or "ALL"),
+        clean_text(item.get("direction") or ""),
+        clean_text(item.get("vector") or ""),
+    )
+    if include_status:
+        key = (*key, clean_text(item.get("status") or "active"))
+    return key
+
+
+def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, Any]]:
+    status_where = "status = 'active'" if status_filter == "active" else "status <> 'active'"
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM security_anomalies
+            WHERE {status_where}
+            ORDER BY last_seen DESC, updated_at DESC, id DESC
+            """
+        ).fetchall()
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        item = security_anomaly_row_to_dict(row)
+        key = security_consolidation_key(item, include_status=status_filter != "active")
+        group = groups.setdefault(key, {"key": key, "items": []})
+        group["items"].append(item)
+    consolidated: list[dict[str, Any]] = []
+    for group in groups.values():
+        items = group["items"]
+        if not items:
+            continue
+        representative = max(items, key=lambda item: (severity_rank(item.get("severity")), float(item.get("packets_s") or 0), float(item.get("bits_s") or 0)))
+        first_seen_values = [parse_datetime_text(item.get("first_seen")) for item in items]
+        last_seen_values = [parse_datetime_text(item.get("last_seen")) for item in items]
+        first_seen_values = [value for value in first_seen_values if value is not None]
+        last_seen_values = [value for value in last_seen_values if value is not None]
+        started_at = iso(min(first_seen_values)) if first_seen_values else clean_text(representative.get("created_at")) or utc_now_iso()
+        last_seen_at = iso(max(last_seen_values)) if last_seen_values else clean_text(representative.get("updated_at")) or started_at
+        status = clean_text(representative.get("status") or ("active" if status_filter == "active" else "closed"))
+        peak_packets = max(float(item.get("packets_s") or 0) for item in items)
+        peak_bits = max(float(item.get("bits_s") or 0) for item in items)
+        peak_flows = max(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+        if peak_packets > 0:
+            metric_unit = "packets_s"
+            peak_value = peak_packets
+            observed_value = sum(float(item.get("packets_s") or 0) for item in items)
+        elif peak_bits > 0:
+            metric_unit = "bits_s"
+            peak_value = peak_bits
+            observed_value = sum(float(item.get("bits_s") or 0) for item in items)
+        else:
+            metric_unit = "flows_s"
+            peak_value = peak_flows
+            observed_value = sum(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+        src_ips = {clean_ip(item.get("src_ip")) for item in items if clean_text(item.get("src_ip"))}
+        dst_ips = {clean_ip(item.get("dst_ip")) for item in items if clean_text(item.get("dst_ip"))}
+        zone_name = clean_text(representative.get("zone_name")) or "IP Zone"
+        decoder = clean_text(representative.get("protocol")) or "ALL"
+        vector = clean_text(representative.get("vector")) or clean_text(representative.get("template_name")) or "Deteccao IP Zone"
+        affected_count = len(src_ips or dst_ips) or len(items)
+        summary = f"{decoder} detectado em {affected_count} IPs da zona {zone_name}"
+        event = {
+            "id": consolidated_security_anomaly_id(group["key"]),
+            "source": "security_anomalies",
+            "security_anomaly_ids": [int(item["id"]) for item in items],
+            "attack_vector_id": None,
+            "attack_vector_name": vector,
+            "sensor_id": None,
+            "sensor_name": "Deteccoes IP Zone",
+            "interface_if_index": None,
+            "target_ip": representative.get("dst_ip") or representative.get("src_ip") or "",
+            "target_cidr": representative.get("prefix_cidr") or "",
+            "direction": clean_text(representative.get("direction")) or "-",
+            "decoder": decoder,
+            "severity": max((clean_text(item.get("severity")) or "info" for item in items), key=severity_rank),
+            "metric_unit": metric_unit,
+            "threshold_value": 0.0,
+            "observed_value": observed_value,
+            "peak_value": peak_value,
+            "started_at": started_at,
+            "last_seen_at": last_seen_at,
+            "ended_at": None if status == "active" else last_seen_at,
+            "status": status,
+            "estimated_bytes": int(sum(float(item.get("bytes") or 0) for item in items)),
+            "estimated_packets": int(sum(float(item.get("packets") or 0) for item in items)),
+            "flow_count": int(sum(float(item.get("flows") or 0) for item in items)),
+            "summary": summary,
+            "created_at": min((clean_text(item.get("created_at")) for item in items if clean_text(item.get("created_at"))), default=started_at),
+            "updated_at": max((clean_text(item.get("updated_at")) for item in items if clean_text(item.get("updated_at"))), default=last_seen_at),
+            "detail_count": len(items),
+            "unique_src_ips": len(src_ips),
+            "unique_dst_ips": len(dst_ips),
+        }
+        consolidated.append({"event": event, "items": items, "key": group["key"]})
+    return consolidated
+
+
 def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
     ensure_sensor_db()
     if status_filter == "active":
@@ -8821,7 +8933,9 @@ def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
             """,
             (limit,),
         ).fetchall()
-    return [anomaly_event_row_to_dict(row) for row in rows]
+    items = [anomaly_event_row_to_dict(row) for row in rows]
+    items.extend(group["event"] for group in consolidated_security_anomaly_groups(status_filter))
+    return sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
 
 
 @app.get("/api/anomalies/summary")
@@ -8839,10 +8953,12 @@ def anomaly_summary_endpoint(request: Request):
             WHERE status = 'active'
             """
         ).fetchone()
+    consolidated = [group["event"] for group in consolidated_security_anomaly_groups("active")]
     return {
-        "active_count": int(row["active_count"] or 0),
-        "critical_count": int(row["critical_count"] or 0),
-        "warning_count": int(row["warning_count"] or 0),
+        "active_count": int(row["active_count"] or 0) + len(consolidated),
+        "critical_count": int(row["critical_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "critical"),
+        "warning_count": int(row["warning_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "warning"),
+        "security_consolidated_count": len(consolidated),
     }
 
 
@@ -8862,6 +8978,52 @@ def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000)):
 def anomaly_detail(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
+    if event_id < 0:
+        group = next(
+            (
+                item
+                for status_filter in ("active", "history")
+                for item in consolidated_security_anomaly_groups(status_filter)
+                if int(item["event"]["id"]) == event_id
+            ),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        event = group["event"]
+        details = group["items"]
+        conversations = {}
+        points_by_time: dict[str, dict[str, Any]] = {}
+        for item in details:
+            key = f"{item.get('src_ip') or '-'} -> {item.get('dst_ip') or '-'} {item.get('protocol') or 'ALL'}"
+            conversation = conversations.setdefault(
+                key,
+                {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0},
+            )
+            conversation["bytes"] += int(float(item.get("bytes") or 0))
+            conversation["packets"] += int(float(item.get("packets") or 0))
+            conversation["flow_count"] += int(float(item.get("flows") or 0))
+            minute = clean_text(item.get("last_seen") or item.get("updated_at"))[:16]
+            point = points_by_time.setdefault(minute, {"time": minute, "bits_s": 0.0, "packets_s": 0.0, "flows_s": 0.0})
+            point["bits_s"] += float(item.get("bits_s") or 0)
+            point["packets_s"] += float(item.get("packets_s") or 0)
+            point["flows_s"] += float(item.get("flows_s") or item.get("flows") or 0)
+        return {
+            "event": event,
+            "flows": [
+                {
+                    **item,
+                    "flow_time": item.get("last_seen") or item.get("updated_at") or item.get("created_at"),
+                    "src_port": 0,
+                    "dst_port": 0,
+                    "proto_name": item.get("protocol") or "ALL",
+                }
+                for item in details
+            ],
+            "security_anomalies": details,
+            "top_conversations": sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
+            "metric_points": sorted(points_by_time.values(), key=lambda item: item["time"]),
+        }
     with sqlite_connection() as conn:
         row = conn.execute(
             """
@@ -8937,6 +9099,27 @@ def acknowledge_anomaly(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
     now = utc_now_iso()
+    if event_id < 0:
+        group = next(
+            (
+                item
+                for status_filter in ("active", "history")
+                for item in consolidated_security_anomaly_groups(status_filter)
+                if int(item["event"]["id"]) == event_id
+            ),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        ids = [int(item["id"]) for item in group["items"]]
+        with sqlite_connection() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE security_anomalies SET status = 'acknowledged', updated_at = ? WHERE id IN ({placeholders})",
+                [now, *ids],
+            )
+            conn.commit()
+        return {"ok": True}
     with sqlite_connection() as conn:
         row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
         if row is None:
@@ -8960,6 +9143,27 @@ def close_anomaly(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
     now = utc_now_iso()
+    if event_id < 0:
+        group = next(
+            (
+                item
+                for status_filter in ("active", "history")
+                for item in consolidated_security_anomaly_groups(status_filter)
+                if int(item["event"]["id"]) == event_id
+            ),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        ids = [int(item["id"]) for item in group["items"]]
+        with sqlite_connection() as conn:
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE security_anomalies SET status = 'closed', updated_at = ? WHERE id IN ({placeholders})",
+                [now, *ids],
+            )
+            conn.commit()
+        return {"ok": True}
     with sqlite_connection() as conn:
         row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
         if row is None:
@@ -12240,11 +12444,16 @@ def geo_flows(
     asn_dst: int | None = Query(None, ge=1),
     src_asn: int | None = Query(None, ge=1),
     dst_asn: int | None = Query(None, ge=1),
+    src_ip: str | None = None,
+    dst_ip: str | None = None,
     src_cidr: str | None = None,
     dst_cidr: str | None = None,
+    src_port: int | None = Query(None, ge=0, le=65535),
+    dst_port: int | None = Query(None, ge=0, le=65535),
     metric: str = "bits_s",
     group_by: str = "city",
     top_n: int = Query(20, ge=1, le=500),
+    limit: int | None = Query(None, ge=1, le=500),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
 ):
@@ -12255,6 +12464,9 @@ def geo_flows(
     group_by = clean_text(group_by).lower() or "city"
     if group_by not in {"city", "country", "asn", "ip"}:
         raise HTTPException(status_code=400, detail="group_by invalido")
+    requested_top_n = int(limit or top_n)
+    src_filter = clean_text(src_cidr or src_ip)
+    dst_filter = clean_text(dst_cidr or dst_ip)
     context = flow_query_context(
         range_minutes,
         start,
@@ -12269,8 +12481,8 @@ def geo_flows(
         None,
         None,
         None,
-        None,
-        None,
+        src_port,
+        dst_port,
         proto or protocol,
         None,
         decoder,
@@ -12292,11 +12504,13 @@ def geo_flows(
             "decoder": decoder or "",
             "asn_src": asn_src or src_asn or "",
             "asn_dst": asn_dst or dst_asn or "",
-            "src_cidr": src_cidr or "",
-            "dst_cidr": dst_cidr or "",
+            "src_cidr": src_filter,
+            "dst_cidr": dst_filter,
+            "src_port": src_port or "",
+            "dst_port": dst_port or "",
             "metric": metric,
             "group_by": group_by,
-            "top_n": top_n,
+            "top_n": requested_top_n,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
         },
@@ -12307,75 +12521,113 @@ def geo_flows(
         return cached
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
-    fetch_limit = min(max(int(top_n) * 10, int(top_n)), 2000)
+    fetch_limit = min(max(int(requested_top_n) * 20, 500), 5000)
     params.update({"seconds": seconds, "limit": fetch_limit})
     filters = [context["where"]]
-    add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_cidr, dst_cidr)
+    add_geo_filters(filters, params, asn_src or src_asn, asn_dst or dst_asn, src_filter, dst_filter)
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "geo_zone")
     if zone_filter:
         filters.append(zone_filter)
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
     order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
+    has_strong_filter = any(
+        [
+            src_filter,
+            dst_filter,
+            asn_src or src_asn,
+            asn_dst or dst_asn,
+            zone_id,
+            interface_id,
+            if_index is not None,
+            src_port is not None,
+            dst_port is not None,
+            clean_text(proto or protocol or decoder),
+            clean_text(direction).lower() in {"download", "upload"},
+        ]
+    )
+    if range_seconds(start_dt, end_dt) > 360 * 60 and not has_strong_filter:
+        warning = "Consulta muito ampla. Reduza o periodo, aplique filtros ou aumente o Top."
+        return dashboard_cache_set(
+            cache_key,
+            {
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "source": "flows",
+                "metric": metric,
+                "group_by": group_by,
+                "requested_top_n": requested_top_n,
+                "summary": {
+                    "total_bits_s": 0.0,
+                    "total_packets_s": 0.0,
+                    "total_flows_s": 0.0,
+                    "total_anomalies": 0,
+                    "countries_active": 0,
+                    "routes_active": 0,
+                    "routes_located": 0,
+                    "missing_geo": 0,
+                },
+                "total_routes": 0,
+                "complete_route_count": 0,
+                "incomplete_route_count": 0,
+                "localized_routes": 0,
+                "unlocalized_routes": 0,
+                "active_countries": 0,
+                "nodes": [],
+                "edges": [],
+                "items": [],
+                "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
+                "warning": warning,
+            },
+        )
     try:
         result = query_clickhouse(
             f"""
             SELECT
-                src_ip,
-                dst_ip,
-                src_asn,
-                dst_asn,
-                src_as_name,
-                dst_as_name,
-                top_protocol,
-                bytes_sum AS bytes,
-                packets_sum AS packets,
-                bytes_sum * 8 / {{seconds:Float64}} AS bits_s,
-                packets_sum / {{seconds:Float64}} AS packets_s,
-                flows
-            FROM (
-                SELECT
-                    src_ip,
-                    dst_ip,
-                    any(src_asn) AS src_asn,
-                    any(dst_asn) AS dst_asn,
-                    any(src_as_name) AS src_as_name,
-                    any(dst_as_name) AS dst_as_name,
-                    topK(1)(top_protocol_raw)[1] AS top_protocol,
-                    sum(corrected_bytes) AS bytes_sum,
-                    sum(corrected_packets) AS packets_sum,
-                    sum(flow_count) AS flows
-                FROM (
-                    SELECT
-                        toString(src_ip) AS src_ip,
-                        toString(dst_ip) AS dst_ip,
-                        src_asn,
-                        dst_asn,
-                        src_as_name,
-                        dst_as_name,
-                        {decoder_label_expr()} AS top_protocol_raw,
-                        {corrected_value_expr("bytes", factor_expr)} AS corrected_bytes,
-                        {corrected_value_expr("packets", factor_expr)} AS corrected_packets,
-                        flow_count
-                    FROM flow_raw
-                    WHERE {where}
-                ) AS raw_flows
-                GROUP BY src_ip, dst_ip
-            ) AS grouped_flows
+                toString(src_ip) AS src_ip,
+                toString(dst_ip) AS dst_ip,
+                toUInt32(src_asn) AS src_asn,
+                toUInt32(dst_asn) AS dst_asn,
+                any(src_as_name) AS src_as_name,
+                any(dst_as_name) AS dst_as_name,
+                {decoder_label_expr()} AS top_protocol,
+                {corrected_sum_expr("bytes", factor_expr)} AS bytes,
+                {corrected_sum_expr("packets", factor_expr)} AS packets,
+                {corrected_sum_expr("bytes", factor_expr)} * 8 / {{seconds:Float64}} AS bits_s,
+                {corrected_sum_expr("packets", factor_expr)} / {{seconds:Float64}} AS packets_s,
+                sum(flow_count) AS flows
+            FROM flow_raw
+            WHERE {where}
+            GROUP BY src_ip, dst_ip, src_asn, dst_asn, top_protocol
             ORDER BY {order_expr} DESC
             LIMIT {{limit:UInt32}}
             """,
             params,
         )
     except Exception as exc:
-        warning = f"Erro ao consultar ClickHouse: {clean_text(exc)}"
+        error_text = clean_text(exc)
+        if "MEMORY_LIMIT_EXCEEDED" in error_text or "code: 241" in error_text or "code 241" in error_text:
+            warning = "Consulta muito ampla. Reduza o periodo, aplique filtros ou aumente o Top."
+        else:
+            warning = f"Erro ao consultar ClickHouse: {error_text}"
         logger.exception("Falha em /api/geo/flows: %s", warning)
         return {
             "start": iso(start_dt),
             "end": iso(end_dt),
+            "source": "flows",
             "metric": metric,
             "group_by": group_by,
-            "requested_top_n": top_n,
+            "requested_top_n": requested_top_n,
+            "summary": {
+                "total_bits_s": 0.0,
+                "total_packets_s": 0.0,
+                "total_flows_s": 0.0,
+                "total_anomalies": 0,
+                "countries_active": 0,
+                "routes_active": 0,
+                "routes_located": 0,
+                "missing_geo": 0,
+            },
             "total_routes": 0,
             "complete_route_count": 0,
             "incomplete_route_count": 0,
@@ -12536,7 +12788,7 @@ def geo_flows(
         "source": "flows",
         "metric": metric,
         "group_by": group_by,
-        "requested_top_n": top_n,
+        "requested_top_n": requested_top_n,
         "summary": summary,
         "total_routes": len(edges),
         "complete_route_count": complete_count,
