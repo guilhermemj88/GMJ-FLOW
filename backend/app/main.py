@@ -504,6 +504,9 @@ BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "announced", "reject
 BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
+BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
+BGP_POLICY_DECISIONS = {"allow_auto", "require_manual_approval", "deny"}
+BGP_POLICY_SEVERITIES = {"safe", "caution", "danger"}
 
 
 class SensorInterfacePayload(BaseModel):
@@ -682,6 +685,14 @@ class AttackVectorPayload(BaseModel):
     severity: str = "warning"
     response_action: str = "alert_only"
     parent_enabled: bool = True
+    response_profile_id: int | None = Field(None, ge=1)
+    mitigation_mode: str = "disabled"
+    max_auto_prefixlen_v4: int | None = Field(None, ge=0, le=32)
+    max_auto_prefixlen_v6: int | None = Field(None, ge=0, le=128)
+    require_protected_prefix: bool = True
+    cooldown_seconds: int = Field(300, ge=0, le=86400)
+    max_active_announcements: int = Field(3, ge=0, le=1000)
+    duration_seconds: int = Field(1800, ge=60, le=604800)
 
 
 class AttackVectorLearnPayload(BaseModel):
@@ -753,18 +764,33 @@ class DetectionWhitelistPayload(BaseModel):
 class BgpConnectorPayload(BaseModel):
     name: str
     role: str = "generic_bgp"
+    backend: str | None = None
     backend_type: str = "dry_run"
     mode: str = "dry_run"
     local_asn: int | None = Field(None, ge=1, le=4294967295)
     peer_asn: int | None = Field(None, ge=1, le=4294967295)
     peer_ip: str = ""
+    local_address: str = ""
     router_id: str = ""
+    passive_listen_enabled: bool = False
+    listen_port: int = Field(179, ge=1, le=65535)
     default_next_hop: str = ""
     default_community: str = ""
     default_large_community: str = ""
+    exabgp_config_path: str = ""
+    exabgp_pipe_in: str = ""
+    exabgp_pipe_out: str = ""
+    systemd_service_name: str = ""
+    router_check_enabled: bool = False
+    router_vendor: str = "huawei_vrp"
+    router_mgmt_ip: str = ""
+    router_username: str = ""
+    router_auth_secret_ref: str = ""
+    router_password: str = ""
     max_active_rules: int = Field(BGP_DEFAULT_MAX_ACTIVE_RULES, ge=1, le=10000)
     max_duration_seconds: int = Field(BGP_DEFAULT_MAX_DURATION_SECONDS, ge=60, le=604800)
     enabled: bool = True
+    is_active: bool = True
     notes: str = ""
 
 
@@ -817,6 +843,35 @@ class BgpAnnouncementDryRunPayload(BaseModel):
     tcp_flags: str | None = None
     duration_seconds: int | None = Field(None, ge=60, le=604800)
     reason: str = ""
+
+
+class BgpFlowspecTestPayload(BaseModel):
+    action: str = "dry_run"
+    src_cidr: str | None = None
+    dst_cidr: str | None = None
+    protocol: str = "any"
+    src_port: str | None = None
+    dst_port: str | None = None
+    then_action: str = "discard"
+    duration_seconds: int | None = Field(None, ge=60, le=604800)
+    confirm: str = ""
+
+
+class BgpMitigationPortPolicyPayload(BaseModel):
+    protocol: str = "udp"
+    port_kind: str = "source"
+    port_value: int = Field(..., ge=1, le=65535)
+    name: str
+    is_critical: bool = True
+    allow_port_only_auto: bool = False
+    require_ip_scope: bool = True
+    allow_with_dst_protected_prefix: bool = True
+    allow_with_src_ip: bool = True
+    allow_with_dst_ip: bool = True
+    min_dst_prefixlen_auto: int | None = Field(None, ge=0, le=128)
+    min_src_prefixlen_auto: int | None = Field(None, ge=0, le=128)
+    description: str = ""
+    is_active: bool = True
 
 
 def get_client():
@@ -1238,6 +1293,14 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "attack_vectors", "dst_asn", "dst_asn TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vectors", "tcp_flags", "tcp_flags TEXT NOT NULL DEFAULT 'any'")
     ensure_sqlite_column(conn, "attack_vectors", "window_seconds", "window_seconds INTEGER NOT NULL DEFAULT 60")
+    ensure_sqlite_column(conn, "attack_vectors", "response_profile_id", "response_profile_id INTEGER")
+    ensure_sqlite_column(conn, "attack_vectors", "mitigation_mode", "mitigation_mode TEXT NOT NULL DEFAULT 'disabled'")
+    ensure_sqlite_column(conn, "attack_vectors", "max_auto_prefixlen_v4", "max_auto_prefixlen_v4 INTEGER")
+    ensure_sqlite_column(conn, "attack_vectors", "max_auto_prefixlen_v6", "max_auto_prefixlen_v6 INTEGER")
+    ensure_sqlite_column(conn, "attack_vectors", "require_protected_prefix", "require_protected_prefix INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "attack_vectors", "cooldown_seconds", "cooldown_seconds INTEGER NOT NULL DEFAULT 300")
+    ensure_sqlite_column(conn, "attack_vectors", "max_active_announcements", "max_active_announcements INTEGER NOT NULL DEFAULT 3")
+    ensure_sqlite_column(conn, "attack_vectors", "duration_seconds", "duration_seconds INTEGER NOT NULL DEFAULT 1800")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     conn.execute(
@@ -1771,6 +1834,50 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "require_protocol_or_port": 1,
         },
         {
+            "name": "FLOWSPEC_BLOCK_SRC_DNS_RESPONSE",
+            "description": "Bloqueia respostas DNS/UDP por source-port 53 com escopo de origem.",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": "discard",
+            "target_selector": "src_ip",
+            "protocol_selector": "udp",
+            "src_port_selector": "fixed",
+            "src_port_value": "53",
+            "require_protocol_or_port": 1,
+        },
+        {
+            "name": "FLOWSPEC_BLOCK_DST_DNS_QUERY",
+            "description": "Bloqueia queries DNS/UDP por destination-port 53 com escopo de destino.",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": "discard",
+            "target_selector": "dst_ip",
+            "protocol_selector": "udp",
+            "dst_port_selector": "fixed",
+            "dst_port_value": "53",
+            "require_protocol_or_port": 1,
+        },
+        {
+            "name": "FLOWSPEC_BLOCK_SRC_IP_ALL",
+            "description": "Bloqueia todo trafego de uma origem especifica.",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": "discard",
+            "target_selector": "src_ip",
+            "protocol_selector": "any",
+            "require_protocol_or_port": 0,
+        },
+        {
+            "name": "FLOWSPEC_BLOCK_DST_IP_ALL",
+            "description": "Bloqueia todo trafego para um destino especifico.",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": "discard",
+            "target_selector": "dst_ip",
+            "protocol_selector": "any",
+            "require_protocol_or_port": 0,
+        },
+        {
             "name": "FLOWSPEC_BLOCK_DST_DNS",
             "description": "Bloqueia destino de trafego DNS/UDP suspeito.",
             "response_type": "flowspec",
@@ -1849,7 +1956,7 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 allow_wide_prefix, max_duration_seconds, default_duration_seconds, created_at, updated_at
             )
             VALUES (
-                ?, ?, 1, ?, NULL, ?, ?, ?, ?, 'any', '', ?, ?, ?, NULL,
+                ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
                 '', '', '', '', ?, 0, ?, 1800, ?, ?
             )
             """,
@@ -1861,6 +1968,8 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 item["action"],
                 item["target_selector"],
                 item["protocol_selector"],
+                item.get("src_port_selector", "any"),
+                item.get("src_port_value", ""),
                 item.get("dst_port_selector", "any"),
                 item.get("dst_port_value", ""),
                 item.get("tcp_flags_selector", "any"),
@@ -1869,6 +1978,44 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 now,
                 now,
             ),
+        )
+
+
+def seed_default_bgp_port_policies(conn: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+    defaults = [
+        ("udp", "source", 53, "DNS_RESPONSE_REFLECTION", 1, 1, 32, 128, "DNS reflection/amplification por source-port 53."),
+        ("udp", "destination", 53, "DNS_QUERY", 1, 1, 32, 128, "DNS query por destination-port 53."),
+        ("udp", "source", 123, "NTP_REFLECTION", 1, 1, 32, 128, "NTP reflection por source-port 123."),
+        ("udp", "destination", 123, "NTP", 1, 1, 32, 128, "NTP por destination-port 123."),
+        ("tcp", "destination", 179, "BGP", 1, 1, 32, 128, "BGP TCP/179."),
+        ("tcp", "destination", 22, "SSH", 1, 1, 32, 128, "SSH TCP/22."),
+        ("udp", "destination", 161, "SNMP", 1, 1, 32, 128, "SNMP UDP/161."),
+        ("tcp", "destination", 80, "HTTP", 1, 1, 32, 128, "HTTP TCP/80."),
+        ("tcp", "destination", 443, "HTTPS", 1, 1, 32, 128, "HTTPS TCP/443."),
+    ]
+    for protocol, port_kind, port_value, name, critical, require_scope, min_dst, min_src, description in defaults:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM bgp_mitigation_port_policies
+            WHERE protocol = ? AND port_kind = ? AND port_value = ?
+            LIMIT 1
+            """,
+            (protocol, port_kind, port_value),
+        ).fetchone()
+        if row is not None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO bgp_mitigation_port_policies (
+                protocol, port_kind, port_value, name, is_critical, allow_port_only_auto,
+                require_ip_scope, allow_with_dst_protected_prefix, allow_with_src_ip, allow_with_dst_ip,
+                min_dst_prefixlen_auto, min_src_prefixlen_auto, description, is_active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, 1, ?, ?, ?, 1, ?, ?)
+            """,
+            (protocol, port_kind, port_value, name, critical, require_scope, min_dst, min_src, description, now, now),
         )
 
 
@@ -1884,19 +2031,47 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             local_asn INTEGER,
             peer_asn INTEGER,
             peer_ip TEXT NOT NULL DEFAULT '',
+            local_address TEXT NOT NULL DEFAULT '',
             router_id TEXT NOT NULL DEFAULT '',
+            passive_listen_enabled INTEGER NOT NULL DEFAULT 0,
+            listen_port INTEGER NOT NULL DEFAULT 179,
             default_next_hop TEXT NOT NULL DEFAULT '',
             default_community TEXT NOT NULL DEFAULT '',
             default_large_community TEXT NOT NULL DEFAULT '',
+            exabgp_config_path TEXT NOT NULL DEFAULT '',
+            exabgp_pipe_in TEXT NOT NULL DEFAULT '',
+            exabgp_pipe_out TEXT NOT NULL DEFAULT '',
+            systemd_service_name TEXT NOT NULL DEFAULT '',
+            router_check_enabled INTEGER NOT NULL DEFAULT 0,
+            router_vendor TEXT NOT NULL DEFAULT 'huawei_vrp',
+            router_mgmt_ip TEXT NOT NULL DEFAULT '',
+            router_username TEXT NOT NULL DEFAULT '',
+            router_auth_secret_ref TEXT NOT NULL DEFAULT '',
+            router_password TEXT NOT NULL DEFAULT '',
             max_active_rules INTEGER NOT NULL DEFAULT 50,
             max_duration_seconds INTEGER NOT NULL DEFAULT 3600,
             enabled INTEGER NOT NULL DEFAULT 1,
+            is_active INTEGER NOT NULL DEFAULT 1,
             notes TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """
     )
+    ensure_sqlite_column(conn, "bgp_connectors", "local_address", "local_address TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "passive_listen_enabled", "passive_listen_enabled INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_connectors", "listen_port", "listen_port INTEGER NOT NULL DEFAULT 179")
+    ensure_sqlite_column(conn, "bgp_connectors", "exabgp_config_path", "exabgp_config_path TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "exabgp_pipe_in", "exabgp_pipe_in TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "exabgp_pipe_out", "exabgp_pipe_out TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "systemd_service_name", "systemd_service_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_check_enabled", "router_check_enabled INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_vendor", "router_vendor TEXT NOT NULL DEFAULT 'huawei_vrp'")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_mgmt_ip", "router_mgmt_ip TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_username", "router_username TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_auth_secret_ref", "router_auth_secret_ref TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "router_password", "router_password TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "is_active", "is_active INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_protected_prefixes (
@@ -1975,11 +2150,25 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             approved_at TEXT,
             rejected_at TEXT,
             withdrawn_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            policy_decision TEXT NOT NULL DEFAULT '',
+            policy_severity TEXT NOT NULL DEFAULT '',
+            policy_reasons TEXT NOT NULL DEFAULT '[]',
+            policy_warnings TEXT NOT NULL DEFAULT '[]',
+            policy_required_scope TEXT NOT NULL DEFAULT '[]',
+            policy_matched_port_policies TEXT NOT NULL DEFAULT '[]',
             FOREIGN KEY(connector_id) REFERENCES bgp_connectors(id) ON DELETE SET NULL,
             FOREIGN KEY(response_profile_id) REFERENCES bgp_response_profiles(id) ON DELETE SET NULL
         )
         """
     )
+    ensure_sqlite_column(conn, "bgp_announcements", "last_error", "last_error TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_decision", "policy_decision TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_severity", "policy_severity TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_reasons", "policy_reasons TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_warnings", "policy_warnings TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_required_scope", "policy_required_scope TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_announcements", "policy_matched_port_policies", "policy_matched_port_policies TEXT NOT NULL DEFAULT '[]'")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_announcement_events (
@@ -1994,12 +2183,37 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bgp_mitigation_port_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            protocol TEXT NOT NULL DEFAULT 'udp',
+            port_kind TEXT NOT NULL DEFAULT 'source',
+            port_value INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            is_critical INTEGER NOT NULL DEFAULT 1,
+            allow_port_only_auto INTEGER NOT NULL DEFAULT 0,
+            require_ip_scope INTEGER NOT NULL DEFAULT 1,
+            allow_with_dst_protected_prefix INTEGER NOT NULL DEFAULT 1,
+            allow_with_src_ip INTEGER NOT NULL DEFAULT 1,
+            allow_with_dst_ip INTEGER NOT NULL DEFAULT 1,
+            min_dst_prefixlen_auto INTEGER,
+            min_src_prefixlen_auto INTEGER,
+            description TEXT NOT NULL DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_connectors_enabled ON bgp_connectors(enabled, role)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_profiles_enabled ON bgp_response_profiles(enabled, response_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_protected_enabled ON bgp_protected_prefixes(enabled)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_status ON bgp_announcements(status, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
     seed_default_bgp_response_profiles(conn)
+    seed_default_bgp_port_policies(conn)
 
 
 def ensure_sensor_db() -> None:
@@ -5259,22 +5473,37 @@ def bgp_json_loads(value: Any, fallback: Any) -> Any:
 
 def bgp_connector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    backend_type = item.get("backend_type") or "dry_run"
     return {
         "id": int(item["id"]),
         "name": item["name"],
         "role": item.get("role") or "generic_bgp",
-        "backend_type": item.get("backend_type") or "dry_run",
+        "backend": backend_type,
+        "backend_type": backend_type,
         "mode": item.get("mode") or "dry_run",
         "local_asn": item.get("local_asn"),
         "peer_asn": item.get("peer_asn"),
         "peer_ip": item.get("peer_ip") or "",
+        "local_address": item.get("local_address") or "",
         "router_id": item.get("router_id") or "",
+        "passive_listen_enabled": sqlite_bool(item.get("passive_listen_enabled")),
+        "listen_port": int(item.get("listen_port") or 179),
         "default_next_hop": item.get("default_next_hop") or "",
         "default_community": item.get("default_community") or "",
         "default_large_community": item.get("default_large_community") or "",
+        "exabgp_config_path": item.get("exabgp_config_path") or "",
+        "exabgp_pipe_in": item.get("exabgp_pipe_in") or "",
+        "exabgp_pipe_out": item.get("exabgp_pipe_out") or "",
+        "systemd_service_name": item.get("systemd_service_name") or "",
+        "router_check_enabled": sqlite_bool(item.get("router_check_enabled")),
+        "router_vendor": item.get("router_vendor") or "huawei_vrp",
+        "router_mgmt_ip": item.get("router_mgmt_ip") or "",
+        "router_username": item.get("router_username") or "",
+        "router_auth_secret_ref": item.get("router_auth_secret_ref") or "",
         "max_active_rules": int(item.get("max_active_rules") or BGP_DEFAULT_MAX_ACTIVE_RULES),
         "max_duration_seconds": int(item.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
         "enabled": sqlite_bool(item.get("enabled")),
+        "is_active": sqlite_bool(item.get("is_active", item.get("enabled", 1))),
         "notes": item.get("notes") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -5351,6 +5580,13 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "rendered_command": item.get("rendered_command") or "",
         "validation_errors": bgp_json_loads(item.get("validation_errors"), []),
         "validation_warnings": bgp_json_loads(item.get("validation_warnings"), []),
+        "last_error": item.get("last_error") or "",
+        "policy_decision": item.get("policy_decision") or "",
+        "policy_severity": item.get("policy_severity") or "",
+        "policy_reasons": bgp_json_loads(item.get("policy_reasons"), []),
+        "policy_warnings": bgp_json_loads(item.get("policy_warnings"), []),
+        "policy_required_scope": bgp_json_loads(item.get("policy_required_scope"), []),
+        "policy_matched_port_policies": bgp_json_loads(item.get("policy_matched_port_policies"), []),
         "raw_payload": bgp_json_loads(item.get("raw_payload"), {}),
         "created_by": item.get("created_by") or "",
         "created_at": item["created_at"],
@@ -5421,21 +5657,36 @@ def bgp_connector_payload_to_values(payload: BgpConnectorPayload) -> dict[str, A
     name = clean_text(payload.name)
     if not name:
         raise HTTPException(status_code=400, detail="name obrigatorio")
+    backend_type = clean_text(payload.backend or payload.backend_type or "dry_run")
     return {
         "name": name,
         "role": normalize_choice(payload.role, BGP_CONNECTOR_ROLES, "role"),
-        "backend_type": normalize_choice(payload.backend_type, BGP_CONNECTOR_BACKENDS, "backend_type"),
+        "backend_type": normalize_choice(backend_type, BGP_CONNECTOR_BACKENDS, "backend"),
         "mode": normalize_choice(payload.mode, BGP_MODES, "mode"),
         "local_asn": payload.local_asn,
         "peer_asn": payload.peer_asn,
         "peer_ip": optional_ip(payload.peer_ip, "peer_ip") if clean_text(payload.peer_ip) else "",
+        "local_address": optional_ip(payload.local_address, "local_address") if clean_text(payload.local_address) else "",
         "router_id": optional_ip(payload.router_id, "router_id") if clean_text(payload.router_id) else "",
+        "passive_listen_enabled": 1 if payload.passive_listen_enabled else 0,
+        "listen_port": int(payload.listen_port or 179),
         "default_next_hop": optional_ip(payload.default_next_hop, "default_next_hop") if clean_text(payload.default_next_hop) else "",
         "default_community": clean_text(payload.default_community),
         "default_large_community": clean_text(payload.default_large_community),
+        "exabgp_config_path": clean_text(payload.exabgp_config_path),
+        "exabgp_pipe_in": clean_text(payload.exabgp_pipe_in),
+        "exabgp_pipe_out": clean_text(payload.exabgp_pipe_out),
+        "systemd_service_name": clean_text(payload.systemd_service_name),
+        "router_check_enabled": 1 if payload.router_check_enabled else 0,
+        "router_vendor": clean_text(payload.router_vendor) or "huawei_vrp",
+        "router_mgmt_ip": optional_ip(payload.router_mgmt_ip, "router_mgmt_ip") if clean_text(payload.router_mgmt_ip) else "",
+        "router_username": clean_text(payload.router_username),
+        "router_auth_secret_ref": clean_text(payload.router_auth_secret_ref),
+        "router_password": clean_text(payload.router_password),
         "max_active_rules": int(payload.max_active_rules),
         "max_duration_seconds": int(payload.max_duration_seconds),
         "enabled": 1 if payload.enabled else 0,
+        "is_active": 1 if payload.is_active else 0,
         "notes": clean_text(payload.notes),
     }
 
@@ -5484,6 +5735,320 @@ def fetch_bgp_profile(conn: sqlite3.Connection, profile_id: int) -> dict[str, An
     if row is None:
         raise HTTPException(status_code=404, detail="Perfil de resposta BGP nao encontrado")
     return bgp_response_profile_row_to_dict(row)
+
+
+def bgp_port_policy_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "protocol": item.get("protocol") or "any",
+        "port_kind": item.get("port_kind") or "source",
+        "port_value": int(item.get("port_value") or 0),
+        "name": item.get("name") or "",
+        "is_critical": sqlite_bool(item.get("is_critical")),
+        "allow_port_only_auto": sqlite_bool(item.get("allow_port_only_auto")),
+        "require_ip_scope": sqlite_bool(item.get("require_ip_scope")),
+        "allow_with_dst_protected_prefix": sqlite_bool(item.get("allow_with_dst_protected_prefix")),
+        "allow_with_src_ip": sqlite_bool(item.get("allow_with_src_ip")),
+        "allow_with_dst_ip": sqlite_bool(item.get("allow_with_dst_ip")),
+        "min_dst_prefixlen_auto": item.get("min_dst_prefixlen_auto"),
+        "min_src_prefixlen_auto": item.get("min_src_prefixlen_auto"),
+        "description": item.get("description") or "",
+        "is_active": sqlite_bool(item.get("is_active")),
+        "created_at": item["created_at"],
+        "updated_at": item["updated_at"],
+    }
+
+
+def bgp_port_policy_payload_to_values(payload: BgpMitigationPortPolicyPayload) -> dict[str, Any]:
+    protocol = normalize_bgp_protocol(payload.protocol) or "any"
+    if protocol not in {"any", "tcp", "udp", "icmp"}:
+        raise HTTPException(status_code=400, detail="protocol invalido")
+    port_kind = normalize_choice(payload.port_kind, {"source", "destination", "both"}, "port_kind")
+    name = clean_text(payload.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="name obrigatorio")
+    return {
+        "protocol": protocol,
+        "port_kind": port_kind,
+        "port_value": int(payload.port_value),
+        "name": name,
+        "is_critical": 1 if payload.is_critical else 0,
+        "allow_port_only_auto": 1 if payload.allow_port_only_auto else 0,
+        "require_ip_scope": 1 if payload.require_ip_scope else 0,
+        "allow_with_dst_protected_prefix": 1 if payload.allow_with_dst_protected_prefix else 0,
+        "allow_with_src_ip": 1 if payload.allow_with_src_ip else 0,
+        "allow_with_dst_ip": 1 if payload.allow_with_dst_ip else 0,
+        "min_dst_prefixlen_auto": payload.min_dst_prefixlen_auto,
+        "min_src_prefixlen_auto": payload.min_src_prefixlen_auto,
+        "description": clean_text(payload.description),
+        "is_active": 1 if payload.is_active else 0,
+    }
+
+
+def bgp_run_command(args: list[str], timeout: float = 2.0) -> tuple[int, str]:
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    except FileNotFoundError:
+        return 127, f"{args[0]} nao encontrado"
+    except subprocess.TimeoutExpired:
+        return 124, f"{args[0]} timeout"
+    except Exception as exc:
+        return 1, str(exc)
+    output = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
+    return int(completed.returncode), output
+
+
+def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    service_name = clean_text(connector.get("systemd_service_name"))
+    service_raw = "unknown"
+    service_active = False
+    if service_name:
+        code, output = bgp_run_command(["systemctl", "is-active", service_name])
+        service_raw = clean_text(output) or ("active" if code == 0 else "unknown")
+        service_active = code == 0 and service_raw == "active"
+        if code not in {0, 3}:
+            errors.append(f"systemctl: {service_raw}")
+
+    local_address = clean_text(connector.get("local_address"))
+    peer_ip = clean_text(connector.get("peer_ip"))
+    listen_port = int(connector.get("listen_port") or 179)
+    code_listen, listen_output = bgp_run_command(["ss", "-lntp"])
+    listening = False
+    if code_listen == 0:
+        for line in listen_output.splitlines():
+            if f":{listen_port}" not in line:
+                continue
+            if not local_address or f"{local_address}:{listen_port}" in line or f"0.0.0.0:{listen_port}" in line or f"*:{listen_port}" in line:
+                listening = True
+                break
+    else:
+        errors.append(f"ss -lntp: {listen_output}")
+
+    code_tcp, tcp_output = bgp_run_command(["ss", "-antp"])
+    tcp_established = False
+    if code_tcp == 0:
+        for line in tcp_output.splitlines():
+            if "ESTAB" not in line and "ESTABLISHED" not in line:
+                continue
+            if peer_ip and peer_ip not in line:
+                continue
+            if f":{listen_port}" in line:
+                tcp_established = True
+                break
+    else:
+        errors.append(f"ss -antp: {tcp_output}")
+
+    pipe_in = clean_text(connector.get("exabgp_pipe_in"))
+    pipe_out = clean_text(connector.get("exabgp_pipe_out"))
+    input_exists = bool(pipe_in and Path(pipe_in).exists())
+    output_exists = bool(pipe_out and Path(pipe_out).exists())
+    input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
+    return {
+        "connector_id": connector["id"],
+        "name": connector["name"],
+        "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
+        "service": {"name": service_name, "active": service_active, "raw": service_raw},
+        "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening},
+        "pipes": {
+            "input_path": pipe_in,
+            "input_exists": input_exists,
+            "input_writable": input_writable,
+            "output_path": pipe_out,
+            "output_exists": output_exists,
+        },
+        "session": {"tcp_established": tcp_established, "peer_ip": peer_ip},
+        "bgp_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
+        "flowspec_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
+        "last_checked_at": utc_now_iso(),
+        "errors": errors,
+    }
+
+
+def normalize_flowspec_port(value: Any, field_name: str) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    return normalize_bgp_port_text(text, field_name)
+
+
+def flowspec_candidate_from_payload(payload: BgpFlowspecTestPayload) -> dict[str, Any]:
+    action = normalize_choice(payload.action, {"announce", "withdraw", "dry_run"}, "action")
+    then_action = normalize_choice(payload.then_action, {"discard"}, "then_action")
+    src_cidr = normalize_bgp_host_or_cidr(payload.src_cidr, "src_cidr") if clean_text(payload.src_cidr) else ""
+    dst_cidr = normalize_bgp_host_or_cidr(payload.dst_cidr, "dst_cidr") if clean_text(payload.dst_cidr) else ""
+    if not src_cidr and not dst_cidr:
+        raise HTTPException(status_code=400, detail="src_cidr ou dst_cidr obrigatorio")
+    protocol = normalize_bgp_protocol(payload.protocol)
+    return {
+        "command_action": "announce" if action == "dry_run" else action,
+        "requested_action": action,
+        "response_type": "flowspec",
+        "action": then_action,
+        "target_prefix": dst_cidr or src_cidr,
+        "src_prefix": src_cidr,
+        "dst_prefix": dst_cidr,
+        "protocol": protocol,
+        "src_port": normalize_flowspec_port(payload.src_port, "src_port"),
+        "dst_port": normalize_flowspec_port(payload.dst_port, "dst_port"),
+        "tcp_flags": "",
+        "duration_seconds": int(payload.duration_seconds or 1800),
+        "raw_payload": dump_model(payload),
+    }
+
+
+def render_exabgp_flowspec_command(command_action: str, candidate: dict[str, Any]) -> str:
+    match_parts: list[str] = []
+    if candidate.get("src_prefix"):
+        match_parts.append(f"source {candidate['src_prefix']};")
+    if candidate.get("dst_prefix"):
+        match_parts.append(f"destination {candidate['dst_prefix']};")
+    if candidate.get("protocol"):
+        match_parts.append(f"protocol {candidate['protocol']};")
+    if candidate.get("src_port"):
+        match_parts.append(f"source-port ={candidate['src_port']};")
+    if candidate.get("dst_port"):
+        match_parts.append(f"destination-port ={candidate['dst_port']};")
+    if candidate.get("tcp_flags"):
+        match_parts.append(f"tcp-flags {clean_text(candidate['tcp_flags']).replace('_', '+')};")
+    then_action = "discard;" if candidate.get("action") == "discard" else "discard;"
+    return f"{command_action} flow route {{ match {{ {' '.join(match_parts)} }} then {{ {then_action} }} }}"
+
+
+def exabgp_write_pipe(connector: dict[str, Any], command: str) -> None:
+    pipe_path = clean_text(connector.get("exabgp_pipe_in"))
+    if not pipe_path:
+        raise HTTPException(status_code=400, detail="exabgp_pipe_in nao configurado")
+    try:
+        fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, (command.strip() + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail=f"Pipe ExaBGP nao encontrado: {pipe_path}") from None
+    except BlockingIOError:
+        raise HTTPException(status_code=503, detail="Pipe ExaBGP sem leitor ativo") from None
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Falha ao escrever no pipe ExaBGP: {exc}") from None
+
+
+def is_documentation_prefix(prefix: str) -> bool:
+    try:
+        network = ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    docs = [ip_network("192.0.2.0/24"), ip_network("198.51.100.0/24"), ip_network("203.0.113.0/24")]
+    return network.version == 4 and any(network.subnet_of(doc) or network.overlaps(doc) for doc in docs)
+
+
+def protected_prefix_match(conn: sqlite3.Connection, prefix: str) -> dict[str, Any] | None:
+    if not clean_text(prefix):
+        return None
+    for row in conn.execute("SELECT * FROM bgp_protected_prefixes WHERE enabled = 1").fetchall():
+        item = bgp_protected_prefix_row_to_dict(row)
+        if bgp_prefix_overlaps(prefix, item["cidr"]):
+            return item
+    return None
+
+
+def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
+    src_cidr = clean_text(candidate.get("src_cidr") or candidate.get("src_prefix"))
+    dst_cidr = clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix"))
+    protocol = clean_text(candidate.get("protocol")) or "any"
+    src_port = clean_text(candidate.get("src_port"))
+    dst_port = clean_text(candidate.get("dst_port"))
+    requested_mode = clean_text(candidate.get("requested_mode")) or clean_text(candidate.get("mitigation_mode")) or "manual_approval"
+    reasons: list[str] = []
+    warnings: list[str] = []
+    required_scope: list[str] = []
+    matched: list[dict[str, Any]] = []
+    decision = "allow_auto" if requested_mode == "automatic" else "require_manual_approval"
+    severity = "safe"
+
+    with sqlite_connection() as conn:
+        dst_protected = protected_prefix_match(conn, dst_cidr)
+        src_protected = protected_prefix_match(conn, src_cidr)
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM bgp_mitigation_port_policies
+            WHERE is_active = 1
+              AND (protocol = ? OR protocol = 'any')
+            ORDER BY is_critical DESC, id
+            """,
+            (protocol,),
+        ).fetchall()
+        for row in rows:
+            policy = bgp_port_policy_row_to_dict(row)
+            if policy["port_kind"] in {"source", "both"} and src_port and int(src_port) == policy["port_value"]:
+                matched.append(policy)
+            if policy["port_kind"] in {"destination", "both"} and dst_port and int(dst_port) == policy["port_value"]:
+                matched.append(policy)
+
+    has_scope = bool(src_cidr or dst_cidr)
+    if protocol == "any" and not has_scope:
+        decision = "deny"
+        severity = "danger"
+        reasons.append("DENY: protocol any sem src_cidr e sem dst_cidr.")
+    if matched and not has_scope:
+        decision = "deny"
+        severity = "danger"
+        reasons.append("DENY: critical whitelisted port requires src_cidr or dst_cidr scope. Port-only automatic block is not allowed.")
+        required_scope.extend(["src_cidr", "dst_cidr"])
+    for policy in matched:
+        port_label = f"{policy['protocol']}/{policy['port_kind']}/{policy['port_value']}"
+        if policy["is_critical"] and policy["require_ip_scope"] and not has_scope:
+            decision = "deny"
+            severity = "danger"
+            reasons.append(f"DENY: porta critica {port_label} exige escopo IP/prefixo.")
+        if requested_mode == "automatic":
+            if policy["port_kind"] == "source" and policy["port_value"] in {53, 123} and not dst_cidr:
+                decision = "deny" if not src_cidr else "require_manual_approval"
+                severity = "danger" if decision == "deny" else "caution"
+                reasons.append(f"{policy['name']}: source-port reflection exige destination protegido para automatico.")
+                required_scope.append("dst_cidr")
+            if dst_cidr:
+                try:
+                    dst_network = ip_network(dst_cidr, strict=False)
+                    min_dst = policy.get("min_dst_prefixlen_auto")
+                    if min_dst is not None and dst_network.prefixlen < int(min_dst):
+                        decision = "require_manual_approval"
+                        severity = "caution"
+                        reasons.append(f"{policy['name']}: dst_cidr {dst_cidr} mais amplo que /{min_dst} para automatico.")
+                except ValueError:
+                    pass
+            if src_cidr:
+                try:
+                    src_network = ip_network(src_cidr, strict=False)
+                    min_src = policy.get("min_src_prefixlen_auto")
+                    if min_src is not None and src_network.prefixlen < int(min_src):
+                        decision = "require_manual_approval"
+                        severity = "caution"
+                        reasons.append(f"{policy['name']}: src_cidr {src_cidr} mais amplo que /{min_src} para automatico.")
+                except ValueError:
+                    pass
+    require_protected = bool(candidate.get("require_protected_prefix"))
+    if require_protected and dst_cidr and not dst_protected:
+        decision = "require_manual_approval" if decision != "deny" else decision
+        severity = "caution" if severity != "danger" else severity
+        reasons.append("Destino nao confirmado dentro de prefixo protegido.")
+    if requested_mode != "automatic" and decision != "deny":
+        decision = "require_manual_approval"
+        severity = "caution"
+        reasons.append("Vetor/perfil nao esta em modo automatic.")
+    if not reasons and decision == "allow_auto":
+        reasons.append("AUTO_ALLOWED: escopo e politica permitem mitigacao automatica.")
+    return {
+        "decision": decision,
+        "severity": severity,
+        "reasons": sorted(set(reasons)),
+        "warnings": sorted(set(warnings)),
+        "required_scope": sorted(set(required_scope)),
+        "matched_port_policies": matched,
+        "protected_prefix_match": dst_protected or src_protected,
+    }
 
 
 def resolve_bgp_port(selector: str, fixed_value: str, manual_value: Any) -> str:
@@ -5618,15 +6183,9 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
     with sqlite_connection() as conn:
         for row in conn.execute("SELECT * FROM bgp_protected_prefixes WHERE enabled = 1").fetchall():
             protected = bgp_protected_prefix_row_to_dict(row)
-            if response_type == "rtbh" and not protected["block_rtbh"]:
-                continue
-            if response_type == "flowspec" and not protected["block_flowspec"]:
-                continue
-            if response_type == "diversion" and not protected["block_diversion"]:
-                continue
             for prefix in prefixes:
                 if bgp_prefix_overlaps(prefix, protected["cidr"]):
-                    errors.append(f"Prefixo protegido bloqueia mitigacao: {protected['cidr']}")
+                    warnings.append(f"Escopo cruza prefixo protegido: {protected['cidr']}")
         active_statuses = sorted(BGP_ACTIVE_STATUSES)
         placeholders = ",".join("?" for _ in active_statuses)
         if connector:
@@ -5687,28 +6246,9 @@ def render_bgp_announcement(candidate: dict[str, Any], connector: dict[str, Any]
     if response_type == "diversion":
         next_hop = clean_text(response_profile.get("next_hop")) or clean_text(response_profile.get("redirect_target")) or clean_text(connector.get("default_next_hop")) or "0.0.0.0"
         return f"announce route {target} next-hop {next_hop}"
-    lines = ["flow route {", "match {"]
-    if candidate.get("src_prefix"):
-        lines.append(f"source {candidate['src_prefix']};")
-    if candidate.get("dst_prefix"):
-        lines.append(f"destination {candidate['dst_prefix']};")
-    if candidate.get("protocol"):
-        lines.append(f"protocol {candidate['protocol']};")
-    if candidate.get("src_port"):
-        lines.append(f"source-port ={candidate['src_port']};")
-    if candidate.get("dst_port"):
-        lines.append(f"destination-port ={candidate['dst_port']};")
-    if candidate.get("tcp_flags"):
-        lines.append(f"tcp-flags {candidate['tcp_flags'].replace('_', '+')};")
-    lines.extend(["}", "then {"])
-    if action == "rate_limit" and response_profile.get("rate_limit_bps"):
-        lines.append(f"rate-limit {int(response_profile['rate_limit_bps'])};")
-    elif action == "redirect":
-        lines.append(f"redirect {clean_text(response_profile.get('redirect_target')) or clean_text(response_profile.get('next_hop'))};")
-    else:
-        lines.append("discard;")
-    lines.extend(["}", "}"])
-    return "\n".join(lines)
+    if action == "discard":
+        return render_exabgp_flowspec_command("announce", candidate)
+    return render_exabgp_flowspec_command("announce", {**candidate, "action": "discard"})
 
 
 def bgp_event(conn: sqlite3.Connection, announcement_id: int, event_type: str, message: str, payload: dict[str, Any] | None = None, created_by: str = "api") -> None:
@@ -5731,15 +6271,23 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
     duration = int(candidate.get("duration_seconds") or 0)
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration else None
     rendered = render_bgp_announcement(candidate, connector, profile)
+    policy = candidate.get("policy") or evaluate_mitigation_policy(
+        {
+            **candidate,
+            "requested_mode": profile.get("approval_mode") or connector.get("mode") or "manual_approval",
+            "require_protected_prefix": False,
+        }
+    )
     cursor = conn.execute(
         """
         INSERT INTO bgp_announcements (
             connector_id, response_profile_id, anomaly_id, status, response_type, action,
             target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
             duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
-            raw_payload, created_by, created_at, updated_at
+            raw_payload, policy_decision, policy_severity, policy_reasons, policy_warnings,
+            policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
         )
-        VALUES (?, ?, ?, 'dry_run', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 'dry_run', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             connector["id"], profile["id"], anomaly_id, candidate.get("response_type") or "", candidate.get("action") or "",
@@ -5747,7 +6295,16 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
             candidate.get("protocol") or "", candidate.get("src_port") or "", candidate.get("dst_port") or "",
             candidate.get("tcp_flags") or "", duration, expires_at, rendered,
             json.dumps(validation["errors"], sort_keys=True), json.dumps(validation["warnings"], sort_keys=True),
-            json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str), created_by, now, now,
+            json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+            policy.get("decision") or "",
+            policy.get("severity") or "",
+            json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+            created_by,
+            now,
+            now,
         ),
     )
     announcement_id = int(cursor.lastrowid)
@@ -5832,17 +6389,19 @@ def create_bgp_connector(request: Request, payload: BgpConnectorPayload):
     ensure_sensor_db()
     values = bgp_connector_payload_to_values(payload)
     now = utc_now_iso()
+    columns = (
+        "name", "role", "backend_type", "mode", "local_asn", "peer_asn", "peer_ip",
+        "local_address", "router_id", "passive_listen_enabled", "listen_port",
+        "default_next_hop", "default_community", "default_large_community",
+        "exabgp_config_path", "exabgp_pipe_in", "exabgp_pipe_out", "systemd_service_name",
+        "router_check_enabled", "router_vendor", "router_mgmt_ip", "router_username",
+        "router_auth_secret_ref", "router_password", "max_active_rules", "max_duration_seconds",
+        "enabled", "is_active", "notes",
+    )
     with sqlite_connection() as conn:
         cursor = conn.execute(
-            """
-            INSERT INTO bgp_connectors (
-                name, role, backend_type, mode, local_asn, peer_asn, peer_ip, router_id,
-                default_next_hop, default_community, default_large_community, max_active_rules,
-                max_duration_seconds, enabled, notes, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (values["name"], values["role"], values["backend_type"], values["mode"], values["local_asn"], values["peer_asn"], values["peer_ip"], values["router_id"], values["default_next_hop"], values["default_community"], values["default_large_community"], values["max_active_rules"], values["max_duration_seconds"], values["enabled"], values["notes"], now, now),
+            f"INSERT INTO bgp_connectors ({', '.join(columns)}, created_at, updated_at) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
+            tuple(values[column] for column in columns) + (now, now),
         )
         conn.commit()
         return fetch_bgp_connector(conn, int(cursor.lastrowid))
@@ -5856,24 +6415,149 @@ def get_bgp_connector(request: Request, connector_id: int):
         return fetch_bgp_connector(conn, connector_id)
 
 
+@app.get("/api/bgp/connectors/{connector_id}/status")
+def get_bgp_connector_status(request: Request, connector_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        connector = fetch_bgp_connector(conn, connector_id)
+    return bgp_connector_status(connector)
+
+
+@app.post("/api/bgp/connectors/{connector_id}/check-router")
+def check_bgp_connector_router(request: Request, connector_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        connector = fetch_bgp_connector(conn, connector_id)
+    return {
+        "connector_id": connector_id,
+        "router_check_enabled": bool(connector.get("router_check_enabled")),
+        "router_vendor": connector.get("router_vendor") or "huawei_vrp",
+        "bgp_state": "unknown_by_router_cli",
+        "flowspec_state": "unknown_by_router_cli",
+        "planned_commands": [
+            f"display bgp peer {connector.get('local_address') or ''}".strip(),
+            "display bgp flow peer",
+        ],
+        "message": "Checagem SSH/Netmiko ainda nao habilitada neste ambiente.",
+    }
+
+
+@app.post("/api/bgp/connectors/{connector_id}/test-flowspec", status_code=201)
+def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: BgpFlowspecTestPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        connector = fetch_bgp_connector(conn, connector_id)
+        profile = {
+            "id": None,
+            "name": "LAB-FLOWSPEC",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": payload.then_action,
+            "max_duration_seconds": connector.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS,
+            "default_duration_seconds": payload.duration_seconds or 1800,
+            "allow_wide_prefix": False,
+            "require_protocol_or_port": True,
+        }
+        candidate = flowspec_candidate_from_payload(payload)
+        candidate["connector_id"] = connector_id
+        candidate["requested_mode"] = "manual_approval" if payload.action in {"announce", "withdraw"} else "dry_run"
+        policy = evaluate_mitigation_policy(candidate)
+        candidate["policy"] = policy
+        command = render_exabgp_flowspec_command(candidate["command_action"], candidate)
+        validation = validate_mitigation_candidate(candidate, connector, profile)
+        action = clean_text(payload.action)
+        last_error = ""
+        status = "dry_run"
+        if action in {"announce", "withdraw"}:
+            if action == "announce" and not all(is_documentation_prefix(prefix) for prefix in [candidate.get("src_prefix"), candidate.get("dst_prefix")] if prefix):
+                if clean_text(payload.confirm).upper() != "ANUNCIAR":
+                    raise HTTPException(status_code=400, detail="Confirmacao ANUNCIAR obrigatoria para prefixo nao RFC5737")
+            if connector.get("backend_type") != "exabgp":
+                raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp")
+            try:
+                exabgp_write_pipe(connector, command)
+                status = "announced" if action == "announce" else "withdrawn"
+            except HTTPException as exc:
+                last_error = clean_text(exc.detail)
+                status = "failed"
+        now = utc_now_iso()
+        cursor = conn.execute(
+            """
+            INSERT INTO bgp_announcements (
+                connector_id, response_profile_id, anomaly_id, status, response_type, action,
+                target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
+                duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
+                raw_payload, last_error, policy_decision, policy_severity, policy_reasons, policy_warnings,
+                policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
+            )
+            VALUES (?, NULL, NULL, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, '', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                connector_id,
+                status,
+                payload.then_action,
+                candidate.get("target_prefix") or "",
+                candidate.get("src_prefix") or "",
+                candidate.get("dst_prefix") or "",
+                candidate.get("protocol") or "",
+                candidate.get("src_port") or "",
+                candidate.get("dst_port") or "",
+                candidate.get("duration_seconds") or 0,
+                command,
+                json.dumps(validation["errors"], sort_keys=True),
+                json.dumps(validation["warnings"], sort_keys=True),
+                json.dumps(dump_model(payload), sort_keys=True, default=str),
+                last_error,
+                policy.get("decision") or "",
+                policy.get("severity") or "",
+                json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+                json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+                json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+                json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+                bgp_current_user(request),
+                now,
+                now,
+            ),
+        )
+        announcement_id = int(cursor.lastrowid)
+        bgp_event(conn, announcement_id, f"flowspec_{action}", last_error or "Comando FlowSpec processado.", {"command": command, "policy": policy}, bgp_current_user(request))
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+            FROM bgp_announcements a
+            LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+            LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+            WHERE a.id = ?
+            """,
+            (announcement_id,),
+        ).fetchone()
+        return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "command": command, "policy": policy}
+
+
 @app.put("/api/bgp/connectors/{connector_id}")
 def update_bgp_connector(request: Request, connector_id: int, payload: BgpConnectorPayload):
     require_admin(request)
     ensure_sensor_db()
     values = bgp_connector_payload_to_values(payload)
     now = utc_now_iso()
+    columns = (
+        "name", "role", "backend_type", "mode", "local_asn", "peer_asn", "peer_ip",
+        "local_address", "router_id", "passive_listen_enabled", "listen_port",
+        "default_next_hop", "default_community", "default_large_community",
+        "exabgp_config_path", "exabgp_pipe_in", "exabgp_pipe_out", "systemd_service_name",
+        "router_check_enabled", "router_vendor", "router_mgmt_ip", "router_username",
+        "router_auth_secret_ref", "router_password", "max_active_rules", "max_duration_seconds",
+        "enabled", "is_active", "notes",
+    )
     with sqlite_connection() as conn:
         fetch_bgp_connector(conn, connector_id)
         conn.execute(
-            """
-            UPDATE bgp_connectors
-            SET name = ?, role = ?, backend_type = ?, mode = ?, local_asn = ?, peer_asn = ?,
-                peer_ip = ?, router_id = ?, default_next_hop = ?, default_community = ?,
-                default_large_community = ?, max_active_rules = ?, max_duration_seconds = ?,
-                enabled = ?, notes = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (values["name"], values["role"], values["backend_type"], values["mode"], values["local_asn"], values["peer_asn"], values["peer_ip"], values["router_id"], values["default_next_hop"], values["default_community"], values["default_large_community"], values["max_active_rules"], values["max_duration_seconds"], values["enabled"], values["notes"], now, connector_id),
+            f"UPDATE bgp_connectors SET {', '.join(f'{column} = ?' for column in columns)}, updated_at = ? WHERE id = ?",
+            tuple(values[column] for column in columns) + (now, connector_id),
         )
         conn.commit()
         return fetch_bgp_connector(conn, connector_id)
@@ -6020,6 +6704,73 @@ def delete_bgp_protected_prefix(request: Request, prefix_id: int):
     return {"ok": True}
 
 
+@app.get("/api/bgp/port-policies")
+def list_bgp_port_policies(request: Request, include_disabled: bool = True):
+    require_admin(request)
+    ensure_sensor_db()
+    where = "" if include_disabled else "WHERE is_active = 1"
+    with sqlite_connection() as conn:
+        rows = conn.execute(f"SELECT * FROM bgp_mitigation_port_policies {where} ORDER BY protocol, port_kind, port_value, id").fetchall()
+    return {"items": [bgp_port_policy_row_to_dict(row) for row in rows]}
+
+
+@app.post("/api/bgp/port-policies", status_code=201)
+def create_bgp_port_policy(request: Request, payload: BgpMitigationPortPolicyPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    values = bgp_port_policy_payload_to_values(payload)
+    columns = (
+        "protocol", "port_kind", "port_value", "name", "is_critical", "allow_port_only_auto",
+        "require_ip_scope", "allow_with_dst_protected_prefix", "allow_with_src_ip", "allow_with_dst_ip",
+        "min_dst_prefixlen_auto", "min_src_prefixlen_auto", "description", "is_active",
+    )
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            f"INSERT INTO bgp_mitigation_port_policies ({', '.join(columns)}, created_at, updated_at) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
+            tuple(values[column] for column in columns) + (now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bgp_mitigation_port_policies WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        return bgp_port_policy_row_to_dict(row)
+
+
+@app.put("/api/bgp/port-policies/{policy_id}")
+def update_bgp_port_policy(request: Request, policy_id: int, payload: BgpMitigationPortPolicyPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    values = bgp_port_policy_payload_to_values(payload)
+    columns = (
+        "protocol", "port_kind", "port_value", "name", "is_critical", "allow_port_only_auto",
+        "require_ip_scope", "allow_with_dst_protected_prefix", "allow_with_src_ip", "allow_with_dst_ip",
+        "min_dst_prefixlen_auto", "min_src_prefixlen_auto", "description", "is_active",
+    )
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM bgp_mitigation_port_policies WHERE id = ?", (policy_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Politica de porta nao encontrada")
+        conn.execute(
+            f"UPDATE bgp_mitigation_port_policies SET {', '.join(f'{column} = ?' for column in columns)}, updated_at = ? WHERE id = ?",
+            tuple(values[column] for column in columns) + (utc_now_iso(), policy_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bgp_mitigation_port_policies WHERE id = ?", (policy_id,)).fetchone()
+        return bgp_port_policy_row_to_dict(row)
+
+
+@app.delete("/api/bgp/port-policies/{policy_id}")
+def delete_bgp_port_policy(request: Request, policy_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM bgp_mitigation_port_policies WHERE id = ?", (policy_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Politica de porta nao encontrada")
+        conn.execute("UPDATE bgp_mitigation_port_policies SET is_active = 0, updated_at = ? WHERE id = ?", (utc_now_iso(), policy_id))
+        conn.commit()
+    return {"ok": True, "disabled": True}
+
+
 @app.get("/api/bgp/announcements")
 def list_bgp_announcements(request: Request, status: str | None = None, limit: int = Query(200, ge=1, le=1000)):
     require_admin(request)
@@ -6106,15 +6857,45 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
     require_admin(request)
     ensure_sensor_db()
     now = utc_now_iso()
-    column = {"pending_approval": "approved_at", "rejected": "rejected_at", "withdrawn": "withdrawn_at"}[status]
+    column = {"pending_approval": "approved_at", "announced": "approved_at", "rejected": "rejected_at", "withdrawn": "withdrawn_at"}[status]
     with sqlite_connection() as conn:
         row = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (announcement_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Dry-run BGP nao encontrado")
-        if row["status"] == "announced":
-            raise HTTPException(status_code=400, detail="Fase 1 nao executa anuncios reais")
-        conn.execute(f"UPDATE bgp_announcements SET status = ?, updated_at = ?, {column} = ? WHERE id = ?", (status, now, now, announcement_id))
-        bgp_event(conn, announcement_id, event_type, message, {}, bgp_current_user(request))
+        connector = fetch_bgp_connector(conn, int(row["connector_id"])) if row["connector_id"] is not None else None
+        final_status = status
+        last_error = ""
+        command = clean_text(row["rendered_command"])
+        if status == "pending_approval" and connector and connector.get("backend_type") == "exabgp":
+            errors = bgp_json_loads(row["validation_errors"], [])
+            if errors:
+                raise HTTPException(status_code=400, detail="Nao e possivel aprovar anuncio com erros de validacao")
+            try:
+                exabgp_write_pipe(connector, command)
+                final_status = "announced"
+                event_type = "announced"
+                message = "Comando announce enviado ao pipe ExaBGP."
+            except HTTPException as exc:
+                final_status = "failed"
+                last_error = clean_text(exc.detail)
+                event_type = "announce_failed"
+                message = last_error
+        elif status == "withdrawn" and connector and connector.get("backend_type") == "exabgp":
+            withdraw_command = re.sub(r"^\s*announce\s+", "withdraw ", command, count=1)
+            try:
+                exabgp_write_pipe(connector, withdraw_command)
+                command = withdraw_command
+                message = "Comando withdraw enviado ao pipe ExaBGP."
+            except HTTPException as exc:
+                final_status = "failed"
+                last_error = clean_text(exc.detail)
+                event_type = "withdraw_failed"
+                message = last_error
+        conn.execute(
+            f"UPDATE bgp_announcements SET status = ?, updated_at = ?, {column} = ?, last_error = ? WHERE id = ?",
+            (final_status, now, now, last_error, announcement_id),
+        )
+        bgp_event(conn, announcement_id, event_type, message, {"command": command}, bgp_current_user(request))
         conn.commit()
         row = conn.execute(
             """
@@ -7950,6 +8731,14 @@ def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "threshold_unit": item["threshold_unit"],
         "severity": item["severity"],
         "response_action": item["response_action"],
+        "response_profile_id": int(item["response_profile_id"]) if item.get("response_profile_id") is not None else None,
+        "mitigation_mode": item.get("mitigation_mode") or "disabled",
+        "max_auto_prefixlen_v4": int(item["max_auto_prefixlen_v4"]) if item.get("max_auto_prefixlen_v4") is not None else None,
+        "max_auto_prefixlen_v6": int(item["max_auto_prefixlen_v6"]) if item.get("max_auto_prefixlen_v6") is not None else None,
+        "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
+        "cooldown_seconds": int(item.get("cooldown_seconds") or 300),
+        "max_active_announcements": int(item.get("max_active_announcements") or 3),
+        "duration_seconds": int(item.get("duration_seconds") or 1800),
         "parent_enabled": sqlite_bool(item["parent_enabled"]),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -8091,6 +8880,10 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
     src_asn = normalize_attack_asn_filter(data.get("src_asn"), "src_asn")
     dst_asn = normalize_attack_asn_filter(data.get("dst_asn"), "dst_asn")
     tcp_flags = normalize_attack_tcp_flags_filter(data.get("tcp_flags"))
+    response_profile_id = data.get("response_profile_id")
+    if response_profile_id is not None:
+        _ = fetch_bgp_profile(conn, int(response_profile_id))
+    mitigation_mode = normalize_choice(data.get("mitigation_mode") or "disabled", BGP_MITIGATION_MODES, "mitigation_mode")
     window_seconds = positive_int(data.get("window_seconds") or 60, "window_seconds")
     if window_seconds > 86400:
         raise HTTPException(status_code=400, detail="window_seconds fora da faixa 1-86400")
@@ -8142,6 +8935,14 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
         "threshold_unit": threshold_unit,
         "severity": severity,
         "response_action": response_action,
+        "response_profile_id": int(response_profile_id) if response_profile_id is not None else None,
+        "mitigation_mode": mitigation_mode,
+        "max_auto_prefixlen_v4": data.get("max_auto_prefixlen_v4"),
+        "max_auto_prefixlen_v6": data.get("max_auto_prefixlen_v6"),
+        "require_protected_prefix": 1 if data.get("require_protected_prefix", True) else 0,
+        "cooldown_seconds": non_negative_int(data.get("cooldown_seconds") or 300, "cooldown_seconds"),
+        "max_active_announcements": non_negative_int(data.get("max_active_announcements") or 3, "max_active_announcements"),
+        "duration_seconds": positive_int(data.get("duration_seconds") or 1800, "duration_seconds"),
         "parent_enabled": 1 if data.get("parent_enabled", True) else 0,
     }
 
@@ -9728,11 +10529,19 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 threshold_unit,
                 severity,
                 response_action,
+                response_profile_id,
+                mitigation_mode,
+                max_auto_prefixlen_v4,
+                max_auto_prefixlen_v6,
+                require_protected_prefix,
+                cooldown_seconds,
+                max_active_announcements,
+                duration_seconds,
                 parent_enabled,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["template_id"],
@@ -9758,6 +10567,14 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 data["threshold_unit"],
                 data["severity"],
                 data["response_action"],
+                data["response_profile_id"],
+                data["mitigation_mode"],
+                data["max_auto_prefixlen_v4"],
+                data["max_auto_prefixlen_v6"],
+                data["require_protected_prefix"],
+                data["cooldown_seconds"],
+                data["max_active_announcements"],
+                data["duration_seconds"],
                 data["parent_enabled"],
                 now,
                 now,
@@ -9829,6 +10646,14 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 threshold_unit = ?,
                 severity = ?,
                 response_action = ?,
+                response_profile_id = ?,
+                mitigation_mode = ?,
+                max_auto_prefixlen_v4 = ?,
+                max_auto_prefixlen_v6 = ?,
+                require_protected_prefix = ?,
+                cooldown_seconds = ?,
+                max_active_announcements = ?,
+                duration_seconds = ?,
                 parent_enabled = ?,
                 updated_at = ?
             WHERE id = ?
@@ -9857,6 +10682,14 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 data["threshold_unit"],
                 data["severity"],
                 data["response_action"],
+                data["response_profile_id"],
+                data["mitigation_mode"],
+                data["max_auto_prefixlen_v4"],
+                data["max_auto_prefixlen_v6"],
+                data["require_protected_prefix"],
+                data["cooldown_seconds"],
+                data["max_active_announcements"],
+                data["duration_seconds"],
                 data["parent_enabled"],
                 now,
                 vector_id,

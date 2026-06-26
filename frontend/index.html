@@ -3201,6 +3201,19 @@
           </div>
 
           <section class="panel p-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Estado dos peers</div>
+                <div id="bgpPeerStatusText" class="metric-readout">-</div>
+              </div>
+              <button id="checkBgpStatusButton" type="button" class="btn btn-sm btn-outline-success">
+                <i data-lucide="activity"></i><span>Verificar agora</span>
+              </button>
+            </div>
+            <div id="bgpPeerStatusCards" class="database-metrics-grid"></div>
+          </section>
+
+          <section class="panel p-3">
             <div class="panel-title mb-2">Conectores</div>
             <div class="flow-search-grid mb-2">
               <input id="bgpConnectorId" type="hidden">
@@ -3211,8 +3224,15 @@
               <div class="field"><label for="bgpConnectorLocalAsn">Local ASN</label><input id="bgpConnectorLocalAsn" type="number" min="1" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpConnectorPeerAsn">Peer ASN</label><input id="bgpConnectorPeerAsn" type="number" min="1" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpConnectorPeerIp">Peer IP</label><input id="bgpConnectorPeerIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorLocalAddress">Local address</label><input id="bgpConnectorLocalAddress" class="form-control form-control-sm" placeholder="172.20.10.40"></div>
+              <div class="field"><label for="bgpConnectorListenPort">Listen port</label><input id="bgpConnectorListenPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="179"></div>
               <div class="field"><label for="bgpConnectorNextHop">Next-hop default</label><input id="bgpConnectorNextHop" class="form-control form-control-sm" placeholder="10.66.66.66"></div>
               <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="268568:666"></div>
+              <div class="field"><label for="bgpConnectorService">Systemd service</label><input id="bgpConnectorService" class="form-control form-control-sm" placeholder="exabgp-gmj-flow"></div>
+              <div class="field"><label for="bgpConnectorPipeIn">Pipe input</label><input id="bgpConnectorPipeIn" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.in"></div>
+              <div class="field"><label for="bgpConnectorPipeOut">Pipe output</label><input id="bgpConnectorPipeOut" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.out"></div>
+              <div class="field"><label for="bgpConnectorConfigPath">Config path</label><input id="bgpConnectorConfigPath" class="form-control form-control-sm" placeholder="/etc/exabgp/gmj-flow-ne8000.conf"></div>
+              <div class="field"><label for="bgpConnectorPassive">Passive/listen</label><select id="bgpConnectorPassive" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
               <div class="field"><label for="bgpConnectorEnabled">Ativo</label><select id="bgpConnectorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
@@ -3233,6 +3253,8 @@
               <div class="field"><label for="bgpProfileAction">Acao</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileTarget">Alvo</label><select id="bgpProfileTarget" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileProtocol">Protocolo</label><select id="bgpProfileProtocol" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileSrcPortSelector">Porta origem</label><select id="bgpProfileSrcPortSelector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileSrcPortValue">Valor origem</label><input id="bgpProfileSrcPortValue" class="form-control form-control-sm" placeholder="53"></div>
               <div class="field"><label for="bgpProfileDstPortSelector">Porta destino</label><select id="bgpProfileDstPortSelector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileDstPortValue">Valor porta</label><input id="bgpProfileDstPortValue" class="form-control form-control-sm" placeholder="53"></div>
               <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
@@ -3244,6 +3266,27 @@
               <button id="clearBgpProfileButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
             </div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Acao</th><th>Alvo</th><th>Filtro</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Politica de seguranca</div>
+            <div class="flow-search-grid mb-2">
+              <input id="bgpPolicyId" type="hidden">
+              <div class="field"><label for="bgpPolicyName">Nome</label><input id="bgpPolicyName" class="form-control form-control-sm" placeholder="DNS_RESPONSE_REFLECTION"></div>
+              <div class="field"><label for="bgpPolicyProtocol">Protocolo</label><select id="bgpPolicyProtocol" class="form-select form-select-sm"><option value="udp">udp</option><option value="tcp">tcp</option><option value="icmp">icmp</option><option value="any">any</option></select></div>
+              <div class="field"><label for="bgpPolicyPortKind">Direcao porta</label><select id="bgpPolicyPortKind" class="form-select form-select-sm"><option value="source">source</option><option value="destination">destination</option><option value="both">both</option></select></div>
+              <div class="field"><label for="bgpPolicyPortValue">Porta</label><input id="bgpPolicyPortValue" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpPolicyCritical">Critico</label><select id="bgpPolicyCritical" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
+              <div class="field"><label for="bgpPolicyRequireScope">Exige IP/prefixo</label><select id="bgpPolicyRequireScope" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
+              <div class="field"><label for="bgpPolicyMinDst">Min dst prefixlen auto</label><input id="bgpPolicyMinDst" type="number" min="0" max="128" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpPolicyMinSrc">Min src prefixlen auto</label><input id="bgpPolicyMinSrc" type="number" min="0" max="128" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpPolicyActive">Ativo</label><select id="bgpPolicyActive" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="saveBgpPolicyButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar politica</span></button>
+              <button id="clearBgpPolicyButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Nova</span></button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Proto</th><th>Porta</th><th>Critico</th><th>Port-only auto</th><th>Min dst/src</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpPoliciesTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -3263,23 +3306,33 @@
           </section>
 
           <section class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Dry-run Manual</div>
+            <div class="panel-title mb-2">Teste manual / laboratorio</div>
+            <div class="subtle mb-2">Este comando sera enviado ao pipe ExaBGP quando usar Anunciar agora ou Retirar agora. Um anuncio pode bloquear trafego real.</div>
             <div class="flow-search-grid mb-2">
-              <div class="field"><label for="bgpDryProfile">Profile</label><select id="bgpDryProfile" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpDryAction">Acao</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
               <div class="field"><label for="bgpDrySrcIp">Src IP/CIDR</label><input id="bgpDrySrcIp" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryDstIp">Dst IP/CIDR</label><input id="bgpDryDstIp" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
+              <div class="field"><label for="bgpDrySrcPort">Src port</label><input id="bgpDrySrcPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryThenAction">Then</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">discard</option></select></div>
               <div class="field"><label for="bgpDryDuration">Duracao (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpDryConfirm">Confirmacao</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
             </div>
-            <button id="runBgpDryRunButton" type="button" class="btn btn-sm btn-success mb-2"><i data-lucide="play"></i><span>Gerar dry-run</span></button>
+            <div class="toolbar mb-2">
+              <button id="previewBgpDryRunButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eye"></i><span>Gerar preview</span></button>
+              <button id="runBgpDryRunButton" type="button" class="btn btn-sm btn-success"><i data-lucide="radio-tower"></i><span>Anunciar agora</span></button>
+              <button id="withdrawBgpDryRunButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="undo-2"></i><span>Retirar agora</span></button>
+            </div>
             <pre id="bgpDryRunOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:90px;"></pre>
           </section>
 
           <section class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Announcements / Dry-runs</div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Profile</th><th>Tipo</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Announcements ativos</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Historico</div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
           </section>
         </section>
 
@@ -3992,6 +4045,8 @@
     let bgpProfiles = [];
     let bgpProtectedPrefixes = [];
     let bgpAnnouncements = [];
+    let bgpPortPolicies = [];
+    let bgpConnectorStatuses = [];
     let activeCustomRangeTarget = null;
     let flowSort = { column: 'flow_time', direction: 'desc' };
     let topFlowSort = { column: 'bits_s', direction: 'desc' };
@@ -6245,9 +6300,9 @@
       document.getElementById('bgpProfileAction').innerHTML = optionList(BGP_ACTION_OPTIONS, selectValue('bgpProfileAction') || 'discard');
       document.getElementById('bgpProfileTarget').innerHTML = optionList(BGP_TARGET_OPTIONS, selectValue('bgpProfileTarget') || 'src_ip');
       document.getElementById('bgpProfileProtocol').innerHTML = optionList(BGP_PROTOCOL_SELECTOR_OPTIONS, selectValue('bgpProfileProtocol') || 'anomaly_protocol');
+      document.getElementById('bgpProfileSrcPortSelector').innerHTML = optionList(BGP_PORT_SELECTOR_OPTIONS, selectValue('bgpProfileSrcPortSelector') || 'any');
       document.getElementById('bgpProfileDstPortSelector').innerHTML = optionList(BGP_PORT_SELECTOR_OPTIONS, selectValue('bgpProfileDstPortSelector') || 'any');
       document.getElementById('bgpProfileTcpFlags').innerHTML = optionList(BGP_TCP_FLAGS_SELECTOR_OPTIONS, selectValue('bgpProfileTcpFlags') || 'any');
-      document.getElementById('bgpDryProfile').innerHTML = bgpProfileOptions(selectValue('bgpDryProfile'));
       document.getElementById('bgpDryConnector').innerHTML = bgpConnectorOptions(selectValue('bgpDryConnector'));
       document.getElementById('bgpMitigationProfile').innerHTML = bgpProfileOptions(selectValue('bgpMitigationProfile'));
       document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
@@ -6258,9 +6313,9 @@
         <tr>
           <td>${escapeHtml(item.name)}</td>
           <td>${escapeHtml(item.role)}</td>
-          <td>${escapeHtml(item.backend_type)}</td>
+          <td>${escapeHtml(item.backend || item.backend_type)}</td>
           <td>${escapeHtml(item.mode)}</td>
-          <td>${escapeHtml(item.peer_ip || '-')} ${item.peer_asn ? `(AS${escapeHtml(item.peer_asn)})` : ''}</td>
+          <td>${escapeHtml(item.peer_ip || '-')} ${item.peer_asn ? `(AS${escapeHtml(item.peer_asn)})` : ''}<br><span class="subtle">${escapeHtml(item.local_address || '-')} : ${escapeHtml(item.listen_port || 179)}</span></td>
           <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
           <td>
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-connector-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
@@ -6270,10 +6325,36 @@
       `).join('') || '<tr><td colspan="7" class="text-muted">Sem conectores</td></tr>';
     }
 
+    function statusBadge(ok, label) {
+      return `<span class="badge-soft ${ok ? 'ok' : 'off'}">${escapeHtml(label)}</span>`;
+    }
+
+    function renderBgpPeerStatus() {
+      document.getElementById('bgpPeerStatusCards').innerHTML = bgpConnectorStatuses.map(status => `
+        <div class="metric-card">
+          <div class="metric-label">${escapeHtml(status.name || `#${status.connector_id}`)}</div>
+          <div class="metric-readout">
+            ExaBGP service: ${statusBadge(Boolean(status.service?.active), status.service?.raw || 'unknown')}<br>
+            Listener ${escapeHtml(status.listener?.expected_port || 179)}: ${statusBadge(Boolean(status.listener?.listening), status.listener?.listening ? 'listening' : 'down')}<br>
+            TCP peer: ${statusBadge(Boolean(status.session?.tcp_established), status.session?.tcp_established ? 'established' : 'unknown')}<br>
+            BGP: ${escapeHtml(status.bgp_state || 'unknown')}<br>
+            FlowSpec: ${escapeHtml(status.flowspec_state || 'unknown')}<br>
+            <span class="subtle">${formatDateTime(status.last_checked_at)}</span>
+          </div>
+        </div>
+      `).join('') || '<div class="subtle">Sem conectores para verificar.</div>';
+      setText('bgpPeerStatusText', bgpConnectorStatuses.length ? `${bgpConnectorStatuses.length} conector(es) verificado(s)` : '-');
+    }
+
     function renderBgpProfiles() {
       document.getElementById('bgpProfilesTable').innerHTML = bgpProfiles.map(item => {
         const connector = bgpConnectors.find(connector => Number(connector.id) === Number(item.connector_id));
-        const filter = [item.protocol_selector, item.dst_port_selector !== 'any' ? `dst:${item.dst_port_selector}${item.dst_port_value ? `=${item.dst_port_value}` : ''}` : '', item.tcp_flags_selector !== 'any' ? item.tcp_flags_selector : ''].filter(Boolean).join(' / ');
+        const filter = [
+          item.protocol_selector,
+          item.src_port_selector !== 'any' ? `src:${item.src_port_selector}${item.src_port_value ? `=${item.src_port_value}` : ''}` : '',
+          item.dst_port_selector !== 'any' ? `dst:${item.dst_port_selector}${item.dst_port_value ? `=${item.dst_port_value}` : ''}` : '',
+          item.tcp_flags_selector !== 'any' ? item.tcp_flags_selector : ''
+        ].filter(Boolean).join(' / ');
         return `
           <tr>
             <td>${escapeHtml(item.name)}</td>
@@ -6307,45 +6388,100 @@
       `).join('') || '<tr><td colspan="5" class="text-muted">Sem prefixos protegidos</td></tr>';
     }
 
+    function renderBgpPolicies() {
+      document.getElementById('bgpPoliciesTable').innerHTML = bgpPortPolicies.map(item => `
+        <tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.protocol)}</td>
+          <td>${escapeHtml(item.port_kind)} ${escapeHtml(item.port_value)}</td>
+          <td>${item.is_critical ? 'Sim' : 'Nao'}</td>
+          <td>${item.allow_port_only_auto ? 'Permitido' : 'Bloqueado'}</td>
+          <td>${escapeHtml(item.min_dst_prefixlen_auto ?? '-')}/${escapeHtml(item.min_src_prefixlen_auto ?? '-')}</td>
+          <td><span class="badge-soft ${item.is_active ? 'ok' : 'off'}">${item.is_active ? 'Ativo' : 'Off'}</span></td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-policy-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-policy-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="8" class="text-muted">Sem politicas</td></tr>';
+    }
+
+    function bgpCommandDetails(item) {
+      return `<details><summary>Comando</summary><pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(item.rendered_command || '-')}</pre></details>`;
+    }
+
     function renderBgpAnnouncements() {
-      document.getElementById('bgpAnnouncementsTable').innerHTML = bgpAnnouncements.map(item => `
+      const active = bgpAnnouncements.filter(item => ['announced', 'pending_approval', 'dry_run'].includes(item.status));
+      const history = bgpAnnouncements.filter(item => !['announced', 'pending_approval', 'dry_run'].includes(item.status));
+      document.getElementById('bgpActiveAnnouncementsTable').innerHTML = active.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td><span class="badge-soft ${item.validation_errors?.length ? '' : item.status === 'dry_run' ? 'off' : 'ok'}">${escapeHtml(item.status)}</span></td>
+          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(item.response_type)}</td>
+          <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
-          <td><pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(item.rendered_command || '-')}</pre></td>
+          <td>${bgpCommandDetails(item)}</td>
           <td>
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-approve" data-id="${item.id}"><i data-lucide="check"></i></button>
             <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="7" class="text-muted">Sem dry-runs</td></tr>';
+      `).join('') || '<tr><td colspan="8" class="text-muted">Sem announcements ativos</td></tr>';
+      document.getElementById('bgpHistoryAnnouncementsTable').innerHTML = history.map(item => `
+        <tr>
+          <td>#${item.id}</td>
+          <td>${formatDateTime(item.created_at)}</td>
+          <td>${formatDateTime(item.withdrawn_at)}</td>
+          <td>${escapeHtml(item.status)}</td>
+          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
+          <td>${escapeHtml(item.policy_decision || '-')}</td>
+          <td>${escapeHtml(item.last_error || '-')}</td>
+          <td>${bgpCommandDetails(item)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem historico</td></tr>';
     }
 
     function renderBgpWorkspace() {
       renderBgpSelects();
+      renderBgpPeerStatus();
       renderBgpConnectors();
       renderBgpProfiles();
       renderBgpProtected();
+      renderBgpPolicies();
       renderBgpAnnouncements();
       createIcons();
     }
 
     async function loadBgpView() {
       setText('bgpStatus', 'Carregando BGP / Mitigacao...');
-      const [connectors, profiles, protectedPrefixes, announcements] = await Promise.all([
+      const [connectors, profiles, protectedPrefixes, policies, announcements] = await Promise.all([
         apiRequest('/api/bgp/connectors?include_disabled=true'),
         apiRequest('/api/bgp/response-profiles?include_disabled=true'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
+        apiRequest('/api/bgp/port-policies?include_disabled=true'),
         apiRequest('/api/bgp/announcements?limit=200')
       ]);
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
       bgpProfiles = Array.isArray(profiles.items) ? profiles.items : [];
       bgpProtectedPrefixes = Array.isArray(protectedPrefixes.items) ? protectedPrefixes.items : [];
+      bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
+      bgpConnectorStatuses = await Promise.all(bgpConnectors.map(connector =>
+        apiRequest(`/api/bgp/connectors/${connector.id}/status`).catch(error => ({
+          connector_id: connector.id,
+          name: connector.name,
+          service: { active: false, raw: 'erro' },
+          listener: { listening: false, expected_port: connector.listen_port || 179 },
+          session: { tcp_established: false },
+          bgp_state: 'unknown',
+          flowspec_state: 'unknown',
+          last_checked_at: new Date().toISOString(),
+          errors: [error.message]
+        }))
+      ));
       renderBgpWorkspace();
       setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Dry-runs: ${bgpAnnouncements.length}`);
     }
@@ -6356,8 +6492,15 @@
       setValue('bgpConnectorLocalAsn', '');
       setValue('bgpConnectorPeerAsn', '');
       setValue('bgpConnectorPeerIp', '');
+      setValue('bgpConnectorLocalAddress', '');
+      setValue('bgpConnectorListenPort', 179);
       setValue('bgpConnectorNextHop', '');
       setValue('bgpConnectorCommunity', '');
+      setValue('bgpConnectorService', '');
+      setValue('bgpConnectorPipeIn', '');
+      setValue('bgpConnectorPipeOut', '');
+      setValue('bgpConnectorConfigPath', '');
+      setBoolSelect('bgpConnectorPassive', false);
       setValue('bgpConnectorRole', 'generic_bgp');
       setValue('bgpConnectorBackend', 'dry_run');
       setValue('bgpConnectorMode', 'dry_run');
@@ -6375,8 +6518,15 @@
       setValue('bgpConnectorLocalAsn', item.local_asn || '');
       setValue('bgpConnectorPeerAsn', item.peer_asn || '');
       setValue('bgpConnectorPeerIp', item.peer_ip || '');
+      setValue('bgpConnectorLocalAddress', item.local_address || '');
+      setValue('bgpConnectorListenPort', item.listen_port || 179);
       setValue('bgpConnectorNextHop', item.default_next_hop || '');
       setValue('bgpConnectorCommunity', item.default_community || '');
+      setValue('bgpConnectorService', item.systemd_service_name || '');
+      setValue('bgpConnectorPipeIn', item.exabgp_pipe_in || '');
+      setValue('bgpConnectorPipeOut', item.exabgp_pipe_out || '');
+      setValue('bgpConnectorConfigPath', item.exabgp_config_path || '');
+      setBoolSelect('bgpConnectorPassive', item.passive_listen_enabled);
       setBoolSelect('bgpConnectorEnabled', item.enabled);
       renderBgpSelects();
     }
@@ -6391,8 +6541,15 @@
         local_asn: selectValue('bgpConnectorLocalAsn') ? numberValue('bgpConnectorLocalAsn', 0) : null,
         peer_asn: selectValue('bgpConnectorPeerAsn') ? numberValue('bgpConnectorPeerAsn', 0) : null,
         peer_ip: selectValue('bgpConnectorPeerIp').trim(),
+        local_address: selectValue('bgpConnectorLocalAddress').trim(),
+        listen_port: Math.max(1, numberValue('bgpConnectorListenPort', 179)),
+        passive_listen_enabled: boolSelectValue('bgpConnectorPassive'),
         default_next_hop: selectValue('bgpConnectorNextHop').trim(),
         default_community: selectValue('bgpConnectorCommunity').trim(),
+        systemd_service_name: selectValue('bgpConnectorService').trim(),
+        exabgp_pipe_in: selectValue('bgpConnectorPipeIn').trim(),
+        exabgp_pipe_out: selectValue('bgpConnectorPipeOut').trim(),
+        exabgp_config_path: selectValue('bgpConnectorConfigPath').trim(),
         enabled: boolSelectValue('bgpConnectorEnabled')
       };
       await apiRequest(id ? `/api/bgp/connectors/${id}` : '/api/bgp/connectors', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -6409,6 +6566,8 @@
       setValue('bgpProfileAction', 'discard');
       setValue('bgpProfileTarget', 'src_ip');
       setValue('bgpProfileProtocol', 'anomaly_protocol');
+      setValue('bgpProfileSrcPortSelector', 'any');
+      setValue('bgpProfileSrcPortValue', '');
       setValue('bgpProfileDstPortSelector', 'any');
       setValue('bgpProfileDstPortValue', '');
       setValue('bgpProfileTcpFlags', 'any');
@@ -6427,6 +6586,8 @@
       setValue('bgpProfileAction', item.action);
       setValue('bgpProfileTarget', item.target_selector);
       setValue('bgpProfileProtocol', item.protocol_selector);
+      setValue('bgpProfileSrcPortSelector', item.src_port_selector);
+      setValue('bgpProfileSrcPortValue', item.src_port_value || '');
       setValue('bgpProfileDstPortSelector', item.dst_port_selector);
       setValue('bgpProfileDstPortValue', item.dst_port_value || '');
       setValue('bgpProfileTcpFlags', item.tcp_flags_selector);
@@ -6446,6 +6607,8 @@
         action: selectValue('bgpProfileAction', 'discard'),
         target_selector: selectValue('bgpProfileTarget', 'src_ip'),
         protocol_selector: selectValue('bgpProfileProtocol', 'anomaly_protocol'),
+        src_port_selector: selectValue('bgpProfileSrcPortSelector', 'any'),
+        src_port_value: selectValue('bgpProfileSrcPortValue').trim(),
         dst_port_selector: selectValue('bgpProfileDstPortSelector', 'any'),
         dst_port_value: selectValue('bgpProfileDstPortValue').trim(),
         tcp_flags_selector: selectValue('bgpProfileTcpFlags', 'any'),
@@ -6491,24 +6654,83 @@
       await loadBgpView();
     }
 
+    function clearBgpPolicyForm() {
+      setValue('bgpPolicyId', '');
+      setValue('bgpPolicyName', '');
+      setValue('bgpPolicyProtocol', 'udp');
+      setValue('bgpPolicyPortKind', 'source');
+      setValue('bgpPolicyPortValue', '');
+      setBoolSelect('bgpPolicyCritical', true);
+      setBoolSelect('bgpPolicyRequireScope', true);
+      setValue('bgpPolicyMinDst', '');
+      setValue('bgpPolicyMinSrc', '');
+      setBoolSelect('bgpPolicyActive', true);
+    }
+
+    function editBgpPolicy(id) {
+      const item = bgpPortPolicies.find(policy => Number(policy.id) === Number(id));
+      if (!item) return;
+      setValue('bgpPolicyId', item.id);
+      setValue('bgpPolicyName', item.name || '');
+      setValue('bgpPolicyProtocol', item.protocol || 'udp');
+      setValue('bgpPolicyPortKind', item.port_kind || 'source');
+      setValue('bgpPolicyPortValue', item.port_value || '');
+      setBoolSelect('bgpPolicyCritical', item.is_critical);
+      setBoolSelect('bgpPolicyRequireScope', item.require_ip_scope);
+      setValue('bgpPolicyMinDst', item.min_dst_prefixlen_auto ?? '');
+      setValue('bgpPolicyMinSrc', item.min_src_prefixlen_auto ?? '');
+      setBoolSelect('bgpPolicyActive', item.is_active);
+    }
+
+    async function saveBgpPolicy() {
+      const id = selectValue('bgpPolicyId');
+      const payload = {
+        name: selectValue('bgpPolicyName').trim(),
+        protocol: selectValue('bgpPolicyProtocol', 'udp'),
+        port_kind: selectValue('bgpPolicyPortKind', 'source'),
+        port_value: numberValue('bgpPolicyPortValue', 0),
+        is_critical: boolSelectValue('bgpPolicyCritical'),
+        require_ip_scope: boolSelectValue('bgpPolicyRequireScope'),
+        allow_port_only_auto: false,
+        allow_with_dst_protected_prefix: true,
+        allow_with_src_ip: true,
+        allow_with_dst_ip: true,
+        min_dst_prefixlen_auto: selectValue('bgpPolicyMinDst') ? numberValue('bgpPolicyMinDst', 32) : null,
+        min_src_prefixlen_auto: selectValue('bgpPolicyMinSrc') ? numberValue('bgpPolicyMinSrc', 32) : null,
+        is_active: boolSelectValue('bgpPolicyActive')
+      };
+      await apiRequest(id ? `/api/bgp/port-policies/${id}` : '/api/bgp/port-policies', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      clearBgpPolicyForm();
+      await loadBgpView();
+    }
+
     function bgpDryRunText(item) {
       const errors = (item.validation_errors || []).map(value => `ERRO: ${value}`).join('\n');
       const warnings = (item.validation_warnings || []).map(value => `AVISO: ${value}`).join('\n');
-      return [`#${item.id} ${item.status}`, errors, warnings, item.rendered_command || ''].filter(Boolean).join('\n\n');
+      const policy = [
+        item.policy_decision ? `Decision: ${item.policy_decision}` : '',
+        item.policy_severity ? `Severity: ${item.policy_severity}` : '',
+        ...(item.policy_reasons || []).map(value => `Motivo: ${value}`),
+        ...(item.policy_warnings || []).map(value => `Warning: ${value}`)
+      ].filter(Boolean).join('\n');
+      return [`#${item.id} ${item.status}`, policy, errors, warnings, item.rendered_command || item.command || ''].filter(Boolean).join('\n\n');
     }
 
-    async function runBgpDryRun() {
+    async function runBgpDryRun(action = 'dry_run') {
       document.getElementById('bgpDryRunOutput').textContent = 'Gerando dry-run...';
+      const connectorId = Number(selectValue('bgpDryConnector'));
       const payload = {
-        response_profile_id: Number(selectValue('bgpDryProfile')),
-        connector_id: selectValue('bgpDryConnector') ? Number(selectValue('bgpDryConnector')) : null,
-        src_ip: selectValue('bgpDrySrcIp').trim() || null,
-        dst_ip: selectValue('bgpDryDstIp').trim() || null,
+        action,
+        src_cidr: selectValue('bgpDrySrcIp').trim() || null,
+        dst_cidr: selectValue('bgpDryDstIp').trim() || null,
         protocol: selectValue('bgpDryProtocol').trim() || null,
-        dst_port: selectValue('bgpDryDstPort') ? numberValue('bgpDryDstPort', 0) : null,
-        duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800))
+        src_port: selectValue('bgpDrySrcPort').trim() || null,
+        dst_port: selectValue('bgpDryDstPort').trim() || null,
+        then_action: selectValue('bgpDryThenAction', 'discard'),
+        duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800)),
+        confirm: selectValue('bgpDryConfirm').trim()
       };
-      const item = await apiRequest('/api/bgp/announcements/dry-run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const item = await apiRequest(`/api/bgp/connectors/${connectorId}/test-flowspec`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
       await loadBgpView();
     }
@@ -10036,13 +10258,18 @@
     });
 
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
+    document.getElementById('checkBgpStatusButton').addEventListener('click', () => loadBgpView().catch(console.error));
     document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpStatus', `Falha ao salvar conector: ${error.message}`)));
     document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
     document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
     document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
     document.getElementById('saveBgpProtectedButton').addEventListener('click', () => saveBgpProtected().catch(error => setText('bgpStatus', `Falha ao salvar prefixo: ${error.message}`)));
     document.getElementById('clearBgpProtectedButton').addEventListener('click', clearBgpProtectedForm);
-    document.getElementById('runBgpDryRunButton').addEventListener('click', () => runBgpDryRun().catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('saveBgpPolicyButton').addEventListener('click', () => saveBgpPolicy().catch(error => setText('bgpStatus', `Falha ao salvar politica: ${error.message}`)));
+    document.getElementById('clearBgpPolicyButton').addEventListener('click', clearBgpPolicyForm);
+    document.getElementById('previewBgpDryRunButton').addEventListener('click', () => runBgpDryRun('dry_run').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('runBgpDryRunButton').addEventListener('click', () => runBgpDryRun('announce').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('withdrawBgpDryRunButton').addEventListener('click', () => runBgpDryRun('withdraw').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('runBgpAnomalyDryRunButton').addEventListener('click', () => runBgpAnomalyDryRun().catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('bgpConnectorsTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
@@ -10065,7 +10292,14 @@
       if (edit) editBgpProtected(Number(edit.dataset.id));
       if (remove) apiRequest(`/api/bgp/protected-prefixes/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover prefixo: ${error.message}`));
     });
-    document.getElementById('bgpAnnouncementsTable').addEventListener('click', event => {
+    document.getElementById('bgpPoliciesTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const edit = target?.closest('.bgp-policy-edit');
+      const remove = target?.closest('.bgp-policy-delete');
+      if (edit) editBgpPolicy(Number(edit.dataset.id));
+      if (remove) apiRequest(`/api/bgp/port-policies/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover politica: ${error.message}`));
+    });
+    document.getElementById('bgpActiveAnnouncementsTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const approve = target?.closest('.bgp-ann-approve');
       const reject = target?.closest('.bgp-ann-reject');
