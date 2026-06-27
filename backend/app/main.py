@@ -4,6 +4,7 @@ import os
 import sqlite3
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -500,7 +501,7 @@ BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "target_ip", "targ
 BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "tcp", "udp", "icmp"}
 BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "fixed"}
 BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "syn", "syn_ack"}
-BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "announced", "rejected", "withdrawn", "failed"}
+BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "announced", "rejected", "rejected_by_policy", "withdrawn", "failed", "failed_withdraw"}
 BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
@@ -685,14 +686,19 @@ class AttackVectorPayload(BaseModel):
     severity: str = "warning"
     response_action: str = "alert_only"
     parent_enabled: bool = True
+    detection_key: str = ""
+    mitigation_enabled: bool = False
     response_profile_id: int | None = Field(None, ge=1)
+    connector_id: int | None = Field(None, ge=1)
     mitigation_mode: str = "disabled"
     max_auto_prefixlen_v4: int | None = Field(None, ge=0, le=32)
     max_auto_prefixlen_v6: int | None = Field(None, ge=0, le=128)
     require_protected_prefix: bool = True
     cooldown_seconds: int = Field(300, ge=0, le=86400)
-    max_active_announcements: int = Field(3, ge=0, le=1000)
-    duration_seconds: int = Field(1800, ge=60, le=604800)
+    max_active_announcements: int = Field(10, ge=0, le=1000)
+    duration_seconds: int = Field(900, ge=60, le=604800)
+    min_confidence_for_auto: float | None = Field(None, ge=0, le=1)
+    notes: str = ""
 
 
 class AttackVectorLearnPayload(BaseModel):
@@ -855,6 +861,11 @@ class BgpFlowspecTestPayload(BaseModel):
     then_action: str = "discard"
     duration_seconds: int | None = Field(None, ge=60, le=604800)
     confirm: str = ""
+
+
+class BgpAnomalyMitigationApplyPayload(BaseModel):
+    candidate_index: int = Field(0, ge=0)
+    mode: str = "manual_approval"
 
 
 class BgpMitigationPortPolicyPayload(BaseModel):
@@ -1293,14 +1304,19 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "attack_vectors", "dst_asn", "dst_asn TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vectors", "tcp_flags", "tcp_flags TEXT NOT NULL DEFAULT 'any'")
     ensure_sqlite_column(conn, "attack_vectors", "window_seconds", "window_seconds INTEGER NOT NULL DEFAULT 60")
+    ensure_sqlite_column(conn, "attack_vectors", "detection_key", "detection_key TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vectors", "mitigation_enabled", "mitigation_enabled INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "attack_vectors", "response_profile_id", "response_profile_id INTEGER")
+    ensure_sqlite_column(conn, "attack_vectors", "connector_id", "connector_id INTEGER")
     ensure_sqlite_column(conn, "attack_vectors", "mitigation_mode", "mitigation_mode TEXT NOT NULL DEFAULT 'disabled'")
     ensure_sqlite_column(conn, "attack_vectors", "max_auto_prefixlen_v4", "max_auto_prefixlen_v4 INTEGER")
     ensure_sqlite_column(conn, "attack_vectors", "max_auto_prefixlen_v6", "max_auto_prefixlen_v6 INTEGER")
     ensure_sqlite_column(conn, "attack_vectors", "require_protected_prefix", "require_protected_prefix INTEGER NOT NULL DEFAULT 1")
     ensure_sqlite_column(conn, "attack_vectors", "cooldown_seconds", "cooldown_seconds INTEGER NOT NULL DEFAULT 300")
-    ensure_sqlite_column(conn, "attack_vectors", "max_active_announcements", "max_active_announcements INTEGER NOT NULL DEFAULT 3")
-    ensure_sqlite_column(conn, "attack_vectors", "duration_seconds", "duration_seconds INTEGER NOT NULL DEFAULT 1800")
+    ensure_sqlite_column(conn, "attack_vectors", "max_active_announcements", "max_active_announcements INTEGER NOT NULL DEFAULT 10")
+    ensure_sqlite_column(conn, "attack_vectors", "duration_seconds", "duration_seconds INTEGER NOT NULL DEFAULT 900")
+    ensure_sqlite_column(conn, "attack_vectors", "min_confidence_for_auto", "min_confidence_for_auto REAL")
+    ensure_sqlite_column(conn, "attack_vectors", "notes", "notes TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     conn.execute(
@@ -1526,6 +1542,129 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_geo_ip_cache_expires ON geo_ip_cache(expires_at)")
 
 
+def seed_mitigation_attack_vectors(conn: sqlite3.Connection, template_id: int) -> None:
+    now = utc_now_iso()
+    defaults = [
+        {
+            "name": "DNS_REFLECTION_INBOUND",
+            "description": "DNS reflection inbound: UDP source-port 53 para prefixo protegido.",
+            "direction": "receives",
+            "decoder": "DNS",
+            "src_port": "53",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 100_000,
+            "threshold_unit": "packets_s",
+            "severity": "critical",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": "DNS_QUERY_OUTBOUND_CLIENT",
+            "description": "Cliente interno gerando flood DNS outbound em UDP destination-port 53.",
+            "direction": "sends",
+            "decoder": "DNS",
+            "src_port": "any",
+            "dst_port": "53",
+            "protocol": "udp",
+            "threshold_value": 30_000,
+            "threshold_unit": "packets_s",
+            "severity": "critical",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": "NTP_REFLECTION_INBOUND",
+            "description": "NTP reflection inbound: UDP source-port 123 para prefixo protegido.",
+            "direction": "receives",
+            "decoder": "NTP",
+            "src_port": "123",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 100_000,
+            "threshold_unit": "packets_s",
+            "severity": "critical",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": "GENERIC_UDP_TO_TARGET",
+            "description": "UDP generico para IP/prefixo protegido, com porta quando disponivel.",
+            "direction": "receives",
+            "decoder": "UDP",
+            "src_port": "any",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 500_000,
+            "threshold_unit": "packets_s",
+            "severity": "warning",
+            "mitigation_mode": "suggest_only",
+            "duration_seconds": 900,
+        },
+    ]
+    for item in defaults:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM attack_vectors
+            WHERE name = ? OR detection_key = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (item["name"], item["name"]),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                """
+                UPDATE attack_vectors
+                SET detection_key = CASE WHEN detection_key = '' THEN ? ELSE detection_key END,
+                    mitigation_enabled = CASE WHEN mitigation_enabled = 0 THEN 1 ELSE mitigation_enabled END,
+                    duration_seconds = CASE WHEN duration_seconds = 1800 THEN ? ELSE duration_seconds END,
+                    max_active_announcements = CASE WHEN max_active_announcements = 3 THEN 10 ELSE max_active_announcements END,
+                    notes = CASE WHEN notes = '' THEN ? ELSE notes END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (item["name"], item["duration_seconds"], item["description"], now, int(row["id"])),
+            )
+            continue
+        conn.execute(
+            """
+            INSERT INTO attack_vectors (
+                template_id, name, enabled, domain_type, target_cidr, src_cidr, dst_cidr,
+                src_port, dst_port, protocol, src_asn, dst_asn, tcp_flags, window_seconds,
+                sensor_id, interface_if_index, direction, decoder, comparison, threshold_value,
+                threshold_unit, severity, response_action, detection_key, mitigation_enabled,
+                response_profile_id, connector_id, mitigation_mode, max_auto_prefixlen_v4,
+                max_auto_prefixlen_v6, require_protected_prefix, cooldown_seconds,
+                max_active_announcements, duration_seconds, min_confidence_for_auto, notes,
+                parent_enabled, created_at, updated_at
+            )
+            VALUES (?, ?, 1, 'internal_ip', NULL, NULL, NULL, ?, ?, ?, '', '', 'any', 60,
+                    NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', ?, 1,
+                    NULL, NULL, ?, 32, 128, 1, 300, 10, ?, NULL, ?, 1, ?, ?)
+            """,
+            (
+                template_id,
+                item["name"],
+                item["src_port"],
+                item["dst_port"],
+                item["protocol"],
+                item["direction"],
+                item["decoder"],
+                item["threshold_value"],
+                item["threshold_unit"],
+                item["severity"],
+                item["name"],
+                item["mitigation_mode"],
+                item["duration_seconds"],
+                item["description"],
+                now,
+                now,
+            ),
+        )
+
+
 def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
     now = utc_now_iso()
     row = conn.execute(
@@ -1562,8 +1701,10 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
     else:
         template_id = int(row["id"])
 
+    seed_mitigation_attack_vectors(conn, template_id)
+
     count = conn.execute(
-        "SELECT COUNT(*) AS count FROM attack_vectors WHERE template_id = ?",
+        "SELECT COUNT(*) AS count FROM attack_vectors WHERE template_id = ? AND COALESCE(detection_key, '') = ''",
         (template_id,),
     ).fetchone()["count"]
     if int(count or 0) > 0:
@@ -2144,6 +2285,9 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             validation_errors TEXT NOT NULL DEFAULT '[]',
             validation_warnings TEXT NOT NULL DEFAULT '[]',
             raw_payload TEXT NOT NULL DEFAULT '{}',
+            mitigation_key TEXT NOT NULL DEFAULT '',
+            attack_vector_name TEXT NOT NULL DEFAULT '',
+            anomaly_source TEXT NOT NULL DEFAULT '',
             created_by TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -2169,6 +2313,9 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_announcements", "policy_warnings", "policy_warnings TEXT NOT NULL DEFAULT '[]'")
     ensure_sqlite_column(conn, "bgp_announcements", "policy_required_scope", "policy_required_scope TEXT NOT NULL DEFAULT '[]'")
     ensure_sqlite_column(conn, "bgp_announcements", "policy_matched_port_policies", "policy_matched_port_policies TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_announcements", "mitigation_key", "mitigation_key TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "attack_vector_name", "attack_vector_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "anomaly_source", "anomaly_source TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_announcement_events (
@@ -2210,6 +2357,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_profiles_enabled ON bgp_response_profiles(enabled, response_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_protected_enabled ON bgp_protected_prefixes(enabled)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_status ON bgp_announcements(status, updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_mitigation_key ON bgp_announcements(mitigation_key, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
     seed_default_bgp_response_profiles(conn)
@@ -5588,6 +5736,9 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "policy_required_scope": bgp_json_loads(item.get("policy_required_scope"), []),
         "policy_matched_port_policies": bgp_json_loads(item.get("policy_matched_port_policies"), []),
         "raw_payload": bgp_json_loads(item.get("raw_payload"), {}),
+        "mitigation_key": item.get("mitigation_key") or "",
+        "attack_vector_name": item.get("attack_vector_name") or "",
+        "anomaly_source": item.get("anomaly_source") or "",
         "created_by": item.get("created_by") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -6089,6 +6240,17 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
     decision = "allow_auto" if requested_mode == "automatic" else "require_manual_approval"
     severity = "safe"
 
+    if requested_mode == "disabled":
+        return {
+            "decision": "deny",
+            "severity": "danger",
+            "reasons": ["DENY: mitigacao desabilitada para este vetor."],
+            "warnings": [],
+            "required_scope": [],
+            "matched_port_policies": [],
+            "protected_prefix_match": None,
+        }
+
     with sqlite_connection() as conn:
         dst_protected = protected_prefix_match(conn, dst_cidr)
         src_protected = protected_prefix_match(conn, src_cidr)
@@ -6104,9 +6266,9 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         ).fetchall()
         for row in rows:
             policy = bgp_port_policy_row_to_dict(row)
-            if policy["port_kind"] in {"source", "both"} and src_port and int(src_port) == policy["port_value"]:
+            if policy["port_kind"] in {"source", "both"} and src_port.isdigit() and int(src_port) == policy["port_value"]:
                 matched.append(policy)
-            if policy["port_kind"] in {"destination", "both"} and dst_port and int(dst_port) == policy["port_value"]:
+            if policy["port_kind"] in {"destination", "both"} and dst_port.isdigit() and int(dst_port) == policy["port_value"]:
                 matched.append(policy)
 
     has_scope = bool(src_cidr or dst_cidr)
@@ -6156,6 +6318,20 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         decision = "require_manual_approval" if decision != "deny" else decision
         severity = "caution" if severity != "danger" else severity
         reasons.append("Destino nao confirmado dentro de prefixo protegido.")
+    if requested_mode == "automatic":
+        for field, limit_field, label in (("dst_cidr", "max_auto_prefixlen_v4", "dst_cidr"), ("src_cidr", "max_auto_prefixlen_v4", "src_cidr")):
+            prefix = dst_cidr if field == "dst_cidr" else src_cidr
+            max_prefixlen = candidate.get(limit_field)
+            if not prefix or max_prefixlen is None:
+                continue
+            try:
+                network = ip_network(prefix, strict=False)
+            except ValueError:
+                continue
+            if network.version == 4 and network.prefixlen < int(max_prefixlen):
+                decision = "require_manual_approval" if decision != "deny" else decision
+                severity = "caution" if severity != "danger" else severity
+                reasons.append(f"{label} {prefix} mais amplo que /{int(max_prefixlen)} para automatico.")
     if requested_mode != "automatic" and decision != "deny":
         decision = "require_manual_approval"
         severity = "caution"
@@ -6349,10 +6525,6 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
         ).fetchone()
         if duplicate is not None:
             errors.append(f"Ja existe mitigacao equivalente ativa: #{duplicate['id']}")
-    if connector and connector.get("backend_type") != "dry_run":
-        warnings.append("Backend configurado nao sera acionado nesta fase; somente dry-run foi implementado.")
-    if response_profile.get("approval_mode") == "automatic":
-        warnings.append("Automatico desativado na Fase 1; dry-run/manual approval apenas.")
     return {"errors": sorted(set(errors)), "warnings": sorted(set(warnings))}
 
 
@@ -6493,6 +6665,572 @@ def candidate_from_anomaly(conn: sqlite3.Connection, anomaly_id: int, payload: B
     candidate = candidate_from_bgp_payload(merged, profile)
     candidate["raw_payload"] = {**candidate["raw_payload"], "anomaly_id": anomaly_id}
     return candidate
+
+
+def cidr_from_ip_or_cidr(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    try:
+        network = ip_network(text, strict=False)
+        return str(network)
+    except ValueError:
+        try:
+            ip = ip_address(text)
+        except ValueError:
+            return ""
+        return f"{ip}/{32 if ip.version == 4 else 128}"
+
+
+def mitigation_key_for_candidate(candidate: dict[str, Any]) -> str:
+    parts = [
+        str(candidate.get("connector_id") or ""),
+        clean_text(candidate.get("attack_vector_name")),
+        clean_text(candidate.get("src_cidr") or candidate.get("src_prefix")),
+        clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix")),
+        clean_text(candidate.get("protocol")),
+        clean_text(candidate.get("src_port")),
+        clean_text(candidate.get("dst_port")),
+        clean_text(candidate.get("then_action") or candidate.get("action")),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def default_bgp_connector(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM bgp_connectors
+        WHERE enabled = 1
+          AND role = 'flowspec_mitigation'
+        ORDER BY is_active DESC, id
+        LIMIT 1
+        """
+    ).fetchone()
+    return bgp_connector_row_to_dict(row) if row is not None else None
+
+
+def default_bgp_profile(conn: sqlite3.Connection, preferred_names: list[str] | None = None) -> dict[str, Any] | None:
+    names = preferred_names or []
+    if names:
+        placeholders = ",".join("?" for _ in names)
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM bgp_response_profiles
+            WHERE enabled = 1
+              AND response_type = 'flowspec'
+              AND name IN ({placeholders})
+            ORDER BY id
+            LIMIT 1
+            """,
+            names,
+        ).fetchone()
+        if row is not None:
+            return bgp_response_profile_row_to_dict(row)
+    row = conn.execute(
+        """
+        SELECT *
+        FROM bgp_response_profiles
+        WHERE enabled = 1
+          AND response_type = 'flowspec'
+        ORDER BY id
+        LIMIT 1
+        """
+    ).fetchone()
+    return bgp_response_profile_row_to_dict(row) if row is not None else None
+
+
+def mitigation_vector_config(conn: sqlite3.Connection, attack_vector_name: str, attack_vector_id: int | None = None) -> dict[str, Any] | None:
+    if attack_vector_id is not None:
+        row = conn.execute(
+            """
+            SELECT v.*, t.name AS template_name, s.name AS sensor_name
+            FROM attack_vectors v
+            LEFT JOIN attack_vector_templates t ON t.id = v.template_id
+            LEFT JOIN sensors s ON s.id = v.sensor_id
+            WHERE v.id = ?
+            """,
+            (attack_vector_id,),
+        ).fetchone()
+        if row is not None:
+            item = attack_vector_row_to_dict(row)
+            if item.get("mitigation_enabled") or item.get("detection_key") == attack_vector_name or item.get("name") == attack_vector_name:
+                return item
+    name = clean_text(attack_vector_name)
+    if not name:
+        return None
+    row = conn.execute(
+        """
+        SELECT v.*, t.name AS template_name, s.name AS sensor_name
+        FROM attack_vectors v
+        LEFT JOIN attack_vector_templates t ON t.id = v.template_id
+        LEFT JOIN sensors s ON s.id = v.sensor_id
+        WHERE v.detection_key = ? OR v.name = ?
+        ORDER BY v.mitigation_enabled DESC, v.id
+        LIMIT 1
+        """,
+        (name, name),
+    ).fetchone()
+    return attack_vector_row_to_dict(row) if row is not None else None
+
+
+def anomaly_confidence(event: dict[str, Any]) -> float:
+    severity = clean_text(event.get("severity")).lower()
+    if severity == "critical":
+        return 0.9
+    if severity == "warning":
+        return 0.75
+    return 0.6
+
+
+def protocol_from_flow_or_event(flow: dict[str, Any], event: dict[str, Any]) -> str:
+    proto = clean_text(flow.get("proto_name") or flow.get("protocol") or proto_name(flow.get("proto"))).lower()
+    if proto in {"udp", "tcp", "icmp"}:
+        return proto
+    decoder = clean_text(event.get("decoder") or flow.get("decoder")).upper()
+    if decoder in {"DNS", "NTP", "UDP", "UDP+QUIC", "QUIC"}:
+        return "udp"
+    if decoder.startswith("TCP") or decoder in {"HTTP", "HTTPS"}:
+        return "tcp"
+    if decoder == "ICMP":
+        return "icmp"
+    return normalize_bgp_protocol(proto or "any")
+
+
+def preferred_profile_names(attack_vector_name: str) -> list[str]:
+    if attack_vector_name == "DNS_QUERY_OUTBOUND_CLIENT":
+        return ["FLOWSPEC_BLOCK_SRC_DNS"]
+    if attack_vector_name == "DNS_REFLECTION_INBOUND":
+        return ["FLOWSPEC_BLOCK_SRC_DNS_RESPONSE", "FLOWSPEC_BLOCK_DST_DNS"]
+    if attack_vector_name == "NTP_REFLECTION_INBOUND":
+        return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
+    return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP", "FLOWSPEC_BLOCK_DST_IP_ALL"]
+
+
+def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any], vector: dict[str, Any] | None) -> dict[str, Any]:
+    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if vector and vector.get("response_profile_id") else default_bgp_profile(conn, preferred_profile_names(candidate["attack_vector_name"]))
+    connector = None
+    if vector and vector.get("connector_id"):
+        connector = fetch_bgp_connector(conn, int(vector["connector_id"]))
+    elif profile and profile.get("connector_id"):
+        connector = fetch_bgp_connector(conn, int(profile["connector_id"]))
+    else:
+        connector = default_bgp_connector(conn)
+    candidate["response_profile_id"] = profile["id"] if profile else None
+    candidate["connector_id"] = connector["id"] if connector else None
+    mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
+    enabled = bool(vector.get("mitigation_enabled")) if vector else True
+    candidate["mitigation_mode"] = mode if enabled else "disabled"
+    candidate["requested_mode"] = candidate["mitigation_mode"]
+    candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or 900) if vector else int(candidate.get("duration_seconds") or 900)
+    candidate["require_protected_prefix"] = bool(vector.get("require_protected_prefix", True)) if vector else bool(candidate.get("require_protected_prefix", True))
+    candidate["max_auto_prefixlen_v4"] = vector.get("max_auto_prefixlen_v4") if vector else candidate.get("max_auto_prefixlen_v4")
+    candidate["max_auto_prefixlen_v6"] = vector.get("max_auto_prefixlen_v6") if vector else candidate.get("max_auto_prefixlen_v6")
+    candidate["cooldown_seconds"] = int(vector.get("cooldown_seconds") or 300) if vector else int(candidate.get("cooldown_seconds") or 300)
+    candidate["max_active_announcements"] = int(vector.get("max_active_announcements") or 10) if vector else int(candidate.get("max_active_announcements") or 10)
+    candidate["min_confidence_for_auto"] = vector.get("min_confidence_for_auto") if vector else candidate.get("min_confidence_for_auto")
+    candidate["target_prefix"] = candidate.get("dst_cidr") or candidate.get("src_cidr") or ""
+    candidate["src_prefix"] = candidate.get("src_cidr") or ""
+    candidate["dst_prefix"] = candidate.get("dst_cidr") or ""
+    candidate["action"] = candidate.get("then_action") or "discard"
+    candidate["response_type"] = "flowspec"
+    candidate["tcp_flags"] = candidate.get("tcp_flags") or ""
+    candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
+    return candidate
+
+
+def base_mitigation_candidate(event: dict[str, Any], attack_vector_name: str, reason: str, confidence: float) -> dict[str, Any]:
+    return {
+        "attack_vector_name": attack_vector_name,
+        "connector_id": None,
+        "response_profile_id": None,
+        "src_cidr": "",
+        "dst_cidr": "",
+        "protocol": "udp",
+        "src_port": "",
+        "dst_port": "",
+        "then_action": "discard",
+        "action": "discard",
+        "target_scope": "",
+        "reason": reason,
+        "confidence": round(max(0.0, min(float(confidence), 1.0)), 3),
+        "anomaly_id": event.get("id"),
+        "anomaly_source": event.get("source") or "anomaly_events",
+        "raw_payload": {"anomaly": event},
+    }
+
+
+def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
+    if anomaly_id < 0:
+        group = next(
+            (
+                item
+                for status_filter in ("active", "history")
+                for item in consolidated_security_anomaly_groups(status_filter)
+                if int(item["event"]["id"]) == anomaly_id
+            ),
+            None,
+        )
+        if group is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        return {"event": group["event"], "flows": group["items"], "security_anomalies": group["items"]}
+    row = conn.execute(
+        """
+        SELECT e.*, v.name AS attack_vector_name, s.name AS sensor_name
+        FROM anomaly_events e
+        LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+        LEFT JOIN sensors s ON s.id = e.sensor_id
+        WHERE e.id = ?
+        """,
+        (anomaly_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+    event = anomaly_event_row_to_dict(row)
+    flows = [
+        {
+            **dict(flow),
+            "src_ip": clean_ip(flow["src_ip"]),
+            "dst_ip": clean_ip(flow["dst_ip"]),
+            "proto_name": proto_name(flow["proto"]),
+            "decoder": classify_flow_decoder(dict(flow)),
+        }
+        for flow in conn.execute(
+            "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY bytes DESC, packets DESC LIMIT 20",
+            (anomaly_id,),
+        ).fetchall()
+    ]
+    return {"event": event, "flows": flows}
+
+
+def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[dict[str, Any]]:
+    event = anomaly.get("event") or anomaly
+    flows = anomaly.get("flows") or []
+    flow = dict(flows[0]) if flows else {}
+    confidence = anomaly_confidence(event)
+    event_vector = clean_text(event.get("attack_vector_name"))
+    decoder = clean_text(event.get("decoder")).upper()
+    protocol = protocol_from_flow_or_event(flow, event)
+    src_port = int(flow.get("src_port") or 0)
+    dst_port = int(flow.get("dst_port") or 0)
+    src_ip = clean_ip(flow.get("src_ip")) or clean_ip(event.get("src_ip"))
+    dst_ip = clean_ip(flow.get("dst_ip")) or clean_ip(event.get("dst_ip")) or clean_ip(event.get("target_ip"))
+    target_cidr = cidr_from_ip_or_cidr(event.get("target_cidr")) or cidr_from_ip_or_cidr(event.get("target_ip")) or cidr_from_ip_or_cidr(dst_ip)
+    candidates: list[dict[str, Any]] = []
+
+    with sqlite_connection() as conn:
+        target_is_protected = bool(target_cidr and protected_prefix_match(conn, target_cidr))
+
+        if protocol == "udp" and (src_port == 53 or decoder == "DNS" and src_port in {0, 53}) and target_cidr and target_is_protected:
+            candidate = base_mitigation_candidate(event, "DNS_REFLECTION_INBOUND", "DNS reflection inbound: UDP source-port 53 para destino protegido.", confidence)
+            candidate.update({"dst_cidr": target_cidr, "protocol": "udp", "src_port": "53", "target_scope": target_cidr})
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            candidates.append(attach_mitigation_config(conn, candidate, vector))
+
+        if protocol == "udp" and (dst_port == 53 or decoder == "DNS" and dst_port in {0, 53}) and src_ip:
+            candidate = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Cliente interno com flood DNS outbound em UDP destination-port 53.", confidence)
+            candidate.update({"src_cidr": cidr_from_ip_or_cidr(src_ip), "protocol": "udp", "dst_port": "53", "target_scope": src_ip})
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            candidates.append(attach_mitigation_config(conn, candidate, vector))
+
+        if protocol == "udp" and (src_port == 123 or decoder == "NTP" and src_port in {0, 123}) and target_cidr and target_is_protected:
+            candidate = base_mitigation_candidate(event, "NTP_REFLECTION_INBOUND", "NTP reflection inbound: UDP source-port 123 para destino protegido.", confidence)
+            candidate.update({"dst_cidr": target_cidr, "protocol": "udp", "src_port": "123", "target_scope": target_cidr})
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            candidates.append(attach_mitigation_config(conn, candidate, vector))
+
+        if protocol == "udp" and target_cidr and target_is_protected:
+            candidate = base_mitigation_candidate(event, "GENERIC_UDP_TO_TARGET", "UDP para destino protegido; porta incluida quando a amostra fornece escopo.", confidence)
+            candidate.update({"dst_cidr": target_cidr, "protocol": "udp", "target_scope": target_cidr})
+            if src_port:
+                candidate["src_port"] = str(src_port)
+            if dst_port:
+                candidate["dst_port"] = str(dst_port)
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            candidates.append(attach_mitigation_config(conn, candidate, vector))
+
+        if protocol == "udp" and not target_cidr and not src_ip and (src_port or dst_port):
+            candidate = base_mitigation_candidate(event, event_vector or "PORT_ONLY_ATTACK", "Deteccao possui porta/protocolo, mas nao possui src_cidr nem dst_cidr.", confidence)
+            candidate.update({"protocol": "udp", "src_port": str(src_port) if src_port else "", "dst_port": str(dst_port) if dst_port else "", "target_scope": "require_scope"})
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            candidates.append(attach_mitigation_config(conn, candidate, vector))
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        deduped[candidate["mitigation_key"]] = candidate
+    return list(deduped.values())
+
+
+def policy_for_candidate(candidate: dict[str, Any], requested_mode: str | None = None) -> dict[str, Any]:
+    mode = clean_text(requested_mode) or clean_text(candidate.get("mitigation_mode")) or "manual_approval"
+    policy = evaluate_mitigation_policy({**candidate, "requested_mode": mode})
+    min_confidence = candidate.get("min_confidence_for_auto")
+    if mode == "automatic" and min_confidence is not None and float(candidate.get("confidence") or 0) < float(min_confidence):
+        policy["decision"] = "require_manual_approval"
+        policy["severity"] = "caution"
+        policy["reasons"] = sorted(set([*(policy.get("reasons") or []), f"Confianca {candidate.get('confidence')} abaixo do minimo automatico {min_confidence}."]))
+    return policy
+
+
+def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+    candidates = build_mitigation_candidates_from_anomaly(context)
+    evaluated = []
+    for candidate in candidates:
+        policy = policy_for_candidate(candidate)
+        rendered = render_exabgp_flowspec_command("announce", candidate)
+        evaluated.append({**candidate, "policy_decision": policy, "rendered_command": rendered})
+    return {"anomaly": context["event"], "candidates": evaluated}
+
+
+def insert_bgp_mitigation_announcement(
+    conn: sqlite3.Connection,
+    candidate: dict[str, Any],
+    connector: dict[str, Any] | None,
+    profile: dict[str, Any] | None,
+    policy: dict[str, Any],
+    validation: dict[str, list[str]],
+    status: str,
+    command: str,
+    created_by: str,
+    last_error: str = "",
+) -> dict[str, Any]:
+    now = utc_now_iso()
+    duration = int(candidate.get("duration_seconds") or 0)
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration and status == "announced" else None
+    cursor = conn.execute(
+        """
+        INSERT INTO bgp_announcements (
+            connector_id, response_profile_id, anomaly_id, status, response_type, action,
+            target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
+            duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
+            raw_payload, mitigation_key, attack_vector_name, anomaly_source, last_error,
+            policy_decision, policy_severity, policy_reasons, policy_warnings,
+            policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            connector["id"] if connector else candidate.get("connector_id"),
+            profile["id"] if profile else candidate.get("response_profile_id"),
+            candidate.get("anomaly_id"),
+            status,
+            candidate.get("then_action") or candidate.get("action") or "discard",
+            candidate.get("target_prefix") or "",
+            candidate.get("src_prefix") or "",
+            candidate.get("dst_prefix") or "",
+            candidate.get("protocol") or "",
+            candidate.get("src_port") or "",
+            candidate.get("dst_port") or "",
+            candidate.get("tcp_flags") or "",
+            duration,
+            expires_at,
+            command,
+            json.dumps(validation.get("errors") or [], sort_keys=True),
+            json.dumps(validation.get("warnings") or [], sort_keys=True),
+            json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+            candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate),
+            candidate.get("attack_vector_name") or "",
+            candidate.get("anomaly_source") or "",
+            last_error,
+            policy.get("decision") or "",
+            policy.get("severity") or "",
+            json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+            json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+            created_by,
+            now,
+            now,
+        ),
+    )
+    announcement_id = int(cursor.lastrowid)
+    bgp_event(conn, announcement_id, "candidate_created", "Candidato de mitigacao registrado.", {"candidate": candidate}, created_by)
+    if policy.get("decision") == "allow_auto":
+        bgp_event(conn, announcement_id, "policy_allow_auto", "Politica permitiu mitigacao automatica.", policy, created_by)
+    elif policy.get("decision") == "require_manual_approval":
+        bgp_event(conn, announcement_id, "policy_require_manual", "Politica exige aprovacao manual.", policy, created_by)
+    else:
+        bgp_event(conn, announcement_id, "policy_denied", "Politica negou mitigacao.", policy, created_by)
+    event_type = {
+        "announced": "announced",
+        "pending_approval": "pending_approval",
+        "rejected_by_policy": "rejected_by_policy",
+        "failed": "failed",
+    }.get(status, status)
+    bgp_event(conn, announcement_id, event_type, last_error or f"Mitigacao registrada com status {status}.", {"command": command}, created_by)
+    row = conn.execute(
+        """
+        SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+        FROM bgp_announcements a
+        LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+        LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+        WHERE a.id = ?
+        """,
+        (announcement_id,),
+    ).fetchone()
+    return bgp_announcement_row_to_dict(row, include_events=True, conn=conn)
+
+
+def active_mitigation_exists(conn: sqlite3.Connection, mitigation_key: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM bgp_announcements
+        WHERE mitigation_key = ?
+          AND status IN ('dry_run', 'pending_approval', 'announced')
+        LIMIT 1
+        """,
+        (mitigation_key,),
+    ).fetchone()
+    return row is not None
+
+
+def cooldown_allows_mitigation(conn: sqlite3.Connection, mitigation_key: str, cooldown_seconds: int) -> bool:
+    if cooldown_seconds <= 0:
+        return True
+    row = conn.execute(
+        """
+        SELECT updated_at
+        FROM bgp_announcements
+        WHERE mitigation_key = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (mitigation_key,),
+    ).fetchone()
+    if row is None:
+        return True
+    updated = parse_datetime_text(row["updated_at"])
+    return updated is None or updated <= datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+
+
+def apply_mitigation_candidate(
+    conn: sqlite3.Connection,
+    candidate: dict[str, Any],
+    mode: str,
+    created_by: str,
+) -> dict[str, Any]:
+    mode = normalize_choice(mode, {"manual_approval", "announce_now", "automatic"}, "mode")
+    if active_mitigation_exists(conn, candidate["mitigation_key"]):
+        raise HTTPException(status_code=409, detail="Ja existe mitigacao ativa para esta chave.")
+    profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+    connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else None
+    requested_mode = "automatic" if mode == "automatic" else "manual_approval"
+    policy = policy_for_candidate(candidate, requested_mode)
+    command = render_exabgp_flowspec_command("announce", candidate)
+    validation = validate_mitigation_candidate(candidate, connector, profile or {
+        "enabled": False,
+        "response_type": "flowspec",
+        "require_protocol_or_port": True,
+        "allow_wide_prefix": False,
+        "max_duration_seconds": BGP_DEFAULT_MAX_DURATION_SECONDS,
+        "default_duration_seconds": 900,
+        "approval_mode": "manual_approval",
+    })
+    if policy["decision"] == "deny":
+        return insert_bgp_mitigation_announcement(conn, candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by)
+    if validation["errors"]:
+        raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
+    if mode == "automatic" and policy["decision"] != "allow_auto":
+        raise HTTPException(status_code=400, detail="Politica nao permite automatico; aprovacao manual exigida.")
+    if mode == "manual_approval" or policy["decision"] == "require_manual_approval" and mode != "announce_now":
+        return insert_bgp_mitigation_announcement(conn, candidate, connector, profile, policy, validation, "pending_approval", command, created_by)
+    if connector is None:
+        raise HTTPException(status_code=400, detail="Conector BGP obrigatorio para anunciar.")
+    if connector.get("backend_type") != "exabgp":
+        raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp para anunciar.")
+    try:
+        exabgp_write_pipe(connector, command)
+        return insert_bgp_mitigation_announcement(conn, candidate, connector, profile, policy, validation, "announced", command, created_by)
+    except HTTPException as exc:
+        return insert_bgp_mitigation_announcement(conn, candidate, connector, profile, policy, validation, "failed", command, created_by, clean_text(exc.detail))
+
+
+def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int]:
+    now = utc_now_iso()
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM bgp_announcements
+        WHERE status = 'announced'
+          AND expires_at IS NOT NULL
+          AND expires_at <= ?
+        ORDER BY expires_at, id
+        LIMIT 100
+        """,
+        (now,),
+    ).fetchall()
+    withdrawn = 0
+    failed = 0
+    for row in rows:
+        item = dict(row)
+        connector = fetch_bgp_connector(conn, int(item["connector_id"])) if item.get("connector_id") is not None else None
+        command = re.sub(r"^\s*announce\s+", "withdraw ", clean_text(item.get("rendered_command")), count=1)
+        status = "withdrawn"
+        last_error = ""
+        if connector and connector.get("backend_type") == "exabgp":
+            try:
+                exabgp_write_pipe(connector, command)
+            except HTTPException as exc:
+                status = "failed_withdraw"
+                last_error = clean_text(exc.detail)
+        conn.execute(
+            """
+            UPDATE bgp_announcements
+            SET status = ?, withdrawn_at = CASE WHEN ? = 'withdrawn' THEN ? ELSE withdrawn_at END,
+                updated_at = ?, last_error = ?
+            WHERE id = ?
+            """,
+            (status, status, now, now, last_error, int(item["id"])),
+        )
+        if status == "withdrawn":
+            withdrawn += 1
+            bgp_event(conn, int(item["id"]), "auto_withdraw", "Duracao expirada; withdraw enviado automaticamente.", {"command": command}, "worker")
+            bgp_event(conn, int(item["id"]), "withdrawn", "Mitigacao retirada automaticamente.", {"command": command}, "worker")
+        else:
+            failed += 1
+            bgp_event(conn, int(item["id"]), "failed", last_error or "Falha no withdraw automatico.", {"command": command}, "worker")
+    return {"withdrawn": withdrawn, "failed": failed}
+
+
+def process_anomaly_mitigation() -> dict[str, int]:
+    ensure_sensor_db()
+    stats = {"checked": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
+    active = anomaly_list("active", 500)
+    with sqlite_connection() as conn:
+        expired = process_expired_bgp_announcements(conn)
+        stats["withdrawn"] += expired["withdrawn"]
+        stats["failed"] += expired["failed"]
+        for event in active:
+            context = fetch_anomaly_mitigation_context(conn, int(event["id"]))
+            for candidate in build_mitigation_candidates_from_anomaly(context):
+                stats["checked"] += 1
+                if active_mitigation_exists(conn, candidate["mitigation_key"]):
+                    stats["skipped"] += 1
+                    continue
+                if not cooldown_allows_mitigation(conn, candidate["mitigation_key"], int(candidate.get("cooldown_seconds") or 0)):
+                    stats["skipped"] += 1
+                    continue
+                mode = clean_text(candidate.get("mitigation_mode")) or "disabled"
+                if mode == "disabled":
+                    stats["skipped"] += 1
+                    continue
+                if mode == "automatic":
+                    item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
+                elif mode in {"manual_approval", "suggest_only"}:
+                    item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
+                else:
+                    stats["skipped"] += 1
+                    continue
+                status = item.get("status") or ""
+                if status in stats:
+                    stats[status] += 1
+        conn.commit()
+    return stats
 
 
 @app.get("/api/bgp/connectors")
@@ -7009,7 +7747,7 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
                 command = withdraw_command
                 message = "Comando withdraw enviado ao pipe ExaBGP."
             except HTTPException as exc:
-                final_status = "failed"
+                final_status = "failed_withdraw"
                 last_error = clean_text(exc.detail)
                 event_type = "withdraw_failed"
                 message = last_error
@@ -8853,14 +9591,19 @@ def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "threshold_unit": item["threshold_unit"],
         "severity": item["severity"],
         "response_action": item["response_action"],
+        "detection_key": item.get("detection_key") or "",
+        "mitigation_enabled": sqlite_bool(item.get("mitigation_enabled")),
         "response_profile_id": int(item["response_profile_id"]) if item.get("response_profile_id") is not None else None,
+        "connector_id": int(item["connector_id"]) if item.get("connector_id") is not None else None,
         "mitigation_mode": item.get("mitigation_mode") or "disabled",
         "max_auto_prefixlen_v4": int(item["max_auto_prefixlen_v4"]) if item.get("max_auto_prefixlen_v4") is not None else None,
         "max_auto_prefixlen_v6": int(item["max_auto_prefixlen_v6"]) if item.get("max_auto_prefixlen_v6") is not None else None,
         "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
         "cooldown_seconds": int(item.get("cooldown_seconds") or 300),
-        "max_active_announcements": int(item.get("max_active_announcements") or 3),
-        "duration_seconds": int(item.get("duration_seconds") or 1800),
+        "max_active_announcements": int(item.get("max_active_announcements") or 10),
+        "duration_seconds": int(item.get("duration_seconds") or 900),
+        "min_confidence_for_auto": float(item["min_confidence_for_auto"]) if item.get("min_confidence_for_auto") is not None else None,
+        "notes": item.get("notes") or "",
         "parent_enabled": sqlite_bool(item["parent_enabled"]),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -9005,6 +9748,9 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
     response_profile_id = data.get("response_profile_id")
     if response_profile_id is not None:
         _ = fetch_bgp_profile(conn, int(response_profile_id))
+    connector_id = data.get("connector_id")
+    if connector_id is not None:
+        _ = fetch_bgp_connector(conn, int(connector_id))
     mitigation_mode = normalize_choice(data.get("mitigation_mode") or "disabled", BGP_MITIGATION_MODES, "mitigation_mode")
     window_seconds = positive_int(data.get("window_seconds") or 60, "window_seconds")
     if window_seconds > 86400:
@@ -9057,14 +9803,19 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
         "threshold_unit": threshold_unit,
         "severity": severity,
         "response_action": response_action,
+        "detection_key": clean_text(data.get("detection_key")),
+        "mitigation_enabled": 1 if data.get("mitigation_enabled") else 0,
         "response_profile_id": int(response_profile_id) if response_profile_id is not None else None,
+        "connector_id": int(connector_id) if connector_id is not None else None,
         "mitigation_mode": mitigation_mode,
         "max_auto_prefixlen_v4": data.get("max_auto_prefixlen_v4"),
         "max_auto_prefixlen_v6": data.get("max_auto_prefixlen_v6"),
         "require_protected_prefix": 1 if data.get("require_protected_prefix", True) else 0,
         "cooldown_seconds": non_negative_int(data.get("cooldown_seconds") or 300, "cooldown_seconds"),
-        "max_active_announcements": non_negative_int(data.get("max_active_announcements") or 3, "max_active_announcements"),
-        "duration_seconds": positive_int(data.get("duration_seconds") or 1800, "duration_seconds"),
+        "max_active_announcements": non_negative_int(data.get("max_active_announcements") or 10, "max_active_announcements"),
+        "duration_seconds": positive_int(data.get("duration_seconds") or 900, "duration_seconds"),
+        "min_confidence_for_auto": float(data["min_confidence_for_auto"]) if data.get("min_confidence_for_auto") is not None else None,
+        "notes": clean_text(data.get("notes")),
         "parent_enabled": 1 if data.get("parent_enabled", True) else 0,
     }
 
@@ -10335,7 +11086,14 @@ def detect_anomalies_once() -> dict[str, Any]:
                     )
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
-    return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "errors": errors}
+    mitigation = {"checked": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
+    try:
+        mitigation = process_anomaly_mitigation()
+    except Exception as exc:
+        message = f"mitigacao: {exc}"
+        errors.append(message)
+        logger.warning("Falha ao processar mitigacao de anomalias: %s", exc)
+    return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "mitigation": mitigation, "errors": errors}
 
 
 def anomaly_detection_enabled() -> bool:
@@ -10651,7 +11409,10 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 threshold_unit,
                 severity,
                 response_action,
+                detection_key,
+                mitigation_enabled,
                 response_profile_id,
+                connector_id,
                 mitigation_mode,
                 max_auto_prefixlen_v4,
                 max_auto_prefixlen_v6,
@@ -10659,11 +11420,13 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 cooldown_seconds,
                 max_active_announcements,
                 duration_seconds,
+                min_confidence_for_auto,
+                notes,
                 parent_enabled,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["template_id"],
@@ -10689,7 +11452,10 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 data["threshold_unit"],
                 data["severity"],
                 data["response_action"],
+                data["detection_key"],
+                data["mitigation_enabled"],
                 data["response_profile_id"],
+                data["connector_id"],
                 data["mitigation_mode"],
                 data["max_auto_prefixlen_v4"],
                 data["max_auto_prefixlen_v6"],
@@ -10697,6 +11463,8 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 data["cooldown_seconds"],
                 data["max_active_announcements"],
                 data["duration_seconds"],
+                data["min_confidence_for_auto"],
+                data["notes"],
                 data["parent_enabled"],
                 now,
                 now,
@@ -10768,7 +11536,10 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 threshold_unit = ?,
                 severity = ?,
                 response_action = ?,
+                detection_key = ?,
+                mitigation_enabled = ?,
                 response_profile_id = ?,
+                connector_id = ?,
                 mitigation_mode = ?,
                 max_auto_prefixlen_v4 = ?,
                 max_auto_prefixlen_v6 = ?,
@@ -10776,6 +11547,8 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 cooldown_seconds = ?,
                 max_active_announcements = ?,
                 duration_seconds = ?,
+                min_confidence_for_auto = ?,
+                notes = ?,
                 parent_enabled = ?,
                 updated_at = ?
             WHERE id = ?
@@ -10804,7 +11577,10 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 data["threshold_unit"],
                 data["severity"],
                 data["response_action"],
+                data["detection_key"],
+                data["mitigation_enabled"],
                 data["response_profile_id"],
+                data["connector_id"],
                 data["mitigation_mode"],
                 data["max_auto_prefixlen_v4"],
                 data["max_auto_prefixlen_v6"],
@@ -10812,6 +11588,8 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 data["cooldown_seconds"],
                 data["max_active_announcements"],
                 data["duration_seconds"],
+                data["min_confidence_for_auto"],
+                data["notes"],
                 data["parent_enabled"],
                 now,
                 vector_id,
@@ -11272,6 +12050,32 @@ def anomaly_detail(request: Request, event_id: int):
         "top_conversations": top_conversations,
         "metric_points": metric_points,
     }
+
+
+@app.post("/api/anomalies/{event_id}/mitigation/evaluate")
+def evaluate_anomaly_mitigation(request: Request, event_id: int):
+    require_admin(request)
+    payload = evaluated_mitigation_candidates(event_id)
+    return {
+        "anomaly": payload["anomaly"],
+        "candidates": payload["candidates"],
+    }
+
+
+@app.post("/api/anomalies/{event_id}/mitigation/apply", status_code=201)
+def apply_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomalyMitigationApplyPayload):
+    require_admin(request)
+    evaluated = evaluated_mitigation_candidates(event_id)
+    candidates = evaluated["candidates"]
+    if payload.candidate_index >= len(candidates):
+        raise HTTPException(status_code=400, detail="candidate_index invalido")
+    candidate = dict(candidates[payload.candidate_index])
+    candidate.pop("policy_decision", None)
+    candidate.pop("rendered_command", None)
+    with sqlite_connection() as conn:
+        item = apply_mitigation_candidate(conn, candidate, payload.mode, bgp_current_user(request))
+        conn.commit()
+        return {"anomaly": evaluated["anomaly"], "announcement": item}
 
 
 @app.post("/api/anomalies/{event_id}/ack")

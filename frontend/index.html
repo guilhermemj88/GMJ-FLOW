@@ -3371,6 +3371,8 @@
           </section>
 
           <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Sugestoes pending_approval</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Announcements ativos</div>
             <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">Historico</div>
@@ -3755,13 +3757,9 @@
       </div>
       <div class="gmj-dialog-body">
         <div id="bgpMitigationSummary" class="subtle mb-2">-</div>
-        <div class="flow-search-grid mb-2">
-          <div class="field"><label for="bgpMitigationProfile">Profile</label><select id="bgpMitigationProfile" class="form-select form-select-sm"></select></div>
-          <div class="field"><label for="bgpMitigationConnector">Conector</label><select id="bgpMitigationConnector" class="form-select form-select-sm"></select></div>
-          <div class="field"><label for="bgpMitigationDuration">Duracao (s)</label><input id="bgpMitigationDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
-        </div>
-        <button id="runBgpAnomalyDryRunButton" type="button" class="btn btn-sm btn-success mb-2">
-          <i data-lucide="play"></i><span>Gerar dry-run</span>
+        <div id="bgpMitigationCandidates" class="d-grid gap-2 mb-2"></div>
+        <button id="runBgpAnomalyDryRunButton" type="button" class="btn btn-sm btn-outline-secondary mb-2">
+          <i data-lucide="refresh-cw"></i><span>Reavaliar</span>
         </button>
         <pre id="bgpMitigationOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:120px;"></pre>
       </div>
@@ -4083,6 +4081,7 @@
     let anomalyActiveTab = 'active';
     let currentAnomalyDetailId = null;
     let currentBgpMitigationAnomalyId = null;
+    let currentBgpMitigationCandidates = [];
     let bgpConnectors = [];
     let bgpProfiles = [];
     let bgpProtectedPrefixes = [];
@@ -6346,8 +6345,12 @@
       document.getElementById('bgpProfileDstPortSelector').innerHTML = optionList(BGP_PORT_SELECTOR_OPTIONS, selectValue('bgpProfileDstPortSelector') || 'any');
       document.getElementById('bgpProfileTcpFlags').innerHTML = optionList(BGP_TCP_FLAGS_SELECTOR_OPTIONS, selectValue('bgpProfileTcpFlags') || 'any');
       document.getElementById('bgpDryConnector').innerHTML = bgpConnectorOptions(selectValue('bgpDryConnector'));
-      document.getElementById('bgpMitigationProfile').innerHTML = bgpProfileOptions(selectValue('bgpMitigationProfile'));
-      document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
+      if (document.getElementById('bgpMitigationProfile')) {
+        document.getElementById('bgpMitigationProfile').innerHTML = bgpProfileOptions(selectValue('bgpMitigationProfile'));
+      }
+      if (document.getElementById('bgpMitigationConnector')) {
+        document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
+      }
     }
 
     function renderBgpConnectors() {
@@ -6550,8 +6553,24 @@
     }
 
     function renderBgpAnnouncements() {
-      const active = bgpAnnouncements.filter(item => ['announced', 'pending_approval', 'dry_run'].includes(item.status));
+      const pending = bgpAnnouncements.filter(item => item.status === 'pending_approval');
+      const active = bgpAnnouncements.filter(item => ['announced', 'dry_run'].includes(item.status));
       const history = bgpAnnouncements.filter(item => !['announced', 'pending_approval', 'dry_run'].includes(item.status));
+      document.getElementById('bgpPendingSuggestionsTable').innerHTML = pending.map(item => `
+        <tr>
+          <td>#${item.id}</td>
+          <td>${item.anomaly_id ? `#${escapeHtml(item.anomaly_id)}` : '-'}</td>
+          <td>${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}</td>
+          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
+          <td>${bgpCommandDetails(item)}</td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-success bgp-ann-approve" data-id="${item.id}"><i data-lucide="radio-tower"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="8" class="text-muted">Sem sugestoes pendentes</td></tr>';
       document.getElementById('bgpActiveAnnouncementsTable').innerHTML = active.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -6879,24 +6898,60 @@
       currentBgpMitigationAnomalyId = Number(anomalyId);
       await loadBgpView();
       setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
-      setValue('bgpMitigationProfile', bgpProfiles.find(item => item.enabled)?.id || '');
-      setValue('bgpMitigationConnector', bgpConnectors.find(item => item.enabled)?.id || '');
-      setValue('bgpMitigationDuration', 1800);
+      document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="subtle">Avaliando mitigacao sugerida...</div>';
       document.getElementById('bgpMitigationOutput').textContent = '';
-      renderBgpSelects();
       openModal('bgpMitigationModal');
+      await runBgpAnomalyDryRun();
+    }
+
+    function mitigationDecisionBadge(decision) {
+      const klass = decision === 'allow_auto' ? 'ok' : decision === 'deny' ? '' : 'off';
+      return `<span class="badge-soft ${klass}">${escapeHtml(decision || '-')}</span>`;
+    }
+
+    function renderBgpMitigationCandidates(candidates) {
+      const container = document.getElementById('bgpMitigationCandidates');
+      container.innerHTML = candidates.map((candidate, index) => {
+        const policy = candidate.policy_decision || {};
+        const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
+        return `
+          <div class="panel p-2">
+            <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+              <div>
+                <div class="panel-title">${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
+                <div class="subtle">${escapeHtml(candidate.reason || '-')}</div>
+              </div>
+              ${mitigationDecisionBadge(policy.decision)}
+            </div>
+            <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
+            <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
+            <div class="toolbar">
+              <button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Criar sugestao</span></button>
+              <button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>
+            </div>
+          </div>
+        `;
+      }).join('') || '<div class="subtle">Nenhum candidato de mitigacao foi montado para esta anomalia.</div>';
+      createIcons();
     }
 
     async function runBgpAnomalyDryRun() {
       if (!currentBgpMitigationAnomalyId) return;
-      document.getElementById('bgpMitigationOutput').textContent = 'Gerando dry-run...';
-      const payload = {
-        response_profile_id: Number(selectValue('bgpMitigationProfile')),
-        connector_id: selectValue('bgpMitigationConnector') ? Number(selectValue('bgpMitigationConnector')) : null,
-        duration_seconds: Math.max(60, numberValue('bgpMitigationDuration', 1800))
-      };
-      const item = await apiRequest(`/api/bgp/announcements/from-anomaly/${currentBgpMitigationAnomalyId}/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(item);
+      document.getElementById('bgpMitigationOutput').textContent = 'Avaliando candidatos...';
+      const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, { method: 'POST' });
+      currentBgpMitigationCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+      renderBgpMitigationCandidates(currentBgpMitigationCandidates);
+      document.getElementById('bgpMitigationOutput').textContent = `${currentBgpMitigationCandidates.length} candidato(s) avaliados.`;
+      await loadBgpView();
+    }
+
+    async function applyBgpMitigationCandidate(index, mode) {
+      if (!currentBgpMitigationAnomalyId) return;
+      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigacao...' : 'Criando sugestao...';
+      const payload = { candidate_index: Number(index), mode };
+      const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
       await loadBgpView();
     }
 
@@ -10411,6 +10466,16 @@
     document.getElementById('runBgpDryRunButton').addEventListener('click', () => runBgpDryRun('announce').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('withdrawBgpDryRunButton').addEventListener('click', () => runBgpDryRun('withdraw').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('runBgpAnomalyDryRunButton').addEventListener('click', () => runBgpAnomalyDryRun().catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('bgpMitigationCandidates').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const apply = target?.closest('.bgp-mitigation-apply');
+      const reject = target?.closest('.bgp-mitigation-reject');
+      if (apply) {
+        applyBgpMitigationCandidate(Number(apply.dataset.index), apply.dataset.mode).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
+      } else if (reject) {
+        document.getElementById('bgpMitigationOutput').textContent = `Candidato ${Number(reject.dataset.index) + 1} rejeitado nesta revisao.`;
+      }
+    });
     document.getElementById('bgpConnectorsTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const edit = target?.closest('.bgp-connector-edit');
@@ -10447,6 +10512,13 @@
       if (approve) updateBgpAnnouncement(approve.dataset.id, 'approve').catch(error => setText('bgpStatus', `Falha ao aprovar: ${error.message}`));
       if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
       if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
+    });
+    document.getElementById('bgpPendingSuggestionsTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const approve = target?.closest('.bgp-ann-approve');
+      const reject = target?.closest('.bgp-ann-reject');
+      if (approve) updateBgpAnnouncement(approve.dataset.id, 'approve').catch(error => setText('bgpStatus', `Falha ao aprovar: ${error.message}`));
+      if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
     });
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
