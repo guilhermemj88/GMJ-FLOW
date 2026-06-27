@@ -5801,68 +5801,95 @@ def bgp_run_command(args: list[str], timeout: float = 2.0) -> tuple[int, str]:
 
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
+    messages: list[str] = []
     service_name = clean_text(connector.get("systemd_service_name"))
     service_raw = "unknown"
     service_active = False
+    service_severity = "unknown"
     if service_name:
-        code, output = bgp_run_command(["systemctl", "is-active", service_name])
-        service_raw = clean_text(output) or ("active" if code == 0 else "unknown")
-        service_active = code == 0 and service_raw == "active"
-        if code not in {0, 3}:
-            errors.append(f"systemctl: {service_raw}")
+        if shutil.which("systemctl") is None:
+            service_raw = "unavailable_in_container"
+            messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
+        else:
+            code, output = bgp_run_command(["systemctl", "is-active", service_name])
+            service_raw = clean_text(output) or ("active" if code == 0 else "unknown")
+            service_active = code == 0 and service_raw == "active"
+            service_severity = "ok" if service_active else "down"
+            if code not in {0, 3}:
+                errors.append(f"systemctl: {service_raw}")
 
     local_address = clean_text(connector.get("local_address"))
     peer_ip = clean_text(connector.get("peer_ip"))
     listen_port = int(connector.get("listen_port") or 179)
-    code_listen, listen_output = bgp_run_command(["ss", "-lntp"])
     listening = False
-    if code_listen == 0:
-        for line in listen_output.splitlines():
-            if f":{listen_port}" not in line:
-                continue
-            if not local_address or f"{local_address}:{listen_port}" in line or f"0.0.0.0:{listen_port}" in line or f"*:{listen_port}" in line:
-                listening = True
-                break
-    else:
-        errors.append(f"ss -lntp: {listen_output}")
-
-    code_tcp, tcp_output = bgp_run_command(["ss", "-antp"])
+    listener_status = "unknown_missing_ss"
+    listener_severity = "unknown"
     tcp_established = False
-    if code_tcp == 0:
-        for line in tcp_output.splitlines():
-            if "ESTAB" not in line and "ESTABLISHED" not in line:
-                continue
-            if peer_ip and peer_ip not in line:
-                continue
-            if f":{listen_port}" in line:
-                tcp_established = True
-                break
+    session_status = "unknown_missing_ss"
+    session_severity = "unknown"
+    ss_available = shutil.which("ss") is not None
+    if not ss_available:
+        if not any("Backend containerizado" in message for message in messages):
+            messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
     else:
-        errors.append(f"ss -antp: {tcp_output}")
+        code_listen, listen_output = bgp_run_command(["ss", "-lntp"])
+        if code_listen == 0:
+            for line in listen_output.splitlines():
+                if f":{listen_port}" not in line:
+                    continue
+                if not local_address or f"{local_address}:{listen_port}" in line or f"0.0.0.0:{listen_port}" in line or f"*:{listen_port}" in line:
+                    listening = True
+                    break
+            listener_status = "listening" if listening else "down"
+            listener_severity = "ok" if listening else "down"
+        else:
+            listener_status = "unknown_ss_error"
+            errors.append(f"ss -lntp: {listen_output}")
+
+        code_tcp, tcp_output = bgp_run_command(["ss", "-antp"])
+        if code_tcp == 0:
+            for line in tcp_output.splitlines():
+                if "ESTAB" not in line and "ESTABLISHED" not in line:
+                    continue
+                if peer_ip and peer_ip not in line:
+                    continue
+                if f":{listen_port}" in line:
+                    tcp_established = True
+                    break
+            session_status = "established" if tcp_established else "not_established"
+            session_severity = "ok" if tcp_established else "down"
+        else:
+            session_status = "unknown_ss_error"
+            errors.append(f"ss -antp: {tcp_output}")
 
     pipe_in = clean_text(connector.get("exabgp_pipe_in"))
     pipe_out = clean_text(connector.get("exabgp_pipe_out"))
     input_exists = bool(pipe_in and Path(pipe_in).exists())
     output_exists = bool(pipe_out and Path(pipe_out).exists())
     input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
+    pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
     return {
         "connector_id": connector["id"],
         "name": connector["name"],
         "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
-        "service": {"name": service_name, "active": service_active, "raw": service_raw},
-        "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening},
+        "service": {"name": service_name, "active": service_active, "raw": service_raw, "severity": service_severity},
+        "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
         "pipes": {
             "input_path": pipe_in,
             "input_exists": input_exists,
             "input_writable": input_writable,
             "output_path": pipe_out,
             "output_exists": output_exists,
+            "ok": pipes_ok,
+            "status": "ok" if pipes_ok else "down",
+            "severity": "ok" if pipes_ok else "down",
         },
-        "session": {"tcp_established": tcp_established, "peer_ip": peer_ip},
+        "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
         "bgp_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
         "flowspec_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
         "last_checked_at": utc_now_iso(),
         "errors": errors,
+        "messages": sorted(set(messages)),
     }
 
 

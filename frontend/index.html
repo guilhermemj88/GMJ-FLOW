@@ -6325,8 +6325,23 @@
       `).join('') || '<tr><td colspan="7" class="text-muted">Sem conectores</td></tr>';
     }
 
-    function statusBadge(ok, label) {
-      return `<span class="badge-soft ${ok ? 'ok' : 'off'}">${escapeHtml(label)}</span>`;
+    function statusBadge(statusOrSeverity, label) {
+      const value = String(statusOrSeverity || '').toLowerCase();
+      const css = value === 'ok' || value === 'active' || value === 'established' || value === 'listening'
+        ? 'ok'
+        : value === 'down' || value === 'failed' || value === 'not_established'
+          ? ''
+          : 'off';
+      return `<span class="badge-soft ${css}">${escapeHtml(label)}</span>`;
+    }
+
+    function statusLabel(status, fallback = 'unknown') {
+      const text = String(status || fallback);
+      if (text.includes('missing_ss') || text.includes('unavailable_in_container')) {
+        return 'Indisponivel para checagem';
+      }
+      if (text === 'not_established') return 'Nao estabelecido';
+      return text;
     }
 
     function renderBgpPeerStatus() {
@@ -6334,11 +6349,13 @@
         <div class="metric-card">
           <div class="metric-label">${escapeHtml(status.name || `#${status.connector_id}`)}</div>
           <div class="metric-readout">
-            ExaBGP service: ${statusBadge(Boolean(status.service?.active), status.service?.raw || 'unknown')}<br>
-            Listener ${escapeHtml(status.listener?.expected_port || 179)}: ${statusBadge(Boolean(status.listener?.listening), status.listener?.listening ? 'listening' : 'down')}<br>
-            TCP peer: ${statusBadge(Boolean(status.session?.tcp_established), status.session?.tcp_established ? 'established' : 'unknown')}<br>
+            ExaBGP service: ${statusBadge(status.service?.severity, statusLabel(status.service?.raw))}<br>
+            Listener ${escapeHtml(status.listener?.expected_port || 179)}: ${statusBadge(status.listener?.severity, statusLabel(status.listener?.status, status.listener?.listening ? 'listening' : 'unknown'))}<br>
+            TCP peer: ${statusBadge(status.session?.severity, statusLabel(status.session?.status, status.session?.tcp_established ? 'established' : 'unknown'))}<br>
+            Pipe ExaBGP: ${statusBadge(status.pipes?.severity, status.pipes?.ok ? 'OK' : 'Falha')}<br>
             BGP: ${escapeHtml(status.bgp_state || 'unknown')}<br>
             FlowSpec: ${escapeHtml(status.flowspec_state || 'unknown')}<br>
+            ${(status.messages || []).map(message => `<span class="subtle">${escapeHtml(message)}</span><br>`).join('')}
             <span class="subtle">${formatDateTime(status.last_checked_at)}</span>
           </div>
         </div>
@@ -6473,9 +6490,10 @@
         apiRequest(`/api/bgp/connectors/${connector.id}/status`).catch(error => ({
           connector_id: connector.id,
           name: connector.name,
-          service: { active: false, raw: 'erro' },
-          listener: { listening: false, expected_port: connector.listen_port || 179 },
-          session: { tcp_established: false },
+          service: { active: false, raw: 'erro', severity: 'down' },
+          listener: { listening: false, expected_port: connector.listen_port || 179, status: 'unknown', severity: 'unknown' },
+          pipes: { ok: false, severity: 'down' },
+          session: { tcp_established: false, status: 'unknown', severity: 'unknown' },
           bgp_state: 'unknown',
           flowspec_state: 'unknown',
           last_checked_at: new Date().toISOString(),
