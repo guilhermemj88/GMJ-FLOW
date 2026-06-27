@@ -5799,6 +5799,93 @@ def bgp_run_command(args: list[str], timeout: float = 2.0) -> tuple[int, str]:
     return int(completed.returncode), output
 
 
+def parse_exabgp_peer_state(text: str, peer_ip: str = "") -> dict[str, Any]:
+    raw = clean_text(text)
+    if not raw:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+    lowered = raw.lower()
+    peer_matches = not peer_ip or peer_ip in raw
+    state = "unknown"
+    if peer_matches and "established" in lowered and "not established" not in lowered:
+        state = "established"
+    elif peer_matches:
+        for candidate in ("idle", "active", "connect", "down"):
+            if re.search(rf"\b{candidate}\b", lowered):
+                state = candidate
+                break
+    return {"state": state, "peer_ip": peer_ip, "source": "exabgp_pipe", "raw": raw[-2000:]}
+
+
+def exabgp_peer_from_pipe(connector: dict[str, Any], timeout: float = 1.2) -> dict[str, Any]:
+    pipe_in = clean_text(connector.get("exabgp_pipe_in"))
+    pipe_out = clean_text(connector.get("exabgp_pipe_out"))
+    peer_ip = clean_text(connector.get("peer_ip"))
+    if not pipe_in or not pipe_out or not Path(pipe_in).exists() or not Path(pipe_out).exists():
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+    if not os.access(pipe_in, os.W_OK):
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+
+    fd_out: int | None = None
+    try:
+        fd_out = os.open(pipe_out, os.O_RDONLY | os.O_NONBLOCK)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if not os.read(fd_out, 8192):
+                    break
+            except BlockingIOError:
+                break
+        try:
+            exabgp_write_pipe(connector, "show neighbor summary")
+        except HTTPException:
+            return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = os.read(fd_out, 8192)
+                if chunk:
+                    chunks.append(chunk)
+                    continue
+            except BlockingIOError:
+                pass
+            time.sleep(0.05)
+        response = b"".join(chunks).decode("utf-8", errors="replace")
+        return parse_exabgp_peer_state(response, peer_ip)
+    except OSError:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+    finally:
+        if fd_out is not None:
+            try:
+                os.close(fd_out)
+            except OSError:
+                pass
+
+
+def exabgp_peer_from_log_heuristic(connector: dict[str, Any]) -> dict[str, Any]:
+    service_name = clean_text(connector.get("systemd_service_name"))
+    peer_ip = clean_text(connector.get("peer_ip"))
+    if not service_name or shutil.which("journalctl") is None:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_log_heuristic"}
+    code, output = bgp_run_command(["journalctl", "-u", service_name, "-n", "120", "--no-pager"], timeout=1.5)
+    if code != 0 or not output:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_log_heuristic"}
+
+    last_connected = -1
+    last_shutdown = -1
+    for index, line in enumerate(output.splitlines()):
+        lowered = line.lower()
+        if peer_ip and peer_ip not in line:
+            continue
+        if "connected to peer" in lowered:
+            last_connected = index
+        if any(marker in lowered for marker in ("shutdown", "disconnected", "closed", "lost connection", "peer reset")):
+            last_shutdown = index
+    state = "established" if last_connected >= 0 and last_connected > last_shutdown else "unknown"
+    return {"state": state, "peer_ip": peer_ip, "source": "exabgp_log_heuristic"}
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -5868,10 +5955,17 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     output_exists = bool(pipe_out and Path(pipe_out).exists())
     input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
     pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
+    exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
+    if exabgp_peer.get("state") == "unknown":
+        heuristic_peer = exabgp_peer_from_log_heuristic(connector)
+        if heuristic_peer.get("state") == "established":
+            exabgp_peer = heuristic_peer
     return {
         "connector_id": connector["id"],
         "name": connector["name"],
         "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
+        "role": connector.get("role") or "",
+        "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
         "service": {"name": service_name, "active": service_active, "raw": service_raw, "severity": service_severity},
         "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
         "pipes": {
@@ -5884,9 +5978,10 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "status": "ok" if pipes_ok else "down",
             "severity": "ok" if pipes_ok else "down",
         },
+        "exabgp_peer": exabgp_peer,
         "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
-        "bgp_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
-        "flowspec_state": "unknown_by_router_cli" if not tcp_established else "unknown_by_router_cli",
+        "bgp_state": exabgp_peer.get("state") or "unknown",
+        "flowspec_state": "unknown",
         "last_checked_at": utc_now_iso(),
         "errors": errors,
         "messages": sorted(set(messages)),

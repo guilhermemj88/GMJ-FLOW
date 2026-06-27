@@ -572,6 +572,35 @@
       color: #475569;
     }
 
+    .badge-soft.down {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .badge-soft.warn {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .bgp-peer-table th,
+    .bgp-peer-table td {
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    .bgp-peer-details summary {
+      cursor: pointer;
+      color: #475569;
+      font-weight: 700;
+    }
+
+    .bgp-peer-details pre {
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .nav-badge {
       margin-left: auto;
       min-width: 22px;
@@ -3210,7 +3239,20 @@
                 <i data-lucide="activity"></i><span>Verificar agora</span>
               </button>
             </div>
-            <div id="bgpPeerStatusCards" class="database-metrics-grid"></div>
+            <div class="table-wrap">
+              <table class="table table-sm bgp-peer-table mb-0">
+                <thead>
+                  <tr>
+                    <th>Conector</th>
+                    <th>BGP Peer</th>
+                    <th>FlowSpec Peer</th>
+                    <th>Pipe ExaBGP</th>
+                    <th>Última checagem</th>
+                  </tr>
+                </thead>
+                <tbody id="bgpPeerStatusRows"></tbody>
+              </table>
+            </div>
           </section>
 
           <section class="panel p-3">
@@ -6344,22 +6386,102 @@
       return text;
     }
 
+    function bgpStatusBadge(label, kind) {
+      const css = kind === 'up' || kind === 'ok'
+        ? 'ok'
+        : kind === 'down'
+          ? 'down'
+          : kind === 'unknown'
+            ? 'warn'
+            : 'off';
+      return `<span class="badge-soft ${css}">${escapeHtml(label)}</span>`;
+    }
+
+    function bgpConnectorForStatus(status) {
+      return bgpConnectors.find(connector => Number(connector.id) === Number(status.connector_id));
+    }
+
+    function truthyFlag(value) {
+      if (typeof value === 'string') {
+        return ['1', 'true', 'yes', 'on', 'enabled', 'flow', 'flowspec'].includes(value.trim().toLowerCase());
+      }
+      return Boolean(value);
+    }
+
+    function bgpConnectorHasFlowspec(connector, status) {
+      const explicitFields = ['ipv4_flow', 'ipv4_flowspec', 'family_flow', 'flow_enabled', 'flowspec_enabled'];
+      for (const field of explicitFields) {
+        if (connector && Object.prototype.hasOwnProperty.call(connector, field)) {
+          return truthyFlag(connector[field]);
+        }
+      }
+      if (connector?.families && Object.prototype.hasOwnProperty.call(connector.families, 'ipv4_flow')) {
+        return truthyFlag(connector.families.ipv4_flow);
+      }
+      const connectorId = Number(status.connector_id || connector?.id);
+      const hasFlowspecProfile = bgpProfiles.some(profile =>
+        Number(profile.connector_id) === connectorId &&
+        profile.response_type === 'flowspec' &&
+        profile.enabled !== false
+      );
+      return hasFlowspecProfile || connector?.role === 'flowspec_mitigation' || status.role === 'flowspec_mitigation' || truthyFlag(status.flowspec_enabled);
+    }
+
+    function bgpPeerOperationalState(status) {
+      const rawState = String(status.exabgp_peer?.state || status.bgp_state || 'unknown').toLowerCase();
+      if (rawState === 'established') return 'UP';
+      if (['idle', 'active', 'connect', 'down'].includes(rawState)) return 'DOWN';
+      return 'UNKNOWN';
+    }
+
+    function bgpPipeOperationalState(status) {
+      const pipes = status.pipes || {};
+      return pipes.ok || (pipes.input_exists && pipes.input_writable) ? 'OK' : 'DOWN';
+    }
+
+    function bgpFlowspecOperationalState(status, connector) {
+      const bgpState = bgpPeerOperationalState(status);
+      if (bgpState === 'UNKNOWN') return 'UNKNOWN';
+      if (bgpState === 'DOWN') return 'DOWN';
+      return bgpConnectorHasFlowspec(connector, status) ? 'UP' : 'UNKNOWN';
+    }
+
+    function bgpPeerDetails(status) {
+      const details = {
+        service: {
+          raw: status.service?.raw,
+          name: status.service?.name,
+          severity: status.service?.severity
+        },
+        listener: status.listener || {},
+        session: status.session || {},
+        pipes: status.pipes || {},
+        exabgp_peer: status.exabgp_peer || {},
+        messages: status.messages || [],
+        errors: status.errors || []
+      };
+      return `<details class="bgp-peer-details"><summary>Detalhes</summary><pre class="bg-light border rounded p-2 mt-2 mb-0">${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
+    }
+
     function renderBgpPeerStatus() {
-      document.getElementById('bgpPeerStatusCards').innerHTML = bgpConnectorStatuses.map(status => `
-        <div class="metric-card">
-          <div class="metric-label">${escapeHtml(status.name || `#${status.connector_id}`)}</div>
-          <div class="metric-readout">
-            ExaBGP service: ${statusBadge(status.service?.severity, statusLabel(status.service?.raw))}<br>
-            Listener ${escapeHtml(status.listener?.expected_port || 179)}: ${statusBadge(status.listener?.severity, statusLabel(status.listener?.status, status.listener?.listening ? 'listening' : 'unknown'))}<br>
-            TCP peer: ${statusBadge(status.session?.severity, statusLabel(status.session?.status, status.session?.tcp_established ? 'established' : 'unknown'))}<br>
-            Pipe ExaBGP: ${statusBadge(status.pipes?.severity, status.pipes?.ok ? 'OK' : 'Falha')}<br>
-            BGP: ${escapeHtml(status.bgp_state || 'unknown')}<br>
-            FlowSpec: ${escapeHtml(status.flowspec_state || 'unknown')}<br>
-            ${(status.messages || []).map(message => `<span class="subtle">${escapeHtml(message)}</span><br>`).join('')}
-            <span class="subtle">${formatDateTime(status.last_checked_at)}</span>
-          </div>
-        </div>
-      `).join('') || '<div class="subtle">Sem conectores para verificar.</div>';
+      document.getElementById('bgpPeerStatusRows').innerHTML = bgpConnectorStatuses.map(status => {
+        const connector = bgpConnectorForStatus(status);
+        const bgpState = bgpPeerOperationalState(status);
+        const flowspecState = bgpFlowspecOperationalState(status, connector);
+        const pipeState = bgpPipeOperationalState(status);
+        return `
+          <tr>
+            <td>${escapeHtml(status.name || connector?.name || `#${status.connector_id}`)}</td>
+            <td>${bgpStatusBadge(bgpState, bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : 'unknown')}</td>
+            <td>${bgpStatusBadge(flowspecState, flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : 'unknown')}</td>
+            <td>${bgpStatusBadge(pipeState, pipeState === 'OK' ? 'ok' : 'down')}</td>
+            <td>${escapeHtml(formatDateTime(status.last_checked_at) || '-')}</td>
+          </tr>
+          <tr>
+            <td colspan="5">${bgpPeerDetails(status)}</td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="5" class="text-muted">Sem conectores para verificar.</td></tr>';
       setText('bgpPeerStatusText', bgpConnectorStatuses.length ? `${bgpConnectorStatuses.length} conector(es) verificado(s)` : '-');
     }
 
