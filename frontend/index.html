@@ -439,6 +439,21 @@
       overflow-wrap: anywhere;
     }
 
+    .metric-chip {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      color: #111827;
+      padding: .38rem .55rem;
+      font-size: .88rem;
+      overflow-wrap: anywhere;
+    }
+
+    .metric-chip span {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
     .database-actions-grid {
       display: grid;
       grid-template-columns: repeat(5, minmax(120px, 1fr));
@@ -3293,6 +3308,9 @@
               <div class="field"><label for="bgpProfileType">Tipo</label><select id="bgpProfileType" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileApproval">Aprovacao</label><select id="bgpProfileApproval" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileAction">Acao</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileRateLimit">Rate-limit padrao</label><input id="bgpProfileRateLimit" class="form-control form-control-sm" placeholder="100M"></div>
+              <div class="field"><label for="bgpProfileMinRateLimit">Rate-limit min</label><input id="bgpProfileMinRateLimit" class="form-control form-control-sm" placeholder="10M"></div>
+              <div class="field"><label for="bgpProfileMaxRateLimit">Rate-limit max</label><input id="bgpProfileMaxRateLimit" class="form-control form-control-sm" placeholder="1G"></div>
               <div class="field"><label for="bgpProfileTarget">Alvo</label><select id="bgpProfileTarget" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileProtocol">Protocolo</label><select id="bgpProfileProtocol" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileSrcPortSelector">Porta origem</label><select id="bgpProfileSrcPortSelector" class="form-select form-select-sm"></select></div>
@@ -3358,7 +3376,8 @@
               <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
               <div class="field"><label for="bgpDrySrcPort">Src port</label><input id="bgpDrySrcPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryThenAction">Then</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">discard</option></select></div>
+              <div class="field"><label for="bgpDryThenAction">Acao FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
+              <div id="bgpDryRateLimitField" class="field"><label for="bgpDryRateLimit">Limite</label><input id="bgpDryRateLimit" class="form-control form-control-sm" placeholder="ex: 100M, 500K, 1G"><div id="bgpDryRatePreview" class="subtle"></div></div>
               <div class="field"><label for="bgpDryDuration">Duracao (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
               <div class="field"><label for="bgpDryConfirm">Confirmacao</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
             </div>
@@ -3372,11 +3391,11 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Sugestoes pending_approval</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Announcements ativos</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">Historico</div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
           </section>
         </section>
 
@@ -3680,6 +3699,7 @@
       </div>
       <div class="gmj-dialog-body">
         <div id="anomalyDetailSummary" class="subtle mb-3">Carregando</div>
+        <div id="anomalyScopeSummary" class="panel p-3 mb-3"></div>
         <div class="anomaly-detail-grid mb-3">
           <div class="metric-card">
             <div class="metric-label">Status</div>
@@ -4189,8 +4209,9 @@
       ['detection_only', 'detection_only']
     ];
     const BGP_ACTION_OPTIONS = [
-      ['discard', 'discard'],
-      ['rate_limit', 'rate_limit'],
+      ['discard', 'Descartar'],
+      ['rate_limit', 'Rate-limit'],
+      ['accept', 'Aceitar'],
       ['redirect', 'redirect'],
       ['announce_route', 'announce_route']
     ];
@@ -6502,7 +6523,7 @@
             <td>${escapeHtml(item.name)}</td>
             <td>${escapeHtml(item.response_type)}</td>
             <td>${escapeHtml(connector?.name || '-')}</td>
-            <td>${escapeHtml(item.action)}</td>
+            <td>${escapeHtml(bgpActionLabel(item))}</td>
             <td>${escapeHtml(item.target_selector)}</td>
             <td>${escapeHtml(filter || '-')}</td>
             <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
@@ -6552,6 +6573,41 @@
       return `<details><summary>Comando</summary><pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(item.rendered_command || '-')}</pre></details>`;
     }
 
+    function parseRateLimitToBps(value) {
+      const text = String(value || '').replace(/\s+/g, '');
+      const match = text.match(/^([+-]?\d+)([kmg]?)(?:bps|bit)?$/i);
+      if (!match) return null;
+      const number = Number(match[1]);
+      if (!Number.isFinite(number) || number <= 0) return null;
+      const unit = match[2].toLowerCase();
+      const multiplier = unit === 'g' ? 1000000000 : unit === 'm' ? 1000000 : unit === 'k' ? 1000 : 1;
+      return number * multiplier;
+    }
+
+    function formatRateLimitBps(value) {
+      const bps = Number(value || 0);
+      if (!bps) return '-';
+      if (bps % 1000000000 === 0) return `${formatNumber(bps / 1000000000)} Gbps`;
+      if (bps % 1000000 === 0) return `${formatNumber(bps / 1000000)} Mbps`;
+      if (bps % 1000 === 0) return `${formatNumber(bps / 1000)} Kbps`;
+      return `${formatNumber(bps)} bps`;
+    }
+
+    function bgpActionLabel(item) {
+      const action = item?.action || item?.then_action || (String(item?.rendered_command || '').includes('discard') ? 'discard' : '');
+      if (action === 'rate_limit') return `Rate-limit ${formatRateLimitBps(item.rate_limit_bps)}`;
+      if (action === 'accept') return 'Accept';
+      if (action === 'discard') return 'Discard';
+      return action || '-';
+    }
+
+    function bgpActionImpactText(item) {
+      const action = item?.action || item?.then_action;
+      if (action === 'rate_limit') return `Esta regra vai limitar o trafego correspondente a ${formatRateLimitBps(item.rate_limit_bps)}.`;
+      if (action === 'accept') return 'Esta regra vai aceitar explicitamente o trafego correspondente.';
+      return 'Esta regra vai descartar o trafego correspondente.';
+    }
+
     function renderBgpAnnouncements() {
       const pending = bgpAnnouncements.filter(item => item.status === 'pending_approval');
       const active = bgpAnnouncements.filter(item => ['announced', 'dry_run'].includes(item.status));
@@ -6563,6 +6619,7 @@
           <td>${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}</td>
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
           <td>
@@ -6570,7 +6627,7 @@
             <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="8" class="text-muted">Sem sugestoes pendentes</td></tr>';
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestoes pendentes</td></tr>';
       document.getElementById('bgpActiveAnnouncementsTable').innerHTML = active.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -6578,6 +6635,7 @@
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
           <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
           <td>
@@ -6586,7 +6644,7 @@
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="8" class="text-muted">Sem announcements ativos</td></tr>';
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem announcements ativos</td></tr>';
       document.getElementById('bgpHistoryAnnouncementsTable').innerHTML = history.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -6596,10 +6654,11 @@
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
           <td>${escapeHtml(item.policy_decision || '-')}</td>
+          <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.last_error || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-muted">Sem historico</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem historico</td></tr>';
     }
 
     function renderBgpWorkspace() {
@@ -6610,6 +6669,7 @@
       renderBgpProtected();
       renderBgpPolicies();
       renderBgpAnnouncements();
+      updateBgpDryRateLimitUi();
       createIcons();
     }
 
@@ -6723,6 +6783,9 @@
       setValue('bgpProfileType', 'flowspec');
       setValue('bgpProfileApproval', 'manual_approval');
       setValue('bgpProfileAction', 'discard');
+      setValue('bgpProfileRateLimit', '');
+      setValue('bgpProfileMinRateLimit', '');
+      setValue('bgpProfileMaxRateLimit', '');
       setValue('bgpProfileTarget', 'src_ip');
       setValue('bgpProfileProtocol', 'anomaly_protocol');
       setValue('bgpProfileSrcPortSelector', 'any');
@@ -6742,7 +6805,10 @@
       setValue('bgpProfileConnector', item.connector_id || '');
       setValue('bgpProfileType', item.response_type);
       setValue('bgpProfileApproval', item.approval_mode);
-      setValue('bgpProfileAction', item.action);
+      setValue('bgpProfileAction', item.default_action || item.action);
+      setValue('bgpProfileRateLimit', item.default_rate_limit_raw || (item.default_rate_limit_bps ? String(item.default_rate_limit_bps) : ''));
+      setValue('bgpProfileMinRateLimit', item.min_rate_limit_bps ? String(item.min_rate_limit_bps) : '');
+      setValue('bgpProfileMaxRateLimit', item.max_rate_limit_bps ? String(item.max_rate_limit_bps) : '');
       setValue('bgpProfileTarget', item.target_selector);
       setValue('bgpProfileProtocol', item.protocol_selector);
       setValue('bgpProfileSrcPortSelector', item.src_port_selector);
@@ -6764,6 +6830,11 @@
         connector_id: selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null,
         approval_mode: selectValue('bgpProfileApproval', 'manual_approval'),
         action: selectValue('bgpProfileAction', 'discard'),
+        default_action: selectValue('bgpProfileAction', 'discard'),
+        default_rate_limit_raw: selectValue('bgpProfileRateLimit').trim(),
+        rate_limit_value_raw: selectValue('bgpProfileRateLimit').trim(),
+        min_rate_limit_bps: parseRateLimitToBps(selectValue('bgpProfileMinRateLimit')) || null,
+        max_rate_limit_bps: parseRateLimitToBps(selectValue('bgpProfileMaxRateLimit')) || null,
         target_selector: selectValue('bgpProfileTarget', 'src_ip'),
         protocol_selector: selectValue('bgpProfileProtocol', 'anomaly_protocol'),
         src_port_selector: selectValue('bgpProfileSrcPortSelector', 'any'),
@@ -6875,9 +6946,19 @@
       return [`#${item.id} ${item.status}`, policy, errors, warnings, item.rendered_command || item.command || ''].filter(Boolean).join('\n\n');
     }
 
+    function updateBgpDryRateLimitUi() {
+      const isRateLimit = selectValue('bgpDryThenAction', 'discard') === 'rate_limit';
+      const field = document.getElementById('bgpDryRateLimitField');
+      field.classList.toggle('d-none', !isRateLimit);
+      const raw = selectValue('bgpDryRateLimit').trim();
+      const bps = parseRateLimitToBps(raw);
+      setText('bgpDryRatePreview', isRateLimit && raw ? (bps ? `${raw} = ${formatRateLimitBps(bps)}` : 'Limite invalido') : '');
+    }
+
     async function runBgpDryRun(action = 'dry_run') {
       document.getElementById('bgpDryRunOutput').textContent = 'Gerando dry-run...';
       const connectorId = Number(selectValue('bgpDryConnector'));
+      updateBgpDryRateLimitUi();
       const payload = {
         action,
         src_cidr: selectValue('bgpDrySrcIp').trim() || null,
@@ -6886,6 +6967,7 @@
         src_port: selectValue('bgpDrySrcPort').trim() || null,
         dst_port: selectValue('bgpDryDstPort').trim() || null,
         then_action: selectValue('bgpDryThenAction', 'discard'),
+        rate_limit_value_raw: selectValue('bgpDryThenAction', 'discard') === 'rate_limit' ? selectValue('bgpDryRateLimit').trim() : null,
         duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800)),
         confirm: selectValue('bgpDryConfirm').trim()
       };
@@ -6924,6 +7006,7 @@
               ${mitigationDecisionBadge(policy.decision)}
             </div>
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
+            <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
             <div class="toolbar">
               <button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>
@@ -7630,14 +7713,45 @@
       };
     }
 
+    function anomalyScopeHtml(event) {
+      const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : '-');
+      const fields = [
+        ['Alvo', target],
+        ['Direção', directionLabel(event.direction || '-')],
+        ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
+        ['Vetor', event.vector_name || event.attack_vector_name || '-'],
+        ['Protocolo', event.decoder || event.protocol || '-'],
+        ['Métrica', unitLabel(event.metric_unit || '-')]
+      ];
+      if (event.invalid_scope) fields.push(['Escopo', 'invalid_scope']);
+      return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
+        <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
+      `).join('')}</div>`;
+    }
+
+    function normalizedAnomalyMetricPoints(points, event) {
+      const unit = event.metric_unit || 'bits_s';
+      const valueKey = unit === 'packets_s' ? 'packets_s' : unit === 'flows_s' ? 'flows_s' : 'bits_s';
+      const items = Array.isArray(points) ? points.slice() : [];
+      const peak = Number(event.peak_value || event.observed_value || 0);
+      const maxPoint = items.reduce((max, point) => Math.max(max, Number(point[valueKey] || 0)), 0);
+      if (peak > 0 && (!items.length || maxPoint < peak * 0.5)) {
+        const time = (event.last_seen_at || event.started_at || '').slice(0, 16) || 'pico';
+        items.push({ time, bits_s: 0, packets_s: 0, flows_s: 0, [valueKey]: peak });
+      }
+      return items;
+    }
+
     async function openAnomalyDetail(anomalyId) {
       currentAnomalyDetailId = Number(anomalyId);
       openModal('anomalyDetailModal');
       document.getElementById('anomalyDetailSummary').textContent = 'Carregando...';
+      document.getElementById('anomalyScopeSummary').innerHTML = '';
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
         const event = payload.event || {};
         document.getElementById('anomalyDetailSummary').textContent = event.summary || '-';
+        document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event);
         setText('anomalyDetailStatus', event.status || '-');
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
         setText('anomalyDetailThreshold', formatMetricValue(event.threshold_value, event.metric_unit));
@@ -7663,7 +7777,7 @@
             <td class="text-end">${formatNumber(flow.packets)}</td>
           </tr>
         `).join('') || '<tr><td colspan="8" class="text-muted">Sem flows amostrados</td></tr>';
-        const points = Array.isArray(payload.metric_points) ? payload.metric_points : [];
+        const points = normalizedAnomalyMetricPoints(payload.metric_points, event);
         charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
         setTimeout(() => charts.anomalyMetric.resize(), 50);
       } catch (error) {
@@ -10465,6 +10579,8 @@
     document.getElementById('previewBgpDryRunButton').addEventListener('click', () => runBgpDryRun('dry_run').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('runBgpDryRunButton').addEventListener('click', () => runBgpDryRun('announce').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('withdrawBgpDryRunButton').addEventListener('click', () => runBgpDryRun('withdraw').catch(error => { document.getElementById('bgpDryRunOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('bgpDryThenAction').addEventListener('change', updateBgpDryRateLimitUi);
+    document.getElementById('bgpDryRateLimit').addEventListener('input', updateBgpDryRateLimitUi);
     document.getElementById('runBgpAnomalyDryRunButton').addEventListener('click', () => runBgpAnomalyDryRun().catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; }));
     document.getElementById('bgpMitigationCandidates').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
