@@ -11200,7 +11200,7 @@ def flow_matches_anomaly_target(flow: dict[str, Any], event: dict[str, Any]) -> 
         return True
     target_ip = clean_ip(event.get("target_ip"))
     if not target_ip:
-        return False
+        return True
     role = clean_text(event.get("target_role"))
     if role == "src_ip":
         return clean_ip(flow.get("src_ip")) == target_ip
@@ -11214,7 +11214,7 @@ def security_item_matches_event_target(item: dict[str, Any], event: dict[str, An
         return True
     target_ip = clean_ip(event.get("target_ip"))
     if not target_ip:
-        return False
+        return True
     role = clean_text(event.get("target_role"))
     if role == "src_ip":
         return clean_ip(item.get("src_ip")) == target_ip or clean_ip(item.get("target_ip")) == target_ip
@@ -12470,6 +12470,35 @@ def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
     return sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
 
 
+def anomaly_detail_payload(
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    top_conversations: list[dict[str, Any]],
+    metric_points: list[dict[str, Any]],
+    **extra: Any,
+) -> dict[str, Any]:
+    target_fields = {
+        "target_ip": clean_ip(event.get("target_ip")),
+        "target_cidr": clean_text(event.get("target_cidr")),
+        "target_role": clean_text(event.get("target_role")),
+        "scope_type": clean_text(event.get("scope_type")) or ("legacy_unscoped" if not clean_ip(event.get("target_ip")) else ""),
+        "invalid_scope": bool(event.get("invalid_scope")),
+    }
+    if not target_fields["target_ip"] and not target_fields["target_cidr"]:
+        target_fields["invalid_scope"] = bool(event.get("scope_type") == "internal_ip_32")
+    return {
+        "event": event,
+        "anomaly": event,
+        "flows": flows,
+        "related_flows": flows,
+        "top_conversations": top_conversations,
+        "metric_points": metric_points,
+        "timeseries": metric_points,
+        **target_fields,
+        **extra,
+    }
+
+
 @app.get("/api/anomalies/summary")
 def anomaly_summary_endpoint(request: Request):
     require_admin(request)
@@ -12540,22 +12569,23 @@ def anomaly_detail(request: Request, event_id: int):
             point["bits_s"] += float(item.get("bits_s") or 0)
             point["packets_s"] += float(item.get("packets_s") or 0)
             point["flows_s"] += float(item.get("flows_s") or item.get("flows") or 0)
-        return {
-            "event": event,
-            "flows": [
-                {
-                    **item,
-                    "flow_time": item.get("last_seen") or item.get("updated_at") or item.get("created_at"),
-                    "src_port": 0,
-                    "dst_port": 0,
-                    "proto_name": item.get("protocol") or "ALL",
-                }
-                for item in details
-            ],
-            "security_anomalies": details,
-            "top_conversations": sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
-            "metric_points": sorted(points_by_time.values(), key=lambda item: item["time"]),
-        }
+        flows = [
+            {
+                **item,
+                "flow_time": item.get("last_seen") or item.get("updated_at") or item.get("created_at"),
+                "src_port": 0,
+                "dst_port": 0,
+                "proto_name": item.get("protocol") or "ALL",
+            }
+            for item in details
+        ]
+        return anomaly_detail_payload(
+            event,
+            flows,
+            sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
+            sorted(points_by_time.values(), key=lambda item: item["time"]),
+            security_anomalies=details,
+        )
     with sqlite_connection() as conn:
         row = conn.execute(
             """
@@ -12574,6 +12604,20 @@ def anomaly_detail(request: Request, event_id: int):
         if row is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         event = anomaly_event_row_to_dict(row)
+        vector = None
+        if event.get("attack_vector_id") is not None:
+            vector_row = conn.execute(
+                """
+                SELECT v.*, t.name AS template_name, s.name AS sensor_name
+                FROM attack_vectors v
+                LEFT JOIN attack_vector_templates t ON t.id = v.template_id
+                LEFT JOIN sensors s ON s.id = v.sensor_id
+                WHERE v.id = ?
+                """,
+                (int(event["attack_vector_id"]),),
+            ).fetchone()
+            if vector_row is not None:
+                vector = attack_vector_row_to_dict(vector_row)
         flow_rows = conn.execute(
             """
             SELECT *
@@ -12587,15 +12631,14 @@ def anomaly_detail(request: Request, event_id: int):
     flows = []
     conversations: dict[str, dict[str, Any]] = {}
     points_by_minute: dict[str, dict[str, Any]] = {}
-    for row in flow_rows:
-        flow = dict(row)
+    def add_detail_flow(flow: dict[str, Any]) -> None:
         flow["src_ip"] = clean_ip(flow.get("src_ip"))
         flow["dst_ip"] = clean_ip(flow.get("dst_ip"))
         flow["exporter_ip"] = clean_ip(flow.get("exporter_ip"))
-        flow["proto_name"] = proto_name(flow.get("proto"))
-        flow["decoder"] = classify_flow_decoder(flow)
+        flow["proto_name"] = flow.get("proto_name") or proto_name(flow.get("proto"))
+        flow["decoder"] = flow.get("decoder") or classify_flow_decoder(flow)
         if not flow_matches_anomaly_target(flow, event):
-            continue
+            return
         flows.append(flow)
         key = f"{flow['src_ip']}:{flow['src_port']} -> {flow['dst_ip']}:{flow['dst_port']} {flow['proto_name']}"
         item = conversations.setdefault(
@@ -12610,6 +12653,18 @@ def anomaly_detail(request: Request, event_id: int):
         point["bytes"] += int(flow.get("bytes") or 0)
         point["packets"] += int(flow.get("packets") or 0)
         point["flow_count"] += int(flow.get("flow_count") or 0)
+
+    for row in flow_rows:
+        add_detail_flow(dict(row))
+    if not flows and vector is not None:
+        start_dt = clickhouse_datetime(event.get("started_at")) or datetime.now(timezone.utc) - timedelta(minutes=5)
+        end_dt = clickhouse_datetime(event.get("last_seen_at") or event.get("ended_at")) or datetime.now(timezone.utc)
+        target_ip = clean_ip(event.get("target_ip")) if event.get("scope_type") == "internal_ip_32" else ""
+        try:
+            for flow in query_vector_sample_rows(vector, start_dt, end_dt, target_ip, 200):
+                add_detail_flow(flow)
+        except Exception as exc:
+            logger.warning("Fallback legado de detalhes da anomalia %s falhou: %s", event_id, exc)
     top_conversations = sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20]
     metric_points = []
     for point in sorted(points_by_minute.values(), key=lambda item: item["time"]):
@@ -12621,12 +12676,7 @@ def anomaly_detail(request: Request, event_id: int):
                 "flows_s": point["flow_count"] / 60,
             }
         )
-    return {
-        "event": event,
-        "flows": flows,
-        "top_conversations": top_conversations,
-        "metric_points": metric_points,
-    }
+    return anomaly_detail_payload(event, flows, top_conversations, metric_points)
 
 
 @app.post("/api/anomalies/{event_id}/mitigation/evaluate")

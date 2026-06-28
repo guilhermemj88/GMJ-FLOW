@@ -7714,16 +7714,19 @@
     }
 
     function anomalyScopeHtml(event) {
-      const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : '-');
+      const hasTarget = Boolean(event.target_cidr || event.target_ip);
+      const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : 'nao definido');
+      const scope = event.scope_type || (hasTarget ? '-' : 'legado/sem alvo normalizado');
       const fields = [
         ['Alvo', target],
+        ['Escopo', scope],
         ['Direção', directionLabel(event.direction || '-')],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Vetor', event.vector_name || event.attack_vector_name || '-'],
         ['Protocolo', event.decoder || event.protocol || '-'],
         ['Métrica', unitLabel(event.metric_unit || '-')]
       ];
-      if (event.invalid_scope) fields.push(['Escopo', 'invalid_scope']);
+      if (event.invalid_scope) fields.push(['Validacao', 'invalid_scope']);
       return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
         <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
       `).join('')}</div>`;
@@ -7749,7 +7752,7 @@
       document.getElementById('anomalyScopeSummary').innerHTML = '';
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
-        const event = payload.event || {};
+        const event = payload.event || payload.anomaly || {};
         document.getElementById('anomalyDetailSummary').textContent = event.summary || '-';
         document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event);
         setText('anomalyDetailStatus', event.status || '-');
@@ -7763,8 +7766,8 @@
             <td class="text-end">${formatBytes(item.bytes)}</td>
             <td class="text-end">${formatNumber(item.packets)}</td>
           </tr>
-        `).join('') || '<tr><td colspan="3" class="text-muted">Sem conversas</td></tr>';
-        const flows = Array.isArray(payload.flows) ? payload.flows : [];
+        `).join('') || '<tr><td colspan="3" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
+        const flows = Array.isArray(payload.related_flows) ? payload.related_flows : Array.isArray(payload.flows) ? payload.flows : [];
         document.getElementById('anomalyFlowTable').innerHTML = flows.map(flow => `
           <tr>
             <td>${formatDateTime(flow.flow_time)}</td>
@@ -7776,8 +7779,9 @@
             <td class="text-end">${formatBytes(flow.bytes)}</td>
             <td class="text-end">${formatNumber(flow.packets)}</td>
           </tr>
-        `).join('') || '<tr><td colspan="8" class="text-muted">Sem flows amostrados</td></tr>';
-        const points = normalizedAnomalyMetricPoints(payload.metric_points, event);
+        `).join('') || '<tr><td colspan="8" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
+        const rawPoints = Array.isArray(payload.timeseries) ? payload.timeseries : payload.metric_points;
+        const points = normalizedAnomalyMetricPoints(rawPoints, event);
         charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
         setTimeout(() => charts.anomalyMetric.resize(), 50);
       } catch (error) {
