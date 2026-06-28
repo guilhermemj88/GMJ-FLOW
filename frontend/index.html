@@ -5268,6 +5268,14 @@
       return labels[value] || value || '-';
     }
 
+    function formatAnomalyDirectionLabel(direction) {
+      const value = String(direction || '').toLowerCase();
+      if (['outbound', 'transmits', 'send', 'saindo'].includes(value)) return 'Saindo da zona';
+      if (['inbound', 'receives', 'receive', 'entrando'].includes(value)) return 'Entrando na zona';
+      if (value === 'both') return 'Recebido/enviado';
+      return direction || 'Nao definida';
+    }
+
     function mountDetectionTemplateSection() {
       const section = document.getElementById('detectionTemplateSection');
       const mount = document.getElementById('attackDetectionTemplateMount');
@@ -7713,18 +7721,19 @@
       };
     }
 
-    function anomalyScopeHtml(event) {
+    function anomalyScopeHtml(anomaly) {
+      const event = anomaly || {};
       const hasTarget = Boolean(event.target_cidr || event.target_ip);
-      const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : 'nao definido');
+      const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : 'Nao definido');
       const scope = event.scope_type || (hasTarget ? '-' : 'legado/sem alvo normalizado');
       const fields = [
         ['Alvo', target],
         ['Escopo', scope],
-        ['Direção', directionLabel(event.direction || '-')],
+        ['Direcao', formatAnomalyDirectionLabel(event.direction)],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Vetor', event.vector_name || event.attack_vector_name || '-'],
         ['Protocolo', event.decoder || event.protocol || '-'],
-        ['Métrica', unitLabel(event.metric_unit || '-')]
+        ['Metrica', event.metric_unit ? unitLabel(event.metric_unit) : '-']
       ];
       if (event.invalid_scope) fields.push(['Validacao', 'invalid_scope']);
       return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
@@ -7752,23 +7761,29 @@
       document.getElementById('anomalyScopeSummary').innerHTML = '';
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
-        const event = payload.event || payload.anomaly || {};
+        const detail = payload || {};
+        const event = detail.event || detail.anomaly || detail;
         document.getElementById('anomalyDetailSummary').textContent = event.summary || '-';
         document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event);
         setText('anomalyDetailStatus', event.status || '-');
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
         setText('anomalyDetailThreshold', formatMetricValue(event.threshold_value, event.metric_unit));
         setText('anomalyDetailTotal', formatBytes(event.estimated_bytes));
-        const conversations = Array.isArray(payload.top_conversations) ? payload.top_conversations : [];
-        document.getElementById('anomalyConversationTable').innerHTML = conversations.map(item => `
+        const conversations = Array.isArray(detail.top_conversations) ? detail.top_conversations : [];
+        document.getElementById('anomalyConversationTable').innerHTML = conversations.map(conversation => {
+          const item = conversation || {};
+          return `
           <tr>
-            <td>${escapeHtml(item.conversation)}</td>
+            <td>${escapeHtml(item.conversation || '-')}</td>
             <td class="text-end">${formatBytes(item.bytes)}</td>
             <td class="text-end">${formatNumber(item.packets)}</td>
           </tr>
-        `).join('') || '<tr><td colspan="3" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
-        const flows = Array.isArray(payload.related_flows) ? payload.related_flows : Array.isArray(payload.flows) ? payload.flows : [];
-        document.getElementById('anomalyFlowTable').innerHTML = flows.map(flow => `
+        `;
+        }).join('') || '<tr><td colspan="3" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
+        const flows = Array.isArray(detail.related_flows) ? detail.related_flows : Array.isArray(detail.flows) ? detail.flows : [];
+        document.getElementById('anomalyFlowTable').innerHTML = flows.map(relatedFlow => {
+          const flow = relatedFlow || {};
+          return `
           <tr>
             <td>${formatDateTime(flow.flow_time)}</td>
             <td>${escapeHtml(flow.src_ip || '-')}</td>
@@ -7779,8 +7794,9 @@
             <td class="text-end">${formatBytes(flow.bytes)}</td>
             <td class="text-end">${formatNumber(flow.packets)}</td>
           </tr>
-        `).join('') || '<tr><td colspan="8" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
-        const rawPoints = Array.isArray(payload.timeseries) ? payload.timeseries : payload.metric_points;
+        `;
+        }).join('') || '<tr><td colspan="8" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
+        const rawPoints = Array.isArray(detail.timeseries) ? detail.timeseries : detail.metric_points;
         const points = normalizedAnomalyMetricPoints(rawPoints, event);
         charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
         setTimeout(() => charts.anomalyMetric.resize(), 50);
