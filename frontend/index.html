@@ -2266,6 +2266,8 @@
                 <div id="dbLastCleanup" class="metric-value">-</div>
               </div>
             </div>
+            <div id="databaseStorageWarning" class="text-warning mt-3"></div>
+            <div id="databaseOperationsStatus" class="subtle mt-2">Merges/Mutations em andamento: -</div>
           </section>
 
           <section class="row g-3 mt-1">
@@ -2326,6 +2328,9 @@
                 <div class="toolbar mt-3">
                   <button id="saveDatabaseRetentionButton" type="button" class="btn btn-sm btn-success">
                     <i data-lucide="save"></i><span>Salvar politica</span>
+                  </button>
+                  <button id="applyDatabaseTtlButton" type="button" class="btn btn-sm btn-outline-secondary">
+                    <i data-lucide="clock"></i><span>Aplicar TTL</span>
                   </button>
                 </div>
               </div>
@@ -5069,6 +5074,34 @@
       status.textContent = `${formatNumber(items.length)} tabelas`;
     }
 
+    function renderDatabaseOptimizeGuard(guard = {}) {
+      const warning = document.getElementById('databaseStorageWarning');
+      if (!warning) return;
+      if (!guard.low_disk) {
+        warning.textContent = '';
+        warning.className = 'text-warning mt-3';
+        return;
+      }
+      const reasons = Array.isArray(guard.reasons) && guard.reasons.length ? guard.reasons.join('; ') : 'disco livre baixo';
+      warning.className = 'text-danger mt-3';
+      warning.textContent = `Aviso: ${reasons}. Livre ${guard.disk_free_human || formatBytes(guard.disk_free_bytes)}; maior tabela ${guard.largest_table_human || formatBytes(guard.largest_table_bytes)}. OPTIMIZE FINAL exige confirmacao reforcada: OTIMIZAR BAIXO DISCO.`;
+    }
+
+    function renderClickHouseOperations(payload = {}) {
+      const status = document.getElementById('databaseOperationsStatus');
+      if (!status) return;
+      const pending = Number(payload.pending_mutation_count || 0);
+      const merges = Number(payload.merge_count || 0);
+      const failed = payload.last_failed_mutation;
+      const parts = [`Merges/Mutations em andamento: ${formatNumber(merges)} merges, ${formatNumber(pending)} mutations pendentes`];
+      if (failed) {
+        parts.push(`ultima falha: ${failed.table || '-'} ${failed.latest_fail_reason || '-'}`);
+      }
+      status.textContent = parts.join(' | ');
+      status.className = failed ? 'subtle text-danger mt-2' : (pending || merges ? 'subtle text-warning mt-2' : 'subtle mt-2');
+      renderDatabaseOptimizeGuard(payload.optimize_guard || {});
+    }
+
     function renderDatabaseStatus(payload) {
       setText('dbClickhouseStatus', payload.clickhouse_ok ? 'OK' : 'Falha');
       setText('dbSqliteStatus', payload.sqlite_ok ? 'OK' : 'Falha');
@@ -5091,6 +5124,7 @@
       document.getElementById('flowTopsRetentionDays').value = String(payload.flow_tops_1m_retention_days || 15);
       document.getElementById('snmpRetentionDays').value = String(payload.snmp_retention_days || 90);
       document.getElementById('databaseCleanupHour').value = String(payload.database_cleanup_hour ?? 3);
+      renderDatabaseOptimizeGuard(payload.optimize_guard || {});
     }
 
     async function loadDatabaseTables() {
@@ -5110,10 +5144,35 @@
         const payload = await apiRequest('/api/database/status');
         renderDatabaseStatus(payload);
         document.getElementById('databaseStatusText').textContent = 'Status e manutencao do armazenamento';
+        apiRequest('/api/database/clickhouse-operations')
+          .then(renderClickHouseOperations)
+          .catch(error => {
+            document.getElementById('databaseOperationsStatus').textContent = `Merges/Mutations em andamento: falha ao consultar (${error.message})`;
+          });
         await loadDatabaseTables();
       } catch (error) {
         document.getElementById('databaseStatusText').textContent = `Falha: ${error.message}`;
       }
+    }
+
+    function databaseRetentionResultText(payload) {
+      if (payload.policy_saved && payload.ttl_update_status === 'pending') {
+        return [
+          'Politica salva, mas a aplicacao do TTL no ClickHouse excedeu o tempo ou ficou pendente. Verifique status/mutations.',
+          payload.error_message || '',
+          '',
+          JSON.stringify(payload, null, 2)
+        ].filter(line => line !== '').join('\n');
+      }
+      if (payload.policy_saved && payload.ttl_update_status === 'failed') {
+        return [
+          'Politica salva, mas a aplicacao do TTL no ClickHouse falhou.',
+          payload.error_message || '',
+          '',
+          JSON.stringify(payload, null, 2)
+        ].filter(line => line !== '').join('\n');
+      }
+      return `Politica salva. TTL no ClickHouse: ${payload.ttl_update_status || 'success'}.\n\n${JSON.stringify(payload, null, 2)}`;
     }
 
     async function saveDatabaseRetention() {
@@ -5133,10 +5192,22 @@
             cleanup_hour: Number(document.getElementById('databaseCleanupHour').value)
           })
         });
-        result.textContent = JSON.stringify(payload, null, 2);
+        result.textContent = databaseRetentionResultText(payload);
         await loadDatabaseStatus();
       } catch (error) {
         result.textContent = `Falha ao salvar politica: ${error.message}`;
+      }
+    }
+
+    async function applyDatabaseTtl() {
+      const result = document.getElementById('databaseActionResult');
+      result.textContent = 'Aplicando TTL no ClickHouse...';
+      try {
+        const payload = await apiRequest('/api/database/retention/apply-ttl', { method: 'POST' });
+        result.textContent = databaseRetentionResultText(payload);
+        await loadDatabaseStatus();
+      } catch (error) {
+        result.textContent = `Falha ao aplicar TTL: ${error.message}`;
       }
     }
 
@@ -5173,7 +5244,8 @@
             older_than_days: Number(days),
             optimize: document.getElementById('databaseCleanupOptimize').value === 'true',
             scope: document.getElementById('databaseCleanupScope').value,
-            confirm: document.getElementById('databaseCleanupConfirm').value.trim()
+            confirm: document.getElementById('databaseCleanupConfirm').value.trim(),
+            force_optimize_low_disk: document.getElementById('databaseOptimizeConfirm').value.trim() === 'OTIMIZAR BAIXO DISCO'
           })
         });
         result.textContent = cleanupResultText(payload);
@@ -5187,11 +5259,13 @@
       const result = document.getElementById('databaseActionResult');
       result.textContent = 'Executando OPTIMIZE...';
       try {
+        const optimizeConfirm = document.getElementById('databaseOptimizeConfirm').value.trim();
         const payload = await apiRequest('/api/database/optimize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            confirm: document.getElementById('databaseOptimizeConfirm').value.trim()
+            confirm: optimizeConfirm === 'OTIMIZAR BAIXO DISCO' ? 'OTIMIZAR' : optimizeConfirm,
+            force_low_disk: optimizeConfirm === 'OTIMIZAR BAIXO DISCO'
           })
         });
         result.textContent = JSON.stringify(payload, null, 2);
@@ -10404,6 +10478,7 @@
     document.getElementById('refreshDatabaseButton').addEventListener('click', () => loadDatabaseStatus().catch(console.error));
     document.getElementById('refreshIngestionButton').addEventListener('click', () => loadIngestionStatus().catch(console.error));
     document.getElementById('saveDatabaseRetentionButton').addEventListener('click', () => saveDatabaseRetention().catch(console.error));
+    document.getElementById('applyDatabaseTtlButton').addEventListener('click', () => applyDatabaseTtl().catch(console.error));
     document.querySelectorAll('.database-cleanup-button').forEach(button => {
       button.addEventListener('click', () => cleanupDatabase(Number(button.dataset.days)).catch(console.error));
     });

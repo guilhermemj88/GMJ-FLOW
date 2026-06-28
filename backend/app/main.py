@@ -644,6 +644,7 @@ class DatabaseCleanupPayload(BaseModel):
     optimize: bool = False
     confirm: str = ""
     scope: str = "raw"
+    force_optimize_low_disk: bool = False
     flow_raw_older_than_days: int | None = Field(None, ge=1, le=3650)
     flow_1m_older_than_days: int | None = Field(None, ge=1, le=3650)
     flow_tops_1m_older_than_days: int | None = Field(None, ge=1, le=3650)
@@ -651,6 +652,7 @@ class DatabaseCleanupPayload(BaseModel):
 
 class DatabaseOptimizePayload(BaseModel):
     confirm: str = ""
+    force_low_disk: bool = False
 
 
 class AttackVectorTemplatePayload(BaseModel):
@@ -898,7 +900,15 @@ class BgpMitigationPortPolicyPayload(BaseModel):
     is_active: bool = True
 
 
-def get_client():
+def clickhouse_admin_timeout_seconds() -> int:
+    raw_value = os.getenv("CLICKHOUSE_ADMIN_TIMEOUT_SECONDS") or os.getenv("GMJFLOW_CLICKHOUSE_ADMIN_TIMEOUT_SECONDS", "300")
+    try:
+        return max(30, int(raw_value))
+    except (TypeError, ValueError):
+        return 300
+
+
+def get_client(send_receive_timeout: int | None = None):
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "localhost"),
         port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
@@ -906,7 +916,7 @@ def get_client():
         password=os.getenv("CLICKHOUSE_PASSWORD", ""),
         database=os.getenv("CLICKHOUSE_DATABASE", "flowdb"),
         connect_timeout=int(os.getenv("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", "5")),
-        send_receive_timeout=int(os.getenv("CLICKHOUSE_QUERY_TIMEOUT_SECONDS", "30")),
+        send_receive_timeout=send_receive_timeout or int(os.getenv("CLICKHOUSE_QUERY_TIMEOUT_SECONDS", "30")),
     )
 
 
@@ -921,8 +931,8 @@ def close_client(client: Any) -> None:
             return
 
 
-def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> Any:
-    client = get_client()
+def query_clickhouse(query: str, parameters: dict[str, Any] | None = None, admin: bool = False) -> Any:
+    client = get_client(send_receive_timeout=clickhouse_admin_timeout_seconds() if admin else None)
     started = time.monotonic()
     try:
         return client.query(query, parameters=parameters or {})
@@ -933,8 +943,8 @@ def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> An
         close_client(client)
 
 
-def command_clickhouse(command: str, parameters: dict[str, Any] | None = None) -> Any:
-    client = get_client()
+def command_clickhouse(command: str, parameters: dict[str, Any] | None = None, admin: bool = False) -> Any:
+    client = get_client(send_receive_timeout=clickhouse_admin_timeout_seconds() if admin else None)
     try:
         return client.command(command, parameters=parameters or {})
     finally:
@@ -3886,13 +3896,58 @@ def clickhouse_size_summary() -> dict[str, int]:
     }
 
 
+def clickhouse_table_create_query(table: str) -> str:
+    rows = rows_as_dicts(
+        query_clickhouse(
+            """
+            SELECT create_table_query
+            FROM system.tables
+            WHERE database = {database:String}
+              AND name = {table:String}
+            LIMIT 1
+            """,
+            {"database": clickhouse_database_name(), "table": table},
+        )
+    )
+    return clean_text(rows[0].get("create_table_query")) if rows else ""
+
+
+def normalize_clickhouse_ddl(value: str) -> str:
+    return re.sub(r"\s+", "", clean_text(value).lower())
+
+
+def clickhouse_ttl_matches(table: str, time_column: str, enabled: bool, days: int) -> bool:
+    create_query = clickhouse_table_create_query(table)
+    normalized = normalize_clickhouse_ddl(create_query)
+    has_ttl = bool(re.search(r"\bTTL\b", create_query, flags=re.IGNORECASE))
+    if not enabled:
+        return not has_ttl
+    expected_variants = (
+        f"ttl todatetime({time_column}) + interval {days} day delete",
+        f"ttl todatetime({time_column}) + interval {days} day",
+        f"ttl todatetime({time_column}) + tointervalday({days}) delete",
+        f"ttl todatetime({time_column}) + tointervalday({days})",
+        f"ttl {time_column} + interval {days} day delete",
+        f"ttl {time_column} + interval {days} day",
+        f"ttl {time_column} + tointervalday({days}) delete",
+        f"ttl {time_column} + tointervalday({days})",
+    )
+    return any(normalize_clickhouse_ddl(variant) in normalized for variant in expected_variants)
+
+
 def apply_clickhouse_table_ttl(table: str, time_column: str, enabled: bool, days: int) -> str:
     days = setting_int({"days": str(days)}, "days", 30)
+    if clickhouse_ttl_matches(table, time_column, enabled, days):
+        return "unchanged"
     if enabled:
-        command = f"ALTER TABLE {table} MODIFY TTL toDateTime({time_column}) + INTERVAL {days} DAY DELETE"
+        command = (
+            f"ALTER TABLE IF EXISTS {table} "
+            f"MODIFY TTL toDateTime({time_column}) + INTERVAL {days} DAY DELETE "
+            "SETTINGS materialize_ttl_after_modify = 0"
+        )
     else:
-        command = f"ALTER TABLE {table} REMOVE TTL"
-    command_clickhouse(command)
+        command = f"ALTER TABLE IF EXISTS {table} REMOVE TTL"
+    command_clickhouse(command, admin=True)
     return command
 
 
@@ -3918,6 +3973,127 @@ def apply_flow_retention_ttl(
     return commands
 
 
+def ttl_update_status_from_exception(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text or "read timed out" in text:
+        return "pending"
+    return "failed"
+
+
+def clickhouse_operations_status(limit: int = 20) -> dict[str, Any]:
+    tables = tuple(FLOW_RETENTION_TABLES.keys())
+    mutations: list[dict[str, Any]] = []
+    merges: list[dict[str, Any]] = []
+    try:
+        mutations = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    table,
+                    mutation_id,
+                    command,
+                    create_time,
+                    is_done,
+                    latest_failed_part,
+                    latest_fail_time,
+                    latest_fail_reason,
+                    parts_to_do
+                FROM system.mutations
+                WHERE database = {database:String}
+                  AND table IN {tables:Array(String)}
+                ORDER BY create_time DESC
+                LIMIT {limit:UInt32}
+                """,
+                {"database": clickhouse_database_name(), "tables": list(tables), "limit": int(limit)},
+            )
+        )
+    except Exception as exc:
+        logger.warning("Falha ao consultar mutations do ClickHouse: %s", exc)
+    try:
+        merges = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    table,
+                    elapsed,
+                    progress,
+                    num_parts,
+                    result_part_name,
+                    total_size_bytes_compressed
+                FROM system.merges
+                WHERE database = {database:String}
+                  AND table IN {tables:Array(String)}
+                ORDER BY elapsed DESC
+                LIMIT {limit:UInt32}
+                """,
+                {"database": clickhouse_database_name(), "tables": list(tables), "limit": int(limit)},
+            )
+        )
+    except Exception as exc:
+        logger.warning("Falha ao consultar merges do ClickHouse: %s", exc)
+
+    pending_mutations = [item for item in mutations if not sqlite_bool(item.get("is_done"))]
+    failed_mutations = [item for item in mutations if clean_text(item.get("latest_fail_reason"))]
+    return {
+        "mutations": mutations,
+        "merges": merges,
+        "pending_mutation_count": len(pending_mutations),
+        "merge_count": len(merges),
+        "has_pending_work": bool(pending_mutations or merges),
+        "last_failed_mutation": failed_mutations[0] if failed_mutations else None,
+    }
+
+
+def clickhouse_optimize_guard() -> dict[str, Any]:
+    db_path = sqlite_path()
+    disk_root = db_path.parent if db_path.parent.exists() else Path(".")
+    disk_usage = shutil.disk_usage(disk_root)
+    try:
+        size_summary = clickhouse_size_summary()
+    except Exception as exc:
+        logger.warning("Falha ao estimar tamanho das tabelas ClickHouse para OPTIMIZE: %s", exc)
+        size_summary = {}
+    largest_table_bytes = max(
+        int(size_summary.get("flow_raw_size_bytes") or 0),
+        int(size_summary.get("flow_1m_size_bytes") or 0),
+        int(size_summary.get("flow_tops_1m_size_bytes") or 0),
+    )
+    free_ratio = (float(disk_usage.free) / float(disk_usage.total)) if disk_usage.total else 0.0
+    low_disk = free_ratio < 0.20 or (largest_table_bytes > 0 and disk_usage.free < largest_table_bytes)
+    reasons = []
+    if free_ratio < 0.20:
+        reasons.append("disco livre abaixo de 20%")
+    if largest_table_bytes > 0 and disk_usage.free < largest_table_bytes:
+        reasons.append("disco livre menor que a maior tabela ClickHouse")
+    return {
+        "low_disk": low_disk,
+        "reasons": reasons,
+        "disk_total_bytes": disk_usage.total,
+        "disk_used_bytes": disk_usage.used,
+        "disk_free_bytes": disk_usage.free,
+        "disk_free_percent": round(free_ratio * 100, 2),
+        "disk_free_human": human_bytes(disk_usage.free),
+        "disk_total_human": human_bytes(disk_usage.total),
+        "largest_table_bytes": largest_table_bytes,
+        "largest_table_human": human_bytes(largest_table_bytes),
+    }
+
+
+def ensure_optimize_allowed(force: bool = False) -> dict[str, Any]:
+    guard = clickhouse_optimize_guard()
+    if guard["low_disk"] and not force:
+        reason = "; ".join(guard["reasons"]) or "disco livre baixo"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "OPTIMIZE FINAL bloqueado: "
+                f"{reason}. Disco livre {guard['disk_free_human']} de {guard['disk_total_human']}; "
+                f"maior tabela {guard['largest_table_human']}. Confirme explicitamente para continuar."
+            ),
+        )
+    return guard
+
+
 def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int, optimize: bool = False) -> dict[str, Any]:
     days = setting_int({"days": str(older_than_days)}, "days", 90)
     cutoff_expression = f"now() - INTERVAL {days} DAY"
@@ -3927,16 +4103,17 @@ def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int,
         SELECT count() AS count
         FROM {table}
         WHERE {time_column} < {cutoff_expression}
-        """
+        """,
+        admin=True,
     )
     rows = rows_as_dicts(count_result)
     approximate_before = int(rows[0]["count"] or 0) if rows else 0
-    command = f"ALTER TABLE {table} DELETE WHERE {time_column} < {cutoff_expression}"
-    command_clickhouse(command)
+    command = f"ALTER TABLE IF EXISTS {table} DELETE WHERE {time_column} < {cutoff_expression} SETTINGS mutations_sync = 0"
+    command_clickhouse(command, admin=True)
     optimize_command = ""
     if optimize:
         optimize_command = f"OPTIMIZE TABLE {table} FINAL"
-        command_clickhouse(optimize_command)
+        command_clickhouse(optimize_command, admin=True)
     return {
         "table": table,
         "approximate_before": approximate_before,
@@ -4022,6 +4199,7 @@ def run_database_cleanup(
     flow_retention_days: int,
     snmp_retention_days: int | None = None,
     optimize: bool = False,
+    force_optimize_low_disk: bool = False,
     source: str = "manual",
     scope: str = "raw",
     flow_1m_retention_days: int | None = None,
@@ -4030,6 +4208,7 @@ def run_database_cleanup(
     scope = clean_text(scope).lower() or "raw"
     if scope not in {"raw", "raw_aggregates", "all"}:
         raise HTTPException(status_code=400, detail="scope invalido")
+    optimize_guard = ensure_optimize_allowed(force_optimize_low_disk) if optimize else clickhouse_optimize_guard()
     clickhouse_results = {
         "flow_raw": cleanup_clickhouse_table("flow_raw", "flow_time", flow_retention_days, optimize=optimize)
     }
@@ -4067,6 +4246,7 @@ def run_database_cleanup(
         "tables": list(clickhouse_results.values()),
         "flow": clickhouse_results["flow_raw"],
         "clickhouse": clickhouse_results,
+        "optimize_guard": optimize_guard,
         "snmp_deleted": snmp_deleted,
         "learning_anomaly_deleted": learning_anomaly_deleted,
     }
@@ -13056,7 +13236,21 @@ def database_status(request: Request):
         "retention_enabled": setting_bool(settings, "database_retention_enabled"),
         "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
         "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+        "optimize_guard": clickhouse_optimize_guard(),
     }
+
+
+@app.get("/api/database/clickhouse-operations")
+def database_clickhouse_operations(request: Request):
+    require_admin(request)
+    try:
+        return {
+            **clickhouse_operations_status(),
+            "optimize_guard": clickhouse_optimize_guard(),
+            "admin_timeout_seconds": clickhouse_admin_timeout_seconds(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Falha ao consultar operacoes ClickHouse: {exc}") from exc
 
 
 @app.get("/api/database/tables")
@@ -13077,12 +13271,9 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
     flow_tops_days = payload.flow_tops_1m_retention_days or 15
     snmp_days = payload.snmp_retention_days or 90
     cleanup_hour = 3 if payload.cleanup_hour is None else payload.cleanup_hour
-    try:
-        ttl_command = apply_flow_retention_ttl(payload.enabled, flow_raw_days, flow_1m_days, flow_tops_days)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Falha ao atualizar TTL no ClickHouse: {exc}") from exc
 
     ensure_sensor_db()
+    policy_saved = False
     with sqlite_connection() as conn:
         set_system_settings(
             conn,
@@ -13098,8 +13289,22 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
         )
         conn.commit()
         settings = get_system_settings(conn)
+        policy_saved = True
+
+    ttl_command: dict[str, str] = {}
+    ttl_update_status = "success"
+    error_message = ""
+    try:
+        ttl_command = apply_flow_retention_ttl(payload.enabled, flow_raw_days, flow_1m_days, flow_tops_days)
+    except Exception as exc:
+        ttl_update_status = ttl_update_status_from_exception(exc)
+        error_message = f"Falha ao atualizar TTL no ClickHouse: {exc}"
+        logger.warning("%s", error_message)
     return {
         "ok": True,
+        "policy_saved": policy_saved,
+        "ttl_update_status": ttl_update_status,
+        "error_message": error_message,
         "retention_enabled": setting_bool(settings, "database_retention_enabled"),
         "retention_days": table_retention_days(settings, "flow_raw") or 7,
         "flow_raw_retention_days": table_retention_days(settings, "flow_raw") or 7,
@@ -13107,6 +13312,38 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
         "flow_tops_1m_retention_days": table_retention_days(settings, "flow_tops_1m") or 15,
         "snmp_retention_days": setting_int(settings, "snmp_retention_days", 90),
         "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
+        "ttl_command": ttl_command,
+    }
+
+
+@app.post("/api/database/retention/apply-ttl")
+def database_apply_retention_ttl(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        settings = get_system_settings(conn)
+    flow_raw_days = table_retention_days(settings, "flow_raw") or 7
+    flow_1m_days = table_retention_days(settings, "flow_1m") or 30
+    flow_tops_days = table_retention_days(settings, "flow_tops_1m") or 15
+    enabled = setting_bool(settings, "database_retention_enabled")
+    ttl_update_status = "success"
+    error_message = ""
+    ttl_command: dict[str, str] = {}
+    try:
+        ttl_command = apply_flow_retention_ttl(enabled, flow_raw_days, flow_1m_days, flow_tops_days)
+    except Exception as exc:
+        ttl_update_status = ttl_update_status_from_exception(exc)
+        error_message = f"Falha ao atualizar TTL no ClickHouse: {exc}"
+        logger.warning("%s", error_message)
+    return {
+        "ok": ttl_update_status == "success",
+        "policy_saved": True,
+        "ttl_update_status": ttl_update_status,
+        "error_message": error_message,
+        "retention_enabled": enabled,
+        "flow_raw_retention_days": flow_raw_days,
+        "flow_1m_retention_days": flow_1m_days,
+        "flow_tops_1m_retention_days": flow_tops_days,
         "ttl_command": ttl_command,
     }
 
@@ -13123,9 +13360,12 @@ def database_cleanup(request: Request, payload: DatabaseCleanupPayload):
             flow_tops_1m_retention_days=payload.flow_tops_1m_older_than_days or payload.older_than_days,
             snmp_retention_days=payload.older_than_days if clean_text(payload.scope).lower() == "all" else None,
             optimize=payload.optimize,
+            force_optimize_low_disk=payload.force_optimize_low_disk,
             source="manual",
             scope=payload.scope,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha na limpeza: {exc}") from exc
     return result
@@ -13136,15 +13376,19 @@ def database_optimize(request: Request, payload: DatabaseOptimizePayload):
     require_admin(request)
     if payload.confirm != "OTIMIZAR":
         raise HTTPException(status_code=400, detail="Digite OTIMIZAR para confirmar")
+    optimize_guard = ensure_optimize_allowed(payload.force_low_disk)
     command = "OPTIMIZE TABLE flow_raw FINAL"
     try:
-        command_clickhouse(command)
+        command_clickhouse(command, admin=True)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao executar OPTIMIZE: {exc}") from exc
     return {
         "ok": True,
         "command_executed": command,
         "status": "ok",
+        "optimize_guard": optimize_guard,
         "note": "OPTIMIZE FINAL solicitado; acompanhe uso de CPU e disco em tabelas grandes.",
     }
 
