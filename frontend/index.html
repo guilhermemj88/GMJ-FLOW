@@ -2376,6 +2376,7 @@
                     <select id="databaseCleanupScope" class="form-select form-select-sm">
                       <option value="raw">Somente flow_raw</option>
                       <option value="raw_aggregates">Raw + agregados</option>
+                      <option value="aggregates">Somente agregados</option>
                       <option value="all">Raw + agregados + SNMP + anomalias</option>
                     </select>
                   </div>
@@ -5115,15 +5116,15 @@
       setText('dbDiskFree', payload.disk_free_human || formatBytes(payload.disk_free_bytes));
       setText(
         'dbRetentionPolicy',
-        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - raw ${formatNumber(payload.flow_raw_retention_days || payload.retention_days)}d / 1m ${formatNumber(payload.flow_1m_retention_days || 30)}d / tops ${formatNumber(payload.flow_tops_1m_retention_days || 15)}d / SNMP ${formatNumber(payload.snmp_retention_days)}d`
+        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - raw ${formatNumber(payload.flow_raw_days || payload.flow_raw_retention_days || payload.retention_days || 7)}d / 1m ${formatNumber(payload.flow_1m_days || payload.flow_1m_retention_days || 30)}d / tops ${formatNumber(payload.flow_tops_1m_days || payload.flow_tops_1m_retention_days || 15)}d / SNMP ${formatNumber(payload.snmp_days || payload.snmp_retention_days || 90)}d`
       );
       setText('dbLastCleanup', formatDateTime(payload.last_cleanup_at));
       document.getElementById('databaseRetentionEnabled').value = payload.retention_enabled ? 'true' : 'false';
-      document.getElementById('flowRawRetentionDays').value = String(payload.flow_raw_retention_days || payload.retention_days || 7);
-      document.getElementById('flow1mRetentionDays').value = String(payload.flow_1m_retention_days || 30);
-      document.getElementById('flowTopsRetentionDays').value = String(payload.flow_tops_1m_retention_days || 15);
-      document.getElementById('snmpRetentionDays').value = String(payload.snmp_retention_days || 90);
-      document.getElementById('databaseCleanupHour').value = String(payload.database_cleanup_hour ?? 3);
+      document.getElementById('flowRawRetentionDays').value = String(payload.flow_raw_days || payload.flow_raw_retention_days || payload.retention_days || 7);
+      document.getElementById('flow1mRetentionDays').value = String(payload.flow_1m_days || payload.flow_1m_retention_days || 30);
+      document.getElementById('flowTopsRetentionDays').value = String(payload.flow_tops_1m_days || payload.flow_tops_1m_retention_days || 15);
+      document.getElementById('snmpRetentionDays').value = String(payload.snmp_days || payload.snmp_retention_days || 90);
+      document.getElementById('databaseCleanupHour').value = String(payload.cleanup_hour_utc ?? payload.database_cleanup_hour ?? 3);
       renderDatabaseOptimizeGuard(payload.optimize_guard || {});
     }
 
@@ -5179,17 +5180,22 @@
       const result = document.getElementById('databaseActionResult');
       result.textContent = 'Salvando politica...';
       try {
+        const flowRawDays = Number(document.getElementById('flowRawRetentionDays').value);
+        const flow1mDays = Number(document.getElementById('flow1mRetentionDays').value);
+        const flowTopsDays = Number(document.getElementById('flowTopsRetentionDays').value);
+        const snmpDays = Number(document.getElementById('snmpRetentionDays').value);
+        const cleanupHourUtc = Number(document.getElementById('databaseCleanupHour').value);
         const payload = await apiRequest('/api/database/retention', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: document.getElementById('databaseRetentionEnabled').value === 'true',
-            retention_days: Number(document.getElementById('flowRawRetentionDays').value),
-            flow_raw_retention_days: Number(document.getElementById('flowRawRetentionDays').value),
-            flow_1m_retention_days: Number(document.getElementById('flow1mRetentionDays').value),
-            flow_tops_1m_retention_days: Number(document.getElementById('flowTopsRetentionDays').value),
-            snmp_retention_days: Number(document.getElementById('snmpRetentionDays').value),
-            cleanup_hour: Number(document.getElementById('databaseCleanupHour').value)
+            flow_raw_days: flowRawDays,
+            flow_1m_days: flow1mDays,
+            flow_tops_1m_days: flowTopsDays,
+            snmp_days: snmpDays,
+            cleanup_hour_utc: cleanupHourUtc,
+            retention_days: flowRawDays
           })
         });
         result.textContent = databaseRetentionResultText(payload);

@@ -631,7 +631,12 @@ class ChangePasswordPayload(BaseModel):
 
 class DatabaseRetentionPayload(BaseModel):
     enabled: bool
-    retention_days: int = Field(..., ge=1, le=3650)
+    retention_days: int | None = Field(None, ge=1, le=3650)
+    flow_raw_days: int | None = Field(None, ge=1, le=3650)
+    flow_1m_days: int | None = Field(None, ge=1, le=3650)
+    flow_tops_1m_days: int | None = Field(None, ge=1, le=3650)
+    snmp_days: int | None = Field(None, ge=1, le=3650)
+    cleanup_hour_utc: int | None = Field(None, ge=0, le=23)
     flow_raw_retention_days: int | None = Field(None, ge=1, le=3650)
     flow_1m_retention_days: int | None = Field(None, ge=1, le=3650)
     flow_tops_1m_retention_days: int | None = Field(None, ge=1, le=3650)
@@ -3734,6 +3739,17 @@ def clickhouse_database_name() -> str:
     return os.getenv("CLICKHOUSE_DATABASE", "flowdb")
 
 
+def clickhouse_identifier(value: str) -> str:
+    text = clean_text(value)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        raise HTTPException(status_code=500, detail=f"Identificador ClickHouse invalido: {text}")
+    return text
+
+
+def clickhouse_table_name(table: str) -> str:
+    return f"{clickhouse_identifier(clickhouse_database_name())}.{clickhouse_identifier(table)}"
+
+
 FLOW_RETENTION_TABLES = {
     "flow_raw": {"time_column": "flow_time", "setting": "flow_raw_retention_days", "default": 7},
     "flow_1m": {"time_column": "minute", "setting": "flow_1m_retention_days", "default": 30},
@@ -3910,6 +3926,21 @@ def clickhouse_table_create_query(table: str) -> str:
         )
     )
     return clean_text(rows[0].get("create_table_query")) if rows else ""
+
+
+def clickhouse_table_exists(table: str) -> bool:
+    rows = rows_as_dicts(
+        query_clickhouse(
+            """
+            SELECT count() AS count
+            FROM system.tables
+            WHERE database = {database:String}
+              AND name = {table:String}
+            """,
+            {"database": clickhouse_database_name(), "table": table},
+        )
+    )
+    return bool(rows and int(rows[0].get("count") or 0) > 0)
 
 
 def normalize_clickhouse_ddl(value: str) -> str:
@@ -4096,23 +4127,39 @@ def ensure_optimize_allowed(force: bool = False) -> dict[str, Any]:
 
 def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int, optimize: bool = False) -> dict[str, Any]:
     days = setting_int({"days": str(older_than_days)}, "days", 90)
-    cutoff_expression = f"now() - INTERVAL {days} DAY"
+    full_table = clickhouse_table_name(table)
+    cutoff_expression = f"(now() - toIntervalDay({days}))"
     cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    if not clickhouse_table_exists(table):
+        return {
+            "table": table,
+            "approximate_before": 0,
+            "approximate_deleted": 0,
+            "older_than_days": days,
+            "period_start": None,
+            "period_end": iso(cutoff_dt),
+            "period_deleted": f"{time_column} < {cutoff_expression}",
+            "command_executed": "",
+            "optimize_command": "",
+            "optimize_executed": False,
+            "status": "skipped",
+            "note": "Tabela ClickHouse nao existe; limpeza ignorada.",
+        }
     count_result = query_clickhouse(
         f"""
         SELECT count() AS count
-        FROM {table}
+        FROM {full_table}
         WHERE {time_column} < {cutoff_expression}
         """,
         admin=True,
     )
     rows = rows_as_dicts(count_result)
     approximate_before = int(rows[0]["count"] or 0) if rows else 0
-    command = f"ALTER TABLE IF EXISTS {table} DELETE WHERE {time_column} < {cutoff_expression} SETTINGS mutations_sync = 0"
+    command = f"ALTER TABLE {full_table} DELETE WHERE {time_column} < {cutoff_expression} SETTINGS mutations_sync = 0"
     command_clickhouse(command, admin=True)
     optimize_command = ""
     if optimize:
-        optimize_command = f"OPTIMIZE TABLE {table} FINAL"
+        optimize_command = f"OPTIMIZE TABLE {full_table} FINAL"
         command_clickhouse(optimize_command, admin=True)
     return {
         "table": table,
@@ -4206,13 +4253,13 @@ def run_database_cleanup(
     flow_tops_1m_retention_days: int | None = None,
 ) -> dict[str, Any]:
     scope = clean_text(scope).lower() or "raw"
-    if scope not in {"raw", "raw_aggregates", "all"}:
+    if scope not in {"raw", "raw_aggregates", "aggregates", "aggregates_only", "all"}:
         raise HTTPException(status_code=400, detail="scope invalido")
     optimize_guard = ensure_optimize_allowed(force_optimize_low_disk) if optimize else clickhouse_optimize_guard()
-    clickhouse_results = {
-        "flow_raw": cleanup_clickhouse_table("flow_raw", "flow_time", flow_retention_days, optimize=optimize)
-    }
-    if scope in {"raw_aggregates", "all"}:
+    clickhouse_results = {}
+    if scope in {"raw", "raw_aggregates", "all"}:
+        clickhouse_results["flow_raw"] = cleanup_clickhouse_table("flow_raw", "flow_time", flow_retention_days, optimize=optimize)
+    if scope in {"raw_aggregates", "aggregates", "aggregates_only", "all"}:
         clickhouse_results["flow_1m"] = cleanup_clickhouse_table(
             "flow_1m",
             "minute",
@@ -4235,16 +4282,17 @@ def run_database_cleanup(
     with sqlite_connection() as conn:
         set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
         conn.commit()
+    primary_result = clickhouse_results.get("flow_raw") or next(iter(clickhouse_results.values()), {})
     return {
         "ok": True,
         "source": source,
         "scope": scope,
         "cleanup_at": cleanup_at,
         "older_than_days": flow_retention_days,
-        "period_end": clickhouse_results["flow_raw"].get("period_end"),
+        "period_end": primary_result.get("period_end"),
         "optimize_executed": any(bool(item.get("optimize_command")) for item in clickhouse_results.values()),
         "tables": list(clickhouse_results.values()),
-        "flow": clickhouse_results["flow_raw"],
+        "flow": primary_result,
         "clickhouse": clickhouse_results,
         "optimize_guard": optimize_guard,
         "snmp_deleted": snmp_deleted,
@@ -13229,6 +13277,11 @@ def database_status(request: Request):
         "disk_free_human": human_bytes(disk_usage.free),
         "disk_total_human": human_bytes(disk_usage.total),
         "retention_days": retention_days,
+        "flow_raw_days": flow_raw_retention_days,
+        "flow_1m_days": flow_1m_retention_days,
+        "flow_tops_1m_days": flow_tops_1m_retention_days,
+        "snmp_days": snmp_retention_days,
+        "cleanup_hour_utc": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
         "flow_raw_retention_days": flow_raw_retention_days,
         "flow_1m_retention_days": flow_1m_retention_days,
         "flow_tops_1m_retention_days": flow_tops_1m_retention_days,
@@ -13266,11 +13319,15 @@ def database_tables(request: Request):
 @app.post("/api/database/retention")
 def database_retention(request: Request, payload: DatabaseRetentionPayload):
     require_admin(request)
-    flow_raw_days = payload.flow_raw_retention_days or payload.retention_days
-    flow_1m_days = payload.flow_1m_retention_days or 30
-    flow_tops_days = payload.flow_tops_1m_retention_days or 15
-    snmp_days = payload.snmp_retention_days or 90
-    cleanup_hour = 3 if payload.cleanup_hour is None else payload.cleanup_hour
+    flow_raw_days = payload.flow_raw_days or payload.flow_raw_retention_days or payload.retention_days or 7
+    flow_1m_days = payload.flow_1m_days or payload.flow_1m_retention_days or 30
+    flow_tops_days = payload.flow_tops_1m_days or payload.flow_tops_1m_retention_days or 15
+    snmp_days = payload.snmp_days or payload.snmp_retention_days or 90
+    cleanup_hour = (
+        payload.cleanup_hour_utc
+        if payload.cleanup_hour_utc is not None
+        else (3 if payload.cleanup_hour is None else payload.cleanup_hour)
+    )
 
     ensure_sensor_db()
     policy_saved = False
@@ -13307,6 +13364,11 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
         "error_message": error_message,
         "retention_enabled": setting_bool(settings, "database_retention_enabled"),
         "retention_days": table_retention_days(settings, "flow_raw") or 7,
+        "flow_raw_days": table_retention_days(settings, "flow_raw") or 7,
+        "flow_1m_days": table_retention_days(settings, "flow_1m") or 30,
+        "flow_tops_1m_days": table_retention_days(settings, "flow_tops_1m") or 15,
+        "snmp_days": setting_int(settings, "snmp_retention_days", 90),
+        "cleanup_hour_utc": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
         "flow_raw_retention_days": table_retention_days(settings, "flow_raw") or 7,
         "flow_1m_retention_days": table_retention_days(settings, "flow_1m") or 30,
         "flow_tops_1m_retention_days": table_retention_days(settings, "flow_tops_1m") or 15,
@@ -13341,6 +13403,9 @@ def database_apply_retention_ttl(request: Request):
         "ttl_update_status": ttl_update_status,
         "error_message": error_message,
         "retention_enabled": enabled,
+        "flow_raw_days": flow_raw_days,
+        "flow_1m_days": flow_1m_days,
+        "flow_tops_1m_days": flow_tops_days,
         "flow_raw_retention_days": flow_raw_days,
         "flow_1m_retention_days": flow_1m_days,
         "flow_tops_1m_retention_days": flow_tops_days,
