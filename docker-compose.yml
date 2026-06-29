@@ -91,6 +91,8 @@ services:
     build:
       context: ./collector/pmacct
     container_name: gmj-flow-pmacct
+    profiles:
+      - single-collector
     ports:
       - "${NETFLOW_PORT-9995}:9995/udp"
     volumes:
@@ -101,6 +103,8 @@ services:
     build:
       context: ./collector/pmacct
     container_name: gmj-flow-pmacct-parser
+    profiles:
+      - single-collector
     command: ["python3", "/opt/gmj-flow/parse_pmacct.py"]
     environment:
       CLICKHOUSE_HOST: clickhouse

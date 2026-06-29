@@ -17,6 +17,8 @@ Ao clicar em **Aplicar Coletor**, o backend gera:
 - `data/collectors/sensor-<id>/allow.lst`;
 - `docker-compose.collectors.yml`.
 
+O compose base ainda preserva os servicos antigos `pmacct` e `pmacct-parser`, mas eles ficam no profile `single-collector`. Ao usar `docker-compose.yml` junto com `docker-compose.collectors.yml`, o padrao e subir somente os servicos sensorizados, por exemplo `pmacct-sensor-1` e `pmacct-parser-sensor-1`.
+
 Dentro dos containers de collector, `data/collectors` e montado como `/app/data/collectors`. Por isso cada `nfacctd.conf` aponta para:
 
 ```text
@@ -38,6 +40,12 @@ Com `GMJFLOW_ENABLE_COLLECTOR_APPLY=false`, a API apenas gera os arquivos. Apliq
 ```sh
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml config
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml up -d --build --remove-orphans
+```
+
+Para conferir que apenas o collector sensorizado esta publicando a porta UDP do sensor:
+
+```sh
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml ps
 ```
 
 ## Modo automatico
@@ -96,6 +104,8 @@ Se o pmacct da distribuicao nao suportar `src_as`/`dst_as`, remova esses campos 
 ## Duplicidade de collectors
 
 O GMJ-FLOW contabiliza apenas flows recebidos pelo collector local configurado para o sensor. Se o roteador exportar para outros collectors, isso nao duplica os dados dentro do GMJ-FLOW. Evite apontar o mesmo exportador para duas portas/sensores GMJ-FLOW com o mesmo trafego, pois isso criaria duplicidade local.
+
+Nao rode o profile `single-collector` junto com collectors sensorizados usando a mesma porta UDP. Isso faria o servico legado `pmacct` disputar `9995/udp` com `pmacct-sensor-1`.
 
 ## Seguranca do Docker socket
 

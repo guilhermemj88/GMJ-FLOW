@@ -34,19 +34,19 @@ Se o Wireshark mostra UDP `9995` chegando de `192.168.0.157`, o caminho de rede 
 
 ## Como subir o coletor real
 
-Copie o arquivo de ambiente e suba o stack padrao. O modo real com pmacct sobe junto com ClickHouse, backend e frontend.
+Copie o arquivo de ambiente e suba o stack com o compose de collectors. O modo padrao atual usa collector por sensor; para o sensor 1, sobem `pmacct-sensor-1` e `pmacct-parser-sensor-1`.
 
 ```bash
 cp .env.example .env
-docker compose --env-file .env up -d --build
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml up -d --build
 ```
 
 Servicos relevantes:
 
 ```bash
-docker compose ps
-docker compose logs -f pmacct
-docker compose logs -f pmacct-parser
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml ps
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml logs -f pmacct-sensor-1
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml logs -f pmacct-parser-sensor-1
 ```
 
 A porta publicada pelo Compose e:
@@ -58,8 +58,10 @@ A porta publicada pelo Compose e:
 O arquivo de saida do pmacct fica em volume Docker compartilhado, montado nos containers em:
 
 ```text
-/var/spool/pmacct/nfacctd.csv
+/var/spool/pmacct/sensor-1-9995.csv
 ```
+
+Os servicos legados `pmacct` e `pmacct-parser` existem apenas para uso manual no profile `single-collector`. Nao use esse profile junto com `pmacct-sensor-1` na mesma porta UDP.
 
 ## Formato de saida do pmacct
 

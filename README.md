@@ -28,22 +28,24 @@ Servicos principais:
 
 IA local para mitigacao e opcional e nao sobe por padrao. Veja [docs/ai-mitigation.md](docs/ai-mitigation.md) para habilitar o profile `ai` com Ollama e baixar o modelo escolhido.
 
-## Modo real com pmacct
+## Modo real com pmacct por sensor
 
-O modo real sobe por padrao com os servicos `pmacct` e `pmacct-parser`.
+O modo real atual usa collectors por sensor via `docker-compose.collectors.yml`. Para o sensor padrao, os servicos ativos sao:
 
-- `pmacct` executa `nfacctd` em foreground e recebe NetFlow v9/IPFIX em `9995/udp`.
-- `pmacct-parser` le `/var/spool/pmacct/nfacctd.csv` no volume compartilhado e insere em `flowdb.flow_raw`.
+- `pmacct-sensor-1`, que executa `nfacctd` e recebe NetFlow v9/IPFIX em `9995/udp`.
+- `pmacct-parser-sensor-1`, que le `/var/spool/pmacct/sensor-1-9995.csv` no volume compartilhado e insere em `flowdb.flow_raw`.
 - Sensor padrao: `mikrotik-lab`.
 - Exporter padrao: `192.168.0.157`.
 - `flow_type`: `netflow-v9`.
 - `sample_rate`: `1`.
 
+Os servicos antigos `pmacct` e `pmacct-parser` ficam preservados apenas no profile `single-collector` e nao sobem no compose normal.
+
 Comandos uteis:
 
 ```bash
-docker compose logs -f pmacct
-docker compose logs -f pmacct-parser
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml logs -f pmacct-sensor-1
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml logs -f pmacct-parser-sensor-1
 ```
 
 Documentacao completa do laboratorio MikroTik: [docs/pmacct.md](docs/pmacct.md).
