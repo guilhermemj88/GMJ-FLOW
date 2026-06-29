@@ -1731,6 +1731,9 @@
                     <button id="flowExportButton" type="button" class="btn btn-sm btn-outline-success">
                       <i data-lucide="download"></i><span>CSV</span>
                     </button>
+                    <button id="flowPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
+                      <i data-lucide="file-down"></i><span>PDF</span>
+                    </button>
                     <button id="flowClearButton" type="button" class="btn btn-sm btn-outline-secondary">
                       <i data-lucide="x"></i><span>Limpar</span>
                     </button>
@@ -3244,6 +3247,9 @@
               <div id="bgpStatus" class="subtle">Fase 1: configuracao, validacao e dry-run</div>
             </div>
             <div class="toolbar">
+              <button id="bgpPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="file-down"></i><span>PDF</span>
+              </button>
               <button id="refreshBgpButton" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
@@ -3597,6 +3603,9 @@
         </div>
       </div>
       <div class="gmj-dialog-footer">
+        <button id="attackVectorTestPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
+          <i data-lucide="file-down"></i><span>Baixar PDF</span>
+        </button>
         <button type="button" class="btn btn-sm btn-success" data-close-modal="attackVectorTestModal">Fechar</button>
       </div>
     </div>
@@ -3762,6 +3771,9 @@
         </div>
       </div>
       <div class="gmj-dialog-footer">
+        <button id="anomalyDetailPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
+          <i data-lucide="file-down"></i><span>Baixar PDF</span>
+        </button>
         <button id="ackAnomalyButton" type="button" class="btn btn-sm btn-outline-secondary">
           <i data-lucide="check"></i><span>Reconhecer</span>
         </button>
@@ -4104,6 +4116,7 @@
     let attackSensorCache = [];
     let currentAttackTemplateId = null;
     let editingAttackVectorId = null;
+    let currentAttackVectorTestId = null;
     let anomalyActiveTab = 'active';
     let currentAnomalyDetailId = null;
     let currentBgpMitigationAnomalyId = null;
@@ -4707,6 +4720,20 @@
         throw new Error(message);
       }
       return payload;
+    }
+
+    async function downloadAuthFile(endpoint, filename, options = {}) {
+      const response = await authFetch(endpoint, options);
+      if (!response.ok) throw new Error(await responseErrorMessage(response, endpoint));
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
     }
 
     function dashboardInterfaceLabel(iface) {
@@ -6793,6 +6820,16 @@
       setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Dry-runs: ${bgpAnnouncements.length}`);
     }
 
+    async function exportBgpPdf() {
+      setText('bgpStatus', 'Exportando PDF BGP / Mitigacao...');
+      try {
+        await downloadAuthFile(`${API_BASE}/api/bgp/report.pdf`, 'gmj-bgp-mitigation.pdf');
+        setText('bgpStatus', 'PDF BGP / Mitigacao exportado');
+      } catch (error) {
+        setText('bgpStatus', `Falha ao exportar PDF: ${error.message}`);
+      }
+    }
+
     function clearBgpConnectorForm() {
       setValue('bgpConnectorId', '');
       setValue('bgpConnectorName', '');
@@ -7049,11 +7086,11 @@
       updateBgpDryRateLimitUi();
       const payload = {
         action,
-        src_cidr: selectValue('bgpDrySrcIp').trim() || null,
-        dst_cidr: selectValue('bgpDryDstIp').trim() || null,
-        protocol: selectValue('bgpDryProtocol').trim() || null,
-        src_port: selectValue('bgpDrySrcPort').trim() || null,
-        dst_port: selectValue('bgpDryDstPort').trim() || null,
+        src_cidr: selectValue('bgpDrySrcIp').trim(),
+        dst_cidr: selectValue('bgpDryDstIp').trim(),
+        protocol: selectValue('bgpDryProtocol').trim().toLowerCase(),
+        src_port: selectValue('bgpDrySrcPort').trim(),
+        dst_port: selectValue('bgpDryDstPort').trim(),
         then_action: selectValue('bgpDryThenAction', 'discard'),
         rate_limit_value_raw: selectValue('bgpDryThenAction', 'discard') === 'rate_limit' ? selectValue('bgpDryRateLimit').trim() : null,
         duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800)),
@@ -7636,6 +7673,7 @@
     }
 
     async function testAttackVector(vectorId) {
+      currentAttackVectorTestId = Number(vectorId);
       resetAttackVectorTestModal();
       openModal('attackVectorTestModal');
       try {
@@ -7650,6 +7688,19 @@
         setText('attackVectorTestReason', error.message);
         document.getElementById('attackVectorTestSamples').innerHTML = '<tr><td colspan="6" class="text-muted">Sem resultado</td></tr>';
       }
+    }
+
+    async function exportAttackVectorTestPdf() {
+      if (!currentAttackVectorTestId) return;
+      await downloadAuthFile(
+        `${API_BASE}/api/attack-vectors/${currentAttackVectorTestId}/test/pdf`,
+        'gmj-attack-vector-test.pdf',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lookback_seconds: 60 })
+        }
+      );
     }
 
     async function learnAttackVectors() {
@@ -7808,11 +7859,14 @@
       const scope = event.scope_type || (hasTarget ? '-' : 'legado/sem alvo normalizado');
       const fields = [
         ['Alvo', target],
+        ['Porta alvo', event.target_port || '-'],
+        ['Origens unicas', event.unique_src_ips || '-'],
         ['Escopo', scope],
         ['Direcao', formatAnomalyDirectionLabel(event.direction)],
+        ['Output if', event.output_if || event.interface_if_index || '-'],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Vetor', event.vector_name || event.attack_vector_name || '-'],
-        ['Protocolo', event.decoder || event.protocol || '-'],
+        ['Protocolo', event.protocol || event.decoder || '-'],
         ['Metrica', event.metric_unit ? unitLabel(event.metric_unit) : '-']
       ];
       if (event.invalid_scope) fields.push(['Validacao', 'invalid_scope']);
@@ -7883,6 +7937,11 @@
       } catch (error) {
         document.getElementById('anomalyDetailSummary').textContent = `Falha: ${error.message}`;
       }
+    }
+
+    async function exportAnomalyDetailPdf() {
+      if (!currentAnomalyDetailId) return;
+      await downloadAuthFile(`${API_BASE}/api/anomalies/${currentAnomalyDetailId}/pdf`, 'gmj-anomaly-detail.pdf');
     }
 
     async function ackAnomaly(anomalyId = currentAnomalyDetailId) {
@@ -8539,21 +8598,24 @@
       status.textContent = 'Exportando CSV';
       const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}&format=csv`;
       try {
-        const response = await authFetch(endpoint);
-        if (!response.ok) throw new Error(await responseErrorMessage(response, endpoint));
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = 'gmj-flow-search.csv';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
+        await downloadAuthFile(endpoint, 'gmj-flow-search.csv');
         status.textContent = 'CSV exportado';
       } catch (error) {
         status.textContent = `Falha ao exportar CSV: ${error.message}`;
         console.error('Falha ao exportar CSV', error);
+      }
+    }
+
+    async function exportFlowsPdf() {
+      const status = document.getElementById('flowSearchStatus');
+      status.textContent = 'Exportando PDF';
+      const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}&format=pdf`;
+      try {
+        await downloadAuthFile(endpoint, 'gmj-flow-search.pdf');
+        status.textContent = 'PDF exportado';
+      } catch (error) {
+        status.textContent = `Falha ao exportar PDF: ${error.message}`;
+        console.error('Falha ao exportar PDF', error);
       }
     }
 
@@ -10384,6 +10446,7 @@
     document.getElementById('logoutButton').addEventListener('click', () => logout().catch(console.error));
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
     document.getElementById('flowExportButton').addEventListener('click', () => exportFlowsCsv().catch(console.error));
+    document.getElementById('flowPdfButton').addEventListener('click', () => exportFlowsPdf().catch(console.error));
     document.getElementById('flowClearButton').addEventListener('click', () => clearFlowSearch().catch(console.error));
     ['flowSrcIp', 'flowDstIp', 'flowSrcPort', 'flowDstPort', 'flowProtoNumber'].forEach(id => {
       document.getElementById(id).addEventListener('keydown', event => {
@@ -10543,6 +10606,8 @@
     document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
     document.getElementById('closeAnomalyButton').addEventListener('click', () => closeAnomalyEvent().catch(console.error));
+    document.getElementById('anomalyDetailPdfButton').addEventListener('click', () => exportAnomalyDetailPdf().catch(console.error));
+    document.getElementById('attackVectorTestPdfButton').addEventListener('click', () => exportAttackVectorTestPdf().catch(console.error));
 
     document.getElementById('ipZoneTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
@@ -10668,6 +10733,7 @@
     });
 
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
+    document.getElementById('bgpPdfButton').addEventListener('click', () => exportBgpPdf().catch(console.error));
     document.getElementById('checkBgpStatusButton').addEventListener('click', () => loadBgpView().catch(console.error));
     document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpStatus', `Falha ao salvar conector: ${error.message}`)));
     document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
