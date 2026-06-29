@@ -331,6 +331,16 @@ SYSTEM_SETTING_DEFAULTS = {
     "snmp_retention_days": "90",
     "database_last_cleanup_at": "",
     "database_cleanup_hour": "3",
+    "ai_mitigation_enabled": os.getenv("AI_MITIGATION_ENABLED", "false"),
+    "ai_provider": os.getenv("AI_PROVIDER", "ollama"),
+    "ai_base_url": os.getenv("AI_BASE_URL", "http://gmj-flow-ollama:11434"),
+    "ai_model_profile": os.getenv("AI_MODEL_PROFILE", "recommended"),
+    "ai_model": os.getenv("AI_MODEL", "qwen2.5:3b-instruct"),
+    "ai_timeout_seconds": os.getenv("AI_TIMEOUT_SECONDS", "20"),
+    "ai_max_top_flows": os.getenv("AI_MAX_TOP_FLOWS", "30"),
+    "ai_max_context_chars": os.getenv("AI_MAX_CONTEXT_CHARS", "12000"),
+    "ai_allow_auto": os.getenv("AI_ALLOW_AUTO", "false"),
+    "ai_require_policy_validation": os.getenv("AI_REQUIRE_POLICY_VALIDATION", "true"),
 }
 
 ATTACK_DOMAIN_TYPES = {"any", "internal_ip", "external_ip", "prefix", "sensor", "interface"}
@@ -527,6 +537,61 @@ UDP_UPLOAD_EXCLUDED_SRC_PORTS_DEFAULT: set[int] = set()
 UDP_DOWNLOAD_EXCLUDED_DST_PORTS_DEFAULT = {443, 500, 4500, 3478, 19302}
 UDP_REFLECTION_SRC_PORTS_DEFAULT = {53, 123, 389, 1900, 11211, 19, 161, 520}
 
+AI_MODEL_PROFILES = {
+    "economical": {
+        "profile_id": "economical",
+        "name": "Economico",
+        "description": "menor consumo, analise simples.",
+        "default_model": "qwen2.5:1.5b-instruct",
+        "alternative_models": ["llama3.2:1b"],
+        "estimated_model_ram_gb": "1 a 2",
+        "recommended_free_ram_gb": 4,
+        "max_top_flows": 15,
+        "max_context_chars": 6000,
+        "timeout_seconds": 15,
+    },
+    "recommended": {
+        "profile_id": "recommended",
+        "name": "Recomendado",
+        "description": "melhor equilibrio para mitigacao.",
+        "default_model": "qwen2.5:3b-instruct",
+        "alternative_models": ["llama3.2:3b"],
+        "estimated_model_ram_gb": "2 a 4",
+        "recommended_free_ram_gb": 8,
+        "max_top_flows": 30,
+        "max_context_chars": 12000,
+        "timeout_seconds": 20,
+    },
+    "strong": {
+        "profile_id": "strong",
+        "name": "Forte",
+        "description": "analise mais rica, maior consumo de RAM/CPU.",
+        "default_model": "qwen2.5:7b-instruct",
+        "alternative_models": ["llama3.1:8b", "mistral", "gemma"],
+        "estimated_model_ram_gb": "5 a 8+",
+        "recommended_free_ram_gb": 16,
+        "max_top_flows": 50,
+        "max_context_chars": 20000,
+        "timeout_seconds": 40,
+    },
+}
+
+AI_SYSTEM_PROMPT = (
+    "Voce e um analista NOC/ISP. Analise anomalias NetFlow e escolha a mitigacao "
+    "mais segura entre candidatos fornecidos. Nao invente comandos. Nao recomende "
+    "bloqueio amplo. Retorne somente JSON valido."
+)
+
+AI_RESPONSE_CLASSIFICATIONS = {
+    "udp_outbound_flood",
+    "udp_reflection",
+    "dns_reflection",
+    "ntp_reflection",
+    "scan",
+    "unknown",
+    "likely_false_positive",
+}
+
 
 class SensorInterfacePayload(BaseModel):
     id: int | None = None
@@ -675,6 +740,19 @@ class DatabaseCleanupPayload(BaseModel):
 class DatabaseOptimizePayload(BaseModel):
     confirm: str = ""
     force_low_disk: bool = False
+
+
+class AiSettingsPayload(BaseModel):
+    enabled: bool = False
+    provider: str = "ollama"
+    base_url: str = "http://gmj-flow-ollama:11434"
+    selected_profile: str = "recommended"
+    selected_model: str = ""
+    timeout_seconds: int | None = Field(None, ge=1, le=300)
+    max_top_flows: int | None = Field(None, ge=1, le=200)
+    max_context_chars: int | None = Field(None, ge=1000, le=100000)
+    allow_auto: bool = False
+    require_policy_validation: bool = True
 
 
 class AttackVectorTemplatePayload(BaseModel):
@@ -1344,6 +1422,30 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_mitigation_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            anomaly_id INTEGER NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            profile TEXT NOT NULL DEFAULT '',
+            request_payload_json TEXT NOT NULL DEFAULT '{}',
+            response_json TEXT NOT NULL DEFAULT '{}',
+            recommended_candidate_index INTEGER,
+            confidence REAL,
+            risk TEXT NOT NULL DEFAULT '',
+            classification TEXT NOT NULL DEFAULT '',
+            manual_approval_required INTEGER NOT NULL DEFAULT 1,
+            allow_auto INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            operator_summary TEXT NOT NULL DEFAULT '',
+            report_summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            error_message TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
     ensure_sqlite_column(conn, "attack_vectors", "src_cidr", "src_cidr TEXT")
@@ -1438,6 +1540,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_status ON anomaly_events(status, last_seen_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_dedupe ON anomaly_events(dedupe_key, status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_event_flows_event ON anomaly_event_flows(anomaly_event_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_mitigation_analysis_anomaly ON ai_mitigation_analysis(anomaly_id, created_at)")
     seed_default_attack_vectors(conn)
 
 
@@ -7835,6 +7938,522 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
     return {"anomaly": context["event"], "candidates": evaluated}
 
 
+def ai_profile(profile_id: str | None = None) -> dict[str, Any]:
+    key = clean_text(profile_id or "recommended").lower()
+    return dict(AI_MODEL_PROFILES.get(key) or AI_MODEL_PROFILES["recommended"])
+
+
+def ai_int_setting(settings: dict[str, str], key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    owns_connection = conn is None
+    if conn is None:
+        conn = sqlite_connection()
+    try:
+        settings = get_system_settings(conn)
+    finally:
+        if owns_connection:
+            conn.close()
+    profile = ai_profile(settings.get("ai_model_profile"))
+    model = clean_text(settings.get("ai_model")) or profile["default_model"]
+    return {
+        "enabled": setting_bool(settings, "ai_mitigation_enabled"),
+        "provider": clean_text(settings.get("ai_provider")).lower() or "ollama",
+        "base_url": clean_text(settings.get("ai_base_url")) or "http://gmj-flow-ollama:11434",
+        "selected_profile": profile["profile_id"],
+        "selected_model": model,
+        "timeout_seconds": ai_int_setting(settings, "ai_timeout_seconds", profile["timeout_seconds"], 1, 300),
+        "max_top_flows": ai_int_setting(settings, "ai_max_top_flows", profile["max_top_flows"], 1, 200),
+        "max_context_chars": ai_int_setting(settings, "ai_max_context_chars", profile["max_context_chars"], 1000, 100000),
+        "allow_auto": setting_bool(settings, "ai_allow_auto"),
+        "require_policy_validation": setting_bool(settings, "ai_require_policy_validation"),
+    }
+
+
+def system_memory_gb() -> dict[str, float | None]:
+    try:
+        psutil = import_module("psutil")
+        memory = psutil.virtual_memory()
+        return {
+            "total": round(float(memory.total) / 1024**3, 2),
+            "available": round(float(memory.available) / 1024**3, 2),
+        }
+    except Exception:
+        pass
+    meminfo = Path("/proc/meminfo")
+    if meminfo.exists():
+        values: dict[str, int] = {}
+        for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                values[parts[0].rstrip(":")] = int(parts[1])
+        total = values.get("MemTotal")
+        available = values.get("MemAvailable") or values.get("MemFree")
+        return {
+            "total": round(total / 1024**2, 2) if total else None,
+            "available": round(available / 1024**2, 2) if available else None,
+        }
+    try:
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return {
+                "total": round(float(status.ullTotalPhys) / 1024**3, 2),
+                "available": round(float(status.ullAvailPhys) / 1024**3, 2),
+            }
+    except Exception:
+        pass
+    return {"total": None, "available": None}
+
+
+def ai_memory_recommendation(available_gb: float | None) -> tuple[str, list[str]]:
+    warnings: list[str] = []
+    if available_gb is None:
+        return "recommended", ["Nao foi possivel detectar RAM disponivel."]
+    if available_gb < 4:
+        warnings.append("RAM disponivel abaixo de 4 GB; prefira Economico ou mantenha IA desativada.")
+        return "economical", warnings
+    if available_gb < 10:
+        return "recommended", warnings
+    if available_gb >= 16:
+        return "strong", warnings
+    warnings.append("RAM disponivel intermediaria; evite Forte se ClickHouse estiver sob carga.")
+    return "recommended", warnings
+
+
+def ai_disk_warnings() -> list[str]:
+    try:
+        usage = shutil.disk_usage(sqlite_path().parent)
+        free_percent = (usage.free / usage.total * 100) if usage.total else 100
+        if free_percent < 10:
+            return ["Disco com menos de 10% livre; evite perfil Forte e reduza carga extra no host."]
+    except Exception:
+        pass
+    return []
+
+
+def ai_provider_reachable(config: dict[str, Any]) -> bool:
+    if not config.get("enabled"):
+        return False
+    try:
+        base_url = clean_text(config.get("base_url")).rstrip("/")
+        provider = clean_text(config.get("provider")).lower()
+        path = "/api/tags" if provider == "ollama" else "/v1/models"
+        request = urllib.request.Request(f"{base_url}{path}", method="GET")
+        with urllib.request.urlopen(request, timeout=min(int(config.get("timeout_seconds") or 5), 5)) as response:
+            return 200 <= int(response.status) < 500
+    except Exception:
+        return False
+
+
+def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = dict(row)
+    response = bgp_json_loads(item.get("response_json"), {})
+    request_payload = bgp_json_loads(item.get("request_payload_json"), {})
+    return {
+        "id": item.get("id"),
+        "anomaly_id": item.get("anomaly_id"),
+        "provider": item.get("provider") or "",
+        "model": item.get("model") or "",
+        "profile": item.get("profile") or "",
+        "request_payload": request_payload,
+        "response": response,
+        "recommended_candidate_index": item.get("recommended_candidate_index"),
+        "confidence": item.get("confidence"),
+        "risk": item.get("risk") or "",
+        "classification": item.get("classification") or "",
+        "manual_approval_required": sqlite_bool(item.get("manual_approval_required")),
+        "allow_auto": sqlite_bool(item.get("allow_auto")),
+        "reason": item.get("reason") or "",
+        "operator_summary": item.get("operator_summary") or "",
+        "report_summary": item.get("report_summary") or "",
+        "risks": response.get("risks") if isinstance(response, dict) else [],
+        "checks_before_approve": response.get("checks_before_approve") if isinstance(response, dict) else [],
+        "created_at": item.get("created_at") or "",
+        "error_message": item.get("error_message") or "",
+    }
+
+
+def latest_ai_analysis(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM ai_mitigation_analysis
+        WHERE anomaly_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (anomaly_id,),
+    ).fetchone()
+    return ai_analysis_row_to_dict(row)
+
+
+def trim_ai_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    if len(text) <= max_chars:
+        return payload
+    trimmed = dict(payload)
+    trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[: max(3, len(trimmed.get("related_flows") or []) // 2)]
+    trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[: max(3, len(trimmed.get("top_conversations") or []) // 2)]
+    text = json.dumps(trimmed, ensure_ascii=False, sort_keys=True, default=str)
+    if len(text) <= max_chars:
+        return trimmed
+    trimmed["context_truncated"] = True
+    trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[:3]
+    trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[:3]
+    while len(json.dumps(trimmed, ensure_ascii=False, sort_keys=True, default=str)) > max_chars and trimmed.get("candidates"):
+        trimmed["candidates"] = trimmed["candidates"][:-1]
+    return trimmed
+
+
+def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict[str, Any]:
+    evaluated = evaluated_mitigation_candidates(anomaly_id)
+    with sqlite_connection() as conn:
+        context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+    flows = list(context.get("flows") or [])[: int(config["max_top_flows"])]
+    conversations: dict[str, dict[str, Any]] = {}
+    for flow in flows:
+        key = f"{flow.get('src_ip') or '-'}:{flow.get('src_port') or '-'} -> {flow.get('dst_ip') or '-'}:{flow.get('dst_port') or '-'}"
+        item = conversations.setdefault(key, {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0})
+        item["bytes"] += int(float(flow.get("bytes") or 0))
+        item["packets"] += int(float(flow.get("packets") or 0))
+        item["flow_count"] += int(float(flow.get("flow_count") or flow.get("flows") or 0))
+    payload = {
+        "anomaly": evaluated["anomaly"],
+        "top_conversations": sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[: int(config["max_top_flows"])],
+        "related_flows": flows,
+        "candidates": evaluated["candidates"],
+        "policy_decisions": [
+            {"candidate_index": index, "policy_decision": candidate.get("policy_decision")}
+            for index, candidate in enumerate(evaluated["candidates"])
+        ],
+        "security_rules": {
+            "ai_never_announces": True,
+            "choose_only_existing_candidate": True,
+            "policy_validation_required": bool(config.get("require_policy_validation")),
+            "ai_allow_auto": bool(config.get("allow_auto")),
+        },
+    }
+    return trim_ai_payload(payload, int(config["max_context_chars"]))
+
+
+def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
+    response_schema = {
+        "recommended_candidate_index": 0,
+        "confidence": 0.72,
+        "risk": "low|medium|high",
+        "classification": "udp_outbound_flood|udp_reflection|dns_reflection|ntp_reflection|scan|unknown|likely_false_positive",
+        "manual_approval_required": True,
+        "allow_auto": False,
+        "reason": "explicacao curta",
+        "operator_summary": "texto para NOC",
+        "report_summary": "texto para PDF",
+        "risks": ["..."],
+        "checks_before_approve": ["..."],
+    }
+    examples = [
+        "UDP upload single client high PPS: preferir candidate top conversation scoped por source /32, destination /32 e destination-port.",
+        "UDP many internal to same dst:port: preferir destination /32 + destination-port e aprovacao manual.",
+        "UDP reflection inbound: preferir destination cliente /32 + source-port reflection.",
+        "Trafego CDN/QUIC: UDP/443 ou portas comuns elevam risco de falso positivo; sugerir investigacao/manual.",
+    ]
+    return "\n\n".join(
+        [
+            "Analise o payload e escolha apenas um indice existente em candidates.",
+            "Se o candidate recomendado tiver policy_decision.deny, marque manual_approval_required=true e explique que esta bloqueado pela policy.",
+            "Nunca recomende accept automatico. Vetores genericos sempre exigem aprovacao manual.",
+            "Exemplos: " + " ".join(examples),
+            "Formato obrigatorio de resposta JSON: " + json.dumps(response_schema, ensure_ascii=False),
+            "Payload: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+        ]
+    )
+
+
+def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int]:
+    base_url = clean_text(config["base_url"]).rstrip("/")
+    provider = clean_text(config["provider"]).lower()
+    started = time.monotonic()
+    if provider == "ollama":
+        endpoint = f"{base_url}/api/chat"
+        body = {
+            "model": config["selected_model"],
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": AI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "format": "json",
+        }
+    else:
+        endpoint = f"{base_url}/v1/chat/completions"
+        body = {
+            "model": config["selected_model"],
+            "messages": [
+                {"role": "system", "content": AI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+        }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    latency_ms = int((time.monotonic() - started) * 1000)
+    if provider == "ollama":
+        content = payload.get("message", {}).get("content") or payload.get("response") or ""
+    else:
+        choices = payload.get("choices") or []
+        content = choices[0].get("message", {}).get("content") if choices else ""
+    return clean_text(content), latency_ms
+
+
+def parse_ai_json_response(text: str) -> dict[str, Any]:
+    content = clean_text(text).strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?", "", content, flags=re.IGNORECASE).strip()
+        content = re.sub(r"```$", "", content).strip()
+    if not content.startswith("{"):
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            content = content[start : end + 1]
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("Resposta da IA nao e um objeto JSON.")
+    return parsed
+
+
+def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+    if not candidates:
+        raise ValueError("Nao ha candidates para a IA escolher.")
+    try:
+        index = int(response.get("recommended_candidate_index"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("recommended_candidate_index invalido.") from exc
+    if index < 0 or index >= len(candidates):
+        raise ValueError("recommended_candidate_index fora da lista de candidates.")
+    try:
+        confidence = max(0.0, min(float(response.get("confidence") or 0), 1.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    risk = clean_text(response.get("risk")).lower()
+    if risk not in {"low", "medium", "high"}:
+        risk = "medium"
+    classification = clean_text(response.get("classification")).lower()
+    if classification not in AI_RESPONSE_CLASSIFICATIONS:
+        classification = "unknown"
+    candidate = candidates[index]
+    policy = candidate.get("policy_decision") or {}
+    policy_denied = policy.get("decision") == "deny"
+    action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
+    allow_auto = bool(response.get("allow_auto")) and bool(config.get("allow_auto")) and not policy_denied and action != "accept"
+    manual_required = bool(response.get("manual_approval_required")) or not allow_auto or policy_denied
+    return {
+        **response,
+        "recommended_candidate_index": index,
+        "confidence": confidence,
+        "risk": risk,
+        "classification": classification,
+        "manual_approval_required": manual_required,
+        "allow_auto": allow_auto,
+        "reason": clean_text(response.get("reason"))[:1000],
+        "operator_summary": clean_text(response.get("operator_summary"))[:2000],
+        "report_summary": clean_text(response.get("report_summary"))[:2000],
+        "risks": [clean_text(item)[:500] for item in (response.get("risks") or []) if clean_text(item)][:10],
+        "checks_before_approve": [clean_text(item)[:500] for item in (response.get("checks_before_approve") or []) if clean_text(item)][:10],
+    }
+
+
+def save_ai_analysis(
+    conn: sqlite3.Connection,
+    anomaly_id: int,
+    config: dict[str, Any],
+    request_payload: dict[str, Any],
+    response_json: dict[str, Any] | None = None,
+    error_message: str = "",
+) -> dict[str, Any]:
+    response_json = response_json or {}
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO ai_mitigation_analysis (
+            anomaly_id, provider, model, profile, request_payload_json, response_json,
+            recommended_candidate_index, confidence, risk, classification,
+            manual_approval_required, allow_auto, reason, operator_summary, report_summary,
+            created_at, error_message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            anomaly_id,
+            config.get("provider") or "",
+            config.get("selected_model") or "",
+            config.get("selected_profile") or "",
+            json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str),
+            json.dumps(response_json, ensure_ascii=False, sort_keys=True, default=str),
+            response_json.get("recommended_candidate_index"),
+            response_json.get("confidence"),
+            response_json.get("risk") or "",
+            response_json.get("classification") or "",
+            1 if response_json.get("manual_approval_required", True) else 0,
+            1 if response_json.get("allow_auto") else 0,
+            response_json.get("reason") or "",
+            response_json.get("operator_summary") or "",
+            response_json.get("report_summary") or "",
+            now,
+            clean_text(error_message)[:2000],
+        ),
+    )
+    row = conn.execute("SELECT * FROM ai_mitigation_analysis WHERE id = last_insert_rowid()").fetchone()
+    return ai_analysis_row_to_dict(row) or {}
+
+
+@app.get("/api/ai/profiles")
+def ai_profiles(request: Request):
+    require_admin(request)
+    return {"items": list(AI_MODEL_PROFILES.values())}
+
+
+@app.get("/api/ai/status")
+def ai_status(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    memory = system_memory_gb()
+    recommended_profile, warnings = ai_memory_recommendation(memory["available"])
+    warnings.extend(ai_disk_warnings())
+    selected_profile = ai_profile(config["selected_profile"])
+    if memory["available"] is not None and memory["available"] < float(selected_profile["recommended_free_ram_gb"]):
+        warnings.append(f"Perfil {selected_profile['name']} recomenda pelo menos {selected_profile['recommended_free_ram_gb']} GB livres.")
+    if config["selected_profile"] == "strong":
+        warnings.append("Perfil Forte pode afetar ClickHouse em hosts com CPU/RAM pressionados.")
+    return {
+        **config,
+        "reachable": ai_provider_reachable(config),
+        "system_memory_total_gb": memory["total"],
+        "system_memory_available_gb": memory["available"],
+        "recommendation": recommended_profile,
+        "warnings": sorted(set(warnings)),
+    }
+
+
+@app.post("/api/ai/settings")
+def save_ai_settings(request: Request, payload: AiSettingsPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    profile = ai_profile(payload.selected_profile)
+    provider = normalize_choice(payload.provider, {"ollama", "llama.cpp", "llamacpp", "openai-compatible"}, "provider")
+    model = clean_text(payload.selected_model) or profile["default_model"]
+    values = {
+        "ai_mitigation_enabled": "true" if payload.enabled else "false",
+        "ai_provider": provider,
+        "ai_base_url": clean_text(payload.base_url) or "http://gmj-flow-ollama:11434",
+        "ai_model_profile": profile["profile_id"],
+        "ai_model": model,
+        "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
+        "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
+        "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_allow_auto": "true" if payload.allow_auto else "false",
+        "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
+    }
+    with sqlite_connection() as conn:
+        set_system_settings(conn, values)
+        conn.commit()
+    return ai_status(request)
+
+
+@app.post("/api/ai/test")
+def ai_test(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    if not config["enabled"]:
+        return {"ok": False, "latency_ms": 0, "provider": config["provider"], "model": config["selected_model"], "response_preview": "", "error_message": "IA desativada."}
+    try:
+        response_text, latency_ms = ai_provider_chat(config, "Responda somente JSON: {\"ok\": true, \"message\": \"pong\"}")
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "provider": config["provider"],
+            "model": config["selected_model"],
+            "response_preview": response_text[:500],
+            "error_message": "",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "latency_ms": 0,
+            "provider": config["provider"],
+            "model": config["selected_model"],
+            "response_preview": "",
+            "error_message": str(exc),
+        }
+
+
+@app.get("/api/anomalies/{event_id}/ai-analysis")
+def get_anomaly_ai_analysis(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        analysis = latest_ai_analysis(conn, event_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="Analise IA nao encontrada")
+    return analysis
+
+
+@app.post("/api/anomalies/{event_id}/ai-analysis")
+def create_anomaly_ai_analysis(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    if not config["enabled"]:
+        raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
+    request_payload = build_ai_mitigation_payload(event_id, config)
+    try:
+        response_text, _latency_ms = ai_provider_chat(config, ai_prompt_for_payload(request_payload))
+        parsed = parse_ai_json_response(response_text)
+        validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, validated)
+            conn.commit()
+        return saved
+    except Exception as exc:
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc))
+            conn.commit()
+        return saved
+
+
 def insert_bgp_mitigation_announcement(
     conn: sqlite3.Connection,
     candidate: dict[str, Any],
@@ -14172,6 +14791,7 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
     chart = anomaly_timeseries_chart_flowable(metric_points, event)
     mitigation_candidates = list(detail.get("mitigation_candidates") or [])
     announcements = list(detail.get("announcements") or [])
+    ai_analysis = detail.get("ai_analysis") or {}
     sections = [
         {
             "title": "Resumo",
@@ -14227,6 +14847,26 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
                 "rows": mitigation_candidates[:20],
             }
         )
+    if ai_analysis:
+        sections.append(
+            {
+                "title": "Analise IA",
+                "headers": ["Campo", "Valor"],
+                "rows": key_value_rows(
+                    [
+                        ("Classificacao", ai_analysis.get("classification")),
+                        ("Risco", ai_analysis.get("risk")),
+                        ("Confianca", ai_analysis.get("confidence")),
+                        ("Candidato recomendado", ai_analysis.get("recommended_candidate_index")),
+                        ("Motivo", ai_analysis.get("reason")),
+                        ("Resumo relatorio", ai_analysis.get("report_summary")),
+                        ("Checks antes de aprovar", "; ".join(ai_analysis.get("checks_before_approve") or [])),
+                        ("Modelo/perfil", f"{ai_analysis.get('model') or '-'} / {ai_analysis.get('profile') or '-'}"),
+                        ("Erro", ai_analysis.get("error_message")),
+                    ]
+                ),
+            }
+        )
     if announcements:
         sections.append(
             {
@@ -14261,6 +14901,7 @@ def anomaly_detail_pdf(request: Request, event_id: int):
                 (event_id,),
             ).fetchall()
             detail["announcements"] = [bgp_announcement_row_to_dict(row) for row in rows]
+            detail["ai_analysis"] = latest_ai_analysis(conn, event_id)
     return anomaly_pdf_response(detail)
 
 

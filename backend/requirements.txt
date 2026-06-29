@@ -7,3 +7,4 @@ python-jose[cryptography]==3.3.0
 bcrypt==4.0.1
 geoip2==4.8.0
 reportlab==4.2.5
+psutil==6.1.1

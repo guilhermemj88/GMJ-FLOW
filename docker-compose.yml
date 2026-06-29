@@ -54,6 +54,16 @@ services:
       GMJFLOW_ASN_RESOLVER_MAX_ATTEMPTS: "${GMJFLOW_ASN_RESOLVER_MAX_ATTEMPTS-3}"
       GMJFLOW_ASN_CACHE_TTL_DAYS: "${GMJFLOW_ASN_CACHE_TTL_DAYS-30}"
       GMJFLOW_GEOIP_MMDB_PATH: "${GMJFLOW_GEOIP_MMDB_PATH-/app/data/GeoLite2-City.mmdb}"
+      AI_MITIGATION_ENABLED: "${AI_MITIGATION_ENABLED-false}"
+      AI_PROVIDER: "${AI_PROVIDER-ollama}"
+      AI_BASE_URL: "${AI_BASE_URL-http://gmj-flow-ollama:11434}"
+      AI_MODEL_PROFILE: "${AI_MODEL_PROFILE-recommended}"
+      AI_MODEL: "${AI_MODEL-qwen2.5:3b-instruct}"
+      AI_TIMEOUT_SECONDS: "${AI_TIMEOUT_SECONDS-20}"
+      AI_MAX_TOP_FLOWS: "${AI_MAX_TOP_FLOWS-30}"
+      AI_MAX_CONTEXT_CHARS: "${AI_MAX_CONTEXT_CHARS-12000}"
+      AI_ALLOW_AUTO: "${AI_ALLOW_AUTO-false}"
+      AI_REQUIRE_POLICY_VALIDATION: "${AI_REQUIRE_POLICY_VALIDATION-true}"
       PMACCT_STATE_DIR: "${PMACCT_STATE_DIR-/var/spool/pmacct/state}"
     ports:
       - "${BACKEND_PORT-8000}:8000"
@@ -141,6 +151,18 @@ services:
       clickhouse:
         condition: service_healthy
 
+  gmj-flow-ollama:
+    image: ollama/ollama
+    container_name: gmj-flow-ollama
+    restart: unless-stopped
+    profiles:
+      - ai
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+
 volumes:
   clickhouse_data:
   pmacct_spool:
+  ollama:

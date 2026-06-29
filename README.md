@@ -26,6 +26,8 @@ Servicos principais:
 - ClickHouse HTTP: http://localhost:8123
 - Coletor real NetFlow/IPFIX: UDP `9995`
 
+IA local para mitigacao e opcional e nao sobe por padrao. Veja [docs/ai-mitigation.md](docs/ai-mitigation.md) para habilitar o profile `ai` com Ollama e baixar o modelo escolhido.
+
 ## Modo real com pmacct
 
 O modo real sobe por padrao com os servicos `pmacct` e `pmacct-parser`.

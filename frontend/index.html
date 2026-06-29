@@ -773,6 +773,11 @@
       height: 240px;
     }
 
+    .ai-recommended-candidate {
+      border-color: #0f766e;
+      box-shadow: 0 0 0 2px rgba(15, 118, 110, .16);
+    }
+
     .color-swatch {
       display: inline-block;
       width: 18px;
@@ -3256,6 +3261,42 @@
             </div>
           </div>
 
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">IA para mitigacao</div>
+                <div id="aiMitigationStatusText" class="metric-readout">IA desativada por padrao</div>
+              </div>
+              <div class="toolbar">
+                <button id="saveAiMitigationButton" type="button" class="btn btn-sm btn-success">
+                  <i data-lucide="save"></i><span>Salvar IA</span>
+                </button>
+                <button id="testAiMitigationButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="activity"></i><span>Testar IA</span>
+                </button>
+              </div>
+            </div>
+            <div class="flow-search-grid mb-2">
+              <div class="field"><label for="aiEnabled">Ativar IA</label><select id="aiEnabled" class="form-select form-select-sm"><option value="false">Desativada</option><option value="true">Ativada</option></select></div>
+              <div class="field"><label for="aiProvider">Provider</label><select id="aiProvider" class="form-select form-select-sm"><option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option><option value="openai-compatible">openai-compatible</option></select></div>
+              <div class="field"><label for="aiBaseUrl">Base URL</label><input id="aiBaseUrl" class="form-control form-control-sm" placeholder="http://gmj-flow-ollama:11434"></div>
+              <div class="field"><label for="aiProfile">Perfil de memoria</label><select id="aiProfile" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="aiModel">Modelo selecionado</label><input id="aiModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
+              <div class="field"><label for="aiTimeout">Timeout (s)</label><input id="aiTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
+              <div class="field"><label for="aiTopFlows">Top flows</label><input id="aiTopFlows" type="number" min="1" max="200" class="form-control form-control-sm"></div>
+              <div class="field"><label for="aiContextChars">Contexto max</label><input id="aiContextChars" type="number" min="1000" max="100000" class="form-control form-control-sm"></div>
+            </div>
+            <div class="database-metrics-grid mb-2">
+              <div class="metric-card"><div class="metric-label">RAM total</div><div id="aiRamTotal" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">RAM disponivel</div><div id="aiRamAvailable" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Recomendacao</div><div id="aiRecommendation" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Provider</div><div id="aiReachable" class="metric-value">-</div></div>
+            </div>
+            <div id="aiProfileDescription" class="subtle"></div>
+            <div id="aiWarnings" class="text-warning mt-2"></div>
+            <pre id="aiTestOutput" class="result-box mt-2">Nenhum teste executado.</pre>
+          </section>
+
           <section class="panel p-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
@@ -3734,6 +3775,18 @@
           </div>
         </div>
         <div id="anomalyMetricChart" class="anomaly-chart"></div>
+        <div class="panel p-3 mt-3">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div>
+              <div class="panel-title">Analise IA</div>
+              <div id="anomalyAiStatus" class="metric-readout">Nenhuma analise carregada.</div>
+            </div>
+            <button id="runAnomalyAiButton" type="button" class="btn btn-sm btn-outline-secondary">
+              <i data-lucide="sparkles"></i><span>Analisar com IA</span>
+            </button>
+          </div>
+          <div id="anomalyAiAnalysisBlock" class="subtle">Sem analise IA para esta anomalia.</div>
+        </div>
         <div class="row g-3 mt-2">
           <div class="col-12 col-xl-5">
             <div class="panel p-3 h-100">
@@ -3795,6 +3848,7 @@
       </div>
       <div class="gmj-dialog-body">
         <div id="bgpMitigationSummary" class="subtle mb-2">-</div>
+        <div id="bgpMitigationAiRecommendation" class="panel p-3 mb-2 d-none"></div>
         <div id="bgpMitigationCandidates" class="d-grid gap-2 mb-2"></div>
         <button id="runBgpAnomalyDryRunButton" type="button" class="btn btn-sm btn-outline-secondary mb-2">
           <i data-lucide="refresh-cw"></i><span>Reavaliar</span>
@@ -4121,6 +4175,8 @@
     let currentAnomalyDetailId = null;
     let currentBgpMitigationAnomalyId = null;
     let currentBgpMitigationCandidates = [];
+    let currentAiMitigationAnalysis = null;
+    let aiProfiles = [];
     let bgpConnectors = [];
     let bgpProfiles = [];
     let bgpProtectedPrefixes = [];
@@ -6817,7 +6873,79 @@
         }))
       ));
       renderBgpWorkspace();
+      await loadAiMitigationStatus().catch(error => setText('aiMitigationStatusText', `Falha IA: ${error.message}`));
       setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Dry-runs: ${bgpAnnouncements.length}`);
+    }
+
+    function aiProfileText(profileId) {
+      const profile = aiProfiles.find(item => item.profile_id === profileId);
+      return profile ? profile.name : profileId || '-';
+    }
+
+    function renderAiMitigationStatus(status) {
+      setBoolSelect('aiEnabled', Boolean(status.enabled));
+      setValue('aiProvider', status.provider || 'ollama');
+      setValue('aiBaseUrl', status.base_url || '');
+      setValue('aiModel', status.selected_model || '');
+      setValue('aiTimeout', status.timeout_seconds || '');
+      setValue('aiTopFlows', status.max_top_flows || '');
+      setValue('aiContextChars', status.max_context_chars || '');
+      document.getElementById('aiProfile').innerHTML = optionList(aiProfiles.map(profile => [profile.profile_id, profile.name]), status.selected_profile || 'recommended');
+      const profile = aiProfiles.find(item => item.profile_id === (status.selected_profile || 'recommended'));
+      setText('aiRamTotal', status.system_memory_total_gb ? `${status.system_memory_total_gb} GB` : '-');
+      setText('aiRamAvailable', status.system_memory_available_gb ? `${status.system_memory_available_gb} GB` : '-');
+      setText('aiRecommendation', aiProfileText(status.recommendation));
+      setText('aiReachable', status.enabled ? (status.reachable ? 'OK' : 'Offline') : 'Desativada');
+      setText('aiMitigationStatusText', status.enabled ? `IA ativa: ${status.provider} / ${status.selected_model}` : 'IA desativada por padrao');
+      setText('aiProfileDescription', profile ? `${profile.name}: ${profile.description} RAM modelo ${profile.estimated_model_ram_gb} GB. Livre recomendado: ${profile.recommended_free_ram_gb} GB.` : '');
+      setText('aiWarnings', (status.warnings || []).join(' | '));
+    }
+
+    async function loadAiMitigationStatus() {
+      const [profiles, status] = await Promise.all([
+        apiRequest('/api/ai/profiles'),
+        apiRequest('/api/ai/status')
+      ]);
+      aiProfiles = Array.isArray(profiles.items) ? profiles.items : [];
+      renderAiMitigationStatus(status);
+    }
+
+    async function saveAiMitigationSettings() {
+      setText('aiMitigationStatusText', 'Salvando configuracao IA...');
+      const payload = {
+        enabled: boolSelectValue('aiEnabled'),
+        provider: selectValue('aiProvider', 'ollama'),
+        base_url: selectValue('aiBaseUrl').trim(),
+        selected_profile: selectValue('aiProfile', 'recommended'),
+        selected_model: selectValue('aiModel').trim(),
+        timeout_seconds: numberValue('aiTimeout', 20),
+        max_top_flows: numberValue('aiTopFlows', 30),
+        max_context_chars: numberValue('aiContextChars', 12000),
+        allow_auto: false,
+        require_policy_validation: true
+      };
+      try {
+        const status = await apiRequest('/api/ai/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        renderAiMitigationStatus(status);
+        setText('aiTestOutput', 'Configuracao IA salva.');
+      } catch (error) {
+        setText('aiMitigationStatusText', `Falha ao salvar IA: ${error.message}`);
+      }
+    }
+
+    async function testAiMitigation() {
+      setText('aiTestOutput', 'Testando provider IA...');
+      try {
+        const result = await apiRequest('/api/ai/test', { method: 'POST' });
+        setText('aiTestOutput', JSON.stringify(result, null, 2));
+        await loadAiMitigationStatus();
+      } catch (error) {
+        setText('aiTestOutput', `Falha: ${error.message}`);
+      }
     }
 
     async function exportBgpPdf() {
@@ -7103,9 +7231,12 @@
 
     async function openBgpMitigationModal(anomalyId) {
       currentBgpMitigationAnomalyId = Number(anomalyId);
+      currentAiMitigationAnalysis = null;
       await loadBgpView();
       setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
       document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="subtle">Avaliando mitigacao sugerida...</div>';
+      document.getElementById('bgpMitigationAiRecommendation').classList.add('d-none');
+      document.getElementById('bgpMitigationAiRecommendation').innerHTML = '';
       document.getElementById('bgpMitigationOutput').textContent = '';
       openModal('bgpMitigationModal');
       await runBgpAnomalyDryRun();
@@ -7120,6 +7251,7 @@
       const container = document.getElementById('bgpMitigationCandidates');
       container.innerHTML = candidates.map((candidate, index) => {
         const policy = candidate.policy_decision || {};
+        const isAiRecommended = currentAiMitigationAnalysis && Number(currentAiMitigationAnalysis.recommended_candidate_index) === index && !currentAiMitigationAnalysis.error_message;
         const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
         const basis = candidate.mitigation_basis === 'top_conversation'
           ? 'Mitigacao por conversa principal'
@@ -7131,10 +7263,10 @@
           ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
           : '';
         return `
-          <div class="panel p-2">
+          <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
               <div>
-                <div class="panel-title">${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
+                <div class="panel-title">${isAiRecommended ? 'Recomendado pela IA - ' : ''}${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
                 <div class="subtle">${escapeHtml(candidate.reason || '-')}</div>
               </div>
               ${mitigationDecisionBadge(policy.decision)}
@@ -7155,11 +7287,46 @@
       createIcons();
     }
 
+    function renderBgpAiRecommendation() {
+      const box = document.getElementById('bgpMitigationAiRecommendation');
+      if (!currentAiMitigationAnalysis) {
+        box.classList.add('d-none');
+        box.innerHTML = '';
+        return;
+      }
+      box.classList.remove('d-none');
+      if (currentAiMitigationAnalysis.error_message) {
+        box.innerHTML = `<div class="panel-title mb-1">Analise IA</div><div class="text-danger">${escapeHtml(currentAiMitigationAnalysis.error_message)}</div>`;
+        return;
+      }
+      box.innerHTML = `
+        <div class="panel-title mb-1">Recomendacao IA</div>
+        <div class="d-flex flex-wrap gap-2 mb-2">
+          <div class="metric-chip"><span>Candidato:</span> #${Number(currentAiMitigationAnalysis.recommended_candidate_index ?? -1) + 1}</div>
+          <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(currentAiMitigationAnalysis.classification || '-')}</div>
+          <div class="metric-chip"><span>Risco:</span> ${escapeHtml(currentAiMitigationAnalysis.risk || '-')}</div>
+          <div class="metric-chip"><span>Confianca:</span> ${(Number(currentAiMitigationAnalysis.confidence || 0) * 100).toFixed(1)}%</div>
+        </div>
+        <div class="metric-readout">${escapeHtml(currentAiMitigationAnalysis.reason || '-')}</div>
+      `;
+    }
+
+    async function loadBgpAiRecommendation() {
+      if (!currentBgpMitigationAnomalyId) return;
+      try {
+        currentAiMitigationAnalysis = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/ai-analysis`);
+      } catch (error) {
+        currentAiMitigationAnalysis = null;
+      }
+      renderBgpAiRecommendation();
+    }
+
     async function runBgpAnomalyDryRun() {
       if (!currentBgpMitigationAnomalyId) return;
       document.getElementById('bgpMitigationOutput').textContent = 'Avaliando candidatos...';
       const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, { method: 'POST' });
       currentBgpMitigationCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+      await loadBgpAiRecommendation();
       renderBgpMitigationCandidates(currentBgpMitigationCandidates);
       document.getElementById('bgpMitigationOutput').textContent = `${currentBgpMitigationCandidates.length} candidato(s) avaliados.`;
       await loadBgpView();
@@ -7914,11 +8081,67 @@
       return items;
     }
 
+    function renderAnomalyAiAnalysis(analysis) {
+      currentAiMitigationAnalysis = analysis || null;
+      const block = document.getElementById('anomalyAiAnalysisBlock');
+      if (!analysis) {
+        setText('anomalyAiStatus', 'Nenhuma analise IA salva.');
+        block.innerHTML = '<div class="subtle">Sem analise IA para esta anomalia.</div>';
+        return;
+      }
+      if (analysis.error_message) {
+        setText('anomalyAiStatus', `Falha IA em ${formatDateTime(analysis.created_at)}`);
+        block.innerHTML = `<div class="text-danger">${escapeHtml(analysis.error_message)}</div>`;
+        return;
+      }
+      const checks = Array.isArray(analysis.checks_before_approve) ? analysis.checks_before_approve : [];
+      const risks = Array.isArray(analysis.risks) ? analysis.risks : [];
+      setText('anomalyAiStatus', `${analysis.classification || 'unknown'} / risco ${analysis.risk || '-'}`);
+      block.innerHTML = `
+        <div class="d-flex flex-wrap gap-2 mb-2">
+          <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(analysis.classification || '-')}</div>
+          <div class="metric-chip"><span>Risco:</span> ${escapeHtml(analysis.risk || '-')}</div>
+          <div class="metric-chip"><span>Confianca:</span> ${(Number(analysis.confidence || 0) * 100).toFixed(1)}%</div>
+          <div class="metric-chip"><span>Candidato:</span> #${Number(analysis.recommended_candidate_index ?? -1) + 1}</div>
+          <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')} / ${escapeHtml(analysis.profile || '-')}</div>
+        </div>
+        <div class="metric-readout mb-2">${escapeHtml(analysis.reason || '-')}</div>
+        <div class="subtle mb-2">${escapeHtml(analysis.operator_summary || '-')}</div>
+        ${risks.length ? `<div class="subtle mb-2">Riscos: ${escapeHtml(risks.join(' | '))}</div>` : ''}
+        ${checks.length ? `<ul class="mb-0">${checks.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      `;
+    }
+
+    async function loadAnomalyAiAnalysis(anomalyId) {
+      try {
+        const analysis = await apiRequest(`/api/anomalies/${anomalyId}/ai-analysis`);
+        renderAnomalyAiAnalysis(analysis);
+      } catch (error) {
+        currentAiMitigationAnalysis = null;
+        renderAnomalyAiAnalysis(null);
+      }
+    }
+
+    async function runAnomalyAiAnalysis() {
+      if (!currentAnomalyDetailId) return;
+      setText('anomalyAiStatus', 'Analisando com IA...');
+      document.getElementById('anomalyAiAnalysisBlock').innerHTML = '<div class="subtle">Aguardando provider local...</div>';
+      try {
+        const analysis = await apiRequest(`/api/anomalies/${currentAnomalyDetailId}/ai-analysis`, { method: 'POST' });
+        renderAnomalyAiAnalysis(analysis);
+      } catch (error) {
+        setText('anomalyAiStatus', `Falha: ${error.message}`);
+        document.getElementById('anomalyAiAnalysisBlock').innerHTML = `<div class="text-danger">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
     async function openAnomalyDetail(anomalyId) {
       currentAnomalyDetailId = Number(anomalyId);
+      currentAiMitigationAnalysis = null;
       openModal('anomalyDetailModal');
       document.getElementById('anomalyDetailSummary').textContent = 'Carregando...';
       document.getElementById('anomalyScopeSummary').innerHTML = '';
+      renderAnomalyAiAnalysis(null);
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
         const detail = payload || {};
@@ -7960,6 +8183,7 @@
         const points = normalizedAnomalyMetricPoints(rawPoints, event);
         charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
         setTimeout(() => charts.anomalyMetric.resize(), 50);
+        await loadAnomalyAiAnalysis(anomalyId);
       } catch (error) {
         document.getElementById('anomalyDetailSummary').textContent = `Falha: ${error.message}`;
       }
@@ -10633,6 +10857,18 @@
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
     document.getElementById('closeAnomalyButton').addEventListener('click', () => closeAnomalyEvent().catch(console.error));
     document.getElementById('anomalyDetailPdfButton').addEventListener('click', () => exportAnomalyDetailPdf().catch(console.error));
+    document.getElementById('runAnomalyAiButton').addEventListener('click', () => runAnomalyAiAnalysis().catch(console.error));
+    document.getElementById('saveAiMitigationButton').addEventListener('click', () => saveAiMitigationSettings().catch(console.error));
+    document.getElementById('testAiMitigationButton').addEventListener('click', () => testAiMitigation().catch(console.error));
+    document.getElementById('aiProfile').addEventListener('change', () => {
+      const profile = aiProfiles.find(item => item.profile_id === selectValue('aiProfile'));
+      if (!profile) return;
+      setValue('aiModel', profile.default_model || '');
+      setValue('aiTimeout', profile.timeout_seconds || '');
+      setValue('aiTopFlows', profile.max_top_flows || '');
+      setValue('aiContextChars', profile.max_context_chars || '');
+      setText('aiProfileDescription', `${profile.name}: ${profile.description} RAM modelo ${profile.estimated_model_ram_gb} GB. Livre recomendado: ${profile.recommended_free_ram_gb} GB.`);
+    });
     document.getElementById('attackVectorTestPdfButton').addEventListener('click', () => exportAttackVectorTestPdf().catch(console.error));
 
     document.getElementById('ipZoneTable').addEventListener('click', event => {
