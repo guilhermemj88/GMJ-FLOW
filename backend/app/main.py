@@ -509,8 +509,23 @@ BGP_DEFAULT_MAX_ACTIVE_RULES = 50
 BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
 BGP_POLICY_DECISIONS = {"allow_auto", "require_manual_approval", "deny"}
 BGP_POLICY_SEVERITIES = {"safe", "caution", "danger"}
+UDP_UPLOAD_SINGLE_CLIENT_VECTOR = "UDP_UPLOAD_SINGLE_CLIENT_HIGH_PPS"
+UDP_UPLOAD_MANY_CLIENTS_VECTOR = "UDP_UPLOAD_MANY_CLIENTS_SAME_DST_PORT"
+UDP_DOWNLOAD_REFLECTION_VECTOR = "UDP_DOWNLOAD_REFLECTION_TO_CLIENT"
+UDP_DOWNLOAD_SAME_DST_PORT_VECTOR = "UDP_DOWNLOAD_SAME_DST_PORT_TO_CLIENT"
 UDP_MANY_INTERNAL_VECTOR = "UDP_MANY_INTERNAL_TO_SAME_DST_PORT"
-UDP_MANY_INTERNAL_EXCLUDED_PORTS_DEFAULT = {53, 123, 443}
+UDP_UPLOAD_MANY_CLIENTS_ALIASES = {UDP_UPLOAD_MANY_CLIENTS_VECTOR, UDP_MANY_INTERNAL_VECTOR}
+UDP_SPECIAL_VECTORS = {
+    UDP_UPLOAD_SINGLE_CLIENT_VECTOR,
+    UDP_UPLOAD_MANY_CLIENTS_VECTOR,
+    UDP_MANY_INTERNAL_VECTOR,
+    UDP_DOWNLOAD_REFLECTION_VECTOR,
+    UDP_DOWNLOAD_SAME_DST_PORT_VECTOR,
+}
+UDP_UPLOAD_EXCLUDED_DST_PORTS_DEFAULT = {53, 123, 443, 500, 4500, 3478, 19302}
+UDP_UPLOAD_EXCLUDED_SRC_PORTS_DEFAULT: set[int] = set()
+UDP_DOWNLOAD_EXCLUDED_DST_PORTS_DEFAULT = {443, 500, 4500, 3478, 19302}
+UDP_REFLECTION_SRC_PORTS_DEFAULT = {53, 123, 389, 1900, 11211, 19, 161, 520}
 
 
 class SensorInterfacePayload(BaseModel):
@@ -1361,10 +1376,19 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "anomaly_events", "invalid_scope", "invalid_scope INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "anomaly_events", "target_port", "target_port INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "protocol", "protocol TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "input_if", "input_if INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "output_if", "output_if INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "unique_src_ips", "unique_src_ips INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "anomaly_events", "unique_dst_ips", "unique_dst_ips INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "anomaly_events", "unique_dst_ports", "unique_dst_ports INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "anomaly_events", "mitigation_basis", "mitigation_basis TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "mitigation_reason", "mitigation_reason TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "top_src_ip", "top_src_ip TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "top_dst_ip", "top_dst_ip TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "top_src_port", "top_src_port INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "top_dst_port", "top_dst_port INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "top_packets", "top_packets INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "anomaly_events", "top_bytes", "top_bytes INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     conn.execute(
@@ -1592,6 +1616,28 @@ def ensure_asn_db(conn: sqlite3.Connection) -> None:
 
 def seed_mitigation_attack_vectors(conn: sqlite3.Connection, template_id: int) -> None:
     now = utc_now_iso()
+    old_many_row = conn.execute(
+        "SELECT id FROM attack_vectors WHERE (name = ? OR detection_key = ?) AND NOT EXISTS (SELECT 1 FROM attack_vectors WHERE name = ? OR detection_key = ?) ORDER BY id LIMIT 1",
+        (UDP_MANY_INTERNAL_VECTOR, UDP_MANY_INTERNAL_VECTOR, UDP_UPLOAD_MANY_CLIENTS_VECTOR, UDP_UPLOAD_MANY_CLIENTS_VECTOR),
+    ).fetchone()
+    if old_many_row is not None:
+        conn.execute(
+            """
+            UPDATE attack_vectors
+            SET name = ?,
+                detection_key = ?,
+                notes = CASE WHEN notes = '' THEN ? ELSE notes END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                UDP_UPLOAD_MANY_CLIENTS_VECTOR,
+                UDP_UPLOAD_MANY_CLIENTS_VECTOR,
+                "Renomeado de UDP_MANY_INTERNAL_TO_SAME_DST_PORT para o vetor UDP upload multi-clientes.",
+                now,
+                int(old_many_row["id"]),
+            ),
+        )
     defaults = [
         {
             "name": "DNS_REFLECTION_INBOUND",
@@ -1650,9 +1696,51 @@ def seed_mitigation_attack_vectors(conn: sqlite3.Connection, template_id: int) -
             "duration_seconds": 900,
         },
         {
-            "name": UDP_MANY_INTERNAL_VECTOR,
+            "name": UDP_UPLOAD_SINGLE_CLIENT_VECTOR,
+            "description": "Cliente interno com PPS UDP alto saindo da zona; mitigacao por conversa principal.",
+            "direction": "sends",
+            "decoder": "UDP",
+            "src_port": "any",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 100_000,
+            "threshold_unit": "packets_s",
+            "severity": "warning",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": UDP_UPLOAD_MANY_CLIENTS_VECTOR,
             "description": "Varios IPs internos enviando UDP para o mesmo destino externo e mesma porta.",
             "direction": "sends",
+            "decoder": "UDP",
+            "src_port": "any",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 100_000,
+            "threshold_unit": "packets_s",
+            "severity": "warning",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": UDP_DOWNLOAD_REFLECTION_VECTOR,
+            "description": "Reflection UDP inbound: muitos IPs externos para cliente interno com source-port conhecido.",
+            "direction": "receives",
+            "decoder": "UDP",
+            "src_port": "any",
+            "dst_port": "any",
+            "protocol": "udp",
+            "threshold_value": 100_000,
+            "threshold_unit": "packets_s",
+            "severity": "warning",
+            "mitigation_mode": "manual_approval",
+            "duration_seconds": 900,
+        },
+        {
+            "name": UDP_DOWNLOAD_SAME_DST_PORT_VECTOR,
+            "description": "UDP inbound para mesmo cliente interno e mesma destination-port.",
+            "direction": "receives",
             "decoder": "UDP",
             "src_port": "any",
             "dst_port": "any",
@@ -2122,6 +2210,17 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "target_selector": "dst_ip",
             "protocol_selector": "udp",
             "dst_port_selector": "anomaly_dst_port",
+            "require_protocol_or_port": 1,
+        },
+        {
+            "name": "FLOWSPEC_BLOCK_DST_UDP_SRC_PORT",
+            "description": "Bloqueia destino UDP /32 por source-port a partir da anomalia.",
+            "response_type": "flowspec",
+            "approval_mode": "manual_approval",
+            "action": "discard",
+            "target_selector": "dst_ip",
+            "protocol_selector": "udp",
+            "src_port_selector": "anomaly_src_port",
             "require_protocol_or_port": 1,
         },
         {
@@ -7347,8 +7446,12 @@ def protocol_from_flow_or_event(flow: dict[str, Any], event: dict[str, Any]) -> 
 
 
 def preferred_profile_names(attack_vector_name: str) -> list[str]:
-    if attack_vector_name == UDP_MANY_INTERNAL_VECTOR:
+    if attack_vector_name in UDP_UPLOAD_MANY_CLIENTS_ALIASES or attack_vector_name == UDP_DOWNLOAD_SAME_DST_PORT_VECTOR:
         return ["FLOWSPEC_BLOCK_DST_UDP_PORT"]
+    if attack_vector_name == UDP_UPLOAD_SINGLE_CLIENT_VECTOR:
+        return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
+    if attack_vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
+        return ["FLOWSPEC_BLOCK_DST_UDP_SRC_PORT"]
     if attack_vector_name == "DNS_QUERY_OUTBOUND_CLIENT":
         return ["FLOWSPEC_BLOCK_SRC_DNS"]
     if attack_vector_name == "DNS_REFLECTION_INBOUND":
@@ -7372,6 +7475,8 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
     enabled = bool(vector.get("mitigation_enabled")) if vector else True
     candidate["mitigation_mode"] = mode if enabled else "disabled"
+    if candidate.get("mitigation_basis") == "top_conversation" or candidate.get("attack_vector_name") in UDP_SPECIAL_VECTORS:
+        candidate["mitigation_mode"] = "manual_approval"
     candidate["requested_mode"] = candidate["mitigation_mode"]
     candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or 900) if vector else int(candidate.get("duration_seconds") or 900)
     candidate["require_protected_prefix"] = bool(vector.get("require_protected_prefix", True)) if vector else bool(candidate.get("require_protected_prefix", True))
@@ -7409,10 +7514,79 @@ def base_mitigation_candidate(event: dict[str, Any], attack_vector_name: str, re
         "target_scope": "",
         "reason": reason,
         "confidence": round(max(0.0, min(float(confidence), 1.0)), 3),
+        "mitigation_basis": clean_text(event.get("mitigation_basis")),
+        "mitigation_reason": clean_text(event.get("mitigation_reason")),
         "anomaly_id": event.get("id"),
         "anomaly_source": event.get("source") or "anomaly_events",
         "raw_payload": {"anomaly": event},
     }
+
+
+def top_udp_flow_for_mitigation(event: dict[str, Any], flows: list[dict[str, Any]]) -> dict[str, Any]:
+    top_flow = event.get("top_flow") if isinstance(event.get("top_flow"), dict) else {}
+    if clean_ip(top_flow.get("src_ip")) and clean_ip(top_flow.get("dst_ip")) and int(top_flow.get("dst_port") or 0) > 0:
+        return {
+            "src_ip": clean_ip(top_flow.get("src_ip")),
+            "src_port": int(top_flow.get("src_port") or 0),
+            "dst_ip": clean_ip(top_flow.get("dst_ip")),
+            "dst_port": int(top_flow.get("dst_port") or 0),
+            "packets": int(top_flow.get("packets") or 0),
+            "bytes": int(top_flow.get("bytes") or 0),
+            "proto_name": clean_text(top_flow.get("protocol")) or "udp",
+        }
+    udp_flows = []
+    for flow in flows:
+        protocol = protocol_from_flow_or_event(flow, event)
+        if protocol != "udp":
+            continue
+        if clean_ip(flow.get("src_ip")) and clean_ip(flow.get("dst_ip")) and int(flow.get("dst_port") or 0) > 0:
+            udp_flows.append(flow)
+    return dict(
+        sorted(
+            udp_flows,
+            key=lambda item: (int(item.get("packets") or 0), int(item.get("bytes") or 0)),
+            reverse=True,
+        )[0]
+    ) if udp_flows else {}
+
+
+def top_conversation_mitigation_candidate(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    attack_vector_name: str,
+    reason: str,
+    confidence: float = 0.65,
+) -> dict[str, Any] | None:
+    top_flow = top_udp_flow_for_mitigation(event, flows)
+    src_ip = clean_ip(top_flow.get("src_ip"))
+    dst_ip = clean_ip(top_flow.get("dst_ip"))
+    dst_port = int(top_flow.get("dst_port") or 0)
+    if not src_ip or not dst_ip or dst_port <= 0:
+        return None
+    candidate = base_mitigation_candidate(event, attack_vector_name, reason, confidence)
+    candidate.update(
+        {
+            "src_cidr": cidr_from_ip_or_cidr(src_ip),
+            "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "protocol": "udp",
+            "dst_port": str(dst_port),
+            "target_scope": cidr_from_ip_or_cidr(dst_ip),
+            "mitigation_basis": "top_conversation",
+            "mitigation_reason": reason,
+            "top_flow": {
+                "src_ip": src_ip,
+                "src_port": int(top_flow.get("src_port") or 0),
+                "dst_ip": dst_ip,
+                "dst_port": dst_port,
+                "packets": int(top_flow.get("packets") or 0),
+                "bytes": int(top_flow.get("bytes") or 0),
+                "protocol": "udp",
+            },
+        }
+    )
+    vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+    return attach_mitigation_config(conn, candidate, vector)
 
 
 def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
@@ -7477,13 +7651,13 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
     candidates: list[dict[str, Any]] = []
 
     with sqlite_connection() as conn:
-        if event_vector == UDP_MANY_INTERNAL_VECTOR or event.get("scope_type") == "external_dst_ip_port":
+        if event_vector in UDP_UPLOAD_MANY_CLIENTS_ALIASES or event.get("scope_type") == "external_dst_ip_port":
             event_target = cidr_from_ip_or_cidr(event.get("target_cidr")) or cidr_from_ip_or_cidr(event.get("target_ip")) or cidr_from_ip_or_cidr(dst_ip)
             event_port = int(event.get("target_port") or dst_port or 0)
             if protocol == "udp" and event_target and event_port:
                 candidate = base_mitigation_candidate(
                     event,
-                    UDP_MANY_INTERNAL_VECTOR,
+                    UDP_UPLOAD_MANY_CLIENTS_VECTOR,
                     "Multiplas origens internas para o mesmo destino UDP externo; mitigacao limitada ao destino/porta.",
                     confidence,
                 )
@@ -7498,6 +7672,8 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
                         "target_port": event_port,
                         "target_role": "dst_ip",
                         "scope_type": "external_dst_ip_port",
+                        "mitigation_basis": "aggregated_dst_port",
+                        "mitigation_reason": "Mitigacao por destino/porta agregados.",
                     }
                 )
                 vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
@@ -7507,10 +7683,52 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
                 deduped[candidate["mitigation_key"]] = candidate
             return list(deduped.values())
 
+        if event_vector == UDP_UPLOAD_SINGLE_CLIENT_VECTOR:
+            candidate = top_conversation_mitigation_candidate(
+                conn,
+                event,
+                flows,
+                UDP_UPLOAD_SINGLE_CLIENT_VECTOR,
+                "Mitigacao por conversa principal: cliente UDP outbound com PPS alto e multiplos destinos.",
+                0.65,
+            )
+            return [candidate] if candidate else []
+
+        if event_vector == UDP_DOWNLOAD_REFLECTION_VECTOR:
+            event_target = cidr_from_ip_or_cidr(event.get("target_cidr")) or cidr_from_ip_or_cidr(event.get("target_ip")) or cidr_from_ip_or_cidr(dst_ip)
+            event_port = int(event.get("target_port") or src_port or 0)
+            if protocol == "udp" and event_target and event_port:
+                candidate = base_mitigation_candidate(event, UDP_DOWNLOAD_REFLECTION_VECTOR, "Mitigacao por source-port de reflection para cliente interno.", confidence)
+                candidate.update({"dst_cidr": event_target, "protocol": "udp", "src_port": str(event_port), "target_scope": event_target, "target_ip": clean_ip(event.get("target_ip")) or dst_ip, "target_cidr": event_target, "target_port": event_port, "target_role": "dst_ip", "scope_type": "internal_dst_ip_port", "mitigation_basis": "aggregated_src_port", "mitigation_reason": "Mitigacao por source-port reflection agregado."})
+                vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+                candidates.append(attach_mitigation_config(conn, candidate, vector))
+            return candidates
+
+        if event_vector == UDP_DOWNLOAD_SAME_DST_PORT_VECTOR:
+            event_target = cidr_from_ip_or_cidr(event.get("target_cidr")) or cidr_from_ip_or_cidr(event.get("target_ip")) or cidr_from_ip_or_cidr(dst_ip)
+            event_port = int(event.get("target_port") or dst_port or 0)
+            if protocol == "udp" and event_target and event_port:
+                candidate = base_mitigation_candidate(event, UDP_DOWNLOAD_SAME_DST_PORT_VECTOR, "Mitigacao por destination-port agregado para cliente interno.", confidence)
+                candidate.update({"dst_cidr": event_target, "protocol": "udp", "dst_port": str(event_port), "target_scope": event_target, "target_ip": clean_ip(event.get("target_ip")) or dst_ip, "target_cidr": event_target, "target_port": event_port, "target_role": "dst_ip", "scope_type": "internal_dst_ip_port", "mitigation_basis": "aggregated_dst_port", "mitigation_reason": "Mitigacao por destino/porta agregados."})
+                vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+                candidates.append(attach_mitigation_config(conn, candidate, vector))
+            return candidates
+
         if event.get("scope_type") == "internal_ip_32":
             if event.get("invalid_scope") or not clean_ip(event.get("target_ip")) or not target_cidr or not is_ipv4_32_cidr(target_cidr):
                 return []
             if protocol == "udp":
+                if clean_text(event.get("target_role")) == "src_ip":
+                    candidate = top_conversation_mitigation_candidate(
+                        conn,
+                        event,
+                        flows,
+                        event_vector or "UDP_TOP_CONVERSATION",
+                        "Mitigacao por conversa principal para evitar bloqueio UDP amplo do cliente.",
+                        0.65,
+                    )
+                    if candidate:
+                        return [candidate]
                 role = clean_text(event.get("target_role"))
                 reason = "Anomalia Internal IP /32; mitigacao limitada ao IP alvo."
                 candidate = base_mitigation_candidate(event, event_vector or "INTERNAL_IP_32_UDP", reason, confidence)
@@ -10473,10 +10691,22 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "target_role": item.get("target_role") or target_role_for_attack_direction(item.get("direction")),
         "target_port": int(item["target_port"]) if item.get("target_port") is not None else None,
         "protocol": protocol,
+        "input_if": int(item["input_if"]) if item.get("input_if") is not None else None,
         "output_if": int(item["output_if"]) if item.get("output_if") is not None else None,
         "unique_src_ips": int(item.get("unique_src_ips") or 0),
         "unique_dst_ips": int(item.get("unique_dst_ips") or 0),
         "unique_dst_ports": int(item.get("unique_dst_ports") or 0),
+        "mitigation_basis": item.get("mitigation_basis") or "",
+        "mitigation_reason": item.get("mitigation_reason") or "",
+        "top_flow": {
+            "src_ip": clean_ip(item.get("top_src_ip")),
+            "src_port": int(item["top_src_port"]) if item.get("top_src_port") is not None else None,
+            "dst_ip": clean_ip(item.get("top_dst_ip")),
+            "dst_port": int(item["top_dst_port"]) if item.get("top_dst_port") is not None else None,
+            "packets": int(item.get("top_packets") or 0),
+            "bytes": int(item.get("top_bytes") or 0),
+            "protocol": item.get("protocol") or item.get("decoder") or "",
+        },
         "zone_id": int(item["zone_id"]) if item.get("zone_id") is not None else None,
         "zone_name": item.get("zone_name") or "",
         "vector_name": item.get("vector_name") or item.get("attack_vector_name") or "",
@@ -11411,8 +11641,15 @@ def query_vector_recent_traffic(
     end_dt: datetime,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
-    if clean_text(vector.get("detection_key") or vector.get("name")) == UDP_MANY_INTERNAL_VECTOR:
+    vector_name = udp_vector_name(vector)
+    if vector_name == UDP_UPLOAD_SINGLE_CLIENT_VECTOR:
+        return query_udp_upload_single_client_high_pps(vector, start_dt, end_dt, limit)
+    if vector_name in UDP_UPLOAD_MANY_CLIENTS_ALIASES:
         return query_udp_many_internal_to_same_dst_port(vector, start_dt, end_dt, limit)
+    if vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
+        return query_udp_download_reflection_to_client(vector, start_dt, end_dt, limit)
+    if vector_name == UDP_DOWNLOAD_SAME_DST_PORT_VECTOR:
+        return query_udp_download_same_dst_port_to_client(vector, start_dt, end_dt, limit)
 
     seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"seconds": seconds, "limit": max(int(limit), 1)}
@@ -11458,10 +11695,14 @@ def query_vector_recent_traffic(
     return items
 
 
-def udp_many_internal_excluded_ports() -> set[int]:
-    raw = clean_text(os.getenv("GMJFLOW_UDP_MANY_INTERNAL_EXCLUDED_PORTS"))
+def udp_vector_name(vector: dict[str, Any]) -> str:
+    return clean_text(vector.get("detection_key") or vector.get("name"))
+
+
+def parse_udp_ports_env(env_name: str, default_ports: set[int]) -> set[int]:
+    raw = clean_text(os.getenv(env_name))
     if not raw:
-        return set(UDP_MANY_INTERNAL_EXCLUDED_PORTS_DEFAULT)
+        return set(default_ports)
     ports: set[int] = set()
     for token in re.split(r"[,;\s]+", raw):
         if not token:
@@ -11473,6 +11714,37 @@ def udp_many_internal_excluded_ports() -> set[int]:
         if 1 <= port <= 65535:
             ports.add(port)
     return ports
+
+
+def udp_upload_excluded_dst_ports() -> set[int]:
+    legacy = clean_text(os.getenv("GMJFLOW_UDP_MANY_INTERNAL_EXCLUDED_PORTS"))
+    if legacy and not clean_text(os.getenv("GMJFLOW_UDP_UPLOAD_EXCLUDED_DST_PORTS")):
+        return parse_udp_ports_env("GMJFLOW_UDP_MANY_INTERNAL_EXCLUDED_PORTS", UDP_UPLOAD_EXCLUDED_DST_PORTS_DEFAULT)
+    return parse_udp_ports_env("GMJFLOW_UDP_UPLOAD_EXCLUDED_DST_PORTS", UDP_UPLOAD_EXCLUDED_DST_PORTS_DEFAULT)
+
+
+def udp_upload_excluded_src_ports() -> set[int]:
+    return parse_udp_ports_env("GMJFLOW_UDP_UPLOAD_EXCLUDED_SRC_PORTS", UDP_UPLOAD_EXCLUDED_SRC_PORTS_DEFAULT)
+
+
+def udp_download_excluded_dst_ports() -> set[int]:
+    return parse_udp_ports_env("GMJFLOW_UDP_DOWNLOAD_EXCLUDED_DST_PORTS", UDP_DOWNLOAD_EXCLUDED_DST_PORTS_DEFAULT)
+
+
+def udp_reflection_src_ports() -> set[int]:
+    return parse_udp_ports_env("GMJFLOW_UDP_REFLECTION_SRC_PORTS", UDP_REFLECTION_SRC_PORTS_DEFAULT)
+
+
+def ports_not_in_filter(column: str, ports: set[int]) -> str:
+    if not ports:
+        return ""
+    return f"{column} NOT IN ({', '.join(str(port) for port in sorted(ports))})"
+
+
+def ports_in_filter(column: str, ports: set[int]) -> str:
+    if not ports:
+        return "0 = 1"
+    return f"{column} IN ({', '.join(str(port) for port in sorted(ports))})"
 
 
 def active_zone_prefix_groups() -> list[dict[str, Any]]:
@@ -11522,6 +11794,159 @@ def active_zone_prefix_groups() -> list[dict[str, Any]]:
     return groups
 
 
+def query_udp_upload_single_client_high_pps(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    seconds = range_seconds(start_dt, end_dt)
+    warning_pps = float(vector.get("threshold_value") or 100_000)
+    critical_pps = float(os.getenv("GMJFLOW_UDP_SINGLE_CLIENT_CRITICAL_PPS", "300000"))
+    row_limit = max(1, int(limit))
+    groups = active_zone_prefix_groups()
+    vector_source_cidr = clean_text(vector.get("target_cidr") or vector.get("src_cidr"))
+    if vector_source_cidr:
+        groups = [{"prefix_id": None, "prefix_cidr": vector_source_cidr, "prefix_type": "manual", "zone_id": None, "zone_name": "", "zone_cidrs": [vector_source_cidr]}]
+    if not groups:
+        return []
+
+    items: list[dict[str, Any]] = []
+    excluded_dst = udp_upload_excluded_dst_ports()
+    excluded_src = udp_upload_excluded_src_ports()
+    for group in groups:
+        params: dict[str, Any] = {
+            "start": start_dt,
+            "end": end_dt,
+            "seconds": seconds,
+            "limit": row_limit,
+            "source_cidr": clickhouse_cidr_string_param(group["prefix_cidr"], "source_cidr"),
+        }
+        filters = [
+            "flow_time >= {start:DateTime}",
+            "flow_time <= {end:DateTime}",
+            "proto = 17",
+            "isIPAddressInRange(toString(src_ip), {source_cidr:String})",
+        ]
+        dst_filter = ports_not_in_filter("dst_port", excluded_dst)
+        src_filter = ports_not_in_filter("src_port", excluded_src)
+        if dst_filter:
+            filters.append(dst_filter)
+        if src_filter:
+            filters.append(src_filter)
+        zone_dst_parts = []
+        for index, cidr in enumerate(group.get("zone_cidrs") or []):
+            key = f"zone_cidr_{index}"
+            params[key] = clickhouse_cidr_string_param(cidr, key)
+            zone_dst_parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
+        if zone_dst_parts:
+            filters.append(f"NOT ({' OR '.join(zone_dst_parts)})")
+        if vector.get("sensor_id") is not None:
+            params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(vector["sensor_id"])), "exporter_ip")
+            filters.append("toString(exporter_ip) = {exporter_ip:String}")
+        if vector.get("interface_if_index") is not None:
+            params["output_if"] = int(vector["interface_if_index"])
+            filters.append("output_if = {output_if:UInt32}")
+        where = " AND ".join(f"({item})" for item in filters if item)
+        rate_expr = clickhouse_sample_rate_expr(vector.get("sensor_id"), "output", int(vector["interface_if_index"]) if vector.get("interface_if_index") is not None else None)
+        packets_expr = corrected_sum_expr("packets", rate_expr)
+        bytes_expr = corrected_sum_expr("bytes", rate_expr)
+        result = query_clickhouse(
+            f"""
+            WITH conversations AS (
+                SELECT
+                    toString(src_ip) AS src_ip,
+                    src_port,
+                    toString(dst_ip) AS dst_ip,
+                    dst_port,
+                    sensor,
+                    output_if,
+                    {bytes_expr} AS bytes,
+                    {packets_expr} AS packets,
+                    sum(flow_count) AS flows,
+                    min(flow_time) AS first_seen_at,
+                    max(flow_time) AS last_seen_at
+                FROM flow_raw
+                WHERE {where}
+                GROUP BY src_ip, src_port, dst_ip, dst_port, sensor, output_if
+            )
+            SELECT
+                src_ip AS target_ip,
+                sensor,
+                output_if,
+                sum(bytes) AS total_bytes,
+                sum(packets) AS total_packets,
+                sum(flows) AS total_flows,
+                uniqExact(dst_ip) AS unique_dst_ips,
+                uniqExact(dst_port) AS unique_dst_ports,
+                1 AS unique_src_ips,
+                min(first_seen_at) AS first_seen_at,
+                max(last_seen_at) AS last_seen_at,
+                sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
+                sum(packets) / {{seconds:Float64}} AS packets_s,
+                sum(flows) / {{seconds:Float64}} AS flows_s,
+                tupleElement(argMax(tuple(src_port, dst_ip, dst_port, packets, bytes), packets), 1) AS top_src_port,
+                tupleElement(argMax(tuple(src_port, dst_ip, dst_port, packets, bytes), packets), 2) AS top_dst_ip,
+                tupleElement(argMax(tuple(src_port, dst_ip, dst_port, packets, bytes), packets), 3) AS top_dst_port,
+                tupleElement(argMax(tuple(src_port, dst_ip, dst_port, packets, bytes), packets), 4) AS top_packets,
+                tupleElement(argMax(tuple(src_port, dst_ip, dst_port, packets, bytes), packets), 5) AS top_bytes
+            FROM conversations
+            GROUP BY target_ip, sensor, output_if
+            HAVING packets_s >= {float(warning_pps)}
+            ORDER BY packets_s DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+        for row in rows_as_dicts(result):
+            packets_s = float(row.get("packets_s") or 0)
+            src_ip = clean_ip(row.get("target_ip"))
+            top_dst_ip = clean_ip(row.get("top_dst_ip"))
+            top_dst_port = int(row.get("top_dst_port") or 0)
+            severity = "critical" if packets_s >= critical_pps else "warning"
+            items.append(
+                {
+                    "target_ip": src_ip,
+                    "target_cidr": host_cidr_for_ip(src_ip),
+                    "target_role": "src_ip",
+                    "target_port": top_dst_port,
+                    "protocol": "udp",
+                    "scope_type": "internal_ip_32",
+                    "invalid_scope": not is_ipv4_32_cidr(host_cidr_for_ip(src_ip)),
+                    "zone_id": group.get("zone_id"),
+                    "zone_name": group.get("zone_name") or "",
+                    "prefix_id": group.get("prefix_id"),
+                    "prefix_cidr": group.get("prefix_cidr"),
+                    "sensor": row.get("sensor") or "",
+                    "output_if": int(row.get("output_if") or 0),
+                    "total_bytes": int(row.get("total_bytes") or 0),
+                    "total_packets": int(row.get("total_packets") or 0),
+                    "flow_count": int(row.get("total_flows") or 0),
+                    "estimated_bytes": int(row.get("total_bytes") or 0),
+                    "estimated_packets": int(row.get("total_packets") or 0),
+                    "unique_src_ips": 1,
+                    "unique_dst_ips": int(row.get("unique_dst_ips") or 0),
+                    "unique_dst_ports": int(row.get("unique_dst_ports") or 0),
+                    "first_seen_at": row.get("first_seen_at"),
+                    "last_seen_at": row.get("last_seen_at"),
+                    "bits_s": float(row.get("bits_s") or 0),
+                    "packets_s": packets_s,
+                    "flows_s": float(row.get("flows_s") or 0),
+                    "severity": severity,
+                    "threshold_value": critical_pps if severity == "critical" else warning_pps,
+                    "mitigation_basis": "top_conversation",
+                    "mitigation_reason": "Cliente UDP outbound com multiplos destinos; sugestao limitada a conversa principal por pacotes.",
+                    "top_src_ip": src_ip,
+                    "top_src_port": int(row.get("top_src_port") or 0),
+                    "top_dst_ip": top_dst_ip,
+                    "top_dst_port": top_dst_port,
+                    "top_packets": int(row.get("top_packets") or 0),
+                    "top_bytes": int(row.get("top_bytes") or 0),
+                }
+            )
+    return sorted(items, key=lambda item: float(item.get("packets_s") or 0), reverse=True)[:row_limit]
+
+
 def query_udp_many_internal_to_same_dst_port(
     vector: dict[str, Any],
     start_dt: datetime,
@@ -11529,8 +11954,8 @@ def query_udp_many_internal_to_same_dst_port(
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
     seconds = range_seconds(start_dt, end_dt)
-    excluded_ports = udp_many_internal_excluded_ports()
-    excluded_sql = ", ".join(str(port) for port in sorted(excluded_ports)) or "0"
+    excluded_dst_ports = udp_upload_excluded_dst_ports()
+    excluded_src_ports = udp_upload_excluded_src_ports()
     warning_pps = float(vector.get("threshold_value") or 100_000)
     critical_pps = float(os.getenv("GMJFLOW_UDP_MANY_INTERNAL_CRITICAL_PPS", "300000"))
     warning_unique = int(os.getenv("GMJFLOW_UDP_MANY_INTERNAL_WARNING_UNIQUE_SRC", "3"))
@@ -11566,8 +11991,13 @@ def query_udp_many_internal_to_same_dst_port(
             "flow_time <= {end:DateTime}",
             "proto = 17",
             "isIPAddressInRange(toString(src_ip), {source_cidr:String})",
-            f"dst_port NOT IN ({excluded_sql})",
         ]
+        dst_filter = ports_not_in_filter("dst_port", excluded_dst_ports)
+        src_filter = ports_not_in_filter("src_port", excluded_src_ports)
+        if dst_filter:
+            filters.append(dst_filter)
+        if src_filter:
+            filters.append(src_filter)
         zone_dst_parts = []
         for index, cidr in enumerate(group.get("zone_cidrs") or []):
             key = f"zone_cidr_{index}"
@@ -11653,6 +12083,153 @@ def query_udp_many_internal_to_same_dst_port(
                     "flows_s": float(row.get("flows_s") or 0),
                     "severity": severity,
                     "threshold_value": threshold,
+                    "mitigation_basis": "aggregated_dst_port",
+                    "mitigation_reason": "Multiplas origens internas para o mesmo destino UDP externo e mesma porta.",
+                }
+            )
+    return sorted(items, key=lambda item: float(item.get("packets_s") or 0), reverse=True)[:row_limit]
+
+
+def query_udp_download_reflection_to_client(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    return query_udp_download_to_client(vector, start_dt, end_dt, limit, mode="reflection_src_port")
+
+
+def query_udp_download_same_dst_port_to_client(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    return query_udp_download_to_client(vector, start_dt, end_dt, limit, mode="same_dst_port")
+
+
+def query_udp_download_to_client(
+    vector: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 1000,
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
+    seconds = range_seconds(start_dt, end_dt)
+    warning_pps = float(vector.get("threshold_value") or 100_000)
+    critical_pps = float(os.getenv("GMJFLOW_UDP_DOWNLOAD_CRITICAL_PPS", "300000"))
+    row_limit = max(1, int(limit))
+    groups = active_zone_prefix_groups()
+    vector_dst_cidr = clean_text(vector.get("target_cidr") or vector.get("dst_cidr"))
+    if vector_dst_cidr:
+        groups = [{"prefix_id": None, "prefix_cidr": vector_dst_cidr, "prefix_type": "manual", "zone_id": None, "zone_name": "", "zone_cidrs": [vector_dst_cidr]}]
+    if not groups:
+        return []
+
+    items: list[dict[str, Any]] = []
+    reflection_ports = udp_reflection_src_ports()
+    excluded_dst_ports = udp_download_excluded_dst_ports()
+    for group in groups:
+        params: dict[str, Any] = {
+            "start": start_dt,
+            "end": end_dt,
+            "seconds": seconds,
+            "limit": row_limit,
+            "dst_cidr": clickhouse_cidr_string_param(group["prefix_cidr"], "dst_cidr"),
+        }
+        filters = [
+            "flow_time >= {start:DateTime}",
+            "flow_time <= {end:DateTime}",
+            "proto = 17",
+            "isIPAddressInRange(toString(dst_ip), {dst_cidr:String})",
+        ]
+        zone_src_parts = []
+        for index, cidr in enumerate(group.get("zone_cidrs") or []):
+            key = f"zone_src_cidr_{index}"
+            params[key] = clickhouse_cidr_string_param(cidr, key)
+            zone_src_parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
+        if zone_src_parts:
+            filters.append(f"NOT ({' OR '.join(zone_src_parts)})")
+        if mode == "reflection_src_port":
+            filters.append(ports_in_filter("src_port", reflection_ports))
+        else:
+            dst_filter = ports_not_in_filter("dst_port", excluded_dst_ports)
+            if dst_filter:
+                filters.append(dst_filter)
+        if vector.get("sensor_id") is not None:
+            params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(vector["sensor_id"])), "exporter_ip")
+            filters.append("toString(exporter_ip) = {exporter_ip:String}")
+        if vector.get("interface_if_index") is not None:
+            params["input_if"] = int(vector["interface_if_index"])
+            filters.append("input_if = {input_if:UInt32}")
+        where = " AND ".join(f"({item})" for item in filters if item)
+        rate_expr = clickhouse_sample_rate_expr(vector.get("sensor_id"), "input", int(vector["interface_if_index"]) if vector.get("interface_if_index") is not None else None)
+        port_expr = "src_port" if mode == "reflection_src_port" else "dst_port"
+        result = query_clickhouse(
+            f"""
+            SELECT
+                toString(dst_ip) AS target_ip,
+                {port_expr} AS target_port,
+                sensor,
+                input_if,
+                {corrected_sum_expr("bytes", rate_expr)} AS total_bytes,
+                {corrected_sum_expr("packets", rate_expr)} AS total_packets,
+                sum(flow_count) AS total_flows,
+                uniqExact(toString(src_ip)) AS unique_src_ips,
+                uniqExact(toString(dst_ip)) AS unique_dst_ips,
+                uniqExact(dst_port) AS unique_dst_ports,
+                min(flow_time) AS first_seen_at,
+                max(flow_time) AS last_seen_at,
+                {corrected_sum_expr("bytes", rate_expr)} * 8 / {{seconds:Float64}} AS bits_s,
+                {corrected_sum_expr("packets", rate_expr)} / {{seconds:Float64}} AS packets_s,
+                sum(flow_count) / {{seconds:Float64}} AS flows_s
+            FROM flow_raw
+            WHERE {where}
+            GROUP BY target_ip, target_port, sensor, input_if
+            HAVING packets_s >= {float(warning_pps)}
+            ORDER BY packets_s DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+        for row in rows_as_dicts(result):
+            packets_s = float(row.get("packets_s") or 0)
+            dst_ip = clean_ip(row.get("target_ip"))
+            severity = "critical" if packets_s >= critical_pps else "warning"
+            basis = "aggregated_src_port" if mode == "reflection_src_port" else "aggregated_dst_port"
+            items.append(
+                {
+                    "target_ip": dst_ip,
+                    "target_cidr": host_cidr_for_ip(dst_ip),
+                    "target_role": "dst_ip",
+                    "target_port": int(row.get("target_port") or 0),
+                    "protocol": "udp",
+                    "scope_type": "internal_dst_ip_port",
+                    "invalid_scope": not is_ipv4_32_cidr(host_cidr_for_ip(dst_ip)),
+                    "zone_id": group.get("zone_id"),
+                    "zone_name": group.get("zone_name") or "",
+                    "prefix_id": group.get("prefix_id"),
+                    "prefix_cidr": group.get("prefix_cidr"),
+                    "sensor": row.get("sensor") or "",
+                    "input_if": int(row.get("input_if") or 0),
+                    "total_bytes": int(row.get("total_bytes") or 0),
+                    "total_packets": int(row.get("total_packets") or 0),
+                    "flow_count": int(row.get("total_flows") or 0),
+                    "estimated_bytes": int(row.get("total_bytes") or 0),
+                    "estimated_packets": int(row.get("total_packets") or 0),
+                    "unique_src_ips": int(row.get("unique_src_ips") or 0),
+                    "unique_dst_ips": int(row.get("unique_dst_ips") or 0),
+                    "unique_dst_ports": int(row.get("unique_dst_ports") or 0),
+                    "first_seen_at": row.get("first_seen_at"),
+                    "last_seen_at": row.get("last_seen_at"),
+                    "bits_s": float(row.get("bits_s") or 0),
+                    "packets_s": packets_s,
+                    "flows_s": float(row.get("flows_s") or 0),
+                    "severity": severity,
+                    "threshold_value": critical_pps if severity == "critical" else warning_pps,
+                    "mitigation_basis": basis,
+                    "mitigation_reason": "Reflection UDP por source-port conhecido." if mode == "reflection_src_port" else "UDP inbound agregado por cliente e destination-port.",
                 }
             )
     return sorted(items, key=lambda item: float(item.get("packets_s") or 0), reverse=True)[:row_limit]
@@ -11665,10 +12242,28 @@ def query_vector_sample_rows(
     target_ip: str = "",
     limit: int = 10,
     target_port: int | None = None,
+    input_if: int | None = None,
     output_if: int | None = None,
+    top_src_ip: str = "",
+    top_dst_ip: str = "",
+    top_src_port: int | None = None,
+    top_dst_port: int | None = None,
 ) -> list[dict[str, Any]]:
-    if clean_text(vector.get("detection_key") or vector.get("name")) == UDP_MANY_INTERNAL_VECTOR:
-        return query_udp_many_internal_sample_rows(vector, start_dt, end_dt, target_ip, target_port, output_if, limit)
+    if udp_vector_name(vector) in UDP_SPECIAL_VECTORS:
+        return query_udp_special_sample_rows(
+            vector,
+            start_dt,
+            end_dt,
+            target_ip,
+            target_port,
+            input_if,
+            output_if,
+            top_src_ip,
+            top_dst_ip,
+            top_src_port,
+            top_dst_port,
+            limit,
+        )
 
     params: dict[str, Any] = {"limit": max(int(limit), 1)}
     where = sample_flow_where_for_event(vector, clean_ip(target_ip), start_dt, end_dt, params)
@@ -11720,37 +12315,79 @@ def query_vector_sample_rows(
     return rows
 
 
-def query_udp_many_internal_sample_rows(
+def query_udp_special_sample_rows(
     vector: dict[str, Any],
     start_dt: datetime,
     end_dt: datetime,
     target_ip: str = "",
     target_port: int | None = None,
+    input_if: int | None = None,
     output_if: int | None = None,
+    top_src_ip: str = "",
+    top_dst_ip: str = "",
+    top_src_port: int | None = None,
+    top_dst_port: int | None = None,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    target = clean_ip(target_ip)
-    port = int(target_port or 0)
-    if not target or port <= 0:
-        return []
+    vector_name = udp_vector_name(vector)
     params: dict[str, Any] = {
         "start": start_dt,
         "end": end_dt,
-        "target_ip": clickhouse_ip_string_param(target, "target_ip"),
-        "target_port": port,
         "limit": max(int(limit), 1),
     }
     filters = [
         "flow_time >= {start:DateTime}",
         "flow_time <= {end:DateTime}",
         "proto = 17",
-        "toString(dst_ip) = {target_ip:String}",
-        "dst_port = {target_port:UInt16}",
     ]
+    target = clean_ip(target_ip)
+    port = int(target_port or 0)
+    if vector_name == UDP_UPLOAD_SINGLE_CLIENT_VECTOR:
+        src_ip = clean_ip(top_src_ip) or target
+        dst_ip = clean_ip(top_dst_ip)
+        dst_port = int(top_dst_port or target_port or 0)
+        src_port = int(top_src_port or 0)
+        if not src_ip:
+            return []
+        params["src_ip"] = clickhouse_ip_string_param(src_ip, "src_ip")
+        filters.append("toString(src_ip) = {src_ip:String}")
+        if dst_ip:
+            params["dst_ip"] = clickhouse_ip_string_param(dst_ip, "dst_ip")
+            filters.append("toString(dst_ip) = {dst_ip:String}")
+        if dst_port:
+            params["dst_port"] = dst_port
+            filters.append("dst_port = {dst_port:UInt16}")
+        if src_port:
+            params["src_port"] = src_port
+            filters.append("src_port = {src_port:UInt16}")
+    elif vector_name in UDP_UPLOAD_MANY_CLIENTS_ALIASES:
+        if not target or port <= 0:
+            return []
+        params["target_ip"] = clickhouse_ip_string_param(target, "target_ip")
+        params["target_port"] = port
+        filters.extend(["toString(dst_ip) = {target_ip:String}", "dst_port = {target_port:UInt16}"])
+    elif vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
+        if not target or port <= 0:
+            return []
+        params["target_ip"] = clickhouse_ip_string_param(target, "target_ip")
+        params["target_port"] = port
+        filters.extend(["toString(dst_ip) = {target_ip:String}", "src_port = {target_port:UInt16}"])
+    elif vector_name == UDP_DOWNLOAD_SAME_DST_PORT_VECTOR:
+        if not target or port <= 0:
+            return []
+        params["target_ip"] = clickhouse_ip_string_param(target, "target_ip")
+        params["target_port"] = port
+        filters.extend(["toString(dst_ip) = {target_ip:String}", "dst_port = {target_port:UInt16}"])
+    else:
+        return []
     if vector.get("sensor_id") is not None:
         params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(vector["sensor_id"])), "exporter_ip")
         filters.append("toString(exporter_ip) = {exporter_ip:String}")
-    selected_output_if = int(output_if or vector.get("interface_if_index") or 0)
+    selected_input_if = int(input_if or 0)
+    if selected_input_if:
+        params["input_if"] = selected_input_if
+        filters.append("input_if = {input_if:UInt32}")
+    selected_output_if = int(output_if or 0)
     if selected_output_if:
         params["output_if"] = selected_output_if
         filters.append("output_if = {output_if:UInt32}")
@@ -11904,7 +12541,12 @@ def attack_vector_test_result(
         target_ip,
         sample_limit,
         row.get("target_port") if row else None,
+        row.get("input_if") if row else None,
         row.get("output_if") if row else None,
+        row.get("top_src_ip") if row else "",
+        row.get("top_dst_ip") if row else "",
+        row.get("top_src_port") if row else None,
+        row.get("top_dst_port") if row else None,
     ) if row else []
     return {
         "vector_id": int(vector["id"]),
@@ -11947,13 +12589,31 @@ def save_anomaly_flow_samples(
     end_dt: datetime,
     limit: int = 20,
     target_port: int | None = None,
+    input_if: int | None = None,
     output_if: int | None = None,
+    top_src_ip: str = "",
+    top_dst_ip: str = "",
+    top_src_port: int | None = None,
+    top_dst_port: int | None = None,
 ) -> None:
     if limit <= 0:
         return
     try:
-        if clean_text(vector.get("detection_key") or vector.get("name")) == UDP_MANY_INTERNAL_VECTOR:
-            rows = query_udp_many_internal_sample_rows(vector, start_dt, end_dt, target_ip, target_port, output_if, limit)
+        if udp_vector_name(vector) in UDP_SPECIAL_VECTORS:
+            rows = query_udp_special_sample_rows(
+                vector,
+                start_dt,
+                end_dt,
+                target_ip,
+                target_port,
+                input_if,
+                output_if,
+                top_src_ip,
+                top_dst_ip,
+                top_src_port,
+                top_dst_port,
+                limit,
+            )
         else:
             params: dict[str, Any] = {"limit": limit}
             where = sample_flow_where_for_event(vector, target_ip, start_dt, end_dt, params)
@@ -12058,19 +12718,29 @@ def upsert_anomaly_event(
     severity = clean_text(traffic.get("severity")) or vector["severity"]
     target_port = int(traffic["target_port"]) if traffic.get("target_port") is not None else None
     event_protocol = clean_text(traffic.get("protocol")).lower()
+    input_if = int(traffic["input_if"]) if traffic.get("input_if") is not None else None
     output_if = int(traffic["output_if"]) if traffic.get("output_if") is not None else None
     unique_src_ips = int(traffic.get("unique_src_ips") or 0)
     unique_dst_ips = int(traffic.get("unique_dst_ips") or 0)
     unique_dst_ports = int(traffic.get("unique_dst_ports") or 0)
+    mitigation_basis = clean_text(traffic.get("mitigation_basis"))
+    mitigation_reason = clean_text(traffic.get("mitigation_reason"))
+    top_src_ip = clean_ip(traffic.get("top_src_ip"))
+    top_dst_ip = clean_ip(traffic.get("top_dst_ip"))
+    top_src_port = int(traffic["top_src_port"]) if traffic.get("top_src_port") is not None else None
+    top_dst_port = int(traffic["top_dst_port"]) if traffic.get("top_dst_port") is not None else None
+    top_packets = int(traffic.get("top_packets") or 0)
+    top_bytes = int(traffic.get("top_bytes") or 0)
     now = iso(end_dt)
     dedupe_key = anomaly_dedupe_key(vector, target_ip)
-    if clean_text(vector.get("detection_key") or vector.get("name")) == UDP_MANY_INTERNAL_VECTOR:
+    if udp_vector_name(vector) in UDP_SPECIAL_VECTORS:
         dedupe_key = "|".join(
             [
                 str(vector.get("id")),
                 target_ip,
                 str(target_port or ""),
                 str(traffic.get("zone_id") or ""),
+                str(input_if or ""),
                 str(output_if or ""),
                 "udp",
             ]
@@ -12102,10 +12772,19 @@ def upsert_anomaly_event(
                 target_role,
                 target_port,
                 protocol,
+                input_if,
                 output_if,
                 unique_src_ips,
                 unique_dst_ips,
                 unique_dst_ports,
+                mitigation_basis,
+                mitigation_reason,
+                top_src_ip,
+                top_dst_ip,
+                top_src_port,
+                top_dst_port,
+                top_packets,
+                top_bytes,
                 zone_id,
                 zone_name,
                 vector_name,
@@ -12129,7 +12808,7 @@ def upsert_anomaly_event(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 vector["id"],
@@ -12140,10 +12819,19 @@ def upsert_anomaly_event(
                 scope["target_role"],
                 target_port,
                 event_protocol,
+                input_if,
                 output_if,
                 unique_src_ips,
                 unique_dst_ips,
                 unique_dst_ports,
+                mitigation_basis,
+                mitigation_reason,
+                top_src_ip,
+                top_dst_ip,
+                top_src_port,
+                top_dst_port,
+                top_packets,
+                top_bytes,
                 traffic.get("zone_id"),
                 clean_text(traffic.get("zone_name")),
                 vector.get("name") or vector.get("detection_key") or "",
@@ -12193,10 +12881,19 @@ def upsert_anomaly_event(
                 target_role = ?,
                 target_port = ?,
                 protocol = ?,
+                input_if = ?,
                 output_if = ?,
                 unique_src_ips = ?,
                 unique_dst_ips = ?,
                 unique_dst_ports = ?,
+                mitigation_basis = ?,
+                mitigation_reason = ?,
+                top_src_ip = ?,
+                top_dst_ip = ?,
+                top_src_port = ?,
+                top_dst_port = ?,
+                top_packets = ?,
+                top_bytes = ?,
                 zone_id = ?,
                 zone_name = ?,
                 vector_name = ?,
@@ -12220,10 +12917,19 @@ def upsert_anomaly_event(
                 scope["target_role"],
                 target_port,
                 event_protocol,
+                input_if,
                 output_if,
                 unique_src_ips,
                 unique_dst_ips,
                 unique_dst_ports,
+                mitigation_basis,
+                mitigation_reason,
+                top_src_ip,
+                top_dst_ip,
+                top_src_port,
+                top_dst_port,
+                top_packets,
+                top_bytes,
                 traffic.get("zone_id"),
                 clean_text(traffic.get("zone_name")),
                 vector.get("name") or vector.get("detection_key") or "",
@@ -12261,7 +12967,12 @@ def upsert_anomaly_event(
         end_dt,
         max(0, min(20, 100 - int(sample_count or 0))),
         target_port,
+        input_if,
         output_if,
+        top_src_ip,
+        top_dst_ip,
+        top_src_port,
+        top_dst_port,
     )
     return action
 
@@ -13421,7 +14132,21 @@ def anomaly_detail(request: Request, event_id: int):
         if event.get("scope_type") == "external_dst_ip_port":
             target_ip = clean_ip(event.get("target_ip"))
         try:
-            for flow in query_vector_sample_rows(vector, start_dt, end_dt, target_ip, 200, event.get("target_port"), event.get("output_if")):
+            top_flow = event.get("top_flow") or {}
+            for flow in query_vector_sample_rows(
+                vector,
+                start_dt,
+                end_dt,
+                target_ip,
+                200,
+                event.get("target_port"),
+                event.get("input_if"),
+                event.get("output_if"),
+                top_flow.get("src_ip") or "",
+                top_flow.get("dst_ip") or "",
+                top_flow.get("src_port"),
+                top_flow.get("dst_port"),
+            ):
                 add_detail_flow(flow)
         except Exception as exc:
             logger.warning("Fallback legado de detalhes da anomalia %s falhou: %s", event_id, exc)
@@ -13443,6 +14168,10 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
     event = detail.get("event") or detail.get("anomaly") or {}
     conversations = list(detail.get("top_conversations") or [])[:50]
     flows = list(detail.get("related_flows") or detail.get("flows") or [])[:100]
+    metric_points = list(detail.get("timeseries") or detail.get("metric_points") or [])
+    chart = anomaly_timeseries_chart_flowable(metric_points, event)
+    mitigation_candidates = list(detail.get("mitigation_candidates") or [])
+    announcements = list(detail.get("announcements") or [])
     sections = [
         {
             "title": "Resumo",
@@ -13460,13 +14189,23 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
                     ("Portas destino unicas", event.get("unique_dst_ports")),
                     ("Escopo", event.get("scope_type")),
                     ("Direcao", event.get("direction")),
+                    ("Input if", event.get("input_if")),
+                    ("Output if", event.get("output_if") or event.get("interface_if_index")),
                     ("Zona", event.get("zone_name") or event.get("zone_id")),
                     ("Vetor", event.get("vector_name") or event.get("attack_vector_name")),
                     ("Protocolo", event.get("protocol") or event.get("decoder")),
                     ("Metrica", event.get("metric_unit")),
+                    ("Base mitigacao", event.get("mitigation_basis")),
+                    ("Motivo mitigacao", event.get("mitigation_reason")),
+                    ("Top flow", pdf_text(event.get("top_flow"))),
                     ("Resumo", event.get("summary")),
                 ]
             ),
+        },
+        {
+            "title": "Grafico / serie temporal",
+            "text": "" if chart is not None else "Sem pontos de serie temporal disponiveis",
+            "flowables": [chart] if chart is not None else [],
         },
         {
             "title": "Top conversas",
@@ -13480,12 +14219,48 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
             "rows": flows,
         },
     ]
+    if mitigation_candidates:
+        sections.append(
+            {
+                "title": "Mitigacao sugerida",
+                "headers": ["attack_vector_name", "mitigation_basis", "reason", "src_cidr", "dst_cidr", "protocol", "src_port", "dst_port", "action", "policy_decision", "rendered_command"],
+                "rows": mitigation_candidates[:20],
+            }
+        )
+    if announcements:
+        sections.append(
+            {
+                "title": "Announcements relacionados",
+                "headers": ["id", "status", "connector_name", "response_profile_name", "policy_decision", "action", "target_prefix", "src_prefix", "dst_prefix", "protocol", "src_port", "dst_port"],
+                "rows": announcements[:50],
+            }
+        )
     return simple_pdf_response("Detalhes da anomalia", sections, "gmj-anomaly-detail.pdf")
 
 
 @app.get("/api/anomalies/{event_id}/pdf")
 def anomaly_detail_pdf(request: Request, event_id: int):
     detail = anomaly_detail(request, event_id)
+    try:
+        evaluated = evaluated_mitigation_candidates(event_id)
+        detail["mitigation_candidates"] = evaluated.get("candidates") or []
+    except Exception as exc:
+        logger.warning("Falha ao avaliar mitigacao para PDF da anomalia %s: %s", event_id, exc)
+    if event_id > 0:
+        with sqlite_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+                FROM bgp_announcements a
+                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+                WHERE a.anomaly_id = ?
+                ORDER BY a.updated_at DESC, a.id DESC
+                LIMIT 50
+                """,
+                (event_id,),
+            ).fetchall()
+            detail["announcements"] = [bgp_announcement_row_to_dict(row) for row in rows]
     return anomaly_pdf_response(detail)
 
 
@@ -18234,6 +19009,9 @@ def simple_pdf_response(title: str, sections: list[dict[str, Any]], filename: st
         if text:
             story.append(paragraph(text, styles["BodyText"]))
             story.append(Spacer(1, 0.15 * cm))
+        for flowable in section.get("flowables") or []:
+            story.append(flowable)
+            story.append(Spacer(1, 0.2 * cm))
         rows = section.get("rows") or []
         headers = section.get("headers") or []
         if headers and rows:
@@ -18270,6 +19048,76 @@ def simple_pdf_response(title: str, sections: list[dict[str, Any]], filename: st
 
 def key_value_rows(items: list[tuple[str, Any]]) -> list[list[str]]:
     return [[label, pdf_text(value) or "-"] for label, value in items]
+
+
+def pdf_axis_metric(value: Any, unit: str) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        number = 0.0
+    if unit == "bits_s":
+        for suffix, divisor in (("Gbps", 1_000_000_000), ("Mbps", 1_000_000), ("Kbps", 1_000)):
+            if abs(number) >= divisor:
+                return f"{number / divisor:.1f} {suffix}"
+        return f"{number:.0f} bps"
+    if unit == "packets_s":
+        for suffix, divisor in (("Mpps", 1_000_000), ("Kpps", 1_000)):
+            if abs(number) >= divisor:
+                return f"{number / divisor:.1f} {suffix}"
+        return f"{number:.0f} pps"
+    for suffix, divisor in (("M flows/s", 1_000_000), ("K flows/s", 1_000)):
+        if abs(number) >= divisor:
+            return f"{number / divisor:.1f} {suffix}"
+    return f"{number:.0f} flows/s"
+
+
+def anomaly_timeseries_chart_flowable(points: list[dict[str, Any]], event: dict[str, Any]) -> Any | None:
+    if not points:
+        return None
+    try:
+        from reportlab.graphics.charts.lineplots import LinePlot
+        from reportlab.graphics.shapes import Drawing, Line, String
+        from reportlab.lib import colors
+    except ImportError:
+        return None
+
+    unit = event.get("metric_unit") or "bits_s"
+    value_key = "packets_s" if unit == "packets_s" else "flows_s" if unit == "flows_s" else "bits_s"
+    values = [float(point.get(value_key) or 0) for point in points]
+    peak = float(event.get("peak_value") or event.get("observed_value") or 0)
+    if peak > 0 and (not values or max(values) < peak * 0.5):
+        values.append(peak)
+        points = [*points, {"time": clean_text(event.get("last_seen_at") or event.get("started_at"))[:16] or "pico", value_key: peak}]
+    if len(values) == 1:
+        values = [values[0], values[0]]
+        points = [points[0], points[0]]
+    y_max = max(max(values), 1.0)
+    y_max = y_max * 1.15 if y_max > 1 else 1.0
+    drawing = Drawing(760, 230)
+    plot = LinePlot()
+    plot.x = 55
+    plot.y = 42
+    plot.width = 670
+    plot.height = 150
+    plot.data = [[(index, value) for index, value in enumerate(values)]]
+    plot.lines[0].strokeColor = colors.HexColor("#b91c1c")
+    plot.lines[0].strokeWidth = 2
+    plot.xValueAxis.valueMin = 0
+    plot.xValueAxis.valueMax = max(len(values) - 1, 1)
+    plot.xValueAxis.valueSteps = list(range(len(values))) if len(values) <= 8 else [0, len(values) // 2, len(values) - 1]
+    plot.yValueAxis.valueMin = 0
+    plot.yValueAxis.valueMax = y_max
+    plot.yValueAxis.labelTextFormat = lambda value: pdf_axis_metric(value, unit)
+    plot.yValueAxis.visibleGrid = True
+    plot.yValueAxis.gridStrokeColor = colors.HexColor("#e5e7eb")
+    drawing.add(plot)
+    drawing.add(Line(55, 36, 725, 36, strokeColor=colors.HexColor("#94a3b8"), strokeWidth=0.5))
+    first_label = clean_text(points[0].get("time"))[:16] or "inicio"
+    last_label = clean_text(points[-1].get("time"))[:16] or "fim"
+    drawing.add(String(55, 18, first_label, fontSize=7, fillColor=colors.HexColor("#475569")))
+    drawing.add(String(650, 18, last_label, fontSize=7, fillColor=colors.HexColor("#475569")))
+    drawing.add(String(55, 205, f"Serie temporal ({unit})", fontSize=10, fillColor=colors.HexColor("#111827")))
+    return drawing
 
 
 def flows_pdf_response(payload: dict[str, Any], row_limit: int = 500) -> Response:

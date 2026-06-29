@@ -7121,6 +7121,15 @@
       container.innerHTML = candidates.map((candidate, index) => {
         const policy = candidate.policy_decision || {};
         const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
+        const basis = candidate.mitigation_basis === 'top_conversation'
+          ? 'Mitigacao por conversa principal'
+          : ['aggregated_dst_port', 'aggregated_src_port'].includes(candidate.mitigation_basis)
+            ? 'Mitigacao por destino/porta agregados'
+            : 'Mitigacao por alvo normalizado';
+        const topFlow = candidate.top_flow || {};
+        const topFlowText = topFlow.src_ip && topFlow.dst_ip
+          ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
+          : '';
         return `
           <div class="panel p-2">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -7130,6 +7139,8 @@
               </div>
               ${mitigationDecisionBadge(policy.decision)}
             </div>
+            <div class="metric-readout mb-2">${escapeHtml(basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
+            ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
@@ -7857,17 +7868,32 @@
       const hasTarget = Boolean(event.target_cidr || event.target_ip);
       const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : 'Nao definido');
       const scope = event.scope_type || (hasTarget ? '-' : 'legado/sem alvo normalizado');
+      const topFlow = event.top_flow || {};
+      const topFlowText = topFlow.src_ip && topFlow.dst_ip
+        ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} ${topFlow.protocol || 'udp'}`
+        : '-';
+      const mitigationBasis = event.mitigation_basis === 'top_conversation'
+        ? 'Mitigacao por conversa principal'
+        : ['aggregated_dst_port', 'aggregated_src_port'].includes(event.mitigation_basis)
+          ? 'Mitigacao por destino/porta agregados'
+          : event.mitigation_basis || '-';
       const fields = [
         ['Alvo', target],
         ['Porta alvo', event.target_port || '-'],
         ['Origens unicas', event.unique_src_ips || '-'],
+        ['Destinos unicos', event.unique_dst_ips || '-'],
+        ['Portas destino unicas', event.unique_dst_ports || '-'],
         ['Escopo', scope],
         ['Direcao', formatAnomalyDirectionLabel(event.direction)],
+        ['Input if', event.input_if || '-'],
         ['Output if', event.output_if || event.interface_if_index || '-'],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Vetor', event.vector_name || event.attack_vector_name || '-'],
         ['Protocolo', event.protocol || event.decoder || '-'],
-        ['Metrica', event.metric_unit ? unitLabel(event.metric_unit) : '-']
+        ['Metrica', event.metric_unit ? unitLabel(event.metric_unit) : '-'],
+        ['Base mitigacao', mitigationBasis],
+        ['Top flow', topFlowText],
+        ['Motivo', event.mitigation_reason || '-']
       ];
       if (event.invalid_scope) fields.push(['Validacao', 'invalid_scope']);
       return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
