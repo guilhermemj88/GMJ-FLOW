@@ -203,23 +203,64 @@ def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS peak_analysis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            peak_time TEXT NOT NULL,
-            interface_id INTEGER NOT NULL,
-            sensor TEXT NOT NULL DEFAULT '',
-            direction TEXT NOT NULL,
-            metric TEXT NOT NULL,
-            peak_value REAL NOT NULL,
-            baseline_p95 REAL NOT NULL DEFAULT 0,
-            baseline_p99 REAL NOT NULL DEFAULT 0,
-            score REAL NOT NULL DEFAULT 0,
-            evidence_status TEXT NOT NULL DEFAULT '',
-            classification TEXT NOT NULL DEFAULT '',
-            dominant_group_json TEXT NOT NULL DEFAULT '{}',
-            candidates_json TEXT NOT NULL DEFAULT '[]',
-            ai_summary TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
+            peak_time TEXT,
+            interface_id INTEGER,
+            sensor TEXT,
+            direction TEXT,
+            metric TEXT,
+            peak_value REAL,
+            baseline_p95 REAL,
+            baseline_p99 REAL,
+            score REAL,
+            evidence_status TEXT,
+            classification TEXT,
+            dominant_group TEXT,
+            candidates TEXT,
+            ai_summary TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
+    )
+    _ensure_peak_analysis_column(conn, "peak_time", "peak_time TEXT")
+    _ensure_peak_analysis_column(conn, "interface_id", "interface_id INTEGER")
+    _ensure_peak_analysis_column(conn, "sensor", "sensor TEXT")
+    _ensure_peak_analysis_column(conn, "direction", "direction TEXT")
+    _ensure_peak_analysis_column(conn, "metric", "metric TEXT")
+    _ensure_peak_analysis_column(conn, "peak_value", "peak_value REAL")
+    _ensure_peak_analysis_column(conn, "baseline_p95", "baseline_p95 REAL")
+    _ensure_peak_analysis_column(conn, "baseline_p99", "baseline_p99 REAL")
+    _ensure_peak_analysis_column(conn, "score", "score REAL")
+    _ensure_peak_analysis_column(conn, "evidence_status", "evidence_status TEXT")
+    _ensure_peak_analysis_column(conn, "classification", "classification TEXT")
+    _ensure_peak_analysis_column(conn, "dominant_group", "dominant_group TEXT")
+    _ensure_peak_analysis_column(conn, "candidates", "candidates TEXT")
+    _ensure_peak_analysis_column(conn, "ai_summary", "ai_summary TEXT")
+    _ensure_peak_analysis_column(conn, "created_at", "created_at TEXT")
+    _copy_legacy_json_column(conn, "dominant_group_json", "dominant_group", "{}")
+    _copy_legacy_json_column(conn, "candidates_json", "candidates", "[]")
+
+
+def _peak_analysis_columns(conn: sqlite3.Connection) -> set[str]:
+    return {str(row[1]) for row in conn.execute("PRAGMA table_info(peak_analysis)").fetchall()}
+
+
+def _ensure_peak_analysis_column(conn: sqlite3.Connection, column: str, definition: str) -> None:
+    if column not in _peak_analysis_columns(conn):
+        conn.execute(f"ALTER TABLE peak_analysis ADD COLUMN {definition}")
+
+
+def _copy_legacy_json_column(conn: sqlite3.Connection, legacy_column: str, new_column: str, empty_value: str) -> None:
+    columns = _peak_analysis_columns(conn)
+    if legacy_column not in columns or new_column not in columns:
+        return
+    conn.execute(
+        f"""
+        UPDATE peak_analysis
+        SET {new_column} = {legacy_column}
+        WHERE {legacy_column} IS NOT NULL
+          AND COALESCE({new_column}, '') IN ('', ?)
+        """,
+        (empty_value,),
     )
 
 
@@ -230,7 +271,7 @@ def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None
         INSERT INTO peak_analysis (
             peak_time, interface_id, sensor, direction, metric, peak_value,
             baseline_p95, baseline_p99, score, evidence_status, classification,
-            dominant_group_json, candidates_json, ai_summary, created_at
+            dominant_group, candidates, ai_summary, created_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,

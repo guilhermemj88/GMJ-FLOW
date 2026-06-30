@@ -1,4 +1,5 @@
 import sys
+import sqlite3
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter
+from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db
 
 
 class PeakHunterTest(unittest.TestCase):
@@ -66,6 +67,37 @@ class PeakHunterTest(unittest.TestCase):
         result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
         self.assertFalse(result["best_peak"]["apply_enabled"])
         self.assertTrue(all(candidate.get("apply_enabled") is False for candidate in result["candidates"]))
+
+    def test_peak_analysis_table_created_by_migration(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            ensure_peak_analysis_db(conn)
+            ensure_peak_analysis_db(conn)
+            columns = {row[1]: row for row in conn.execute("PRAGMA table_info(peak_analysis)").fetchall()}
+        finally:
+            conn.close()
+
+        expected_columns = {
+            "id",
+            "peak_time",
+            "interface_id",
+            "sensor",
+            "direction",
+            "metric",
+            "peak_value",
+            "baseline_p95",
+            "baseline_p99",
+            "score",
+            "evidence_status",
+            "classification",
+            "dominant_group",
+            "candidates",
+            "ai_summary",
+            "created_at",
+        }
+        self.assertTrue(expected_columns.issubset(columns))
+        self.assertEqual(columns["id"][2].upper(), "INTEGER")
+        self.assertEqual(columns["created_at"][4].upper(), "CURRENT_TIMESTAMP")
 
     def _series(self, request):
         return [

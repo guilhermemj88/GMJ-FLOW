@@ -35,6 +35,7 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.services.peak_hunter import ensure_peak_analysis_db
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -3014,6 +3015,7 @@ def ensure_sensor_db() -> None:
         ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
+        ensure_peak_analysis_db(conn)
         ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
