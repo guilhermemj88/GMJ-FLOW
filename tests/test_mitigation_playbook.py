@@ -136,6 +136,61 @@ class MitigationPlaybookTest(unittest.TestCase):
         _, candidates = generate_mitigation_candidates(incident, self.playbook)
         self.assertEqual(candidates[0]["template"], "alert_only")
 
+    def test_fallback_top_flow_with_26_packets_is_rejected(self):
+        candidate = {
+            "candidate_index": 0,
+            "source": "fallback_analysis",
+            "template": "fallback",
+            "action": "flowspec_block",
+            "match": {"src_ip": "179.189.80.241/32", "dst_ip": "189.39.178.6/32", "protocol": "udp", "dst_port": 38476},
+            "packets": 26,
+            "bytes": 25906,
+            "share_top_flow_percent": 0,
+            "ttl": "2h",
+            "risk": "high",
+        }
+        incident = dict(self.incident, observed_value=99916, threshold_value=40000)
+        validation = validate_mitigation_decision(
+            _decision(0, ttl="2h"), [candidate], incident, self.playbook, "udp_flood_outbound_cpe"
+        )
+        self.assertFalse(validation["valid"])
+        self.assertIn("fallback_analysis_packets_below_min", validation["violations"])
+
+    def test_share_top_flow_zero_rejects_discard_candidate(self):
+        candidate = {
+            "candidate_index": 0,
+            "source": "fallback_analysis",
+            "template": "fallback",
+            "action": "flowspec_block",
+            "match": {"src_ip": "179.189.80.241/32", "dst_ip": "189.39.178.6/32", "protocol": "udp", "dst_port": 38476},
+            "packets": 5000,
+            "bytes": 2000000,
+            "share_top_flow_percent": 0,
+            "ttl": "2h",
+            "risk": "high",
+        }
+        validation = validate_mitigation_decision(
+            _decision(0, ttl="2h"), [candidate], self.incident, self.playbook, "udp_flood_outbound_cpe"
+        )
+        self.assertFalse(validation["valid"])
+        self.assertIn("fallback_analysis_share_top_flow_zero", validation["violations"])
+
+    def test_empty_top_flow_rejects_mitigation_candidate(self):
+        candidate = {
+            "candidate_index": 0,
+            "template": "unsafe",
+            "action": "flowspec_block",
+            "match": {"src_ip": "179.189.80.241/32", "dst_ip": "189.39.178.6/32", "protocol": "udp", "dst_port": 38476},
+            "ttl": "2h",
+            "risk": "high",
+        }
+        incident = dict(self.incident, top_flow={"src_ip": "", "dst_ip": "", "packets": 0, "bytes": 0})
+        validation = validate_mitigation_decision(
+            _decision(0, ttl="2h"), [candidate], incident, self.playbook, "udp_flood_outbound_cpe"
+        )
+        self.assertFalse(validation["valid"])
+        self.assertIn("top_flow_scope_empty", validation["violations"])
+
 
 def _decision(index, allow_auto=0, ttl="2h"):
     return {

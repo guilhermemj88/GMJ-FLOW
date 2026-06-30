@@ -22,6 +22,8 @@ def generate_mitigation_candidates(
         preferred = attack_template.get("allowed_if_syn_flood") or preferred
     if _has_multi_source_dominant_outbound_group(incident):
         preferred = ["dst_external_32_proto_dst_port", "dst_external_prefix_proto_dst_port", "alert_only"]
+    if _explicit_empty_top_flow_without_dominant_group(incident):
+        preferred = ["alert_only"]
 
     candidates: list[dict[str, Any]] = []
     for template_name in preferred:
@@ -166,6 +168,20 @@ def _has_multi_source_dominant_outbound_group(incident: dict[str, Any]) -> bool:
         and bool(dominant.get("dst_port"))
         and bool(dominant.get("protocol"))
     )
+
+
+def _explicit_empty_top_flow_without_dominant_group(incident: dict[str, Any]) -> bool:
+    if isinstance(incident.get("dominant_attack_group"), dict):
+        return False
+    top_flow = incident.get("top_flow")
+    if not isinstance(top_flow, dict):
+        return False
+    top_src = top_flow.get("src_ip") or incident.get("top_src_ip")
+    top_dst = top_flow.get("dst_ip") or incident.get("top_dst_ip")
+    top_port = top_flow.get("dst_port") or incident.get("top_dst_port")
+    packets = _to_int(top_flow.get("packets"))
+    bytes_value = _to_int(top_flow.get("bytes"))
+    return not top_src and not top_dst and not top_port and not packets and not bytes_value
 
 
 def _is_clear_syn_flood(incident: dict[str, Any]) -> bool:

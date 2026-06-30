@@ -4,6 +4,11 @@ from typing import Any
 
 from app.services.mitigation_playbook import minimum_ttl_for_template, ttl_to_seconds
 
+MIN_FALLBACK_CANDIDATE_PACKETS = 1000
+MIN_FALLBACK_CANDIDATE_BYTES = 1000000
+MIN_FALLBACK_SHARE_PERCENT = 20.0
+HIGH_ANOMALY_PEAK_PPS = 40000
+
 
 def validate_mitigation_decision(
     ai_decision: dict[str, Any],
@@ -74,6 +79,8 @@ def validate_candidate(candidate: dict[str, Any], incident: dict[str, Any], play
     match = candidate.get("match") if isinstance(candidate.get("match"), dict) else {}
     forbidden_actions = set(playbook.get("forbidden_actions") or [])
 
+    if action != "alert_only":
+        violations.extend(_flow_evidence_violations(candidate, incident))
     if _blocks_customer_ip_only(candidate, incident):
         violations.append("block_customer_ip_only")
     if _blocks_customer_prefix(candidate, incident):
@@ -90,7 +97,59 @@ def validate_candidate(candidate: dict[str, Any], incident: dict[str, Any], play
         if port in {80, 443}:
             violations.append("rate_limit_http_https_as_customer_destination")
 
-    return [violation for violation in violations if violation in forbidden_actions or violation.startswith("recommended_")]
+    return [
+        violation
+        for violation in violations
+        if violation in forbidden_actions
+        or violation.startswith("recommended_")
+        or violation.startswith("insufficient_")
+        or violation.startswith("fallback_")
+        or violation.startswith("top_flow_")
+    ]
+
+
+def _flow_evidence_violations(candidate: dict[str, Any], incident: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    packets = _to_int(candidate.get("packets") or candidate.get("top_packets") or incident.get("packets"), default=0)
+    bytes_value = _to_int(candidate.get("bytes") or candidate.get("top_bytes") or incident.get("bytes"), default=0)
+    share = _to_float(candidate.get("share_top_flow_percent") or candidate.get("top_packet_share") or incident.get("share_top_flow_percent"))
+    peak_pps = _anomaly_peak_pps(incident)
+    is_fallback = clean_reason(candidate.get("reason")) == "fallback_analysis" or clean_reason(candidate.get("source")) == "fallback_analysis" or clean_reason(candidate.get("mitigation_basis")) == "fallback_analysis"
+
+    if is_fallback:
+        if share == 0:
+            violations.append("fallback_analysis_share_top_flow_zero")
+        if packets < MIN_FALLBACK_CANDIDATE_PACKETS:
+            violations.append("fallback_analysis_packets_below_min")
+        if bytes_value < MIN_FALLBACK_CANDIDATE_BYTES:
+            violations.append("fallback_analysis_bytes_below_min")
+        if share < MIN_FALLBACK_SHARE_PERCENT:
+            violations.append("fallback_analysis_share_below_min")
+    if packets < MIN_FALLBACK_CANDIDATE_PACKETS and peak_pps > HIGH_ANOMALY_PEAK_PPS:
+        violations.append("insufficient_flow_evidence_packets_vs_peak")
+    if _top_flow_scope_empty(candidate, incident):
+        violations.append("top_flow_scope_empty")
+    return violations
+
+
+def _top_flow_scope_empty(candidate: dict[str, Any], incident: dict[str, Any]) -> bool:
+    match = candidate.get("match") if isinstance(candidate.get("match"), dict) else {}
+    top_flow = incident.get("top_flow")
+    if isinstance(top_flow, dict):
+        explicit_values = (
+            top_flow.get("src_ip"),
+            top_flow.get("dst_ip"),
+            top_flow.get("dst_port"),
+            top_flow.get("packets"),
+            top_flow.get("bytes"),
+        )
+        if not any(_has_value(value) for value in explicit_values):
+            return True
+    top_src = candidate.get("top_src") or incident.get("top_src") or incident.get("top_src_ip") or match.get("src_ip")
+    top_dst = candidate.get("top_dst") or incident.get("top_dst") or incident.get("top_dst_ip") or match.get("dst_ip") or match.get("dst_prefix")
+    top_port = candidate.get("top_port") or incident.get("top_port") or incident.get("top_dst_port") or match.get("dst_port")
+    protocol = candidate.get("protocol") or incident.get("protocol") or match.get("protocol")
+    return not any(_has_value(value) for value in (top_src, top_dst, top_port, protocol))
 
 
 def validate_direction_scope(candidate: dict[str, Any], incident: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -208,3 +267,33 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "sim"}
     return default
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _anomaly_peak_pps(incident: dict[str, Any]) -> float:
+    for field in ("anomaly_peak_pps", "peak_pps", "observed_value", "packets_s", "pps"):
+        value = _to_float(incident.get(field), default=0.0)
+        if value > 0:
+            return value
+    packets = _to_float(incident.get("estimated_packets") or incident.get("packets"), default=0.0)
+    window = _to_float(incident.get("window_seconds"), default=0.0)
+    return packets / window if packets > 0 and window > 0 else 0.0
+
+
+def _has_value(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    text = str(value).strip()
+    return bool(text and text not in {"0", "0.0", "0/0"})
+
+
+def clean_reason(value: Any) -> str:
+    return str(value or "").strip().lower()

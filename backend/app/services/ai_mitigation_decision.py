@@ -12,6 +12,8 @@ AI_PROMPT = (
     "A anomalia ja foi detectada. Nao crie regra, FlowSpec, blackhole, ACL ou rate-limit.\n"
     "Escolha somente um candidate_index existente. Todo bloqueio exige aprovacao manual nesta fase.\n"
     "Nunca recomende bloqueio somente do IP do cliente ou prefixo de cliente. allow_auto deve ser 0.\n"
+    "Se a evidencia de flow for fraca ou fallback_analysis sem volume, escolha alert_only/manual_review e diga: "
+    "\"Nao ha evidencia suficiente para recomendar descarte. Confirmar top flows no ClickHouse/roteador.\"\n"
     "Responda somente JSON valido."
 )
 

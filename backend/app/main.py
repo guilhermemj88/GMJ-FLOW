@@ -601,7 +601,9 @@ AI_MODEL_PROFILES = {
 AI_SYSTEM_PROMPT = (
     "Voce e um analista NOC/ISP. Analise anomalias NetFlow e escolha a mitigacao "
     "mais segura entre candidatos fornecidos. Nao invente comandos. Nao recomende "
-    "bloqueio amplo. Retorne somente JSON valido."
+    "bloqueio amplo. Se o candidato vier de fallback_analysis fraco, nao diga que "
+    "descarte e a opcao mais segura; diga: \"Nao ha evidencia suficiente para recomendar "
+    "descarte. Confirmar top flows no ClickHouse/roteador.\" Retorne somente JSON valido."
 )
 
 AI_RESPONSE_CLASSIFICATIONS = {
@@ -612,7 +614,13 @@ AI_RESPONSE_CLASSIFICATIONS = {
     "scan",
     "unknown",
     "likely_false_positive",
+    "insufficient_flow_evidence",
 }
+
+MIN_FALLBACK_CANDIDATE_PACKETS = 1000
+MIN_FALLBACK_CANDIDATE_BYTES = 1000000
+MIN_FALLBACK_SHARE_PERCENT = 20.0
+HIGH_ANOMALY_PEAK_PPS = 40000
 
 
 class SensorInterfacePayload(BaseModel):
@@ -8346,6 +8354,52 @@ def fallback_analysis_candidate(
     return candidate
 
 
+def anomaly_peak_pps(event: dict[str, Any]) -> float:
+    for field in ("anomaly_peak_pps", "peak_pps", "observed_value", "packets_s", "pps"):
+        try:
+            value = float(event.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    try:
+        packets = float(event.get("estimated_packets") or event.get("packets") or 0)
+        window = float(event.get("window_seconds") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return packets / window if packets > 0 and window > 0 else 0.0
+
+
+def fallback_analysis_rejection_reason(
+    event: dict[str, Any],
+    top_flow: dict[str, Any],
+    total_packets: int,
+    total_bytes: int,
+) -> str:
+    packets = int(top_flow.get("packets") or 0)
+    bytes_value = int(top_flow.get("bytes") or 0)
+    packet_share = round((packets / total_packets * 100), 2) if total_packets else 0.0
+    src_ip = clean_ip(top_flow.get("src_ip"))
+    dst_ip = clean_ip(top_flow.get("dst_ip"))
+    dst_port = int(top_flow.get("dst_port") or 0)
+    if not src_ip or not dst_ip or not dst_port:
+        return "Top flow incompleto/zerado; consultar ClickHouse/roteador antes de recomendar mitigacao."
+    if not flow_is_udp(top_flow):
+        protocol = clean_text(top_flow.get("protocol") or top_flow.get("proto"))
+        return f"Top flow nao identificado como UDP: protocol={protocol}."
+    if packets < MIN_FALLBACK_CANDIDATE_PACKETS:
+        return f"Fallback rejeitado: top flow tem {packets} packets, abaixo do minimo {MIN_FALLBACK_CANDIDATE_PACKETS}."
+    if bytes_value < MIN_FALLBACK_CANDIDATE_BYTES:
+        return f"Fallback rejeitado: top flow tem {bytes_value} bytes, abaixo do minimo {MIN_FALLBACK_CANDIDATE_BYTES}."
+    if packet_share < MIN_FALLBACK_SHARE_PERCENT:
+        return f"Fallback rejeitado: share_top_flow_percent {packet_share} abaixo do minimo {MIN_FALLBACK_SHARE_PERCENT}."
+    if packet_share == 0:
+        return "Fallback rejeitado: share_top_flow_percent igual a 0."
+    if packets < MIN_FALLBACK_CANDIDATE_PACKETS and anomaly_peak_pps(event) > HIGH_ANOMALY_PEAK_PPS:
+        return "Fallback rejeitado: pico alto da anomalia nao e explicado pelos flows relacionados."
+    return ""
+
+
 def enrich_deterministic_candidate(candidate: dict[str, Any], top_flow: dict[str, Any], total_packets: int, total_bytes: int) -> dict[str, Any]:
     packets = int(top_flow.get("packets") or 0)
     bytes_value = int(top_flow.get("bytes") or 0)
@@ -8371,8 +8425,15 @@ def enrich_deterministic_candidate(candidate: dict[str, Any], top_flow: dict[str
                 "top_packet_share": packet_share,
                 "top_byte_share": byte_share,
             },
+            "packets": packets,
+            "bytes": bytes_value,
+            "flow_count": int(top_flow.get("flow_count") or 0),
             "top_packet_share": packet_share,
             "top_byte_share": byte_share,
+            "share_top_flow_percent": packet_share,
+            "top_src": clean_ip(top_flow.get("src_ip")),
+            "top_dst": clean_ip(top_flow.get("dst_ip")),
+            "top_port": int(top_flow.get("dst_port") or 0),
             "candidate_scope": "src_dst_port" if candidate.get("src_cidr") and candidate.get("dst_cidr") and candidate.get("dst_port") else "dst_port" if candidate.get("dst_cidr") and candidate.get("dst_port") else "src_port",
             "risk": risk,
             "manual_approval_required": manual_required,
@@ -8438,7 +8499,8 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     top_dst_ip = clean_ip(top_flow_by_packets.get("dst_ip"))
     top_dst_port_value = int(top_flow_by_packets.get("dst_port") or 0)
     top_protocol = clean_text(top_flow_by_packets.get("protocol") or top_flow_by_packets.get("proto")).lower()
-    if top_src_ip and top_dst_ip and top_dst_port_value and flow_is_udp(top_flow_by_packets):
+    fallback_candidate_block_reason = fallback_analysis_rejection_reason(event, top_flow_by_packets, total_packets, total_bytes) if top_flow_by_packets else ""
+    if top_src_ip and top_dst_ip and top_dst_port_value and flow_is_udp(top_flow_by_packets) and not fallback_candidate_block_reason:
         fallback_candidate_reason = "Top flow UDP valido encontrado no ClickHouse/flows relacionados."
         candidates.append(
             fallback_analysis_candidate(
@@ -8483,9 +8545,18 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     for index, candidate in enumerate(candidates):
         candidate["candidate_index"] = index
         enrich_deterministic_candidate(candidate, top_flow_by_packets, total_packets, total_bytes)
+    evidence_status = "weak" if candidates else "insufficient" if fallback_candidate_block_reason else "weak"
+    mitigation_allowed = False
+    recommended_action = "fallback_analysis" if candidates else "alert_only"
     return {
         "source": "deterministic_anomaly_analysis",
         "anomaly_id": anomaly_id,
+        "evidence_status": evidence_status,
+        "mitigation_allowed": mitigation_allowed,
+        "recommended_action": recommended_action,
+        "recommended_candidate": "fallback_analysis" if candidates else "alert_only",
+        "classification": "unknown" if candidates else "insufficient_flow_evidence",
+        "reason": "" if candidates else "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
         "clickhouse_rows_considered": clickhouse_rows_considered,
         "rows_considered": len(rows),
         "prioritized_rows_considered": len(prioritized_rows),
@@ -8948,6 +9019,7 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
             "choose_only_existing_candidate": True,
             "fallback_analysis_never_announces": True,
             "analysis_only_never_apply": True,
+            "weak_fallback_must_choose_alert_only": True,
         },
     }
     return compact_ai_payload_for_model(payload, int(config["max_context_chars"]))
@@ -9046,6 +9118,19 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
     if classification not in AI_RESPONSE_CLASSIFICATIONS:
         classification = "unknown"
     candidate = candidates[index]
+    if clean_text(candidate.get("source")) == "fallback_analysis":
+        packets = int(candidate.get("packets") or 0)
+        bytes_value = int(candidate.get("bytes") or 0)
+        share = float(candidate.get("share_top_flow_percent") or candidate.get("top_packet_share") or 0)
+        has_scope = bool(candidate.get("top_src") or candidate.get("top_dst") or candidate.get("top_port") or candidate.get("src_prefix") or candidate.get("dst_prefix"))
+        if (
+            packets < MIN_FALLBACK_CANDIDATE_PACKETS
+            or bytes_value < MIN_FALLBACK_CANDIDATE_BYTES
+            or share < MIN_FALLBACK_SHARE_PERCENT
+            or share == 0
+            or not has_scope
+        ):
+            raise ValueError("fallback_analysis rejeitado por evidencia insuficiente.")
     policy = candidate.get("policy_decision") or {}
     policy_denied = policy.get("decision") == "deny"
     action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
@@ -9264,12 +9349,16 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
             "recommended_candidate_index": None,
             "confidence": 0.0,
             "risk": "high",
-            "classification": "unknown",
+            "classification": "insufficient_flow_evidence",
             "manual_approval_required": True,
             "allow_auto": False,
-            "reason": "Nao foi encontrado candidate normal ou fallback_analysis seguro.",
-            "operator_summary": "Sem candidato seguro para a IA escolher. Seguir fluxo manual de investigacao.",
-            "report_summary": "Analise IA nao executada: sem candidato seguro.",
+            "recommended_candidate": "alert_only",
+            "recommended_action": "alert_only",
+            "evidence_status": "insufficient",
+            "mitigation_allowed": False,
+            "reason": "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
+            "operator_summary": "Nao ha evidencia suficiente para recomendar descarte. Confirmar top flows no ClickHouse/roteador.",
+            "report_summary": "Analise IA nao executada: sem candidato seguro para descarte.",
             "risks": ["Anomalia sem escopo suficiente para recomendacao automatizada."],
             "checks_before_approve": ["Confirmar top flows diretamente no ClickHouse/roteador.", "Validar sensor, interface e janela da anomalia."],
         }
@@ -16057,8 +16146,14 @@ def anomaly_detail_pdf(request: Request, event_id: int):
 def evaluate_anomaly_mitigation(request: Request, event_id: int):
     require_admin(request)
     payload = evaluated_mitigation_candidates(event_id)
+    evidence_status = "complete" if payload["candidates"] else "insufficient"
     return {
         "anomaly": payload["anomaly"],
+        "evidence_status": evidence_status,
+        "mitigation_allowed": bool(payload["candidates"]),
+        "recommended_action": "manual_review" if payload["candidates"] else "alert_only",
+        "manual_approval_required": True,
+        "apply_enabled": bool(payload["candidates"]),
         "candidates": payload["candidates"],
     }
 

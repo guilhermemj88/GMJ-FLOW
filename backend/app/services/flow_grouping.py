@@ -8,6 +8,8 @@ DEFAULT_GROUPING_PARAMS = {
     "min_unique_sources": 2,
     "min_share_of_top_packets_percent": 50.0,
     "min_share_of_top_bytes_percent": 50.0,
+    "min_dominant_packets": 1000,
+    "min_dominant_bytes": 1000000,
     "prefer_same_dst_ip_port_protocol": True,
 }
 
@@ -225,6 +227,12 @@ def _select_dominant_group(groups: list[dict[str, Any]], params: dict[str, Any])
         return None
     top = groups[0]
     runner_up = groups[1] if len(groups) > 1 else None
+    enough_volume = (
+        int(top.get("total_packets") or 0) >= int(params.get("min_dominant_packets") or 0)
+        or int(top.get("total_bytes") or 0) >= int(params.get("min_dominant_bytes") or 0)
+    )
+    if not enough_volume:
+        return None
     enough_sources = len(top.get("unique_src_ips") or []) >= int(params["min_unique_sources"])
     enough_share = (
         float(top.get("share_packets_percent") or 0) >= float(params["min_share_of_top_packets_percent"])

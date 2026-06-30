@@ -1,5 +1,6 @@
 import json
 import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -7,11 +8,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
+try:
+    import fastapi  # noqa: F401
+except ModuleNotFoundError:
+    fastapi_stub = types.ModuleType("fastapi")
+
+    class _APIRouter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def post(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    fastapi_stub.APIRouter = _APIRouter
+    sys.modules["fastapi"] = fastapi_stub
+
 from app.services.ai_mitigation_decision import build_ai_prompt
 from app.services.flow_grouping import analyze_flow_groups, incident_from_dominant_group
 from app.services.mitigation_candidates import generate_mitigation_candidates
 from app.services.mitigation_playbook import load_playbook
 from app.services.mitigation_validator import validate_mitigation_decision
+from app.api.mitigation import analyze_mitigation
 
 
 class FlowGroupingTest(unittest.TestCase):
@@ -146,6 +166,78 @@ class FlowGroupingTest(unittest.TestCase):
         enriched = incident_from_dominant_group(incident, grouping)
         _, candidates = generate_mitigation_candidates(enriched, self.playbook)
         self.assertEqual(candidates[0]["template"], "alert_only")
+
+    def test_low_volume_single_udp_flow_is_not_dominant(self):
+        incident = {
+            "incident_id": "inc-low-flow",
+            "direction": "sends",
+            "related_flows": [
+                {
+                    "src_ip": "179.189.80.241",
+                    "src_port": 4933,
+                    "dst_ip": "189.39.178.6",
+                    "dst_port": 38476,
+                    "protocol": "udp",
+                    "bytes": 25906,
+                    "packets": 26,
+                    "flow_count": 1,
+                }
+            ],
+        }
+        grouping = analyze_flow_groups(incident)
+        self.assertIsNone(grouping["dominant_attack_group"])
+
+    def test_100kpps_empty_top_flow_returns_alert_only(self):
+        result = analyze_mitigation(
+            {
+                "incident_id": 102,
+                "suspected_template": "udp_flood_outbound_cpe",
+                "direction": "sends",
+                "src_is_customer": True,
+                "src_is_internal": True,
+                "dst_is_external": True,
+                "protocol": "udp",
+                "observed_value": 99916,
+                "threshold_value": 40000,
+                "top_flow": {"src_ip": "", "dst_ip": "", "packets": 0, "bytes": 0},
+                "related_flows": [
+                    {
+                        "src_ip": "179.189.80.241",
+                        "src_port": 4933,
+                        "dst_ip": "189.39.178.6",
+                        "dst_port": 38476,
+                        "protocol": "udp",
+                        "bytes": 25906,
+                        "packets": 26,
+                        "flow_count": 1,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(result["evidence_status"], "insufficient")
+        self.assertFalse(result["mitigation_allowed"])
+        self.assertEqual(result["operator_recommendation"]["recommended_action"], "alert_only")
+        self.assertTrue(result["operator_recommendation"]["manual_approval_required"])
+        self.assertFalse(result["operator_recommendation"]["apply_enabled"])
+        self.assertTrue(all(candidate["action"] == "alert_only" for candidate in result["candidates"]))
+
+    def test_generic_udp_without_dominant_group_returns_alert_only(self):
+        result = analyze_mitigation(
+            {
+                "incident_id": "inc-generic-udp",
+                "suspected_template": "udp_flood_outbound_cpe",
+                "direction": "sends",
+                "src_is_customer": True,
+                "src_is_internal": True,
+                "dst_is_external": True,
+                "protocol": "udp",
+                "related_flows": [
+                    {"src_ip": "198.51.100.1", "src_port": 1000, "dst_ip": "203.0.113.10", "dst_port": 1111, "protocol": "udp", "bytes": 1000, "packets": 100},
+                    {"src_ip": "198.51.100.2", "src_port": 1001, "dst_ip": "203.0.113.11", "dst_port": 2222, "protocol": "udp", "bytes": 1000, "packets": 100},
+                ],
+            }
+        )
+        self.assertEqual(result["operator_recommendation"]["recommended_action"], "alert_only")
 
 
 def _dominant_related_flows():

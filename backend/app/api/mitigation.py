@@ -29,10 +29,22 @@ def analyze_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
     validation = validate_mitigation_decision(ai_decision, candidates, analysis_payload, playbook, suspected_template)
     selected = validation.get("selected_candidate") or {}
     normalized_ai_decision = validation.get("ai_decision") or ai_decision
+    evidence_status = _evidence_status(flow_grouping, candidates, validation)
+    mitigation_allowed = evidence_status == "complete" and selected.get("action") not in {None, "alert_only"} and bool(validation.get("valid"))
+    if not mitigation_allowed:
+        selected = _alert_candidate(candidates) or selected
+        normalized_ai_decision = {
+            **normalized_ai_decision,
+            "classification": "insufficient_flow_evidence",
+            "recommended_candidate": "alert_only",
+            "reason": "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
+        }
 
     return {
         "incident_id": payload.get("incident_id"),
         "suspected_template": suspected_template,
+        "evidence_status": evidence_status,
+        "mitigation_allowed": mitigation_allowed,
         "dominant_group": flow_grouping.get("dominant_attack_group"),
         "ignored_noise_flows_count": flow_grouping.get("ignored_noise_flows_count", 0),
         "flow_grouping": {
@@ -54,6 +66,8 @@ def analyze_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
             selected,
             normalized_ai_decision,
             flow_grouping,
+            evidence_status,
+            mitigation_allowed,
         ),
     }
 
@@ -64,6 +78,8 @@ def _operator_recommendation(
     selected: dict[str, Any],
     ai_decision: dict[str, Any],
     flow_grouping: dict[str, Any] | None = None,
+    evidence_status: str = "weak",
+    mitigation_allowed: bool = False,
 ) -> dict[str, Any]:
     action = str(selected.get("action") or "alert_only")
     title = _template_title(suspected_template)
@@ -75,12 +91,30 @@ def _operator_recommendation(
         "dominant_group": (flow_grouping or {}).get("dominant_attack_group"),
         "ignored_noise_flows_count": (flow_grouping or {}).get("ignored_noise_flows_count", 0),
         "dominant_group_summary": group_summary,
-        "recommended_action": action,
+        "evidence_status": evidence_status,
+        "mitigation_allowed": mitigation_allowed,
+        "classification": ai_decision.get("classification") or ("insufficient_flow_evidence" if not mitigation_allowed else "unknown"),
+        "recommended_action": action if mitigation_allowed else "alert_only",
+        "recommended_candidate": selected.get("template") or "alert_only",
+        "reason": ai_decision.get("reason") or "",
         "recommended_candidate_index": selected.get("candidate_index", ai_decision.get("recommended_candidate_index")),
         "manual_approval_required": True,
         "allow_auto": False,
         "apply_enabled": False,
     }
+
+
+def _evidence_status(flow_grouping: dict[str, Any], candidates: list[dict[str, Any]], validation: dict[str, Any]) -> str:
+    if flow_grouping.get("dominant_attack_group"):
+        return "complete" if validation.get("valid", False) else "weak"
+    has_mitigation_candidate = any(candidate.get("action") != "alert_only" for candidate in candidates)
+    if not has_mitigation_candidate:
+        return "insufficient"
+    return "weak"
+
+
+def _alert_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((candidate for candidate in candidates if candidate.get("action") == "alert_only"), None)
 
 
 def _template_title(template_name: str) -> str:
