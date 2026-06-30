@@ -1,0 +1,465 @@
+{
+  "global_policy": {
+    "anomaly_already_detected": true,
+    "ai_can_create_new_mitigation": false,
+    "ai_can_choose_existing_candidate": true,
+    "ai_can_change_ttl": false,
+    "ai_can_override_forbidden_action": false,
+    "default_allow_auto": false,
+    "default_manual_approval_required": true
+  },
+  "forbidden_actions": [
+    "block_customer_ip_only",
+    "block_customer_prefix",
+    "block_all_udp",
+    "block_all_tcp",
+    "block_all_icmp",
+    "block_dns_as_customer_destination",
+    "rate_limit_dns_as_customer_destination",
+    "rate_limit_http_https_as_customer_destination",
+    "block_without_protocol",
+    "block_without_ip",
+    "block_prefix_internal",
+    "block_all_dns",
+    "block_all_icmp_without_type_code",
+    "rate_limit_80_443_as_customer_destination"
+  ],
+  "preferred_candidate_order": [
+    "src_customer_32_dst_external_32_proto_dst_port",
+    "dst_external_32_proto_dst_port",
+    "src_external_32_dst_customer_32_proto_dst_port",
+    "dst_customer_32_proto_dst_port",
+    "src_customer_32_dst_external_32_proto",
+    "dst_external_32_proto",
+    "dst_external_prefix_proto_dst_port",
+    "rate_limit_specific",
+    "alert_only"
+  ],
+  "attack_templates": {
+    "udp_flood_outbound_cpe": {
+      "title": "UDP flood outbound de CPE/TV Box infectado",
+      "description": "Upload de TV Box, roteador ou CPE infectado.",
+      "signals": [
+        "direction_outbound",
+        "src_is_customer",
+        "high_pps",
+        "bursty_traffic",
+        "same_dst_port",
+        "destination_changes_within_same_prefix",
+        "destination_changes_within_same_asn",
+        "upload_from_customer"
+      ],
+      "preferred_candidates": [
+        "src_customer_32_dst_external_32_proto_dst_port",
+        "dst_external_32_proto_dst_port",
+        "dst_external_prefix_proto_dst_port"
+      ],
+      "ttl": {
+        "minimum": "2h",
+        "normal": "4h",
+        "repeat": "24h"
+      },
+      "forbidden_actions": [
+        "block_customer_ip_only",
+        "block_customer_prefix",
+        "block_all_udp"
+      ]
+    },
+    "dns_udp_abuse_outbound": {
+      "title": "Abuso DNS UDP outbound",
+      "description": "Abuso DNS UDP outbound.",
+      "signals": [
+        "protocol_udp",
+        "dst_port_53",
+        "high_packets",
+        "high_bytes",
+        "abnormal_conversation_size",
+        "dominant_external_dns_destination",
+        "bursty_traffic"
+      ],
+      "normal_pattern": {
+        "packets_per_conversation": "1-5",
+        "bytes_per_conversation": "100-1500",
+        "conversation_shape": "many_small_conversations"
+      },
+      "suspicious_pattern": [
+        "many_packets_in_conversation",
+        "many_bytes",
+        "dominant_external_destination"
+      ],
+      "preferred_candidates": [
+        "src_customer_32_dst_external_32_udp_dst_port_53",
+        "dst_external_32_udp_dst_port_53"
+      ],
+      "ttl": {
+        "minimum": "2h",
+        "normal": "4h",
+        "repeat": "24h"
+      },
+      "forbidden_actions": [
+        "block_all_dns",
+        "block_customer_ip_only",
+        "rate_limit_dns_as_customer_destination"
+      ]
+    },
+    "tcp_syn_flood": {
+      "title": "TCP SYN flood",
+      "description": "TCP SYN flood.",
+      "signals": [
+        "protocol_tcp",
+        "flag_syn",
+        "syn_pps_above_baseline",
+        "incomplete_handshake",
+        "dominant_destination",
+        "dominant_port",
+        "bursty_traffic"
+      ],
+      "preferred_candidates": [
+        "src_32_dst_32_tcp_dst_port_syn",
+        "dst_32_tcp_dst_port_syn",
+        "src_32_dst_32_tcp_syn",
+        "dst_32_tcp_syn"
+      ],
+      "ttl": {
+        "minimum": "30m",
+        "normal": "2h",
+        "severe": "4h"
+      }
+    },
+    "icmp_flood": {
+      "title": "ICMP flood",
+      "description": "ICMP flood.",
+      "signals": [
+        "high_pps",
+        "dominant_destination",
+        "repeated_type_code"
+      ],
+      "preferred_candidates": [
+        "src_32_dst_32_icmp_type_code",
+        "dst_32_icmp_type_code"
+      ],
+      "ttl": {
+        "minimum": "30m",
+        "normal": "2h",
+        "severe": "4h"
+      },
+      "forbidden_actions": [
+        "block_all_icmp_without_type_code",
+        "block_customer_ip_only"
+      ]
+    },
+    "possible_l7_http_https": {
+      "title": "Possivel ataque HTTP/HTTPS visto por flow",
+      "description": "NetFlow/IPFIX/sFlow nao confirma ataque L7 sozinho.",
+      "limitations": [
+        "no_url",
+        "no_http_method",
+        "no_headers",
+        "no_cookie",
+        "no_user_agent"
+      ],
+      "ports": [
+        80,
+        443
+      ],
+      "preferred_candidates": [
+        "alert_only"
+      ],
+      "allowed_if_syn_flood": [
+        "dst_32_tcp_dst_port_syn",
+        "src_32_dst_32_tcp_dst_port_syn"
+      ],
+      "forbidden_actions": [
+        "rate_limit_80_443_as_customer_destination",
+        "block_customer_ip_only",
+        "block_all_tcp"
+      ],
+      "ttl": {
+        "minimum": "30m",
+        "normal": "2h"
+      }
+    }
+  },
+  "candidate_templates": {
+    "src_customer_32_dst_external_32_proto_dst_port": {
+      "action": "flowspec_block",
+      "risk": "low",
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "src_is_customer",
+        "dst_is_external",
+        "protocol_known",
+        "dst_port_known"
+      ],
+      "description": "Bloqueio especifico entre cliente e destino externo em uma porta/protocolo."
+    },
+    "src_customer_32_dst_external_32_udp_dst_port_53": {
+      "action": "flowspec_block",
+      "risk": "low",
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "src_is_customer",
+        "dst_is_external",
+        "protocol_udp",
+        "dst_port_53"
+      ],
+      "description": "Bloqueio especifico de abuso DNS UDP outbound entre cliente e resolvedor externo."
+    },
+    "dst_external_32_proto_dst_port": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "dst_is_external",
+        "protocol_known",
+        "dst_port_known"
+      ],
+      "description": "Bloqueia todos os clientes para um destino externo em uma porta/protocolo."
+    },
+    "dst_external_32_udp_dst_port_53": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "dst_is_external",
+        "protocol_udp",
+        "dst_port_53"
+      ],
+      "description": "Bloqueia trafego DNS UDP para destino externo especifico."
+    },
+    "src_external_32_dst_customer_32_proto_dst_port": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "manual_only": true,
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "dst_is_customer",
+        "src_is_external",
+        "protocol_known",
+        "dst_port_known"
+      ],
+      "description": "Bloqueio especifico entre origem externa e destino cliente em uma porta/protocolo."
+    },
+    "dst_customer_32_proto_dst_port": {
+      "action": "flowspec_block",
+      "risk": "high",
+      "manual_only": true,
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "dst_is_customer",
+        "protocol_known",
+        "dst_port_known"
+      ],
+      "description": "Bloqueio especifico para destino cliente, protocolo e porta. Exige revisao manual."
+    },
+    "src_customer_32_dst_external_32_proto": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "manual_only": true,
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol"
+      ],
+      "requirements": [
+        "src_is_customer",
+        "dst_is_external",
+        "protocol_known"
+      ],
+      "description": "Bloqueio entre cliente e destino externo por protocolo, sem porta."
+    },
+    "dst_external_32_proto": {
+      "action": "flowspec_block",
+      "risk": "high",
+      "manual_only": true,
+      "match_fields": [
+        "dst_ip",
+        "protocol"
+      ],
+      "requirements": [
+        "dst_is_external",
+        "protocol_known"
+      ],
+      "description": "Bloqueio para destino externo por protocolo, sem porta."
+    },
+    "dst_external_prefix_proto_dst_port": {
+      "action": "flowspec_block",
+      "risk": "high",
+      "manual_only": true,
+      "match_fields": [
+        "dst_prefix",
+        "protocol",
+        "dst_port"
+      ],
+      "requirements": [
+        "dst_prefix_is_external",
+        "protocol_known",
+        "dst_port_known",
+        "same_asn_or_same_prefix_detected"
+      ],
+      "description": "Bloqueia destino externo por prefixo, protocolo e porta. Usar apenas manualmente."
+    },
+    "src_32_dst_32_tcp_dst_port_syn": {
+      "action": "flowspec_block",
+      "risk": "low",
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "dst_port",
+        "tcp_flags"
+      ],
+      "requirements": [
+        "protocol_tcp",
+        "tcp_flag_syn",
+        "dst_port_known"
+      ],
+      "description": "Bloqueio especifico para SYN flood entre origem e destino."
+    },
+    "dst_32_tcp_dst_port_syn": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "dst_port",
+        "tcp_flags"
+      ],
+      "requirements": [
+        "protocol_tcp",
+        "tcp_flag_syn",
+        "dst_port_known"
+      ],
+      "description": "Bloqueio SYN para destino e porta."
+    },
+    "src_32_dst_32_tcp_syn": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "manual_only": true,
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "tcp_flags"
+      ],
+      "requirements": [
+        "protocol_tcp",
+        "tcp_flag_syn"
+      ],
+      "description": "Bloqueio SYN entre origem e destino, sem porta."
+    },
+    "dst_32_tcp_syn": {
+      "action": "flowspec_block",
+      "risk": "high",
+      "manual_only": true,
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "tcp_flags"
+      ],
+      "requirements": [
+        "protocol_tcp",
+        "tcp_flag_syn"
+      ],
+      "description": "Bloqueio SYN para destino, sem porta."
+    },
+    "src_32_dst_32_icmp_type_code": {
+      "action": "flowspec_block",
+      "risk": "low",
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "icmp_type_code"
+      ],
+      "requirements": [
+        "protocol_icmp",
+        "icmp_type_code_known"
+      ],
+      "description": "Bloqueio ICMP especifico entre origem, destino, tipo e codigo."
+    },
+    "dst_32_icmp_type_code": {
+      "action": "flowspec_block",
+      "risk": "medium",
+      "match_fields": [
+        "dst_ip",
+        "protocol",
+        "icmp_type_code"
+      ],
+      "requirements": [
+        "protocol_icmp",
+        "icmp_type_code_known"
+      ],
+      "description": "Bloqueio ICMP especifico para destino, tipo e codigo."
+    },
+    "dst_blackhole_32": {
+      "action": "blackhole_dst",
+      "risk": "high",
+      "manual_only": true,
+      "match_fields": [
+        "dst_ip"
+      ],
+      "requirements": [
+        "dst_is_external_or_attack_destination",
+        "manual_approval"
+      ],
+      "description": "Blackhole de destino /32. Mais agressivo, pois bloqueia tudo para o destino."
+    },
+    "rate_limit_specific": {
+      "action": "flowspec_rate_limit",
+      "risk": "medium",
+      "manual_only": true,
+      "match_fields": [
+        "src_ip",
+        "dst_ip",
+        "protocol",
+        "dst_port",
+        "rate_limit"
+      ],
+      "requirements": [
+        "manual_approval",
+        "service_should_remain_available"
+      ],
+      "forbidden_if": [
+        "dst_port_53_and_destination_is_customer",
+        "dst_port_80_and_destination_is_customer",
+        "dst_port_443_and_destination_is_customer"
+      ],
+      "description": "Rate-limit especifico quando bloquear totalmente nao e adequado."
+    },
+    "alert_only": {
+      "action": "alert_only",
+      "risk": "none",
+      "match_fields": [],
+      "requirements": [],
+      "description": "Sem mitigacao. Apenas alerta para operador."
+    }
+  }
+}

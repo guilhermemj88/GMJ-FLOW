@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "recommended_candidate_index",
+    "allow_auto",
+    "manual_approval_required",
+    "risk",
+    "reason"
+  ],
+  "properties": {
+    "attack_vector": {
+      "type": "string"
+    },
+    "recommended_candidate_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "confidence": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      ]
+    },
+    "recommended_ttl": {
+      "type": "string",
+      "pattern": "^[0-9]+[mh]$"
+    },
+    "allow_auto": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    "manual_approval_required": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    "risk": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

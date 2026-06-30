@@ -33,6 +33,8 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
+from app.api.mitigation import router as mitigation_router
+
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
 logger = logging.getLogger("gmj-flow")
@@ -45,6 +47,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(mitigation_router)
 
 PROTO_LABELS = {
     "1": "ICMP",
