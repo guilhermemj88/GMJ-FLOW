@@ -8471,21 +8471,126 @@ def latest_ai_analysis(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, A
     return ai_analysis_row_to_dict(row)
 
 
+def compact_ai_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "candidate_index",
+        "source",
+        "attack_vector_id",
+        "attack_vector_name",
+        "name",
+        "confidence",
+        "reason",
+        "mitigation_reason",
+        "mitigation_basis",
+        "mitigation_mode",
+        "requested_mode",
+        "allow_auto",
+        "never_announce",
+        "response_type",
+        "action",
+        "then_action",
+        "protocol",
+        "src_cidr",
+        "dst_cidr",
+        "src_prefix",
+        "dst_prefix",
+        "target_prefix",
+        "target_scope",
+        "src_port",
+        "dst_port",
+        "tcp_flags",
+        "rate_limit_bps",
+        "duration_seconds",
+        "connector_id",
+        "response_profile_id",
+        "mitigation_key",
+        "policy_decision",
+        "rendered_command_preview",
+    )
+    return {key: candidate.get(key) for key in keys if candidate.get(key) not in (None, "", [], {})}
+
+
+def compact_deterministic_analysis_for_ai(deterministic: dict[str, Any]) -> dict[str, Any]:
+    if not deterministic:
+        return {}
+    keys = (
+        "source",
+        "anomaly_id",
+        "clickhouse_rows_considered",
+        "rows_considered",
+        "prioritized_rows_considered",
+        "valid_udp_rows_considered",
+        "fallback_candidate_reason",
+        "fallback_candidate_block_reason",
+        "window",
+        "interface_if_index",
+        "direction",
+        "warnings",
+        "top_flow_by_packets",
+        "top_flow_by_bytes",
+        "top_conversation_by_packets",
+        "top_src_ip_by_packets",
+        "top_dst_ip_by_packets",
+        "top_dst_port_by_packets",
+        "top_dst_port_pair_by_packets",
+        "unique_src_ips",
+        "unique_dst_ips",
+        "unique_dst_ports",
+        "packet_share_percent",
+        "top_src_share_percent",
+        "top_dst_port_share_percent",
+    )
+    compacted = {key: deterministic.get(key) for key in keys if deterministic.get(key) not in (None, "", [], {})}
+    compacted["top_flows"] = list(deterministic.get("top_flows") or [])[:5]
+    compacted["output_interface_top_flows"] = list(deterministic.get("output_interface_top_flows") or [])[:3]
+    compacted["input_interface_top_flows"] = list(deterministic.get("input_interface_top_flows") or [])[:3]
+    compacted["top_src_ips"] = list(deterministic.get("top_src_ips") or [])[:5]
+    compacted["top_dst_ips"] = list(deterministic.get("top_dst_ips") or [])[:5]
+    compacted["top_dst_ports"] = list(deterministic.get("top_dst_ports") or [])[:5]
+    compacted["top_dst_port_pairs"] = list(deterministic.get("top_dst_port_pairs") or [])[:5]
+    compacted["fallback_analysis_candidates"] = [
+        compact_ai_candidate(candidate)
+        for candidate in list(deterministic.get("fallback_analysis_candidates") or [])
+    ]
+    return compacted
+
+
+def ai_payload_json_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+
+
 def trim_ai_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    if len(text) <= max_chars:
+    if ai_payload_json_size(payload) <= max_chars:
         return payload
     trimmed = dict(payload)
+    trimmed["context_truncated"] = True
+    trimmed["candidates"] = [compact_ai_candidate(candidate) for candidate in list(payload.get("candidates") or [])]
+    trimmed["deterministic_analysis"] = compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {}))
+    trimmed["policy_decisions"] = [
+        {"candidate_index": index, "policy_decision": candidate.get("policy_decision")}
+        for index, candidate in enumerate(trimmed["candidates"])
+    ]
     trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[: max(3, len(trimmed.get("related_flows") or []) // 2)]
     trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[: max(3, len(trimmed.get("top_conversations") or []) // 2)]
-    text = json.dumps(trimmed, ensure_ascii=False, sort_keys=True, default=str)
-    if len(text) <= max_chars:
+    if ai_payload_json_size(trimmed) <= max_chars:
         return trimmed
-    trimmed["context_truncated"] = True
     trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[:3]
     trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[:3]
-    while len(json.dumps(trimmed, ensure_ascii=False, sort_keys=True, default=str)) > max_chars and trimmed.get("candidates"):
-        trimmed["candidates"] = trimmed["candidates"][:-1]
+    if ai_payload_json_size(trimmed) <= max_chars:
+        return trimmed
+    deterministic = dict(trimmed.get("deterministic_analysis") or {})
+    deterministic["top_flows"] = list(deterministic.get("top_flows") or [])[:1]
+    deterministic["output_interface_top_flows"] = list(deterministic.get("output_interface_top_flows") or [])[:1]
+    deterministic["input_interface_top_flows"] = list(deterministic.get("input_interface_top_flows") or [])[:1]
+    deterministic["top_src_ips"] = list(deterministic.get("top_src_ips") or [])[:3]
+    deterministic["top_dst_ips"] = list(deterministic.get("top_dst_ips") or [])[:3]
+    deterministic["top_dst_ports"] = list(deterministic.get("top_dst_ports") or [])[:3]
+    deterministic["top_dst_port_pairs"] = list(deterministic.get("top_dst_port_pairs") or [])[:3]
+    trimmed["deterministic_analysis"] = deterministic
+    if ai_payload_json_size(trimmed) <= max_chars:
+        return trimmed
+    trimmed["related_flows"] = []
+    trimmed["top_conversations"] = []
     return trimmed
 
 
