@@ -3415,47 +3415,78 @@
             </div>
             <form id="peakHunterForm" class="peak-hunter-form-grid">
               <div class="field">
-                <label for="peakHunterSensor">sensor</label>
-                <input id="peakHunterSensor" class="form-control form-control-sm" placeholder="ex: edge-a">
+                <label for="peakHunterSensor">Sensor</label>
+                <input id="peakHunterSensor" class="form-control form-control-sm" list="peakHunterSensorOptions" placeholder="Buscar sensor">
+                <datalist id="peakHunterSensorOptions"></datalist>
               </div>
               <div class="field">
-                <label for="peakHunterInterfaceId">interface_id</label>
-                <input id="peakHunterInterfaceId" type="number" min="1" step="1" class="form-control form-control-sm" required>
+                <label for="peakHunterInterfaceId">Interface</label>
+                <select id="peakHunterInterfaceId" class="form-select form-select-sm" required disabled>
+                  <option value="">Selecione o sensor</option>
+                </select>
               </div>
               <div class="field">
-                <label for="peakHunterDirection">direction</label>
+                <label for="peakHunterDirection">Direcao</label>
                 <select id="peakHunterDirection" class="form-select form-select-sm">
                   <option value="sends">sends</option>
                   <option value="receives">receives</option>
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterMetric">metric</label>
+                <label for="peakHunterMetric">Metrica</label>
                 <select id="peakHunterMetric" class="form-select form-select-sm">
                   <option value="packets_s">packets_s</option>
                   <option value="bits_s">bits_s</option>
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterStartTime">start_time</label>
+                <label for="peakHunterPeriod">Periodo</label>
+                <select id="peakHunterPeriod" class="form-select form-select-sm">
+                  <option value="15">Ultimos 15 min</option>
+                  <option value="60">Ultima 1h</option>
+                  <option value="360">Ultimas 6h</option>
+                  <option value="1440">Ultimas 24h</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterStartTime">Inicio</label>
                 <input id="peakHunterStartTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
-                <label for="peakHunterEndTime">end_time</label>
+                <label for="peakHunterEndTime">Fim</label>
                 <input id="peakHunterEndTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
-                <label for="peakHunterProtocol">protocol opcional</label>
+                <label for="peakHunterProtocol">Protocolo opcional</label>
                 <input id="peakHunterProtocol" class="form-control form-control-sm" placeholder="udp, tcp, icmp">
               </div>
               <div class="field">
-                <label for="peakHunterThreshold">threshold opcional</label>
+                <label for="peakHunterThreshold">Threshold opcional</label>
                 <input id="peakHunterThreshold" type="number" min="0" step="any" class="form-control form-control-sm">
               </div>
-              <div class="grid-span-3">
-                <div id="peakHunterFormHint" class="subtle">Use a janela exata do pico observado na interface para buscar flows nos arredores do evento.</div>
+              <div class="field">
+                <label for="peakHunterSensitivity">Sensibilidade</label>
+                <select id="peakHunterSensitivity" class="form-select form-select-sm">
+                  <option value="medium">Media</option>
+                  <option value="high">Alta</option>
+                  <option value="low">Baixa</option>
+                </select>
               </div>
-              <div class="d-flex justify-content-end align-items-end">
+              <details class="grid-span-3">
+                <summary class="subtle">Avancado</summary>
+                <div class="field mt-2">
+                  <label for="peakHunterManualInterfaceId">interface_id manual</label>
+                  <input id="peakHunterManualInterfaceId" type="number" min="1" step="1" class="form-control form-control-sm" placeholder="Usar apenas se a interface nao estiver listada">
+                </div>
+              </details>
+              <div class="grid-span-3">
+                <div id="peakHunterFormHint" class="subtle">Escolha sensor/interface e use o modo recente para localizar o melhor pico automaticamente.</div>
+              </div>
+              <div class="d-flex justify-content-end align-items-end gap-2">
+                <button id="peakHunterRecentButton" type="button" class="btn btn-sm btn-outline-success">
+                  <i data-lucide="radar"></i><span>Encontrar picos recentes</span>
+                </button>
                 <button id="peakHunterAnalyzeButton" type="submit" class="btn btn-sm btn-success">
                   <i data-lucide="search"></i><span>Analisar picos</span>
                 </button>
@@ -3472,23 +3503,24 @@
             </div>
             <div class="database-metrics-grid mb-3">
               <div class="metric-card">
-                <div class="metric-label">peaks_detected</div>
+                <div class="metric-label">Picos detectados</div>
                 <div id="peakHunterPeaksDetected" class="metric-value">-</div>
               </div>
               <div class="metric-card">
-                <div class="metric-label">peaks_analyzed</div>
+                <div class="metric-label">Picos analisados</div>
                 <div id="peakHunterPeaksAnalyzed" class="metric-value">-</div>
               </div>
               <div class="metric-card">
-                <div class="metric-label">evidence_status</div>
+                <div class="metric-label">Evidencia</div>
                 <div id="peakHunterEvidenceStatus" class="metric-value">-</div>
               </div>
               <div class="metric-card">
-                <div class="metric-label">mitigation_allowed</div>
+                <div class="metric-label">Mitigacao permitida</div>
                 <div id="peakHunterMitigationAllowed" class="metric-value">-</div>
               </div>
             </div>
             <div id="peakHunterSummary" class="d-flex flex-wrap gap-2 mb-3"></div>
+            <div id="peakHunterDominantReadable" class="metric-readout mb-3">Grupo dominante: -</div>
             <div class="row g-3">
               <div class="col-12 col-xl-4">
                 <div class="panel p-3 h-100">
@@ -3506,6 +3538,76 @@
                 <div class="panel p-3 h-100">
                   <div class="panel-title mb-2">recommendation</div>
                   <pre id="peakHunterRecommendation" class="result-box mb-0">-</pre>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Top grupos</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>dst_ip</th>
+                    <th>dst_port</th>
+                    <th>protocol</th>
+                    <th class="text-end">packets</th>
+                    <th class="text-end">bytes</th>
+                    <th class="text-end">packets_s</th>
+                    <th class="text-end">bits_s</th>
+                    <th class="text-end">unique_src</th>
+                    <th class="text-end">share</th>
+                    <th>classification</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterGroupsTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Top conversas</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Conversa</th>
+                    <th class="text-end">packets</th>
+                    <th class="text-end">bytes</th>
+                    <th class="text-end">packets_s</th>
+                    <th class="text-end">bits_s</th>
+                    <th class="text-end">input_if</th>
+                    <th class="text-end">output_if</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterConversationsTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="row g-3">
+              <div class="col-12 col-xl-6">
+                <div class="panel p-3 h-100">
+                  <div class="panel-title mb-2">Top origens</div>
+                  <div class="table-wrap">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                      <thead><tr><th>src_ip</th><th class="text-end">packets</th><th class="text-end">bytes</th><th class="text-end">share</th></tr></thead>
+                      <tbody id="peakHunterSourcesTable"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="col-12 col-xl-6">
+                <div class="panel p-3 h-100">
+                  <div class="panel-title mb-2">Top destinos</div>
+                  <div class="table-wrap">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                      <thead><tr><th>dst_ip</th><th class="text-end">packets</th><th class="text-end">bytes</th><th class="text-end">share</th></tr></thead>
+                      <tbody id="peakHunterDestinationsTable"></tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3532,6 +3634,7 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Serie temporal</div>
+            <div id="peakHunterSeriesChart" class="anomaly-chart mb-3"></div>
             <div class="table-wrap">
               <table class="table table-sm table-hover align-middle mb-0">
                 <thead>
@@ -3542,6 +3645,37 @@
                   </tr>
                 </thead>
                 <tbody id="peakHunterSeriesTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Historico</div>
+                <div id="peakHunterHistoryStatus" class="metric-readout">Ultimas investigacoes salvas.</div>
+              </div>
+              <button id="peakHunterHistoryRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Horario do pico</th>
+                    <th>Sensor</th>
+                    <th>Interface</th>
+                    <th>Direcao</th>
+                    <th>Metrica</th>
+                    <th class="text-end">Pico</th>
+                    <th>Classificacao</th>
+                    <th>Evidencia</th>
+                    <th>Grupo dominante</th>
+                    <th>Acao</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterHistoryTable"></tbody>
               </table>
             </div>
           </section>
@@ -4473,7 +4607,8 @@
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
       asnDst: echarts.init(document.getElementById('asnDstChart')),
       topFlow: echarts.init(document.getElementById('topFlowChart')),
-      anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart'))
+      anomalyMetric: echarts.init(document.getElementById('anomalyMetricChart')),
+      peakHunterSeries: echarts.init(document.getElementById('peakHunterSeriesChart'))
     };
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
@@ -4499,6 +4634,9 @@
     let mapInterfaceCache = [];
     let flowInterfaceCache = [];
     let topFlowInterfaceCache = [];
+    let peakHunterSensorOptionsCache = [];
+    let peakHunterInterfaceOptionsCache = [];
+    let peakHunterLastResult = null;
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -7767,6 +7905,13 @@
       return metric === 'bits_s' ? formatBps(value) : formatPps(value);
     }
 
+    function peakHunterDominantLabel(group) {
+      if (!group) return '-';
+      const sources = Array.isArray(group.unique_src_ips) ? group.unique_src_ips.slice(0, 3).join(', ') : 'origens';
+      const extra = Array.isArray(group.unique_src_ips) && group.unique_src_ips.length > 3 ? ` +${group.unique_src_ips.length - 3}` : '';
+      return `${sources || 'origens'}${extra} -> ${group.dst_ip || '-'}:${group.dst_port || '-'} ${(group.protocol || '-').toUpperCase()}`;
+    }
+
     function peakHunterDatetimeInput(value) {
       const date = value instanceof Date ? value : new Date(value);
       if (!Number.isFinite(date.getTime())) return '';
@@ -7774,33 +7919,94 @@
       return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
     }
 
-    function resetPeakHunterForm() {
+    function setPeakHunterRecentWindow(minutes = Number(document.getElementById('peakHunterPeriod')?.value || 15)) {
+      if (!Number.isFinite(minutes) || minutes <= 0) return;
       const end = new Date();
-      const start = new Date(end.getTime() - 15 * 60 * 1000);
-      document.getElementById('peakHunterSensor').value = '';
-      document.getElementById('peakHunterInterfaceId').value = '';
-      document.getElementById('peakHunterDirection').value = 'sends';
-      document.getElementById('peakHunterMetric').value = 'packets_s';
+      const start = new Date(end.getTime() - minutes * 60 * 1000);
       document.getElementById('peakHunterStartTime').value = peakHunterDatetimeInput(start);
       document.getElementById('peakHunterEndTime').value = peakHunterDatetimeInput(end);
+    }
+
+    function resetPeakHunterForm() {
+      document.getElementById('peakHunterPeriod').value = '15';
+      setPeakHunterRecentWindow(15);
+      document.getElementById('peakHunterSensor').value = '';
+      document.getElementById('peakHunterInterfaceId').innerHTML = '<option value="">Selecione o sensor</option>';
+      document.getElementById('peakHunterInterfaceId').disabled = true;
+      document.getElementById('peakHunterManualInterfaceId').value = '';
+      document.getElementById('peakHunterDirection').value = 'sends';
+      document.getElementById('peakHunterMetric').value = 'packets_s';
       document.getElementById('peakHunterProtocol').value = '';
       document.getElementById('peakHunterThreshold').value = '';
+      document.getElementById('peakHunterSensitivity').value = 'medium';
       setText('peakHunterStatus', 'Investigue picos por interface e enriqueça anomalias com top flows.');
       setText('peakHunterFormHint', 'Use a janela exata do pico observado na interface para buscar flows nos arredores do evento.');
     }
 
+    async function loadPeakHunterSensors() {
+      try {
+        const payload = await apiRequest('/api/peak-hunter/options/sensors');
+        peakHunterSensorOptionsCache = Array.isArray(payload.items) ? payload.items : [];
+        document.getElementById('peakHunterSensorOptions').innerHTML = peakHunterSensorOptionsCache.map(sensor => {
+          const value = sensor.sensor_name || sensor.sensor_id || '';
+          const label = [sensor.exporter_ip, sensor.status, sensor.last_seen ? formatDateTime(sensor.last_seen) : ''].filter(Boolean).join(' | ');
+          return `<option value="${escapeHtml(value)}" label="${escapeHtml(label)}"></option>`;
+        }).join('');
+      } catch (error) {
+        setText('peakHunterFormHint', `Nao foi possivel carregar sensores: ${error.message}`);
+      }
+    }
+
+    async function loadPeakHunterInterfaces(sensor = document.getElementById('peakHunterSensor').value.trim()) {
+      const select = document.getElementById('peakHunterInterfaceId');
+      const selected = select.value;
+      if (!sensor) {
+        peakHunterInterfaceOptionsCache = [];
+        select.innerHTML = '<option value="">Selecione o sensor</option>';
+        select.disabled = true;
+        return;
+      }
+      select.innerHTML = '<option value="">Carregando interfaces...</option>';
+      select.disabled = true;
+      try {
+        const query = new URLSearchParams({ sensor });
+        const payload = await apiRequest(`/api/peak-hunter/options/interfaces?${query}`);
+        peakHunterInterfaceOptionsCache = Array.isArray(payload.items) ? payload.items : [];
+        select.innerHTML = '<option value="">Selecione a interface</option>' + peakHunterInterfaceOptionsCache.map(iface => `
+          <option value="${escapeHtml(iface.interface_id)}">${escapeHtml(iface.label || `ifIndex ${iface.interface_id}`)}</option>
+        `).join('');
+        if (selected && peakHunterInterfaceOptionsCache.some(iface => String(iface.interface_id) === String(selected))) {
+          select.value = selected;
+        }
+        select.disabled = false;
+        setText('peakHunterFormHint', `${formatNumber(peakHunterInterfaceOptionsCache.length)} interfaces disponiveis para ${sensor}.`);
+      } catch (error) {
+        select.innerHTML = '<option value="">Falha ao carregar</option>';
+        setText('peakHunterFormHint', `Falha ao carregar interfaces: ${error.message}`);
+      }
+    }
+
     function peakHunterPayload() {
       const sensor = document.getElementById('peakHunterSensor').value.trim();
-      const interfaceId = Number(document.getElementById('peakHunterInterfaceId').value);
+      const selectedInterface = document.getElementById('peakHunterInterfaceId').value;
+      const manualInterface = document.getElementById('peakHunterManualInterfaceId').value;
+      const interfaceId = Number(selectedInterface || manualInterface);
       const thresholdText = document.getElementById('peakHunterThreshold').value.trim();
       const protocol = document.getElementById('peakHunterProtocol').value.trim();
       const start = new Date(document.getElementById('peakHunterStartTime').value);
       const end = new Date(document.getElementById('peakHunterEndTime').value);
+      const maxRangeMs = 24 * 60 * 60 * 1000;
+      if (!sensor) {
+        throw new Error('Selecione um sensor ou informe manualmente em Avancado.');
+      }
       if (!Number.isInteger(interfaceId) || interfaceId < 1) {
-        throw new Error('Informe interface_id valido.');
+        throw new Error('Selecione uma interface ou informe interface_id manual.');
       }
       if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || start >= end) {
         throw new Error('Informe uma janela de tempo valida.');
+      }
+      if (end.getTime() - start.getTime() > maxRangeMs) {
+        throw new Error('Periodo maximo permitido: 24h.');
       }
       const payload = {
         sensor,
@@ -7808,7 +8014,8 @@
         direction: document.getElementById('peakHunterDirection').value,
         metric: document.getElementById('peakHunterMetric').value,
         start_time: start.toISOString(),
-        end_time: end.toISOString()
+        end_time: end.toISOString(),
+        sensitivity: document.getElementById('peakHunterSensitivity').value
       };
       if (protocol) payload.protocol = protocol;
       if (thresholdText) {
@@ -7821,28 +8028,85 @@
 
     function renderPeakHunterResult(payload) {
       const result = payload || {};
+      peakHunterLastResult = result;
       const best = result.best_peak || {};
       const metric = document.getElementById('peakHunterMetric').value || (best.packets_s !== undefined ? 'packets_s' : 'bits_s');
       const evidenceStatus = best.evidence_status || result.evidence_status || '-';
+      const dominant = result.dominant_group || best.dominant_group || null;
       setText('peakHunterPeaksDetected', formatNumber(result.peaks_detected || 0));
       setText('peakHunterPeaksAnalyzed', formatNumber(result.peaks_analyzed || 0));
       setText('peakHunterEvidenceStatus', evidenceStatus);
-      setText('peakHunterMitigationAllowed', result.mitigation_allowed ? 'true' : 'false');
+      setText('peakHunterMitigationAllowed', result.mitigation_allowed ? 'Sim' : 'Nao');
       setText('peakHunterResultStatus', result.best_peak ? `${result.classification || '-'} / janela ${result.evidence_window_used || '-'}s` : 'Sem pico analisado.');
+      setText('peakHunterDominantReadable', `Grupo dominante: ${peakHunterDominantLabel(dominant)}`);
       document.getElementById('peakHunterSummary').innerHTML = [
-        ['peak_time', best.peak_time || best.time || '-'],
-        ['peak_value', peakHunterMetricValue(best.peak_value || best.value || 0, metric)],
-        ['classification', result.classification || best.classification || '-'],
-        ['evidence_window_used', result.evidence_window_used ? `${result.evidence_window_used}s` : '-'],
-        ['evidence_windows_tried', (result.evidence_windows_tried || []).map(item => `${item.window_seconds}s/${item.evidence_status}`).join(' | ') || '-'],
-        ['mitigation_allowed', result.mitigation_allowed ? 'true' : 'false']
+        ['Melhor pico', best.peak_time || best.time || '-'],
+        ['Valor', peakHunterMetricValue(best.peak_value || best.value || 0, metric)],
+        ['Baseline p95', peakHunterMetricValue(best.baseline_p95 || result.baseline?.p95 || 0, metric)],
+        ['Baseline p99', peakHunterMetricValue(best.baseline_p99 || result.baseline?.p99 || 0, metric)],
+        ['Score', best.score || '-'],
+        ['Threshold', peakHunterMetricValue(best.threshold_used || result.threshold_used || 0, metric)],
+        ['Janela evidencia', result.evidence_window_used ? `${result.evidence_window_used}s` : '-'],
+        ['Status evidencia', evidenceStatus],
+        ['Classificacao', result.classification || best.classification || '-'],
+        ['Mitigacao permitida', result.mitigation_allowed ? 'Sim' : 'Nao'],
+        ['Acao recomendada', result.recommendation?.recommended_action || '-']
       ].map(([label, value]) => `<div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>`).join('');
       document.getElementById('peakHunterBestPeak').textContent = JSON.stringify(best || null, null, 2);
-      document.getElementById('peakHunterDominantGroup').textContent = JSON.stringify(result.dominant_group || best.dominant_group || null, null, 2);
+      document.getElementById('peakHunterDominantGroup').textContent = JSON.stringify(dominant, null, 2);
       document.getElementById('peakHunterRecommendation').textContent = JSON.stringify(result.recommendation || null, null, 2);
+      renderPeakHunterGroups(result.top_groups || best.groups || [], result.classification || best.classification || '-', metric);
+      renderPeakHunterConversations(result.top_conversations || best.top_conversations || []);
+      renderPeakHunterEndpointTable('peakHunterSourcesTable', result.top_sources || best.top_sources || [], 'src_ip');
+      renderPeakHunterEndpointTable('peakHunterDestinationsTable', result.top_destinations || best.top_destinations || [], 'dst_ip');
       renderPeakHunterCandidates(result.candidates || best.candidates || []);
-      renderPeakHunterSeries(result.series || [], metric);
+      renderPeakHunterSeries(result.series || [], metric, best, result.baseline || {});
       createIcons();
+    }
+
+    function renderPeakHunterGroups(groups, classification, metric) {
+      const rows = Array.isArray(groups) ? groups : [];
+      document.getElementById('peakHunterGroupsTable').innerHTML = rows.map(group => `
+        <tr>
+          <td>${escapeHtml(group.dst_ip || '-')}</td>
+          <td>${escapeHtml(group.dst_port ?? '-')}</td>
+          <td>${escapeHtml((group.protocol || '-').toUpperCase())}</td>
+          <td class="text-end">${formatNumber(group.total_packets || 0)}</td>
+          <td class="text-end">${formatBytes(group.total_bytes || 0)}</td>
+          <td class="text-end">${formatPps(group.max_packets_s || 0)}</td>
+          <td class="text-end">${formatBps(group.max_bits_s || 0)}</td>
+          <td class="text-end">${formatNumber(group.unique_src_count || 0)}</td>
+          <td class="text-end">${formatNumber(metric === 'bits_s' ? group.share_bits : group.share_packets)}%</td>
+          <td>${escapeHtml(classification || '-')}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem grupos retornados.</td></tr>';
+    }
+
+    function renderPeakHunterConversations(flows) {
+      const rows = Array.isArray(flows) ? flows : [];
+      document.getElementById('peakHunterConversationsTable').innerHTML = rows.map(flow => `
+        <tr>
+          <td>${escapeHtml(flow.src_ip || '-')}:${escapeHtml(flow.src_port ?? '-')} -> ${escapeHtml(flow.dst_ip || '-')}:${escapeHtml(flow.dst_port ?? '-')} ${escapeHtml((flow.protocol || '-').toUpperCase())}</td>
+          <td class="text-end">${formatNumber(flow.packets || 0)}</td>
+          <td class="text-end">${formatBytes(flow.bytes || 0)}</td>
+          <td class="text-end">${formatPps(flow.packets_s || 0)}</td>
+          <td class="text-end">${formatBps(flow.bits_s || 0)}</td>
+          <td class="text-end">${escapeHtml(flow.input_if ?? '-')}</td>
+          <td class="text-end">${escapeHtml(flow.output_if ?? '-')}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="7" class="text-muted">Sem conversas retornadas.</td></tr>';
+    }
+
+    function renderPeakHunterEndpointTable(id, items, field) {
+      const rows = Array.isArray(items) ? items : [];
+      document.getElementById(id).innerHTML = rows.map(item => `
+        <tr>
+          <td>${escapeHtml(item[field] || '-')}</td>
+          <td class="text-end">${formatNumber(item.packets || 0)}</td>
+          <td class="text-end">${formatBytes(item.bytes || 0)}</td>
+          <td class="text-end">${formatNumber(item.share || 0)}%</td>
+        </tr>
+      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados.</td></tr>';
     }
 
     function renderPeakHunterCandidates(candidates) {
@@ -7859,7 +8123,7 @@
       `).join('') || '<tr><td colspan="6" class="text-muted">Nenhum candidato retornado.</td></tr>';
     }
 
-    function renderPeakHunterSeries(series, metric) {
+    function renderPeakHunterSeries(series, metric, best = {}, baseline = {}) {
       const rows = Array.isArray(series) ? series : [];
       document.getElementById('peakHunterMetricHeader').textContent = metric;
       document.getElementById('peakHunterSeriesTable').innerHTML = rows.map(point => {
@@ -7873,11 +8137,42 @@
           </tr>
         `;
       }).join('') || '<tr><td colspan="3" class="text-muted">Sem serie temporal retornada.</td></tr>';
+      const labels = rows.map(point => formatDateTime(point.time));
+      const values = rows.map(point => Number(point[metric] ?? point.value ?? 0));
+      const p95 = Number(best.baseline_p95 ?? baseline.p95 ?? 0);
+      const p99 = Number(best.baseline_p99 ?? baseline.p99 ?? 0);
+      const threshold = Number(best.threshold_used ?? peakHunterLastResult?.threshold_used ?? 0);
+      const peakTime = best.peak_time || best.time;
+      const peakIndex = rows.findIndex(point => point.time === peakTime);
+      charts.peakHunterSeries.setOption({
+        tooltip: { trigger: 'axis' },
+        legend: { data: [metric, 'p95', 'p99', 'threshold'] },
+        grid: { left: 48, right: 24, top: 32, bottom: 32 },
+        xAxis: { type: 'category', data: labels },
+        yAxis: { type: 'value' },
+        series: [
+          {
+            name: metric,
+            type: 'line',
+            smooth: true,
+            symbolSize: 5,
+            data: values,
+            markPoint: peakIndex >= 0 ? { data: [{ name: 'Pico', coord: [peakIndex, Number(best.peak_value || best.value || 0)] }] } : undefined
+          },
+          { name: 'p95', type: 'line', data: rows.map(() => p95), symbol: 'none', lineStyle: { type: 'dashed' } },
+          { name: 'p99', type: 'line', data: rows.map(() => p99), symbol: 'none', lineStyle: { type: 'dashed' } },
+          { name: 'threshold', type: 'line', data: rows.map(() => threshold), symbol: 'none', lineStyle: { type: 'dotted' } }
+        ]
+      }, true);
+      setTimeout(() => charts.peakHunterSeries.resize(), 50);
     }
 
-    async function analyzePeakHunter() {
+    async function analyzePeakHunter(useRecent = false) {
       const button = document.getElementById('peakHunterAnalyzeButton');
+      const recentButton = document.getElementById('peakHunterRecentButton');
+      if (useRecent) setPeakHunterRecentWindow();
       button.disabled = true;
+      recentButton.disabled = true;
       setText('peakHunterStatus', 'Analisando picos...');
       setText('peakHunterResultStatus', 'Consultando serie temporal e flows.');
       try {
@@ -7888,36 +8183,90 @@
         });
         renderPeakHunterResult(payload);
         setText('peakHunterStatus', 'Analise concluida. Nenhuma mitigacao foi aplicada.');
+        await loadPeakHunterHistory();
       } catch (error) {
         setText('peakHunterStatus', `Falha: ${error.message}`);
         setText('peakHunterResultStatus', `Falha: ${error.message}`);
       } finally {
         button.disabled = false;
+        recentButton.disabled = false;
       }
     }
 
-    function fillPeakHunterFromAnomaly(event) {
+    async function loadPeakHunterHistory() {
+      try {
+        const query = new URLSearchParams();
+        const sensor = document.getElementById('peakHunterSensor')?.value?.trim();
+        const interfaceId = document.getElementById('peakHunterInterfaceId')?.value || document.getElementById('peakHunterManualInterfaceId')?.value;
+        if (sensor) query.set('sensor', sensor);
+        if (interfaceId) query.set('interface_id', interfaceId);
+        query.set('limit', '100');
+        const payload = await apiRequest(`/api/peak-hunter/history?${query}`);
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        document.getElementById('peakHunterHistoryStatus').textContent = `${formatNumber(items.length)} investigacoes`;
+        document.getElementById('peakHunterHistoryTable').innerHTML = items.map(item => `
+          <tr>
+            <td>${formatDateTime(item.peak_time)}</td>
+            <td>${escapeHtml(item.sensor || '-')}</td>
+            <td>${escapeHtml(item.interface_id ?? '-')}</td>
+            <td>${escapeHtml(item.direction || '-')}</td>
+            <td>${escapeHtml(item.metric || '-')}</td>
+            <td class="text-end">${peakHunterMetricValue(item.peak_value || 0, item.metric || 'packets_s')}</td>
+            <td>${escapeHtml(item.classification || '-')}</td>
+            <td>${escapeHtml(item.evidence_status || '-')}</td>
+            <td>${escapeHtml(item.dominant_group_label || peakHunterDominantLabel(item.dominant_group))}</td>
+            <td>${escapeHtml(item.recommended_action || '-')}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="10" class="text-muted">Sem historico.</td></tr>';
+      } catch (error) {
+        document.getElementById('peakHunterHistoryStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function fillPeakHunterFromAnomaly(event) {
       const anomaly = event || {};
-      const start = anomaly.started_at ? new Date(anomaly.started_at) : new Date(Date.now() - 15 * 60 * 1000);
-      const end = anomaly.last_seen_at ? new Date(anomaly.last_seen_at) : new Date(start.getTime() + 15 * 60 * 1000);
+      const started = anomaly.started_at ? new Date(anomaly.started_at) : null;
+      const ended = (anomaly.ended_at || anomaly.last_seen_at) ? new Date(anomaly.ended_at || anomaly.last_seen_at) : null;
+      const detected = (anomaly.detected_at || anomaly.created_at || anomaly.last_seen_at) ? new Date(anomaly.detected_at || anomaly.created_at || anomaly.last_seen_at) : new Date();
+      const start = started && ended ? new Date(started.getTime() - 2 * 60 * 1000) : new Date(detected.getTime() - 5 * 60 * 1000);
+      const end = started && ended ? new Date(ended.getTime() + 2 * 60 * 1000) : new Date(detected.getTime() + 5 * 60 * 1000);
       const direction = ['sends', 'receives'].includes(anomaly.direction) ? anomaly.direction : 'sends';
       const metric = ['packets_s', 'bits_s'].includes(anomaly.metric_unit) ? anomaly.metric_unit : 'packets_s';
       document.getElementById('peakHunterSensor').value = anomaly.sensor_name || anomaly.sensor || '';
+      await loadPeakHunterInterfaces(document.getElementById('peakHunterSensor').value.trim());
       document.getElementById('peakHunterInterfaceId').value = anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '';
+      document.getElementById('peakHunterManualInterfaceId').value = document.getElementById('peakHunterInterfaceId').value ? '' : (anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '');
       document.getElementById('peakHunterDirection').value = direction;
       document.getElementById('peakHunterMetric').value = metric;
+      document.getElementById('peakHunterPeriod').value = 'custom';
       document.getElementById('peakHunterStartTime').value = peakHunterDatetimeInput(start);
       document.getElementById('peakHunterEndTime').value = peakHunterDatetimeInput(end);
       document.getElementById('peakHunterProtocol').value = anomaly.protocol || anomaly.decoder || '';
       document.getElementById('peakHunterThreshold').value = anomaly.threshold_value || '';
-      setText('peakHunterFormHint', `Preenchido a partir da anomalia #${anomaly.id || currentAnomalyDetailId || '-'}.`);
+      setText('peakHunterFormHint', `Investigando anomalia #${anomaly.id || currentAnomalyDetailId || '-'}.`);
     }
 
     function investigateCurrentAnomalyPeak() {
       if (!currentAnomalyDetailEvent) return;
-      fillPeakHunterFromAnomaly(currentAnomalyDetailEvent);
       closeModal('anomalyDetailModal');
       showView('peak-hunter');
+      fillPeakHunterFromAnomaly(currentAnomalyDetailEvent).catch(console.error);
+    }
+
+    async function investigateInterfacePeak(index) {
+      const iface = currentInterfaces[Number(index)] || {};
+      const sensor = sensorCache.find(item => Number(item.id) === Number(currentSensorId)) || {};
+      const sensorName = sensor.name || sensor.exporter_ip || '';
+      showView('peak-hunter');
+      document.getElementById('peakHunterSensor').value = sensorName;
+      await loadPeakHunterInterfaces(sensorName);
+      document.getElementById('peakHunterInterfaceId').value = iface.if_index || '';
+      document.getElementById('peakHunterManualInterfaceId').value = document.getElementById('peakHunterInterfaceId').value ? '' : (iface.if_index || '');
+      document.getElementById('peakHunterDirection').value = (iface.direction || '').toLowerCase().includes('in') ? 'receives' : 'sends';
+      document.getElementById('peakHunterMetric').value = 'packets_s';
+      document.getElementById('peakHunterPeriod').value = '15';
+      setPeakHunterRecentWindow(15);
+      setText('peakHunterFormHint', `Interface ${iface.if_name || iface.if_alias || iface.if_index || '-'} pronta para investigar os ultimos 15 min.`);
     }
 
     function attackFilterSummary(vector) {
@@ -10769,6 +11118,9 @@
               <button type="button" class="btn btn-sm btn-outline-secondary sample-rate-inherit-button" data-if-index="${Number(iface.if_index) || 0}">
                 Herdar sensor
               </button>
+              <button type="button" class="btn btn-sm btn-outline-success investigate-interface-peak" data-index="${index}">
+                <i data-lucide="activity"></i><span>Investigar pico</span>
+              </button>
             </div>
           </td>
         </tr>
@@ -11305,6 +11657,12 @@
         if (!document.getElementById('peakHunterStartTime').value || !document.getElementById('peakHunterEndTime').value) {
           resetPeakHunterForm();
         }
+        Promise.all([loadPeakHunterSensors(), loadPeakHunterHistory()]).then(() => {
+          const sensor = document.getElementById('peakHunterSensor').value.trim();
+          if (sensor) return loadPeakHunterInterfaces(sensor);
+          return null;
+        }).catch(console.error);
+        setTimeout(() => charts.peakHunterSeries.resize(), 50);
       } else if (view === 'bgp') {
         document.getElementById('view-bgp').classList.add('active');
         document.querySelector('[data-nav-view="bgp"]').classList.add('active');
@@ -11547,6 +11905,13 @@
       event.preventDefault();
       analyzePeakHunter().catch(console.error);
     });
+    document.getElementById('peakHunterSensor').addEventListener('change', () => loadPeakHunterInterfaces().catch(console.error));
+    document.getElementById('peakHunterSensor').addEventListener('blur', () => loadPeakHunterInterfaces().catch(console.error));
+    document.getElementById('peakHunterPeriod').addEventListener('change', event => {
+      if (event.target.value !== 'custom') setPeakHunterRecentWindow(Number(event.target.value));
+    });
+    document.getElementById('peakHunterRecentButton').addEventListener('click', () => analyzePeakHunter(true).catch(console.error));
+    document.getElementById('peakHunterHistoryRefreshButton').addEventListener('click', () => loadPeakHunterHistory().catch(console.error));
     document.getElementById('peakHunterResetButton').addEventListener('click', resetPeakHunterForm);
     document.getElementById('saveAiMitigationButton').addEventListener('click', () => saveAiMitigationSettings().catch(console.error));
     document.getElementById('testAiMitigationButton').addEventListener('click', () => testAiMitigation().catch(console.error));
@@ -11786,6 +12151,7 @@
       const sample1000Button = target?.closest('.sample-rate-1000-button');
       const sampleResetButton = target?.closest('.sample-rate-reset-button');
       const sampleInheritButton = target?.closest('.sample-rate-inherit-button');
+      const investigatePeakButton = target?.closest('.investigate-interface-peak');
       if (calibrationButton) {
         applyCalibrationFactor(Number(calibrationButton.dataset.ifIndex)).catch(console.error);
       } else if (sample1000Button) {
@@ -11794,6 +12160,8 @@
         setInterfaceSampleRate(Number(sampleResetButton.dataset.ifIndex), 1, 1, true).catch(console.error);
       } else if (sampleInheritButton) {
         setInterfaceSampleRate(Number(sampleInheritButton.dataset.ifIndex), 1, 1, false).catch(console.error);
+      } else if (investigatePeakButton) {
+        investigateInterfacePeak(investigatePeakButton.dataset.index).catch(console.error);
       }
     });
 

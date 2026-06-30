@@ -29,6 +29,7 @@ class PeakHunterRequest:
     baseline: float | dict[str, Any] | None = None
     window_seconds: int = 5
     max_peaks: int = 5
+    sensitivity: str = "medium"
 
 
 def analyze_peak_hunter(
@@ -39,10 +40,11 @@ def analyze_peak_hunter(
 ) -> dict[str, Any]:
     series = normalize_series(series_fetcher(request), request.metric)
     baseline = calculate_baseline(series, request.metric, request.baseline)
-    peaks = detect_local_peaks(series, request.metric, baseline, request.threshold, request.max_peaks)
+    threshold = effective_threshold(baseline, request.threshold, request.sensitivity)
+    peaks = detect_local_peaks(series, request.metric, baseline, threshold, request.max_peaks)
     analyzed = []
     for peak in peaks:
-        analyzed.append(_analyze_peak(request, peak, baseline, flow_fetcher))
+        analyzed.append(_analyze_peak(request, peak, baseline, threshold, flow_fetcher))
     best = select_best_peak(analyzed)
     if save_history and best:
         save_history(history_record(request, best, baseline))
@@ -51,11 +53,18 @@ def analyze_peak_hunter(
         "peaks_detected": len(peaks),
         "peaks_analyzed": len(analyzed),
         "series": series,
+        "baseline": baseline,
+        "threshold_used": threshold,
+        "sensitivity": normalize_sensitivity(request.sensitivity),
         "best_peak": best,
         "evidence_window_used": best.get("evidence_window_used") if best else None,
         "evidence_windows_tried": best.get("evidence_windows_tried") if best else [],
         "dominant_group": best.get("dominant_group") if best else None,
         "classification": best.get("classification") if best else "insufficient_flow_evidence",
+        "top_groups": best.get("groups") if best else [],
+        "top_conversations": best.get("top_conversations") if best else [],
+        "top_sources": best.get("top_sources") if best else [],
+        "top_destinations": best.get("top_destinations") if best else [],
         "candidates": best.get("candidates") if best else [],
         "mitigation_allowed": bool(best and best.get("mitigation_allowed")),
         "recommendation": recommendation,
@@ -66,6 +75,7 @@ def _analyze_peak(
     request: PeakHunterRequest,
     peak: dict[str, Any],
     baseline: dict[str, float],
+    threshold: float,
     flow_fetcher: FlowFetcher,
 ) -> dict[str, Any]:
     peak_time = parse_time(peak["time"])
@@ -89,12 +99,16 @@ def _analyze_peak(
         **peak,
         "baseline_p95": baseline["p95"],
         "baseline_p99": baseline["p99"],
+        "threshold_used": threshold,
         "evidence_status": best_enrichment["evidence_status"],
         "evidence_window_used": selected_window,
         "evidence_windows_tried": tried,
         "dominant_group": best_enrichment.get("dominant_group"),
         "classification": best_enrichment.get("classification") or "insufficient_flow_evidence",
         "groups": best_enrichment.get("groups") or [],
+        "top_conversations": best_enrichment.get("top_conversations") or [],
+        "top_sources": best_enrichment.get("top_sources") or [],
+        "top_destinations": best_enrichment.get("top_destinations") or [],
         "candidates": candidates,
         "mitigation_allowed": mitigation_allowed,
         "apply_enabled": False,
@@ -127,6 +141,32 @@ def calculate_baseline(series: list[dict[str, Any]], metric: str, baseline: floa
     return {"p95": percentile(ordered, 95), "p99": percentile(ordered, 99)}
 
 
+def normalize_sensitivity(value: str | None) -> str:
+    text = str(value or "medium").strip().lower()
+    aliases = {
+        "alta": "high",
+        "high": "high",
+        "media": "medium",
+        "média": "medium",
+        "medium": "medium",
+        "baixa": "low",
+        "low": "low",
+    }
+    return aliases.get(text, "medium")
+
+
+def sensitivity_factor(value: str | None) -> float:
+    return {"high": 1.5, "medium": 2.0, "low": 3.0}[normalize_sensitivity(value)]
+
+
+def effective_threshold(baseline: dict[str, float], threshold: float | None, sensitivity: str | None = None) -> float:
+    if threshold and float(threshold) > 0:
+        return float(threshold)
+    p95 = float(baseline.get("p95") or 0)
+    p99 = float(baseline.get("p99") or 0)
+    return max(p99, p95 * sensitivity_factor(sensitivity))
+
+
 def detect_local_peaks(
     series: list[dict[str, Any]],
     metric: str,
@@ -135,7 +175,7 @@ def detect_local_peaks(
     max_peaks: int,
 ) -> list[dict[str, Any]]:
     peaks = []
-    floor = float(threshold or baseline.get("p95") or 0)
+    floor = float(threshold or 0)
     for index, point in enumerate(series):
         value = float(point.get(metric) or point.get("value") or 0)
         previous_value = float(series[index - 1].get(metric) or series[index - 1].get("value") or 0) if index > 0 else -1
@@ -295,6 +335,133 @@ def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None
     )
 
 
+def list_peak_analysis_history(
+    conn: sqlite3.Connection,
+    filters: dict[str, Any] | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    ensure_peak_analysis_db(conn)
+    filters = filters or {}
+    where = []
+    values: list[Any] = []
+    for column in ("sensor", "direction", "metric", "evidence_status", "classification"):
+        value = str(filters.get(column) or "").strip()
+        if value:
+            where.append(f"{column} = ?")
+            values.append(value)
+    if filters.get("interface_id") not in (None, ""):
+        where.append("interface_id = ?")
+        values.append(int(filters["interface_id"]))
+    if filters.get("start_time"):
+        where.append("peak_time >= ?")
+        values.append(str(filters["start_time"]))
+    if filters.get("end_time"):
+        where.append("peak_time <= ?")
+        values.append(str(filters["end_time"]))
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM peak_analysis
+        {where_sql}
+        ORDER BY peak_time DESC, created_at DESC
+        LIMIT ?
+        """,
+        (*values, int(limit)),
+    ).fetchall()
+    return [peak_analysis_row_to_dict(row) for row in rows]
+
+
+def peak_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    dominant_group = _json_value(item.get("dominant_group"), {})
+    candidates = _json_value(item.get("candidates"), [])
+    recommendation = recommendation_for_history(item, candidates)
+    return {
+        "id": item.get("id"),
+        "peak_time": item.get("peak_time"),
+        "sensor": item.get("sensor") or "",
+        "interface_id": item.get("interface_id"),
+        "direction": item.get("direction") or "",
+        "metric": item.get("metric") or "",
+        "peak_value": float(item.get("peak_value") or 0),
+        "baseline_p95": float(item.get("baseline_p95") or 0),
+        "baseline_p99": float(item.get("baseline_p99") or 0),
+        "score": float(item.get("score") or 0),
+        "evidence_status": item.get("evidence_status") or "",
+        "classification": item.get("classification") or "",
+        "dominant_group": dominant_group,
+        "dominant_group_label": dominant_group_label(dominant_group),
+        "candidates": candidates,
+        "recommended_action": recommendation["recommended_action"],
+        "recommendation": recommendation,
+        "created_at": item.get("created_at"),
+    }
+
+
+def recommendation_for_history(item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    if item.get("evidence_status") != "complete":
+        return {"recommended_action": "alert_only", "reason": "Evidencia incompleta."}
+    if any(candidate.get("action") != "alert_only" for candidate in candidates):
+        return {"recommended_action": "manual_review", "reason": "Revisar candidato manualmente."}
+    return {"recommended_action": "alert_only", "reason": "Sem candidato aplicavel."}
+
+
+def dominant_group_label(group: dict[str, Any] | None) -> str:
+    if not group:
+        return "-"
+    sources = group.get("unique_src_ips") or []
+    source_text = ", ".join(str(item) for item in sources[:3]) if sources else "origens"
+    if len(sources) > 3:
+        source_text += f" +{len(sources) - 3}"
+    dst = group.get("dst_ip") or "-"
+    port = group.get("dst_port") or "-"
+    proto = str(group.get("protocol") or "").upper() or "-"
+    return f"{source_text} -> {dst}:{port} {proto}"
+
+
+def anomaly_peak_hunter_prefill(anomaly: dict[str, Any]) -> dict[str, Any]:
+    started = parse_optional_time(anomaly.get("started_at"))
+    ended = parse_optional_time(anomaly.get("ended_at") or anomaly.get("last_seen_at"))
+    detected = parse_optional_time(anomaly.get("detected_at") or anomaly.get("created_at"))
+    if started and ended:
+        start = started - timedelta(minutes=2)
+        end = ended + timedelta(minutes=2)
+    else:
+        center = detected or parse_optional_time(anomaly.get("last_seen_at")) or datetime.now(timezone.utc)
+        start = center - timedelta(minutes=5)
+        end = center + timedelta(minutes=5)
+    if end <= start:
+        end = start + timedelta(minutes=10)
+    metric = anomaly.get("metric_unit") or anomaly.get("metric") or "packets_s"
+    if metric not in {"packets_s", "bits_s"}:
+        metric = "packets_s"
+    direction = anomaly.get("direction") or "sends"
+    if direction not in {"sends", "receives"}:
+        direction = "sends"
+    return {
+        "anomaly_id": anomaly.get("id"),
+        "sensor": anomaly.get("sensor_name") or anomaly.get("sensor") or "",
+        "interface_id": anomaly.get("interface_if_index") or anomaly.get("output_if") or anomaly.get("input_if") or None,
+        "direction": direction,
+        "metric": metric,
+        "protocol": anomaly.get("protocol") or anomaly.get("decoder") or "",
+        "start_time": start.isoformat().replace("+00:00", "Z"),
+        "end_time": end.isoformat().replace("+00:00", "Z"),
+        "threshold": anomaly.get("threshold_value") or None,
+        "label": f"Investigando anomalia #{anomaly.get('id') or '-'}",
+    }
+
+
+def parse_optional_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return parse_time(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def history_record(request: PeakHunterRequest, peak: dict[str, Any], baseline: dict[str, float]) -> dict[str, Any]:
     return {
         "peak_time": peak.get("peak_time") or peak.get("time"),
@@ -377,3 +544,12 @@ def _string_time(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value or "")
+
+
+def _json_value(value: Any, fallback: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value or "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback

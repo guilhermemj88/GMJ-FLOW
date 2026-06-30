@@ -1,5 +1,7 @@
 import sys
+import os
 import sqlite3
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db
+
+try:
+    from app.api import peak_hunter as peak_hunter_api
+except (ImportError, ModuleNotFoundError):
+    peak_hunter_api = None
 
 
 class PeakHunterTest(unittest.TestCase):
@@ -68,6 +75,19 @@ class PeakHunterTest(unittest.TestCase):
         self.assertFalse(result["best_peak"]["apply_enabled"])
         self.assertTrue(all(candidate.get("apply_enabled") is False for candidate in result["candidates"]))
 
+    def test_auto_threshold_when_empty(self):
+        request = PeakHunterRequest(
+            **{
+                **self.request.__dict__,
+                "threshold": None,
+                "sensitivity": "high",
+                "max_peaks": 3,
+            }
+        )
+        result = analyze_peak_hunter(request, self._series_with_clear_auto_peak, lambda _request, _time, _window: [])
+        self.assertGreater(result["threshold_used"], result["baseline"]["p95"])
+        self.assertEqual(result["peaks_detected"], 1)
+
     def test_peak_analysis_table_created_by_migration(self):
         conn = sqlite3.connect(":memory:")
         try:
@@ -99,12 +119,142 @@ class PeakHunterTest(unittest.TestCase):
         self.assertEqual(columns["id"][2].upper(), "INTEGER")
         self.assertEqual(columns["created_at"][4].upper(), "CURRENT_TIMESTAMP")
 
+    def test_rejects_invalid_time_range(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        with self.assertRaises(Exception):
+            peak_hunter_api._request_window(self.base_time + timedelta(minutes=1), self.base_time, None)
+
+    def test_recent_period_defaults(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        start, end = peak_hunter_api._request_window(None, None, 15)
+        self.assertAlmostEqual((end - start).total_seconds(), 900, delta=2)
+
+    def test_options_sensors(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path)
+            original = peak_hunter_api.fetch_peak_hunter_sensors
+            peak_hunter_api.fetch_peak_hunter_sensors = lambda: [
+                {"sensor_name": "edge-a", "sensor_id": "edge-a", "last_seen": self.base_time, "row_count": 10}
+            ]
+            try:
+                payload = peak_hunter_api.peak_hunter_sensor_options()
+            finally:
+                peak_hunter_api.fetch_peak_hunter_sensors = original
+            self.assertEqual(payload["items"][0]["sensor_name"], "edge-a")
+            self.assertEqual(payload["items"][0]["exporter_ip"], "192.0.2.10")
+
+    def test_options_interfaces(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path)
+            original = peak_hunter_api.fetch_peak_hunter_interfaces
+            peak_hunter_api.fetch_peak_hunter_interfaces = lambda sensor: [
+                {"interface_id": 140, "last_seen": self.base_time, "rx_packets": 10, "tx_packets": 20}
+            ]
+            try:
+                payload = peak_hunter_api.peak_hunter_interface_options("edge-a")
+            finally:
+                peak_hunter_api.fetch_peak_hunter_interfaces = original
+            self.assertEqual(payload["items"][0]["interface_id"], 140)
+            self.assertIn("Eth-Trunk10", payload["items"][0]["label"])
+
+    def test_history_endpoint(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        with temporary_peak_db() as db_path:
+            conn = sqlite3.connect(db_path)
+            try:
+                from app.services.peak_hunter import save_peak_analysis
+
+                save_peak_analysis(
+                    conn,
+                    {
+                        "peak_time": self.base_time.isoformat(),
+                        "interface_id": 10,
+                        "sensor": "edge-a",
+                        "direction": "sends",
+                        "metric": "packets_s",
+                        "peak_value": 120000,
+                        "baseline_p95": 1000,
+                        "baseline_p99": 2000,
+                        "score": 120,
+                        "evidence_status": "complete",
+                        "classification": "udp_flood_outbound_to_single_destination_port",
+                        "dominant_group": {"dst_ip": "203.0.113.10", "dst_port": 53, "protocol": "udp"},
+                        "candidates": [{"action": "alert_only"}],
+                        "created_at": self.base_time.isoformat(),
+                    },
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            payload = peak_hunter_api.peak_hunter_history(sensor="edge-a")
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertEqual(payload["items"][0]["evidence_status"], "complete")
+
+    def test_from_anomaly_prefills_window(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE anomaly_events (
+                        id INTEGER PRIMARY KEY,
+                        sensor_id INTEGER,
+                        interface_if_index INTEGER,
+                        output_if INTEGER,
+                        input_if INTEGER,
+                        direction TEXT,
+                        metric_unit TEXT,
+                        protocol TEXT,
+                        decoder TEXT,
+                        threshold_value REAL,
+                        started_at TEXT,
+                        last_seen_at TEXT,
+                        ended_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO anomaly_events (
+                        id, sensor_id, interface_if_index, direction, metric_unit, protocol,
+                        threshold_value, started_at, last_seen_at, ended_at
+                    )
+                    VALUES (7, 1, 140, 'sends', 'packets_s', 'udp', 50000, ?, ?, ?)
+                    """,
+                    (
+                        self.base_time.isoformat(),
+                        (self.base_time + timedelta(minutes=3)).isoformat(),
+                        (self.base_time + timedelta(minutes=4)).isoformat(),
+                    ),
+                )
+            payload = peak_hunter_api.peak_hunter_from_anomaly(7)
+            self.assertEqual(payload["anomaly_id"], 7)
+            self.assertEqual(payload["interface_id"], 140)
+            self.assertEqual(payload["start_time"], (self.base_time - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"))
+
     def _series(self, request):
         return [
             {"time": self.base_time.isoformat(), "packets_s": 1000},
             {"time": (self.base_time + timedelta(seconds=5)).isoformat(), "packets_s": 120000},
             {"time": (self.base_time + timedelta(seconds=10)).isoformat(), "packets_s": 2000},
         ]
+
+    def _series_with_clear_auto_peak(self, request):
+        rows = [
+            {"time": (self.base_time + timedelta(seconds=index * 5)).isoformat(), "packets_s": 1000}
+            for index in range(20)
+        ]
+        rows[10]["packets_s"] = 100000
+        return rows
 
     def _series_bits(self, request):
         return [
@@ -150,6 +300,57 @@ def dominant_udp_flows():
         {"src_ip": "100.64.0.3", "src_port": 1002, "dst_ip": "203.0.113.10", "dst_port": 65535, "protocol": "udp", "packets": 1400, "bytes": 800000, "packets_s": 4500},
         {"src_ip": "100.64.0.9", "src_port": 9999, "dst_ip": "198.51.100.9", "dst_port": 9, "protocol": "udp", "packets": 10, "bytes": 1000, "packets_s": 10},
     ]
+
+
+class temporary_peak_db:
+    def __enter__(self):
+        self.original = os.environ.get("GMJFLOW_DB_PATH")
+        handle = tempfile.NamedTemporaryFile(delete=False)
+        self.path = handle.name
+        handle.close()
+        os.environ["GMJFLOW_DB_PATH"] = self.path
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.original is None:
+            os.environ.pop("GMJFLOW_DB_PATH", None)
+        else:
+            os.environ["GMJFLOW_DB_PATH"] = self.original
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+def create_sensor_schema(db_path):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sensors (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                exporter_ip TEXT,
+                active INTEGER,
+                updated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE sensor_interfaces (
+                sensor_id INTEGER,
+                if_index INTEGER,
+                if_name TEXT,
+                if_descr TEXT,
+                if_alias TEXT,
+                direction TEXT
+            )
+            """
+        )
+        conn.execute("INSERT INTO sensors VALUES (1, 'edge-a', '192.0.2.10', 1, '2026-06-30T12:00:00Z')")
+        conn.execute(
+            "INSERT INTO sensor_interfaces VALUES (1, 140, 'Eth-Trunk10.123', 'LINK/CLIENTE', 'alias', 'sends')"
+        )
 
 
 if __name__ == "__main__":

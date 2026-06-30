@@ -116,6 +116,72 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
     )
 
 
+def fetch_peak_hunter_sensors() -> list[dict[str, Any]]:
+    return query_clickhouse(
+        """
+        SELECT
+            sensor AS sensor_name,
+            any(sensor) AS sensor_id,
+            max(flow_time) AS last_seen,
+            count() AS row_count
+        FROM flow_raw
+        WHERE sensor != ''
+        GROUP BY sensor
+        ORDER BY last_seen DESC
+        LIMIT 500
+        """
+    )
+
+
+def fetch_peak_hunter_interfaces(sensor: str) -> list[dict[str, Any]]:
+    filters = []
+    params: dict[str, Any] = {}
+    if sensor:
+        filters.append("sensor = {sensor:String}")
+        params["sensor"] = sensor
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    return query_clickhouse(
+        f"""
+        SELECT
+            interface_id,
+            max(last_seen) AS last_seen,
+            sum(rx_packets) AS rx_packets,
+            sum(tx_packets) AS tx_packets,
+            sum(rx_bytes) AS rx_bytes,
+            sum(tx_bytes) AS tx_bytes
+        FROM
+        (
+            SELECT
+                input_if AS interface_id,
+                max(flow_time) AS last_seen,
+                sum(packets) AS rx_packets,
+                0 AS tx_packets,
+                sum(bytes) AS rx_bytes,
+                0 AS tx_bytes
+            FROM flow_raw
+            {where}
+            GROUP BY input_if
+            UNION ALL
+            SELECT
+                output_if AS interface_id,
+                max(flow_time) AS last_seen,
+                0 AS rx_packets,
+                sum(packets) AS tx_packets,
+                0 AS rx_bytes,
+                sum(bytes) AS tx_bytes
+            FROM flow_raw
+            {where}
+            GROUP BY output_if
+        )
+        WHERE interface_id > 0
+        GROUP BY interface_id
+        ORDER BY interface_id
+        LIMIT 2000
+        """,
+        params,
+    )
+
+
 def _proto_number(value: str) -> int:
     text = str(value or "").strip().lower()
     if text in {"udp", "17"}:
