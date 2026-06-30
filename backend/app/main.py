@@ -8458,8 +8458,8 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "operator_summary": item.get("operator_summary") or "",
         "report_summary": item.get("report_summary") or "",
         "rendered_command_preview": response.get("rendered_command_preview") if isinstance(response, dict) else "",
-        "risks": response.get("risks") if isinstance(response, dict) else [],
-        "checks_before_approve": response.get("checks_before_approve") if isinstance(response, dict) else [],
+        "risks": normalize_string_list(response.get("risks")) if isinstance(response, dict) else [],
+        "checks_before_approve": normalize_string_list(response.get("checks_before_approve")) if isinstance(response, dict) else [],
         "request_payload_chars": int(item.get("request_payload_chars") or 0),
         "prompt_chars": int(item.get("prompt_chars") or 0),
         "candidate_count": int(item.get("candidate_count") or 0),
@@ -8499,6 +8499,34 @@ def ai_bool(value: Any) -> bool:
         return bool(value)
     text = clean_text(value).lower()
     return text in {"1", "true", "yes", "sim", "on"}
+
+
+def normalize_string_list(value: Any, max_items: int = 10, max_chars: int = 500) -> list[str]:
+    if value is None or isinstance(value, bool) or isinstance(value, (int, float)):
+        return []
+    if isinstance(value, str):
+        text = clean_text(value)[:max_chars]
+        return [text] if text else []
+    if isinstance(value, dict):
+        if not value:
+            return []
+        text = clean_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))[:max_chars]
+        return [text] if text else []
+    if isinstance(value, (list, tuple, set)):
+        items: list[str] = []
+        for item in value:
+            if item is None or isinstance(item, bool) or isinstance(item, (int, float)):
+                continue
+            if isinstance(item, dict):
+                text = clean_text(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))[:max_chars]
+            else:
+                text = clean_text(item)[:max_chars]
+            if text:
+                items.append(text)
+            if len(items) >= max_items:
+                break
+        return items
+    return []
 
 
 def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None = None, text_limit: int = 320) -> dict[str, Any]:
@@ -8806,7 +8834,11 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
     policy = candidate.get("policy_decision") or {}
     policy_denied = policy.get("decision") == "deny"
     action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
-    never_announce = ai_bool(candidate.get("never_announce")) or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
+    never_announce = (
+        ai_bool(candidate.get("never_announce"))
+        or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
+        or clean_text(candidate.get("source")) == "fallback_analysis"
+    )
     candidate_manual_required = ai_bool(candidate.get("manual_approval_required"))
     candidate_allows_auto = ai_bool(candidate.get("allow_auto"))
     allow_auto = (
@@ -8819,6 +8851,12 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
         and not never_announce
     )
     manual_required = ai_bool(response.get("manual_approval_required")) or not allow_auto or policy_denied or never_announce or candidate_manual_required
+    checks_before_approve = normalize_string_list(response.get("checks_before_approve"))
+    if not checks_before_approve:
+        checks_before_approve = [
+            "Confirmar top flow diretamente no ClickHouse/roteador.",
+            "Validar impacto do FlowSpec antes de qualquer aprovação manual.",
+        ]
     return {
         **response,
         "recommended_candidate_index": index,
@@ -8831,8 +8869,10 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
         "operator_summary": clean_text(response.get("operator_summary"))[:2000],
         "report_summary": clean_text(response.get("report_summary"))[:2000],
         "rendered_command_preview": clean_text(response.get("rendered_command_preview") or candidate.get("rendered_command_preview"))[:2000],
-        "risks": [clean_text(item)[:500] for item in (response.get("risks") or []) if clean_text(item)][:10],
-        "checks_before_approve": [clean_text(item)[:500] for item in (response.get("checks_before_approve") or []) if clean_text(item)][:10],
+        "risks": normalize_string_list(response.get("risks")),
+        "warnings": normalize_string_list(response.get("warnings")),
+        "reasons": normalize_string_list(response.get("reasons")),
+        "checks_before_approve": checks_before_approve,
     }
 
 
