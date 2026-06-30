@@ -349,34 +349,41 @@ ATTACK_COMPARISONS = {"over"}
 ATTACK_THRESHOLD_UNITS = {"bits_s", "packets_s", "flows_s"}
 ATTACK_PROTOCOLS = {"any", "tcp", "udp", "icmp", "icmpv6", "gre", "esp", "other"}
 ATTACK_TCP_FLAGS = {"any", "fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr", "syn+ack", "null", "none"}
-ATTACK_DECODERS = {
-    "IP",
-    "TCP",
-    "TCP+SYN",
-    "TCP+SYNACK",
-    "TCP+ACK",
-    "TCP+RST",
-    "TCP+NULL",
-    "TCP+ALL",
-    "UDP",
-    "ICMP",
-    "DNS",
-    "NTP",
-    "QUIC",
-    "UDP+QUIC",
-    "HTTP",
-    "HTTPS",
-    "MAIL",
-    "SIP",
-    "IPSEC",
-    "FRAGMENT",
-    "NETBIOS",
-    "MEMCACHED",
-    "OTHER",
-    "INVALID",
-    "FLOWS",
-    "FLOW+SYN",
-}
+DECODER_REGISTRY = [
+    {"id": "IP", "label": "Any IP", "protocol": "any", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "TCP", "label": "TCP", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "TCP+SYN", "label": "TCP SYN", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "syn"},
+    {"id": "TCP+SYNACK", "label": "TCP SYN/ACK", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "syn+ack"},
+    {"id": "TCP+ACK", "label": "TCP ACK", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "ack"},
+    {"id": "TCP+RST", "label": "TCP RST", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "rst"},
+    {"id": "TCP+NULL", "label": "TCP NULL", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "null"},
+    {"id": "TCP+ALL", "label": "TCP all flags", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "UDP", "label": "UDP", "protocol": "udp", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "DNS", "label": "DNS", "protocol": "udp", "src_port": "53", "dst_port": "53", "tcp_flags": "any"},
+    {"id": "NTP", "label": "NTP", "protocol": "udp", "src_port": "123", "dst_port": "123", "tcp_flags": "any"},
+    {"id": "SSDP", "label": "SSDP", "protocol": "udp", "src_port": "1900", "dst_port": "1900", "tcp_flags": "any"},
+    {"id": "CLDAP", "label": "CLDAP", "protocol": "udp", "src_port": "389", "dst_port": "389", "tcp_flags": "any"},
+    {"id": "CHARGEN", "label": "CHARGEN", "protocol": "udp", "src_port": "19", "dst_port": "19", "tcp_flags": "any"},
+    {"id": "QUIC", "label": "QUIC", "protocol": "udp", "src_port": "any", "dst_port": "443", "tcp_flags": "any"},
+    {"id": "UDP+QUIC", "label": "UDP QUIC", "protocol": "udp", "src_port": "any", "dst_port": "443", "tcp_flags": "any"},
+    {"id": "ICMP", "label": "ICMP", "protocol": "icmp", "src_port": "any", "dst_port": "any", "tcp_flags": "any", "icmp_type": "any", "icmp_code": "any"},
+    {"id": "GRE", "label": "GRE", "protocol": "gre", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "ESP", "label": "ESP", "protocol": "esp", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "FRAGMENT", "label": "Fragments", "protocol": "any", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "HTTP", "label": "HTTP", "protocol": "tcp", "src_port": "any", "dst_port": "80", "tcp_flags": "any"},
+    {"id": "HTTPS", "label": "HTTPS", "protocol": "tcp", "src_port": "any", "dst_port": "443", "tcp_flags": "any"},
+    {"id": "MAIL", "label": "Mail", "protocol": "tcp", "src_port": "any", "dst_port": "25,465,587,110,995,143,993", "tcp_flags": "any"},
+    {"id": "SIP", "label": "SIP", "protocol": "udp", "src_port": "any", "dst_port": "5060,5061", "tcp_flags": "any"},
+    {"id": "IPSEC", "label": "IPsec", "protocol": "esp", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "NETBIOS", "label": "NetBIOS", "protocol": "udp", "src_port": "any", "dst_port": "137,138,139", "tcp_flags": "any"},
+    {"id": "MEMCACHED", "label": "Memcached", "protocol": "udp", "src_port": "11211", "dst_port": "11211", "tcp_flags": "any"},
+    {"id": "OTHER", "label": "Other", "protocol": "other", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "CUSTOM", "label": "Custom", "protocol": "any", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "INVALID", "label": "Invalid", "protocol": "other", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "FLOWS", "label": "Flows", "protocol": "any", "src_port": "any", "dst_port": "any", "tcp_flags": "any"},
+    {"id": "FLOW+SYN", "label": "Flow SYN", "protocol": "tcp", "src_port": "any", "dst_port": "any", "tcp_flags": "syn"},
+]
+ATTACK_DECODERS = {item["id"] for item in DECODER_REGISTRY}
 ATTACK_SEVERITIES = {"info", "warning", "critical"}
 ATTACK_RESPONSE_ACTIONS = {"alert_only", "response_ip", "webhook_future", "ignore"}
 ATTACK_VECTOR_PRESET_TEMPLATES = [
@@ -469,6 +476,11 @@ LEARN_DECODER_UNITS = (
     ("ICMP", "flows_s"),
     ("OTHER", "bits_s"),
     ("OTHER", "packets_s"),
+    ("DNS", "packets_s"),
+    ("NTP", "packets_s"),
+    ("SSDP", "packets_s"),
+    ("CLDAP", "packets_s"),
+    ("CHARGEN", "packets_s"),
     ("FLOWS", "flows_s"),
 )
 
@@ -494,19 +506,26 @@ DETECTION_PROTOCOLS = {
     "UDP",
     "TCP",
     "TCP+SYN",
+    "TCP+ACK",
+    "TCP+RST",
     "ICMP",
     "GRE",
+    "ESP",
     "DNS",
+    "NTP",
+    "SSDP",
     "CLDAP",
+    "CHARGEN",
     "UDP-QUIC",
     "OTHER",
+    "CUSTOM",
 }
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
 BGP_MODES = {"detection_only", "dry_run", "manual_approval", "automatic"}
 BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion"}
-BGP_ACTIONS = {"discard", "accept", "rate_limit", "redirect", "announce_route"}
+BGP_ACTIONS = {"alert_only", "discard", "accept", "rate_limit", "redirect", "community", "blackhole", "announce_route"}
 BGP_FLOWSPEC_ACTIONS = {"discard", "accept", "rate_limit"}
 BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "target_ip", "target_cidr", "anomaly_src_ip", "anomaly_dst_ip"}
 BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "tcp", "udp", "icmp"}
@@ -794,6 +813,9 @@ class AttackVectorPayload(BaseModel):
     response_profile_id: int | None = Field(None, ge=1)
     connector_id: int | None = Field(None, ge=1)
     mitigation_mode: str = "disabled"
+    use_global_whitelist: bool = True
+    extra_whitelist_ids: list[int] = Field(default_factory=list)
+    bypass_whitelist: bool = False
     max_auto_prefixlen_v4: int | None = Field(None, ge=0, le=32)
     max_auto_prefixlen_v6: int | None = Field(None, ge=0, le=128)
     require_protected_prefix: bool = True
@@ -809,6 +831,10 @@ class AttackVectorLearnPayload(BaseModel):
     days: int = Field(2, ge=1, le=30)
     margin_percent: float = Field(20, ge=0, le=500)
     sensor_id: int | None = Field(None, ge=1)
+    interface_if_index: int | None = Field(None, ge=0)
+    direction: str | None = None
+    zone_id: int | None = Field(None, ge=1)
+    window_minutes: int | None = Field(None, ge=1, le=43200)
     target_cidr: str | None = None
 
 
@@ -926,6 +952,11 @@ class BgpResponseProfilePayload(BaseModel):
     default_rate_limit_raw: str | None = None
     max_rate_limit_bps: int | None = Field(None, ge=1)
     min_rate_limit_bps: int | None = Field(None, ge=1)
+    bgp_community: str = ""
+    action_metadata: str = ""
+    use_global_whitelist: bool = True
+    extra_whitelist_ids: list[int] = Field(default_factory=list)
+    bypass_whitelist: bool = False
     redirect_target: str = ""
     next_hop: str = ""
     community: str = ""
@@ -1353,6 +1384,13 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             baseline_average REAL NOT NULL DEFAULT 0,
             margin_percent REAL NOT NULL DEFAULT 20,
             confidence REAL NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            samples_json TEXT NOT NULL DEFAULT '[]',
+            impact TEXT NOT NULL DEFAULT '',
+            attack_shape TEXT NOT NULL DEFAULT '',
+            inferred_protocol TEXT NOT NULL DEFAULT '',
+            suggested_metric TEXT NOT NULL DEFAULT '',
+            expected_impact TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT '',
             applied_at TEXT,
@@ -1472,6 +1510,9 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "attack_vectors", "cooldown_seconds", "cooldown_seconds INTEGER NOT NULL DEFAULT 300")
     ensure_sqlite_column(conn, "attack_vectors", "max_active_announcements", "max_active_announcements INTEGER NOT NULL DEFAULT 10")
     ensure_sqlite_column(conn, "attack_vectors", "duration_seconds", "duration_seconds INTEGER NOT NULL DEFAULT 900")
+    ensure_sqlite_column(conn, "attack_vectors", "use_global_whitelist", "use_global_whitelist INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "attack_vectors", "extra_whitelist_ids", "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "attack_vectors", "bypass_whitelist", "bypass_whitelist INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "ai_mitigation_analysis", "request_payload_chars", "request_payload_chars INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "ai_mitigation_analysis", "prompt_chars", "prompt_chars INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "ai_mitigation_analysis", "candidate_count", "candidate_count INTEGER NOT NULL DEFAULT 0")
@@ -1501,6 +1542,37 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "anomaly_events", "top_bytes", "top_bytes INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "reason", "reason TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "samples_json", "samples_json TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "impact", "impact TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "attack_shape", "attack_shape TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "inferred_protocol", "inferred_protocol TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "suggested_metric", "suggested_metric TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "attack_vector_suggestions", "expected_impact", "expected_impact TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attack_vector_response_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vector_id INTEGER NOT NULL,
+            response_profile_id INTEGER,
+            condition_type TEXT NOT NULL DEFAULT 'severity',
+            condition_operator TEXT NOT NULL DEFAULT '=',
+            condition_value TEXT NOT NULL DEFAULT '',
+            severity TEXT NOT NULL DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 100,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            manual_approval_required INTEGER NOT NULL DEFAULT 1,
+            recommendation_only INTEGER NOT NULL DEFAULT 0,
+            use_global_whitelist INTEGER NOT NULL DEFAULT 1,
+            extra_whitelist_ids TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(vector_id) REFERENCES attack_vectors(id) ON DELETE CASCADE,
+            FOREIGN KEY(response_profile_id) REFERENCES bgp_response_profiles(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vector_response_rules_vector ON attack_vector_response_rules(vector_id, enabled, priority)")
     conn.execute(
         """
         UPDATE attack_vector_suggestions
@@ -2548,6 +2620,11 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             default_rate_limit_raw TEXT NOT NULL DEFAULT '',
             max_rate_limit_bps INTEGER,
             min_rate_limit_bps INTEGER,
+            bgp_community TEXT NOT NULL DEFAULT '',
+            action_metadata TEXT NOT NULL DEFAULT '',
+            use_global_whitelist INTEGER NOT NULL DEFAULT 1,
+            extra_whitelist_ids TEXT NOT NULL DEFAULT '[]',
+            bypass_whitelist INTEGER NOT NULL DEFAULT 0,
             redirect_target TEXT NOT NULL DEFAULT '',
             next_hop TEXT NOT NULL DEFAULT '',
             community TEXT NOT NULL DEFAULT '',
@@ -2629,6 +2706,11 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_response_profiles", "default_rate_limit_raw", "default_rate_limit_raw TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_response_profiles", "max_rate_limit_bps", "max_rate_limit_bps INTEGER")
     ensure_sqlite_column(conn, "bgp_response_profiles", "min_rate_limit_bps", "min_rate_limit_bps INTEGER")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "bgp_community", "bgp_community TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "action_metadata", "action_metadata TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "use_global_whitelist", "use_global_whitelist INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "extra_whitelist_ids", "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "bypass_whitelist", "bypass_whitelist INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_announcement_events (
@@ -6194,7 +6276,7 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
     item = dict(row)
     response_type = item.get("response_type") or "flowspec"
     default_action = item.get("default_action") or item.get("action") or "discard"
-    if response_type == "flowspec":
+    if response_type == "flowspec" and default_action not in {"alert_only", "blackhole", "community"}:
         default_action = normalize_flowspec_action(default_action)
     default_rate_limit_bps = item.get("default_rate_limit_bps") or item.get("rate_limit_bps")
     return {
@@ -6221,6 +6303,11 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "default_rate_limit_raw": item.get("default_rate_limit_raw") or item.get("rate_limit_value_raw") or "",
         "max_rate_limit_bps": item.get("max_rate_limit_bps"),
         "min_rate_limit_bps": item.get("min_rate_limit_bps"),
+        "bgp_community": item.get("bgp_community") or item.get("community") or "",
+        "action_metadata": item.get("action_metadata") or "",
+        "use_global_whitelist": sqlite_bool(item.get("use_global_whitelist", 1)),
+        "extra_whitelist_ids": bgp_json_loads(item.get("extra_whitelist_ids"), []),
+        "bypass_whitelist": sqlite_bool(item.get("bypass_whitelist", 0)),
         "redirect_target": item.get("redirect_target") or "",
         "next_hop": item.get("next_hop") or "",
         "community": item.get("community") or "",
@@ -6403,7 +6490,8 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
     max_duration = int(payload.max_duration_seconds)
     response_type = normalize_choice(payload.response_type, BGP_RESPONSE_TYPES, "response_type")
     action = normalize_choice(payload.action, BGP_ACTIONS, "action")
-    default_action = normalize_flowspec_action(payload.default_action or action) if response_type == "flowspec" else action
+    requested_default_action = clean_text(payload.default_action or action) or "discard"
+    default_action = normalize_flowspec_action(requested_default_action) if response_type == "flowspec" and requested_default_action not in {"alert_only", "blackhole", "community"} else requested_default_action
     default_rate_raw = clean_text(payload.default_rate_limit_raw or payload.rate_limit_value_raw)
     default_rate_bps = normalize_rate_limit_bps(default_rate_raw, payload.default_rate_limit_bps or payload.rate_limit_bps) if default_action == "rate_limit" else None
     min_rate = payload.min_rate_limit_bps
@@ -6435,6 +6523,11 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "default_rate_limit_raw": default_rate_raw,
         "max_rate_limit_bps": max_rate,
         "min_rate_limit_bps": min_rate,
+        "bgp_community": clean_text(payload.bgp_community or payload.community),
+        "action_metadata": clean_text(payload.action_metadata),
+        "use_global_whitelist": 1 if payload.use_global_whitelist else 0,
+        "extra_whitelist_ids": json.dumps([int(item) for item in payload.extra_whitelist_ids or []], sort_keys=True),
+        "bypass_whitelist": 1 if payload.bypass_whitelist else 0,
         "redirect_target": clean_text(payload.redirect_target),
         "next_hop": clean_text(payload.next_hop),
         "community": clean_text(payload.community),
@@ -6773,6 +6866,8 @@ def normalize_rate_limit_bps(raw: Any = None, bps: Any = None) -> int | None:
 def flowspec_action_settings(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = profile or {}
     fallback_action = clean_text(profile.get("default_action") or profile.get("action") or "discard")
+    if fallback_action in {"alert_only", "blackhole", "community"}:
+        fallback_action = "discard"
     action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or fallback_action)
     raw = clean_text(candidate.get("rate_limit_value_raw") or candidate.get("default_rate_limit_raw") or profile.get("default_rate_limit_raw") or profile.get("rate_limit_value_raw"))
     bps = normalize_rate_limit_bps(raw, candidate.get("rate_limit_bps") or candidate.get("default_rate_limit_bps") or profile.get("default_rate_limit_bps") or profile.get("rate_limit_bps")) if action == "rate_limit" else None
@@ -7579,7 +7674,8 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
 
 
 def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any], vector: dict[str, Any] | None) -> dict[str, Any]:
-    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if vector and vector.get("response_profile_id") else default_bgp_profile(conn, preferred_profile_names(candidate["attack_vector_name"]))
+    explicit_profile = bool(vector and vector.get("response_profile_id"))
+    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if explicit_profile else None
     connector = None
     if vector and vector.get("connector_id"):
         connector = fetch_bgp_connector(conn, int(vector["connector_id"]))
@@ -7592,6 +7688,12 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
     enabled = bool(vector.get("mitigation_enabled")) if vector else True
     candidate["mitigation_mode"] = mode if enabled else "disabled"
+    if not explicit_profile:
+        candidate["mitigation_mode"] = "manual_approval"
+        candidate["manual_approval_required"] = True
+        candidate["allow_auto"] = False
+        candidate["never_announce"] = True
+        candidate["response_profile_fallback"] = "alert_only_manual_approval"
     if candidate.get("mitigation_basis") == "top_conversation" or candidate.get("attack_vector_name") in UDP_SPECIAL_VECTORS:
         candidate["mitigation_mode"] = "manual_approval"
     candidate["requested_mode"] = candidate["mitigation_mode"]
@@ -7602,6 +7704,9 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     candidate["cooldown_seconds"] = int(vector.get("cooldown_seconds") or 300) if vector else int(candidate.get("cooldown_seconds") or 300)
     candidate["max_active_announcements"] = int(vector.get("max_active_announcements") or 10) if vector else int(candidate.get("max_active_announcements") or 10)
     candidate["min_confidence_for_auto"] = vector.get("min_confidence_for_auto") if vector else candidate.get("min_confidence_for_auto")
+    candidate["use_global_whitelist"] = bool(vector.get("use_global_whitelist", True)) if vector else bool(candidate.get("use_global_whitelist", True))
+    candidate["extra_whitelist_ids"] = vector.get("extra_whitelist_ids") if vector else candidate.get("extra_whitelist_ids", [])
+    candidate["bypass_whitelist"] = bool(vector.get("bypass_whitelist")) if vector else bool(candidate.get("bypass_whitelist"))
     if profile:
         candidate["max_rate_limit_bps"] = profile.get("max_rate_limit_bps")
         candidate["min_rate_limit_bps"] = profile.get("min_rate_limit_bps")
@@ -7930,7 +8035,76 @@ def policy_for_candidate(candidate: dict[str, Any], requested_mode: str | None =
         policy["decision"] = "require_manual_approval"
         policy["severity"] = "caution"
         policy["reasons"] = sorted(set([*(policy.get("reasons") or []), f"Confianca {candidate.get('confidence')} abaixo do minimo automatico {min_confidence}."]))
+    whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
+    if whitelist_hits:
+        policy["decision"] = "require_manual_approval"
+        policy["severity"] = "caution" if policy.get("severity") != "danger" else "danger"
+        policy["warnings"] = sorted(set([*(policy.get("warnings") or []), "whitelist_match"]))
+        policy["reasons"] = sorted(set([*(policy.get("reasons") or []), "Candidate cruza whitelist; acao automatica bloqueada e aprovacao manual exigida."]))
+        policy["whitelist_hits"] = whitelist_hits
     return policy
+
+
+def cidr_overlaps(left: Any, right: Any) -> bool:
+    left_text = clean_text(left)
+    right_text = clean_text(right)
+    if not left_text or not right_text:
+        return False
+    try:
+        return ip_network(left_text, strict=False).overlaps(ip_network(right_text, strict=False))
+    except ValueError:
+        return False
+
+
+def mitigation_candidate_whitelist_hits(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    if bool(candidate.get("bypass_whitelist")):
+        return []
+    src_cidr = clean_text(candidate.get("src_cidr") or candidate.get("src_prefix"))
+    dst_cidr = clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix"))
+    protocol = clean_text(candidate.get("protocol")).lower()
+    src_port = clean_text(candidate.get("src_port"))
+    dst_port = clean_text(candidate.get("dst_port"))
+    zone_id = candidate.get("zone_id")
+    extra_ids = set()
+    for item in candidate.get("extra_whitelist_ids") or []:
+        try:
+            extra_ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    use_global = bool(candidate.get("use_global_whitelist", True))
+    with sqlite_connection() as conn:
+        filters = ["active = 1"]
+        values: list[Any] = []
+        if use_global and zone_id is not None:
+            filters.append("(zone_id IS NULL OR zone_id = ?)")
+            values.append(int(zone_id))
+        elif use_global:
+            filters.append("zone_id IS NULL")
+        elif extra_ids:
+            filters.append(f"id IN ({','.join('?' for _ in extra_ids)})")
+            values.extend(sorted(extra_ids))
+        else:
+            return []
+        rows = conn.execute(f"SELECT * FROM detection_whitelist WHERE {' AND '.join(filters)}", values).fetchall()
+    hits: list[dict[str, Any]] = []
+    for row in rows:
+        item = detection_whitelist_row_to_dict(row)
+        wl_protocol = clean_text(item.get("protocol")).lower()
+        if wl_protocol and wl_protocol not in {"all", "any", protocol}:
+            continue
+        wl_src = clean_text(item.get("src_cidr"))
+        wl_dst = clean_text(item.get("dst_cidr"))
+        src_match = bool(wl_src and src_cidr and cidr_overlaps(src_cidr, wl_src))
+        dst_match = bool(wl_dst and dst_cidr and cidr_overlaps(dst_cidr, wl_dst))
+        wl_type = clean_text(item.get("type"))
+        if wl_type == "source" and not src_match:
+            continue
+        if wl_type == "destination" and not dst_match:
+            continue
+        if wl_type == "source_destination" and not (src_match and dst_match):
+            continue
+        hits.append({"id": item["id"], "name": item.get("name") or "", "type": wl_type, "src_cidr": wl_src, "dst_cidr": wl_dst, "protocol": wl_protocol, "src_port": src_port, "dst_port": dst_port})
+    return hits[:10]
 
 
 def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
@@ -8169,6 +8343,42 @@ def fallback_analysis_candidate(
     return candidate
 
 
+def enrich_deterministic_candidate(candidate: dict[str, Any], top_flow: dict[str, Any], total_packets: int, total_bytes: int) -> dict[str, Any]:
+    packets = int(top_flow.get("packets") or 0)
+    bytes_value = int(top_flow.get("bytes") or 0)
+    packet_share = round((packets / total_packets * 100), 2) if total_packets else 0.0
+    byte_share = round((bytes_value / total_bytes * 100), 2) if total_bytes else 0.0
+    sensitive_ports = {19, 53, 123, 389, 1900, 11211}
+    src_port = int(candidate.get("src_port") or 0) if clean_text(candidate.get("src_port")).isdigit() else 0
+    dst_port = int(candidate.get("dst_port") or 0) if clean_text(candidate.get("dst_port")).isdigit() else 0
+    packet_score = min(packet_share / 25, 2.0)
+    byte_score = min(byte_share / 25, 2.0)
+    concentration_score = 2.0 if packet_share >= 50 and byte_share >= 50 else 1.0 if packet_share >= 25 or byte_share >= 25 else 0.3
+    protocol_score = 1.0 if clean_text(candidate.get("protocol")).lower() == "udp" else 0.5
+    safety_score = 1.0 if candidate.get("src_cidr") and candidate.get("dst_cidr") and candidate.get("dst_port") else 0.3
+    score = round(packet_score + byte_score + concentration_score + protocol_score + safety_score, 3)
+    manual_required = True
+    risk = "high" if src_port in sensitive_ports or dst_port in sensitive_ports or not candidate.get("dst_port") else "medium"
+    candidate.update(
+        {
+            "score": score,
+            "evidence": {
+                "playbook": "preferir bloqueio mais especifico primeiro; servicos sensiveis exigem aprovacao manual",
+                "top_flow": top_flow,
+                "top_packet_share": packet_share,
+                "top_byte_share": byte_share,
+            },
+            "top_packet_share": packet_share,
+            "top_byte_share": byte_share,
+            "candidate_scope": "src_dst_port" if candidate.get("src_cidr") and candidate.get("dst_cidr") and candidate.get("dst_port") else "dst_port" if candidate.get("dst_cidr") and candidate.get("dst_port") else "src_port",
+            "risk": risk,
+            "manual_approval_required": manual_required,
+            "allow_auto": False,
+        }
+    )
+    return candidate
+
+
 def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     ensure_sensor_db()
     with sqlite_connection() as conn:
@@ -8199,6 +8409,7 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     if not valid_udp_rows:
         valid_udp_rows = [row for row in rows if valid_udp_analysis_flow(row)]
     total_packets = sum(int(row.get("packets") or 0) for row in prioritized_rows) or sum(int(row.get("packets") or 0) for row in rows)
+    total_bytes = sum(int(row.get("bytes") or 0) for row in prioritized_rows) or sum(int(row.get("bytes") or 0) for row in rows)
     top_flow_by_packets = valid_udp_rows[0] if valid_udp_rows else prioritized_rows[0] if prioritized_rows else {}
     top_flow_by_bytes = sorted(rows, key=lambda item: (int(item.get("bytes") or 0), int(item.get("packets") or 0)), reverse=True)[0] if rows else {}
     top_src = aggregate_packets(prioritized_rows or rows, lambda row: clean_ip(row.get("src_ip")), lambda row: clean_ip(row.get("src_ip")))
@@ -8268,6 +8479,7 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
         fallback_candidate_block_reason = f"Top flow nao identificado como UDP: protocol={top_protocol or top_flow_by_packets.get('protocol') or top_flow_by_packets.get('proto')}."
     for index, candidate in enumerate(candidates):
         candidate["candidate_index"] = index
+        enrich_deterministic_candidate(candidate, top_flow_by_packets, total_packets, total_bytes)
     return {
         "source": "deterministic_anomaly_analysis",
         "anomaly_id": anomaly_id,
@@ -9566,7 +9778,7 @@ def create_bgp_response_profile(request: Request, payload: BgpResponseProfilePay
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
     now = utc_now_iso()
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
     with sqlite_connection() as conn:
         if values["connector_id"]:
             fetch_bgp_connector(conn, int(values["connector_id"]))
@@ -9591,7 +9803,7 @@ def update_bgp_response_profile(request: Request, profile_id: int, payload: BgpR
     require_admin(request)
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
     with sqlite_connection() as conn:
         fetch_bgp_profile(conn, profile_id)
         if values["connector_id"]:
@@ -11875,6 +12087,9 @@ def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "response_profile_id": int(item["response_profile_id"]) if item.get("response_profile_id") is not None else None,
         "connector_id": int(item["connector_id"]) if item.get("connector_id") is not None else None,
         "mitigation_mode": item.get("mitigation_mode") or "disabled",
+        "use_global_whitelist": sqlite_bool(item.get("use_global_whitelist", 1)),
+        "extra_whitelist_ids": bgp_json_loads(item.get("extra_whitelist_ids"), []),
+        "bypass_whitelist": sqlite_bool(item.get("bypass_whitelist", 0)),
         "max_auto_prefixlen_v4": int(item["max_auto_prefixlen_v4"]) if item.get("max_auto_prefixlen_v4") is not None else None,
         "max_auto_prefixlen_v6": int(item["max_auto_prefixlen_v6"]) if item.get("max_auto_prefixlen_v6") is not None else None,
         "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
@@ -11909,6 +12124,13 @@ def attack_vector_suggestion_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> d
         "baseline_average": round(float(item.get("baseline_average") or 0), 2),
         "margin_percent": round(float(item["margin_percent"] or 0), 2),
         "confidence": round(float(item["confidence"] or 0), 3),
+        "reason": item.get("reason") or "",
+        "samples": bgp_json_loads(item.get("samples_json"), []),
+        "impact": item.get("impact") or "",
+        "attack_shape": item.get("attack_shape") or "",
+        "inferred_protocol": item.get("inferred_protocol") or "",
+        "suggested_metric": item.get("suggested_metric") or item["threshold_unit"],
+        "expected_impact": item.get("expected_impact") or "",
         "created_at": item["created_at"],
         "updated_at": item.get("updated_at") or item["created_at"],
         "applied_at": item.get("applied_at"),
@@ -12118,6 +12340,9 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
         "response_profile_id": int(response_profile_id) if response_profile_id is not None else None,
         "connector_id": int(connector_id) if connector_id is not None else None,
         "mitigation_mode": mitigation_mode,
+        "use_global_whitelist": 1 if data.get("use_global_whitelist", True) else 0,
+        "extra_whitelist_ids": json.dumps([int(item) for item in data.get("extra_whitelist_ids") or []], sort_keys=True),
+        "bypass_whitelist": 1 if data.get("bypass_whitelist") else 0,
         "max_auto_prefixlen_v4": data.get("max_auto_prefixlen_v4"),
         "max_auto_prefixlen_v6": data.get("max_auto_prefixlen_v6"),
         "require_protected_prefix": 1 if data.get("require_protected_prefix", True) else 0,
@@ -12156,6 +12381,9 @@ def decoder_clickhouse_condition(decoder: str) -> str:
         "ICMP": "proto IN (1, 58)",
         "DNS": "proto IN (6, 17) AND (src_port = 53 OR dst_port = 53)",
         "NTP": "proto = 17 AND (src_port = 123 OR dst_port = 123)",
+        "SSDP": "proto = 17 AND (src_port = 1900 OR dst_port = 1900)",
+        "CLDAP": "proto = 17 AND (src_port = 389 OR dst_port = 389)",
+        "CHARGEN": "proto = 17 AND (src_port = 19 OR dst_port = 19)",
         "QUIC": "proto = 17 AND (src_port IN (443, 8443) OR dst_port IN (443, 8443))",
         "UDP+QUIC": "proto = 17 AND (src_port IN (443, 8443) OR dst_port IN (443, 8443))",
         "HTTP": "proto = 6 AND (src_port = 80 OR dst_port = 80)",
@@ -12163,10 +12391,13 @@ def decoder_clickhouse_condition(decoder: str) -> str:
         "MAIL": f"proto = 6 AND {port.format(ports='25, 465, 587, 110, 995, 143, 993')}",
         "SIP": "proto IN (6, 17) AND (src_port IN (5060, 5061) OR dst_port IN (5060, 5061))",
         "IPSEC": "proto IN (50, 51) OR (proto = 17 AND (src_port IN (500, 4500) OR dst_port IN (500, 4500)))",
+        "GRE": "proto = 47",
+        "ESP": "proto = 50",
         "MEMCACHED": "proto IN (6, 17) AND (src_port = 11211 OR dst_port = 11211)",
         "NETBIOS": "proto IN (6, 17) AND (src_port IN (137, 138, 139) OR dst_port IN (137, 138, 139))",
         "FRAGMENT": "0 = 1",
         "INVALID": "0 = 1",
+        "CUSTOM": "1 = 1",
         "OTHER": f"NOT ({' OR '.join(known_conditions)} OR proto IN (6, 17))",
     }
     return mapping.get(decoder, "0 = 1")
@@ -12185,6 +12416,12 @@ def classify_flow_decoder(flow: dict[str, Any]) -> str:
         return "DNS"
     if proto == 17 and 123 in ports:
         return "NTP"
+    if proto == 17 and 1900 in ports:
+        return "SSDP"
+    if proto == 17 and 389 in ports:
+        return "CLDAP"
+    if proto == 17 and 19 in ports:
+        return "CHARGEN"
     if proto == 17 and ports & {443, 8443}:
         return "UDP+QUIC"
     if proto == 6 and 80 in ports:
@@ -12201,6 +12438,10 @@ def classify_flow_decoder(flow: dict[str, Any]) -> str:
         return "NETBIOS"
     if proto in {1, 58}:
         return "ICMP"
+    if proto == 47:
+        return "GRE"
+    if proto == 50:
+        return "ESP"
     if proto == 6 and flags == 0:
         return "TCP+NULL"
     if proto == 6 and flags & 18 == 18:
@@ -12563,6 +12804,71 @@ def query_learn_series(
     return values
 
 
+def learn_flow_samples(
+    decoder: str,
+    direction: str,
+    sensor_id: int | None,
+    interface_if_index: int | None,
+    target_cidr: str | None,
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"limit": int(limit)}
+    vector_like = {
+        "sensor_id": sensor_id,
+        "interface_if_index": interface_if_index,
+        "target_cidr": target_cidr,
+        "direction": direction,
+        "decoder": decoder,
+    }
+    where = append_attack_vector_filters(vector_like, start_dt, end_dt, params)
+    rows = rows_as_dicts(
+        query_clickhouse(
+            f"""
+            SELECT
+                toString(src_ip) AS src_ip,
+                src_port,
+                toString(dst_ip) AS dst_ip,
+                dst_port,
+                proto,
+                input_if,
+                output_if,
+                sum(packets) AS packets,
+                sum(bytes) AS bytes,
+                sum(flow_count) AS flows
+            FROM flow_raw
+            WHERE {where}
+            GROUP BY src_ip, src_port, dst_ip, dst_port, proto, input_if, output_if
+            ORDER BY packets DESC, bytes DESC
+            LIMIT {{limit:UInt32}}
+            """,
+            params,
+        )
+    )
+    return [compact_flow_row(row) for row in rows]
+
+
+def attack_shape_from_samples(samples: list[dict[str, Any]]) -> str:
+    if not samples:
+        return "volumetric"
+    src_ips = {clean_ip(item.get("src_ip")) for item in samples if clean_ip(item.get("src_ip"))}
+    dst_ips = {clean_ip(item.get("dst_ip")) for item in samples if clean_ip(item.get("dst_ip"))}
+    dst_ports = {int(item.get("dst_port") or 0) for item in samples if int(item.get("dst_port") or 0) > 0}
+    top = samples[0]
+    total_packets = sum(int(item.get("packets") or 0) for item in samples)
+    top_share = int(top.get("packets") or 0) / total_packets if total_packets else 0
+    if len(src_ips) == 1 and top_share >= 0.5:
+        return "single-source"
+    if len(src_ips) >= 3 and len(dst_ips) <= 2 and len(dst_ports) <= 2:
+        return "multi-source"
+    if int(top.get("src_port") or 0) in UDP_REFLECTION_SRC_PORTS_DEFAULT:
+        return "reflection"
+    if len(dst_ports) >= 5:
+        return "scan"
+    return "volumetric"
+
+
 def learn_sensor_targets(payload: AttackVectorLearnPayload) -> list[dict[str, Any]]:
     with sqlite_connection() as conn:
         if payload.sensor_id is not None:
@@ -12644,6 +12950,13 @@ def upsert_attack_vector_suggestion(conn: sqlite3.Connection, suggestion: dict[s
                 baseline_average = ?,
                 margin_percent = ?,
                 confidence = ?,
+                reason = ?,
+                samples_json = ?,
+                impact = ?,
+                attack_shape = ?,
+                inferred_protocol = ?,
+                suggested_metric = ?,
+                expected_impact = ?,
                 created_at = ?,
                 updated_at = ?
             WHERE id = ?
@@ -12656,6 +12969,13 @@ def upsert_attack_vector_suggestion(conn: sqlite3.Connection, suggestion: dict[s
                 suggestion["baseline_average"],
                 suggestion["margin_percent"],
                 suggestion["confidence"],
+                suggestion.get("reason") or "",
+                json.dumps(suggestion.get("samples") or [], ensure_ascii=False, sort_keys=True, default=str),
+                suggestion.get("impact") or "",
+                suggestion.get("attack_shape") or "",
+                suggestion.get("inferred_protocol") or "",
+                suggestion.get("suggested_metric") or suggestion["threshold_unit"],
+                suggestion.get("expected_impact") or "",
                 suggestion["created_at"],
                 suggestion["updated_at"],
                 suggestion_id,
@@ -12680,10 +13000,17 @@ def upsert_attack_vector_suggestion(conn: sqlite3.Connection, suggestion: dict[s
                 baseline_average,
                 margin_percent,
                 confidence,
+                reason,
+                samples_json,
+                impact,
+                attack_shape,
+                inferred_protocol,
+                suggested_metric,
+                expected_impact,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 suggestion["template_id"],
@@ -12701,6 +13028,13 @@ def upsert_attack_vector_suggestion(conn: sqlite3.Connection, suggestion: dict[s
                 suggestion["baseline_average"],
                 suggestion["margin_percent"],
                 suggestion["confidence"],
+                suggestion.get("reason") or "",
+                json.dumps(suggestion.get("samples") or [], ensure_ascii=False, sort_keys=True, default=str),
+                suggestion.get("impact") or "",
+                suggestion.get("attack_shape") or "",
+                suggestion.get("inferred_protocol") or "",
+                suggestion.get("suggested_metric") or suggestion["threshold_unit"],
+                suggestion.get("expected_impact") or "",
                 suggestion["created_at"],
                 suggestion["updated_at"],
             ),
@@ -12723,11 +13057,16 @@ def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[d
     ensure_sensor_db()
     target_cidr = normalize_target_cidr(payload.target_cidr)
     end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=payload.days)
+    start_dt = end_dt - timedelta(minutes=payload.window_minutes) if payload.window_minutes else end_dt - timedelta(days=payload.days)
     suggestions: list[dict[str, Any]] = []
 
     with sqlite_connection() as conn:
         template = fetch_attack_vector_template(conn, payload.template_id)
+        if payload.zone_id is not None:
+            zone = fetch_ip_zone(conn, int(payload.zone_id), include_prefixes=True)
+            if not target_cidr:
+                prefixes = [item.get("cidr") for item in zone.get("prefixes") or [] if item.get("active") and item.get("cidr")]
+                target_cidr = prefixes[0] if len(prefixes) == 1 else None
     if not template.get("learn_enabled"):
         return []
 
@@ -12735,8 +13074,9 @@ def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[d
     sensor_targets = learn_sensor_targets(payload)
     for sensor in sensor_targets:
         sensor_id = sensor["sensor_id"]
-        interface_if_index = None
-        for direction in ("receives", "sends"):
+        interface_if_index = payload.interface_if_index
+        directions = [payload.direction] if payload.direction in ATTACK_DIRECTIONS else ["receives", "sends"]
+        for direction in directions:
             for decoder, unit in LEARN_DECODER_UNITS:
                 try:
                     values = query_learn_series(
@@ -12770,6 +13110,13 @@ def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[d
                 suggested = maximum * (1 + payload.margin_percent / 100)
                 expected_points = max(payload.days * 24 * 60, 1)
                 confidence = min(1.0, max(0.2, len(values) / expected_points))
+                samples = []
+                try:
+                    samples = learn_flow_samples(decoder, direction, sensor_id, interface_if_index, target_cidr, start_dt, end_dt)
+                except Exception as exc:
+                    logger.warning("Falha ao coletar samples de aprendizado sensor=%s %s/%s: %s", sensor_id, direction, decoder, exc)
+                attack_shape = attack_shape_from_samples(samples)
+                top_sample = samples[0] if samples else {}
                 now = utc_now_iso()
                 suggestion = {
                     "template_id": payload.template_id,
@@ -12787,6 +13134,18 @@ def learn_attack_vector_suggestions(payload: AttackVectorLearnPayload) -> list[d
                     "baseline_average": average,
                     "margin_percent": payload.margin_percent,
                     "confidence": confidence,
+                    "reason": (
+                        f"Baseline aprendido em trafego real: max={format_metric(maximum, unit)}, "
+                        f"p99={format_metric(p99, unit)}, margem={payload.margin_percent:.0f}%. "
+                        f"Top flow {top_sample.get('src_ip', '-')}:{top_sample.get('src_port', '-')} -> "
+                        f"{top_sample.get('dst_ip', '-')}:{top_sample.get('dst_port', '-')}."
+                    ),
+                    "samples": samples,
+                    "impact": "Criar vetor de deteccao com aprovacao manual para mitigacao.",
+                    "attack_shape": attack_shape,
+                    "inferred_protocol": samples[0].get("protocol") if samples else decoder,
+                    "suggested_metric": unit,
+                    "expected_impact": "Aumenta cobertura do template sem alterar THRESHOLD legado.",
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -14554,6 +14913,38 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
         return fetch_attack_vector_template(conn, new_template_id)
 
 
+@app.post("/api/attack-vector-templates/{template_id}/learn")
+@app.get("/api/attack-vector-templates/{template_id}/learn")
+def learn_attack_vector_template(
+    request: Request,
+    template_id: int,
+    days: int = Query(2, ge=1, le=30),
+    margin_percent: float = Query(20, ge=0, le=500),
+    sensor_id: int | None = Query(None, ge=1),
+    interface_if_index: int | None = Query(None, ge=0),
+    direction: str | None = Query(None),
+    zone_id: int | None = Query(None, ge=1),
+    window_minutes: int | None = Query(None, ge=1, le=43200),
+    target_cidr: str | None = Query(None),
+    payload: AttackVectorLearnPayload | None = None,
+):
+    require_admin(request)
+    effective = payload or AttackVectorLearnPayload(
+        template_id=template_id,
+        days=days,
+        margin_percent=margin_percent,
+        sensor_id=sensor_id,
+        interface_if_index=interface_if_index,
+        direction=direction,
+        zone_id=zone_id,
+        window_minutes=window_minutes,
+        target_cidr=target_cidr,
+    )
+    effective.template_id = template_id
+    suggestions = learn_attack_vector_suggestions(effective)
+    return {"ok": True, "template_id": template_id, "items": suggestions, "count": len(suggestions)}
+
+
 @app.get("/api/attack-vectors/templates")
 def list_attack_vector_presets(request: Request):
     require_admin(request)
@@ -14571,6 +14962,18 @@ def list_attack_vector_presets(request: Request):
         "window_seconds": 60,
     }
     return {"items": [{**defaults, **item} for item in ATTACK_VECTOR_PRESET_TEMPLATES]}
+
+
+@app.get("/api/decoders")
+def list_decoder_registry(request: Request):
+    require_admin(request)
+    return {
+        "items": DECODER_REGISTRY,
+        "protocols": sorted(ATTACK_PROTOCOLS),
+        "tcp_flags": sorted(ATTACK_TCP_FLAGS),
+        "threshold_units": sorted(ATTACK_THRESHOLD_UNITS),
+        "directions": sorted(ATTACK_DIRECTIONS),
+    }
 
 
 @app.get("/api/attack-vectors")
@@ -14639,6 +15042,9 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 response_profile_id,
                 connector_id,
                 mitigation_mode,
+                use_global_whitelist,
+                extra_whitelist_ids,
+                bypass_whitelist,
                 max_auto_prefixlen_v4,
                 max_auto_prefixlen_v6,
                 require_protected_prefix,
@@ -14651,7 +15057,7 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["template_id"],
@@ -14682,6 +15088,9 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 data["response_profile_id"],
                 data["connector_id"],
                 data["mitigation_mode"],
+                data["use_global_whitelist"],
+                data["extra_whitelist_ids"],
+                data["bypass_whitelist"],
                 data["max_auto_prefixlen_v4"],
                 data["max_auto_prefixlen_v6"],
                 data["require_protected_prefix"],
@@ -14809,6 +15218,9 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 response_profile_id = ?,
                 connector_id = ?,
                 mitigation_mode = ?,
+                use_global_whitelist = ?,
+                extra_whitelist_ids = ?,
+                bypass_whitelist = ?,
                 max_auto_prefixlen_v4 = ?,
                 max_auto_prefixlen_v6 = ?,
                 require_protected_prefix = ?,
@@ -14850,6 +15262,9 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
                 data["response_profile_id"],
                 data["connector_id"],
                 data["mitigation_mode"],
+                data["use_global_whitelist"],
+                data["extra_whitelist_ids"],
+                data["bypass_whitelist"],
                 data["max_auto_prefixlen_v4"],
                 data["max_auto_prefixlen_v6"],
                 data["require_protected_prefix"],
@@ -15237,6 +15652,109 @@ def anomaly_summary_endpoint(request: Request):
     }
 
 
+def anomaly_time_filter(range_minutes: int, values: list[Any]) -> str:
+    start = (datetime.now(timezone.utc) - timedelta(minutes=range_minutes)).isoformat().replace("+00:00", "Z")
+    values.append(start)
+    return "created_at >= ?"
+
+
+def sqlite_top_rows(query: str, values: list[Any]) -> list[dict[str, Any]]:
+    with sqlite_connection() as conn:
+        return [dict(row) for row in conn.execute(query, values).fetchall()]
+
+
+@app.get("/api/anomalies/stats")
+def anomaly_stats_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES)):
+    require_admin(request)
+    ensure_sensor_db()
+    values: list[Any] = []
+    where = anomaly_time_filter(range_minutes, values)
+    with sqlite_connection() as conn:
+        total = conn.execute(f"SELECT COUNT(*) AS count FROM anomaly_events WHERE {where}", values).fetchone()
+        by_direction = conn.execute(f"SELECT direction AS key, COUNT(*) AS count FROM anomaly_events WHERE {where} GROUP BY direction", values).fetchall()
+        by_severity = conn.execute(f"SELECT severity AS key, COUNT(*) AS count FROM anomaly_events WHERE {where} GROUP BY severity", values).fetchall()
+        by_status = conn.execute(f"SELECT status AS key, COUNT(*) AS count FROM anomaly_events WHERE {where} GROUP BY status", values).fetchall()
+    return {
+        "range_minutes": range_minutes,
+        "total": int(total["count"] or 0) if total else 0,
+        "by_direction": [dict(row) for row in by_direction],
+        "by_severity": [dict(row) for row in by_severity],
+        "by_status": [dict(row) for row in by_status],
+    }
+
+
+@app.get("/api/anomalies/timeseries")
+def anomaly_timeseries_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES)):
+    require_admin(request)
+    ensure_sensor_db()
+    values: list[Any] = []
+    where = anomaly_time_filter(range_minutes, values)
+    rows = sqlite_top_rows(
+        f"""
+        SELECT substr(created_at, 1, 16) AS time, direction, COUNT(*) AS count
+        FROM anomaly_events
+        WHERE {where}
+        GROUP BY substr(created_at, 1, 16), direction
+        ORDER BY time
+        """,
+        values,
+    )
+    return {"items": rows, "range_minutes": range_minutes}
+
+
+def anomaly_top_endpoint(dimension_sql: str, range_minutes: int, limit: int) -> dict[str, Any]:
+    values: list[Any] = []
+    where = anomaly_time_filter(range_minutes, values)
+    values.append(limit)
+    rows = sqlite_top_rows(
+        f"""
+        SELECT {dimension_sql} AS key, COUNT(*) AS count, SUM(estimated_packets) AS packets, SUM(estimated_bytes) AS bytes
+        FROM anomaly_events
+        WHERE {where}
+        GROUP BY {dimension_sql}
+        ORDER BY count DESC, packets DESC
+        LIMIT ?
+        """,
+        values,
+    )
+    return {"items": rows, "range_minutes": range_minutes}
+
+
+@app.get("/api/anomalies/top-vectors")
+def anomaly_top_vectors_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES), limit: int = Query(10, ge=1, le=100)):
+    require_admin(request)
+    ensure_sensor_db()
+    return anomaly_top_endpoint("COALESCE(NULLIF(vector_name, ''), decoder)", range_minutes, limit)
+
+
+@app.get("/api/anomalies/top-protocols")
+def anomaly_top_protocols_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES), limit: int = Query(10, ge=1, le=100)):
+    require_admin(request)
+    ensure_sensor_db()
+    return anomaly_top_endpoint("COALESCE(NULLIF(protocol, ''), decoder)", range_minutes, limit)
+
+
+@app.get("/api/anomalies/top-interfaces")
+def anomaly_top_interfaces_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES), limit: int = Query(10, ge=1, le=100)):
+    require_admin(request)
+    ensure_sensor_db()
+    return anomaly_top_endpoint("COALESCE(interface_if_index, input_if, output_if, 0)", range_minutes, limit)
+
+
+@app.get("/api/anomalies/top-targets")
+def anomaly_top_targets_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES), limit: int = Query(10, ge=1, le=100)):
+    require_admin(request)
+    ensure_sensor_db()
+    return anomaly_top_endpoint("COALESCE(NULLIF(target_cidr, ''), NULLIF(target_ip, ''), NULLIF(top_dst_ip, ''), '-')", range_minutes, limit)
+
+
+@app.get("/api/anomalies/top-sensors")
+def anomaly_top_sensors_endpoint(request: Request, range_minutes: int = Query(1440, ge=1, le=MAX_RANGE_MINUTES), limit: int = Query(10, ge=1, le=100)):
+    require_admin(request)
+    ensure_sensor_db()
+    return anomaly_top_endpoint("COALESCE(sensor_id, 0)", range_minutes, limit)
+
+
 @app.get("/api/anomalies/active")
 def active_anomalies(request: Request, limit: int = Query(200, ge=1, le=1000)):
     require_admin(request)
@@ -15424,6 +15942,7 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
             "headers": ["Campo", "Valor"],
             "rows": key_value_rows(
                 [
+                    ("ID", event.get("id")),
                     ("Status", event.get("status")),
                     ("Pico", f"{event.get('peak_value')} {event.get('metric_unit') or ''}"),
                     ("Threshold", f"{event.get('threshold_value')} {event.get('metric_unit') or ''}"),
@@ -15837,6 +16356,120 @@ def collectors_ingestion_status(request: Request):
             }
         )
     return {"items": items}
+
+
+def unavailable_metric(reason: str = "") -> dict[str, Any]:
+    return {"available": False, "status": "indisponivel", "reason": reason}
+
+
+@app.get("/api/system/resources")
+def system_resources(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    disk = shutil.disk_usage(sqlite_path().parent)
+    payload: dict[str, Any] = {
+        "cpu": unavailable_metric(),
+        "memory": system_memory_gb(),
+        "disk": {
+            "available": True,
+            "total_bytes": disk.total,
+            "used_bytes": disk.used,
+            "free_bytes": disk.free,
+            "used_percent": round((disk.used / disk.total * 100), 2) if disk.total else 0,
+        },
+        "clickhouse": unavailable_metric(),
+        "ingestion": unavailable_metric(),
+        "database": {},
+        "warnings": [],
+    }
+    try:
+        psutil = import_module("psutil")
+        payload["cpu"] = {
+            "available": True,
+            "percent": psutil.cpu_percent(interval=0.1),
+            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
+        }
+        vm = psutil.virtual_memory()
+        payload["memory"] = {
+            "available": True,
+            "total_gb": round(vm.total / 1024**3, 2),
+            "available_gb": round(vm.available / 1024**3, 2),
+            "used_percent": vm.percent,
+        }
+    except Exception as exc:
+        payload["cpu"] = unavailable_metric(str(exc))
+    try:
+        row = rows_as_dicts(query_clickhouse("SELECT 1 AS ok"))[0]
+        payload["clickhouse"] = {"available": True, "status": "ok", "ok": int(row.get("ok") or 0)}
+    except Exception as exc:
+        payload["clickhouse"] = unavailable_metric(str(exc))
+    try:
+        payload["database"] = database_status(request)
+    except Exception as exc:
+        payload["database"] = unavailable_metric(str(exc))
+    try:
+        payload["ingestion"] = collectors_ingestion_status(request)
+    except Exception as exc:
+        payload["ingestion"] = unavailable_metric(str(exc))
+    if payload["disk"]["used_percent"] >= 90:
+        payload["warnings"].append("Disco acima de 90%.")
+    memory_used = payload.get("memory", {}).get("used_percent")
+    if isinstance(memory_used, (int, float)) and memory_used >= 90:
+        payload["warnings"].append("RAM acima de 90%.")
+    return payload
+
+
+@app.get("/api/system/containers")
+def system_containers(request: Request):
+    require_admin(request)
+    names = ["gmj-flow-clickhouse", "gmj-flow-backend", "gmj-flow-frontend", "gmj-flow-collector", "gmj-flow-pmacct", "gmj-flow-ollama"]
+    try:
+        completed = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{json .}}", *names],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return {"items": [], "status": "indisponivel", "error": clean_text(completed.stderr or completed.stdout)}
+        items = []
+        for line in completed.stdout.splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            items.append(
+                {
+                    "name": item.get("Name") or item.get("Container") or "",
+                    "cpu_percent": item.get("CPUPerc") or "",
+                    "memory": item.get("MemUsage") or "",
+                    "memory_percent": item.get("MemPerc") or "",
+                    "net_io": item.get("NetIO") or "",
+                    "block_io": item.get("BlockIO") or "",
+                    "pids": item.get("PIDs") or "",
+                    "status": "ok",
+                }
+            )
+        return {"items": items, "status": "ok"}
+    except Exception as exc:
+        return {"items": [], "status": "indisponivel", "error": str(exc)}
+
+
+@app.get("/api/collectors/health")
+def collectors_health(request: Request):
+    require_admin(request)
+    try:
+        ingestion = collectors_ingestion_status(request)
+    except Exception as exc:
+        return {"status": "indisponivel", "items": [], "error": str(exc)}
+    items = []
+    for item in ingestion.get("items") or []:
+        last_seen = clean_text(item.get("last_flow_time") or item.get("last_insert_at") or item.get("updated_at"))
+        lag = int(item.get("lag_bytes") or 0)
+        status = "ok" if last_seen and lag < 10_000_000 else "atrasado" if lag >= 10_000_000 else "sem_flow_recente"
+        items.append({**item, "last_flow_time": last_seen, "status": status})
+    return {"status": "ok", "items": items, "summary": ingestion}
 
 
 @app.get("/api/database/status")

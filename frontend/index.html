@@ -1098,6 +1098,9 @@
         <button id="bgpNavButton" type="button" data-nav-view="bgp">
           <i data-lucide="shield-check"></i><span>BGP / Mitigacao</span>
         </button>
+        <button id="systemNavButton" type="button" data-nav-view="system">
+          <i data-lucide="activity"></i><span>Sistema</span>
+        </button>
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
         </button>
@@ -2398,6 +2401,16 @@
           </section>
 
           <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Dashboard de anomalias</div>
+                <div id="anomalyDashboardStatus" class="metric-readout">Agregados por tempo, vetor, protocolo e alvo.</div>
+              </div>
+            </div>
+            <div id="anomalyDashboardCards" class="d-flex flex-wrap gap-2"></div>
+          </section>
+
+          <section class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center mb-2">
               <div class="panel-title">Tabelas ClickHouse</div>
               <div id="databaseTablesStatus" class="metric-readout">-</div>
@@ -3053,7 +3066,7 @@
                   </div>
                   <div class="toolbar">
                     <button id="learnAttackVectorsButton" type="button" class="btn btn-sm btn-outline-success">
-                      <i data-lucide="brain-circuit"></i><span>Aprender trafego normal</span>
+                      <i data-lucide="brain-circuit"></i><span>Aprender com trafego</span>
                     </button>
                     <button id="addVectorButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="plus"></i><span>Adicionar vetor</span>
@@ -3128,6 +3141,7 @@
                         <th class="text-end">Sugestao</th>
                         <th class="text-end">Margem</th>
                         <th>Confianca</th>
+                        <th>Motivo</th>
                         <th>Acoes</th>
                       </tr>
                     </thead>
@@ -3148,6 +3162,7 @@
               <div id="anomalyStatus" class="subtle">Eventos detectados pelos vetores ativos</div>
             </div>
             <div class="toolbar">
+              <input id="anomalyIdSearch" class="form-control form-control-sm" style="max-width:140px" placeholder="#ID">
               <div class="tab-strip" role="tablist" aria-label="Filtro de anomalias">
                 <button id="anomalyTabActive" type="button" class="active">Ativas</button>
                 <button id="anomalyTabHistory" type="button">Historico</button>
@@ -3185,6 +3200,7 @@
                 <thead>
                   <tr>
                     <th>Status</th>
+                    <th>ID</th>
                     <th>Severidade</th>
                     <th>Inicio</th>
                     <th>Ultima deteccao</th>
@@ -3241,6 +3257,40 @@
                 </thead>
                 <tbody id="securityAnomaliesMainTable"></tbody>
               </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-system" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Sistema</h1>
+              <div id="systemStatus" class="subtle">Recursos, containers e collectors</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshSystemButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+          <section class="row g-3">
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">Host</div>
+                <div id="systemResourceCards" class="d-grid gap-2"></div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">Containers</div>
+                <div id="systemContainerList" class="d-grid gap-2"></div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-4">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">Collectors</div>
+                <div id="systemCollectorList" class="d-grid gap-2"></div>
+              </div>
             </div>
           </section>
         </section>
@@ -4172,6 +4222,7 @@
     let editingAttackVectorId = null;
     let currentAttackVectorTestId = null;
     let anomalyActiveTab = 'active';
+    let anomalyItems = [];
     let currentAnomalyDetailId = null;
     let currentBgpMitigationAnomalyId = null;
     let currentBgpMitigationCandidates = [];
@@ -7605,13 +7656,14 @@
           <td class="text-end">${formatMetricValue(item.threshold_value, item.threshold_unit)}</td>
           <td class="text-end">${formatNumber(item.margin_percent || 0)}%</td>
           <td>${Math.round(Number(item.confidence || 0) * 100)}%</td>
+          <td>${escapeHtml(item.reason || item.attack_shape || '-')}</td>
           <td>
             <button type="button" class="btn btn-sm btn-outline-success attack-suggestion-apply" data-suggestion-id="${item.id}">
               <i data-lucide="check"></i><span>Aplicar sugestao</span>
             </button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="11" class="text-muted">Sem sugestoes pendentes</td></tr>';
+      `).join('') || '<tr><td colspan="12" class="text-muted">Sem sugestoes pendentes</td></tr>';
       createIcons();
     }
 
@@ -7886,13 +7938,17 @@
       if (!template) return;
       setAttackVectorStatus('Aprendendo baseline no ClickHouse...');
       try {
-        const payload = await apiRequest('/api/attack-vectors/learn', {
+        const payload = await apiRequest(`/api/attack-vector-templates/${template.id}/learn`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             template_id: template.id,
             days: numberValue('avTemplateLearnDays', 2),
             margin_percent: numberValue('avTemplateSafetyMargin', 20),
+            interface_if_index: null,
+            direction: null,
+            zone_id: null,
+            window_minutes: null,
             sensor_id: null,
             target_cidr: null
           })
@@ -7948,6 +8004,26 @@
       renderAnomalyBadge(summary);
     }
 
+    async function loadAnomalyDashboard() {
+      const [stats, vectors, protocols, targets] = await Promise.all([
+        apiRequest('/api/anomalies/stats?range_minutes=1440'),
+        apiRequest('/api/anomalies/top-vectors?range_minutes=1440&limit=5'),
+        apiRequest('/api/anomalies/top-protocols?range_minutes=1440&limit=5'),
+        apiRequest('/api/anomalies/top-targets?range_minutes=1440&limit=5')
+      ]);
+      const topText = items => (items || []).map(item => `${item.key || '-'} (${formatNumber(item.count || 0)})`).join(' | ') || '-';
+      document.getElementById('anomalyDashboardCards').innerHTML = [
+        metricChipHtml('24h', formatNumber(stats.total || 0)),
+        metricChipHtml('Inbound/Outbound', topText(stats.by_direction)),
+        metricChipHtml('Severidade', topText(stats.by_severity)),
+        metricChipHtml('Status', topText(stats.by_status)),
+        metricChipHtml('Top vetores', topText(vectors.items)),
+        metricChipHtml('Top protocolos', topText(protocols.items)),
+        metricChipHtml('Top alvos', topText(targets.items))
+      ].join('');
+      setText('anomalyDashboardStatus', 'Agregados das ultimas 24h');
+    }
+
     function anomalyDuration(event) {
       const start = new Date(event.started_at);
       const end = new Date(event.ended_at || event.last_seen_at || Date.now());
@@ -7961,9 +8037,12 @@
 
     function renderAnomalyTable(items) {
       const tbody = document.getElementById('anomaliesTable');
-      tbody.innerHTML = items.map(event => `
+      const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
+      const visibleItems = idSearch ? items.filter(event => String(event.id || '') === idSearch) : items;
+      tbody.innerHTML = visibleItems.map(event => `
         <tr>
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
+          <td>#${escapeHtml(event.id || '-')}</td>
           <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
           <td>${formatDateTime(event.started_at)}</td>
           <td>${formatDateTime(event.last_seen_at)}</td>
@@ -7992,7 +8071,7 @@
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="17" class="text-muted">Sem anomalias</td></tr>';
+      `).join('') || '<tr><td colspan="18" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -8005,7 +8084,9 @@
       try {
         await updateAnomalySummary();
         const payload = await apiRequest(tab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
-        renderAnomalyTable(Array.isArray(payload.items) ? payload.items : []);
+        anomalyItems = Array.isArray(payload.items) ? payload.items : [];
+        renderAnomalyTable(anomalyItems);
+        await loadAnomalyDashboard();
         await loadSecurityAnomaliesForAnomalyView(tab);
         document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Historico de anomalias';
       } catch (error) {
@@ -8182,7 +8263,8 @@
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
         const detail = payload || {};
         const event = detail.event || detail.anomaly || detail;
-        document.getElementById('anomalyDetailSummary').textContent = event.summary || '-';
+        document.getElementById('anomalyDetailModalTitle').textContent = `#${event.id || anomalyId} ${event.attack_vector_name || event.vector_name || event.decoder || 'Anomalia'}`;
+        document.getElementById('anomalyDetailSummary').textContent = `#${event.id || anomalyId} ${event.summary || '-'}`;
         document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event);
         setText('anomalyDetailStatus', event.status || '-');
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
@@ -10600,6 +10682,42 @@
       }
     }
 
+    function metricChipHtml(label, value) {
+      return `<div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value ?? '-')}</div>`;
+    }
+
+    async function loadSystemView() {
+      setText('systemStatus', 'Atualizando recursos...');
+      const [resources, containers, collectors] = await Promise.all([
+        apiRequest('/api/system/resources'),
+        apiRequest('/api/system/containers'),
+        apiRequest('/api/collectors/health')
+      ]);
+      const memory = resources.memory || {};
+      const disk = resources.disk || {};
+      const cpu = resources.cpu || {};
+      document.getElementById('systemResourceCards').innerHTML = [
+        metricChipHtml('CPU', cpu.available ? `${cpu.percent}%` : 'indisponivel'),
+        metricChipHtml('RAM', memory.available ? `${memory.used_percent}% usado` : `${memory.available_gb || '-'} GB livre`),
+        metricChipHtml('Disco', disk.available ? `${disk.used_percent}% usado` : 'indisponivel'),
+        metricChipHtml('ClickHouse', resources.clickhouse?.status || 'indisponivel'),
+        ...(resources.warnings || []).map(item => `<div class="text-danger">${escapeHtml(item)}</div>`)
+      ].join('');
+      document.getElementById('systemContainerList').innerHTML = (containers.items || []).map(item => `
+        <div class="metric-readout">
+          <strong>${escapeHtml(item.name || '-')}</strong><br>
+          CPU ${escapeHtml(item.cpu_percent || '-')} / RAM ${escapeHtml(item.memory_percent || item.memory || '-')}
+        </div>
+      `).join('') || '<div class="subtle">Containers indisponiveis.</div>';
+      document.getElementById('systemCollectorList').innerHTML = (collectors.items || []).map(item => `
+        <div class="metric-readout">
+          <strong>${escapeHtml(item.sensor || item.file || '-')}</strong><br>
+          ${escapeHtml(item.status || '-')} / lag ${formatBytes(item.lag_bytes || 0)} / ultimo flow ${escapeHtml(item.last_flow_time || '-')}
+        </div>
+      `).join('') || '<div class="subtle">Collectors indisponiveis.</div>';
+      setText('systemStatus', 'Recursos atualizados');
+    }
+
     function showView(view, placeholderTitle = '') {
       if (view !== 'dashboard') {
         if (dashboardRefreshTimer) {
@@ -10667,6 +10785,10 @@
         document.getElementById('view-bgp').classList.add('active');
         document.querySelector('[data-nav-view="bgp"]').classList.add('active');
         loadBgpView().catch(console.error);
+      } else if (view === 'system') {
+        document.getElementById('view-system').classList.add('active');
+        document.querySelector('[data-nav-view="system"]').classList.add('active');
+        loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`));
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
@@ -10888,6 +11010,8 @@
     document.getElementById('saveAttackVectorButton').addEventListener('click', () => saveAttackVector().catch(console.error));
     document.getElementById('modalVectorSensor').addEventListener('change', () => populateAttackVectorInterfaces());
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
+    document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
+    document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
     document.getElementById('anomalyTabActive').addEventListener('click', () => loadAnomalies('active').catch(console.error));
     document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
