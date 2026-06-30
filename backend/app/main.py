@@ -1441,6 +1441,10 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             reason TEXT NOT NULL DEFAULT '',
             operator_summary TEXT NOT NULL DEFAULT '',
             report_summary TEXT NOT NULL DEFAULT '',
+            request_payload_chars INTEGER NOT NULL DEFAULT 0,
+            prompt_chars INTEGER NOT NULL DEFAULT 0,
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            timeout_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             error_message TEXT NOT NULL DEFAULT ''
         )
@@ -1468,6 +1472,10 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "attack_vectors", "cooldown_seconds", "cooldown_seconds INTEGER NOT NULL DEFAULT 300")
     ensure_sqlite_column(conn, "attack_vectors", "max_active_announcements", "max_active_announcements INTEGER NOT NULL DEFAULT 10")
     ensure_sqlite_column(conn, "attack_vectors", "duration_seconds", "duration_seconds INTEGER NOT NULL DEFAULT 900")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "request_payload_chars", "request_payload_chars INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "prompt_chars", "prompt_chars INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "candidate_count", "candidate_count INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "timeout_seconds", "timeout_seconds INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "attack_vectors", "min_confidence_for_auto", "min_confidence_for_auto REAL")
     ensure_sqlite_column(conn, "attack_vectors", "notes", "notes TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "anomaly_events", "target_role", "target_role TEXT NOT NULL DEFAULT ''")
@@ -8452,6 +8460,10 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "rendered_command_preview": response.get("rendered_command_preview") if isinstance(response, dict) else "",
         "risks": response.get("risks") if isinstance(response, dict) else [],
         "checks_before_approve": response.get("checks_before_approve") if isinstance(response, dict) else [],
+        "request_payload_chars": int(item.get("request_payload_chars") or 0),
+        "prompt_chars": int(item.get("prompt_chars") or 0),
+        "candidate_count": int(item.get("candidate_count") or 0),
+        "timeout_seconds": int(item.get("timeout_seconds") or 0),
         "created_at": item.get("created_at") or "",
         "error_message": item.get("error_message") or "",
     }
@@ -8471,43 +8483,84 @@ def latest_ai_analysis(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, A
     return ai_analysis_row_to_dict(row)
 
 
-def compact_ai_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "candidate_index",
+def ai_compact_text(value: Any, max_chars: int) -> str:
+    text = clean_text(value)
+    return text[:max_chars] if max_chars > 0 else text
+
+
+def ai_keep_value(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def ai_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = clean_text(value).lower()
+    return text in {"1", "true", "yes", "sim", "on"}
+
+
+def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None = None, text_limit: int = 320) -> dict[str, Any]:
+    compacted: dict[str, Any] = {}
+    index = candidate.get("candidate_index")
+    if index in (None, "") and candidate_index is not None:
+        index = candidate_index
+    compacted["candidate_index"] = index
+    policy = candidate.get("policy_decision") if isinstance(candidate.get("policy_decision"), dict) else {}
+    policy_allows_auto = policy.get("decision") == "allow_auto"
+    mode = clean_text(candidate.get("mitigation_mode"))
+    never_announce = ai_bool(candidate.get("never_announce")) or mode == "analysis_only"
+    allow_auto = ai_bool(candidate.get("allow_auto")) if "allow_auto" in candidate else policy_allows_auto
+    manual_required = ai_bool(candidate.get("manual_approval_required")) if "manual_approval_required" in candidate else not policy_allows_auto
+    compacted["never_announce"] = never_announce
+    compacted["allow_auto"] = allow_auto and not never_announce
+    compacted["manual_approval_required"] = manual_required or never_announce
+    for key in (
         "source",
-        "attack_vector_id",
-        "attack_vector_name",
-        "name",
-        "confidence",
-        "reason",
-        "mitigation_reason",
-        "mitigation_basis",
         "mitigation_mode",
-        "requested_mode",
-        "allow_auto",
-        "never_announce",
-        "response_type",
-        "action",
-        "then_action",
-        "protocol",
         "src_cidr",
         "dst_cidr",
-        "src_prefix",
-        "dst_prefix",
-        "target_prefix",
-        "target_scope",
+        "protocol",
         "src_port",
         "dst_port",
-        "tcp_flags",
-        "rate_limit_bps",
-        "duration_seconds",
-        "connector_id",
-        "response_profile_id",
-        "mitigation_key",
-        "policy_decision",
-        "rendered_command_preview",
-    )
-    return {key: candidate.get(key) for key in keys if candidate.get(key) not in (None, "", [], {})}
+        "action",
+        "confidence",
+    ):
+        value = candidate.get(key)
+        if ai_keep_value(value):
+            compacted[key] = value
+    if not compacted.get("action") and ai_keep_value(candidate.get("then_action")):
+        compacted["action"] = candidate.get("then_action")
+    for key in ("reason", "rendered_command_preview"):
+        value = ai_compact_text(candidate.get(key), text_limit)
+        if value:
+            compacted[key] = value
+    return {key: value for key, value in compacted.items() if ai_keep_value(value)}
+
+
+def compact_ai_flow(flow: dict[str, Any]) -> dict[str, Any]:
+    keys = ("src_ip", "src_port", "dst_ip", "dst_port", "protocol", "input_if", "output_if", "packets", "bytes")
+    compacted: dict[str, Any] = {}
+    for key in keys:
+        value = flow.get(key)
+        if key == "protocol" and not ai_keep_value(value):
+            value = flow.get("proto")
+        if ai_keep_value(value):
+            compacted[key] = value
+    return compacted
+
+
+def compact_ai_flow_list(items: list[Any], limit: int = 1) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            flow = compact_ai_flow(item)
+            if flow:
+                compacted.append(flow)
+        if len(compacted) >= limit:
+            break
+    return compacted
 
 
 def compact_deterministic_analysis_for_ai(deterministic: dict[str, Any]) -> dict[str, Any]:
@@ -8515,44 +8568,25 @@ def compact_deterministic_analysis_for_ai(deterministic: dict[str, Any]) -> dict
         return {}
     keys = (
         "source",
-        "anomaly_id",
         "clickhouse_rows_considered",
         "rows_considered",
         "prioritized_rows_considered",
         "valid_udp_rows_considered",
-        "fallback_candidate_reason",
-        "fallback_candidate_block_reason",
-        "window",
-        "interface_if_index",
-        "direction",
-        "warnings",
-        "top_flow_by_packets",
-        "top_flow_by_bytes",
-        "top_conversation_by_packets",
-        "top_src_ip_by_packets",
-        "top_dst_ip_by_packets",
-        "top_dst_port_by_packets",
-        "top_dst_port_pair_by_packets",
-        "unique_src_ips",
-        "unique_dst_ips",
-        "unique_dst_ports",
-        "packet_share_percent",
-        "top_src_share_percent",
-        "top_dst_port_share_percent",
     )
-    compacted = {key: deterministic.get(key) for key in keys if deterministic.get(key) not in (None, "", [], {})}
-    compacted["top_flows"] = list(deterministic.get("top_flows") or [])[:5]
-    compacted["output_interface_top_flows"] = list(deterministic.get("output_interface_top_flows") or [])[:3]
-    compacted["input_interface_top_flows"] = list(deterministic.get("input_interface_top_flows") or [])[:3]
-    compacted["top_src_ips"] = list(deterministic.get("top_src_ips") or [])[:5]
-    compacted["top_dst_ips"] = list(deterministic.get("top_dst_ips") or [])[:5]
-    compacted["top_dst_ports"] = list(deterministic.get("top_dst_ports") or [])[:5]
-    compacted["top_dst_port_pairs"] = list(deterministic.get("top_dst_port_pairs") or [])[:5]
+    compacted = {key: deterministic.get(key) for key in keys if ai_keep_value(deterministic.get(key))}
+    for key in ("fallback_candidate_reason", "fallback_candidate_block_reason"):
+        value = ai_compact_text(deterministic.get(key), 240)
+        if value:
+            compacted[key] = value
+    top_flow = deterministic.get("top_flow_by_packets")
+    if isinstance(top_flow, dict):
+        compacted["top_flow_by_packets"] = compact_ai_flow(top_flow)
     compacted["fallback_analysis_candidates"] = [
-        compact_ai_candidate(candidate)
-        for candidate in list(deterministic.get("fallback_analysis_candidates") or [])
+        compact_ai_candidate(candidate, index)
+        for index, candidate in enumerate(list(deterministic.get("fallback_analysis_candidates") or []))
+        if isinstance(candidate, dict)
     ]
-    return compacted
+    return {key: value for key, value in compacted.items() if ai_keep_value(value)}
 
 
 def ai_payload_json_size(payload: dict[str, Any]) -> int:
@@ -8560,70 +8594,95 @@ def ai_payload_json_size(payload: dict[str, Any]) -> int:
 
 
 def trim_ai_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
-    if ai_payload_json_size(payload) <= max_chars:
-        return payload
-    trimmed = dict(payload)
-    trimmed["context_truncated"] = True
-    trimmed["candidates"] = [compact_ai_candidate(candidate) for candidate in list(payload.get("candidates") or [])]
-    trimmed["deterministic_analysis"] = compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {}))
-    trimmed["policy_decisions"] = [
-        {"candidate_index": index, "policy_decision": candidate.get("policy_decision")}
-        for index, candidate in enumerate(trimmed["candidates"])
-    ]
-    trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[: max(3, len(trimmed.get("related_flows") or []) // 2)]
-    trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[: max(3, len(trimmed.get("top_conversations") or []) // 2)]
-    if ai_payload_json_size(trimmed) <= max_chars:
-        return trimmed
-    trimmed["related_flows"] = list(trimmed.get("related_flows") or [])[:3]
-    trimmed["top_conversations"] = list(trimmed.get("top_conversations") or [])[:3]
-    if ai_payload_json_size(trimmed) <= max_chars:
-        return trimmed
-    deterministic = dict(trimmed.get("deterministic_analysis") or {})
-    deterministic["top_flows"] = list(deterministic.get("top_flows") or [])[:1]
-    deterministic["output_interface_top_flows"] = list(deterministic.get("output_interface_top_flows") or [])[:1]
-    deterministic["input_interface_top_flows"] = list(deterministic.get("input_interface_top_flows") or [])[:1]
-    deterministic["top_src_ips"] = list(deterministic.get("top_src_ips") or [])[:3]
-    deterministic["top_dst_ips"] = list(deterministic.get("top_dst_ips") or [])[:3]
-    deterministic["top_dst_ports"] = list(deterministic.get("top_dst_ports") or [])[:3]
-    deterministic["top_dst_port_pairs"] = list(deterministic.get("top_dst_port_pairs") or [])[:3]
-    trimmed["deterministic_analysis"] = deterministic
-    if ai_payload_json_size(trimmed) <= max_chars:
-        return trimmed
-    trimmed["related_flows"] = []
-    trimmed["top_conversations"] = []
-    return trimmed
+    return compact_ai_payload_for_model(payload, max_chars)
 
 
 def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "id",
-        "status",
         "attack_vector_name",
-        "vector_name",
         "sensor_name",
-        "sensor_id",
         "interface_if_index",
         "direction",
         "decoder",
-        "protocol",
-        "metric_unit",
         "observed_value",
-        "peak_value",
         "threshold_value",
         "estimated_packets",
-        "estimated_bytes",
         "flow_count",
         "started_at",
-        "last_seen_at",
         "ended_at",
-        "target_ip",
-        "target_cidr",
-        "target_port",
-        "input_if",
-        "output_if",
+        "status",
         "summary",
     )
-    return {key: event.get(key) for key in keys if event.get(key) not in {None, ""}}
+    compacted = {key: event.get(key) for key in keys if event.get(key) not in {None, ""}}
+    if compacted.get("summary"):
+        compacted["summary"] = ai_compact_text(compacted["summary"], 320)
+    return compacted
+
+
+def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int) -> dict[str, Any]:
+    max_context_chars = max(1000, int(max_context_chars or 1000))
+    raw_size = ai_payload_json_size(payload)
+    raw_candidates = list(payload.get("candidates") or [])
+    compacted: dict[str, Any] = {
+        "anomaly": compact_anomaly_for_ai(dict(payload.get("anomaly") or {})),
+        "deterministic_analysis": compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {})),
+        "related_flows": compact_ai_flow_list(list(payload.get("related_flows") or []), 1),
+        "top_conversations": compact_ai_flow_list(list(payload.get("top_conversations") or []), 1),
+        "candidates": [
+            compact_ai_candidate(candidate, index)
+            for index, candidate in enumerate(raw_candidates)
+            if isinstance(candidate, dict)
+        ],
+        "security_rules": {
+            "choose_only_existing_candidate": True,
+            "ai_never_announces": True,
+            "fallback_analysis_never_announces": True,
+            "analysis_only_never_apply": True,
+        },
+        "context_truncated": raw_size > max_context_chars,
+    }
+    if not compacted["top_conversations"] and compacted["related_flows"]:
+        compacted["top_conversations"] = [dict(compacted["related_flows"][0])]
+    budget = max_context_chars + 1000
+    if ai_payload_json_size(compacted) <= budget:
+        return compacted
+    compacted["candidates"] = [
+        compact_ai_candidate(candidate, index, text_limit=180)
+        for index, candidate in enumerate(raw_candidates)
+        if isinstance(candidate, dict)
+    ]
+    deterministic = compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {}))
+    deterministic["fallback_analysis_candidates"] = [
+        compact_ai_candidate(candidate, index, text_limit=180)
+        for index, candidate in enumerate(list((payload.get("deterministic_analysis") or {}).get("fallback_analysis_candidates") or []))
+        if isinstance(candidate, dict)
+    ]
+    if deterministic.get("fallback_candidate_reason"):
+        deterministic["fallback_candidate_reason"] = ai_compact_text(deterministic["fallback_candidate_reason"], 160)
+    if deterministic.get("fallback_candidate_block_reason"):
+        deterministic["fallback_candidate_block_reason"] = ai_compact_text(deterministic["fallback_candidate_block_reason"], 160)
+    compacted["deterministic_analysis"] = deterministic
+    if compacted.get("anomaly", {}).get("summary"):
+        compacted["anomaly"]["summary"] = ai_compact_text(compacted["anomaly"]["summary"], 160)
+    if ai_payload_json_size(compacted) <= budget:
+        return compacted
+    compacted["related_flows"] = []
+    compacted["top_conversations"] = []
+    if ai_payload_json_size(compacted) <= budget:
+        return compacted
+    compacted["candidates"] = [
+        compact_ai_candidate(candidate, index, text_limit=100)
+        for index, candidate in enumerate(raw_candidates)
+        if isinstance(candidate, dict)
+    ]
+    deterministic["fallback_analysis_candidates"] = [
+        compact_ai_candidate(candidate, index, text_limit=100)
+        for index, candidate in enumerate(list((payload.get("deterministic_analysis") or {}).get("fallback_analysis_candidates") or []))
+        if isinstance(candidate, dict)
+    ]
+    compacted["deterministic_analysis"] = deterministic
+    return compacted
 
 
 def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict[str, Any]:
@@ -8635,66 +8694,29 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
     flows = list(context.get("flows") or [])[: int(config["max_top_flows"])]
     if not flows and deterministic:
         flows = list(deterministic.get("top_flows") or [])[: int(config["max_top_flows"])]
-    conversations: dict[str, dict[str, Any]] = {}
-    for flow in flows:
-        key = f"{flow.get('src_ip') or '-'}:{flow.get('src_port') or '-'} -> {flow.get('dst_ip') or '-'}:{flow.get('dst_port') or '-'}"
-        item = conversations.setdefault(key, {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0})
-        item["bytes"] += int(float(flow.get("bytes") or 0))
-        item["packets"] += int(float(flow.get("packets") or 0))
-        item["flow_count"] += int(float(flow.get("flow_count") or flow.get("flows") or 0))
     payload = {
         "anomaly": compact_anomaly_for_ai(evaluated["anomaly"]),
         "deterministic_analysis": deterministic,
-        "top_conversations": sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[: int(config["max_top_flows"])],
+        "top_conversations": sorted(flows, key=lambda item: int(float(item.get("bytes") or 0)), reverse=True)[: int(config["max_top_flows"])],
         "related_flows": flows,
         "candidates": candidates,
-        "policy_decisions": [
-            {"candidate_index": index, "policy_decision": candidate.get("policy_decision")}
-            for index, candidate in enumerate(candidates)
-        ],
         "security_rules": {
             "ai_never_announces": True,
             "choose_only_existing_candidate": True,
-            "policy_validation_required": bool(config.get("require_policy_validation")),
-            "ai_allow_auto": bool(config.get("allow_auto")),
             "fallback_analysis_never_announces": True,
+            "analysis_only_never_apply": True,
         },
     }
-    return trim_ai_payload(payload, int(config["max_context_chars"]))
+    return compact_ai_payload_for_model(payload, int(config["max_context_chars"]))
 
 
 def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
-    response_schema = {
-        "recommended_candidate_index": 0,
-        "confidence": 0.72,
-        "risk": "low|medium|high",
-        "classification": "udp_outbound_flood|udp_reflection|dns_reflection|ntp_reflection|scan|unknown|likely_false_positive",
-        "manual_approval_required": True,
-        "allow_auto": False,
-        "reason": "explicacao curta",
-        "operator_summary": "texto para NOC",
-        "report_summary": "texto para PDF",
-        "rendered_command_preview": "preview opcional, nunca anunciado automaticamente",
-        "risks": ["..."],
-        "checks_before_approve": ["..."],
-    }
-    examples = [
-        "UDP upload single client high PPS: preferir candidate top conversation scoped por source /32, destination /32 e destination-port.",
-        "UDP many internal to same dst:port: preferir destination /32 + destination-port e aprovacao manual.",
-        "UDP reflection inbound: preferir destination cliente /32 + source-port reflection.",
-        "Trafego CDN/QUIC: UDP/443 ou portas comuns elevam risco de falso positivo; sugerir investigacao/manual.",
-    ]
-    return "\n\n".join(
-        [
-            "Analise o payload e escolha apenas um indice existente em candidates.",
-            "Se o candidate recomendado tiver policy_decision.deny, marque manual_approval_required=true e explique que esta bloqueado pela policy.",
-            "Candidates com source=fallback_analysis, mitigation_mode=analysis_only ou never_announce=true sao apenas recomendacao de analise e nunca devem ser tratados como anuncio automatico.",
-            "Nunca recomende accept automatico. Vetores genericos sempre exigem aprovacao manual.",
-            "Exemplos: " + " ".join(examples),
-            "Formato obrigatorio de resposta JSON: " + json.dumps(response_schema, ensure_ascii=False),
-            "Payload: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
-        ]
+    instruction = (
+        "Escolha um candidate existente. Responda apenas JSON valido com "
+        "recommended_candidate_index, confidence, risk, classification, reason, "
+        "operator_summary, checks_before_approve, manual_approval_required, allow_auto."
     )
+    return instruction + "\nPayload: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int]:
@@ -8711,6 +8733,12 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
                 {"role": "user", "content": user_prompt},
             ],
             "format": "json",
+            "options": {
+                "temperature": 0,
+                "num_predict": 256,
+                "num_ctx": 2048,
+                "top_p": 0.9,
+            },
         }
     else:
         endpoint = f"{base_url}/v1/chat/completions"
@@ -8778,9 +8806,19 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
     policy = candidate.get("policy_decision") or {}
     policy_denied = policy.get("decision") == "deny"
     action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
-    never_announce = bool(candidate.get("never_announce")) or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
-    allow_auto = bool(response.get("allow_auto")) and bool(config.get("allow_auto")) and not policy_denied and action != "accept" and not never_announce
-    manual_required = bool(response.get("manual_approval_required")) or not allow_auto or policy_denied or never_announce
+    never_announce = ai_bool(candidate.get("never_announce")) or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
+    candidate_manual_required = ai_bool(candidate.get("manual_approval_required"))
+    candidate_allows_auto = ai_bool(candidate.get("allow_auto"))
+    allow_auto = (
+        ai_bool(response.get("allow_auto"))
+        and bool(config.get("allow_auto"))
+        and candidate_allows_auto
+        and not candidate_manual_required
+        and not policy_denied
+        and action != "accept"
+        and not never_announce
+    )
+    manual_required = ai_bool(response.get("manual_approval_required")) or not allow_auto or policy_denied or never_announce or candidate_manual_required
     return {
         **response,
         "recommended_candidate_index": index,
@@ -8805,25 +8843,41 @@ def save_ai_analysis(
     request_payload: dict[str, Any],
     response_json: dict[str, Any] | None = None,
     error_message: str = "",
+    prompt: str = "",
 ) -> dict[str, Any]:
     response_json = response_json or {}
     now = utc_now_iso()
+    request_payload_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str)
+    request_payload_chars = len(request_payload_json)
+    prompt_chars = len(prompt)
+    candidate_count = len(list(request_payload.get("candidates") or []))
+    timeout_seconds = int(config.get("timeout_seconds") or 0)
+    logger.info(
+        "ai_analysis_diagnostic anomaly_id=%s model=%s request_payload_chars=%s prompt_chars=%s candidate_count=%s timeout_seconds=%s",
+        anomaly_id,
+        config.get("selected_model") or "",
+        request_payload_chars,
+        prompt_chars,
+        candidate_count,
+        timeout_seconds,
+    )
     conn.execute(
         """
         INSERT INTO ai_mitigation_analysis (
             anomaly_id, provider, model, profile, request_payload_json, response_json,
             recommended_candidate_index, confidence, risk, classification,
             manual_approval_required, allow_auto, reason, operator_summary, report_summary,
+            request_payload_chars, prompt_chars, candidate_count, timeout_seconds,
             created_at, error_message
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             anomaly_id,
             config.get("provider") or "",
             config.get("selected_model") or "",
             config.get("selected_profile") or "",
-            json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str),
+            request_payload_json,
             json.dumps(response_json, ensure_ascii=False, sort_keys=True, default=str),
             response_json.get("recommended_candidate_index"),
             response_json.get("confidence"),
@@ -8834,6 +8888,10 @@ def save_ai_analysis(
             response_json.get("reason") or "",
             response_json.get("operator_summary") or "",
             response_json.get("report_summary") or "",
+            request_payload_chars,
+            prompt_chars,
+            candidate_count,
+            timeout_seconds,
             now,
             clean_text(error_message)[:2000],
         ),
@@ -8964,17 +9022,18 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
             saved = save_ai_analysis(conn, event_id, config, request_payload, fallback_response)
             conn.commit()
         return saved
+    prompt = ai_prompt_for_payload(request_payload)
     try:
-        response_text, _latency_ms = ai_provider_chat(config, ai_prompt_for_payload(request_payload))
+        response_text, _latency_ms = ai_provider_chat(config, prompt)
         parsed = parse_ai_json_response(response_text)
         validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
         with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, validated)
+            saved = save_ai_analysis(conn, event_id, config, request_payload, validated, prompt=prompt)
             conn.commit()
         return saved
     except Exception as exc:
         with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc))
+            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc), prompt=prompt)
             conn.commit()
         return saved
 
