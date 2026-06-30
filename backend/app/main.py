@@ -4677,7 +4677,13 @@ def sensor_clause(sensor: str | None, params: dict[str, Any]) -> str:
 
 
 def clean_ip(value: Any) -> str:
-    text = str(value or "")
+    text = str(value or "").strip()
+    if text.lower().startswith("::ffff:"):
+        mapped = text.split(":", 3)[-1]
+        try:
+            return str(IPv4Address(mapped))
+        except ValueError:
+            pass
     try:
         parsed = ip_address(text)
     except ValueError:
@@ -7968,6 +7974,21 @@ def compact_flow_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def flow_is_udp(row: dict[str, Any]) -> bool:
+    text = clean_text(row.get("protocol") or row.get("proto_name") or row.get("proto")).lower()
+    return text in {"udp", "17"} or text.endswith("/udp")
+
+
+def valid_udp_analysis_flow(row: dict[str, Any]) -> bool:
+    return (
+        flow_is_udp(row)
+        and bool(clean_ip(row.get("src_ip")))
+        and bool(clean_ip(row.get("dst_ip")))
+        and int(row.get("dst_port") or 0) > 0
+        and int(row.get("packets") or 0) > 0
+    )
+
+
 def aggregate_packets(rows: list[dict[str, Any]], key_func: Any, label_func: Any, limit: int = 10) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -8082,7 +8103,7 @@ def analysis_flows_from_context(context: dict[str, Any]) -> list[dict[str, Any]]
     flows = [compact_flow_row(dict(flow)) for flow in list(context.get("flows") or [])]
     strong = [
         flow for flow in flows
-        if clean_ip(flow.get("src_ip")) and clean_ip(flow.get("dst_ip")) and int(flow.get("packets") or 0) > 0
+        if valid_udp_analysis_flow(flow)
     ]
     return strong
 
@@ -8151,6 +8172,7 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     if len(saved_flows) < 3:
         clickhouse_flows, query_warnings = query_clickhouse_flows_for_analysis(event)
         warnings.extend(query_warnings)
+    clickhouse_rows_considered = len(clickhouse_flows)
     rows_by_key: dict[str, dict[str, Any]] = {}
     for flow in [*saved_flows, *clickhouse_flows]:
         key = flow_identity(flow)
@@ -8165,8 +8187,11 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     input_rows = [row for row in rows if interface_if_index and int(row.get("input_if") or 0) == interface_if_index]
     direction = clean_text(event.get("direction")).lower()
     prioritized_rows = output_rows if direction == "sends" and output_rows else input_rows if direction == "receives" and input_rows else rows
+    valid_udp_rows = [row for row in prioritized_rows if valid_udp_analysis_flow(row)]
+    if not valid_udp_rows:
+        valid_udp_rows = [row for row in rows if valid_udp_analysis_flow(row)]
     total_packets = sum(int(row.get("packets") or 0) for row in prioritized_rows) or sum(int(row.get("packets") or 0) for row in rows)
-    top_flow_by_packets = prioritized_rows[0] if prioritized_rows else {}
+    top_flow_by_packets = valid_udp_rows[0] if valid_udp_rows else prioritized_rows[0] if prioritized_rows else {}
     top_flow_by_bytes = sorted(rows, key=lambda item: (int(item.get("bytes") or 0), int(item.get("packets") or 0)), reverse=True)[0] if rows else {}
     top_src = aggregate_packets(prioritized_rows or rows, lambda row: clean_ip(row.get("src_ip")), lambda row: clean_ip(row.get("src_ip")))
     top_dst = aggregate_packets(prioritized_rows or rows, lambda row: clean_ip(row.get("dst_ip")), lambda row: clean_ip(row.get("dst_ip")))
@@ -8185,11 +8210,14 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
         return round((int(value or 0) / total_packets * 100), 2) if total_packets else 0.0
 
     candidates: list[dict[str, Any]] = []
+    fallback_candidate_reason = ""
+    fallback_candidate_block_reason = ""
     top_src_ip = clean_ip(top_flow_by_packets.get("src_ip"))
     top_dst_ip = clean_ip(top_flow_by_packets.get("dst_ip"))
     top_dst_port_value = int(top_flow_by_packets.get("dst_port") or 0)
-    top_protocol = clean_text(top_flow_by_packets.get("protocol")).lower()
-    if top_src_ip and top_dst_ip and top_dst_port_value and top_protocol == "udp":
+    top_protocol = clean_text(top_flow_by_packets.get("protocol") or top_flow_by_packets.get("proto")).lower()
+    if top_src_ip and top_dst_ip and top_dst_port_value and flow_is_udp(top_flow_by_packets):
+        fallback_candidate_reason = "Top flow UDP valido encontrado no ClickHouse/flows relacionados."
         candidates.append(
             fallback_analysis_candidate(
                 event,
@@ -8222,11 +8250,25 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
                     top_dst_port_value,
                 )
             )
+    elif not rows:
+        fallback_candidate_block_reason = "Nenhum flow encontrado na janela/interface da anomalia."
+    elif not top_src_ip or not top_dst_ip:
+        fallback_candidate_block_reason = f"Top flow sem IP valido apos normalizacao: src={top_flow_by_packets.get('src_ip')} dst={top_flow_by_packets.get('dst_ip')}."
+    elif not top_dst_port_value:
+        fallback_candidate_block_reason = "Top flow sem destination-port valido."
+    elif not flow_is_udp(top_flow_by_packets):
+        fallback_candidate_block_reason = f"Top flow nao identificado como UDP: protocol={top_protocol or top_flow_by_packets.get('protocol') or top_flow_by_packets.get('proto')}."
     for index, candidate in enumerate(candidates):
         candidate["candidate_index"] = index
     return {
         "source": "deterministic_anomaly_analysis",
         "anomaly_id": anomaly_id,
+        "clickhouse_rows_considered": clickhouse_rows_considered,
+        "rows_considered": len(rows),
+        "prioritized_rows_considered": len(prioritized_rows),
+        "valid_udp_rows_considered": len(valid_udp_rows),
+        "fallback_candidate_reason": fallback_candidate_reason,
+        "fallback_candidate_block_reason": fallback_candidate_block_reason,
         "window": {"start": iso(anomaly_analysis_window(event)[0]), "end": iso(anomaly_analysis_window(event)[1])},
         "interface_if_index": interface_if_index,
         "direction": direction,
