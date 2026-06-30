@@ -488,52 +488,50 @@ LEARN_DECODER_UNITS = (
 )
 
 IP_ZONE_PREFIX_TYPES = {"client", "public_cgnat", "infrastructure", "server", "cache", "transit", "other"}
-DETECTION_DOMAINS = {"internal_ip", "subnet"}
-DETECTION_DIRECTIONS = {"transmits", "receives", "both"}
+DETECTION_DOMAINS = {"internal_ip", "internal_ip_to_dst", "subnet", "interface", "sensor", "destination", "asn"}
+DETECTION_DIRECTION_ALIASES = {"sends": "transmits", "outbound": "transmits", "inbound": "receives"}
+DETECTION_DIRECTIONS = {"transmits", "receives", "sends", "outbound", "inbound", "both"}
 DETECTION_METRICS = {
     "packets_s",
     "bits_s",
+    "bytes_s",
     "flows_s",
+    "flow_count",
+    "pps",
+    "bps",
     "flows",
     "unique_dst_ips",
     "unique_dst_ports",
     "unique_src_ports",
 }
-DETECTION_COMPARISONS = {"over"}
-DETECTION_RESPONSES = {"DETECTION_ONLY"}
+DETECTION_COMPARISONS = {"over", "under"}
+DETECTION_RESPONSES = {"DETECTION_ONLY", "ALERT_ONLY", "MANUAL_REVIEW"}
 DETECTION_WHITELIST_TYPES = {"source", "destination", "source_destination"}
-DETECTION_PROTOCOLS = {
-    "ALL",
-    "IP/ALL",
-    "IP",
-    "UDP",
-    "TCP",
-    "TCP+SYN",
-    "TCP+ACK",
-    "TCP+RST",
-    "ICMP",
-    "GRE",
-    "ESP",
-    "DNS",
-    "NTP",
-    "SSDP",
-    "CLDAP",
-    "CHARGEN",
-    "UDP-QUIC",
-    "OTHER",
-    "CUSTOM",
+DETECTION_PROTOCOLS = {item["id"] for item in DECODER_REGISTRY} | {"ALL", "IP/ALL", "FRAGMENTS"}
+DETECTION_GROUP_BY_OPTIONS = {
+    "",
+    "src_ip",
+    "dst_ip",
+    "src_ip,dst_ip",
+    "dst_ip,dst_port,protocol",
+    "src_ip,dst_ip,dst_port,protocol",
+    "src_subnet",
+    "dst_subnet",
+    "asn",
+    "interface",
 }
+DETECTION_MITIGATION_MODES = {"detection_only", "manual", "semi_auto", "auto"}
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
-BGP_MODES = {"detection_only", "dry_run", "manual_approval", "automatic"}
-BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion"}
-BGP_ACTIONS = {"alert_only", "discard", "accept", "rate_limit", "redirect", "community", "blackhole", "announce_route"}
+BGP_MODES = {"detection_only", "dry_run", "manual_approval", "semi_auto", "auto", "automatic"}
+BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion", "blackhole", "rate_limit", "alert_only", "webhook"}
+BGP_ACTIONS = {"alert_only", "discard", "accept", "rate_limit", "redirect", "redirect_to_vrf", "set_community", "community", "blackhole", "announce_blackhole", "announce_route"}
 BGP_FLOWSPEC_ACTIONS = {"discard", "accept", "rate_limit"}
-BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "target_ip", "target_cidr", "anomaly_src_ip", "anomaly_dst_ip"}
-BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "tcp", "udp", "icmp"}
+BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "dst_prefix", "src_prefix", "conversation", "target_ip", "target_cidr", "anomaly_src_ip", "anomaly_dst_ip"}
+BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "fixed", "tcp", "udp", "icmp"}
 BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "fixed"}
-BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "syn", "syn_ack"}
+BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "anomaly_tcp_flags", "fixed", "syn", "syn_ack"}
 BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "announced", "rejected", "rejected_by_policy", "withdrawn", "failed", "failed_withdraw"}
 BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
@@ -893,6 +891,35 @@ class DetectionRulePayload(BaseModel):
     cooldown_minutes: int = Field(5, ge=0, le=1440)
     enabled: bool = True
     response: str = "DETECTION_ONLY"
+    src_cidr: str = ""
+    dst_cidr: str = ""
+    src_port: str = "any"
+    dst_port: str = "any"
+    tcp_flags: str = ""
+    icmp_type: str = ""
+    icmp_code: str = ""
+    detection_key: str = ""
+    group_by: str = ""
+    scope: str = ""
+    input_if: str = ""
+    output_if: str = ""
+    sensor_id: int | None = Field(None, ge=1)
+    warning_response_profile_id: int | None = Field(None, ge=1)
+    critical_response_profile_id: int | None = Field(None, ge=1)
+    fallback_response_profile_id: int | None = Field(None, ge=1)
+    mitigation_mode: str = "detection_only"
+    mitigation_enabled: bool = False
+    max_auto_prefixlen_v4: int = Field(32, ge=0, le=32)
+    max_auto_prefixlen_v6: int = Field(128, ge=0, le=128)
+    require_protected_prefix: bool = True
+    cooldown_seconds: int | None = Field(None, ge=0, le=86400)
+    duration_seconds: int = Field(7200, ge=60, le=604800)
+    max_active_announcements: int = Field(10, ge=1, le=10000)
+    min_confidence_for_auto: float = Field(0.90, ge=0, le=1)
+    use_global_whitelist: bool = True
+    extra_whitelist_ids: list[int] = Field(default_factory=list)
+    bypass_whitelist: bool = False
+    notes: str = ""
 
 
 class DetectionWhitelistPayload(BaseModel):
@@ -951,11 +978,13 @@ class BgpResponseProfilePayload(BaseModel):
     default_action: str | None = None
     target_selector: str = "src_ip"
     protocol_selector: str = "anomaly_protocol"
+    fixed_protocol: str = ""
     src_port_selector: str = "any"
     src_port_value: str = ""
     dst_port_selector: str = "any"
     dst_port_value: str = ""
     tcp_flags_selector: str = "any"
+    tcp_flags_value: str = ""
     rate_limit_bps: int | None = Field(None, ge=1)
     rate_limit_value_raw: str | None = None
     rate_limit_unit: str | None = None
@@ -976,6 +1005,9 @@ class BgpResponseProfilePayload(BaseModel):
     allow_wide_prefix: bool = False
     max_duration_seconds: int = Field(BGP_DEFAULT_MAX_DURATION_SECONDS, ge=60, le=604800)
     default_duration_seconds: int = Field(1800, ge=60, le=604800)
+    max_prefixlen_v4: int = Field(32, ge=0, le=32)
+    max_prefixlen_v6: int = Field(128, ge=0, le=128)
+    notes: str = ""
 
 
 class BgpProtectedPrefixPayload(BaseModel):
@@ -1551,6 +1583,12 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "anomaly_events", "top_dst_port", "top_dst_port INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "top_packets", "top_packets INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "anomaly_events", "top_bytes", "top_bytes INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "anomaly_events", "detection_engine", "detection_engine TEXT NOT NULL DEFAULT 'legacy'")
+    ensure_sqlite_column(conn, "anomaly_events", "detection_template_id", "detection_template_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "detection_template_rule_id", "detection_template_rule_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "legacy_attack_vector_id", "legacy_attack_vector_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "response_profile_id", "response_profile_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "rule_snapshot_json", "rule_snapshot_json TEXT NOT NULL DEFAULT '{}'")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "reason", "reason TEXT NOT NULL DEFAULT ''")
@@ -2237,9 +2275,65 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "target_role", "target_role TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "scope_type", "scope_type TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "invalid_scope", "invalid_scope INTEGER NOT NULL DEFAULT 0")
+    detection_rule_columns = {
+        "src_cidr": "src_cidr TEXT NOT NULL DEFAULT ''",
+        "dst_cidr": "dst_cidr TEXT NOT NULL DEFAULT ''",
+        "src_port": "src_port TEXT NOT NULL DEFAULT 'any'",
+        "dst_port": "dst_port TEXT NOT NULL DEFAULT 'any'",
+        "tcp_flags": "tcp_flags TEXT NOT NULL DEFAULT ''",
+        "icmp_type": "icmp_type TEXT NOT NULL DEFAULT ''",
+        "icmp_code": "icmp_code TEXT NOT NULL DEFAULT ''",
+        "detection_key": "detection_key TEXT NOT NULL DEFAULT ''",
+        "group_by": "group_by TEXT NOT NULL DEFAULT ''",
+        "scope": "scope TEXT NOT NULL DEFAULT ''",
+        "input_if": "input_if TEXT NOT NULL DEFAULT ''",
+        "output_if": "output_if TEXT NOT NULL DEFAULT ''",
+        "sensor_id": "sensor_id INTEGER",
+        "warning_response_profile_id": "warning_response_profile_id INTEGER",
+        "critical_response_profile_id": "critical_response_profile_id INTEGER",
+        "fallback_response_profile_id": "fallback_response_profile_id INTEGER",
+        "mitigation_mode": "mitigation_mode TEXT NOT NULL DEFAULT 'detection_only'",
+        "mitigation_enabled": "mitigation_enabled INTEGER NOT NULL DEFAULT 0",
+        "max_auto_prefixlen_v4": "max_auto_prefixlen_v4 INTEGER NOT NULL DEFAULT 32",
+        "max_auto_prefixlen_v6": "max_auto_prefixlen_v6 INTEGER NOT NULL DEFAULT 128",
+        "require_protected_prefix": "require_protected_prefix INTEGER NOT NULL DEFAULT 1",
+        "cooldown_seconds": "cooldown_seconds INTEGER NOT NULL DEFAULT 300",
+        "duration_seconds": "duration_seconds INTEGER NOT NULL DEFAULT 7200",
+        "max_active_announcements": "max_active_announcements INTEGER NOT NULL DEFAULT 10",
+        "min_confidence_for_auto": "min_confidence_for_auto REAL NOT NULL DEFAULT 0.90",
+        "use_global_whitelist": "use_global_whitelist INTEGER NOT NULL DEFAULT 1",
+        "extra_whitelist_ids": "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'",
+        "bypass_whitelist": "bypass_whitelist INTEGER NOT NULL DEFAULT 0",
+        "notes": "notes TEXT NOT NULL DEFAULT ''",
+    }
+    for column_name, definition in detection_rule_columns.items():
+        ensure_sqlite_column(conn, "detection_template_rules", column_name, definition)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_template_rule_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            severity TEXT NOT NULL DEFAULT '',
+            condition TEXT NOT NULL DEFAULT '',
+            min_packets_s REAL,
+            min_bits_s REAL,
+            min_confidence REAL,
+            required_evidence_status TEXT NOT NULL DEFAULT '',
+            required_attack_shape TEXT NOT NULL DEFAULT '',
+            response_profile_id INTEGER,
+            priority INTEGER NOT NULL DEFAULT 100,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(rule_id) REFERENCES detection_template_rules(id) ON DELETE CASCADE,
+            FOREIGN KEY(response_profile_id) REFERENCES bgp_response_profiles(id) ON DELETE SET NULL
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zone_prefixes_zone ON ip_zone_prefixes(zone_id, active)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zones_active ON ip_zones(active)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_detection_template_rules_template ON detection_template_rules(template_id, enabled)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_detection_template_rule_responses_rule ON detection_template_rule_responses(rule_id, enabled, priority)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_detection_whitelist_active ON detection_whitelist(active, zone_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_security_anomalies_status ON security_anomalies(status, last_seen)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_security_anomalies_dedupe ON security_anomalies(dedupe_key, status)")
@@ -2722,6 +2816,12 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_response_profiles", "use_global_whitelist", "use_global_whitelist INTEGER NOT NULL DEFAULT 1")
     ensure_sqlite_column(conn, "bgp_response_profiles", "extra_whitelist_ids", "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'")
     ensure_sqlite_column(conn, "bgp_response_profiles", "bypass_whitelist", "bypass_whitelist INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "fixed_protocol", "fixed_protocol TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "tcp_flags_value", "tcp_flags_value TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "max_prefixlen_v4", "max_prefixlen_v4 INTEGER NOT NULL DEFAULT 32")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "max_prefixlen_v6", "max_prefixlen_v6 INTEGER NOT NULL DEFAULT 128")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "require_protected_prefix", "require_protected_prefix INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "notes", "notes TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_announcement_events (
@@ -5944,9 +6044,16 @@ def fetch_ip_zone_prefix_row(conn: sqlite3.Connection, zone_id: int, prefix_id: 
 def fetch_detection_rule_row(conn: sqlite3.Connection, template_id: int, rule_id: int) -> sqlite3.Row:
     row = conn.execute(
         """
-        SELECT *
-        FROM detection_template_rules
-        WHERE id = ? AND template_id = ?
+        SELECT
+            r.*,
+            wp.name AS warning_response_profile_name,
+            cp.name AS critical_response_profile_name,
+            fp.name AS fallback_response_profile_name
+        FROM detection_template_rules r
+        LEFT JOIN bgp_response_profiles wp ON wp.id = r.warning_response_profile_id
+        LEFT JOIN bgp_response_profiles cp ON cp.id = r.critical_response_profile_id
+        LEFT JOIN bgp_response_profiles fp ON fp.id = r.fallback_response_profile_id
+        WHERE r.id = ? AND r.template_id = ?
         """,
         (rule_id, template_id),
     ).fetchone()
@@ -5978,6 +6085,7 @@ def detection_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[st
 
 def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    cooldown_seconds = int(item.get("cooldown_seconds") or int(item.get("cooldown_minutes") or 5) * 60)
     return {
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
@@ -5992,8 +6100,40 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "window_seconds": int(item.get("window_seconds") or 60),
         "consecutive_windows": int(item.get("consecutive_windows") or 1),
         "cooldown_minutes": int(item.get("cooldown_minutes") or 5),
+        "cooldown_seconds": cooldown_seconds,
         "enabled": sqlite_bool(item.get("enabled")),
         "response": item.get("response") or "DETECTION_ONLY",
+        "src_cidr": item.get("src_cidr") or "",
+        "dst_cidr": item.get("dst_cidr") or "",
+        "src_port": item.get("src_port") or "any",
+        "dst_port": item.get("dst_port") or "any",
+        "tcp_flags": item.get("tcp_flags") or "",
+        "icmp_type": item.get("icmp_type") or "",
+        "icmp_code": item.get("icmp_code") or "",
+        "detection_key": item.get("detection_key") or "",
+        "group_by": item.get("group_by") or "",
+        "scope": item.get("scope") or "",
+        "input_if": item.get("input_if") or "",
+        "output_if": item.get("output_if") or "",
+        "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
+        "warning_response_profile_id": int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None,
+        "critical_response_profile_id": int(item["critical_response_profile_id"]) if item.get("critical_response_profile_id") is not None else None,
+        "fallback_response_profile_id": int(item["fallback_response_profile_id"]) if item.get("fallback_response_profile_id") is not None else None,
+        "warning_response_profile_name": item.get("warning_response_profile_name") or "",
+        "critical_response_profile_name": item.get("critical_response_profile_name") or "",
+        "fallback_response_profile_name": item.get("fallback_response_profile_name") or "",
+        "mitigation_mode": item.get("mitigation_mode") or "detection_only",
+        "mitigation_enabled": sqlite_bool(item.get("mitigation_enabled")),
+        "max_auto_prefixlen_v4": int(item.get("max_auto_prefixlen_v4") or 32),
+        "max_auto_prefixlen_v6": int(item.get("max_auto_prefixlen_v6") or 128),
+        "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
+        "duration_seconds": int(item.get("duration_seconds") or 7200),
+        "max_active_announcements": int(item.get("max_active_announcements") or 10),
+        "min_confidence_for_auto": float(item.get("min_confidence_for_auto") or 0.90),
+        "use_global_whitelist": sqlite_bool(item.get("use_global_whitelist", 1)),
+        "extra_whitelist_ids": bgp_json_loads(item.get("extra_whitelist_ids"), []),
+        "bypass_whitelist": sqlite_bool(item.get("bypass_whitelist")),
+        "notes": item.get("notes") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -6101,9 +6241,18 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
     data = dump_model(payload)
     domain = normalize_choice(clean_text(data.get("domain")).lower() or "internal_ip", DETECTION_DOMAINS, "domain")
     direction = normalize_choice(clean_text(data.get("direction")).lower() or "transmits", DETECTION_DIRECTIONS, "direction")
+    direction = DETECTION_DIRECTION_ALIASES.get(direction, direction)
     metric = normalize_choice(clean_text(data.get("metric")).lower() or "packets_s", DETECTION_METRICS, "metric")
     comparison = normalize_choice(clean_text(data.get("comparison")).lower() or "over", DETECTION_COMPARISONS, "comparison")
     response = normalize_choice(clean_text(data.get("response")).upper() or "DETECTION_ONLY", DETECTION_RESPONSES, "response")
+    group_by = clean_text(data.get("group_by") or data.get("detection_key"))
+    if group_by not in DETECTION_GROUP_BY_OPTIONS:
+        raise HTTPException(status_code=400, detail="group_by invalido")
+    src_port = normalize_detection_port_text(data.get("src_port"), "src_port")
+    dst_port = normalize_detection_port_text(data.get("dst_port"), "dst_port")
+    cooldown_seconds = data.get("cooldown_seconds")
+    if cooldown_seconds is None:
+        cooldown_seconds = int(data.get("cooldown_minutes") or 0) * 60
     warning_value = data.get("warning_value")
     critical_value = data.get("critical_value")
     if warning_value is None and critical_value is None:
@@ -6122,9 +6271,61 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
         "window_seconds": positive_int(data.get("window_seconds") or 60, "window_seconds"),
         "consecutive_windows": positive_int(data.get("consecutive_windows") or 1, "consecutive_windows"),
         "cooldown_minutes": non_negative_int(data.get("cooldown_minutes") or 0, "cooldown_minutes"),
+        "cooldown_seconds": non_negative_int(cooldown_seconds, "cooldown_seconds"),
         "enabled": 1 if data.get("enabled") else 0,
         "response": response,
+        "src_cidr": normalize_optional_cidr(data.get("src_cidr"), "src_cidr") or "",
+        "dst_cidr": normalize_optional_cidr(data.get("dst_cidr"), "dst_cidr") or "",
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "tcp_flags": clean_text(data.get("tcp_flags")).lower(),
+        "icmp_type": clean_text(data.get("icmp_type")),
+        "icmp_code": clean_text(data.get("icmp_code")),
+        "detection_key": group_by,
+        "group_by": group_by,
+        "scope": clean_text(data.get("scope")),
+        "input_if": clean_text(data.get("input_if")),
+        "output_if": clean_text(data.get("output_if")),
+        "sensor_id": data.get("sensor_id"),
+        "warning_response_profile_id": data.get("warning_response_profile_id"),
+        "critical_response_profile_id": data.get("critical_response_profile_id"),
+        "fallback_response_profile_id": data.get("fallback_response_profile_id"),
+        "mitigation_mode": normalize_choice(clean_text(data.get("mitigation_mode")).lower() or "detection_only", DETECTION_MITIGATION_MODES, "mitigation_mode"),
+        "mitigation_enabled": 1 if data.get("mitigation_enabled") else 0,
+        "max_auto_prefixlen_v4": int(data.get("max_auto_prefixlen_v4") or 32),
+        "max_auto_prefixlen_v6": int(data.get("max_auto_prefixlen_v6") or 128),
+        "require_protected_prefix": 1 if data.get("require_protected_prefix") else 0,
+        "duration_seconds": positive_int(data.get("duration_seconds") or 7200, "duration_seconds"),
+        "max_active_announcements": positive_int(data.get("max_active_announcements") or 10, "max_active_announcements"),
+        "min_confidence_for_auto": float(data.get("min_confidence_for_auto") or 0.90),
+        "use_global_whitelist": 1 if data.get("use_global_whitelist") else 0,
+        "extra_whitelist_ids": json.dumps([int(item) for item in data.get("extra_whitelist_ids") or []], sort_keys=True),
+        "bypass_whitelist": 1 if data.get("bypass_whitelist") else 0,
+        "notes": clean_text(data.get("notes")),
     }
+
+
+def validate_detection_rule_profile_refs(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+    for field in ("warning_response_profile_id", "critical_response_profile_id", "fallback_response_profile_id"):
+        profile_id = data.get(field)
+        if profile_id is not None:
+            fetch_bgp_profile(conn, int(profile_id))
+
+
+def normalize_detection_port_text(value: Any, field_name: str) -> str:
+    text = clean_text(value or "any").lower()
+    if text in {"", "any", "all", "*"}:
+        return "any"
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    normalized: list[str] = []
+    for part in parts:
+        if not part.isdigit():
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+        port = int(part)
+        if port < 1 or port > 65535:
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido")
+        normalized.append(str(port))
+    return ",".join(normalized) if normalized else "any"
 
 
 def normalize_detection_whitelist_payload(conn: sqlite3.Connection, payload: DetectionWhitelistPayload) -> dict[str, Any]:
@@ -6226,10 +6427,17 @@ def fetch_detection_template(conn: sqlite3.Connection, template_id: int, include
     if include_rules:
         rows = conn.execute(
             """
-            SELECT *
-            FROM detection_template_rules
-            WHERE template_id = ?
-            ORDER BY enabled DESC, vector, id
+            SELECT
+                r.*,
+                wp.name AS warning_response_profile_name,
+                cp.name AS critical_response_profile_name,
+                fp.name AS fallback_response_profile_name
+            FROM detection_template_rules r
+            LEFT JOIN bgp_response_profiles wp ON wp.id = r.warning_response_profile_id
+            LEFT JOIN bgp_response_profiles cp ON cp.id = r.critical_response_profile_id
+            LEFT JOIN bgp_response_profiles fp ON fp.id = r.fallback_response_profile_id
+            WHERE r.template_id = ?
+            ORDER BY r.enabled DESC, r.vector, r.id
             """,
             (template_id,),
         ).fetchall()
@@ -6290,24 +6498,34 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
     if response_type == "flowspec" and default_action not in {"alert_only", "blackhole", "community"}:
         default_action = normalize_flowspec_action(default_action)
     default_rate_limit_bps = item.get("default_rate_limit_bps") or item.get("rate_limit_bps")
-    return {
+    result = {
         "id": int(item["id"]),
         "name": item["name"],
         "description": item.get("description") or "",
         "enabled": sqlite_bool(item.get("enabled")),
         "response_type": response_type,
+        "type": response_type,
         "connector_id": item.get("connector_id"),
+        "connector_name": item.get("connector_name") or "",
         "approval_mode": item.get("approval_mode") or "manual_approval",
         "action": default_action if response_type == "flowspec" else item.get("action") or "discard",
         "default_action": default_action,
         "target_selector": item.get("target_selector") or "src_ip",
+        "target": item.get("target_selector") or "src_ip",
         "protocol_selector": item.get("protocol_selector") or "anomaly_protocol",
+        "protocol_mode": item.get("protocol_selector") or "anomaly_protocol",
+        "fixed_protocol": item.get("fixed_protocol") or "",
         "src_port_selector": item.get("src_port_selector") or "any",
+        "src_port_mode": item.get("src_port_selector") or "any",
         "src_port_value": item.get("src_port_value") or "",
         "dst_port_selector": item.get("dst_port_selector") or "any",
+        "dst_port_mode": item.get("dst_port_selector") or "any",
         "dst_port_value": item.get("dst_port_value") or "",
         "tcp_flags_selector": item.get("tcp_flags_selector") or "any",
+        "tcp_flags_mode": item.get("tcp_flags_selector") or "any",
+        "tcp_flags_value": item.get("tcp_flags_value") or "",
         "rate_limit_bps": default_rate_limit_bps,
+        "rate_limit_default": item.get("default_rate_limit_raw") or item.get("rate_limit_value_raw") or "",
         "rate_limit_value_raw": item.get("rate_limit_value_raw") or item.get("default_rate_limit_raw") or "",
         "rate_limit_unit": item.get("rate_limit_unit") or rate_limit_unit_for_bps(default_rate_limit_bps),
         "default_rate_limit_bps": default_rate_limit_bps,
@@ -6324,12 +6542,84 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "community": item.get("community") or "",
         "large_community": item.get("large_community") or "",
         "require_protocol_or_port": sqlite_bool(item.get("require_protocol_or_port")),
+        "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
         "allow_wide_prefix": sqlite_bool(item.get("allow_wide_prefix")),
+        "max_prefixlen_v4": int(item.get("max_prefixlen_v4") or 32),
+        "max_prefixlen_v6": int(item.get("max_prefixlen_v6") or 128),
         "max_duration_seconds": int(item.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
         "default_duration_seconds": int(item.get("default_duration_seconds") or 1800),
+        "duration_seconds": int(item.get("default_duration_seconds") or 1800),
+        "notes": item.get("notes") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
+    result["profile_status"] = response_profile_status(result)
+    result["operational_description"] = response_profile_operational_description(result)
+    result["rendered_command_preview"] = response_profile_placeholder_preview(result)
+    result["used_by_rules_count"] = int(item.get("used_by_rules_count") or 0)
+    return result
+
+
+def response_profile_status(profile: dict[str, Any]) -> str:
+    if not sqlite_bool(profile.get("enabled", True)):
+        return "disabled"
+    response_type = clean_text(profile.get("response_type") or profile.get("type")).lower()
+    if response_type in {"flowspec", "diversion", "rtbh", "blackhole", "rate_limit"} and not profile.get("connector_id"):
+        return "invalid_connector"
+    if response_type == "flowspec" and not clean_text(profile.get("target_selector") or profile.get("target")):
+        return "missing_required_field"
+    return "valid"
+
+
+def response_profile_operational_description(profile: dict[str, Any]) -> str:
+    target = clean_text(profile.get("target_selector") or profile.get("target"))
+    action = clean_text(profile.get("action") or profile.get("default_action"))
+    response_type = clean_text(profile.get("response_type") or profile.get("type"))
+    if response_type == "flowspec" and target == "dst_ip":
+        return "Bloqueia o destino dominante da anomalia usando FlowSpec." if action == "discard" else "Aplica FlowSpec ao destino dominante da anomalia."
+    if response_type == "flowspec" and target == "src_ip":
+        return "Aplica FlowSpec a origem da anomalia; em outbound pode ser alto risco se a origem for cliente interno."
+    if response_type in {"diversion"}:
+        return "Desvia o trafego do alvo selecionado para scrubbing/diversion."
+    if response_type in {"rtbh", "blackhole"}:
+        return "Anuncia blackhole para o alvo selecionado."
+    if response_type in {"detection_only", "alert_only", "webhook"}:
+        return "Nao anuncia BGP; gera alerta ou integracao externa."
+    return "Gera candidato de resposta conforme seletores do profile."
+
+
+def response_profile_placeholder_preview(profile: dict[str, Any]) -> str:
+    response_type = clean_text(profile.get("response_type") or profile.get("type")).lower()
+    if response_type in {"detection_only", "alert_only", "webhook"}:
+        return "alert_only"
+    target = clean_text(profile.get("target_selector") or profile.get("target") or "dst_ip")
+    action = clean_text(profile.get("action") or profile.get("default_action") or "discard")
+    protocol = clean_text(profile.get("fixed_protocol")) or (
+        clean_text(profile.get("protocol_selector")) if clean_text(profile.get("protocol_selector")) in {"tcp", "udp", "icmp"} else "<anomaly.protocol>"
+    )
+    dst_port_selector = clean_text(profile.get("dst_port_selector") or "any")
+    destination = "<anomaly.dominant_dst_ip>/32" if target in {"dst_ip", "src_and_dst_ip", "conversation"} else ""
+    source = "<anomaly.src_ip>/32" if target in {"src_ip", "src_and_dst_ip", "conversation"} else ""
+    match_parts = []
+    if source:
+        match_parts.append(f"source {source};")
+    if destination:
+        match_parts.append(f"destination {destination};")
+    if protocol and protocol != "any":
+        match_parts.append(f"protocol {protocol};")
+    if dst_port_selector == "anomaly_dst_port":
+        match_parts.append("destination-port =<anomaly.dominant_dst_port>;")
+    elif dst_port_selector == "fixed" and clean_text(profile.get("dst_port_value")):
+        match_parts.append(f"destination-port ={clean_text(profile.get('dst_port_value'))};")
+    if action == "rate_limit":
+        then = f"rate-limit {clean_text(profile.get('default_rate_limit_bps') or profile.get('rate_limit_bps') or '<rate_limit>')};"
+    elif action in {"redirect", "redirect_to_vrf"}:
+        then = f"redirect {clean_text(profile.get('community') or profile.get('bgp_community') or '<community>')};"
+    else:
+        then = "discard;" if action in {"discard", "blackhole", "announce_blackhole"} else f"{action};"
+    if response_type == "diversion":
+        return f"announce route <target_prefix> next-hop {clean_text(profile.get('next_hop') or profile.get('redirect_target') or '<next-hop>')}"
+    return f"announce flow route {{ match {{ {' '.join(match_parts)} }} then {{ {then} }} }}"
 
 
 def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -6500,7 +6790,12 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         raise HTTPException(status_code=400, detail="name obrigatorio")
     max_duration = int(payload.max_duration_seconds)
     response_type = normalize_choice(payload.response_type, BGP_RESPONSE_TYPES, "response_type")
-    action = normalize_choice(payload.action, BGP_ACTIONS, "action")
+    action_aliases = {"set_community": "community", "announce_blackhole": "blackhole", "redirect_to_vrf": "redirect"}
+    action = normalize_choice(action_aliases.get(clean_text(payload.action), clean_text(payload.action)), BGP_ACTIONS, "action")
+    protocol_selector = normalize_choice(payload.protocol_selector, BGP_PROTOCOL_SELECTORS, "protocol_selector")
+    fixed_protocol = normalize_bgp_protocol(payload.fixed_protocol or payload.protocol_selector) if protocol_selector == "fixed" else ""
+    tcp_flags_selector = normalize_choice(payload.tcp_flags_selector, BGP_TCP_FLAGS_SELECTORS, "tcp_flags_selector")
+    tcp_flags_value = clean_text(payload.tcp_flags_value).lower() if tcp_flags_selector == "fixed" else ""
     requested_default_action = clean_text(payload.default_action or action) or "discard"
     default_action = normalize_flowspec_action(requested_default_action) if response_type == "flowspec" and requested_default_action not in {"alert_only", "blackhole", "community"} else requested_default_action
     default_rate_raw = clean_text(payload.default_rate_limit_raw or payload.rate_limit_value_raw)
@@ -6521,12 +6816,14 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "action": default_action if response_type == "flowspec" else action,
         "default_action": default_action,
         "target_selector": normalize_choice(payload.target_selector, BGP_TARGET_SELECTORS, "target_selector"),
-        "protocol_selector": normalize_choice(payload.protocol_selector, BGP_PROTOCOL_SELECTORS, "protocol_selector"),
+        "protocol_selector": protocol_selector,
+        "fixed_protocol": fixed_protocol,
         "src_port_selector": normalize_choice(payload.src_port_selector, BGP_PORT_SELECTORS, "src_port_selector"),
         "src_port_value": normalize_bgp_port_text(payload.src_port_value, "src_port_value"),
         "dst_port_selector": normalize_choice(payload.dst_port_selector, BGP_PORT_SELECTORS, "dst_port_selector"),
         "dst_port_value": normalize_bgp_port_text(payload.dst_port_value, "dst_port_value"),
-        "tcp_flags_selector": normalize_choice(payload.tcp_flags_selector, BGP_TCP_FLAGS_SELECTORS, "tcp_flags_selector"),
+        "tcp_flags_selector": tcp_flags_selector,
+        "tcp_flags_value": tcp_flags_value,
         "rate_limit_bps": default_rate_bps,
         "rate_limit_value_raw": default_rate_raw,
         "rate_limit_unit": rate_limit_unit_for_bps(default_rate_bps),
@@ -6544,9 +6841,13 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "community": clean_text(payload.community),
         "large_community": clean_text(payload.large_community),
         "require_protocol_or_port": 1 if payload.require_protocol_or_port else 0,
+        "require_protected_prefix": 1 if payload.require_protected_prefix else 0,
         "allow_wide_prefix": 1 if payload.allow_wide_prefix else 0,
+        "max_prefixlen_v4": int(payload.max_prefixlen_v4),
+        "max_prefixlen_v6": int(payload.max_prefixlen_v6),
         "max_duration_seconds": max_duration,
         "default_duration_seconds": min(int(payload.default_duration_seconds), max_duration),
+        "notes": clean_text(payload.notes),
     }
 
 
@@ -6558,7 +6859,15 @@ def fetch_bgp_connector(conn: sqlite3.Connection, connector_id: int) -> dict[str
 
 
 def fetch_bgp_profile(conn: sqlite3.Connection, profile_id: int) -> dict[str, Any]:
-    row = conn.execute("SELECT * FROM bgp_response_profiles WHERE id = ?", (profile_id,)).fetchone()
+    row = conn.execute(
+        """
+        SELECT p.*, c.name AS connector_name
+        FROM bgp_response_profiles p
+        LEFT JOIN bgp_connectors c ON c.id = p.connector_id
+        WHERE p.id = ?
+        """,
+        (profile_id,),
+    ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Perfil de resposta BGP nao encontrado")
     return bgp_response_profile_row_to_dict(row)
@@ -7200,6 +7509,15 @@ def candidate_from_bgp_payload(payload: BgpAnnouncementDryRunPayload, profile: d
             src_prefix = normalize_bgp_host_or_cidr(payload.src_ip, "src_ip")
         if payload.dst_ip:
             dst_prefix = normalize_bgp_host_or_cidr(payload.dst_ip, "dst_ip")
+    elif selector in {"dst_prefix"} and payload.dst_ip:
+        dst_prefix = normalize_bgp_host_or_cidr(payload.dst_ip, "dst_ip")
+    elif selector in {"src_prefix"} and payload.src_ip:
+        src_prefix = normalize_bgp_host_or_cidr(payload.src_ip, "src_ip")
+    elif selector in {"conversation"}:
+        if payload.src_ip:
+            src_prefix = normalize_bgp_host_or_cidr(payload.src_ip, "src_ip")
+        if payload.dst_ip:
+            dst_prefix = normalize_bgp_host_or_cidr(payload.dst_ip, "dst_ip")
     elif selector in {"target_ip", "target_cidr"} and (payload.target_cidr or payload.target_ip):
         target_prefix = normalize_bgp_host_or_cidr(payload.target_cidr or payload.target_ip, "target_cidr")
     target_prefix = target_prefix or dst_prefix or src_prefix
@@ -7208,6 +7526,8 @@ def candidate_from_bgp_payload(payload: BgpAnnouncementDryRunPayload, profile: d
     protocol_selector = profile["protocol_selector"]
     if protocol_selector in {"tcp", "udp", "icmp"}:
         protocol = protocol_selector
+    elif protocol_selector == "fixed":
+        protocol = normalize_bgp_protocol(profile.get("fixed_protocol"))
     elif protocol_selector in {"manual", "anomaly_protocol"}:
         protocol = normalize_bgp_protocol(payload.protocol)
     duration = int(payload.duration_seconds or profile["default_duration_seconds"])
@@ -7238,6 +7558,142 @@ def candidate_from_bgp_payload(payload: BgpAnnouncementDryRunPayload, profile: d
         "duration_seconds": duration,
         "reason": clean_text(payload.reason),
         "raw_payload": dump_model(payload),
+    }
+
+
+def response_profile_candidate_for_anomaly(
+    profile: dict[str, Any],
+    anomaly: dict[str, Any],
+    flow_context: dict[str, Any],
+) -> dict[str, Any]:
+    dominant_dst_ip = clean_ip(flow_context.get("dominant_dst_ip")) or clean_ip(anomaly.get("top_dst_ip") or anomaly.get("dst_ip") or anomaly.get("target_ip"))
+    dominant_dst_port = int(flow_context.get("dominant_dst_port") or anomaly.get("top_dst_port") or anomaly.get("target_port") or 0)
+    dominant_protocol = clean_text(flow_context.get("dominant_protocol") or anomaly.get("protocol") or anomaly.get("decoder")).lower()
+    src_ip = clean_ip(anomaly.get("top_src_ip") or anomaly.get("src_ip"))
+    top_conversations = flow_context.get("top_conversations_by_packets") if isinstance(flow_context.get("top_conversations_by_packets"), list) else []
+    if not src_ip and top_conversations:
+        src_ip = clean_ip(top_conversations[0].get("src_ip"))
+    if not dominant_dst_ip and top_conversations:
+        dominant_dst_ip = clean_ip(top_conversations[0].get("dst_ip"))
+    if not dominant_dst_port and top_conversations:
+        dominant_dst_port = int(top_conversations[0].get("dst_port") or 0)
+
+    selector = clean_text(profile.get("target_selector") or "dst_ip")
+    src_prefix = ""
+    dst_prefix = ""
+    target_prefix = ""
+    if selector in {"src_ip", "anomaly_src_ip", "src_prefix"} and src_ip:
+        src_prefix = normalize_bgp_host_or_cidr(src_ip, "src_ip")
+    if selector in {"dst_ip", "anomaly_dst_ip", "dst_prefix"} and dominant_dst_ip:
+        dst_prefix = normalize_bgp_host_or_cidr(dominant_dst_ip, "dst_ip")
+    if selector in {"src_and_dst_ip", "conversation"}:
+        if src_ip:
+            src_prefix = normalize_bgp_host_or_cidr(src_ip, "src_ip")
+        if dominant_dst_ip:
+            dst_prefix = normalize_bgp_host_or_cidr(dominant_dst_ip, "dst_ip")
+    if selector in {"target_ip", "target_cidr"}:
+        target = anomaly.get("target_cidr") or anomaly.get("target_ip")
+        if target:
+            target_prefix = normalize_bgp_host_or_cidr(target, "target")
+    target_prefix = target_prefix or dst_prefix or src_prefix
+
+    protocol_selector = clean_text(profile.get("protocol_selector"))
+    if protocol_selector == "fixed":
+        protocol = clean_text(profile.get("fixed_protocol"))
+    elif protocol_selector in {"tcp", "udp", "icmp"}:
+        protocol = protocol_selector
+    elif protocol_selector in {"manual", "anomaly_protocol"}:
+        protocol = normalize_bgp_protocol(dominant_protocol)
+    else:
+        protocol = ""
+    src_port = resolve_bgp_port(profile.get("src_port_selector") or "any", profile.get("src_port_value") or "", anomaly.get("top_src_port") or anomaly.get("src_port"))
+    dst_port = resolve_bgp_port(profile.get("dst_port_selector") or "any", profile.get("dst_port_value") or "", dominant_dst_port)
+    action_settings = flowspec_action_settings({"action": profile.get("default_action") or profile.get("action")}, profile)
+    candidate = {
+        "response_profile_id": profile["id"],
+        "response_profile_name": profile.get("name") or "",
+        "connector_id": profile.get("connector_id"),
+        "connector_name": profile.get("connector_name") or "",
+        "response_type": "flowspec" if profile.get("response_type") == "rate_limit" else "rtbh" if profile.get("response_type") == "blackhole" else profile.get("response_type"),
+        "action": "rate_limit" if profile.get("response_type") == "rate_limit" else action_settings["action"],
+        "then_action": "rate_limit" if profile.get("response_type") == "rate_limit" else action_settings["then_action"],
+        "rate_limit_bps": action_settings["rate_limit_bps"],
+        "rate_limit_value_raw": action_settings["rate_limit_value_raw"],
+        "rate_limit_unit": action_settings["rate_limit_unit"],
+        "target_type": selector,
+        "target_prefix": target_prefix,
+        "src_prefix": src_prefix,
+        "dst_prefix": dst_prefix,
+        "protocol": protocol,
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "tcp_flags": clean_text(profile.get("tcp_flags_value") if profile.get("tcp_flags_selector") == "fixed" else profile.get("tcp_flags_selector") if profile.get("tcp_flags_selector") in {"syn", "syn_ack"} else ""),
+        "duration_seconds": int(profile.get("default_duration_seconds") or 1800),
+        "manual_approval_required": True,
+        "allow_auto": False,
+        "apply_enabled": False,
+        "evidence_status": flow_context.get("evidence_status") or "insufficient",
+        "raw_payload": {"anomaly": anomaly, "flow_context": flow_context, "response_profile": {"id": profile.get("id"), "name": profile.get("name")}},
+    }
+    try:
+        candidate["rendered_command_preview"] = render_bgp_announcement(candidate, {"default_next_hop": "", "default_community": ""}, profile)
+    except Exception as exc:
+        candidate["rendered_command_preview"] = f"INVALID: {exc}"
+    candidate["rendered_match"] = {
+        "source": candidate["src_prefix"],
+        "destination": candidate["dst_prefix"] or candidate["target_prefix"],
+        "protocol": candidate["protocol"],
+        "source_port": candidate["src_port"],
+        "destination_port": candidate["dst_port"],
+        "tcp_flags": candidate["tcp_flags"],
+    }
+    candidate["rendered_then"] = {"action": candidate["action"], "rate_limit_bps": candidate.get("rate_limit_bps")}
+    return candidate
+
+
+def validate_response_profile_for_anomaly(
+    profile: dict[str, Any],
+    anomaly: dict[str, Any],
+    flow_context: dict[str, Any],
+    candidate: dict[str, Any],
+    connector: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    status = response_profile_status(profile)
+    if status != "valid":
+        errors.append(status)
+    evidence_status = clean_text(flow_context.get("evidence_status") or candidate.get("evidence_status"))
+    if evidence_status == "insufficient":
+        errors.append("evidence_status_insufficient")
+    direction = clean_text(anomaly.get("direction")).lower()
+    outbound = direction in {"sends", "transmits", "outbound"}
+    if outbound and candidate.get("src_prefix") and not candidate.get("dst_prefix"):
+        errors.append("unsafe_target_src_only_outbound")
+    if clean_text(profile.get("dst_port_selector")) == "anomaly_dst_port" and not clean_text(candidate.get("dst_port")):
+        errors.append("missing_anomaly_dst_port")
+    if clean_text(profile.get("protocol_selector")) in {"manual", "anomaly_protocol"} and not clean_text(candidate.get("protocol")):
+        errors.append("missing_anomaly_protocol")
+    if not clean_text(candidate.get("target_prefix") or candidate.get("src_prefix") or candidate.get("dst_prefix")):
+        errors.append("target_empty")
+    if connector is None and profile.get("connector_id"):
+        errors.append("connector_not_found")
+    if connector and not connector.get("enabled"):
+        errors.append("connector_disabled")
+    whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
+    if whitelist_hits:
+        errors.append("whitelist_match")
+    validation_status = "valid" if not errors else errors[0]
+    apply_enabled = validation_status == "valid" and profile.get("approval_mode") not in {"manual_approval", "detection_only"} and evidence_status == "complete"
+    return {
+        "validation_status": validation_status,
+        "validation_messages": sorted(set(errors + warnings)),
+        "errors": sorted(set(errors)),
+        "warnings": sorted(set(warnings)),
+        "whitelist_hits": whitelist_hits,
+        "manual_approval_required": True,
+        "allow_auto": False,
+        "apply_enabled": apply_enabled,
     }
 
 
@@ -8591,6 +9047,79 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     }
 
 
+def flow_context_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    rows = [dict(row) for row in analysis.get("top_flows") or [] if isinstance(row, dict)]
+
+    def top_ip(field: str, metric: str) -> list[dict[str, Any]]:
+        totals: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = clean_ip(row.get(field))
+            if not key:
+                continue
+            item = totals.setdefault(key, {"ip": key, "packets": 0, "bytes": 0, "flow_count": 0})
+            item["packets"] += int(row.get("packets") or 0)
+            item["bytes"] += int(row.get("bytes") or 0)
+            item["flow_count"] += int(row.get("flow_count") or 1)
+        return sorted(totals.values(), key=lambda item: (int(item.get(metric) or 0), int(item.get("packets") or 0)), reverse=True)[:20]
+
+    def top_port(field: str, metric: str) -> list[dict[str, Any]]:
+        totals: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                port = int(row.get(field) or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port <= 0:
+                continue
+            key = str(port)
+            item = totals.setdefault(key, {"port": port, "packets": 0, "bytes": 0, "flow_count": 0})
+            item["packets"] += int(row.get("packets") or 0)
+            item["bytes"] += int(row.get("bytes") or 0)
+            item["flow_count"] += int(row.get("flow_count") or 1)
+        return sorted(totals.values(), key=lambda item: (int(item.get(metric) or 0), int(item.get("packets") or 0)), reverse=True)[:20]
+
+    conversations = []
+    for row in rows:
+        conversations.append(
+            {
+                **row,
+                "conversation": f"{clean_ip(row.get('src_ip'))}:{int(row.get('src_port') or 0)} -> {clean_ip(row.get('dst_ip'))}:{int(row.get('dst_port') or 0)} {clean_text(row.get('protocol') or row.get('proto_name') or row.get('proto')).upper()}",
+            }
+        )
+    by_packets = sorted(conversations, key=lambda item: (int(item.get("packets") or 0), int(item.get("bytes") or 0)), reverse=True)[:20]
+    by_bytes = sorted(conversations, key=lambda item: (int(item.get("bytes") or 0), int(item.get("packets") or 0)), reverse=True)[:20]
+    dominant = analysis.get("top_dst_port_pair_by_packets") or {}
+    top_flow = analysis.get("top_flow_by_packets") or {}
+    evidence_status = analysis.get("evidence_status") or ("insufficient" if not rows else "weak")
+    attack_shape = "unknown"
+    if evidence_status != "insufficient" and dominant:
+        attack_shape = "multi_source_same_dst_port" if int(dominant.get("unique_src_ips") or 0) >= 2 else "single_source_single_dst_port"
+    elif evidence_status == "insufficient":
+        attack_shape = "insufficient_flow_evidence"
+    return {
+        "anomaly_id": analysis.get("anomaly_id"),
+        "top_src_ips_by_packets": top_ip("src_ip", "packets"),
+        "top_src_ips_by_bytes": top_ip("src_ip", "bytes"),
+        "top_dst_ips_by_packets": top_ip("dst_ip", "packets"),
+        "top_dst_ips_by_bytes": top_ip("dst_ip", "bytes"),
+        "top_dst_ports_by_packets": top_port("dst_port", "packets"),
+        "top_dst_ports_by_bytes": top_port("dst_port", "bytes"),
+        "top_src_ports_by_packets": top_port("src_port", "packets"),
+        "top_conversations_by_packets": by_packets,
+        "top_conversations_by_bytes": by_bytes,
+        "related_flows": rows[:50],
+        "unique_src_ips": int(analysis.get("unique_src_ips") or len({clean_ip(row.get("src_ip")) for row in rows if clean_ip(row.get("src_ip"))})),
+        "unique_dst_ips": int(analysis.get("unique_dst_ips") or len({clean_ip(row.get("dst_ip")) for row in rows if clean_ip(row.get("dst_ip"))})),
+        "unique_dst_ports": int(analysis.get("unique_dst_ports") or len({int(row.get("dst_port") or 0) for row in rows if int(row.get("dst_port") or 0)})),
+        "dominant_dst_ip": clean_ip(top_flow.get("dst_ip")) or clean_text(dominant.get("dst_ip")),
+        "dominant_dst_port": int(top_flow.get("dst_port") or 0) or int(dominant.get("dst_port") or 0),
+        "dominant_protocol": clean_text(top_flow.get("protocol") or top_flow.get("proto_name") or dominant.get("protocol")).lower(),
+        "attack_shape": attack_shape,
+        "evidence_status": evidence_status,
+        "warnings": analysis.get("warnings") or ([] if rows else ["Sem flows detalhados encontrados para esta janela."]),
+    }
+
+
 def ai_profile(profile_id: str | None = None) -> dict[str, Any]:
     key = clean_text(profile_id or "recommended").lower()
     return dict(AI_MODEL_PROFILES.get(key) or AI_MODEL_PROFILES["recommended"])
@@ -8877,6 +9406,33 @@ def compact_ai_flow_list(items: list[Any], limit: int = 1) -> list[dict[str, Any
     return compacted
 
 
+def compact_flow_context_for_ai(flow_context: dict[str, Any]) -> dict[str, Any]:
+    if not flow_context:
+        return {}
+    keys = (
+        "evidence_status",
+        "attack_shape",
+        "unique_src_ips",
+        "unique_dst_ips",
+        "unique_dst_ports",
+        "dominant_dst_ip",
+        "dominant_dst_port",
+        "dominant_protocol",
+    )
+    compacted = {key: flow_context.get(key) for key in keys if ai_keep_value(flow_context.get(key))}
+    for key in (
+        "top_src_ips_by_packets",
+        "top_dst_ips_by_packets",
+        "top_dst_ports_by_packets",
+        "top_conversations_by_packets",
+        "related_flows",
+    ):
+        values = flow_context.get(key)
+        if isinstance(values, list) and values:
+            compacted[key] = values[:5]
+    return compacted
+
+
 def compact_deterministic_analysis_for_ai(deterministic: dict[str, Any]) -> dict[str, Any]:
     if not deterministic:
         return {}
@@ -8941,6 +9497,7 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
     compacted: dict[str, Any] = {
         "anomaly": compact_anomaly_for_ai(dict(payload.get("anomaly") or {})),
         "deterministic_analysis": compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {})),
+        "flow_context": compact_flow_context_for_ai(dict(payload.get("flow_context") or {})),
         "related_flows": compact_ai_flow_list(list(payload.get("related_flows") or []), 1),
         "top_conversations": compact_ai_flow_list(list(payload.get("top_conversations") or []), 1),
         "candidates": [
@@ -9005,12 +9562,14 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
     deterministic = deterministic_anomaly_analysis(anomaly_id) if not evaluated["candidates"] else {}
     candidates = evaluated["candidates"] or list(deterministic.get("fallback_analysis_candidates") or [])
+    flow_context = flow_context_from_analysis(deterministic) if deterministic else {}
     flows = list(context.get("flows") or [])[: int(config["max_top_flows"])]
     if not flows and deterministic:
         flows = list(deterministic.get("top_flows") or [])[: int(config["max_top_flows"])]
     payload = {
         "anomaly": compact_anomaly_for_ai(evaluated["anomaly"]),
         "deterministic_analysis": deterministic,
+        "flow_context": flow_context,
         "top_conversations": sorted(flows, key=lambda item: int(float(item.get("bytes") or 0)), reverse=True)[: int(config["max_top_flows"])],
         "related_flows": flows,
         "candidates": candidates,
@@ -9333,6 +9892,14 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
     if analysis is None:
         raise HTTPException(status_code=404, detail="Analise IA nao encontrada")
     return analysis
+
+
+@app.get("/api/anomalies/{event_id}/flow-context")
+def get_anomaly_flow_context(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    analysis = deterministic_anomaly_analysis(event_id)
+    return flow_context_from_analysis(analysis)
 
 
 @app.post("/api/anomalies/{event_id}/ai-analysis")
@@ -9860,7 +10427,24 @@ def list_bgp_response_profiles(request: Request, include_disabled: bool = True):
     ensure_sensor_db()
     where = "" if include_disabled else "WHERE enabled = 1"
     with sqlite_connection() as conn:
-        rows = conn.execute(f"SELECT * FROM bgp_response_profiles {where} ORDER BY name, id").fetchall()
+        rows = conn.execute(
+            f"""
+            SELECT
+                p.*,
+                c.name AS connector_name,
+                COUNT(DISTINCT r.id) AS used_by_rules_count
+            FROM bgp_response_profiles p
+            LEFT JOIN bgp_connectors c ON c.id = p.connector_id
+            LEFT JOIN detection_template_rules r ON (
+                r.warning_response_profile_id = p.id
+                OR r.critical_response_profile_id = p.id
+                OR r.fallback_response_profile_id = p.id
+            )
+            {where}
+            GROUP BY p.id
+            ORDER BY p.name, p.id
+            """
+        ).fetchall()
     return {"items": [bgp_response_profile_row_to_dict(row) for row in rows]}
 
 
@@ -9870,7 +10454,7 @@ def create_bgp_response_profile(request: Request, payload: BgpResponseProfilePay
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
     now = utc_now_iso()
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
     with sqlite_connection() as conn:
         if values["connector_id"]:
             fetch_bgp_connector(conn, int(values["connector_id"]))
@@ -9890,12 +10474,48 @@ def get_bgp_response_profile(request: Request, profile_id: int):
         return fetch_bgp_profile(conn, profile_id)
 
 
+@app.post("/api/bgp/response-profiles/{profile_id}/test-anomaly")
+def test_bgp_response_profile_with_anomaly(request: Request, profile_id: int, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    anomaly_id = int(payload.get("anomaly_id") or 0)
+    if anomaly_id <= 0:
+        raise HTTPException(status_code=400, detail="anomaly_id obrigatorio")
+    with sqlite_connection() as conn:
+        profile = fetch_bgp_profile(conn, profile_id)
+        row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (anomaly_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+        anomaly = anomaly_event_row_to_dict(row)
+        connector = fetch_bgp_connector(conn, int(profile["connector_id"])) if profile.get("connector_id") else None
+    flow_context = flow_context_from_analysis(deterministic_anomaly_analysis(anomaly_id))
+    candidate = response_profile_candidate_for_anomaly(profile, anomaly, flow_context)
+    validation = validate_response_profile_for_anomaly(profile, anomaly, flow_context, candidate, connector)
+    candidate.update(
+        {
+            "validation_status": validation["validation_status"],
+            "validation_messages": validation["validation_messages"],
+            "manual_approval_required": validation["manual_approval_required"],
+            "allow_auto": validation["allow_auto"],
+            "apply_enabled": validation["apply_enabled"],
+        }
+    )
+    return {
+        "anomaly": anomaly,
+        "flow_context": flow_context,
+        "response_profile": profile,
+        "candidate": candidate,
+        "validation": validation,
+        "would_announce": False,
+    }
+
+
 @app.put("/api/bgp/response-profiles/{profile_id}")
 def update_bgp_response_profile(request: Request, profile_id: int, payload: BgpResponseProfilePayload):
     require_admin(request)
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "allow_wide_prefix", "max_duration_seconds", "default_duration_seconds")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
     with sqlite_connection() as conn:
         fetch_bgp_profile(conn, profile_id)
         if values["connector_id"]:
@@ -10782,10 +11402,17 @@ def list_detection_rules(template_id: int):
         _ = fetch_detection_template_row(conn, template_id)
         rows = conn.execute(
             """
-            SELECT *
-            FROM detection_template_rules
-            WHERE template_id = ?
-            ORDER BY enabled DESC, vector, id
+            SELECT
+                r.*,
+                wp.name AS warning_response_profile_name,
+                cp.name AS critical_response_profile_name,
+                fp.name AS fallback_response_profile_name
+            FROM detection_template_rules r
+            LEFT JOIN bgp_response_profiles wp ON wp.id = r.warning_response_profile_id
+            LEFT JOIN bgp_response_profiles cp ON cp.id = r.critical_response_profile_id
+            LEFT JOIN bgp_response_profiles fp ON fp.id = r.fallback_response_profile_id
+            WHERE r.template_id = ?
+            ORDER BY r.enabled DESC, r.vector, r.id
             """,
             (template_id,),
         ).fetchall()
@@ -10798,28 +11425,25 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
     with sqlite_connection() as conn:
         _ = fetch_detection_template_row(conn, template_id)
         data = normalize_detection_rule_payload(payload)
+        validate_detection_rule_profile_refs(conn, data)
         now = utc_now_iso()
         cursor = conn.execute(
             """
             INSERT INTO detection_template_rules (
-                template_id,
-                vector,
-                domain,
-                direction,
-                protocol,
-                metric,
-                comparison,
-                warning_value,
-                critical_value,
-                window_seconds,
-                consecutive_windows,
-                cooldown_minutes,
-                enabled,
-                response,
+                template_id, vector, domain, direction, protocol, metric, comparison,
+                warning_value, critical_value, window_seconds, consecutive_windows,
+                cooldown_minutes, cooldown_seconds, enabled, response, src_cidr,
+                dst_cidr, src_port, dst_port, tcp_flags, icmp_type, icmp_code,
+                detection_key, group_by, scope, input_if, output_if, sensor_id,
+                warning_response_profile_id, critical_response_profile_id,
+                fallback_response_profile_id, mitigation_mode, mitigation_enabled,
+                max_auto_prefixlen_v4, max_auto_prefixlen_v6, require_protected_prefix,
+                duration_seconds, max_active_announcements, min_confidence_for_auto,
+                use_global_whitelist, extra_whitelist_ids, bypass_whitelist, notes,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 template_id,
@@ -10834,8 +11458,37 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
                 data["window_seconds"],
                 data["consecutive_windows"],
                 data["cooldown_minutes"],
+                data["cooldown_seconds"],
                 data["enabled"],
                 data["response"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["src_port"],
+                data["dst_port"],
+                data["tcp_flags"],
+                data["icmp_type"],
+                data["icmp_code"],
+                data["detection_key"],
+                data["group_by"],
+                data["scope"],
+                data["input_if"],
+                data["output_if"],
+                data["sensor_id"],
+                data["warning_response_profile_id"],
+                data["critical_response_profile_id"],
+                data["fallback_response_profile_id"],
+                data["mitigation_mode"],
+                data["mitigation_enabled"],
+                data["max_auto_prefixlen_v4"],
+                data["max_auto_prefixlen_v6"],
+                data["require_protected_prefix"],
+                data["duration_seconds"],
+                data["max_active_announcements"],
+                data["min_confidence_for_auto"],
+                data["use_global_whitelist"],
+                data["extra_whitelist_ids"],
+                data["bypass_whitelist"],
+                data["notes"],
                 now,
                 now,
             ),
@@ -10850,6 +11503,7 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
     with sqlite_connection() as conn:
         _ = fetch_detection_rule_row(conn, template_id, rule_id)
         data = normalize_detection_rule_payload(payload)
+        validate_detection_rule_profile_refs(conn, data)
         now = utc_now_iso()
         conn.execute(
             """
@@ -10865,8 +11519,37 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
                 window_seconds = ?,
                 consecutive_windows = ?,
                 cooldown_minutes = ?,
+                cooldown_seconds = ?,
                 enabled = ?,
                 response = ?,
+                src_cidr = ?,
+                dst_cidr = ?,
+                src_port = ?,
+                dst_port = ?,
+                tcp_flags = ?,
+                icmp_type = ?,
+                icmp_code = ?,
+                detection_key = ?,
+                group_by = ?,
+                scope = ?,
+                input_if = ?,
+                output_if = ?,
+                sensor_id = ?,
+                warning_response_profile_id = ?,
+                critical_response_profile_id = ?,
+                fallback_response_profile_id = ?,
+                mitigation_mode = ?,
+                mitigation_enabled = ?,
+                max_auto_prefixlen_v4 = ?,
+                max_auto_prefixlen_v6 = ?,
+                require_protected_prefix = ?,
+                duration_seconds = ?,
+                max_active_announcements = ?,
+                min_confidence_for_auto = ?,
+                use_global_whitelist = ?,
+                extra_whitelist_ids = ?,
+                bypass_whitelist = ?,
+                notes = ?,
                 updated_at = ?
             WHERE id = ? AND template_id = ?
             """,
@@ -10882,8 +11565,37 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
                 data["window_seconds"],
                 data["consecutive_windows"],
                 data["cooldown_minutes"],
+                data["cooldown_seconds"],
                 data["enabled"],
                 data["response"],
+                data["src_cidr"],
+                data["dst_cidr"],
+                data["src_port"],
+                data["dst_port"],
+                data["tcp_flags"],
+                data["icmp_type"],
+                data["icmp_code"],
+                data["detection_key"],
+                data["group_by"],
+                data["scope"],
+                data["input_if"],
+                data["output_if"],
+                data["sensor_id"],
+                data["warning_response_profile_id"],
+                data["critical_response_profile_id"],
+                data["fallback_response_profile_id"],
+                data["mitigation_mode"],
+                data["mitigation_enabled"],
+                data["max_auto_prefixlen_v4"],
+                data["max_auto_prefixlen_v6"],
+                data["require_protected_prefix"],
+                data["duration_seconds"],
+                data["max_active_announcements"],
+                data["min_confidence_for_auto"],
+                data["use_global_whitelist"],
+                data["extra_whitelist_ids"],
+                data["bypass_whitelist"],
+                data["notes"],
                 now,
                 rule_id,
                 template_id,
