@@ -7938,6 +7938,323 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
     return {"anomaly": context["event"], "candidates": evaluated}
 
 
+def flow_identity(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            clean_ip(row.get("src_ip")),
+            str(int(row.get("src_port") or 0)),
+            clean_ip(row.get("dst_ip")),
+            str(int(row.get("dst_port") or 0)),
+            clean_text(row.get("protocol") or row.get("proto_name") or proto_name(row.get("proto"))).lower(),
+        ]
+    )
+
+
+def compact_flow_row(row: dict[str, Any]) -> dict[str, Any]:
+    proto_label = clean_text(row.get("protocol") or row.get("proto_name") or proto_name(row.get("proto"))).upper()
+    return {
+        "src_ip": clean_ip(row.get("src_ip")),
+        "src_port": int(row.get("src_port") or 0),
+        "dst_ip": clean_ip(row.get("dst_ip")),
+        "dst_port": int(row.get("dst_port") or 0),
+        "protocol": proto_label if proto_label else "OTHER",
+        "input_if": int(row.get("input_if") or 0),
+        "output_if": int(row.get("output_if") or 0),
+        "packets": int(float(row.get("packets") or 0)),
+        "bytes": int(float(row.get("bytes") or 0)),
+        "flows": int(float(row.get("flows") or row.get("flow_count") or 0)),
+        "first_seen": iso(row["first_seen"]) if isinstance(row.get("first_seen"), datetime) else clean_text(row.get("first_seen") or row.get("flow_time")),
+        "last_seen": iso(row["last_seen"]) if isinstance(row.get("last_seen"), datetime) else clean_text(row.get("last_seen") or row.get("flow_time")),
+    }
+
+
+def aggregate_packets(rows: list[dict[str, Any]], key_func: Any, label_func: Any, limit: int = 10) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = key_func(row)
+        if not key:
+            continue
+        item = grouped.setdefault(
+            key,
+            {"key": label_func(row), "packets": 0, "bytes": 0, "flows": 0, "src_ips": set(), "dst_ips": set(), "dst_ports": set()},
+        )
+        item["packets"] += int(row.get("packets") or 0)
+        item["bytes"] += int(row.get("bytes") or 0)
+        item["flows"] += int(row.get("flows") or 0)
+        if clean_ip(row.get("src_ip")):
+            item["src_ips"].add(clean_ip(row.get("src_ip")))
+        if clean_ip(row.get("dst_ip")):
+            item["dst_ips"].add(clean_ip(row.get("dst_ip")))
+        if int(row.get("dst_port") or 0) > 0:
+            item["dst_ports"].add(int(row.get("dst_port") or 0))
+    items = []
+    for item in grouped.values():
+        items.append(
+            {
+                "key": item["key"],
+                "packets": item["packets"],
+                "bytes": item["bytes"],
+                "flows": item["flows"],
+                "unique_src_ips": len(item["src_ips"]),
+                "unique_dst_ips": len(item["dst_ips"]),
+                "unique_dst_ports": len(item["dst_ports"]),
+            }
+        )
+    return sorted(items, key=lambda item: (item["packets"], item["bytes"]), reverse=True)[:limit]
+
+
+def anomaly_analysis_window(event: dict[str, Any]) -> tuple[datetime, datetime]:
+    start = clickhouse_datetime(event.get("started_at")) or datetime.now(timezone.utc) - timedelta(minutes=5)
+    end = clickhouse_datetime(event.get("ended_at") or event.get("last_seen_at")) or datetime.now(timezone.utc)
+    if end < start:
+        end = start + timedelta(minutes=5)
+    return start - timedelta(seconds=60), end + timedelta(seconds=60)
+
+
+def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    start_dt, end_dt = anomaly_analysis_window(event)
+    interface_if_index = int(event.get("interface_if_index") or 0)
+    decoder = clean_text(event.get("protocol") or event.get("decoder")).lower()
+    proto_filter = ""
+    params: dict[str, Any] = {"start": start_dt, "end": end_dt, "limit": limit}
+    if decoder in {"udp", "dns", "ntp", "quic", "udp+quic"} or "udp" in decoder:
+        proto_filter = " AND proto = 17"
+    elif decoder == "tcp" or decoder.startswith("tcp"):
+        proto_filter = " AND proto = 6"
+    elif decoder == "icmp":
+        proto_filter = " AND proto = 1"
+    sensor_name = clean_text(event.get("sensor_name"))
+    sensor_filter = ""
+    if sensor_name:
+        params["sensor"] = sensor_name
+        sensor_filter = " AND sensor = {sensor:String}"
+    interface_filter = ""
+    if interface_if_index > 0:
+        params["interface_if_index"] = interface_if_index
+        interface_filter = " AND (input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})"
+    query = f"""
+        SELECT
+            toString(src_ip) AS src_ip,
+            src_port,
+            toString(dst_ip) AS dst_ip,
+            dst_port,
+            proto,
+            input_if,
+            output_if,
+            sum(packets) AS packets,
+            sum(bytes) AS bytes,
+            sum(flow_count) AS flows,
+            min(flow_time) AS first_seen,
+            max(flow_time) AS last_seen
+        FROM flow_raw
+        WHERE flow_time >= {{start:DateTime}}
+          AND flow_time <= {{end:DateTime}}
+          {sensor_filter}
+          {proto_filter}
+          {interface_filter}
+        GROUP BY src_ip, src_port, dst_ip, dst_port, proto, input_if, output_if
+        ORDER BY packets DESC, bytes DESC
+        LIMIT {{limit:UInt32}}
+    """
+    try:
+        rows = [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(query, params))]
+    except Exception as exc:
+        warnings.append(f"Falha ao consultar ClickHouse para fallback IA: {exc}")
+        return [], warnings
+    if not rows and (sensor_filter or proto_filter):
+        relaxed_params = {"start": start_dt, "end": end_dt, "limit": limit}
+        relaxed_interface = ""
+        if interface_if_index > 0:
+            relaxed_params["interface_if_index"] = interface_if_index
+            relaxed_interface = " AND (input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})"
+        relaxed_query = query.replace(sensor_filter, "").replace(proto_filter, "").replace(interface_filter, relaxed_interface)
+        try:
+            rows = [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(relaxed_query, relaxed_params))]
+            if rows:
+                warnings.append("Fallback IA usou consulta ClickHouse relaxada sem sensor/protocolo.")
+        except Exception as exc:
+            warnings.append(f"Falha ao consultar ClickHouse relaxado para fallback IA: {exc}")
+    return rows, warnings
+
+
+def analysis_flows_from_context(context: dict[str, Any]) -> list[dict[str, Any]]:
+    flows = [compact_flow_row(dict(flow)) for flow in list(context.get("flows") or [])]
+    strong = [
+        flow for flow in flows
+        if clean_ip(flow.get("src_ip")) and clean_ip(flow.get("dst_ip")) and int(flow.get("packets") or 0) > 0
+    ]
+    return strong
+
+
+def analysis_only_policy(reason: str = "Candidate criado apenas para analise IA; anuncio automatico bloqueado.") -> dict[str, Any]:
+    return {
+        "decision": "require_manual_approval",
+        "severity": "caution",
+        "reasons": [reason],
+        "warnings": ["analysis_only", "never_announce"],
+        "required_scope": [],
+        "matched_port_policies": [],
+        "protected_prefix_match": None,
+    }
+
+
+def fallback_analysis_candidate(
+    event: dict[str, Any],
+    name: str,
+    reason: str,
+    src_ip: str = "",
+    dst_ip: str = "",
+    dst_port: int = 0,
+) -> dict[str, Any]:
+    candidate = base_mitigation_candidate(event, name, reason, anomaly_confidence(event))
+    candidate.update(
+        {
+            "source": "fallback_analysis",
+            "mitigation_mode": "analysis_only",
+            "requested_mode": "manual_approval",
+            "allow_auto": False,
+            "never_announce": True,
+            "protocol": "udp",
+            "src_cidr": cidr_from_ip_or_cidr(src_ip) if src_ip else "",
+            "dst_cidr": cidr_from_ip_or_cidr(dst_ip) if dst_ip else "",
+            "dst_port": str(dst_port) if dst_port else "",
+            "src_prefix": cidr_from_ip_or_cidr(src_ip) if src_ip else "",
+            "dst_prefix": cidr_from_ip_or_cidr(dst_ip) if dst_ip else "",
+            "target_prefix": cidr_from_ip_or_cidr(dst_ip) or cidr_from_ip_or_cidr(src_ip),
+            "target_scope": cidr_from_ip_or_cidr(dst_ip) or cidr_from_ip_or_cidr(src_ip),
+            "action": "discard",
+            "then_action": "discard",
+            "response_type": "flowspec",
+            "duration_seconds": 900,
+            "mitigation_basis": "fallback_analysis",
+            "mitigation_reason": reason,
+            "policy_decision": analysis_only_policy(),
+        }
+    )
+    candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
+    try:
+        candidate["rendered_command_preview"] = render_exabgp_flowspec_command("announce", candidate)
+    except HTTPException as exc:
+        candidate["rendered_command_preview"] = f"INVALID: {clean_text(exc.detail)}"
+    return candidate
+
+
+def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+    event = context["event"]
+    warnings: list[str] = []
+    saved_flows = analysis_flows_from_context(context)
+    clickhouse_flows: list[dict[str, Any]] = []
+    if len(saved_flows) < 3:
+        clickhouse_flows, query_warnings = query_clickhouse_flows_for_analysis(event)
+        warnings.extend(query_warnings)
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    for flow in [*saved_flows, *clickhouse_flows]:
+        key = flow_identity(flow)
+        if not key:
+            continue
+        existing = rows_by_key.get(key)
+        if existing is None or int(flow.get("packets") or 0) > int(existing.get("packets") or 0):
+            rows_by_key[key] = flow
+    rows = sorted(rows_by_key.values(), key=lambda item: (int(item.get("packets") or 0), int(item.get("bytes") or 0)), reverse=True)
+    interface_if_index = int(event.get("interface_if_index") or 0)
+    output_rows = [row for row in rows if interface_if_index and int(row.get("output_if") or 0) == interface_if_index]
+    input_rows = [row for row in rows if interface_if_index and int(row.get("input_if") or 0) == interface_if_index]
+    direction = clean_text(event.get("direction")).lower()
+    prioritized_rows = output_rows if direction == "sends" and output_rows else input_rows if direction == "receives" and input_rows else rows
+    total_packets = sum(int(row.get("packets") or 0) for row in prioritized_rows) or sum(int(row.get("packets") or 0) for row in rows)
+    top_flow_by_packets = prioritized_rows[0] if prioritized_rows else {}
+    top_flow_by_bytes = sorted(rows, key=lambda item: (int(item.get("bytes") or 0), int(item.get("packets") or 0)), reverse=True)[0] if rows else {}
+    top_src = aggregate_packets(prioritized_rows or rows, lambda row: clean_ip(row.get("src_ip")), lambda row: clean_ip(row.get("src_ip")))
+    top_dst = aggregate_packets(prioritized_rows or rows, lambda row: clean_ip(row.get("dst_ip")), lambda row: clean_ip(row.get("dst_ip")))
+    top_dst_port = aggregate_packets(prioritized_rows or rows, lambda row: str(int(row.get("dst_port") or 0)) if int(row.get("dst_port") or 0) else "", lambda row: str(int(row.get("dst_port") or 0)))
+    top_dst_port_pair = aggregate_packets(
+        prioritized_rows or rows,
+        lambda row: f"{clean_ip(row.get('dst_ip'))}:{int(row.get('dst_port') or 0)}" if clean_ip(row.get("dst_ip")) and int(row.get("dst_port") or 0) else "",
+        lambda row: f"{clean_ip(row.get('dst_ip'))}:{int(row.get('dst_port') or 0)}",
+    )
+    top_conversations = aggregate_packets(prioritized_rows or rows, flow_identity, lambda row: f"{clean_ip(row.get('src_ip'))}:{row.get('src_port')} -> {clean_ip(row.get('dst_ip'))}:{row.get('dst_port')} {row.get('protocol')}")
+    unique_src_ips = len({clean_ip(row.get("src_ip")) for row in rows if clean_ip(row.get("src_ip"))})
+    unique_dst_ips = len({clean_ip(row.get("dst_ip")) for row in rows if clean_ip(row.get("dst_ip"))})
+    unique_dst_ports = len({int(row.get("dst_port") or 0) for row in rows if int(row.get("dst_port") or 0) > 0})
+
+    def share(value: Any) -> float:
+        return round((int(value or 0) / total_packets * 100), 2) if total_packets else 0.0
+
+    candidates: list[dict[str, Any]] = []
+    top_src_ip = clean_ip(top_flow_by_packets.get("src_ip"))
+    top_dst_ip = clean_ip(top_flow_by_packets.get("dst_ip"))
+    top_dst_port_value = int(top_flow_by_packets.get("dst_port") or 0)
+    top_protocol = clean_text(top_flow_by_packets.get("protocol")).lower()
+    if top_src_ip and top_dst_ip and top_dst_port_value and top_protocol == "udp":
+        candidates.append(
+            fallback_analysis_candidate(
+                event,
+                "FALLBACK_TOP_FLOW_UDP",
+                "Fallback por top flow em packets no ClickHouse.",
+                top_src_ip,
+                top_dst_ip,
+                top_dst_port_value,
+            )
+        )
+        candidates.append(
+            fallback_analysis_candidate(
+                event,
+                "FALLBACK_TOP_SRC_UDP_DST_PORT",
+                "Fallback por top source com trafego UDP para porta alvo.",
+                top_src_ip,
+                "",
+                top_dst_port_value,
+            )
+        )
+        top_pair = top_dst_port_pair[0] if top_dst_port_pair else {}
+        if int(top_pair.get("unique_src_ips") or 0) >= 3:
+            candidates.append(
+                fallback_analysis_candidate(
+                    event,
+                    "FALLBACK_MANY_SOURCES_DST_UDP_PORT",
+                    "Fallback por muitos sources para mesmo destino/porta.",
+                    "",
+                    top_dst_ip,
+                    top_dst_port_value,
+                )
+            )
+    for index, candidate in enumerate(candidates):
+        candidate["candidate_index"] = index
+    return {
+        "source": "deterministic_anomaly_analysis",
+        "anomaly_id": anomaly_id,
+        "window": {"start": iso(anomaly_analysis_window(event)[0]), "end": iso(anomaly_analysis_window(event)[1])},
+        "interface_if_index": interface_if_index,
+        "direction": direction,
+        "warnings": sorted(set(warnings)),
+        "top_flow_by_packets": top_flow_by_packets,
+        "top_flow_by_bytes": top_flow_by_bytes,
+        "top_conversation_by_packets": top_conversations[0] if top_conversations else {},
+        "top_src_ip_by_packets": top_src[0] if top_src else {},
+        "top_dst_ip_by_packets": top_dst[0] if top_dst else {},
+        "top_dst_port_by_packets": top_dst_port[0] if top_dst_port else {},
+        "top_dst_port_pair_by_packets": top_dst_port_pair[0] if top_dst_port_pair else {},
+        "unique_src_ips": unique_src_ips,
+        "unique_dst_ips": unique_dst_ips,
+        "unique_dst_ports": unique_dst_ports,
+        "packet_share_percent": share(top_flow_by_packets.get("packets")),
+        "top_src_share_percent": share(top_src[0].get("packets") if top_src else 0),
+        "top_dst_port_share_percent": share(top_dst_port_pair[0].get("packets") if top_dst_port_pair else 0),
+        "top_flows": rows[:10],
+        "output_interface_top_flows": output_rows[:10],
+        "input_interface_top_flows": input_rows[:10],
+        "top_src_ips": top_src,
+        "top_dst_ips": top_dst,
+        "top_dst_ports": top_dst_port,
+        "top_dst_port_pairs": top_dst_port_pair,
+        "fallback_analysis_candidates": candidates,
+    }
+
+
 def ai_profile(profile_id: str | None = None) -> dict[str, Any]:
     key = clean_text(profile_id or "recommended").lower()
     return dict(AI_MODEL_PROFILES.get(key) or AI_MODEL_PROFILES["recommended"])
@@ -8090,6 +8407,7 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "reason": item.get("reason") or "",
         "operator_summary": item.get("operator_summary") or "",
         "report_summary": item.get("report_summary") or "",
+        "rendered_command_preview": response.get("rendered_command_preview") if isinstance(response, dict) else "",
         "risks": response.get("risks") if isinstance(response, dict) else [],
         "checks_before_approve": response.get("checks_before_approve") if isinstance(response, dict) else [],
         "created_at": item.get("created_at") or "",
@@ -8129,11 +8447,47 @@ def trim_ai_payload(payload: dict[str, Any], max_chars: int) -> dict[str, Any]:
     return trimmed
 
 
+def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "id",
+        "status",
+        "attack_vector_name",
+        "vector_name",
+        "sensor_name",
+        "sensor_id",
+        "interface_if_index",
+        "direction",
+        "decoder",
+        "protocol",
+        "metric_unit",
+        "observed_value",
+        "peak_value",
+        "threshold_value",
+        "estimated_packets",
+        "estimated_bytes",
+        "flow_count",
+        "started_at",
+        "last_seen_at",
+        "ended_at",
+        "target_ip",
+        "target_cidr",
+        "target_port",
+        "input_if",
+        "output_if",
+        "summary",
+    )
+    return {key: event.get(key) for key in keys if event.get(key) not in {None, ""}}
+
+
 def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict[str, Any]:
     evaluated = evaluated_mitigation_candidates(anomaly_id)
     with sqlite_connection() as conn:
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+    deterministic = deterministic_anomaly_analysis(anomaly_id) if not evaluated["candidates"] else {}
+    candidates = evaluated["candidates"] or list(deterministic.get("fallback_analysis_candidates") or [])
     flows = list(context.get("flows") or [])[: int(config["max_top_flows"])]
+    if not flows and deterministic:
+        flows = list(deterministic.get("top_flows") or [])[: int(config["max_top_flows"])]
     conversations: dict[str, dict[str, Any]] = {}
     for flow in flows:
         key = f"{flow.get('src_ip') or '-'}:{flow.get('src_port') or '-'} -> {flow.get('dst_ip') or '-'}:{flow.get('dst_port') or '-'}"
@@ -8142,19 +8496,21 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
         item["packets"] += int(float(flow.get("packets") or 0))
         item["flow_count"] += int(float(flow.get("flow_count") or flow.get("flows") or 0))
     payload = {
-        "anomaly": evaluated["anomaly"],
+        "anomaly": compact_anomaly_for_ai(evaluated["anomaly"]),
+        "deterministic_analysis": deterministic,
         "top_conversations": sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[: int(config["max_top_flows"])],
         "related_flows": flows,
-        "candidates": evaluated["candidates"],
+        "candidates": candidates,
         "policy_decisions": [
             {"candidate_index": index, "policy_decision": candidate.get("policy_decision")}
-            for index, candidate in enumerate(evaluated["candidates"])
+            for index, candidate in enumerate(candidates)
         ],
         "security_rules": {
             "ai_never_announces": True,
             "choose_only_existing_candidate": True,
             "policy_validation_required": bool(config.get("require_policy_validation")),
             "ai_allow_auto": bool(config.get("allow_auto")),
+            "fallback_analysis_never_announces": True,
         },
     }
     return trim_ai_payload(payload, int(config["max_context_chars"]))
@@ -8171,6 +8527,7 @@ def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
         "reason": "explicacao curta",
         "operator_summary": "texto para NOC",
         "report_summary": "texto para PDF",
+        "rendered_command_preview": "preview opcional, nunca anunciado automaticamente",
         "risks": ["..."],
         "checks_before_approve": ["..."],
     }
@@ -8184,6 +8541,7 @@ def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
         [
             "Analise o payload e escolha apenas um indice existente em candidates.",
             "Se o candidate recomendado tiver policy_decision.deny, marque manual_approval_required=true e explique que esta bloqueado pela policy.",
+            "Candidates com source=fallback_analysis, mitigation_mode=analysis_only ou never_announce=true sao apenas recomendacao de analise e nunca devem ser tratados como anuncio automatico.",
             "Nunca recomende accept automatico. Vetores genericos sempre exigem aprovacao manual.",
             "Exemplos: " + " ".join(examples),
             "Formato obrigatorio de resposta JSON: " + json.dumps(response_schema, ensure_ascii=False),
@@ -8273,8 +8631,9 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
     policy = candidate.get("policy_decision") or {}
     policy_denied = policy.get("decision") == "deny"
     action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
-    allow_auto = bool(response.get("allow_auto")) and bool(config.get("allow_auto")) and not policy_denied and action != "accept"
-    manual_required = bool(response.get("manual_approval_required")) or not allow_auto or policy_denied
+    never_announce = bool(candidate.get("never_announce")) or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
+    allow_auto = bool(response.get("allow_auto")) and bool(config.get("allow_auto")) and not policy_denied and action != "accept" and not never_announce
+    manual_required = bool(response.get("manual_approval_required")) or not allow_auto or policy_denied or never_announce
     return {
         **response,
         "recommended_candidate_index": index,
@@ -8286,6 +8645,7 @@ def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dic
         "reason": clean_text(response.get("reason"))[:1000],
         "operator_summary": clean_text(response.get("operator_summary"))[:2000],
         "report_summary": clean_text(response.get("report_summary"))[:2000],
+        "rendered_command_preview": clean_text(response.get("rendered_command_preview") or candidate.get("rendered_command_preview"))[:2000],
         "risks": [clean_text(item)[:500] for item in (response.get("risks") or []) if clean_text(item)][:10],
         "checks_before_approve": [clean_text(item)[:500] for item in (response.get("checks_before_approve") or []) if clean_text(item)][:10],
     }
@@ -8439,6 +8799,24 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
     request_payload = build_ai_mitigation_payload(event_id, config)
+    if not request_payload.get("candidates"):
+        fallback_response = {
+            "recommended_candidate_index": None,
+            "confidence": 0.0,
+            "risk": "high",
+            "classification": "unknown",
+            "manual_approval_required": True,
+            "allow_auto": False,
+            "reason": "Nao foi encontrado candidate normal ou fallback_analysis seguro.",
+            "operator_summary": "Sem candidato seguro para a IA escolher. Seguir fluxo manual de investigacao.",
+            "report_summary": "Analise IA nao executada: sem candidato seguro.",
+            "risks": ["Anomalia sem escopo suficiente para recomendacao automatizada."],
+            "checks_before_approve": ["Confirmar top flows diretamente no ClickHouse/roteador.", "Validar sensor, interface e janela da anomalia."],
+        }
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, fallback_response)
+            conn.commit()
+        return saved
     try:
         response_text, _latency_ms = ai_provider_chat(config, ai_prompt_for_payload(request_payload))
         parsed = parse_ai_json_response(response_text)
@@ -8586,6 +8964,8 @@ def apply_mitigation_candidate(
     mode: str,
     created_by: str,
 ) -> dict[str, Any]:
+    if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
+        raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
     mode = normalize_choice(mode, {"manual_approval", "announce_now", "automatic"}, "mode")
     if active_mitigation_exists(conn, candidate["mitigation_key"]):
         raise HTTPException(status_code=409, detail="Ja existe mitigacao ativa para esta chave.")
@@ -14923,6 +15303,8 @@ def apply_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomal
     if payload.candidate_index >= len(candidates):
         raise HTTPException(status_code=400, detail="candidate_index invalido")
     candidate = dict(candidates[payload.candidate_index])
+    if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
+        raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
     candidate.pop("policy_decision", None)
     candidate.pop("rendered_command", None)
     with sqlite_connection() as conn:

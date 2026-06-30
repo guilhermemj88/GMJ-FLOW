@@ -8089,16 +8089,26 @@
         block.innerHTML = '<div class="subtle">Sem analise IA para esta anomalia.</div>';
         return;
       }
-      if (analysis.error_message) {
+      if (analysis.error_message && !analysis.request_payload?.deterministic_analysis) {
         setText('anomalyAiStatus', `Falha IA em ${formatDateTime(analysis.created_at)}`);
         block.innerHTML = `<div class="text-danger">${escapeHtml(analysis.error_message)}</div>`;
         return;
       }
       const checks = Array.isArray(analysis.checks_before_approve) ? analysis.checks_before_approve : [];
       const risks = Array.isArray(analysis.risks) ? analysis.risks : [];
+      const requestPayload = analysis.request_payload || {};
+      const deterministic = requestPayload.deterministic_analysis || {};
+      const fallbackCandidates = Array.isArray(deterministic.fallback_analysis_candidates) ? deterministic.fallback_analysis_candidates : [];
+      const topFlow = deterministic.top_flow_by_packets || {};
+      const topSrc = deterministic.top_src_ip_by_packets || {};
+      const topDstPort = deterministic.top_dst_port_pair_by_packets || deterministic.top_dst_port_by_packets || {};
+      const commandPreview = analysis.rendered_command_preview || analysis.response?.rendered_command_preview || '';
       setText('anomalyAiStatus', `${analysis.classification || 'unknown'} / risco ${analysis.risk || '-'}`);
       block.innerHTML = `
+        <div class="mb-2"><span class="badge-soft off">Analise IA sem mitigacao automatica</span></div>
+        ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
         <div class="d-flex flex-wrap gap-2 mb-2">
+          <div class="metric-chip"><span>Anomalia:</span> #${escapeHtml(analysis.anomaly_id || requestPayload.anomaly?.id || '-')}</div>
           <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(analysis.classification || '-')}</div>
           <div class="metric-chip"><span>Risco:</span> ${escapeHtml(analysis.risk || '-')}</div>
           <div class="metric-chip"><span>Confianca:</span> ${(Number(analysis.confidence || 0) * 100).toFixed(1)}%</div>
@@ -8107,6 +8117,32 @@
         </div>
         <div class="metric-readout mb-2">${escapeHtml(analysis.reason || '-')}</div>
         <div class="subtle mb-2">${escapeHtml(analysis.operator_summary || '-')}</div>
+        ${deterministic.source ? `
+          <div class="panel p-2 mb-2">
+            <div class="panel-title mb-2">Analise deterministica</div>
+            <div class="d-flex flex-wrap gap-2 mb-2">
+              <div class="metric-chip"><span>Top flow:</span> ${escapeHtml(topFlow.src_ip || '-')}:${escapeHtml(topFlow.src_port || '-')} -> ${escapeHtml(topFlow.dst_ip || '-')}:${escapeHtml(topFlow.dst_port || '-')} ${escapeHtml(topFlow.protocol || '-')}</div>
+              <div class="metric-chip"><span>Packets:</span> ${formatNumber(topFlow.packets || 0)}</div>
+              <div class="metric-chip"><span>Bytes:</span> ${formatBytes(topFlow.bytes || 0)}</div>
+              <div class="metric-chip"><span>Share top flow:</span> ${escapeHtml(deterministic.packet_share_percent || 0)}%</div>
+              <div class="metric-chip"><span>Top src:</span> ${escapeHtml(topSrc.key || '-')} (${formatNumber(topSrc.packets || 0)} packets)</div>
+              <div class="metric-chip"><span>Top dst:port:</span> ${escapeHtml(topDstPort.key || '-')} (${formatNumber(topDstPort.packets || 0)} packets)</div>
+              <div class="metric-chip"><span>Unicos:</span> src ${formatNumber(deterministic.unique_src_ips || 0)} / dst ${formatNumber(deterministic.unique_dst_ips || 0)} / portas ${formatNumber(deterministic.unique_dst_ports || 0)}</div>
+            </div>
+            ${fallbackCandidates.length ? `
+              <div class="panel-title mb-1">Candidates fallback_analysis</div>
+              <div class="d-grid gap-2">
+                ${fallbackCandidates.map((candidate, index) => `
+                  <div class="metric-readout">
+                    #${index + 1} ${escapeHtml(candidate.attack_vector_name || 'fallback_analysis')} - ${escapeHtml(candidate.reason || candidate.mitigation_reason || '-')}<br>
+                    <span class="subtle">${escapeHtml(candidate.rendered_command_preview || '-')}</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<div class="subtle">Sem candidates fallback_analysis.</div>'}
+          </div>
+        ` : ''}
+        ${commandPreview ? `<pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(commandPreview)}</pre>` : ''}
         ${risks.length ? `<div class="subtle mb-2">Riscos: ${escapeHtml(risks.join(' | '))}</div>` : ''}
         ${checks.length ? `<ul class="mb-0">${checks.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
       `;
