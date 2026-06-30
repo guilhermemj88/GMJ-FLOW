@@ -1,0 +1,338 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List
+
+from app.services.mitigation_candidates import generate_mitigation_candidates
+from app.services.mitigation_playbook import load_playbook
+from app.services.mitigation_validator import validate_mitigation_decision
+from app.services.peak_flow_enrichment import enrich_peak_flows
+
+
+FlowFetcher = Callable[["PeakHunterRequest", datetime, int], List[Dict[str, Any]]]
+SeriesFetcher = Callable[["PeakHunterRequest"], List[Dict[str, Any]]]
+
+
+@dataclass
+class PeakHunterRequest:
+    sensor: str
+    interface_id: int
+    direction: str
+    metric: str
+    start_time: datetime
+    end_time: datetime
+    protocol: str | None = None
+    threshold: float | None = None
+    baseline: float | dict[str, Any] | None = None
+    window_seconds: int = 5
+    max_peaks: int = 5
+
+
+def analyze_peak_hunter(
+    request: PeakHunterRequest,
+    series_fetcher: SeriesFetcher,
+    flow_fetcher: FlowFetcher,
+    save_history: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    series = normalize_series(series_fetcher(request), request.metric)
+    baseline = calculate_baseline(series, request.metric, request.baseline)
+    peaks = detect_local_peaks(series, request.metric, baseline, request.threshold, request.max_peaks)
+    analyzed = []
+    for peak in peaks:
+        analyzed.append(_analyze_peak(request, peak, baseline, flow_fetcher))
+    best = select_best_peak(analyzed)
+    if save_history and best:
+        save_history(history_record(request, best, baseline))
+    recommendation = recommendation_for_peak(best)
+    return {
+        "peaks_detected": len(peaks),
+        "peaks_analyzed": len(analyzed),
+        "series": series,
+        "best_peak": best,
+        "evidence_window_used": best.get("evidence_window_used") if best else None,
+        "evidence_windows_tried": best.get("evidence_windows_tried") if best else [],
+        "dominant_group": best.get("dominant_group") if best else None,
+        "classification": best.get("classification") if best else "insufficient_flow_evidence",
+        "candidates": best.get("candidates") if best else [],
+        "mitigation_allowed": bool(best and best.get("mitigation_allowed")),
+        "recommendation": recommendation,
+    }
+
+
+def _analyze_peak(
+    request: PeakHunterRequest,
+    peak: dict[str, Any],
+    baseline: dict[str, float],
+    flow_fetcher: FlowFetcher,
+) -> dict[str, Any]:
+    peak_time = parse_time(peak["time"])
+    tried = []
+    best_enrichment: dict[str, Any] | None = None
+    selected_window = None
+    for window in (5, 15, 30, 60):
+        flows = flow_fetcher(request, peak_time, window)
+        enrichment = enrich_peak_flows(flows, request.metric, max(window * 2, 1), request.direction)
+        tried.append({"window_seconds": window, "flow_count": len(flows), "evidence_status": enrichment["evidence_status"]})
+        if best_enrichment is None or _enrichment_rank(enrichment, request.metric) > _enrichment_rank(best_enrichment, request.metric):
+            best_enrichment = enrichment
+            selected_window = window
+        if enrichment["evidence_status"] == "complete":
+            best_enrichment = enrichment
+            selected_window = window
+            break
+    best_enrichment = best_enrichment or {"evidence_status": "insufficient", "classification": "insufficient_flow_evidence", "dominant_group": None}
+    candidates, mitigation_allowed = candidates_for_enrichment(request, best_enrichment)
+    return {
+        **peak,
+        "baseline_p95": baseline["p95"],
+        "baseline_p99": baseline["p99"],
+        "evidence_status": best_enrichment["evidence_status"],
+        "evidence_window_used": selected_window,
+        "evidence_windows_tried": tried,
+        "dominant_group": best_enrichment.get("dominant_group"),
+        "classification": best_enrichment.get("classification") or "insufficient_flow_evidence",
+        "groups": best_enrichment.get("groups") or [],
+        "candidates": candidates,
+        "mitigation_allowed": mitigation_allowed,
+        "apply_enabled": False,
+    }
+
+
+def normalize_series(rows: list[dict[str, Any]], metric: str) -> list[dict[str, Any]]:
+    series = []
+    for row in rows:
+        value = float(row.get(metric) or row.get("value") or 0)
+        time_value = row.get("time") or row.get("bucket") or row.get("ts")
+        series.append({"time": _string_time(time_value), metric: value, "value": value})
+    return sorted(series, key=lambda item: item["time"])
+
+
+def calculate_baseline(series: list[dict[str, Any]], metric: str, baseline: float | dict[str, Any] | None = None) -> dict[str, float]:
+    if isinstance(baseline, dict):
+        p95 = float(baseline.get("p95") or baseline.get("baseline_p95") or 0)
+        p99 = float(baseline.get("p99") or baseline.get("baseline_p99") or p95)
+        return {"p95": p95, "p99": p99}
+    if isinstance(baseline, (int, float)):
+        return {"p95": float(baseline), "p99": float(baseline)}
+    values = [float(point.get(metric) or point.get("value") or 0) for point in series]
+    if not values:
+        return {"p95": 0.0, "p99": 0.0}
+    if len(values) < 3:
+        maximum = max(values)
+        return {"p95": maximum, "p99": maximum}
+    ordered = sorted(values)
+    return {"p95": percentile(ordered, 95), "p99": percentile(ordered, 99)}
+
+
+def detect_local_peaks(
+    series: list[dict[str, Any]],
+    metric: str,
+    baseline: dict[str, float],
+    threshold: float | None,
+    max_peaks: int,
+) -> list[dict[str, Any]]:
+    peaks = []
+    floor = float(threshold or baseline.get("p95") or 0)
+    for index, point in enumerate(series):
+        value = float(point.get(metric) or point.get("value") or 0)
+        previous_value = float(series[index - 1].get(metric) or series[index - 1].get("value") or 0) if index > 0 else -1
+        next_value = float(series[index + 1].get(metric) or series[index + 1].get("value") or 0) if index < len(series) - 1 else -1
+        if value >= floor and value >= previous_value and value >= next_value:
+            p95 = float(baseline.get("p95") or 0)
+            score = value / p95 if p95 > 0 else value
+            peaks.append({"peak_time": point["time"], "time": point["time"], "peak_value": value, "score": round(score, 3)})
+    peaks.sort(key=lambda item: (float(item["score"]), float(item["peak_value"])), reverse=True)
+    return peaks[: max(int(max_peaks or 1), 1)]
+
+
+def candidates_for_enrichment(request: PeakHunterRequest, enrichment: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    if enrichment.get("evidence_status") != "complete" or not enrichment.get("dominant_group"):
+        return [], False
+    dominant = enrichment["dominant_group"]
+    incident = {
+        "incident_id": f"peak-{request.interface_id}-{dominant.get('dst_ip')}",
+        "suspected_template": _template_for_classification(enrichment.get("classification")),
+        "direction": request.direction,
+        "src_is_customer": True,
+        "src_is_internal": True,
+        "dst_is_customer": False,
+        "dst_is_external": True,
+        "protocol": dominant.get("protocol"),
+        "dst_ip": dominant.get("dst_ip"),
+        "dst_port": dominant.get("dst_port"),
+        "dst_prefix": _ipv4_24(dominant.get("dst_ip")),
+        "same_dst_24": True,
+        "dominant_attack_group": {
+            "dst_ip": dominant.get("dst_ip"),
+            "dst_port": dominant.get("dst_port"),
+            "protocol": dominant.get("protocol"),
+            "total_packets": dominant.get("total_packets"),
+            "total_bytes": dominant.get("total_bytes"),
+            "unique_src_ips": dominant.get("unique_src_ips") or [],
+        },
+        "packets": dominant.get("total_packets"),
+        "bytes": dominant.get("total_bytes"),
+    }
+    playbook = load_playbook()
+    suspected_template, candidates = generate_mitigation_candidates(incident, playbook)
+    for candidate in candidates:
+        candidate["apply_enabled"] = False
+    selected = next((candidate for candidate in candidates if candidate.get("action") != "alert_only"), None)
+    if selected is None:
+        return candidates, False
+    validation = validate_mitigation_decision(
+        {
+            "recommended_candidate_index": selected.get("candidate_index", 0),
+            "allow_auto": 0,
+            "manual_approval_required": 1,
+            "recommended_ttl": selected.get("ttl") or "2h",
+        },
+        candidates,
+        incident,
+        playbook,
+        suspected_template,
+    )
+    return candidates, bool(validation.get("valid"))
+
+
+def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS peak_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            peak_time TEXT NOT NULL,
+            interface_id INTEGER NOT NULL,
+            sensor TEXT NOT NULL DEFAULT '',
+            direction TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            peak_value REAL NOT NULL,
+            baseline_p95 REAL NOT NULL DEFAULT 0,
+            baseline_p99 REAL NOT NULL DEFAULT 0,
+            score REAL NOT NULL DEFAULT 0,
+            evidence_status TEXT NOT NULL DEFAULT '',
+            classification TEXT NOT NULL DEFAULT '',
+            dominant_group_json TEXT NOT NULL DEFAULT '{}',
+            candidates_json TEXT NOT NULL DEFAULT '[]',
+            ai_summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+    ensure_peak_analysis_db(conn)
+    conn.execute(
+        """
+        INSERT INTO peak_analysis (
+            peak_time, interface_id, sensor, direction, metric, peak_value,
+            baseline_p95, baseline_p99, score, evidence_status, classification,
+            dominant_group_json, candidates_json, ai_summary, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["peak_time"],
+            record["interface_id"],
+            record["sensor"],
+            record["direction"],
+            record["metric"],
+            record["peak_value"],
+            record["baseline_p95"],
+            record["baseline_p99"],
+            record["score"],
+            record["evidence_status"],
+            record["classification"],
+            json.dumps(record.get("dominant_group") or {}, sort_keys=True),
+            json.dumps(record.get("candidates") or [], sort_keys=True, default=str),
+            record.get("ai_summary") or "",
+            record["created_at"],
+        ),
+    )
+
+
+def history_record(request: PeakHunterRequest, peak: dict[str, Any], baseline: dict[str, float]) -> dict[str, Any]:
+    return {
+        "peak_time": peak.get("peak_time") or peak.get("time"),
+        "interface_id": request.interface_id,
+        "sensor": request.sensor,
+        "direction": request.direction,
+        "metric": request.metric,
+        "peak_value": peak.get("peak_value") or 0,
+        "baseline_p95": baseline.get("p95") or 0,
+        "baseline_p99": baseline.get("p99") or 0,
+        "score": peak.get("score") or 0,
+        "evidence_status": peak.get("evidence_status") or "insufficient",
+        "classification": peak.get("classification") or "insufficient_flow_evidence",
+        "dominant_group": peak.get("dominant_group") or {},
+        "candidates": peak.get("candidates") or [],
+        "ai_summary": peak.get("ai_summary") or "",
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def recommendation_for_peak(peak: dict[str, Any] | None) -> dict[str, Any]:
+    if not peak or peak.get("evidence_status") != "complete":
+        return {"recommended_action": "alert_only", "reason": "Sem evidencia de flow suficiente para identificar vetor dominante."}
+    if peak.get("mitigation_allowed"):
+        return {"recommended_action": "manual_review", "reason": "Candidato seguro gerado para revisao manual; aplicacao automatica desativada."}
+    return {"recommended_action": "alert_only", "reason": "Grupo dominante encontrado, mas candidato nao passou na validacao."}
+
+
+def select_best_peak(peaks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not peaks:
+        return None
+    return sorted(peaks, key=lambda item: (item.get("evidence_status") == "complete", float(item.get("score") or 0)), reverse=True)[0]
+
+
+def percentile(ordered_values: list[float], percentile_value: int) -> float:
+    if not ordered_values:
+        return 0.0
+    index = (len(ordered_values) - 1) * (percentile_value / 100)
+    lower = int(index)
+    upper = min(lower + 1, len(ordered_values) - 1)
+    weight = index - lower
+    return ordered_values[lower] * (1 - weight) + ordered_values[upper] * weight
+
+
+def parse_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    text = str(value).replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _enrichment_rank(enrichment: dict[str, Any], metric: str) -> float:
+    dominant = enrichment.get("dominant_group") or {}
+    if not dominant:
+        return 0.0
+    return float(dominant.get("share_bits") if metric == "bits_s" else dominant.get("share_packets") or 0)
+
+
+def _template_for_classification(classification: Any) -> str:
+    text = str(classification or "")
+    if text == "dns_udp_abuse_outbound":
+        return "dns_udp_abuse_outbound"
+    if "tcp" in text:
+        return "tcp_syn_flood"
+    if "icmp" in text:
+        return "icmp_flood"
+    return "udp_flood_outbound_cpe"
+
+
+def _ipv4_24(value: Any) -> str:
+    text = str(value or "").strip()
+    parts = text.split(".")
+    if len(parts) != 4:
+        return ""
+    return ".".join(parts[:3] + ["0"]) + "/24"
+
+
+def _string_time(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")

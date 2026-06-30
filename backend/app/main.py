@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
+from app.api.peak_hunter import router as peak_hunter_router
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -48,6 +49,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(mitigation_router)
+app.include_router(peak_hunter_router)
 
 PROTO_LABELS = {
     "1": "ICMP",
