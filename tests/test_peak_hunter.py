@@ -357,6 +357,21 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("output_if = {interface_id:UInt32}", where_sql)
         self.assertNotIn("any(output_if)", where_sql)
 
+    def test_peak_flows_uses_non_conflicting_interface_aliases(self):
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5))
+        self.assertNotIn("any(output_if) AS output_if", captured["query"])
+        self.assertNotIn("any(input_if) AS input_if", captured["query"])
+        self.assertIn("any(output_if) AS flow_output_if", captured["query"])
+        self.assertIn("any(input_if) AS flow_input_if", captured["query"])
+
+    def test_peak_flows_maps_interface_aliases_to_public_fields(self):
+        rows = capture_clickhouse_query(
+            lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5),
+            rows=[{"flow_input_if": 11, "flow_output_if": 22}],
+        )["result"]
+        self.assertEqual(rows[0]["input_if"], 11)
+        self.assertEqual(rows[0]["output_if"], 22)
+
     def test_clickhouse_error_returns_json(self):
         if peak_hunter_api is None:
             self.skipTest("fastapi nao instalado")
@@ -534,18 +549,18 @@ def create_sensor_schema(db_path, default_in=1000, default_out=1000, interface_i
         )
 
 
-def capture_clickhouse_query(callback):
+def capture_clickhouse_query(callback, rows=None):
     captured = {}
     original = peak_clickhouse.query_clickhouse
 
     def fake_query(query, parameters=None):
         captured["query"] = query
         captured["parameters"] = parameters or {}
-        return []
+        return [dict(row) for row in (rows or [])]
 
     peak_clickhouse.query_clickhouse = fake_query
     try:
-        callback()
+        captured["result"] = callback()
     finally:
         peak_clickhouse.query_clickhouse = original
     return captured

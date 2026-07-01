@@ -125,7 +125,7 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
         filters.append("proto = {proto:UInt8}")
         params["proto"] = _proto_number(request.protocol)
     sort_expr = "bits_s" if request.metric == "bits_s" else "packets_s"
-    return query_clickhouse_context(
+    rows = query_clickhouse_context(
         "fetch_peak_flows",
         f"""
         SELECT
@@ -146,8 +146,8 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
             sum(flow_count) AS flow_count,
             {packets_expr} / {{seconds:Float64}} AS packets_s,
             {bytes_expr} * 8 / {{seconds:Float64}} AS bits_s,
-            any(input_if) AS input_if,
-            any(output_if) AS output_if
+            any(input_if) AS flow_input_if,
+            any(output_if) AS flow_output_if
         FROM flow_raw
         WHERE {' AND '.join(filters)}
         GROUP BY src_ip, src_port, dst_ip, dst_port, proto
@@ -156,6 +156,10 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
         """,
         params,
     )
+    for row in rows:
+        row["input_if"] = row.get("flow_input_if")
+        row["output_if"] = row.get("flow_output_if")
+    return rows
 
 
 def fetch_peak_hunter_sensors() -> list[dict[str, Any]]:
