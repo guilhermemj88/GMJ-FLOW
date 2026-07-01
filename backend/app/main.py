@@ -978,12 +978,15 @@ class BgpConnectorPayload(BaseModel):
 class BgpResponseProfilePayload(BaseModel):
     name: str
     description: str = ""
-    enabled: bool = True
-    response_type: str = "flowspec"
+    enabled: bool | None = None
+    active: bool | None = None
+    response_type: str | None = None
+    type: str | None = None
     connector_id: int | None = Field(None, ge=1)
     approval_mode: str = "manual_approval"
-    action: str = "discard"
+    action: str | None = None
     default_action: str | None = None
+    allow_automatic: bool = False
     target_selector: str = "src_ip"
     protocol_selector: str = "anomaly_protocol"
     fixed_protocol: str = ""
@@ -1013,6 +1016,7 @@ class BgpResponseProfilePayload(BaseModel):
     allow_wide_prefix: bool = False
     max_duration_seconds: int = Field(BGP_DEFAULT_MAX_DURATION_SECONDS, ge=60, le=604800)
     default_duration_seconds: int = Field(1800, ge=60, le=604800)
+    duration_default: int | None = Field(None, ge=60, le=604800)
     max_prefixlen_v4: int = Field(32, ge=0, le=32)
     max_prefixlen_v6: int = Field(128, ge=0, le=128)
     notes: str = ""
@@ -6590,6 +6594,7 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "name": item["name"],
         "description": item.get("description") or "",
         "enabled": sqlite_bool(item.get("enabled")),
+        "active": sqlite_bool(item.get("enabled")),
         "response_type": response_type,
         "type": response_type,
         "connector_id": item.get("connector_id"),
@@ -6645,6 +6650,7 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
     result["profile_status"] = response_profile_status(result)
     result["operational_description"] = response_profile_operational_description(result)
     result["rendered_command_preview"] = response_profile_placeholder_preview(result)
+    result["preview"] = result["rendered_command_preview"]
     result["used_by_rules_count"] = int(item.get("used_by_rules_count") or 0)
     return result
 
@@ -6897,10 +6903,17 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
     name = clean_text(payload.name)
     if not name:
         raise HTTPException(status_code=400, detail="name obrigatorio")
-    max_duration = int(payload.max_duration_seconds)
-    response_type = normalize_choice(payload.response_type, BGP_RESPONSE_TYPES, "response_type")
+    default_duration = int(payload.duration_default or payload.default_duration_seconds or 1800)
+    max_duration = int(payload.max_duration_seconds or BGP_DEFAULT_MAX_DURATION_SECONDS)
+    if default_duration > max_duration:
+        default_duration = max_duration
+    enabled = payload.enabled if payload.enabled is not None else payload.active
+    if enabled is None:
+        enabled = True
+    response_type = normalize_choice(payload.response_type or payload.type or "flowspec", BGP_RESPONSE_TYPES, "response_type")
     action_aliases = {"set_community": "community", "announce_blackhole": "blackhole", "redirect_to_vrf": "redirect"}
-    action = normalize_choice(action_aliases.get(clean_text(payload.action), clean_text(payload.action)), BGP_ACTIONS, "action")
+    action_text = clean_text(payload.action or payload.default_action or "discard")
+    action = normalize_choice(action_aliases.get(action_text, action_text), BGP_ACTIONS, "action")
     protocol_selector = normalize_choice(payload.protocol_selector, BGP_PROTOCOL_SELECTORS, "protocol_selector")
     fixed_protocol = normalize_bgp_protocol(payload.fixed_protocol or payload.protocol_selector) if protocol_selector == "fixed" else ""
     tcp_flags_selector = normalize_choice(payload.tcp_flags_selector, BGP_TCP_FLAGS_SELECTORS, "tcp_flags_selector")
@@ -6915,13 +6928,16 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         raise HTTPException(status_code=400, detail="default_rate_limit obrigatorio para action=rate_limit")
     if min_rate is not None and max_rate is not None and int(min_rate) > int(max_rate):
         raise HTTPException(status_code=400, detail="min_rate_limit_bps maior que max_rate_limit_bps")
+    approval_mode = normalize_choice(payload.approval_mode, BGP_MODES, "approval_mode")
+    if approval_mode in {"automatic", "auto"} and not payload.allow_automatic:
+        raise HTTPException(status_code=400, detail="approval_mode automatic bloqueado por padrao; envie allow_automatic=true para permitir.")
     return {
         "name": name,
         "description": clean_text(payload.description),
-        "enabled": 1 if payload.enabled else 0,
+        "enabled": 1 if enabled else 0,
         "response_type": response_type,
         "connector_id": payload.connector_id,
-        "approval_mode": normalize_choice(payload.approval_mode, BGP_MODES, "approval_mode"),
+        "approval_mode": approval_mode,
         "action": default_action if response_type == "flowspec" else action,
         "default_action": default_action,
         "target_selector": normalize_choice(payload.target_selector, BGP_TARGET_SELECTORS, "target_selector"),
@@ -6955,7 +6971,7 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "max_prefixlen_v4": int(payload.max_prefixlen_v4),
         "max_prefixlen_v6": int(payload.max_prefixlen_v6),
         "max_duration_seconds": max_duration,
-        "default_duration_seconds": min(int(payload.default_duration_seconds), max_duration),
+        "default_duration_seconds": default_duration,
         "notes": clean_text(payload.notes),
     }
 
@@ -6988,8 +7004,11 @@ def validate_profile_connector_for_save(conn: sqlite3.Connection, values: dict[s
         return
     connector_id = values.get("connector_id")
     if connector_id is None:
-        return
-    connector = fetch_bgp_connector(conn, int(connector_id))
+        raise HTTPException(status_code=400, detail=f"connector_id obrigatorio para response_type {response_type}.")
+    row = conn.execute("SELECT * FROM bgp_connectors WHERE id = ?", (int(connector_id),)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=400, detail=f"connector_id invalido: conector BGP {connector_id} nao encontrado.")
+    connector = bgp_connector_row_to_dict(row)
     if not connector.get("enabled") or not connector.get("is_active"):
         raise HTTPException(status_code=400, detail="Conector BGP selecionado esta desativado ou inativo.")
 

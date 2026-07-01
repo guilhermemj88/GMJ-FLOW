@@ -4270,11 +4270,14 @@
               <div class="field"><label for="bgpProfileDstPortValue">Valor porta</label><input id="bgpProfileDstPortValue" class="form-control form-control-sm" placeholder="53"></div>
               <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileDuration">Duracao padrao (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpProfileMaxDuration">Duracao maxima (s)</label><input id="bgpProfileMaxDuration" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
               <div class="field"><label for="bgpProfileEnabled">Ativo</label><select id="bgpProfileEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
               <button id="saveBgpProfileButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar profile</span></button>
               <button id="clearBgpProfileButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+              <button id="attachLegacyBgpProfilesButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="link"></i><span>Associar legados ao conector</span></button>
+              <label class="d-inline-flex align-items-center gap-1 small mb-0"><input id="activateLegacyBgpProfiles" type="checkbox"> ativar tambem</label>
             </div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Acao</th><th>Alvo</th><th>Filtro</th><th>Usado por</th><th>Status</th><th>Preview</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
           </section>
@@ -7697,6 +7700,11 @@
       return optionList([['', 'Selecionar']], selected) + optionList(bgpConnectors.map(item => [item.id, item.name]), selected);
     }
 
+    function firstActiveBgpConnectorId() {
+      const connector = bgpConnectors.find(item => item.enabled !== false && item.is_active !== false);
+      return connector?.id || '';
+    }
+
     function bgpProfileOptions(selected = '') {
       return optionList([['', 'Selecionar']], selected) + optionList(
         bgpProfiles
@@ -8039,7 +8047,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function loadBgpView() {
       setText('bgpStatus', 'Carregando BGP / Mitigacao...');
       const [connectors, profiles, protectedPrefixes, policies, announcements] = await Promise.all([
-        apiRequest('/api/bgp/connectors?include_disabled=true'),
+        apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles?include_disabled=true'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
         apiRequest('/api/bgp/port-policies?include_disabled=true'),
@@ -8224,22 +8232,25 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function clearBgpProfileForm() {
       setValue('bgpProfileId', '');
       setValue('bgpProfileName', '');
-      setValue('bgpProfileConnector', '');
+      setValue('bgpProfileConnector', firstActiveBgpConnectorId());
       setValue('bgpProfileType', 'flowspec');
       setValue('bgpProfileApproval', 'manual_approval');
       setValue('bgpProfileAction', 'discard');
       setValue('bgpProfileRateLimit', '');
       setValue('bgpProfileMinRateLimit', '');
       setValue('bgpProfileMaxRateLimit', '');
-      setValue('bgpProfileTarget', 'src_ip');
-      setValue('bgpProfileProtocol', 'anomaly_protocol');
+      setValue('bgpProfileTarget', 'dst_ip');
+      setValue('bgpProfileProtocol', 'udp');
       setValue('bgpProfileSrcPortSelector', 'any');
       setValue('bgpProfileSrcPortValue', '');
-      setValue('bgpProfileDstPortSelector', 'any');
-      setValue('bgpProfileDstPortValue', '');
+      setValue('bgpProfileDstPortSelector', 'fixed');
+      setValue('bgpProfileDstPortValue', '53');
       setValue('bgpProfileTcpFlags', 'any');
       setValue('bgpProfileDuration', 1800);
+      setValue('bgpProfileMaxDuration', 3600);
       setBoolSelect('bgpProfileEnabled', true);
+      renderBgpSelects();
+      setValue('bgpProfileConnector', firstActiveBgpConnectorId());
     }
 
     function editBgpProfile(id) {
@@ -8262,16 +8273,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileDstPortValue', item.dst_port_value || '');
       setValue('bgpProfileTcpFlags', item.tcp_flags_selector);
       setValue('bgpProfileDuration', item.default_duration_seconds || 1800);
-      setBoolSelect('bgpProfileEnabled', item.enabled);
+      setValue('bgpProfileMaxDuration', item.max_duration_seconds || 3600);
+      setBoolSelect('bgpProfileEnabled', item.enabled ?? item.active);
       renderBgpSelects();
+      setValue('bgpProfileConnector', item.connector_id || '');
     }
 
-    async function saveBgpProfile() {
+    function collectBgpProfilePayload() {
       const id = selectValue('bgpProfileId');
-      const payload = {
+      return {
         name: selectValue('bgpProfileName').trim(),
         enabled: boolSelectValue('bgpProfileEnabled'),
+        active: boolSelectValue('bgpProfileEnabled'),
         response_type: selectValue('bgpProfileType', 'flowspec'),
+        type: selectValue('bgpProfileType', 'flowspec'),
         connector_id: selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null,
         approval_mode: selectValue('bgpProfileApproval', 'manual_approval'),
         action: selectValue('bgpProfileAction', 'discard'),
@@ -8288,11 +8303,99 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         dst_port_value: selectValue('bgpProfileDstPortValue').trim(),
         tcp_flags_selector: selectValue('bgpProfileTcpFlags', 'any'),
         default_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800)),
-        max_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800))
+        duration_default: Math.max(60, numberValue('bgpProfileDuration', 1800)),
+        max_duration_seconds: Math.max(60, numberValue('bgpProfileMaxDuration', 3600))
       };
-      await apiRequest(id ? `/api/bgp/response-profiles/${id}` : '/api/bgp/response-profiles', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      clearBgpProfileForm();
+    }
+
+    function showBgpProfileSaveError(error, payload) {
+      const text = `Erro ao salvar Response Profile: ${error.message}`;
+      setText('bgpStatus', text);
+      const output = document.getElementById('bgpDryRunOutput');
+      if (output) {
+        output.textContent = `${text}\n\nPayload enviado:\n${JSON.stringify(payload, null, 2)}`;
+      }
+    }
+
+    async function saveBgpProfile() {
+      const id = selectValue('bgpProfileId');
+      const payload = collectBgpProfilePayload();
+      try {
+        const saved = await apiRequest(id ? `/api/bgp/response-profiles/${id}` : '/api/bgp/response-profiles', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        await loadBgpView();
+        editBgpProfile(saved.id);
+        setText('bgpStatus', 'Profile salvo com sucesso');
+      } catch (error) {
+        showBgpProfileSaveError(error, payload);
+      }
+    }
+
+    function bgpProfilePayloadFromItem(item, connectorId, activate) {
+      return {
+        name: item.name,
+        description: item.description || '',
+        enabled: activate ? true : Boolean(item.enabled ?? item.active),
+        active: activate ? true : Boolean(item.enabled ?? item.active),
+        response_type: item.response_type || item.type || 'flowspec',
+        type: item.response_type || item.type || 'flowspec',
+        connector_id: Number(connectorId),
+        approval_mode: item.approval_mode || 'manual_approval',
+        action: item.default_action || item.action || 'discard',
+        default_action: item.default_action || item.action || 'discard',
+        default_rate_limit_raw: item.default_rate_limit_raw || item.rate_limit_value_raw || '',
+        rate_limit_value_raw: item.rate_limit_value_raw || item.default_rate_limit_raw || '',
+        min_rate_limit_bps: item.min_rate_limit_bps || null,
+        max_rate_limit_bps: item.max_rate_limit_bps || null,
+        target_selector: item.target_selector || item.target || 'dst_ip',
+        protocol_selector: item.protocol_selector || item.protocol_mode || 'udp',
+        fixed_protocol: item.fixed_protocol || '',
+        src_port_selector: item.src_port_selector || item.src_port_mode || 'any',
+        src_port_value: item.src_port_value || '',
+        dst_port_selector: item.dst_port_selector || item.dst_port_mode || 'fixed',
+        dst_port_value: item.dst_port_value || '53',
+        tcp_flags_selector: item.tcp_flags_selector || item.tcp_flags_mode || 'any',
+        tcp_flags_value: item.tcp_flags_value || '',
+        require_protocol_or_port: item.require_protocol_or_port !== false,
+        allow_wide_prefix: Boolean(item.allow_wide_prefix),
+        default_duration_seconds: Number(item.default_duration_seconds || item.duration_seconds || 1800),
+        duration_default: Number(item.default_duration_seconds || item.duration_seconds || 1800),
+        max_duration_seconds: Number(item.max_duration_seconds || 3600),
+        max_prefixlen_v4: Number(item.max_prefixlen_v4 || 32),
+        max_prefixlen_v6: Number(item.max_prefixlen_v6 || 128),
+        notes: item.notes || ''
+      };
+    }
+
+    async function attachLegacyBgpProfiles() {
+      const connectorId = Number(selectValue('bgpProfileConnector') || firstActiveBgpConnectorId());
+      if (!connectorId) {
+        setText('bgpStatus', 'Selecione um conector antes de associar profiles legados.');
+        return;
+      }
+      const activate = Boolean(document.getElementById('activateLegacyBgpProfiles')?.checked);
+      const legacy = bgpProfiles.filter(item => !item.connector_id);
+      if (!legacy.length) {
+        setText('bgpStatus', 'Nao ha profiles legados sem connector_id.');
+        return;
+      }
+      const errors = [];
+      for (const item of legacy) {
+        const payload = bgpProfilePayloadFromItem(item, connectorId, activate);
+        try {
+          await apiRequest(`/api/bgp/response-profiles/${item.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } catch (error) {
+          errors.push(`#${item.id} ${item.name}: ${error.message}`);
+        }
+      }
       await loadBgpView();
+      setText('bgpStatus', errors.length ? `Associacao concluida com erros: ${errors.join(' | ')}` : `Profiles legados associados ao conector #${connectorId}.`);
+      if (errors.length && document.getElementById('bgpDryRunOutput')) {
+        document.getElementById('bgpDryRunOutput').textContent = errors.join('\n\n');
+      }
     }
 
     async function testBgpProfile(id) {
@@ -13345,6 +13448,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
     document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
     document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
+    document.getElementById('attachLegacyBgpProfilesButton').addEventListener('click', () => attachLegacyBgpProfiles().catch(error => setText('bgpStatus', `Falha ao associar profiles legados: ${error.message}`)));
     document.getElementById('saveBgpProtectedButton').addEventListener('click', () => saveBgpProtected().catch(error => setText('bgpStatus', `Falha ao salvar prefixo: ${error.message}`)));
     document.getElementById('clearBgpProtectedButton').addEventListener('click', clearBgpProtectedForm);
     document.getElementById('saveBgpPolicyButton').addEventListener('click', () => saveBgpPolicy().catch(error => setText('bgpStatus', `Falha ao salvar politica: ${error.message}`)));

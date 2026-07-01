@@ -243,6 +243,48 @@ class BgpMitigationTest(unittest.TestCase):
             conn.commit()
             self.assertEqual(main.fetch_bgp_profile(conn, profile_id)["profile_status"], "invalid_connector")
 
+    def test_response_profile_missing_connector_returns_clear_error(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._connector_and_profile()
+            payload = main.BgpResponseProfilePayload(name="NO_CONNECTOR", response_type="flowspec")
+            values = main.bgp_profile_payload_to_values(payload)
+            with self.assertRaises(HTTPException) as ctx:
+                main.validate_profile_connector_for_save(conn, values)
+            self.assertIn("connector_id obrigatorio", str(ctx.exception.detail))
+
+    def test_response_profile_invalid_connector_returns_clear_error(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._connector_and_profile()
+            payload = main.BgpResponseProfilePayload(name="BAD_CONNECTOR", response_type="flowspec", connector_id=999)
+            values = main.bgp_profile_payload_to_values(payload)
+            with self.assertRaises(HTTPException) as ctx:
+                main.validate_profile_connector_for_save(conn, values)
+            self.assertIn("connector_id invalido", str(ctx.exception.detail))
+
+    def test_response_profile_alias_payload_normalizes_to_real_columns(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            payload = main.BgpResponseProfilePayload(
+                name="FLOWSPEC_BLOCK_DST_DNS",
+                type="flowspec",
+                active=True,
+                connector_id=connector["id"],
+                default_action="discard",
+                target_selector="dst_ip",
+                protocol_selector="udp",
+                dst_port_selector="fixed",
+                dst_port_value="53",
+                duration_default=1800,
+                max_duration_seconds=3600,
+            )
+            values = main.bgp_profile_payload_to_values(payload)
+            main.validate_profile_connector_for_save(conn, values)
+            self.assertEqual(values["response_type"], "flowspec")
+            self.assertEqual(values["enabled"], 1)
+            self.assertEqual(values["connector_id"], connector["id"])
+            self.assertEqual(values["default_duration_seconds"], 1800)
+            self.assertEqual(values["max_duration_seconds"], 3600)
+
     def test_detection_rule_saves_response_profile_ids(self):
         with temporary_main_db():
             conn, _connector, profile = self._connector_and_profile()
