@@ -3405,6 +3405,16 @@
             </div>
           </div>
 
+          <div class="toolbar mb-3">
+            <button type="button" class="btn btn-sm btn-success peak-hunter-tab-button" data-peak-hunter-tab="manual">
+              <i data-lucide="search"></i><span>Analise manual</span>
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="history">
+              <i data-lucide="database"></i><span>Historico / Dataset</span>
+            </button>
+          </div>
+
+          <section id="peakHunterManualTab">
           <section class="panel p-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
               <div>
@@ -3539,6 +3549,8 @@
             <div id="peakHunterSummary" class="d-flex flex-wrap gap-2 mb-3"></div>
             <div id="peakHunterDominantReadable" class="metric-readout mb-3">Grupo dominante: -</div>
             <div id="peakHunterRecommendationCards" class="database-metrics-grid mb-3"></div>
+            <div class="panel-title mb-2">Relatorio tecnico</div>
+            <pre id="peakHunterTechnicalReport" class="result-box">-</pre>
             <details>
               <summary class="subtle">Avancado: JSON bruto</summary>
               <div class="row g-3 mt-1">
@@ -3690,16 +3702,55 @@
               </table>
             </div>
           </section>
+          </section>
 
+          <section id="peakHunterHistoryTab" class="d-none">
           <section class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
                 <div class="panel-title">Historico</div>
                 <div id="peakHunterHistoryStatus" class="metric-readout">Ultimas investigacoes salvas.</div>
               </div>
-              <button id="peakHunterHistoryRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
-                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
-              </button>
+              <div class="toolbar">
+                <button id="peakHunterHistoryRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+                </button>
+                <button id="peakHunterDatasetExportButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="download"></i><span>Exportar JSONL</span>
+                </button>
+              </div>
+            </div>
+            <div class="peak-hunter-form-grid mb-3">
+              <div class="field">
+                <label for="peakHunterHistorySensor">Sensor</label>
+                <input id="peakHunterHistorySensor" class="form-control form-control-sm" placeholder="Sensor">
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryInterfaceId">Interface</label>
+                <input id="peakHunterHistoryInterfaceId" type="number" min="1" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryEvidence">Evidencia</label>
+                <select id="peakHunterHistoryEvidence" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="complete">complete</option>
+                  <option value="insufficient">insufficient</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryLabel">Label operador</label>
+                <select id="peakHunterHistoryLabel" class="form-select form-select-sm">
+                  <option value="">Todos</option>
+                  <option value="attack">attack</option>
+                  <option value="false_positive">false_positive</option>
+                  <option value="noise_or_unclear">noise_or_unclear</option>
+                  <option value="infected_customer">infected_customer</option>
+                  <option value="normal_traffic">normal_traffic</option>
+                  <option value="mitigation_correct">mitigation_correct</option>
+                  <option value="mitigation_wrong">mitigation_wrong</option>
+                  <option value="unknown">unknown</option>
+                </select>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="table table-sm table-hover align-middle mb-0">
@@ -3717,11 +3768,87 @@
                     <th>Template</th>
                     <th>TTL</th>
                     <th>Acao</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody id="peakHunterHistoryTable"></tbody>
               </table>
             </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Detalhe do caso</div>
+            <div id="peakHunterHistoryDetailStatus" class="metric-readout mb-3">Selecione uma investigacao.</div>
+            <pre id="peakHunterHistoryTechnicalReport" class="result-box">-</pre>
+            <div class="row g-3">
+              <div class="col-12 col-xl-4">
+                <div class="panel p-3 h-100">
+                  <div class="panel-title mb-2">dominant_group</div>
+                  <pre id="peakHunterHistoryDominantGroup" class="result-box mb-0">-</pre>
+                </div>
+              </div>
+              <div class="col-12 col-xl-4">
+                <div class="panel p-3 h-100">
+                  <div class="panel-title mb-2">candidates</div>
+                  <pre id="peakHunterHistoryCandidates" class="result-box mb-0">-</pre>
+                </div>
+              </div>
+              <div class="col-12 col-xl-4">
+                <div class="panel p-3 h-100">
+                  <div class="panel-title mb-2">raw_json</div>
+                  <pre id="peakHunterHistoryRawJson" class="result-box mb-0">-</pre>
+                </div>
+              </div>
+            </div>
+            <form id="peakHunterFeedbackForm" class="peak-hunter-form-grid mt-3">
+              <div class="field">
+                <label for="peakHunterFeedbackLabel">Label</label>
+                <select id="peakHunterFeedbackLabel" class="form-select form-select-sm">
+                  <option value="">Sem label</option>
+                  <option value="attack">attack</option>
+                  <option value="false_positive">false_positive</option>
+                  <option value="noise_or_unclear">noise_or_unclear</option>
+                  <option value="infected_customer">infected_customer</option>
+                  <option value="normal_traffic">normal_traffic</option>
+                  <option value="mitigation_correct">mitigation_correct</option>
+                  <option value="mitigation_wrong">mitigation_wrong</option>
+                  <option value="unknown">unknown</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterFeedbackVector">Vetor</label>
+                <input id="peakHunterFeedbackVector" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterFeedbackAction">Melhor acao</label>
+                <input id="peakHunterFeedbackAction" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterFeedbackTemplate">Template confirmado</label>
+                <input id="peakHunterFeedbackTemplate" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterFeedbackTtl">TTL confirmado</label>
+                <input id="peakHunterFeedbackTtl" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterFeedbackResolved">Resolvido por mitigacao</label>
+                <select id="peakHunterFeedbackResolved" class="form-select form-select-sm">
+                  <option value="0">Nao</option>
+                  <option value="1">Sim</option>
+                </select>
+              </div>
+              <div class="field grid-span-3">
+                <label for="peakHunterFeedbackComment">Comentario</label>
+                <textarea id="peakHunterFeedbackComment" class="form-control form-control-sm" rows="3"></textarea>
+              </div>
+              <div class="d-flex justify-content-end align-items-end gap-2">
+                <button id="peakHunterFeedbackSaveButton" type="submit" class="btn btn-sm btn-success">
+                  <i data-lucide="save"></i><span>Salvar feedback</span>
+                </button>
+              </div>
+            </form>
+          </section>
           </section>
         </section>
 
@@ -4682,6 +4809,7 @@
     let peakHunterInterfaceOptionsCache = [];
     let peakHunterLastResult = null;
     let peakHunterLastHistory = [];
+    let peakHunterCurrentHistoryId = null;
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -8390,6 +8518,81 @@
       setText('peakHunterStatus', 'Relatorio PDF preparado.');
     }
 
+    function showPeakHunterTab(tab) {
+      const active = tab === 'history' ? 'history' : 'manual';
+      document.getElementById('peakHunterManualTab').classList.toggle('d-none', active !== 'manual');
+      document.getElementById('peakHunterHistoryTab').classList.toggle('d-none', active !== 'history');
+      document.querySelectorAll('.peak-hunter-tab-button').forEach(button => {
+        const isActive = button.dataset.peakHunterTab === active;
+        button.classList.toggle('btn-success', isActive);
+        button.classList.toggle('btn-outline-secondary', !isActive);
+      });
+      if (active === 'history') loadPeakHunterHistory().catch(console.error);
+      setTimeout(() => charts.peakHunterSeries.resize(), 50);
+    }
+
+    function peakHunterHistoryQuery() {
+      const query = new URLSearchParams();
+      const sensor = document.getElementById('peakHunterHistorySensor')?.value?.trim() || document.getElementById('peakHunterSensor')?.value?.trim();
+      const interfaceId = document.getElementById('peakHunterHistoryInterfaceId')?.value || document.getElementById('peakHunterInterfaceId')?.value || document.getElementById('peakHunterManualInterfaceId')?.value;
+      const evidence = document.getElementById('peakHunterHistoryEvidence')?.value;
+      const label = document.getElementById('peakHunterHistoryLabel')?.value;
+      if (sensor) query.set('sensor', sensor);
+      if (interfaceId) query.set('interface_id', interfaceId);
+      if (evidence) query.set('evidence_status', evidence);
+      if (label) query.set('operator_label', label);
+      query.set('limit', '100');
+      return query;
+    }
+
+    async function openPeakHunterHistoryDetail(id) {
+      if (!id) return;
+      peakHunterCurrentHistoryId = Number(id);
+      const item = await apiRequest(`/api/peak-hunter/history/${id}`);
+      document.getElementById('peakHunterHistoryDetailStatus').textContent = `Caso #${item.id || id} - ${item.classification || '-'}`;
+      document.getElementById('peakHunterHistoryTechnicalReport').textContent = item.technical_report || '-';
+      document.getElementById('peakHunterHistoryDominantGroup').textContent = JSON.stringify(item.dominant_group || {}, null, 2);
+      document.getElementById('peakHunterHistoryCandidates').textContent = JSON.stringify(item.candidates || [], null, 2);
+      document.getElementById('peakHunterHistoryRawJson').textContent = JSON.stringify(item.result_json || item, null, 2);
+      document.getElementById('peakHunterFeedbackLabel').value = item.operator_label || '';
+      document.getElementById('peakHunterFeedbackVector').value = item.operator_vector || '';
+      document.getElementById('peakHunterFeedbackAction').value = item.operator_best_action || '';
+      document.getElementById('peakHunterFeedbackTemplate').value = item.operator_confirmed_template || '';
+      document.getElementById('peakHunterFeedbackTtl').value = item.operator_confirmed_ttl || '';
+      document.getElementById('peakHunterFeedbackResolved').value = item.resolved_by_mitigation ? '1' : '0';
+      document.getElementById('peakHunterFeedbackComment').value = item.operator_comment || '';
+    }
+
+    async function savePeakHunterFeedback() {
+      if (!peakHunterCurrentHistoryId) {
+        setText('peakHunterHistoryDetailStatus', 'Selecione uma investigacao antes de salvar feedback.');
+        return;
+      }
+      const payload = {
+        operator_label: document.getElementById('peakHunterFeedbackLabel').value,
+        operator_vector: document.getElementById('peakHunterFeedbackVector').value.trim(),
+        operator_best_action: document.getElementById('peakHunterFeedbackAction').value.trim(),
+        operator_comment: document.getElementById('peakHunterFeedbackComment').value.trim(),
+        operator_confirmed_template: document.getElementById('peakHunterFeedbackTemplate').value.trim(),
+        operator_confirmed_ttl: document.getElementById('peakHunterFeedbackTtl').value.trim(),
+        resolved_by_mitigation: document.getElementById('peakHunterFeedbackResolved').value === '1'
+      };
+      const item = await apiRequest(`/api/peak-hunter/history/${peakHunterCurrentHistoryId}/feedback`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      setText('peakHunterHistoryDetailStatus', `Feedback salvo para caso #${item.id}.`);
+      await loadPeakHunterHistory();
+    }
+
+    async function exportPeakHunterDataset() {
+      const query = peakHunterHistoryQuery();
+      query.set('format', 'jsonl');
+      await downloadAuthFile(`${API_BASE}/api/peak-hunter/export-dataset?${query}`, 'gmj-peak-hunter-dataset.jsonl');
+      setText('peakHunterHistoryStatus', 'Dataset JSONL exportado.');
+    }
+
     function renderPeakHunterResult(payload) {
       const result = payload || {};
       peakHunterLastResult = result;
@@ -8420,6 +8623,7 @@
       document.getElementById('peakHunterBestPeak').textContent = JSON.stringify(best || null, null, 2);
       document.getElementById('peakHunterDominantGroup').textContent = JSON.stringify(dominant, null, 2);
       document.getElementById('peakHunterRecommendation').textContent = JSON.stringify(result.recommendation || null, null, 2);
+      document.getElementById('peakHunterTechnicalReport').textContent = result.technical_report || peakHunterReportText(result);
       renderPeakHunterRecommendation(result);
       renderPeakHunterPeaks(result.peaks || [], metric);
       renderPeakHunterGroups(result.top_groups || best.groups || [], result.classification || best.classification || '-', metric);
@@ -8575,12 +8779,7 @@
 
     async function loadPeakHunterHistory() {
       try {
-        const query = new URLSearchParams();
-        const sensor = document.getElementById('peakHunterSensor')?.value?.trim();
-        const interfaceId = document.getElementById('peakHunterInterfaceId')?.value || document.getElementById('peakHunterManualInterfaceId')?.value;
-        if (sensor) query.set('sensor', sensor);
-        if (interfaceId) query.set('interface_id', interfaceId);
-        query.set('limit', '100');
+        const query = peakHunterHistoryQuery();
         const payload = await apiRequest(`/api/peak-hunter/history?${query}`);
         const items = Array.isArray(payload.items) ? payload.items : [];
         peakHunterLastHistory = items;
@@ -8601,9 +8800,11 @@
               <td>${escapeHtml(peakHunterCandidateTemplate(candidate))}</td>
               <td>${escapeHtml(peakHunterCandidateTtl(candidate))}</td>
               <td>${escapeHtml(candidate.action || item.recommended_action || '-')}</td>
+              <td><button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-history-detail" data-id="${escapeHtml(item.id)}"><i data-lucide="file-search"></i><span>Abrir</span></button></td>
             </tr>
           `;
-        }).join('') || '<tr><td colspan="12" class="text-muted">Sem historico.</td></tr>';
+        }).join('') || '<tr><td colspan="13" class="text-muted">Sem historico.</td></tr>';
+        createIcons();
       } catch (error) {
         document.getElementById('peakHunterHistoryStatus').textContent = `Falha: ${error.message}`;
       }
@@ -12310,6 +12511,24 @@
     document.getElementById('peakHunterRecentButton').addEventListener('click', () => analyzePeakHunter(true).catch(console.error));
     document.getElementById('peakHunterHistoryRefreshButton').addEventListener('click', () => loadPeakHunterHistory().catch(console.error));
     document.getElementById('peakHunterResetButton').addEventListener('click', resetPeakHunterForm);
+    document.querySelectorAll('.peak-hunter-tab-button').forEach(button => {
+      button.addEventListener('click', () => showPeakHunterTab(button.dataset.peakHunterTab));
+    });
+    ['peakHunterHistorySensor', 'peakHunterHistoryInterfaceId', 'peakHunterHistoryEvidence', 'peakHunterHistoryLabel'].forEach(id => {
+      document.getElementById(id).addEventListener('change', () => loadPeakHunterHistory().catch(console.error));
+      document.getElementById(id).addEventListener('keydown', event => {
+        if (event.key === 'Enter') loadPeakHunterHistory().catch(console.error);
+      });
+    });
+    document.getElementById('peakHunterHistoryTable').addEventListener('click', event => {
+      const button = event.target.closest('.peak-hunter-history-detail');
+      if (button) openPeakHunterHistoryDetail(button.dataset.id).catch(console.error);
+    });
+    document.getElementById('peakHunterFeedbackForm').addEventListener('submit', event => {
+      event.preventDefault();
+      savePeakHunterFeedback().catch(error => setText('peakHunterHistoryDetailStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('peakHunterDatasetExportButton').addEventListener('click', () => exportPeakHunterDataset().catch(error => setText('peakHunterHistoryStatus', `Falha: ${error.message}`)));
     document.getElementById('peakHunterCopyVectorButton').addEventListener('click', () => copyPeakHunterVector().catch(console.error));
     document.getElementById('peakHunterCopyCommandButton').addEventListener('click', () => copyPeakHunterCommand().catch(console.error));
     document.getElementById('peakHunterCopyReportButton').addEventListener('click', () => copyPeakHunterReport().catch(console.error));

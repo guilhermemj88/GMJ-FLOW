@@ -53,10 +53,8 @@ def analyze_peak_hunter(
     for peak in peaks:
         analyzed.append(_analyze_peak(request, peak, baseline, threshold, flow_fetcher))
     best = select_best_peak(analyzed)
-    if save_history and best:
-        save_history(history_record(request, best, baseline))
     recommendation = recommendation_for_peak(best)
-    return {
+    result = {
         "peaks_detected": len(peaks),
         "peaks_analyzed": len(analyzed),
         "peaks": analyzed,
@@ -81,6 +79,10 @@ def analyze_peak_hunter(
         "mitigation_allowed": bool(best and best.get("mitigation_allowed")),
         "recommendation": recommendation,
     }
+    result["technical_report"] = build_technical_report(request, result)
+    if save_history and best:
+        save_history(history_record(request, result, baseline))
+    return result
 
 
 def _analyze_peak(
@@ -305,6 +307,111 @@ def candidates_for_enrichment(request: PeakHunterRequest, enrichment: dict[str, 
     return candidates, bool(validation.get("valid"))
 
 
+def build_technical_report(request: PeakHunterRequest, result: dict[str, Any]) -> str:
+    best = result.get("best_peak") or {}
+    baseline = result.get("baseline") or {}
+    dominant = result.get("dominant_group") or best.get("dominant_group") or {}
+    candidates = result.get("candidates") or best.get("candidates") or []
+    sources = dominant.get("unique_src_ips") if isinstance(dominant.get("unique_src_ips"), list) else []
+    sample_rate = best.get("effective_sample_rate") or best.get("db_sample_rate") or "-"
+    candidate_lines = []
+    for candidate in candidates:
+        candidate_lines.append(
+            f"- #{candidate.get('candidate_index', '-')}: action={candidate.get('action', '-')}, "
+            f"template={candidate.get('template', '-')}, ttl={candidate.get('ttl', '-')}, "
+            f"manual_approval_required={candidate.get('manual_approval_required', True)}, "
+            f"apply_enabled={candidate.get('apply_enabled', False)}"
+        )
+    if not candidate_lines:
+        candidate_lines.append("- nenhum candidate gerado")
+    local_time = _display_local(best.get("peak_time_local") or best.get("peak_time_utc") or best.get("peak_time"))
+    utc_time = best.get("peak_time_utc") or _format_time_utc_z(parse_time(best.get("peak_time") or datetime.now(timezone.utc)))
+    window_local = f"{_display_local(request.start_time)} ate {_display_local(request.end_time)}"
+    window_utc = f"{_format_time_utc_z(request.start_time)} ate {_format_time_utc_z(request.end_time)}"
+    direction_label = "upload" if request.direction in {"sends", "transmits", "outbound"} else "download"
+    metric_value = metric_value_text(best.get("peak_value") or 0, request.metric)
+    p99_value = metric_value_text(baseline.get("p99") or 0, request.metric)
+    p95_value = metric_value_text(baseline.get("p95") or 0, request.metric)
+    group_pps = metric_value_text(dominant.get("max_packets_s") or dominant.get("avg_packets_s") or 0, "packets_s")
+    group_bps = metric_value_text(dominant.get("max_bits_s") or dominant.get("avg_bits_s") or 0, "bits_s")
+    summary = (
+        f"Foi detectado pico de {direction_label} {str(dominant.get('protocol') or request.protocol or '').upper() or request.metric} "
+        f"na interface {request.interface_id}. O melhor pico ocorreu em {local_time} / {utc_time}, "
+        f"com {metric_value}, acima do baseline p99 de {p99_value}. "
+        f"A janela de evidencia de {result.get('evidence_window_used') or '-'}s mostrou grupo dominante "
+        f"{str(dominant.get('protocol') or '-').upper()} para {dominant.get('dst_ip') or '-'}:{dominant.get('dst_port') or '-'}, "
+        f"responsavel por {float(dominant.get('share_packets') or 0):.2f}% dos pacotes. "
+        f"Foram observadas {dominant.get('unique_src_count') or len(sources)} origens. "
+        f"O vetor provavel e {result.get('classification') or '-'}. "
+        f"Foi gerado candidate para revisao manual, sem aplicacao automatica."
+    )
+    return "\n".join(
+        [
+            "Peak Hunter - relatorio tecnico",
+            "",
+            summary,
+            "",
+            "Contexto",
+            f"- sensor: {request.sensor or '-'}",
+            f"- interface: {request.interface_id}",
+            f"- direcao: {request.direction}",
+            f"- metrica: {request.metric}",
+            f"- protocolo: {request.protocol or '-'}",
+            f"- janela local: {window_local}",
+            f"- janela UTC: {window_utc}",
+            "",
+            "Pico e baseline",
+            f"- melhor pico local: {local_time}",
+            f"- melhor pico UTC: {utc_time}",
+            f"- valor do pico: {metric_value}",
+            f"- baseline p95: {p95_value}",
+            f"- baseline p99: {p99_value}",
+            f"- threshold usado: {metric_value_text(result.get('threshold_used') or 0, request.metric)}",
+            f"- score: {best.get('score') or '-'}",
+            f"- sample_rate efetivo: {sample_rate}",
+            "",
+            "Evidencia de flows",
+            f"- janela de evidencia usada: {result.get('evidence_window_used') or '-'}s",
+            f"- status de evidencia: {result.get('evidence_status') or '-'}",
+            f"- classificacao: {result.get('classification') or '-'}",
+            f"- grupo dominante: {dominant_group_label(dominant)}",
+            f"- principais origens: {', '.join(str(item) for item in sources[:10]) if sources else '-'}",
+            f"- destino/porta/protocolo: {dominant.get('dst_ip') or '-'}:{dominant.get('dst_port') or '-'} {str(dominant.get('protocol') or '-').upper()}",
+            f"- share_packets: {float(dominant.get('share_packets') or 0):.2f}%",
+            f"- share_bits: {float(dominant.get('share_bits') or 0):.2f}%",
+            f"- pps do grupo: {group_pps}",
+            f"- bps do grupo: {group_bps}",
+            "",
+            "Recomendacao",
+            f"- acao recomendada: {(result.get('recommendation') or {}).get('recommended_action') or '-'}",
+            f"- motivo: {(result.get('recommendation') or {}).get('reason') or '-'}",
+            f"- mitigation_allowed: {bool(result.get('mitigation_allowed'))} (apenas candidate seguro para revisao manual)",
+            "- mitigacao automatica nao aplicada: apply_enabled=false, manual_approval_required=true, validator/playbook permanecem como camada de seguranca.",
+            "",
+            "Candidates",
+            *candidate_lines,
+        ]
+    )
+
+
+def metric_value_text(value: Any, metric: str) -> str:
+    number = float(value or 0)
+    units = [("T", 1_000_000_000_000), ("G", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]
+    suffix = "bps" if metric == "bits_s" else "pps" if metric == "packets_s" else metric
+    for label, factor in units:
+        if abs(number) >= factor:
+            return f"{number / factor:.2f} {label}{suffix}"
+    return f"{number:.2f} {suffix}"
+
+
+def _display_local(value: Any) -> str:
+    parsed = parse_optional_time(value)
+    if not parsed:
+        return "-"
+    local = parsed.astimezone(LOCAL_TIMEZONE)
+    return local.strftime("%d/%m/%Y %H:%M:%S BRT")
+
+
 def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -343,8 +450,36 @@ def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
     _ensure_peak_analysis_column(conn, "candidates", "candidates TEXT")
     _ensure_peak_analysis_column(conn, "ai_summary", "ai_summary TEXT")
     _ensure_peak_analysis_column(conn, "created_at", "created_at TEXT")
+    _ensure_peak_analysis_column(conn, "request_json", "request_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_peak_analysis_column(conn, "result_json", "result_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_peak_analysis_column(conn, "technical_report", "technical_report TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "peak_time_utc", "peak_time_utc TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "peak_time_local", "peak_time_local TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "timezone", "timezone TEXT NOT NULL DEFAULT 'America/Sao_Paulo'")
+    _ensure_peak_analysis_column(conn, "interface_name", "interface_name TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "interface_alias", "interface_alias TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "protocol", "protocol TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "threshold_used", "threshold_used REAL NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "mitigation_allowed", "mitigation_allowed INTEGER NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "recommended_action", "recommended_action TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "dominant_dst_ip", "dominant_dst_ip TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "dominant_dst_port", "dominant_dst_port INTEGER")
+    _ensure_peak_analysis_column(conn, "dominant_protocol", "dominant_protocol TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "dominant_unique_src_count", "dominant_unique_src_count INTEGER NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "dominant_share_packets", "dominant_share_packets REAL NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "dominant_share_bits", "dominant_share_bits REAL NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "candidates_json", "candidates_json TEXT NOT NULL DEFAULT '[]'")
+    _ensure_peak_analysis_column(conn, "operator_label", "operator_label TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "operator_vector", "operator_vector TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "operator_best_action", "operator_best_action TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "operator_comment", "operator_comment TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "operator_confirmed_template", "operator_confirmed_template TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "operator_confirmed_ttl", "operator_confirmed_ttl TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "resolved_by_mitigation", "resolved_by_mitigation INTEGER NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "feedback_updated_at", "feedback_updated_at TEXT NOT NULL DEFAULT ''")
     _copy_legacy_json_column(conn, "dominant_group_json", "dominant_group", "{}")
     _copy_legacy_json_column(conn, "candidates_json", "candidates", "[]")
+    _copy_legacy_json_column(conn, "candidates", "candidates_json", "[]")
 
 
 def _peak_analysis_columns(conn: sqlite3.Connection) -> set[str]:
@@ -373,33 +508,103 @@ def _copy_legacy_json_column(conn: sqlite3.Connection, legacy_column: str, new_c
 
 def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
     ensure_peak_analysis_db(conn)
+    columns = [
+        "peak_time",
+        "peak_time_utc",
+        "peak_time_local",
+        "timezone",
+        "interface_id",
+        "interface_name",
+        "interface_alias",
+        "sensor",
+        "direction",
+        "metric",
+        "protocol",
+        "peak_value",
+        "baseline_p95",
+        "baseline_p99",
+        "threshold_used",
+        "score",
+        "evidence_status",
+        "classification",
+        "mitigation_allowed",
+        "recommended_action",
+        "dominant_dst_ip",
+        "dominant_dst_port",
+        "dominant_protocol",
+        "dominant_unique_src_count",
+        "dominant_share_packets",
+        "dominant_share_bits",
+        "dominant_group",
+        "candidates",
+        "candidates_json",
+        "request_json",
+        "result_json",
+        "technical_report",
+        "ai_summary",
+        "created_at",
+    ]
+    values = [record_value_for_db(record, column) for column in columns]
     conn.execute(
-        """
-        INSERT INTO peak_analysis (
-            peak_time, interface_id, sensor, direction, metric, peak_value,
-            baseline_p95, baseline_p99, score, evidence_status, classification,
-            dominant_group, candidates, ai_summary, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO peak_analysis ({', '.join(columns)})
+        VALUES ({', '.join('?' for _ in columns)})
         """,
-        (
-            record["peak_time"],
-            record["interface_id"],
-            record["sensor"],
-            record["direction"],
-            record["metric"],
-            record["peak_value"],
-            record["baseline_p95"],
-            record["baseline_p99"],
-            record["score"],
-            record["evidence_status"],
-            record["classification"],
-            json.dumps(record.get("dominant_group") or {}, sort_keys=True),
-            json.dumps(record.get("candidates") or [], sort_keys=True, default=str),
-            record.get("ai_summary") or "",
-            record["created_at"],
-        ),
+        values,
     )
+
+
+def record_value_for_db(record: dict[str, Any], column: str) -> Any:
+    if column in {"dominant_group", "request_json", "result_json"}:
+        value = record.get(column)
+        return value if isinstance(value, str) else json.dumps(value or {}, sort_keys=True, default=str)
+    if column in {"candidates", "candidates_json"}:
+        value = record.get("candidates_json") if column == "candidates_json" else record.get("candidates")
+        return value if isinstance(value, str) else json.dumps(value or [], sort_keys=True, default=str)
+    if column in {"mitigation_allowed", "resolved_by_mitigation"}:
+        return 1 if record.get(column) else 0
+    if column == "peak_time_utc":
+        return record.get("peak_time_utc") or record.get("peak_time") or ""
+    if column == "peak_time_local":
+        peak_time = parse_optional_time(record.get("peak_time_utc") or record.get("peak_time"))
+        return record.get("peak_time_local") or (_format_time_local(peak_time) if peak_time else "")
+    if column == "timezone":
+        return record.get("timezone") or "America/Sao_Paulo"
+    if column == "threshold_used":
+        return float(record.get("threshold_used") or 0)
+    if column == "recommended_action":
+        return record.get("recommended_action") or recommendation_for_history(record, record.get("candidates") or []).get("recommended_action") or ""
+    text_defaults = {
+        "interface_name",
+        "interface_alias",
+        "sensor",
+        "direction",
+        "metric",
+        "protocol",
+        "evidence_status",
+        "classification",
+        "dominant_dst_ip",
+        "dominant_protocol",
+        "technical_report",
+        "ai_summary",
+        "created_at",
+    }
+    if column in text_defaults:
+        return record.get(column) or ""
+    numeric_defaults = {
+        "peak_value",
+        "baseline_p95",
+        "baseline_p99",
+        "score",
+        "dominant_unique_src_count",
+        "dominant_share_packets",
+        "dominant_share_bits",
+    }
+    if column in numeric_defaults:
+        return record.get(column) or 0
+    if column in {"interface_id", "dominant_dst_port"}:
+        return record.get(column)
+    return record.get(column)
 
 
 def list_peak_analysis_history(
@@ -411,11 +616,14 @@ def list_peak_analysis_history(
     filters = filters or {}
     where = []
     values: list[Any] = []
-    for column in ("sensor", "direction", "metric", "evidence_status", "classification"):
+    for column in ("sensor", "direction", "metric", "protocol", "evidence_status", "classification", "operator_label"):
         value = str(filters.get(column) or "").strip()
         if value:
             where.append(f"{column} = ?")
             values.append(value)
+    if filters.get("mitigation_allowed") not in (None, ""):
+        where.append("mitigation_allowed = ?")
+        values.append(1 if filters.get("mitigation_allowed") in (True, 1, "1", "true", "True", "sim", "yes") else 0)
     if filters.get("interface_id") not in (None, ""):
         where.append("interface_id = ?")
         values.append(int(filters["interface_id"]))
@@ -442,34 +650,122 @@ def list_peak_analysis_history(
 def peak_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     dominant_group = _json_value(item.get("dominant_group"), {})
-    candidates = _json_value(item.get("candidates"), [])
+    candidates = _json_value(item.get("candidates_json") or item.get("candidates"), [])
     recommendation = recommendation_for_history(item, candidates)
     peak_time = parse_optional_time(item.get("peak_time"))
-    peak_time_utc = _format_time_utc_z(peak_time) if peak_time else item.get("peak_time")
-    peak_time_local = _format_time_local(peak_time) if peak_time else ""
+    peak_time_utc = item.get("peak_time_utc") or (_format_time_utc_z(peak_time) if peak_time else item.get("peak_time"))
+    peak_time_local = item.get("peak_time_local") or (_format_time_local(peak_time) if peak_time else "")
+    result_json = _json_value(item.get("result_json"), {})
+    request_json = _json_value(item.get("request_json"), {})
     return {
         "id": item.get("id"),
         "peak_time": item.get("peak_time"),
         "peak_time_utc": peak_time_utc,
         "peak_time_local": peak_time_local,
-        "timezone": "America/Sao_Paulo",
+        "timezone": item.get("timezone") or "America/Sao_Paulo",
         "sensor": item.get("sensor") or "",
         "interface_id": item.get("interface_id"),
+        "interface_name": item.get("interface_name") or "",
+        "interface_alias": item.get("interface_alias") or "",
         "direction": item.get("direction") or "",
         "metric": item.get("metric") or "",
+        "protocol": item.get("protocol") or "",
         "peak_value": float(item.get("peak_value") or 0),
         "baseline_p95": float(item.get("baseline_p95") or 0),
         "baseline_p99": float(item.get("baseline_p99") or 0),
+        "threshold_used": float(item.get("threshold_used") or 0),
         "score": float(item.get("score") or 0),
         "evidence_status": item.get("evidence_status") or "",
         "classification": item.get("classification") or "",
+        "mitigation_allowed": bool(item.get("mitigation_allowed")),
         "dominant_group": dominant_group,
         "dominant_group_label": dominant_group_label(dominant_group),
+        "dominant_dst_ip": item.get("dominant_dst_ip") or dominant_group.get("dst_ip") or "",
+        "dominant_dst_port": item.get("dominant_dst_port") or dominant_group.get("dst_port"),
+        "dominant_protocol": item.get("dominant_protocol") or dominant_group.get("protocol") or "",
+        "dominant_unique_src_count": int(item.get("dominant_unique_src_count") or dominant_group.get("unique_src_count") or 0),
+        "dominant_share_packets": float(item.get("dominant_share_packets") or dominant_group.get("share_packets") or 0),
+        "dominant_share_bits": float(item.get("dominant_share_bits") or dominant_group.get("share_bits") or 0),
         "candidates": candidates,
-        "recommended_action": recommendation["recommended_action"],
+        "recommended_action": item.get("recommended_action") or recommendation["recommended_action"],
         "recommendation": recommendation,
+        "technical_report": item.get("technical_report") or "",
+        "request_json": request_json,
+        "result_json": result_json,
+        "operator_label": item.get("operator_label") or "",
+        "operator_vector": item.get("operator_vector") or "",
+        "operator_best_action": item.get("operator_best_action") or "",
+        "operator_comment": item.get("operator_comment") or "",
+        "operator_confirmed_template": item.get("operator_confirmed_template") or "",
+        "operator_confirmed_ttl": item.get("operator_confirmed_ttl") or "",
+        "resolved_by_mitigation": bool(item.get("resolved_by_mitigation")),
+        "feedback_updated_at": item.get("feedback_updated_at") or "",
         "created_at": item.get("created_at"),
     }
+
+
+def get_peak_analysis_history_item(conn: sqlite3.Connection, item_id: int) -> dict[str, Any] | None:
+    ensure_peak_analysis_db(conn)
+    row = conn.execute("SELECT * FROM peak_analysis WHERE id = ?", (int(item_id),)).fetchone()
+    return peak_analysis_row_to_dict(row) if row else None
+
+
+ALLOWED_OPERATOR_LABELS = {
+    "attack",
+    "false_positive",
+    "noise_or_unclear",
+    "infected_customer",
+    "normal_traffic",
+    "mitigation_correct",
+    "mitigation_wrong",
+    "unknown",
+}
+
+
+def update_peak_analysis_feedback(conn: sqlite3.Connection, item_id: int, feedback: dict[str, Any]) -> dict[str, Any]:
+    ensure_peak_analysis_db(conn)
+    label = str(feedback.get("operator_label") or "").strip()
+    if label and label not in ALLOWED_OPERATOR_LABELS:
+        raise ValueError("operator_label invalido")
+    values = {
+        "operator_label": label,
+        "operator_vector": str(feedback.get("operator_vector") or "").strip(),
+        "operator_best_action": str(feedback.get("operator_best_action") or "").strip(),
+        "operator_comment": str(feedback.get("operator_comment") or "").strip(),
+        "operator_confirmed_template": str(feedback.get("operator_confirmed_template") or "").strip(),
+        "operator_confirmed_ttl": str(feedback.get("operator_confirmed_ttl") or "").strip(),
+        "resolved_by_mitigation": 1 if feedback.get("resolved_by_mitigation") else 0,
+        "feedback_updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    conn.execute(
+        """
+        UPDATE peak_analysis
+        SET operator_label = ?,
+            operator_vector = ?,
+            operator_best_action = ?,
+            operator_comment = ?,
+            operator_confirmed_template = ?,
+            operator_confirmed_ttl = ?,
+            resolved_by_mitigation = ?,
+            feedback_updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            values["operator_label"],
+            values["operator_vector"],
+            values["operator_best_action"],
+            values["operator_comment"],
+            values["operator_confirmed_template"],
+            values["operator_confirmed_ttl"],
+            values["resolved_by_mitigation"],
+            values["feedback_updated_at"],
+            int(item_id),
+        ),
+    )
+    item = get_peak_analysis_history_item(conn, item_id)
+    if item is None:
+        raise KeyError("Historico nao encontrado")
+    return item
 
 
 def recommendation_for_history(item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -535,24 +831,111 @@ def parse_optional_time(value: Any) -> datetime | None:
         return None
 
 
-def history_record(request: PeakHunterRequest, peak: dict[str, Any], baseline: dict[str, float]) -> dict[str, Any]:
+def history_record(request: PeakHunterRequest, result: dict[str, Any], baseline: dict[str, float]) -> dict[str, Any]:
+    peak = result.get("best_peak") or {}
+    dominant = result.get("dominant_group") or peak.get("dominant_group") or {}
+    candidates = result.get("candidates") or peak.get("candidates") or []
+    recommendation = result.get("recommendation") or {}
     return {
         "peak_time": peak.get("peak_time_utc") or peak.get("peak_time") or peak.get("time"),
+        "peak_time_utc": peak.get("peak_time_utc") or peak.get("peak_time") or peak.get("time"),
+        "peak_time_local": peak.get("peak_time_local") or "",
+        "timezone": peak.get("timezone") or "America/Sao_Paulo",
         "interface_id": request.interface_id,
+        "interface_name": "",
+        "interface_alias": "",
         "sensor": request.sensor,
         "direction": request.direction,
         "metric": request.metric,
+        "protocol": request.protocol or "",
         "peak_value": peak.get("peak_value") or 0,
         "baseline_p95": baseline.get("p95") or 0,
         "baseline_p99": baseline.get("p99") or 0,
+        "threshold_used": result.get("threshold_used") or peak.get("threshold_used") or 0,
         "score": peak.get("score") or 0,
         "evidence_status": peak.get("evidence_status") or "insufficient",
         "classification": peak.get("classification") or "insufficient_flow_evidence",
-        "dominant_group": peak.get("dominant_group") or {},
-        "candidates": peak.get("candidates") or [],
+        "mitigation_allowed": bool(result.get("mitigation_allowed")),
+        "recommended_action": recommendation.get("recommended_action") or "",
+        "dominant_dst_ip": dominant.get("dst_ip") or "",
+        "dominant_dst_port": dominant.get("dst_port"),
+        "dominant_protocol": dominant.get("protocol") or "",
+        "dominant_unique_src_count": dominant.get("unique_src_count") or len(dominant.get("unique_src_ips") or []),
+        "dominant_share_packets": dominant.get("share_packets") or 0,
+        "dominant_share_bits": dominant.get("share_bits") or 0,
+        "dominant_group": dominant,
+        "candidates": candidates,
+        "candidates_json": candidates,
+        "request_json": peak_hunter_request_to_dict(request),
+        "result_json": result,
+        "technical_report": result.get("technical_report") or "",
         "ai_summary": peak.get("ai_summary") or "",
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+
+
+def peak_hunter_request_to_dict(request: PeakHunterRequest) -> dict[str, Any]:
+    return {
+        "sensor": request.sensor,
+        "interface_id": request.interface_id,
+        "direction": request.direction,
+        "metric": request.metric,
+        "start_time": _format_time_utc_z(request.start_time),
+        "end_time": _format_time_utc_z(request.end_time),
+        "protocol": request.protocol or "",
+        "threshold": request.threshold,
+        "baseline": request.baseline,
+        "window_seconds": request.window_seconds,
+        "max_peaks": request.max_peaks,
+        "sensitivity": request.sensitivity,
+    }
+
+
+def dataset_case_from_history_item(item: dict[str, Any]) -> dict[str, Any]:
+    result = item.get("result_json") if isinstance(item.get("result_json"), dict) else {}
+    peak = result.get("best_peak") or {
+        "peak_time_utc": item.get("peak_time_utc"),
+        "peak_time_local": item.get("peak_time_local"),
+        "peak_value": item.get("peak_value"),
+        "score": item.get("score"),
+    }
+    baseline = result.get("baseline") or {"p95": item.get("baseline_p95"), "p99": item.get("baseline_p99")}
+    return {
+        "case_id": f"peak-analysis-{item.get('id')}",
+        "input": {
+            "technical_report": item.get("technical_report") or "",
+            "sensor": item.get("sensor") or "",
+            "interface_id": item.get("interface_id"),
+            "direction": item.get("direction") or "",
+            "metric": item.get("metric") or "",
+            "protocol": (item.get("protocol") or item.get("dominant_protocol") or "").upper(),
+            "peak": peak,
+            "baseline": baseline,
+            "dominant_group": item.get("dominant_group") or result.get("dominant_group") or {},
+            "top_groups": result.get("top_groups") or [],
+            "top_conversations": result.get("top_conversations") or [],
+            "candidates": item.get("candidates") or result.get("candidates") or [],
+        },
+        "expected_output": {
+            "classification": item.get("classification") or "",
+            "evidence_status": item.get("evidence_status") or "",
+            "recommended_action": item.get("recommended_action") or "",
+            "operator_label": item.get("operator_label") or "",
+            "operator_vector": item.get("operator_vector") or "",
+            "operator_best_action": item.get("operator_best_action") or "",
+        },
+        "metadata": {
+            "created_at": item.get("created_at") or "",
+            "peak_time_utc": item.get("peak_time_utc") or "",
+            "peak_time_local": item.get("peak_time_local") or "",
+            "timezone": item.get("timezone") or "America/Sao_Paulo",
+        },
+    }
+
+
+def export_peak_analysis_dataset(conn: sqlite3.Connection, filters: dict[str, Any] | None = None, limit: int = 1000) -> str:
+    items = list_peak_analysis_history(conn, filters, limit=limit)
+    return "\n".join(json.dumps(dataset_case_from_history_item(item), sort_keys=True, default=str) for item in items) + ("\n" if items else "")
 
 
 def recommendation_for_peak(peak: dict[str, Any] | None) -> dict[str, Any]:

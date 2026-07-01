@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import sqlite3
 import tempfile
 import types
@@ -248,6 +249,88 @@ class PeakHunterTest(unittest.TestCase):
             payload = peak_hunter_api.peak_hunter_history(sensor="edge-a")
             self.assertEqual(len(payload["items"]), 1)
             self.assertEqual(payload["items"][0]["evidence_status"], "complete")
+
+    def test_peak_history_saves_technical_report_and_full_result_json(self):
+        from app.services.peak_hunter import get_peak_analysis_history_item, save_peak_analysis
+
+        with temporary_peak_db() as db_path:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                result = analyze_peak_hunter(
+                    self.request,
+                    self._series,
+                    self._flows_with_dominant_5s,
+                    save_history=lambda record: save_peak_analysis(conn, record),
+                )
+                conn.commit()
+                item = get_peak_analysis_history_item(conn, 1)
+            finally:
+                conn.close()
+        self.assertIsNotNone(item)
+        self.assertIn("Peak Hunter - relatorio tecnico", item["technical_report"])
+        self.assertIn(item["peak_time_utc"], item["technical_report"])
+        self.assertIn("BRT", item["technical_report"])
+        self.assertEqual(item["result_json"]["classification"], result["classification"])
+        self.assertEqual(item["request_json"]["sensor"], "edge-a")
+        self.assertFalse(item["result_json"]["best_peak"]["apply_enabled"])
+
+    def test_peak_history_filters_detail_feedback_and_dataset_export(self):
+        from app.services.peak_hunter import (
+            export_peak_analysis_dataset,
+            get_peak_analysis_history_item,
+            list_peak_analysis_history,
+            save_peak_analysis,
+            update_peak_analysis_feedback,
+        )
+
+        with temporary_peak_db() as db_path:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                analyze_peak_hunter(
+                    self.request,
+                    self._series,
+                    self._flows_with_dominant_5s,
+                    save_history=lambda record: save_peak_analysis(conn, record),
+                )
+                analyze_peak_hunter(
+                    self.request,
+                    self._series,
+                    lambda _request, _time, _window: [],
+                    save_history=lambda record: save_peak_analysis(conn, record),
+                )
+                conn.commit()
+                positive = list_peak_analysis_history(conn, {"mitigation_allowed": "true"}, limit=10)
+                negative = list_peak_analysis_history(conn, {"evidence_status": "insufficient"}, limit=10)
+                detail = get_peak_analysis_history_item(conn, 1)
+                updated = update_peak_analysis_feedback(
+                    conn,
+                    1,
+                    {
+                        "operator_label": "attack",
+                        "operator_vector": "udp_flood_outbound_to_single_destination_port",
+                        "operator_best_action": "manual_review",
+                        "operator_comment": "Confirmado pelo NOC.",
+                        "operator_confirmed_template": "dst_external_32_proto_dst_port",
+                        "operator_confirmed_ttl": "2h",
+                        "resolved_by_mitigation": True,
+                    },
+                )
+                conn.commit()
+                jsonl = export_peak_analysis_dataset(conn, {}, limit=10)
+            finally:
+                conn.close()
+        self.assertEqual(len(positive), 1)
+        self.assertEqual(len(negative), 1)
+        self.assertEqual(detail["id"], 1)
+        self.assertEqual(updated["operator_label"], "attack")
+        self.assertTrue(updated["resolved_by_mitigation"])
+        lines = [json.loads(line) for line in jsonl.splitlines()]
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(any(line["expected_output"]["operator_label"] == "attack" for line in lines))
+        self.assertTrue(any(line["expected_output"]["evidence_status"] == "insufficient" for line in lines))
+        self.assertIn("technical_report", lines[0]["input"])
 
     def test_from_anomaly_prefills_window(self):
         if peak_hunter_api is None:

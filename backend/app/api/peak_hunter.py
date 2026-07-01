@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.services.clickhouse import (
@@ -19,8 +19,11 @@ from app.services.peak_hunter import (
     PeakHunterRequest,
     analyze_peak_hunter,
     anomaly_peak_hunter_prefill,
+    export_peak_analysis_dataset,
+    get_peak_analysis_history_item,
     list_peak_analysis_history,
     save_peak_analysis,
+    update_peak_analysis_feedback,
 )
 
 
@@ -43,6 +46,16 @@ class PeakHunterPayload(BaseModel):
     sensitivity: str = "medium"
 
 
+class PeakHunterFeedbackPayload(BaseModel):
+    operator_label: str = ""
+    operator_vector: str = ""
+    operator_best_action: str = ""
+    operator_comment: str = ""
+    operator_confirmed_template: str = ""
+    operator_confirmed_ttl: str = ""
+    resolved_by_mitigation: bool = False
+
+
 @router.post("/analyze")
 def analyze_peak_hunter_endpoint(payload: PeakHunterPayload) -> dict[str, Any]:
     start_time, end_time = _request_window(payload.start_time, payload.end_time, payload.recent_period_minutes)
@@ -63,6 +76,8 @@ def analyze_peak_hunter_endpoint(payload: PeakHunterPayload) -> dict[str, Any]:
 
     def save(record: dict[str, Any]) -> None:
         with sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db")) as conn:
+            conn.row_factory = sqlite3.Row
+            record.update(_interface_metadata(record.get("sensor") or "", int(record.get("interface_id") or 0)))
             save_peak_analysis(conn, record)
             conn.commit()
 
@@ -134,6 +149,9 @@ def peak_hunter_history(
     end_time: datetime | None = None,
     evidence_status: str = "",
     classification: str = "",
+    protocol: str = "",
+    mitigation_allowed: str = "",
+    operator_label: str = "",
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     filters = {
@@ -145,10 +163,75 @@ def peak_hunter_history(
         "end_time": _string_time(_as_utc(end_time)) if end_time else "",
         "evidence_status": evidence_status,
         "classification": classification,
+        "protocol": protocol,
+        "mitigation_allowed": mitigation_allowed,
+        "operator_label": operator_label,
     }
     with _sqlite_connect() as conn:
         items = list_peak_analysis_history(conn, filters, limit=limit)
     return {"items": items}
+
+
+@router.get("/history/{item_id}")
+def peak_hunter_history_detail(item_id: int) -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        item = get_peak_analysis_history_item(conn, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Historico nao encontrado")
+    return item
+
+
+@router.patch("/history/{item_id}/feedback")
+def peak_hunter_history_feedback(item_id: int, payload: PeakHunterFeedbackPayload) -> dict[str, Any]:
+    try:
+        with _sqlite_connect() as conn:
+            item = update_peak_analysis_feedback(conn, item_id, payload.dict())
+            conn.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Historico nao encontrado") from exc
+    return item
+
+
+@router.get("/export-dataset")
+def peak_hunter_export_dataset(
+    format: str = "jsonl",
+    sensor: str = "",
+    interface_id: int | None = Query(None, ge=1),
+    direction: str = "",
+    metric: str = "",
+    protocol: str = "",
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    evidence_status: str = "",
+    classification: str = "",
+    mitigation_allowed: str = "",
+    operator_label: str = "",
+    limit: int = Query(1000, ge=1, le=10000),
+) -> Response:
+    if format != "jsonl":
+        raise HTTPException(status_code=400, detail="format suportado: jsonl")
+    filters = {
+        "sensor": sensor,
+        "interface_id": interface_id,
+        "direction": direction,
+        "metric": metric,
+        "protocol": protocol,
+        "start_time": _string_time(_as_utc(start_time)) if start_time else "",
+        "end_time": _string_time(_as_utc(end_time)) if end_time else "",
+        "evidence_status": evidence_status,
+        "classification": classification,
+        "mitigation_allowed": mitigation_allowed,
+        "operator_label": operator_label,
+    }
+    with _sqlite_connect() as conn:
+        body = export_peak_analysis_dataset(conn, filters, limit=limit)
+    return Response(
+        body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="gmj-peak-hunter-dataset.jsonl"'},
+    )
 
 
 @router.get("/from-anomaly/{anomaly_id}")
@@ -273,6 +356,14 @@ def _sqlite_interface_options(sensor: str) -> dict[int, dict[str, Any]]:
     except sqlite3.Error:
         return {}
     return {int(row["if_index"]): dict(row) for row in rows if int(row["if_index"] or 0) > 0}
+
+
+def _interface_metadata(sensor: str, interface_id: int) -> dict[str, Any]:
+    meta = _sqlite_interface_options(sensor).get(int(interface_id or 0), {})
+    return {
+        "interface_name": str(meta.get("if_name") or "").strip(),
+        "interface_alias": str(meta.get("if_alias") or meta.get("if_descr") or "").strip(),
+    }
 
 
 def _interface_option(interface_id: int, row: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
