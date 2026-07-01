@@ -19404,6 +19404,88 @@ def dashboard_series_color(group: str, group_by: str, fallback: int = 0) -> str:
     return DASHBOARD_PALETTE[fallback % len(DASHBOARD_PALETTE)]
 
 
+def dashboard_bucket_seconds(range_minutes: int) -> int:
+    seconds = max(60, int(range_minutes) * 60)
+    if range_minutes <= 120:
+        return 60
+    if range_minutes <= 360:
+        return 120
+    if range_minutes <= 1440:
+        return 300
+    if range_minutes <= 10080:
+        return 3600
+    target = max(1, seconds // 500)
+    for bucket in (3600, 7200, 10800, 21600, 43200, 86400):
+        if target <= bucket:
+            return bucket
+    return 86400
+
+
+def dashboard_sensor_name(sensor_id: int | None) -> str:
+    if sensor_id is None:
+        return ""
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT name FROM sensors WHERE id = ?", (int(sensor_id),)).fetchone()
+    return clean_text(row["name"]) if row else ""
+
+
+def dashboard_interface_title(iface: dict[str, Any]) -> str:
+    if not iface:
+        return ""
+    alias = clean_text(iface.get("if_alias") or iface.get("alias"))
+    name = clean_text(iface.get("if_name") or iface.get("name"))
+    if_index = int(iface.get("if_index") or 0)
+    parts = [part for part in (alias, name) if part]
+    if if_index:
+        parts.append(f"ifIndex {if_index}")
+    return " - ".join(parts) or (f"ifIndex {if_index}" if if_index else "")
+
+
+def dashboard_interface_metadata(sensor_id: int | None, interface_id: int | None, if_index: int | None) -> dict[str, Any] | None:
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    if resolved_if_index is None:
+        return None
+    row = None
+    if sensor_id is not None:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            if interface_id is not None:
+                row = conn.execute(
+                    """
+                    SELECT id, if_index, if_name, if_alias, color
+                    FROM sensor_interfaces
+                    WHERE sensor_id = ? AND id = ?
+                    """,
+                    (int(sensor_id), int(interface_id)),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT id, if_index, if_name, if_alias, color
+                    FROM sensor_interfaces
+                    WHERE sensor_id = ? AND if_index = ?
+                    ORDER BY id
+                    LIMIT 1
+                    """,
+                    (int(sensor_id), int(resolved_if_index)),
+                ).fetchone()
+    if row is None:
+        item = {"id": interface_id, "if_index": int(resolved_if_index), "if_name": "", "if_alias": "", "color": ""}
+    else:
+        item = dict(row)
+    label = clean_text(item.get("if_alias")) or clean_text(item.get("if_name")) or f"ifIndex {int(item.get('if_index') or resolved_if_index)}"
+    return {
+        "id": item.get("id"),
+        "if_index": int(item.get("if_index") or resolved_if_index),
+        "if_name": clean_text(item.get("if_name")),
+        "if_alias": clean_text(item.get("if_alias")),
+        "label": label,
+        "title": dashboard_interface_title(item),
+        "color": clean_text(item.get("color")),
+    }
+
+
 def interface_label_map(sensor_id: int | None) -> dict[int, dict[str, Any]]:
     if sensor_id is None:
         return {}
@@ -19494,6 +19576,7 @@ def dashboard_series_payload(
     if cached:
         return cached
 
+    bucket_seconds = dashboard_bucket_seconds(range_minutes)
     value_field = "bytes" if metric == "bits_s" else "packets"
     multiplier = "8" if metric == "bits_s" else "1"
     input_factor = clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"])
@@ -19532,10 +19615,10 @@ def dashboard_series_payload(
             selects.append(
                 f"""
                 SELECT
-                    toStartOfMinute(flow_time) AS ts,
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {zone_input_group} AS group_key,
                     'download' AS flow_direction,
-                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
                 FROM flow_raw
                 WHERE {base_where} AND {zone_download_filter} AND {input_condition}
                 GROUP BY ts, group_key
@@ -19545,10 +19628,10 @@ def dashboard_series_payload(
             selects.append(
                 f"""
                 SELECT
-                    toStartOfMinute(flow_time) AS ts,
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {zone_output_group} AS group_key,
                     'upload' AS flow_direction,
-                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
                 FROM flow_raw
                 WHERE {base_where} AND {zone_upload_filter} AND {output_condition}
                 GROUP BY ts, group_key
@@ -19559,10 +19642,10 @@ def dashboard_series_payload(
             selects.append(
                 f"""
                 SELECT
-                    toStartOfMinute(flow_time) AS ts,
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {input_group} AS group_key,
                     'download' AS flow_direction,
-                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / 60 AS value
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
                 FROM flow_raw
                 WHERE {base_where} AND {input_condition}
                 GROUP BY ts, group_key
@@ -19572,10 +19655,10 @@ def dashboard_series_payload(
             selects.append(
                 f"""
                 SELECT
-                    toStartOfMinute(flow_time) AS ts,
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {output_group} AS group_key,
                     'upload' AS flow_direction,
-                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / 60 AS value
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
                 FROM flow_raw
                 WHERE {base_where} AND {output_condition}
                 GROUP BY ts, group_key
@@ -19590,6 +19673,8 @@ def dashboard_series_payload(
                 "metric": metric,
                 "group_by": group_by,
                 "direction": direction,
+                "bucket_seconds": bucket_seconds,
+                "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
                 "series": [],
                 "items": [],
             },
@@ -19666,6 +19751,8 @@ def dashboard_series_payload(
         "metric": metric,
         "group_by": group_by,
         "direction": direction,
+        "bucket_seconds": bucket_seconds,
+        "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
         "series": list(series_by_key.values()),
         "items": list(series_by_key.values()),
     }
@@ -19704,6 +19791,277 @@ def dashboard_series(
         limit,
         zone_id,
         zone_direction,
+    )
+
+
+def dashboard_anomaly_row_time(row: sqlite3.Row | dict[str, Any]) -> datetime | None:
+    item = dict(row)
+    return parse_datetime_text(item.get("peak_time_utc") or item.get("peak_time") or item.get("created_at"))
+
+
+def dashboard_anomaly_local_time(row: sqlite3.Row | dict[str, Any]) -> str:
+    item = dict(row)
+    local = clean_text(item.get("peak_time_local"))
+    if local:
+        return local
+    peak_time = dashboard_anomaly_row_time(item)
+    if peak_time is None:
+        return ""
+    return peak_time.astimezone(timezone(timedelta(hours=-3))).isoformat()
+
+
+def dashboard_anomaly_bucket(value: datetime, bucket_seconds: int) -> datetime:
+    timestamp = int(value.timestamp())
+    bucket_start = timestamp - (timestamp % max(60, int(bucket_seconds)))
+    return datetime.fromtimestamp(bucket_start, timezone.utc)
+
+
+def dashboard_anomaly_summary_payload(
+    range_minutes: int,
+    start: datetime | None,
+    end: datetime | None,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    sensor: str | None,
+    sensor_id: int | None,
+    interface_id: int | None,
+    if_index: int | None,
+    zone_id: int | None,
+    direction: str,
+    protocol: str,
+    classification: str,
+    include_negative_samples: bool,
+    limit: int,
+) -> dict[str, Any]:
+    start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    sensor_name = clean_text(sensor) or dashboard_sensor_name(sensor_id)
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    normalized_direction = clean_text(direction)
+    normalized_protocol = clean_text(protocol)
+    normalized_classification = clean_text(classification)
+    cache_key = dashboard_cache_key(
+        "dashboard-anomalies-summary",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor": sensor_name,
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "zone_id": zone_id,
+            "direction": normalized_direction,
+            "protocol": normalized_protocol,
+            "classification": normalized_classification,
+            "include_negative_samples": include_negative_samples,
+            "limit": limit,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
+
+    where = ["COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) >= ?", "COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) <= ?"]
+    values: list[Any] = [iso(start_dt), iso(end_dt)]
+    if sensor_name:
+        where.append("sensor = ?")
+        values.append(sensor_name)
+    if resolved_if_index is not None:
+        where.append("interface_id = ?")
+        values.append(int(resolved_if_index))
+    if normalized_direction:
+        where.append("direction = ?")
+        values.append(normalized_direction)
+    if normalized_protocol:
+        where.append("LOWER(protocol) = LOWER(?)")
+        values.append(normalized_protocol)
+    if normalized_classification:
+        where.append("classification = ?")
+        values.append(normalized_classification)
+    if not include_negative_samples:
+        where.append("is_negative_sample = 0")
+
+    where_sql = " AND ".join(where)
+    with sqlite_connection() as conn:
+        ensure_peak_analysis_db(conn)
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM peak_analysis
+            WHERE {where_sql}
+            ORDER BY COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (*values, max(1, int(limit))),
+        ).fetchall()
+        all_rows = conn.execute(
+            f"""
+            SELECT *
+            FROM peak_analysis
+            WHERE {where_sql}
+            ORDER BY COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) ASC, id ASC
+            """,
+            values,
+        ).fetchall()
+
+    total = len(all_rows)
+    by_classification: dict[str, dict[str, Any]] = {}
+    by_direction: dict[str, dict[str, Any]] = {}
+    by_protocol: dict[str, dict[str, Any]] = {}
+    by_interface: dict[str, dict[str, Any]] = {}
+    timeline_groups: dict[str, dict[str, Any]] = {}
+    bucket_seconds = dashboard_bucket_seconds(range_minutes)
+    probable_attacks = 0
+    feedback_negative = 0
+    last_anomaly = ""
+
+    for row in all_rows:
+        item = dict(row)
+        classification_key = clean_text(item.get("classification")) or "unknown"
+        direction_key = clean_text(item.get("direction")) or "unknown"
+        protocol_key = clean_text(item.get("protocol")).upper() or "UNKNOWN"
+        interface_key = str(item.get("interface_id") or "unknown")
+        peak_value = float(item.get("peak_value") or 0)
+        peak_time = dashboard_anomaly_row_time(item)
+        peak_time_iso = iso(peak_time) if peak_time else clean_text(item.get("peak_time_utc"))
+        if peak_time_iso:
+            last_anomaly = max(last_anomaly, peak_time_iso)
+        class_group = by_classification.setdefault(
+            classification_key,
+            {"classification": classification_key, "count": 0, "max_peak_value": 0.0, "last_seen": ""},
+        )
+        class_group["count"] += 1
+        class_group["max_peak_value"] = max(float(class_group["max_peak_value"]), peak_value)
+        class_group["last_seen"] = max(clean_text(class_group["last_seen"]), peak_time_iso)
+        by_direction.setdefault(direction_key, {"direction": direction_key, "count": 0})["count"] += 1
+        by_protocol.setdefault(protocol_key, {"protocol": protocol_key, "count": 0})["count"] += 1
+        interface_group = by_interface.setdefault(
+            interface_key,
+            {
+                "interface_id": item.get("interface_id"),
+                "interface_name": clean_text(item.get("monitored_interface_name") or item.get("interface_name")),
+                "interface_alias": clean_text(item.get("monitored_interface_alias") or item.get("interface_alias")),
+                "count": 0,
+                "max_peak_value": 0.0,
+                "last_seen": "",
+            },
+        )
+        interface_group["count"] += 1
+        interface_group["max_peak_value"] = max(float(interface_group["max_peak_value"]), peak_value)
+        interface_group["last_seen"] = max(clean_text(interface_group["last_seen"]), peak_time_iso)
+        if classification_key not in {"no_significant_peak", "normal_traffic", "false_positive", "insufficient_flow_evidence"}:
+            probable_attacks += 1
+        if clean_text(item.get("operator_label")) in {"false_positive", "normal_traffic"} or bool(item.get("is_negative_sample")):
+            feedback_negative += 1
+        if peak_time is not None:
+            bucket = iso(dashboard_anomaly_bucket(peak_time, bucket_seconds))
+            timeline = timeline_groups.setdefault(bucket, {"bucket_time": bucket, "total": 0, "others": 0})
+            timeline["total"] += 1
+            if classification_key in {"udp_flood_outbound_to_single_destination_port", "tcp_syn_flood", "dns_udp_abuse", "no_significant_peak"}:
+                timeline[classification_key] = int(timeline.get(classification_key, 0)) + 1
+            else:
+                timeline["others"] += 1
+
+    recent = []
+    for row in rows:
+        item = dict(row)
+        candidate_action = clean_text(item.get("recommended_action")) or "alert_only"
+        dominant_parts = [
+            clean_text(item.get("dominant_protocol")).upper(),
+            clean_text(item.get("dominant_dst_ip")),
+            str(item.get("dominant_dst_port") or "") if item.get("dominant_dst_port") is not None else "",
+        ]
+        recent.append(
+            {
+                "id": item.get("id"),
+                "peak_time_local": dashboard_anomaly_local_time(item),
+                "peak_time_utc": clean_text(item.get("peak_time_utc") or item.get("peak_time")),
+                "sensor": clean_text(item.get("sensor")),
+                "interface_id": item.get("interface_id"),
+                "interface_name": clean_text(item.get("monitored_interface_name") or item.get("interface_name")),
+                "interface_alias": clean_text(item.get("monitored_interface_alias") or item.get("interface_alias")),
+                "direction": clean_text(item.get("direction")),
+                "metric": clean_text(item.get("metric")),
+                "protocol": clean_text(item.get("protocol")).upper(),
+                "classification": clean_text(item.get("classification")),
+                "evidence_status": clean_text(item.get("evidence_status")),
+                "peak_value": float(item.get("peak_value") or 0),
+                "dominant_group_summary": " ".join(part for part in dominant_parts if part),
+                "recommended_action": candidate_action,
+                "analysis_source": clean_text(item.get("analysis_source")) or "manual",
+                "is_negative_sample": bool(item.get("is_negative_sample")),
+            }
+        )
+
+    interface_items = sorted(by_interface.values(), key=lambda item: (int(item["count"]), float(item["max_peak_value"])), reverse=True)
+    protocol_items = sorted(by_protocol.values(), key=lambda item: int(item["count"]), reverse=True)
+    payload = {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "bucket_seconds": bucket_seconds,
+        "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
+        "total_anomalies": total,
+        "probable_attacks": probable_attacks,
+        "feedback_negative": feedback_negative,
+        "last_anomaly": last_anomaly,
+        "most_affected_interface": interface_items[0] if interface_items else None,
+        "most_common_protocol": protocol_items[0] if protocol_items else None,
+        "by_classification": sorted(by_classification.values(), key=lambda item: int(item["count"]), reverse=True),
+        "by_direction": sorted(by_direction.values(), key=lambda item: int(item["count"]), reverse=True),
+        "by_protocol": protocol_items,
+        "by_interface": interface_items,
+        "timeline": [timeline_groups[key] for key in sorted(timeline_groups)],
+        "recent": recent,
+        "items": recent,
+        "filters": {
+            "sensor": sensor_name,
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": resolved_if_index,
+            "zone_id": zone_id,
+            "direction": normalized_direction,
+            "protocol": normalized_protocol,
+            "classification": normalized_classification,
+            "include_negative_samples": include_negative_samples,
+        },
+    }
+    return dashboard_cache_set(cache_key, payload)
+
+
+@app.get("/api/dashboard/anomalies-summary")
+def dashboard_anomalies_summary(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    zone_id: int | None = Query(None, ge=1),
+    direction: str = "",
+    protocol: str = "",
+    classification: str = "",
+    include_negative_samples: bool = False,
+    limit: int = Query(20, ge=1, le=200),
+) -> dict[str, Any]:
+    return dashboard_anomaly_summary_payload(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        sensor,
+        sensor_id,
+        interface_id,
+        if_index,
+        zone_id,
+        direction,
+        protocol,
+        classification,
+        include_negative_samples,
+        limit,
     )
 
 
@@ -20989,7 +21347,13 @@ def top_dimension(
             item = {"flags": flags, "bps": bps, "flows": flows, "packets": packets}
         items.append(item)
 
-    return dashboard_cache_set(cache_key, {"items": items})
+    return dashboard_cache_set(
+        cache_key,
+        {
+            "items": items,
+            "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
+        },
+    )
 
 
 @app.get("/api/tops/src-ip")
@@ -21515,11 +21879,15 @@ def sort_direction(value: str | None) -> str:
 
 
 def dashboard_cache_ttl(range_minutes: int) -> int:
-    if range_minutes <= 5:
-        return 5
+    if range_minutes <= 15:
+        return 10
     if range_minutes <= 60:
-        return 15
-    return 60
+        return 20
+    if range_minutes <= 360:
+        return 30
+    if range_minutes <= 1440:
+        return 60
+    return 300
 
 
 def dashboard_cache_key(name: str, values: dict[str, Any]) -> str:
@@ -21530,6 +21898,18 @@ def dashboard_cache_key(name: str, values: dict[str, Any]) -> str:
             value = iso(value)
         normalized.append((key, value))
     return json.dumps([name, normalized], sort_keys=True, default=str)
+
+
+def dashboard_cache_ttl_from_key(key: str) -> int:
+    try:
+        _name, normalized = json.loads(key)
+    except (ValueError, TypeError):
+        return 0
+    values = dict(normalized or [])
+    try:
+        return dashboard_cache_ttl(int(values.get("range_minutes") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def dashboard_cache_get(key: str, ttl: int) -> dict[str, Any] | None:
@@ -21545,6 +21925,8 @@ def dashboard_cache_get(key: str, ttl: int) -> dict[str, Any] | None:
             return None
     cached_payload = dict(payload)
     cached_payload["cached"] = True
+    cached_payload["cache_status"] = "hit"
+    cached_payload["cache_ttl_seconds"] = int(ttl)
     cached_payload["cache_age_seconds"] = round(age, 2)
     return cached_payload
 
@@ -21552,6 +21934,8 @@ def dashboard_cache_get(key: str, ttl: int) -> dict[str, Any] | None:
 def dashboard_cache_set(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     stored = dict(payload)
     stored["cached"] = False
+    stored["cache_status"] = "miss"
+    stored["cache_ttl_seconds"] = dashboard_cache_ttl_from_key(key)
     stored["cache_age_seconds"] = 0
     with DASHBOARD_RESPONSE_CACHE_LOCK:
         DASHBOARD_RESPONSE_CACHE[key] = (time.monotonic(), stored)

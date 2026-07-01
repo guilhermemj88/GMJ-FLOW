@@ -1208,7 +1208,7 @@
             <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="bps-chart" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="panel-title">Bits/s</div>
+                  <div id="bpsTitle" class="panel-title">Bits/s</div>
                   <div class="d-flex align-items-center gap-2">
                     <div id="bpsReadout" class="metric-readout">0 bps</div>
                     <div class="widget-actions">
@@ -1229,7 +1229,7 @@
             <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="pps-chart" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="panel-title">Packets/s</div>
+                  <div id="ppsTitle" class="panel-title">Packets/s</div>
                   <div class="d-flex align-items-center gap-2">
                     <div id="ppsReadout" class="metric-readout">0 pps</div>
                     <div class="widget-actions">
@@ -1276,7 +1276,7 @@
             </div>
             <div class="col-12 col-xl-4">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-2">Top portas</div>
+                <div id="portsTitle" class="panel-title mb-2">Top portas</div>
                 <div id="portsChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -1291,7 +1291,7 @@
           <section class="row g-3 mt-1">
             <div class="col-12 col-lg-6">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-2">Protocolos</div>
+                <div id="protocolsTitle" class="panel-title mb-2">Protocolos</div>
                 <div id="protocolsChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -1303,7 +1303,7 @@
             </div>
             <div class="col-12 col-lg-6">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-2">TCP flags</div>
+                <div id="tcpFlagsTitle" class="panel-title mb-2">TCP flags</div>
                 <div id="tcpFlagsChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -1312,6 +1312,71 @@
                   </table>
                 </div>
               </div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <div class="panel-title">Historico de Anomalias</div>
+                <div id="dashboardAnomaliesStatus" class="metric-readout">Resumo de analises salvas pelo Peak Hunter.</div>
+              </div>
+            </div>
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card">
+                <div class="metric-label">Total</div>
+                <div id="dashboardAnomalyTotal" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Ataques provaveis</div>
+                <div id="dashboardAnomalyProbable" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Feedback/negativos</div>
+                <div id="dashboardAnomalyNegative" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Ultima anomalia</div>
+                <div id="dashboardAnomalyLast" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Interface mais afetada</div>
+                <div id="dashboardAnomalyInterface" class="metric-value">-</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">Protocolo comum</div>
+                <div id="dashboardAnomalyProtocol" class="metric-value">-</div>
+              </div>
+            </div>
+            <div class="row g-3">
+              <div class="col-12 col-xl-6">
+                <div id="dashboardAnomalyTimelineChart" class="top-chart"></div>
+              </div>
+              <div class="col-12 col-xl-3">
+                <div id="dashboardAnomalyClassificationChart" class="top-chart"></div>
+              </div>
+              <div class="col-12 col-xl-3">
+                <div id="dashboardAnomalyProtocolChart" class="top-chart"></div>
+              </div>
+            </div>
+            <div class="table-wrap mt-3">
+              <table class="table table-sm align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Horario BRT</th>
+                    <th>Interface</th>
+                    <th>Direcao</th>
+                    <th>Protocolo</th>
+                    <th>Classificacao</th>
+                    <th class="text-end">Pico</th>
+                    <th>Evidencia</th>
+                    <th>Acao</th>
+                    <th>Origem</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="dashboardAnomaliesTable"></tbody>
+              </table>
             </div>
           </section>
 
@@ -4964,6 +5029,9 @@
       ports: echarts.init(document.getElementById('portsChart')),
       protocols: echarts.init(document.getElementById('protocolsChart')),
       tcpFlags: echarts.init(document.getElementById('tcpFlagsChart')),
+      dashboardAnomalyTimeline: echarts.init(document.getElementById('dashboardAnomalyTimelineChart')),
+      dashboardAnomalyClassification: echarts.init(document.getElementById('dashboardAnomalyClassificationChart')),
+      dashboardAnomalyProtocol: echarts.init(document.getElementById('dashboardAnomalyProtocolChart')),
       asnSrc: echarts.init(document.getElementById('asnSrcChart')),
       asnDst: echarts.init(document.getElementById('asnDstChart')),
       topFlow: echarts.init(document.getElementById('topFlowChart')),
@@ -5736,6 +5804,54 @@
     function dashboardInterfaceLabel(iface) {
       const name = iface.name || iface.if_alias || iface.if_name || `ifIndex ${iface.if_index}`;
       return `${name} (ifIndex ${formatNumber(iface.if_index)})`;
+    }
+
+    function dashboardSelectedInterfaceMeta(payload = null) {
+      if (payload?.interface) return payload.interface;
+      const interfaceId = selectedDashboardInterfaceId();
+      if (!interfaceId) return null;
+      const iface = dashboardInterfaceCache.find(item => Number(item.id) === Number(interfaceId));
+      if (!iface) return null;
+      return {
+        id: iface.id,
+        if_index: iface.if_index,
+        if_name: iface.if_name || iface.name || '',
+        if_alias: iface.if_alias || '',
+        label: iface.if_alias || iface.if_name || iface.name || `ifIndex ${iface.if_index}`,
+        title: `${iface.if_alias || iface.name || iface.if_name || `ifIndex ${iface.if_index}`} - ifIndex ${iface.if_index}`
+      };
+    }
+
+    function dashboardInterfaceTitleSuffix(payload = null) {
+      const iface = dashboardSelectedInterfaceMeta(payload);
+      if (!iface) return '';
+      return iface.title || `${iface.label || 'Interface'} - ifIndex ${iface.if_index}`;
+    }
+
+    function updateDashboardWidgetTitles(referencePayload = null) {
+      const suffix = dashboardInterfaceTitleSuffix(referencePayload);
+      const suffixText = suffix ? ` - ${suffix}` : '';
+      const zoneId = selectedDashboardZoneId();
+      const zoneDirection = document.getElementById('dashboardZoneDirection')?.value || 'both';
+      let srcTitle = 'Top IP origem';
+      let dstTitle = 'Top IP destino';
+      if (zoneId && (zoneDirection === 'transmits' || zoneDirection === 'out')) {
+        srcTitle = 'Top IP origem da zona';
+        dstTitle = 'Top IP destino externo';
+      } else if (zoneId && (zoneDirection === 'receives' || zoneDirection === 'in')) {
+        srcTitle = 'Top IP origem externa';
+        dstTitle = 'Top IP destino da zona';
+      } else if (zoneId) {
+        srcTitle = 'Top IP origem (envolvendo a zona)';
+        dstTitle = 'Top IP destino (envolvendo a zona)';
+      }
+      setText('bpsTitle', `Bits/s${suffixText}`);
+      setText('ppsTitle', `Packets/s${suffixText}`);
+      setText('srcIpTitle', `${srcTitle}${suffixText}`);
+      setText('dstIpTitle', `${dstTitle}${suffixText}`);
+      setText('portsTitle', `Top portas${suffixText}`);
+      setText('protocolsTitle', `Protocolos${suffixText}`);
+      setText('tcpFlagsTitle', `TCP flags${suffixText}`);
     }
 
     function renderDashboardSensorSelect() {
@@ -10314,15 +10430,20 @@
       return {
         animation: false,
         grid: {
-          left: 18,
-          right: manySeries ? 190 : 18,
-          top: manySeries ? 18 : 54,
-          bottom: manySeries ? 36 : 42,
+          left: 60,
+          right: 30,
+          top: 40,
+          bottom: 70,
           containLabel: true
         },
-        legend: manySeries
-          ? { type: 'scroll', orient: 'vertical', right: 0, top: 8, bottom: 8, width: 170, textStyle: { color: '#374151' } }
-          : { type: 'scroll', top: 0, left: 0, right: 0, textStyle: { color: '#374151' } },
+        legend: {
+          bottom: 0,
+          type: 'scroll',
+          orient: 'horizontal',
+          left: 0,
+          right: 0,
+          textStyle: { color: '#374151' }
+        },
         tooltip: {
           trigger: 'axis',
           formatter(params) {
@@ -10588,6 +10709,99 @@
           <td class="text-end">${formatNumber(item[thirdKey])}</td>
         </tr>
       `).join('') || `<tr><td colspan="3" class="text-muted">Sem dados</td></tr>`;
+    }
+
+    function dashboardAnomalyTime(value) {
+      if (!value) return '-';
+      return new Date(value).toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+    }
+
+    function anomalyTimelineOption(items) {
+      const rows = Array.isArray(items) ? items : [];
+      if (!rows.length) return emptyChartOption('Sem anomalias no periodo');
+      return {
+        animation: false,
+        grid: { left: 48, right: 16, top: 20, bottom: 34, containLabel: true },
+        tooltip: { trigger: 'axis' },
+        xAxis: {
+          type: 'time',
+          axisLabel: { color: '#6b7280', formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) }
+        },
+        yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        series: [{
+          name: 'Anomalias',
+          type: 'bar',
+          barMaxWidth: 18,
+          data: rows.map(item => [item.bucket_time, item.total || 0])
+        }]
+      };
+    }
+
+    function anomalyCountBarOption(items, labelKey) {
+      const rows = Array.isArray(items) ? items.slice(0, 8) : [];
+      if (!rows.length) return emptyChartOption('Sem dados');
+      const data = rows.slice().reverse();
+      return {
+        animation: false,
+        color: palette,
+        grid: { left: 8, right: 12, top: 8, bottom: 20, containLabel: true },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        yAxis: {
+          type: 'category',
+          data: data.map(item => item[labelKey] || '-'),
+          axisLabel: { color: '#374151', width: 100, overflow: 'truncate' }
+        },
+        series: [{ type: 'bar', barMaxWidth: 18, data: data.map(item => item.count || 0) }]
+      };
+    }
+
+    function dashboardAnomalyInterfaceText(item) {
+      if (!item) return '-';
+      const alias = item.interface_alias || item.if_alias || '';
+      const name = item.interface_name || item.if_name || '';
+      const ifIndex = item.interface_id ?? item.if_index ?? '';
+      return [alias || name || (ifIndex ? `ifIndex ${ifIndex}` : ''), alias && name ? name : '', ifIndex ? `ifIndex ${ifIndex}` : '']
+        .filter(Boolean)
+        .join(' - ') || '-';
+    }
+
+    function renderDashboardAnomalies(payload) {
+      const data = payload || {};
+      setText('dashboardAnomalyTotal', formatNumber(data.total_anomalies || 0));
+      setText('dashboardAnomalyProbable', formatNumber(data.probable_attacks || 0));
+      setText('dashboardAnomalyNegative', formatNumber(data.feedback_negative || 0));
+      setText('dashboardAnomalyLast', data.last_anomaly ? dashboardAnomalyTime(data.last_anomaly) : '-');
+      const affected = data.most_affected_interface;
+      setText('dashboardAnomalyInterface', affected ? `${dashboardAnomalyInterfaceText(affected)} (${formatNumber(affected.count || 0)})` : '-');
+      const protocol = data.most_common_protocol;
+      setText('dashboardAnomalyProtocol', protocol ? `${protocol.protocol || '-'} (${formatNumber(protocol.count || 0)})` : '-');
+      setText('dashboardAnomaliesStatus', `${formatNumber(data.total_anomalies || 0)} anomalias no periodo${data.cache_status === 'hit' ? ' - cache' : ''}.`);
+      charts.dashboardAnomalyTimeline.setOption(anomalyTimelineOption(data.timeline || []), true);
+      charts.dashboardAnomalyClassification.setOption(anomalyCountBarOption(data.by_classification || [], 'classification'), true);
+      charts.dashboardAnomalyProtocol.setOption(anomalyCountBarOption(data.by_protocol || [], 'protocol'), true);
+      const recent = Array.isArray(data.recent) ? data.recent : [];
+      document.getElementById('dashboardAnomaliesTable').innerHTML = recent.map(item => `
+        <tr>
+          <td>${escapeHtml(dashboardAnomalyTime(item.peak_time_local || item.peak_time_utc))}</td>
+          <td>${escapeHtml(dashboardAnomalyInterfaceText(item))}</td>
+          <td>${escapeHtml(item.direction || '-')}</td>
+          <td>${escapeHtml(item.protocol || '-')}</td>
+          <td>${escapeHtml(item.classification || '-')}</td>
+          <td class="text-end">${peakHunterMetricValue(item.peak_value || 0, item.metric || 'packets_s')}</td>
+          <td>${escapeHtml(item.evidence_status || '-')}</td>
+          <td>${escapeHtml(item.recommended_action || 'alert_only')}</td>
+          <td>${escapeHtml(item.analysis_source || 'manual')}${item.is_negative_sample ? ' / negativo' : ''}</td>
+          <td><button type="button" class="btn btn-sm btn-outline-secondary dashboard-anomaly-open" data-id="${escapeHtml(item.id)}"><i data-lucide="file-search"></i><span>Abrir</span></button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem anomalias no periodo.</td></tr>';
+      createIcons();
     }
 
     function asnCode(item) {
@@ -11549,6 +11763,10 @@
       dashboardAbortController = controller;
       try {
         updateDashboardZoneLabels();
+        setText('bpsReadout', 'Carregando...');
+        setText('ppsReadout', 'Carregando...');
+        setText('dashboardAnomaliesStatus', 'Carregando historico...');
+        renderTableMessage('dashboardAnomaliesTable', 10, 'Carregando...');
         await checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
         const bpsSeriesQuery = dashboardSeriesParams('bits_s');
@@ -11563,6 +11781,7 @@
           ['ports', fetchJSON('/api/tops/ports', topQuery, requestOptions)],
           ['protocols', fetchJSON('/api/tops/protocols', topQuery, requestOptions)],
           ['tcpFlags', fetchJSON('/api/tops/tcp-flags', topQuery, requestOptions)],
+          ['anomaliesSummary', fetchJSON('/api/dashboard/anomalies-summary', `${topQuery}&limit=20`, requestOptions)],
           ['asnSrc', fetchJSON('/api/tops/asn-src', topQuery, requestOptions)],
           ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)]
         ];
@@ -11583,6 +11802,7 @@
         const ppsAllItems = payloadSeries(payloads.pps);
         const bpsItems = limitDashboardSeries(bpsAllItems);
         const ppsItems = limitDashboardSeries(ppsAllItems);
+        updateDashboardWidgetTitles(payloads.bps?.__error ? payloads.srcIp : payloads.bps);
         if (payloads.bps.__error) {
           renderChartError(charts.bps);
           document.getElementById('bpsReadout').textContent = 'Erro ao carregar widget';
@@ -11642,6 +11862,15 @@
         } else {
           charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
           fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
+        }
+        if (payloads.anomaliesSummary.__error) {
+          setText('dashboardAnomaliesStatus', 'Erro ao carregar historico de anomalias');
+          renderChartError(charts.dashboardAnomalyTimeline);
+          renderChartError(charts.dashboardAnomalyClassification);
+          renderChartError(charts.dashboardAnomalyProtocol);
+          renderTableMessage('dashboardAnomaliesTable', 10, widgetErrorMessage(payloads.anomaliesSummary), true);
+        } else {
+          renderDashboardAnomalies(payloads.anomaliesSummary);
         }
         if (payloads.asnSrc.__error) {
           renderChartError(charts.asnSrc);
@@ -12758,6 +12987,13 @@
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
     document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
     document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.getElementById('dashboardAnomaliesTable').addEventListener('click', event => {
+      const button = event.target.closest('.dashboard-anomaly-open');
+      if (!button) return;
+      showView('peak-hunter');
+      showPeakHunterTab('history');
+      openPeakHunterHistoryDetail(button.dataset.id).catch(console.error);
+    });
     document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(() => debounceGlobalMapLoad()).catch(console.error));
     document.getElementById('mapInterface').addEventListener('change', () => debounceGlobalMapLoad());
     ['mapRangeMinutes', 'mapMode', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN', 'mapZone', 'mapZoneDirection', 'mapSeverity', 'mapAnomalyStatus'].forEach(id => {

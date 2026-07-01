@@ -686,6 +686,32 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("apiRequest(`/api/peak-hunter/from-anomaly/${anomalyId}`", html)
         self.assertNotIn("window.location.hostname}:8000", html)
 
+    def test_dashboard_frontend_anomalies_summary_and_interface_titles(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Historico de Anomalias", html)
+        self.assertIn("fetchJSON('/api/dashboard/anomalies-summary'", html)
+        self.assertIn('id="bpsTitle"', html)
+        self.assertIn('id="ppsTitle"', html)
+        self.assertIn("function updateDashboardWidgetTitles", html)
+        self.assertIn("bottom: 0", html)
+        self.assertIn("orient: 'horizontal'", html)
+        self.assertIn("type: 'scroll'", html)
+        self.assertIn("dashboard-anomaly-open", html)
+
+    def test_dashboard_backend_summary_cache_and_downsample_contract(self):
+        source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        summary_start = source.find("def dashboard_anomaly_summary_payload")
+        summary_end = source.find('@app.get("/api/dashboard/anomalies-summary")')
+        self.assertIn('@app.get("/api/dashboard/anomalies-summary")', source)
+        self.assertIn("def dashboard_anomaly_summary_payload", source)
+        self.assertIn("FROM peak_analysis", source)
+        self.assertIn("is_negative_sample = 0", source)
+        self.assertIn("cache_status", source)
+        self.assertIn("cache_ttl_seconds", source)
+        self.assertIn("def dashboard_bucket_seconds", source)
+        self.assertIn("toStartOfInterval(flow_time", source)
+        self.assertNotIn("apply_mitigation", source[summary_start:summary_end])
+
     def test_frontend_peak_hunter_error_messages_include_http_and_cors(self):
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Backend retornou HTTP", html)
