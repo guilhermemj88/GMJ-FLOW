@@ -477,6 +477,16 @@ def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
     _ensure_peak_analysis_column(conn, "operator_confirmed_ttl", "operator_confirmed_ttl TEXT NOT NULL DEFAULT ''")
     _ensure_peak_analysis_column(conn, "resolved_by_mitigation", "resolved_by_mitigation INTEGER NOT NULL DEFAULT 0")
     _ensure_peak_analysis_column(conn, "feedback_updated_at", "feedback_updated_at TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "analysis_source", "analysis_source TEXT NOT NULL DEFAULT 'manual'")
+    _ensure_peak_analysis_column(conn, "job_id", "job_id INTEGER")
+    _ensure_peak_analysis_column(conn, "run_id", "run_id INTEGER")
+    _ensure_peak_analysis_column(conn, "is_negative_sample", "is_negative_sample INTEGER NOT NULL DEFAULT 0")
+    _ensure_peak_analysis_column(conn, "duplicate_of_id", "duplicate_of_id INTEGER")
+    _ensure_peak_analysis_column(conn, "auto_runner_version", "auto_runner_version TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "monitored_interface_name", "monitored_interface_name TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "monitored_interface_alias", "monitored_interface_alias TEXT NOT NULL DEFAULT ''")
+    _ensure_peak_analysis_column(conn, "lookback_minutes", "lookback_minutes INTEGER")
+    _ensure_peak_analysis_column(conn, "interval_minutes", "interval_minutes INTEGER")
     _copy_legacy_json_column(conn, "dominant_group_json", "dominant_group", "{}")
     _copy_legacy_json_column(conn, "candidates_json", "candidates", "[]")
     _copy_legacy_json_column(conn, "candidates", "candidates_json", "[]")
@@ -542,6 +552,16 @@ def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None
         "result_json",
         "technical_report",
         "ai_summary",
+        "analysis_source",
+        "job_id",
+        "run_id",
+        "is_negative_sample",
+        "duplicate_of_id",
+        "auto_runner_version",
+        "monitored_interface_name",
+        "monitored_interface_alias",
+        "lookback_minutes",
+        "interval_minutes",
         "created_at",
     ]
     values = [record_value_for_db(record, column) for column in columns]
@@ -561,7 +581,7 @@ def record_value_for_db(record: dict[str, Any], column: str) -> Any:
     if column in {"candidates", "candidates_json"}:
         value = record.get("candidates_json") if column == "candidates_json" else record.get("candidates")
         return value if isinstance(value, str) else json.dumps(value or [], sort_keys=True, default=str)
-    if column in {"mitigation_allowed", "resolved_by_mitigation"}:
+    if column in {"mitigation_allowed", "resolved_by_mitigation", "is_negative_sample"}:
         return 1 if record.get(column) else 0
     if column == "peak_time_utc":
         return record.get("peak_time_utc") or record.get("peak_time") or ""
@@ -587,6 +607,10 @@ def record_value_for_db(record: dict[str, Any], column: str) -> Any:
         "dominant_protocol",
         "technical_report",
         "ai_summary",
+        "analysis_source",
+        "auto_runner_version",
+        "monitored_interface_name",
+        "monitored_interface_alias",
         "created_at",
     }
     if column in text_defaults:
@@ -604,6 +628,8 @@ def record_value_for_db(record: dict[str, Any], column: str) -> Any:
         return record.get(column) or 0
     if column in {"interface_id", "dominant_dst_port"}:
         return record.get(column)
+    if column in {"job_id", "run_id", "duplicate_of_id", "lookback_minutes", "interval_minutes"}:
+        return record.get(column)
     return record.get(column)
 
 
@@ -616,7 +642,7 @@ def list_peak_analysis_history(
     filters = filters or {}
     where = []
     values: list[Any] = []
-    for column in ("sensor", "direction", "metric", "protocol", "evidence_status", "classification", "operator_label"):
+    for column in ("sensor", "direction", "metric", "protocol", "evidence_status", "classification", "operator_label", "analysis_source"):
         value = str(filters.get(column) or "").strip()
         if value:
             where.append(f"{column} = ?")
@@ -627,6 +653,15 @@ def list_peak_analysis_history(
     if filters.get("interface_id") not in (None, ""):
         where.append("interface_id = ?")
         values.append(int(filters["interface_id"]))
+    if filters.get("job_id") not in (None, ""):
+        where.append("job_id = ?")
+        values.append(int(filters["job_id"]))
+    if filters.get("run_id") not in (None, ""):
+        where.append("run_id = ?")
+        values.append(int(filters["run_id"]))
+    if filters.get("is_negative_sample") not in (None, ""):
+        where.append("is_negative_sample = ?")
+        values.append(1 if filters.get("is_negative_sample") in (True, 1, "1", "true", "True", "sim", "yes") else 0)
     if filters.get("start_time"):
         where.append("peak_time >= ?")
         values.append(str(filters["start_time"]))
@@ -700,6 +735,16 @@ def peak_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "operator_confirmed_ttl": item.get("operator_confirmed_ttl") or "",
         "resolved_by_mitigation": bool(item.get("resolved_by_mitigation")),
         "feedback_updated_at": item.get("feedback_updated_at") or "",
+        "analysis_source": item.get("analysis_source") or "manual",
+        "job_id": item.get("job_id"),
+        "run_id": item.get("run_id"),
+        "is_negative_sample": bool(item.get("is_negative_sample")),
+        "duplicate_of_id": item.get("duplicate_of_id"),
+        "auto_runner_version": item.get("auto_runner_version") or "",
+        "monitored_interface_name": item.get("monitored_interface_name") or "",
+        "monitored_interface_alias": item.get("monitored_interface_alias") or "",
+        "lookback_minutes": item.get("lookback_minutes"),
+        "interval_minutes": item.get("interval_minutes"),
         "created_at": item.get("created_at"),
     }
 
@@ -870,6 +915,8 @@ def history_record(request: PeakHunterRequest, result: dict[str, Any], baseline:
         "result_json": result,
         "technical_report": result.get("technical_report") or "",
         "ai_summary": peak.get("ai_summary") or "",
+        "analysis_source": "manual",
+        "is_negative_sample": False,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
@@ -929,6 +976,12 @@ def dataset_case_from_history_item(item: dict[str, Any]) -> dict[str, Any]:
             "peak_time_utc": item.get("peak_time_utc") or "",
             "peak_time_local": item.get("peak_time_local") or "",
             "timezone": item.get("timezone") or "America/Sao_Paulo",
+            "analysis_source": item.get("analysis_source") or "manual",
+            "job_id": item.get("job_id"),
+            "run_id": item.get("run_id"),
+            "is_negative_sample": bool(item.get("is_negative_sample")),
+            "duplicate_of_id": item.get("duplicate_of_id"),
+            "operator_comment": item.get("operator_comment") or "",
         },
     }
 

@@ -3412,6 +3412,9 @@
             <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="history">
               <i data-lucide="database"></i><span>Historico / Dataset</span>
             </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="automation">
+              <i data-lucide="timer"></i><span>Automacao / Coleta</span>
+            </button>
           </div>
 
           <section id="peakHunterManualTab">
@@ -3751,6 +3754,30 @@
                   <option value="unknown">unknown</option>
                 </select>
               </div>
+              <div class="field">
+                <label for="peakHunterHistorySource">Origem</label>
+                <select id="peakHunterHistorySource" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="manual">manual</option>
+                  <option value="automatic">automatic</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryNegative">Amostra negativa</label>
+                <select id="peakHunterHistoryNegative" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="true">Sim</option>
+                  <option value="false">Nao</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryJobId">Job ID</label>
+                <input id="peakHunterHistoryJobId" type="number" min="1" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterHistoryRunId">Run ID</label>
+                <input id="peakHunterHistoryRunId" type="number" min="1" class="form-control form-control-sm">
+              </div>
             </div>
             <div class="table-wrap">
               <table class="table table-sm table-hover align-middle mb-0">
@@ -3768,6 +3795,10 @@
                     <th>Template</th>
                     <th>TTL</th>
                     <th>Acao</th>
+                    <th>Origem</th>
+                    <th>Job</th>
+                    <th>Run</th>
+                    <th>Neg.</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -3848,6 +3879,164 @@
                 </button>
               </div>
             </form>
+          </section>
+          </section>
+
+          <section id="peakHunterAutomationTab" class="d-none">
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <div class="panel-title">Automacao / Coleta</div>
+                <div id="peakHunterAutomationStatus" class="metric-readout">Jobs automaticos geram historico e dataset; mitigacao permanece desativada.</div>
+              </div>
+              <div class="toolbar">
+                <button id="peakHunterAutomationRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+                </button>
+                <button id="peakHunterJobNewButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="plus"></i><span>Novo</span>
+                </button>
+              </div>
+            </div>
+
+            <form id="peakHunterJobForm" class="peak-hunter-form-grid">
+              <input id="peakHunterJobId" type="hidden">
+              <div class="field">
+                <label for="peakHunterJobEnabled">Status</label>
+                <select id="peakHunterJobEnabled" class="form-select form-select-sm">
+                  <option value="false">Desativado</option>
+                  <option value="true">Ativado</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterJobName">Nome</label>
+                <input id="peakHunterJobName" class="form-control form-control-sm" placeholder="Coleta NE8000">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobSensor">Sensor</label>
+                <input id="peakHunterJobSensor" class="form-control form-control-sm" placeholder="Sensor">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobInterfaceId">Interface opcional</label>
+                <input id="peakHunterJobInterfaceId" type="number" min="1" class="form-control form-control-sm" placeholder="Vazio = todas">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobDirection">Direcao</label>
+                <select id="peakHunterJobDirection" class="form-select form-select-sm">
+                  <option value="both">both</option>
+                  <option value="sends">sends</option>
+                  <option value="receives">receives</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterJobMetric">Metrica</label>
+                <select id="peakHunterJobMetric" class="form-select form-select-sm">
+                  <option value="packets_s">packets_s</option>
+                  <option value="bits_s">bits_s</option>
+                  <option value="both">both</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterJobProtocol">Protocolo</label>
+                <input id="peakHunterJobProtocol" class="form-control form-control-sm" placeholder="udp, tcp, icmp">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobInterval">Intervalo min.</label>
+                <input id="peakHunterJobInterval" type="number" min="1" class="form-control form-control-sm" value="60">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobLookback">Lookback min.</label>
+                <input id="peakHunterJobLookback" type="number" min="1" class="form-control form-control-sm" value="60">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobSensitivity">Sensibilidade</label>
+                <select id="peakHunterJobSensitivity" class="form-select form-select-sm">
+                  <option value="high">Alta</option>
+                  <option value="medium">Media</option>
+                  <option value="low">Baixa</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterJobThreshold">Threshold</label>
+                <input id="peakHunterJobThreshold" type="number" min="0" step="any" class="form-control form-control-sm" placeholder="Dinamico">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobMinScore">Score minimo</label>
+                <input id="peakHunterJobMinScore" type="number" min="0" step="any" class="form-control form-control-sm" value="2">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobMinValue">Valor minimo</label>
+                <input id="peakHunterJobMinValue" type="number" min="0" step="any" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="peakHunterJobSaveNegative">Salvar negativos</label>
+                <select id="peakHunterJobSaveNegative" class="form-select form-select-sm">
+                  <option value="true">Sim</option>
+                  <option value="false">Nao</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="peakHunterJobNegativeInterval">Intervalo negativos</label>
+                <input id="peakHunterJobNegativeInterval" type="number" min="1" class="form-control form-control-sm" value="6">
+              </div>
+              <div class="d-flex justify-content-end align-items-end gap-2">
+                <button id="peakHunterJobDeleteButton" type="button" class="btn btn-sm btn-outline-danger">
+                  <i data-lucide="trash-2"></i><span>Excluir</span>
+                </button>
+                <button id="peakHunterJobSaveButton" type="submit" class="btn btn-sm btn-success">
+                  <i data-lucide="save"></i><span>Salvar job</span>
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Jobs</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Nome</th>
+                    <th>Status</th>
+                    <th>Sensor</th>
+                    <th>Interface</th>
+                    <th>Direcao</th>
+                    <th>Metrica</th>
+                    <th>Intervalo</th>
+                    <th>Ultimo sucesso</th>
+                    <th>Ultimo erro</th>
+                    <th>Acoes</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterJobsTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Execucoes recentes</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Run</th>
+                    <th>Job</th>
+                    <th>Status</th>
+                    <th>Inicio</th>
+                    <th>Sensor</th>
+                    <th>Interface</th>
+                    <th>Direcao</th>
+                    <th>Metrica</th>
+                    <th class="text-end">Picos</th>
+                    <th class="text-end">Casos</th>
+                    <th class="text-end">Neg.</th>
+                    <th>Erro</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterRunsTable"></tbody>
+              </table>
+            </div>
           </section>
           </section>
         </section>
@@ -4810,6 +4999,8 @@
     let peakHunterLastResult = null;
     let peakHunterLastHistory = [];
     let peakHunterCurrentHistoryId = null;
+    let peakHunterAutomationJobs = [];
+    let peakHunterCurrentJobId = null;
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -8519,15 +8710,17 @@
     }
 
     function showPeakHunterTab(tab) {
-      const active = tab === 'history' ? 'history' : 'manual';
+      const active = ['history', 'automation'].includes(tab) ? tab : 'manual';
       document.getElementById('peakHunterManualTab').classList.toggle('d-none', active !== 'manual');
       document.getElementById('peakHunterHistoryTab').classList.toggle('d-none', active !== 'history');
+      document.getElementById('peakHunterAutomationTab').classList.toggle('d-none', active !== 'automation');
       document.querySelectorAll('.peak-hunter-tab-button').forEach(button => {
         const isActive = button.dataset.peakHunterTab === active;
         button.classList.toggle('btn-success', isActive);
         button.classList.toggle('btn-outline-secondary', !isActive);
       });
       if (active === 'history') loadPeakHunterHistory().catch(console.error);
+      if (active === 'automation') loadPeakHunterAutomation().catch(console.error);
       setTimeout(() => charts.peakHunterSeries.resize(), 50);
     }
 
@@ -8537,10 +8730,18 @@
       const interfaceId = document.getElementById('peakHunterHistoryInterfaceId')?.value || document.getElementById('peakHunterInterfaceId')?.value || document.getElementById('peakHunterManualInterfaceId')?.value;
       const evidence = document.getElementById('peakHunterHistoryEvidence')?.value;
       const label = document.getElementById('peakHunterHistoryLabel')?.value;
+      const source = document.getElementById('peakHunterHistorySource')?.value;
+      const negative = document.getElementById('peakHunterHistoryNegative')?.value;
+      const jobId = document.getElementById('peakHunterHistoryJobId')?.value;
+      const runId = document.getElementById('peakHunterHistoryRunId')?.value;
       if (sensor) query.set('sensor', sensor);
       if (interfaceId) query.set('interface_id', interfaceId);
       if (evidence) query.set('evidence_status', evidence);
       if (label) query.set('operator_label', label);
+      if (source) query.set('analysis_source', source);
+      if (negative) query.set('is_negative_sample', negative);
+      if (jobId) query.set('job_id', jobId);
+      if (runId) query.set('run_id', runId);
       query.set('limit', '100');
       return query;
     }
@@ -8591,6 +8792,168 @@
       query.set('format', 'jsonl');
       await downloadAuthFile(`${API_BASE}/api/peak-hunter/export-dataset?${query}`, 'gmj-peak-hunter-dataset.jsonl');
       setText('peakHunterHistoryStatus', 'Dataset JSONL exportado.');
+    }
+
+    function peakHunterOptionalNumber(id) {
+      const value = document.getElementById(id)?.value;
+      if (value === undefined || value === null || String(value).trim() === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function peakHunterJobPayload() {
+      return {
+        enabled: document.getElementById('peakHunterJobEnabled').value === 'true',
+        name: document.getElementById('peakHunterJobName').value.trim() || 'Peak Hunter automation',
+        sensor: document.getElementById('peakHunterJobSensor').value.trim(),
+        interface_id: peakHunterOptionalNumber('peakHunterJobInterfaceId'),
+        direction: document.getElementById('peakHunterJobDirection').value,
+        metric: document.getElementById('peakHunterJobMetric').value,
+        protocol: document.getElementById('peakHunterJobProtocol').value.trim() || null,
+        interval_minutes: peakHunterOptionalNumber('peakHunterJobInterval') || 60,
+        lookback_minutes: peakHunterOptionalNumber('peakHunterJobLookback') || 60,
+        threshold: peakHunterOptionalNumber('peakHunterJobThreshold'),
+        sensitivity: document.getElementById('peakHunterJobSensitivity').value,
+        save_negative_samples: document.getElementById('peakHunterJobSaveNegative').value === 'true',
+        negative_sample_interval_runs: peakHunterOptionalNumber('peakHunterJobNegativeInterval') || 6,
+        min_peak_score: peakHunterOptionalNumber('peakHunterJobMinScore') ?? 2,
+        min_peak_value: peakHunterOptionalNumber('peakHunterJobMinValue')
+      };
+    }
+
+    function resetPeakHunterJobForm() {
+      peakHunterCurrentJobId = null;
+      document.getElementById('peakHunterJobForm').reset();
+      setValue('peakHunterJobId', '');
+      setValue('peakHunterJobEnabled', 'false');
+      setValue('peakHunterJobName', 'Peak Hunter automation');
+      setValue('peakHunterJobDirection', 'both');
+      setValue('peakHunterJobMetric', 'packets_s');
+      setValue('peakHunterJobInterval', '60');
+      setValue('peakHunterJobLookback', '60');
+      setValue('peakHunterJobSensitivity', 'high');
+      setValue('peakHunterJobSaveNegative', 'true');
+      setValue('peakHunterJobNegativeInterval', '6');
+      setValue('peakHunterJobMinScore', '2');
+      setText('peakHunterAutomationStatus', 'Novo job pronto para configurar.');
+    }
+
+    function fillPeakHunterJobForm(job) {
+      peakHunterCurrentJobId = job?.id || null;
+      setValue('peakHunterJobId', job?.id || '');
+      setValue('peakHunterJobEnabled', job?.enabled ? 'true' : 'false');
+      setValue('peakHunterJobName', job?.name || 'Peak Hunter automation');
+      setValue('peakHunterJobSensor', job?.sensor || '');
+      setValue('peakHunterJobInterfaceId', job?.interface_id || '');
+      setValue('peakHunterJobDirection', job?.direction || 'both');
+      setValue('peakHunterJobMetric', job?.metric || 'packets_s');
+      setValue('peakHunterJobProtocol', job?.protocol || '');
+      setValue('peakHunterJobInterval', job?.interval_minutes || 60);
+      setValue('peakHunterJobLookback', job?.lookback_minutes || 60);
+      setValue('peakHunterJobSensitivity', job?.sensitivity || 'high');
+      setValue('peakHunterJobThreshold', job?.threshold ?? '');
+      setValue('peakHunterJobMinScore', job?.min_peak_score ?? 2);
+      setValue('peakHunterJobMinValue', job?.min_peak_value ?? '');
+      setValue('peakHunterJobSaveNegative', job?.save_negative_samples ? 'true' : 'false');
+      setValue('peakHunterJobNegativeInterval', job?.negative_sample_interval_runs || 6);
+      setText('peakHunterAutomationStatus', `Editando job #${job?.id || '-'}.`);
+    }
+
+    async function savePeakHunterJob() {
+      const payload = peakHunterJobPayload();
+      const jobId = peakHunterCurrentJobId || peakHunterOptionalNumber('peakHunterJobId');
+      const method = jobId ? 'PATCH' : 'POST';
+      const path = jobId ? `/api/peak-hunter/automation/jobs/${jobId}` : '/api/peak-hunter/automation/jobs';
+      const job = await apiRequest(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      fillPeakHunterJobForm(job);
+      await loadPeakHunterAutomation();
+      setText('peakHunterAutomationStatus', `Job #${job.id} salvo.`);
+    }
+
+    async function deletePeakHunterJob() {
+      const jobId = peakHunterCurrentJobId || peakHunterOptionalNumber('peakHunterJobId');
+      if (!jobId) {
+        resetPeakHunterJobForm();
+        return;
+      }
+      if (!window.confirm(`Excluir job #${jobId}?`)) return;
+      await apiRequest(`/api/peak-hunter/automation/jobs/${jobId}`, { method: 'DELETE' });
+      resetPeakHunterJobForm();
+      await loadPeakHunterAutomation();
+      setText('peakHunterAutomationStatus', `Job #${jobId} excluido.`);
+    }
+
+    async function runPeakHunterAutomationJob(jobId) {
+      if (!jobId) return;
+      setText('peakHunterAutomationStatus', `Executando job #${jobId} agora...`);
+      const payload = await apiRequest(`/api/peak-hunter/automation/jobs/${jobId}/run-now`, { method: 'POST' });
+      const runs = Array.isArray(payload.items) ? payload.items : [];
+      await loadPeakHunterAutomation();
+      await loadPeakHunterHistory();
+      setText('peakHunterAutomationStatus', `Job #${jobId} executado: ${formatNumber(runs.length)} combinacoes.`);
+    }
+
+    async function loadPeakHunterAutomation() {
+      try {
+        const [jobsPayload, runsPayload] = await Promise.all([
+          apiRequest('/api/peak-hunter/automation/jobs'),
+          apiRequest('/api/peak-hunter/automation/runs?limit=100')
+        ]);
+        peakHunterAutomationJobs = Array.isArray(jobsPayload.items) ? jobsPayload.items : [];
+        renderPeakHunterJobs(peakHunterAutomationJobs);
+        renderPeakHunterRuns(Array.isArray(runsPayload.items) ? runsPayload.items : []);
+        setText('peakHunterAutomationStatus', `${formatNumber(peakHunterAutomationJobs.length)} jobs configurados.`);
+      } catch (error) {
+        setText('peakHunterAutomationStatus', `Falha: ${error.message}`);
+      }
+    }
+
+    function renderPeakHunterJobs(jobs) {
+      document.getElementById('peakHunterJobsTable').innerHTML = jobs.map(job => `
+        <tr>
+          <td>${escapeHtml(job.id)}</td>
+          <td>${escapeHtml(job.name || '-')}</td>
+          <td>${job.enabled ? 'Ativo' : 'Inativo'}</td>
+          <td>${escapeHtml(job.sensor || '-')}</td>
+          <td>${escapeHtml(job.interface_id ?? 'todas')}</td>
+          <td>${escapeHtml(job.direction || '-')}</td>
+          <td>${escapeHtml(job.metric || '-')}</td>
+          <td>${escapeHtml(job.interval_minutes || '-')} min</td>
+          <td>${escapeHtml(job.last_success_at ? formatPeakHunterLocal(job.last_success_at) : '-')}</td>
+          <td>${escapeHtml(job.last_error_at ? formatPeakHunterLocal(job.last_error_at) : '-')}</td>
+          <td>
+            <div class="toolbar">
+              <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-job-edit" data-id="${escapeHtml(job.id)}"><i data-lucide="settings"></i><span>Editar</span></button>
+              <button type="button" class="btn btn-sm btn-outline-success peak-hunter-job-run" data-id="${escapeHtml(job.id)}"><i data-lucide="play"></i><span>Rodar</span></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-job-history" data-id="${escapeHtml(job.id)}"><i data-lucide="database"></i><span>Historico</span></button>
+            </div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="11" class="text-muted">Nenhum job configurado.</td></tr>';
+      createIcons();
+    }
+
+    function renderPeakHunterRuns(runs) {
+      document.getElementById('peakHunterRunsTable').innerHTML = runs.map(run => `
+        <tr>
+          <td>${escapeHtml(run.id)}</td>
+          <td>${escapeHtml(run.job_id || '-')}</td>
+          <td>${escapeHtml(run.status || '-')}</td>
+          <td>${escapeHtml(run.started_at ? formatPeakHunterLocal(run.started_at) : '-')}</td>
+          <td>${escapeHtml(run.sensor || '-')}</td>
+          <td>${escapeHtml(run.interface_id ?? '-')}</td>
+          <td>${escapeHtml(run.direction || '-')}</td>
+          <td>${escapeHtml(run.metric || '-')}</td>
+          <td class="text-end">${formatNumber(run.peaks_detected || 0)}</td>
+          <td class="text-end">${formatNumber(run.cases_saved || 0)}</td>
+          <td class="text-end">${formatNumber(run.negative_sample_saved || 0)}</td>
+          <td>${escapeHtml(run.error_message || '-')}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="12" class="text-muted">Nenhuma execucao registrada.</td></tr>';
     }
 
     function renderPeakHunterResult(payload) {
@@ -8800,10 +9163,14 @@
               <td>${escapeHtml(peakHunterCandidateTemplate(candidate))}</td>
               <td>${escapeHtml(peakHunterCandidateTtl(candidate))}</td>
               <td>${escapeHtml(candidate.action || item.recommended_action || '-')}</td>
+              <td>${escapeHtml(item.analysis_source || 'manual')}</td>
+              <td>${escapeHtml(item.job_id ?? '-')}</td>
+              <td>${escapeHtml(item.run_id ?? '-')}</td>
+              <td>${item.is_negative_sample ? 'Sim' : 'Nao'}</td>
               <td><button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-history-detail" data-id="${escapeHtml(item.id)}"><i data-lucide="file-search"></i><span>Abrir</span></button></td>
             </tr>
           `;
-        }).join('') || '<tr><td colspan="13" class="text-muted">Sem historico.</td></tr>';
+        }).join('') || '<tr><td colspan="17" class="text-muted">Sem historico.</td></tr>';
         createIcons();
       } catch (error) {
         document.getElementById('peakHunterHistoryStatus').textContent = `Falha: ${error.message}`;
@@ -12514,7 +12881,7 @@
     document.querySelectorAll('.peak-hunter-tab-button').forEach(button => {
       button.addEventListener('click', () => showPeakHunterTab(button.dataset.peakHunterTab));
     });
-    ['peakHunterHistorySensor', 'peakHunterHistoryInterfaceId', 'peakHunterHistoryEvidence', 'peakHunterHistoryLabel'].forEach(id => {
+    ['peakHunterHistorySensor', 'peakHunterHistoryInterfaceId', 'peakHunterHistoryEvidence', 'peakHunterHistoryLabel', 'peakHunterHistorySource', 'peakHunterHistoryNegative', 'peakHunterHistoryJobId', 'peakHunterHistoryRunId'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => loadPeakHunterHistory().catch(console.error));
       document.getElementById(id).addEventListener('keydown', event => {
         if (event.key === 'Enter') loadPeakHunterHistory().catch(console.error);
@@ -12534,6 +12901,37 @@
     document.getElementById('peakHunterCopyReportButton').addEventListener('click', () => copyPeakHunterReport().catch(console.error));
     document.getElementById('peakHunterExportJsonlButton').addEventListener('click', exportPeakHunterJsonl);
     document.getElementById('peakHunterExportPdfButton').addEventListener('click', exportPeakHunterPdf);
+    document.getElementById('peakHunterAutomationRefreshButton').addEventListener('click', () => loadPeakHunterAutomation().catch(console.error));
+    document.getElementById('peakHunterJobNewButton').addEventListener('click', resetPeakHunterJobForm);
+    document.getElementById('peakHunterJobDeleteButton').addEventListener('click', () => deletePeakHunterJob().catch(error => setText('peakHunterAutomationStatus', `Falha: ${error.message}`)));
+    document.getElementById('peakHunterJobForm').addEventListener('submit', event => {
+      event.preventDefault();
+      savePeakHunterJob().catch(error => setText('peakHunterAutomationStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('peakHunterJobsTable').addEventListener('click', event => {
+      const editButton = event.target.closest('.peak-hunter-job-edit');
+      const runButton = event.target.closest('.peak-hunter-job-run');
+      const historyButton = event.target.closest('.peak-hunter-job-history');
+      if (editButton) {
+        const job = peakHunterAutomationJobs.find(item => String(item.id) === String(editButton.dataset.id));
+        if (job) fillPeakHunterJobForm(job);
+      }
+      if (runButton) runPeakHunterAutomationJob(runButton.dataset.id).catch(error => setText('peakHunterAutomationStatus', `Falha: ${error.message}`));
+      if (historyButton) {
+        setValue('peakHunterHistorySource', 'automatic');
+        setValue('peakHunterHistoryJobId', historyButton.dataset.id);
+        setValue('peakHunterHistoryRunId', '');
+        showPeakHunterTab('history');
+      }
+    });
+    document.getElementById('peakHunterRunsTable').addEventListener('click', event => {
+      const row = event.target.closest('tr');
+      const runId = row?.firstElementChild?.textContent?.trim();
+      if (!runId || runId === 'Nenhuma execucao registrada.') return;
+      setValue('peakHunterHistorySource', 'automatic');
+      setValue('peakHunterHistoryRunId', runId);
+      showPeakHunterTab('history');
+    });
     document.getElementById('saveAiMitigationButton').addEventListener('click', () => saveAiMitigationSettings().catch(console.error));
     document.getElementById('testAiMitigationButton').addEventListener('click', () => testAiMitigation().catch(console.error));
     document.getElementById('aiProfile').addEventListener('change', () => {

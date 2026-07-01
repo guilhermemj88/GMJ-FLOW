@@ -25,6 +25,16 @@ from app.services.peak_hunter import (
     save_peak_analysis,
     update_peak_analysis_feedback,
 )
+from app.services.peak_hunter_runner import (
+    create_peak_hunter_job,
+    delete_peak_hunter_job,
+    ensure_peak_hunter_automation_db,
+    get_peak_hunter_job,
+    list_peak_hunter_jobs,
+    list_peak_hunter_runs,
+    run_peak_hunter_job_now,
+    update_peak_hunter_job,
+)
 
 
 router = APIRouter(prefix="/api/peak-hunter", tags=["peak-hunter"])
@@ -54,6 +64,24 @@ class PeakHunterFeedbackPayload(BaseModel):
     operator_confirmed_template: str = ""
     operator_confirmed_ttl: str = ""
     resolved_by_mitigation: bool = False
+
+
+class PeakHunterJobPayload(BaseModel):
+    enabled: bool = False
+    name: str = "Peak Hunter automation"
+    sensor: str = ""
+    interface_id: int | None = Field(None, ge=1)
+    direction: str = "both"
+    metric: str = "packets_s"
+    protocol: str | None = None
+    interval_minutes: int = Field(60, ge=1)
+    lookback_minutes: int = Field(60, ge=1)
+    threshold: float | None = None
+    sensitivity: str = "high"
+    save_negative_samples: bool = True
+    negative_sample_interval_runs: int = Field(6, ge=1)
+    min_peak_score: float = 2.0
+    min_peak_value: float | None = None
 
 
 @router.post("/analyze")
@@ -152,6 +180,10 @@ def peak_hunter_history(
     protocol: str = "",
     mitigation_allowed: str = "",
     operator_label: str = "",
+    analysis_source: str = "",
+    is_negative_sample: str = "",
+    job_id: int | None = Query(None, ge=1),
+    run_id: int | None = Query(None, ge=1),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     filters = {
@@ -166,6 +198,10 @@ def peak_hunter_history(
         "protocol": protocol,
         "mitigation_allowed": mitigation_allowed,
         "operator_label": operator_label,
+        "analysis_source": analysis_source,
+        "is_negative_sample": is_negative_sample,
+        "job_id": job_id,
+        "run_id": run_id,
     }
     with _sqlite_connect() as conn:
         items = list_peak_analysis_history(conn, filters, limit=limit)
@@ -208,6 +244,10 @@ def peak_hunter_export_dataset(
     classification: str = "",
     mitigation_allowed: str = "",
     operator_label: str = "",
+    analysis_source: str = "",
+    is_negative_sample: str = "",
+    job_id: int | None = Query(None, ge=1),
+    run_id: int | None = Query(None, ge=1),
     limit: int = Query(1000, ge=1, le=10000),
 ) -> Response:
     if format != "jsonl":
@@ -224,6 +264,10 @@ def peak_hunter_export_dataset(
         "classification": classification,
         "mitigation_allowed": mitigation_allowed,
         "operator_label": operator_label,
+        "analysis_source": analysis_source,
+        "is_negative_sample": is_negative_sample,
+        "job_id": job_id,
+        "run_id": run_id,
     }
     with _sqlite_connect() as conn:
         body = export_peak_analysis_dataset(conn, filters, limit=limit)
@@ -232,6 +276,65 @@ def peak_hunter_export_dataset(
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="gmj-peak-hunter-dataset.jsonl"'},
     )
+
+
+@router.get("/automation/jobs")
+def peak_hunter_automation_jobs() -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        jobs = list_peak_hunter_jobs(conn)
+    return {"items": jobs}
+
+
+@router.post("/automation/jobs")
+def peak_hunter_automation_create_job(payload: PeakHunterJobPayload) -> dict[str, Any]:
+    try:
+        with _sqlite_connect() as conn:
+            job = create_peak_hunter_job(conn, payload.dict())
+            conn.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return job
+
+
+@router.patch("/automation/jobs/{job_id}")
+def peak_hunter_automation_update_job(job_id: int, payload: PeakHunterJobPayload) -> dict[str, Any]:
+    try:
+        with _sqlite_connect() as conn:
+            job = update_peak_hunter_job(conn, job_id, payload.dict())
+            conn.commit()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job nao encontrado") from exc
+    return job
+
+
+@router.delete("/automation/jobs/{job_id}")
+def peak_hunter_automation_delete_job(job_id: int) -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        existing = get_peak_hunter_job(conn, job_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Job nao encontrado")
+        delete_peak_hunter_job(conn, job_id)
+        conn.commit()
+    return {"deleted": True}
+
+
+@router.post("/automation/jobs/{job_id}/run-now")
+def peak_hunter_automation_run_now(job_id: int) -> dict[str, Any]:
+    try:
+        runs = run_peak_hunter_job_now(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Job nao encontrado") from exc
+    return {"items": runs}
+
+
+@router.get("/automation/runs")
+def peak_hunter_automation_runs(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        ensure_peak_hunter_automation_db(conn)
+        runs = list_peak_hunter_runs(conn, limit=limit)
+    return {"items": runs}
 
 
 @router.get("/from-anomaly/{anomaly_id}")

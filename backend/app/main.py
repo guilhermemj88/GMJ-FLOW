@@ -36,6 +36,7 @@ from starlette.responses import JSONResponse, Response
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
 from app.services.peak_hunter import ensure_peak_analysis_db
+from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, run_due_peak_hunter_jobs
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -138,6 +139,8 @@ ASN_RESOLVER_MAX_ATTEMPTS = int(os.getenv("GMJFLOW_ASN_RESOLVER_MAX_ATTEMPTS", "
 ASN_CACHE_TTL_DAYS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_DAYS", "30"))
 ASN_CACHE_TTL_SECONDS = int(os.getenv("GMJFLOW_ASN_CACHE_TTL_SECONDS", str(ASN_CACHE_TTL_DAYS * 86400)))
 ASN_RESOLVER_STOP = threading.Event()
+PEAK_HUNTER_RUNNER_STOP = threading.Event()
+PEAK_HUNTER_RUNNER_THREAD: threading.Thread | None = None
 SQLITE_MIGRATION_LOCK = threading.Lock()
 SENSOR_DB_READY = False
 DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -3016,6 +3019,7 @@ def ensure_sensor_db() -> None:
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
         ensure_peak_analysis_db(conn)
+        ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
@@ -3050,6 +3054,7 @@ def startup() -> None:
     start_database_retention_thread()
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
+    start_peak_hunter_runner_thread()
 
 
 @app.on_event("shutdown")
@@ -3058,6 +3063,34 @@ def shutdown() -> None:
     DATABASE_RETENTION_STOP.set()
     ANOMALY_DETECTION_STOP.set()
     ASN_RESOLVER_STOP.set()
+    PEAK_HUNTER_RUNNER_STOP.set()
+
+
+def peak_hunter_runner_enabled() -> bool:
+    return os.getenv("GMJFLOW_PEAK_HUNTER_RUNNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def peak_hunter_runner_loop() -> None:
+    while not PEAK_HUNTER_RUNNER_STOP.wait(60):
+        try:
+            run_due_peak_hunter_jobs()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no runner automatico do Peak Hunter: %s", exc)
+
+
+def start_peak_hunter_runner_thread() -> None:
+    global PEAK_HUNTER_RUNNER_THREAD
+    if not peak_hunter_runner_enabled():
+        return
+    if PEAK_HUNTER_RUNNER_THREAD is not None and PEAK_HUNTER_RUNNER_THREAD.is_alive():
+        return
+    PEAK_HUNTER_RUNNER_STOP.clear()
+    PEAK_HUNTER_RUNNER_THREAD = threading.Thread(
+        target=peak_hunter_runner_loop,
+        name="gmj-flow-peak-hunter-runner",
+        daemon=True,
+    )
+    PEAK_HUNTER_RUNNER_THREAD.start()
 
 
 def clean_text(value: Any) -> str:

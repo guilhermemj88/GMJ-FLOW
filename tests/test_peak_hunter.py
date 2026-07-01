@@ -332,6 +332,180 @@ class PeakHunterTest(unittest.TestCase):
         self.assertTrue(any(line["expected_output"]["evidence_status"] == "insufficient" for line in lines))
         self.assertIn("technical_report", lines[0]["input"])
 
+    def test_peak_hunter_job_crud(self):
+        from app.services.peak_hunter_runner import (
+            create_peak_hunter_job,
+            delete_peak_hunter_job,
+            list_peak_hunter_jobs,
+            update_peak_hunter_job,
+        )
+
+        with temporary_peak_db():
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                jobs = list_peak_hunter_jobs(conn)
+                self.assertEqual(jobs[0]["name"], "Default NE8000 dataset collector")
+                job = create_peak_hunter_job(
+                    conn,
+                    {
+                        "enabled": True,
+                        "name": "auto edge",
+                        "sensor": "edge-a",
+                        "interface_id": 10,
+                        "direction": "sends",
+                        "metric": "packets_s",
+                    },
+                )
+                self.assertTrue(job["enabled"])
+                updated = update_peak_hunter_job(conn, job["id"], {**job, "enabled": False, "lookback_minutes": 30})
+                self.assertFalse(updated["enabled"])
+                self.assertEqual(updated["lookback_minutes"], 30)
+                cleared = update_peak_hunter_job(conn, job["id"], {**updated, "interface_id": None, "threshold": None, "protocol": None})
+                self.assertIsNone(cleared["interface_id"])
+                self.assertIsNone(cleared["threshold"])
+                delete_peak_hunter_job(conn, job["id"])
+                conn.commit()
+                self.assertTrue(all(item["id"] != job["id"] for item in list_peak_hunter_jobs(conn)))
+            finally:
+                conn.close()
+
+    def test_peak_hunter_runner_expands_and_saves_automatic_cases(self):
+        from app.services.peak_hunter import list_peak_analysis_history
+        from app.services.peak_hunter_runner import create_peak_hunter_job, run_peak_hunter_job_now
+
+        calls = []
+
+        def fake_interfaces(sensor):
+            return [{"interface_id": 10, "ifName": "Eth10", "ifAlias": "Cliente"}]
+
+        def fake_series(request):
+            calls.append((request.interface_id, request.direction, request.metric))
+            key = request.metric
+            return [
+                {"time": self.base_time.isoformat(), key: 1000},
+                {"time": (self.base_time + timedelta(seconds=5)).isoformat(), key: 120000 if key == "packets_s" else 3_000_000},
+                {"time": (self.base_time + timedelta(seconds=10)).isoformat(), key: 1000},
+            ]
+
+        with temporary_peak_db():
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                job = create_peak_hunter_job(
+                    conn,
+                    {
+                        "enabled": True,
+                        "name": "expand",
+                        "sensor": "edge-a",
+                        "interface_id": None,
+                        "direction": "both",
+                        "metric": "both",
+                        "threshold": 50_000,
+                        "min_peak_score": 0,
+                    },
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            runs = run_peak_hunter_job_now(
+                job["id"],
+                series_fetcher=fake_series,
+                flow_fetcher=self._flows_with_dominant_5s,
+                interface_fetcher=fake_interfaces,
+                now=self.base_time + timedelta(minutes=1),
+            )
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                items = list_peak_analysis_history(conn, {"analysis_source": "automatic"}, limit=10)
+            finally:
+                conn.close()
+        self.assertEqual(len(runs), 4)
+        self.assertEqual(set(calls), {(10, "sends", "packets_s"), (10, "receives", "packets_s"), (10, "sends", "bits_s"), (10, "receives", "bits_s")})
+        self.assertEqual(len(items), 4)
+        self.assertTrue(all(item["analysis_source"] == "automatic" for item in items))
+        self.assertTrue(all(candidate.get("apply_enabled") is False for item in items for candidate in item["candidates"]))
+
+    def test_peak_hunter_runner_deduplicates_existing_peak(self):
+        from app.services.peak_hunter import list_peak_analysis_history
+        from app.services.peak_hunter_runner import create_peak_hunter_job, run_peak_hunter_job_now
+
+        with temporary_peak_db():
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                job = create_peak_hunter_job(
+                    conn,
+                    {
+                        "enabled": True,
+                        "name": "dedupe",
+                        "sensor": "edge-a",
+                        "interface_id": 10,
+                        "direction": "sends",
+                        "metric": "packets_s",
+                        "threshold": 50_000,
+                    },
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            run_peak_hunter_job_now(job["id"], self._series, self._flows_with_dominant_5s, lambda _sensor: [], self.base_time + timedelta(minutes=1))
+            runs = run_peak_hunter_job_now(job["id"], self._series, self._flows_with_dominant_5s, lambda _sensor: [], self.base_time + timedelta(minutes=1))
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                items = list_peak_analysis_history(conn, {"analysis_source": "automatic"}, limit=10)
+            finally:
+                conn.close()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(runs[0]["status"], "skipped_duplicate")
+
+    def test_peak_hunter_runner_saves_negative_sample_and_exports_jsonl(self):
+        from app.services.peak_hunter import export_peak_analysis_dataset, list_peak_analysis_history
+        from app.services.peak_hunter_runner import create_peak_hunter_job, run_peak_hunter_job_now
+
+        with temporary_peak_db():
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                job = create_peak_hunter_job(
+                    conn,
+                    {
+                        "enabled": True,
+                        "name": "negative",
+                        "sensor": "edge-a",
+                        "interface_id": 10,
+                        "direction": "sends",
+                        "metric": "packets_s",
+                        "save_negative_samples": True,
+                        "negative_sample_interval_runs": 1,
+                    },
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            runs = run_peak_hunter_job_now(
+                job["id"],
+                series_fetcher=lambda _request: [{"time": self.base_time.isoformat(), "packets_s": 1000}],
+                flow_fetcher=lambda _request, _time, _window: [],
+                interface_fetcher=lambda _sensor: [],
+                now=self.base_time + timedelta(minutes=1),
+            )
+            conn = sqlite3.connect(os.environ["GMJFLOW_DB_PATH"])
+            conn.row_factory = sqlite3.Row
+            try:
+                items = list_peak_analysis_history(conn, {"is_negative_sample": "true"}, limit=10)
+                jsonl = export_peak_analysis_dataset(conn, {"analysis_source": "automatic"}, limit=10)
+            finally:
+                conn.close()
+        self.assertEqual(runs[0]["negative_sample_saved"], 1)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["classification"], "no_significant_peak")
+        case = json.loads(jsonl.splitlines()[0])
+        self.assertTrue(case["metadata"]["is_negative_sample"])
+        self.assertEqual(case["metadata"]["analysis_source"], "automatic")
+
     def test_from_anomaly_prefills_window(self):
         if peak_hunter_api is None:
             self.skipTest("fastapi nao instalado")
@@ -507,6 +681,8 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("apiRequest('/api/peak-hunter/options/sensors'", html)
         self.assertIn("apiRequest('/api/peak-hunter/analyze'", html)
         self.assertIn("apiRequest(`/api/peak-hunter/history?", html)
+        self.assertIn("apiRequest('/api/peak-hunter/automation/jobs')", html)
+        self.assertIn("apiRequest('/api/peak-hunter/automation/runs?limit=100')", html)
         self.assertIn("apiRequest(`/api/peak-hunter/from-anomaly/${anomalyId}`", html)
         self.assertNotIn("window.location.hostname}:8000", html)
 
