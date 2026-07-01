@@ -9,6 +9,12 @@ import clickhouse_connect
 from app.services.peak_hunter import PeakHunterRequest
 
 
+class ClickHouseQueryError(RuntimeError):
+    def __init__(self, query_context: str, message: str):
+        super().__init__(message)
+        self.query_context = query_context
+
+
 def get_client() -> Any:
     return clickhouse_connect.get_client(
         host=os.getenv("CLICKHOUSE_HOST", "clickhouse"),
@@ -29,6 +35,13 @@ def rows_as_dicts(result: Any) -> list[dict[str, Any]]:
 
 def query_clickhouse(query: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     return rows_as_dicts(get_client().query(query, parameters=parameters or {}))
+
+
+def query_clickhouse_context(query_context: str, query: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    try:
+        return query_clickhouse(query, parameters)
+    except Exception as exc:
+        raise ClickHouseQueryError(query_context, str(exc)) from exc
 
 
 def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
@@ -52,17 +65,18 @@ def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
     if request.protocol:
         filters.append("proto = {proto:UInt8}")
         params["proto"] = _proto_number(request.protocol)
-    return query_clickhouse(
+    return query_clickhouse_context(
+        "fetch_interface_series",
         f"""
         SELECT
-            toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS time,
+            toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS bucket,
             {value_expr} / {{window_seconds:Float64}} AS value,
             sum(packets) / {{window_seconds:Float64}} AS packets_s,
             sum(bytes) * 8 / {{window_seconds:Float64}} AS bits_s
         FROM flow_raw
         WHERE {' AND '.join(filters)}
-        GROUP BY time
-        ORDER BY time
+        GROUP BY bucket
+        ORDER BY bucket
         """,
         params,
     )
@@ -90,10 +104,13 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
     if request.protocol:
         filters.append("proto = {proto:UInt8}")
         params["proto"] = _proto_number(request.protocol)
-    return query_clickhouse(
+    sort_expr = "bits_s" if request.metric == "bits_s" else "packets_s"
+    return query_clickhouse_context(
+        "fetch_peak_flows",
         f"""
         SELECT
-            min(flow_time) AS flow_time,
+            min(flow_time) AS first_seen,
+            max(flow_time) AS last_seen,
             toString(src_ip) AS src_ip,
             src_port,
             toString(dst_ip) AS dst_ip,
@@ -109,7 +126,7 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
         FROM flow_raw
         WHERE {' AND '.join(filters)}
         GROUP BY src_ip, src_port, dst_ip, dst_port, proto
-        ORDER BY {request.metric} DESC
+        ORDER BY {sort_expr} DESC
         LIMIT 200
         """,
         params,
@@ -117,7 +134,8 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
 
 
 def fetch_peak_hunter_sensors() -> list[dict[str, Any]]:
-    return query_clickhouse(
+    return query_clickhouse_context(
+        "fetch_peak_hunter_sensors",
         """
         SELECT
             sensor AS sensor_name,
@@ -140,7 +158,8 @@ def fetch_peak_hunter_interfaces(sensor: str) -> list[dict[str, Any]]:
         filters.append("sensor = {sensor:String}")
         params["sensor"] = sensor
     where = f"WHERE {' AND '.join(filters)}" if filters else ""
-    return query_clickhouse(
+    return query_clickhouse_context(
+        "fetch_peak_hunter_interfaces",
         f"""
         SELECT
             interface_id,
@@ -190,4 +209,8 @@ def _proto_number(value: str) -> int:
         return 6
     if text in {"icmp", "1"}:
         return 1
+    if text in {"gre", "47"}:
+        return 47
+    if text in {"esp", "50"}:
+        return 50
     return int(text)

@@ -4592,7 +4592,7 @@
   </div>
 
   <script>
-    const API_BASE = `${window.location.protocol}//${window.location.hostname}:8000`;
+    const API_BASE = '';
     const AUTH_TOKEN_KEY = 'gmjFlowAuthToken';
     let currentAuthUser = null;
 
@@ -5178,6 +5178,17 @@
       return `${API_BASE}${path}`;
     }
 
+    function requestBodyPreview(options = {}) {
+      const body = options.body;
+      if (!body) return '';
+      if (typeof body === 'string') return body.length > 1200 ? `${body.slice(0, 1200)}...` : body;
+      try {
+        return JSON.stringify(body).slice(0, 1200);
+      } catch (error) {
+        return String(body);
+      }
+    }
+
     function apiDetailMessage(detail) {
       if (!detail) return '';
       if (typeof detail === 'string') return detail;
@@ -5188,13 +5199,32 @@
     }
 
     async function responseErrorMessage(response, endpoint) {
-      const payload = await response.clone().json().catch(() => ({}));
-      return apiDetailMessage(payload.detail) || payload.message || `${endpoint} ${response.status}`;
+      const text = await response.clone().text().catch(() => '');
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch (error) {
+        payload = {};
+      }
+      const detail = apiDetailMessage(payload.detail) || payload.message || payload.error_message || text;
+      return `Backend retornou HTTP ${response.status}: ${detail || response.statusText || endpoint}`;
+    }
+
+    function networkErrorMessage(endpoint) {
+      return `Falha de rede/CORS ao chamar ${endpoint}. Verifique se a UI esta usando /api via porta 8080, e nao backend direto :8000.`;
     }
 
     async function fetchJSON(path, queryString = dashboardParams(), options = {}) {
       const endpoint = `${API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
-      const response = await authFetch(endpoint, options);
+      let response;
+      try {
+        response = await authFetch(endpoint, options);
+      } catch (error) {
+        if (error instanceof TypeError || error.message === 'Failed to fetch') {
+          throw new Error(networkErrorMessage(endpoint));
+        }
+        throw error;
+      }
       if (!response.ok) {
         console.error('Falha na chamada da API', endpoint, response.status);
         throw new Error(await responseErrorMessage(response, endpoint));
@@ -5267,11 +5297,27 @@
 
     async function apiRequest(path, options = {}) {
       const endpoint = apiUrl(path);
-      const response = await authFetch(endpoint, options);
-      const payload = await response.json().catch(() => ({}));
+      let response;
+      try {
+        response = await authFetch(endpoint, options);
+      } catch (error) {
+        if (error instanceof TypeError || error.message === 'Failed to fetch') {
+          const preview = requestBodyPreview(options);
+          throw new Error(`${networkErrorMessage(endpoint)}${preview ? ` Payload: ${preview}` : ''}`);
+        }
+        throw error;
+      }
+      const text = await response.text().catch(() => '');
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch (error) {
+        payload = {};
+      }
       if (!response.ok) {
-        const message = apiDetailMessage(payload.detail) || payload.message || `${endpoint} ${response.status}`;
-        throw new Error(message);
+        const detail = apiDetailMessage(payload.detail) || payload.message || payload.error_message || text || response.statusText;
+        const preview = requestBodyPreview(options);
+        throw new Error(`Backend retornou HTTP ${response.status}: ${detail}. URL: ${endpoint}${preview ? `. Payload: ${preview}` : ''}`);
       }
       return payload;
     }
@@ -8037,7 +8083,7 @@
       setText('peakHunterPeaksAnalyzed', formatNumber(result.peaks_analyzed || 0));
       setText('peakHunterEvidenceStatus', evidenceStatus);
       setText('peakHunterMitigationAllowed', result.mitigation_allowed ? 'Sim' : 'Nao');
-      setText('peakHunterResultStatus', result.best_peak ? `${result.classification || '-'} / janela ${result.evidence_window_used || '-'}s` : 'Sem pico analisado.');
+      setText('peakHunterResultStatus', result.error_message ? `${result.error || 'erro'}: ${result.error_message}` : (result.best_peak ? `${result.classification || '-'} / janela ${result.evidence_window_used || '-'}s` : 'Sem pico analisado.'));
       setText('peakHunterDominantReadable', `Grupo dominante: ${peakHunterDominantLabel(dominant)}`);
       document.getElementById('peakHunterSummary').innerHTML = [
         ['Melhor pico', best.peak_time || best.time || '-'],
@@ -8228,14 +8274,14 @@
       const started = anomaly.started_at ? new Date(anomaly.started_at) : null;
       const ended = (anomaly.ended_at || anomaly.last_seen_at) ? new Date(anomaly.ended_at || anomaly.last_seen_at) : null;
       const detected = (anomaly.detected_at || anomaly.created_at || anomaly.last_seen_at) ? new Date(anomaly.detected_at || anomaly.created_at || anomaly.last_seen_at) : new Date();
-      const start = started && ended ? new Date(started.getTime() - 2 * 60 * 1000) : new Date(detected.getTime() - 5 * 60 * 1000);
-      const end = started && ended ? new Date(ended.getTime() + 2 * 60 * 1000) : new Date(detected.getTime() + 5 * 60 * 1000);
+      const start = anomaly.start_time ? new Date(anomaly.start_time) : (started && ended ? new Date(started.getTime() - 2 * 60 * 1000) : new Date(detected.getTime() - 5 * 60 * 1000));
+      const end = anomaly.end_time ? new Date(anomaly.end_time) : (started && ended ? new Date(ended.getTime() + 2 * 60 * 1000) : new Date(detected.getTime() + 5 * 60 * 1000));
       const direction = ['sends', 'receives'].includes(anomaly.direction) ? anomaly.direction : 'sends';
-      const metric = ['packets_s', 'bits_s'].includes(anomaly.metric_unit) ? anomaly.metric_unit : 'packets_s';
+      const metric = ['packets_s', 'bits_s'].includes(anomaly.metric || anomaly.metric_unit) ? (anomaly.metric || anomaly.metric_unit) : 'packets_s';
       document.getElementById('peakHunterSensor').value = anomaly.sensor_name || anomaly.sensor || '';
       await loadPeakHunterInterfaces(document.getElementById('peakHunterSensor').value.trim());
-      document.getElementById('peakHunterInterfaceId').value = anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '';
-      document.getElementById('peakHunterManualInterfaceId').value = document.getElementById('peakHunterInterfaceId').value ? '' : (anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '');
+      document.getElementById('peakHunterInterfaceId').value = anomaly.interface_id || anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '';
+      document.getElementById('peakHunterManualInterfaceId').value = document.getElementById('peakHunterInterfaceId').value ? '' : (anomaly.interface_id || anomaly.interface_if_index || anomaly.output_if || anomaly.input_if || '');
       document.getElementById('peakHunterDirection').value = direction;
       document.getElementById('peakHunterMetric').value = metric;
       document.getElementById('peakHunterPeriod').value = 'custom';
@@ -8243,14 +8289,25 @@
       document.getElementById('peakHunterEndTime').value = peakHunterDatetimeInput(end);
       document.getElementById('peakHunterProtocol').value = anomaly.protocol || anomaly.decoder || '';
       document.getElementById('peakHunterThreshold').value = anomaly.threshold_value || '';
-      setText('peakHunterFormHint', `Investigando anomalia #${anomaly.id || currentAnomalyDetailId || '-'}.`);
+      setText('peakHunterFormHint', `Investigando anomalia #${anomaly.anomaly_id || anomaly.id || currentAnomalyDetailId || '-'}.`);
+    }
+
+    async function loadPeakHunterFromAnomaly(anomalyId) {
+      return apiRequest(`/api/peak-hunter/from-anomaly/${anomalyId}`);
     }
 
     function investigateCurrentAnomalyPeak() {
       if (!currentAnomalyDetailEvent) return;
       closeModal('anomalyDetailModal');
       showView('peak-hunter');
-      fillPeakHunterFromAnomaly(currentAnomalyDetailEvent).catch(console.error);
+      const anomalyId = currentAnomalyDetailEvent.id || currentAnomalyDetailId;
+      if (anomalyId) {
+        loadPeakHunterFromAnomaly(anomalyId)
+          .then(fillPeakHunterFromAnomaly)
+          .catch(() => fillPeakHunterFromAnomaly(currentAnomalyDetailEvent).catch(console.error));
+      } else {
+        fillPeakHunterFromAnomaly(currentAnomalyDetailEvent).catch(console.error);
+      }
     }
 
     async function investigateInterfacePeak(index) {

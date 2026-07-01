@@ -2,6 +2,7 @@ import sys
 import os
 import sqlite3
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db
+
+sys.modules.setdefault("clickhouse_connect", types.SimpleNamespace(get_client=lambda **_kwargs: None))
+from app.services import clickhouse as peak_clickhouse
 
 try:
     from app.api import peak_hunter as peak_hunter_api
@@ -65,6 +69,13 @@ class PeakHunterTest(unittest.TestCase):
         self.assertEqual(result["dominant_group"]["dst_ip"], "203.0.113.200")
         self.assertEqual(result["dominant_group"]["max_bits_s"], 2000000)
 
+    def test_bits_s_analyze_returns_200(self):
+        request = PeakHunterRequest(**{**self.request.__dict__, "metric": "bits_s", "threshold": 1_000_000})
+        result = analyze_peak_hunter(request, self._series_bits, self._bits_flows)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["best_peak"]["peak_value"], 3_000_000)
+        self.assertEqual(result["dominant_group"]["dst_ip"], "203.0.113.200")
+
     def test_packets_s_orders_by_packets_s(self):
         result = analyze_peak_hunter(self.request, self._series, self._packet_flows)
         self.assertEqual(result["dominant_group"]["dst_ip"], "203.0.113.201")
@@ -87,6 +98,12 @@ class PeakHunterTest(unittest.TestCase):
         result = analyze_peak_hunter(request, self._series_with_clear_auto_peak, lambda _request, _time, _window: [])
         self.assertGreater(result["threshold_used"], result["baseline"]["p95"])
         self.assertEqual(result["peaks_detected"], 1)
+
+    def test_peak_hunter_large_series_is_limited_or_downsampled(self):
+        result = analyze_peak_hunter(self.request, self._large_series, lambda _request, _time, _window: [])
+        self.assertLessEqual(len(result["series"]), 1000)
+        self.assertTrue(result["series_downsampled"])
+        self.assertEqual(result["series_points"], 1500)
 
     def test_peak_analysis_table_created_by_migration(self):
         conn = sqlite3.connect(":memory:")
@@ -241,6 +258,51 @@ class PeakHunterTest(unittest.TestCase):
             self.assertEqual(payload["interface_id"], 140)
             self.assertEqual(payload["start_time"], (self.base_time - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"))
 
+    def test_clickhouse_bits_s_query_uses_bytes_times_8(self):
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(
+            PeakHunterRequest(**{**self.request.__dict__, "metric": "bits_s"})
+        ))
+        self.assertIn("sum(bytes) * 8", captured["query"])
+        self.assertIn("flow_time >=", captured["query"])
+
+    def test_clickhouse_query_uses_flow_time_not_time(self):
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5))
+        self.assertIn("flow_time >=", captured["query"])
+        self.assertIn("flow_time <=", captured["query"])
+        self.assertNotIn("WHERE time", captured["query"])
+
+    def test_clickhouse_query_maps_udp_to_proto_17(self):
+        request = PeakHunterRequest(**{**self.request.__dict__, "protocol": "udp"})
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(request))
+        self.assertEqual(captured["parameters"]["proto"], 17)
+
+    def test_clickhouse_illegal_aggregation_not_used(self):
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5))
+        self.assertNotIn("AS flow_time", captured["query"])
+        self.assertIn("min(flow_time) AS first_seen", captured["query"])
+        self.assertIn("max(flow_time) AS last_seen", captured["query"])
+
+    def test_clickhouse_error_returns_json(self):
+        if peak_hunter_api is None:
+            self.skipTest("fastapi nao instalado")
+        payload = peak_hunter_api._analysis_error_response(self.request, "clickhouse_query_failed", "boom", "fetch_peak_flows")
+        self.assertEqual(payload["error"], "clickhouse_query_failed")
+        self.assertEqual(payload["recommendation"]["recommended_action"], "alert_only")
+
+    def test_frontend_peak_hunter_uses_relative_api_paths(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const API_BASE = ''", html)
+        self.assertIn("apiRequest('/api/peak-hunter/options/sensors'", html)
+        self.assertIn("apiRequest('/api/peak-hunter/analyze'", html)
+        self.assertIn("apiRequest(`/api/peak-hunter/history?", html)
+        self.assertIn("apiRequest(`/api/peak-hunter/from-anomaly/${anomalyId}`", html)
+        self.assertNotIn("window.location.hostname}:8000", html)
+
+    def test_frontend_peak_hunter_error_messages_include_http_and_cors(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Backend retornou HTTP", html)
+        self.assertIn("Falha de rede/CORS ao chamar", html)
+
     def _series(self, request):
         return [
             {"time": self.base_time.isoformat(), "packets_s": 1000},
@@ -255,6 +317,12 @@ class PeakHunterTest(unittest.TestCase):
         ]
         rows[10]["packets_s"] = 100000
         return rows
+
+    def _large_series(self, request):
+        return [
+            {"time": (self.base_time + timedelta(seconds=index * 5)).isoformat(), "packets_s": 1000 + index}
+            for index in range(1500)
+        ]
 
     def _series_bits(self, request):
         return [
@@ -351,6 +419,23 @@ def create_sensor_schema(db_path):
         conn.execute(
             "INSERT INTO sensor_interfaces VALUES (1, 140, 'Eth-Trunk10.123', 'LINK/CLIENTE', 'alias', 'sends')"
         )
+
+
+def capture_clickhouse_query(callback):
+    captured = {}
+    original = peak_clickhouse.query_clickhouse
+
+    def fake_query(query, parameters=None):
+        captured["query"] = query
+        captured["parameters"] = parameters or {}
+        return []
+
+    peak_clickhouse.query_clickhouse = fake_query
+    try:
+        callback()
+    finally:
+        peak_clickhouse.query_clickhouse = original
+    return captured
 
 
 if __name__ == "__main__":

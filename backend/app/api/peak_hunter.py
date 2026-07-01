@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.clickhouse import (
+    ClickHouseQueryError,
     fetch_interface_series,
     fetch_peak_flows,
     fetch_peak_hunter_interfaces,
@@ -65,7 +66,12 @@ def analyze_peak_hunter_endpoint(payload: PeakHunterPayload) -> dict[str, Any]:
             save_peak_analysis(conn, record)
             conn.commit()
 
-    return analyze_peak_hunter(request, fetch_interface_series, fetch_peak_flows, save_history=save)
+    try:
+        return analyze_peak_hunter(request, fetch_interface_series, fetch_peak_flows, save_history=save)
+    except ClickHouseQueryError as exc:
+        return _analysis_error_response(request, "clickhouse_query_failed", str(exc), exc.query_context)
+    except Exception as exc:
+        return _analysis_error_response(request, "peak_hunter_analyze_failed", str(exc), "analyze_peak_hunter")
 
 
 @router.get("/options/sensors")
@@ -295,3 +301,40 @@ def _string_time(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat().replace("+00:00", "Z")
     return str(value or "")
+
+
+def _analysis_error_response(
+    request: PeakHunterRequest,
+    error: str,
+    message: str,
+    query_context: str,
+) -> dict[str, Any]:
+    return {
+        "error": error,
+        "message": message,
+        "query_context": query_context,
+        "peaks_detected": 0,
+        "peaks_analyzed": 0,
+        "series": [],
+        "series_points": 0,
+        "series_returned_points": 0,
+        "series_downsampled": False,
+        "baseline": {"p95": 0.0, "p99": 0.0},
+        "threshold_used": float(request.threshold or 0),
+        "best_peak": None,
+        "evidence_window_used": None,
+        "evidence_windows_tried": [],
+        "dominant_group": None,
+        "classification": "insufficient_flow_evidence",
+        "top_groups": [],
+        "top_conversations": [],
+        "top_sources": [],
+        "top_destinations": [],
+        "candidates": [],
+        "mitigation_allowed": False,
+        "recommendation": {
+            "recommended_action": "alert_only",
+            "reason": f"Falha ao consultar ClickHouse: {message}",
+        },
+        "error_message": message,
+    }

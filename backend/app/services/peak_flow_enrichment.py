@@ -73,6 +73,9 @@ def enrich_peak_flows(
     return {
         "flows": normalized,
         "groups": [_public_group(group) for group in public_groups],
+        "top_conversations": normalized[:20],
+        "top_sources": _top_endpoints(normalized, "src_ip", total_packets, total_bytes),
+        "top_destinations": _top_endpoints(normalized, "dst_ip", total_packets, total_bytes),
         "dominant_group": _public_group(dominant) if dominant else None,
         "classification": classification,
         "evidence_status": evidence_status,
@@ -156,6 +159,36 @@ def _public_group(group: dict[str, Any] | None) -> dict[str, Any] | None:
         "share_bits": round(float(group["share_bits"]), 2),
         "top_flows": group.get("flows", [])[:5],
     }
+
+
+def _top_endpoints(
+    flows: list[dict[str, Any]],
+    field: str,
+    total_packets: int,
+    total_bytes: int,
+) -> list[dict[str, Any]]:
+    endpoints: dict[str, dict[str, Any]] = {}
+    for flow in flows:
+        key = str(flow.get(field) or "").strip()
+        if not key:
+            continue
+        item = endpoints.setdefault(key, {field: key, "packets": 0, "bytes": 0})
+        item["packets"] += int(flow.get("packets") or 0)
+        item["bytes"] += int(flow.get("bytes") or 0)
+    rows = []
+    for item in endpoints.values():
+        packets = int(item["packets"])
+        bytes_value = int(item["bytes"])
+        rows.append(
+            {
+                **item,
+                "share_packets": round(_percent(packets, total_packets), 2),
+                "share_bytes": round(_percent(bytes_value, total_bytes), 2),
+                "share": round(_percent(bytes_value, total_bytes), 2),
+            }
+        )
+    rows.sort(key=lambda item: (int(item["bytes"]), int(item["packets"])), reverse=True)
+    return rows[:20]
 
 
 def _percent(value: int | float, total: int | float) -> float:

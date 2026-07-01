@@ -14,6 +14,7 @@ from app.services.peak_flow_enrichment import enrich_peak_flows
 
 FlowFetcher = Callable[["PeakHunterRequest", datetime, int], List[Dict[str, Any]]]
 SeriesFetcher = Callable[["PeakHunterRequest"], List[Dict[str, Any]]]
+MAX_RESPONSE_SERIES_POINTS = 1000
 
 
 @dataclass
@@ -39,6 +40,7 @@ def analyze_peak_hunter(
     save_history: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     series = normalize_series(series_fetcher(request), request.metric)
+    response_series = downsample_series(series, MAX_RESPONSE_SERIES_POINTS)
     baseline = calculate_baseline(series, request.metric, request.baseline)
     threshold = effective_threshold(baseline, request.threshold, request.sensitivity)
     peaks = detect_local_peaks(series, request.metric, baseline, threshold, request.max_peaks)
@@ -52,7 +54,10 @@ def analyze_peak_hunter(
     return {
         "peaks_detected": len(peaks),
         "peaks_analyzed": len(analyzed),
-        "series": series,
+        "series": response_series,
+        "series_points": len(series),
+        "series_returned_points": len(response_series),
+        "series_downsampled": len(response_series) < len(series),
         "baseline": baseline,
         "threshold_used": threshold,
         "sensitivity": normalize_sensitivity(request.sensitivity),
@@ -122,6 +127,28 @@ def normalize_series(rows: list[dict[str, Any]], metric: str) -> list[dict[str, 
         time_value = row.get("time") or row.get("bucket") or row.get("ts")
         series.append({"time": _string_time(time_value), metric: value, "value": value})
     return sorted(series, key=lambda item: item["time"])
+
+
+def downsample_series(series: list[dict[str, Any]], max_points: int = MAX_RESPONSE_SERIES_POINTS) -> list[dict[str, Any]]:
+    limit = max(int(max_points or MAX_RESPONSE_SERIES_POINTS), 1)
+    if len(series) <= limit:
+        return series
+    if limit == 1:
+        return [max(series, key=lambda item: float(item.get("value") or 0))]
+    step = (len(series) - 1) / float(limit - 1)
+    selected = []
+    seen = set()
+    for index in range(limit):
+        source_index = round(index * step)
+        if source_index in seen:
+            continue
+        seen.add(source_index)
+        selected.append(series[source_index])
+    peak = max(series, key=lambda item: float(item.get("value") or 0))
+    if peak not in selected:
+        selected[-1] = peak
+        selected.sort(key=lambda item: item["time"])
+    return selected
 
 
 def calculate_baseline(series: list[dict[str, Any]], metric: str, baseline: float | dict[str, Any] | None = None) -> dict[str, float]:
