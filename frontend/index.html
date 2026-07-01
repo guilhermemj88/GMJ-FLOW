@@ -8496,26 +8496,39 @@
       document.getElementById('peakHunterSeriesTable').innerHTML = rows.map(point => {
         const value = Number(point.value ?? point[metric] ?? 0);
         const metricValue = Number(point[metric] ?? value);
+        const timeValue = point.time_utc || point.time;
         return `
           <tr>
-            <td>${formatDateTime(point.time)}</td>
+            <td>${formatPeakHunterLocal(timeValue)}</td>
             <td class="text-end">${peakHunterMetricValue(value, metric)}</td>
             <td class="text-end">${peakHunterMetricValue(metricValue, metric)}</td>
           </tr>
         `;
       }).join('') || '<tr><td colspan="3" class="text-muted">Sem serie temporal retornada.</td></tr>';
-      const labels = rows.map(point => formatDateTime(point.time));
-      const values = rows.map(point => Number(point[metric] ?? point.value ?? 0));
+      const values = rows.map(point => [point.time_utc || point.time, Number(point[metric] ?? point.value ?? 0)]);
       const p95 = Number(best.baseline_p95 ?? baseline.p95 ?? 0);
       const p99 = Number(best.baseline_p99 ?? baseline.p99 ?? 0);
       const threshold = Number(best.threshold_used ?? peakHunterLastResult?.threshold_used ?? 0);
-      const peakTime = best.peak_time || best.time;
-      const peakIndex = rows.findIndex(point => point.time === peakTime);
+      const peakTime = best.peak_time_utc || best.peak_time || best.time;
       charts.peakHunterSeries.setOption({
-        tooltip: { trigger: 'axis' },
+        tooltip: {
+          trigger: 'axis',
+          formatter(params) {
+            const items = Array.isArray(params) ? params : [params];
+            const first = items[0];
+            const timeValue = Array.isArray(first?.value) ? first.value[0] : first?.axisValue;
+            return [
+              formatPeakHunterLocal(timeValue),
+              ...items.map(item => `${item.marker}${escapeHtml(item.seriesName)}: ${peakHunterMetricValue(Array.isArray(item.value) ? item.value[1] : item.value, metric)}`)
+            ].join('<br>');
+          }
+        },
         legend: { data: [metric, 'p95', 'p99', 'threshold'] },
         grid: { left: 48, right: 24, top: 32, bottom: 32 },
-        xAxis: { type: 'category', data: labels },
+        xAxis: {
+          type: 'time',
+          axisLabel: { formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) }
+        },
         yAxis: { type: 'value' },
         series: [
           {
@@ -8524,11 +8537,11 @@
             smooth: true,
             symbolSize: 5,
             data: values,
-            markPoint: peakIndex >= 0 ? { data: [{ name: 'Pico', coord: [peakIndex, Number(best.peak_value || best.value || 0)] }] } : undefined
+            markPoint: peakTime ? { data: [{ name: 'Pico', coord: [peakTime, Number(best.peak_value || best.value || 0)] }] } : undefined
           },
-          { name: 'p95', type: 'line', data: rows.map(() => p95), symbol: 'none', lineStyle: { type: 'dashed' } },
-          { name: 'p99', type: 'line', data: rows.map(() => p99), symbol: 'none', lineStyle: { type: 'dashed' } },
-          { name: 'threshold', type: 'line', data: rows.map(() => threshold), symbol: 'none', lineStyle: { type: 'dotted' } }
+          { name: 'p95', type: 'line', data: rows.map(point => [point.time_utc || point.time, p95]), symbol: 'none', lineStyle: { type: 'dashed' } },
+          { name: 'p99', type: 'line', data: rows.map(point => [point.time_utc || point.time, p99]), symbol: 'none', lineStyle: { type: 'dashed' } },
+          { name: 'threshold', type: 'line', data: rows.map(point => [point.time_utc || point.time, threshold]), symbol: 'none', lineStyle: { type: 'dotted' } }
         ]
       }, true);
       setTimeout(() => charts.peakHunterSeries.resize(), 50);

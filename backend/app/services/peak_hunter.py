@@ -137,8 +137,19 @@ def normalize_series(rows: list[dict[str, Any]], metric: str) -> list[dict[str, 
     for row in rows:
         value = float(row.get(metric) or row.get("value") or 0)
         time_value = row.get("time") or row.get("bucket") or row.get("ts")
-        point = {"time": _string_time(time_value), metric: value, "value": value}
-        for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source"):
+        source_timezone = _source_timezone(row)
+        time_info = _time_payload(time_value, source_timezone)
+        point = {
+            "raw_time_from_clickhouse": row.get("raw_time_from_clickhouse") or time_info["raw_time_from_clickhouse"],
+            "time": time_info["peak_time_utc"],
+            "time_utc": time_info["peak_time_utc"],
+            "time_local": time_info["peak_time_local"],
+            "timezone": "America/Sao_Paulo",
+            "clickhouse_timezone": source_timezone,
+            metric: value,
+            "value": value,
+        }
+        for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source", "clickhouse_time_type"):
             if field in row:
                 point[field] = row.get(field)
         series.append(point)
@@ -226,8 +237,17 @@ def detect_local_peaks(
         if value >= floor and value >= previous_value and value >= next_value:
             p95 = float(baseline.get("p95") or 0)
             score = value / p95 if p95 > 0 else value
-            peak = {"peak_time": point["time"], "time": point["time"], "peak_value": value, "score": round(score, 3)}
-            for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source"):
+            peak = {
+                "raw_time_from_clickhouse": point.get("raw_time_from_clickhouse"),
+                "peak_time": point["time"],
+                "time": point["time"],
+                "peak_time_utc": point.get("time_utc") or point["time"],
+                "peak_time_local": point.get("time_local"),
+                "timezone": "America/Sao_Paulo",
+                "peak_value": value,
+                "score": round(score, 3),
+            }
+            for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source", "clickhouse_time_type", "clickhouse_timezone"):
                 if field in point:
                     peak[field] = point.get(field)
             peaks.append(peak)
@@ -562,6 +582,16 @@ def percentile(ordered_values: list[float], percentile_value: int) -> float:
 LOCAL_TIMEZONE = ZoneInfo("America/Sao_Paulo") if ZoneInfo is not None else timezone(timedelta(hours=-3))
 
 
+def _time_payload(value: Any, source_timezone: str | None = None) -> dict[str, str]:
+    parsed = parse_time_with_source_timezone(value, source_timezone)
+    return {
+        "raw_time_from_clickhouse": _raw_time_text(value),
+        "peak_time_utc": _format_time_utc_z(parsed),
+        "peak_time_local": _format_time_local(parsed),
+        "timezone": "America/Sao_Paulo",
+    }
+
+
 def _format_time_utc_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -571,11 +601,42 @@ def _format_time_local(value: datetime) -> str:
 
 
 def parse_time(value: Any) -> datetime:
+    return parse_time_with_source_timezone(value, "UTC")
+
+
+def parse_time_with_source_timezone(value: Any, source_timezone: str | None = None) -> datetime:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if value.tzinfo:
+            return value
+        return value.replace(tzinfo=_timezone_for_source(source_timezone))
     text = str(value).replace("Z", "+00:00")
     parsed = datetime.fromisoformat(text)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_timezone_for_source(source_timezone))
+
+
+def _timezone_for_source(source_timezone: str | None) -> timezone:
+    text = str(source_timezone or "").strip()
+    if text == "America/Sao_Paulo":
+        return LOCAL_TIMEZONE
+    return timezone.utc
+
+
+def _source_timezone(row: dict[str, Any]) -> str:
+    explicit = str(row.get("clickhouse_timezone") or row.get("source_timezone") or "").strip()
+    if explicit:
+        return explicit
+    type_name = str(row.get("clickhouse_time_type") or "").strip()
+    if "America/Sao_Paulo" in type_name:
+        return "America/Sao_Paulo"
+    if "UTC" in type_name:
+        return "UTC"
+    return "UTC"
+
+
+def _raw_time_text(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
 
 
 def _enrichment_rank(enrichment: dict[str, Any], metric: str) -> float:

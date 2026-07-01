@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db
+from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db, normalize_series
 
 sys.modules.setdefault("clickhouse_connect", types.SimpleNamespace(get_client=lambda **_kwargs: None))
 from app.services import clickhouse as peak_clickhouse
@@ -50,6 +50,24 @@ class PeakHunterTest(unittest.TestCase):
         self.assertEqual(best["peak_time_local"], "2026-06-30T09:00:05-03:00")
         self.assertEqual(best["timezone"], "America/Sao_Paulo")
         self.assertTrue(all(peak["peak_time_utc"].endswith("Z") for peak in result["peaks"]))
+
+    def test_peak_hunter_utc_input_displays_sao_paulo_local(self):
+        points = normalize_series(
+            [{"bucket": "2026-07-01T08:58:10Z", "packets_s": 1000, "clickhouse_timezone": "UTC"}],
+            "packets_s",
+        )
+        self.assertEqual(points[0]["time"], "2026-07-01T08:58:10Z")
+        self.assertEqual(points[0]["time_utc"], "2026-07-01T08:58:10Z")
+        self.assertEqual(points[0]["time_local"], "2026-07-01T05:58:10-03:00")
+
+    def test_peak_hunter_sao_paulo_input_preserves_local_and_returns_utc(self):
+        points = normalize_series(
+            [{"bucket": "2026-07-01T05:58:10-03:00", "packets_s": 1000, "clickhouse_timezone": "America/Sao_Paulo"}],
+            "packets_s",
+        )
+        self.assertEqual(points[0]["time"], "2026-07-01T08:58:10Z")
+        self.assertEqual(points[0]["time_utc"], "2026-07-01T08:58:10Z")
+        self.assertEqual(points[0]["time_local"], "2026-07-01T05:58:10-03:00")
 
     def test_peak_with_dominant_group_only_in_15s(self):
         result = analyze_peak_hunter(self.request, self._series, self._flows_dominant_only_15s)

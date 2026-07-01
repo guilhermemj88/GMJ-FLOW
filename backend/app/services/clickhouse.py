@@ -78,8 +78,12 @@ def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
     return query_clickhouse_context(
         "fetch_interface_series",
         f"""
+        WITH toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS bucket
         SELECT
-            toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS bucket,
+            bucket,
+            toString(bucket) AS raw_time_from_clickhouse,
+            toTypeName(bucket) AS clickhouse_time_type,
+            'UTC' AS clickhouse_timezone,
             {value_expr} / {{window_seconds:Float64}} AS value,
             {packets_expr} / {{window_seconds:Float64}} AS packets_s,
             {bytes_expr} * 8 / {{window_seconds:Float64}} AS bits_s,
