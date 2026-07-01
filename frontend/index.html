@@ -3620,6 +3620,21 @@
             <div id="peakHunterSummary" class="d-flex flex-wrap gap-2 mb-3"></div>
             <div id="peakHunterDominantReadable" class="metric-readout mb-3">Grupo dominante: -</div>
             <div id="peakHunterRecommendationCards" class="database-metrics-grid mb-3"></div>
+            <div id="peakHunterEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidencia parcial. A regra criada deve ser revisada com cuidado.</div>
+            <div id="peakHunterActionToolbar" class="toolbar d-none mb-3">
+              <button id="peakHunterCreateRuleButton" type="button" class="btn btn-sm btn-outline-success" data-peak-action="detection-rule" data-source="result">
+                <i data-lucide="list-plus"></i><span>Criar regra</span>
+              </button>
+              <button id="peakHunterCreateResponseProfileButton" type="button" class="btn btn-sm btn-outline-success" data-peak-action="response-profile" data-source="result">
+                <i data-lucide="shield-plus"></i><span>Criar Response Profile</span>
+              </button>
+              <button id="peakHunterCreatePlaybookButton" type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="playbook" data-source="result">
+                <i data-lucide="book-open-check"></i><span>Criar playbook</span>
+              </button>
+              <button id="peakHunterAssociateVectorButton" type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="associate-vector" data-source="result">
+                <i data-lucide="link"></i><span>Associar a vetor existente</span>
+              </button>
+            </div>
             <div class="panel-title mb-2">Relatorio tecnico</div>
             <pre id="peakHunterTechnicalReport" class="result-box">-</pre>
             <details>
@@ -3878,6 +3893,21 @@
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Detalhe do caso</div>
             <div id="peakHunterHistoryDetailStatus" class="metric-readout mb-3">Selecione uma investigacao.</div>
+            <div id="peakHunterHistoryEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidencia parcial. A regra criada deve ser revisada com cuidado.</div>
+            <div id="peakHunterHistoryActionToolbar" class="toolbar d-none mb-3">
+              <button type="button" class="btn btn-sm btn-outline-success" data-peak-action="detection-rule" data-source="history">
+                <i data-lucide="list-plus"></i><span>Criar regra</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-success" data-peak-action="response-profile" data-source="history">
+                <i data-lucide="shield-plus"></i><span>Criar Response Profile</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="playbook" data-source="history">
+                <i data-lucide="book-open-check"></i><span>Criar playbook</span>
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="associate-vector" data-source="history">
+                <i data-lucide="link"></i><span>Associar a vetor existente</span>
+              </button>
+            </div>
             <pre id="peakHunterHistoryTechnicalReport" class="result-box">-</pre>
             <div class="row g-3">
               <div class="col-12 col-xl-4">
@@ -4553,6 +4583,27 @@
     </div>
   </div>
 
+  <div id="peakHunterDraftModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="peakHunterDraftModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="peakHunterDraftModalTitle" class="view-title">Draft Peak Hunter</h2>
+        <button type="button" class="icon-button" data-close-modal="peakHunterDraftModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="peakHunterDraftStatus" class="metric-readout mb-3">-</div>
+        <pre id="peakHunterDraftPreview" class="result-box mb-0">-</pre>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="peakHunterDraftModal">Fechar</button>
+        <button id="peakHunterDraftOpenButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="external-link"></i><span>Abrir para revisar</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="detectionRuleTestModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="detectionRuleTestModalTitle">
     <div class="gmj-dialog wide">
       <div class="gmj-dialog-header">
@@ -5073,6 +5124,8 @@
     let peakHunterLastResult = null;
     let peakHunterLastHistory = [];
     let peakHunterCurrentHistoryId = null;
+    let peakHunterCurrentHistoryItem = null;
+    let peakHunterCurrentDraft = null;
     let peakHunterAutomationJobs = [];
     let peakHunterCurrentJobId = null;
     let sensorCache = [];
@@ -8892,6 +8945,155 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       ].join('\n');
     }
 
+    function peakHunterActionContext(source = 'result') {
+      const item = source === 'history' ? peakHunterCurrentHistoryItem : peakHunterLastResult;
+      const best = item?.best_peak || item?.result_json?.best_peak || {};
+      const candidates = Array.isArray(item?.candidates) && item.candidates.length ? item.candidates : (best.candidates || item?.result_json?.candidates || []);
+      return {
+        item,
+        id: item?.history_id || item?.id || peakHunterCurrentHistoryId,
+        classification: item?.classification || best.classification || item?.result_json?.classification || '',
+        dominantGroup: item?.dominant_group || best.dominant_group || item?.result_json?.dominant_group || null,
+        candidate: candidates.find(entry => entry.action && entry.action !== 'alert_only') || candidates[0] || null,
+        technicalReport: item?.technical_report || item?.result_json?.technical_report || '',
+        evidenceStatus: item?.evidence_status || best.evidence_status || item?.result_json?.evidence_status || ''
+      };
+    }
+
+    function peakHunterCanCreateAction(source = 'result') {
+      const context = peakHunterActionContext(source);
+      return Boolean(
+        context.id &&
+        context.classification &&
+        (context.dominantGroup || context.candidate) &&
+        context.technicalReport &&
+        !['insufficient', 'no_peak'].includes(context.evidenceStatus)
+      );
+    }
+
+    function renderPeakHunterActionButtons(source = 'result') {
+      const toolbar = document.getElementById(source === 'history' ? 'peakHunterHistoryActionToolbar' : 'peakHunterActionToolbar');
+      const warning = document.getElementById(source === 'history' ? 'peakHunterHistoryEvidenceWarning' : 'peakHunterEvidenceWarning');
+      if (!toolbar || !warning) return;
+      const context = peakHunterActionContext(source);
+      const visible = peakHunterCanCreateAction(source);
+      toolbar.classList.toggle('d-none', !visible);
+      warning.classList.toggle('d-none', !visible || context.evidenceStatus === 'complete');
+    }
+
+    async function openPeakHunterDraft(action, source = 'result') {
+      if (action === 'associate-vector') {
+        associatePeakHunterExistingVector(source);
+        return;
+      }
+      const context = peakHunterActionContext(source);
+      if (!peakHunterCanCreateAction(source)) {
+        const target = source === 'history' ? 'peakHunterHistoryDetailStatus' : 'peakHunterResultStatus';
+        setText(target, 'Caso sem classification/candidate/evidencia suficiente para criar draft.');
+        return;
+      }
+      const endpointByAction = {
+        'response-profile': 'create-response-profile-draft',
+        'detection-rule': 'create-detection-rule-draft',
+        playbook: 'create-playbook-draft'
+      };
+      const endpoint = endpointByAction[action];
+      if (!endpoint) return;
+      const payload = await apiRequest(`/api/peak-hunter/history/${context.id}/${endpoint}`, { method: 'POST' });
+      peakHunterCurrentDraft = { action, source, draft: payload.draft || payload };
+      document.getElementById('peakHunterDraftModalTitle').textContent = action === 'response-profile'
+        ? 'Draft de Response Profile'
+        : action === 'detection-rule'
+          ? 'Draft de regra'
+          : 'Draft de playbook';
+      document.getElementById('peakHunterDraftStatus').textContent = action === 'playbook'
+        ? 'Preview seguro. Playbooks ainda devem ser registrados manualmente conforme o processo operacional.'
+        : 'Revise os campos antes de salvar. O draft nasce desativado e sem anuncio BGP.';
+      document.getElementById('peakHunterDraftPreview').textContent = JSON.stringify(peakHunterCurrentDraft.draft, null, 2);
+      document.getElementById('peakHunterDraftOpenButton').classList.toggle('d-none', action === 'playbook');
+      openModal('peakHunterDraftModal');
+    }
+
+    async function openCurrentPeakHunterDraftForReview() {
+      const draft = peakHunterCurrentDraft?.draft || {};
+      const action = peakHunterCurrentDraft?.action;
+      closeModal('peakHunterDraftModal');
+      if (action === 'response-profile') {
+        await openBgpResponseProfileDraft(draft);
+      } else if (action === 'detection-rule') {
+        await openDetectionRuleDraft(draft);
+      }
+    }
+
+    async function openBgpResponseProfileDraft(draft) {
+      showView('bgp');
+      await loadBgpView();
+      clearBgpProfileForm();
+      setValue('bgpProfileId', '');
+      setValue('bgpProfileName', draft.name || '');
+      setValue('bgpProfileConnector', draft.connector_id || firstActiveBgpConnectorId());
+      setValue('bgpProfileType', draft.response_type || 'flowspec');
+      setValue('bgpProfileApproval', draft.approval_mode || 'manual_approval');
+      setValue('bgpProfileAction', draft.action || 'discard');
+      setValue('bgpProfileTarget', draft.target_selector || 'dst_ip');
+      setValue('bgpProfileProtocol', draft.protocol_selector || 'udp');
+      setValue('bgpProfileSrcPortSelector', draft.src_port_selector || 'any');
+      setValue('bgpProfileSrcPortValue', draft.src_port_value || '');
+      setValue('bgpProfileDstPortSelector', draft.dst_port_selector || 'any');
+      setValue('bgpProfileDstPortValue', draft.dst_port_value || '');
+      setValue('bgpProfileTcpFlags', draft.tcp_flags_selector || 'any');
+      setValue('bgpProfileDuration', draft.default_duration_seconds || 1800);
+      setValue('bgpProfileMaxDuration', draft.max_duration_seconds || 3600);
+      setBoolSelect('bgpProfileEnabled', Boolean(draft.enabled));
+      renderBgpSelects();
+      setValue('bgpProfileConnector', draft.connector_id || firstActiveBgpConnectorId());
+      setText('bgpStatus', `Draft do Peak Hunter #${draft.source_peak_analysis_id || '-'} carregado para revisao.`);
+    }
+
+    async function openDetectionRuleDraft(draft) {
+      showView('attack-vectors');
+      await loadDetectionTemplates();
+      resetDetectionRuleForm({
+        vector: draft.vector,
+        domain: draft.domain,
+        direction: draft.direction,
+        protocol: draft.protocol,
+        metric: draft.metric,
+        comparison: draft.comparison,
+        warning_value: draft.warning_value,
+        critical_value: draft.critical_value,
+        window_seconds: draft.window_seconds,
+        consecutive_windows: draft.consecutive_windows,
+        cooldown_minutes: draft.cooldown_minutes,
+        enabled: false,
+        response: draft.response || 'MANUAL_REVIEW',
+        src_cidr: draft.src_cidr || '',
+        dst_cidr: draft.dst_cidr || '',
+        src_port: draft.src_port || 'any',
+        dst_port: draft.dst_port || 'any',
+        group_by: draft.group_by || '',
+        input_if: draft.input_if || '',
+        output_if: draft.output_if || '',
+        mitigation_enabled: false,
+        mitigation_mode: draft.mitigation_mode || 'manual_review',
+        duration_seconds: draft.duration_seconds || draft.ttl_seconds || 1800,
+        notes: draft.notes || ''
+      });
+      setText('detectionRuleStatus', `Draft do Peak Hunter #${draft.source_peak_analysis_id || '-'} carregado. Revise e salve no grupo selecionado.`);
+    }
+
+    function associatePeakHunterExistingVector(source = 'result') {
+      const context = peakHunterActionContext(source);
+      if (context.id) {
+        showPeakHunterTab('history');
+        peakHunterCurrentHistoryId = Number(context.id);
+      }
+      setValue('peakHunterFeedbackLabel', 'attack');
+      setValue('peakHunterFeedbackVector', context.classification || peakHunterVectorText(context.item));
+      setValue('peakHunterFeedbackAction', 'manual_review');
+      setText('peakHunterHistoryDetailStatus', `Caso #${context.id || '-'} pronto para associar a um vetor existente.`);
+    }
+
     function renderPeakHunterRecommendation(result) {
       const candidate = peakHunterRecommendedCandidate(result);
       const command = peakHunterFlowspecCommand(candidate, result.mitigation_allowed);
@@ -9003,6 +9205,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!id) return;
       peakHunterCurrentHistoryId = Number(id);
       const item = await apiRequest(`/api/peak-hunter/history/${id}`);
+      peakHunterCurrentHistoryItem = item;
       document.getElementById('peakHunterHistoryDetailStatus').textContent = `Caso #${item.id || id} - ${item.classification || '-'}`;
       document.getElementById('peakHunterHistoryTechnicalReport').textContent = item.technical_report || '-';
       document.getElementById('peakHunterHistoryDominantGroup').textContent = JSON.stringify(item.dominant_group || {}, null, 2);
@@ -9015,6 +9218,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('peakHunterFeedbackTtl').value = item.operator_confirmed_ttl || '';
       document.getElementById('peakHunterFeedbackResolved').value = item.resolved_by_mitigation ? '1' : '0';
       document.getElementById('peakHunterFeedbackComment').value = item.operator_comment || '';
+      renderPeakHunterActionButtons('history');
+      createIcons();
     }
 
     async function savePeakHunterFeedback() {
@@ -9248,6 +9453,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderPeakHunterEndpointTable('peakHunterDestinationsTable', result.top_destinations || best.top_destinations || [], 'dst_ip');
       renderPeakHunterCandidates(result.candidates || best.candidates || []);
       renderPeakHunterSeries(result.series || [], metric, best, result.baseline || {});
+      renderPeakHunterActionButtons('result');
       createIcons();
     }
 
@@ -13274,6 +13480,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('peakHunterCopyReportButton').addEventListener('click', () => copyPeakHunterReport().catch(console.error));
     document.getElementById('peakHunterExportJsonlButton').addEventListener('click', exportPeakHunterJsonl);
     document.getElementById('peakHunterExportPdfButton').addEventListener('click', exportPeakHunterPdf);
+    document.getElementById('peakHunterActionToolbar').addEventListener('click', event => {
+      const button = event.target.closest('[data-peak-action]');
+      if (button) openPeakHunterDraft(button.dataset.peakAction, button.dataset.source || 'result').catch(error => setText('peakHunterResultStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('peakHunterHistoryActionToolbar').addEventListener('click', event => {
+      const button = event.target.closest('[data-peak-action]');
+      if (button) openPeakHunterDraft(button.dataset.peakAction, button.dataset.source || 'history').catch(error => setText('peakHunterHistoryDetailStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('peakHunterDraftOpenButton').addEventListener('click', () => openCurrentPeakHunterDraftForReview().catch(error => setText('peakHunterDraftStatus', `Falha: ${error.message}`)));
     document.getElementById('peakHunterAutomationRefreshButton').addEventListener('click', () => loadPeakHunterAutomation().catch(console.error));
     document.getElementById('peakHunterJobNewButton').addEventListener('click', resetPeakHunterJobForm);
     document.getElementById('peakHunterJobDeleteButton').addEventListener('click', () => deletePeakHunterJob().catch(error => setText('peakHunterAutomationStatus', `Falha: ${error.message}`)));

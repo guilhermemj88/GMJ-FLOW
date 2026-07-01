@@ -19,6 +19,10 @@ from app.services.peak_hunter import (
     PeakHunterRequest,
     analyze_peak_hunter,
     anomaly_peak_hunter_prefill,
+    build_peak_hunter_attack_vector_draft,
+    build_peak_hunter_detection_rule_draft,
+    build_peak_hunter_playbook_draft,
+    build_peak_hunter_response_profile_draft,
     export_peak_analysis_dataset,
     get_peak_analysis_history_item,
     list_peak_analysis_history,
@@ -106,8 +110,9 @@ def analyze_peak_hunter_endpoint(payload: PeakHunterPayload) -> dict[str, Any]:
         with sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db")) as conn:
             conn.row_factory = sqlite3.Row
             record.update(_interface_metadata(record.get("sensor") or "", int(record.get("interface_id") or 0)))
-            save_peak_analysis(conn, record)
+            saved_id = save_peak_analysis(conn, record)
             conn.commit()
+            return saved_id
 
     try:
         return analyze_peak_hunter(request, fetch_interface_series, fetch_peak_flows, save_history=save)
@@ -228,6 +233,46 @@ def peak_hunter_history_feedback(item_id: int, payload: PeakHunterFeedbackPayloa
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Historico nao encontrado") from exc
     return item
+
+
+@router.post("/history/{item_id}/create-response-profile-draft")
+def peak_hunter_create_response_profile_draft(item_id: int) -> dict[str, Any]:
+    item = _peak_hunter_history_item_or_404(item_id)
+    try:
+        draft = build_peak_hunter_response_profile_draft(item, _active_bgp_connectors())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft
+
+
+@router.post("/history/{item_id}/create-detection-rule-draft")
+def peak_hunter_create_detection_rule_draft(item_id: int) -> dict[str, Any]:
+    item = _peak_hunter_history_item_or_404(item_id)
+    try:
+        draft = build_peak_hunter_detection_rule_draft(item)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft
+
+
+@router.post("/history/{item_id}/create-playbook-draft")
+def peak_hunter_create_playbook_draft(item_id: int) -> dict[str, Any]:
+    item = _peak_hunter_history_item_or_404(item_id)
+    try:
+        draft = build_peak_hunter_playbook_draft(item)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft
+
+
+@router.post("/history/{item_id}/create-attack-vector-draft")
+def peak_hunter_create_attack_vector_draft(item_id: int) -> dict[str, Any]:
+    item = _peak_hunter_history_item_or_404(item_id)
+    try:
+        draft = build_peak_hunter_attack_vector_draft(item)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft
 
 
 @router.get("/export-dataset")
@@ -352,6 +397,30 @@ def peak_hunter_from_anomaly(anomaly_id: int) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
     return anomaly_peak_hunter_prefill(dict(row))
+
+
+def _peak_hunter_history_item_or_404(item_id: int) -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        item = get_peak_analysis_history_item(conn, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Historico nao encontrado")
+    return item
+
+
+def _active_bgp_connectors() -> list[dict[str, Any]]:
+    try:
+        with _sqlite_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, enabled, is_active
+                FROM bgp_connectors
+                WHERE enabled = 1 AND is_active = 1
+                ORDER BY id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
 
 
 def _normalize_direction(value: str) -> str:

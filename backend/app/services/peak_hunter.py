@@ -81,7 +81,9 @@ def analyze_peak_hunter(
     }
     result["technical_report"] = build_technical_report(request, result)
     if save_history and best:
-        save_history(history_record(request, result, baseline))
+        saved_id = save_history(history_record(request, result, baseline))
+        if saved_id is not None:
+            result["history_id"] = saved_id
     return result
 
 
@@ -516,7 +518,7 @@ def _copy_legacy_json_column(conn: sqlite3.Connection, legacy_column: str, new_c
     )
 
 
-def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None:
+def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> int:
     ensure_peak_analysis_db(conn)
     columns = [
         "peak_time",
@@ -565,13 +567,14 @@ def save_peak_analysis(conn: sqlite3.Connection, record: dict[str, Any]) -> None
         "created_at",
     ]
     values = [record_value_for_db(record, column) for column in columns]
-    conn.execute(
+    cursor = conn.execute(
         f"""
         INSERT INTO peak_analysis ({', '.join(columns)})
         VALUES ({', '.join('?' for _ in columns)})
         """,
         values,
     )
+    return int(cursor.lastrowid)
 
 
 def record_value_for_db(record: dict[str, Any], column: str) -> Any:
@@ -819,6 +822,273 @@ def recommendation_for_history(item: dict[str, Any], candidates: list[dict[str, 
     if any(candidate.get("action") != "alert_only" for candidate in candidates):
         return {"recommended_action": "manual_review", "reason": "Revisar candidato manualmente."}
     return {"recommended_action": "alert_only", "reason": "Sem candidato aplicavel."}
+
+
+def build_peak_hunter_response_profile_draft(
+    item: dict[str, Any],
+    active_connectors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    context = _peak_hunter_action_context(item)
+    dominant = context["dominant_group"]
+    classification = context["classification"]
+    protocol = str(dominant.get("protocol") or item.get("dominant_protocol") or "udp").lower()
+    dst_port = _to_int_or_none(dominant.get("dst_port") or item.get("dominant_dst_port"))
+    target_selector = "dst_ip"
+    dst_port_selector = "fixed" if dst_port else "anomaly_dst_port"
+    dst_port_value = str(dst_port or "")
+    safety_notes = [
+        "Draft gerado pelo Peak Hunter para revisao manual.",
+        "Nenhum anuncio BGP foi enviado; apply_enabled=false.",
+    ]
+    if context["evidence_status"] != "complete":
+        safety_notes.append("Evidencia parcial. A regra criada deve ser revisada com cuidado.")
+    if classification == "dns_udp_abuse_outbound":
+        protocol = "udp"
+        target_selector = "dst_ip"
+        dst_port_selector = "fixed"
+        dst_port_value = "53"
+    elif classification == "aggregate_udp_without_dominant_vector":
+        protocol = "udp"
+        target_selector = "src_and_dst_ip"
+        dst_port_selector = "anomaly_dst_port"
+        dst_port_value = str(dst_port or "")
+        safety_notes.append("Caso agregado: usar match restrito por origem+destino+protocolo+porta e manter disabled.")
+    elif classification == "udp_flood_outbound_to_single_destination_port":
+        protocol = "udp"
+        target_selector = "dst_ip"
+    elif "tcp" in classification:
+        protocol = "tcp"
+        target_selector = "dst_ip"
+    elif "icmp" in classification:
+        protocol = "icmp"
+        target_selector = "dst_ip"
+        dst_port_selector = "any"
+        dst_port_value = ""
+    if target_selector == "src_ip":
+        target_selector = "src_and_dst_ip"
+        safety_notes.append("Outbound nao deve bloquear source interno sozinho; alvo ajustado para src_and_dst_ip.")
+    connector_id = _default_connector_id(active_connectors or [])
+    return {
+        "name": _peak_hunter_draft_name("PH", classification, dst_port, protocol),
+        "connector_id": connector_id,
+        "response_type": "flowspec",
+        "approval_mode": "manual_approval",
+        "action": "discard",
+        "target_selector": target_selector,
+        "protocol_selector": protocol if protocol in {"udp", "tcp", "icmp"} else "anomaly_protocol",
+        "src_port_selector": "any",
+        "src_port_value": "",
+        "dst_port_selector": dst_port_selector,
+        "dst_port_value": dst_port_value,
+        "tcp_flags_selector": "any",
+        "default_duration_seconds": 1800,
+        "max_duration_seconds": 3600,
+        "enabled": False,
+        "active": False,
+        "apply_enabled": False,
+        "source_peak_analysis_id": item.get("id"),
+        "safety_notes": " ".join(safety_notes),
+    }
+
+
+def build_peak_hunter_detection_rule_draft(item: dict[str, Any]) -> dict[str, Any]:
+    context = _peak_hunter_action_context(item, require_candidate=False)
+    dominant = context["dominant_group"]
+    classification = context["classification"]
+    protocol = str(dominant.get("protocol") or item.get("dominant_protocol") or item.get("protocol") or "udp").upper()
+    if protocol not in {"UDP", "TCP", "ICMP"}:
+        protocol = "ALL"
+    dst_port = _to_int_or_none(dominant.get("dst_port") or item.get("dominant_dst_port"))
+    baseline_p99 = float(item.get("baseline_p99") or (item.get("result_json") or {}).get("baseline", {}).get("p99") or 0)
+    peak_value = float(item.get("peak_value") or 0)
+    warning = max(baseline_p99 * 1.2, peak_value * 0.5)
+    critical = max(baseline_p99 * 1.5, peak_value * 0.8)
+    window = _to_int_or_none((item.get("result_json") or {}).get("evidence_window_used") or item.get("evidence_window_used")) or 60
+    direction = "transmits" if item.get("direction") in {"sends", "transmits", "outbound"} else "receives"
+    notes = [
+        "Draft gerado pelo Peak Hunter; revisar antes de ativar.",
+        "Criado desativado, manual_review e apply_enabled=false.",
+    ]
+    group_by = "dst_ip,dst_port,protocol"
+    dst_cidr = _ip_cidr32(dominant.get("dst_ip") or item.get("dominant_dst_ip"))
+    src_cidr = ""
+    mitigation_mode = "manual_review"
+    if classification == "aggregate_udp_without_dominant_vector":
+        group_by = "src_ip,dst_ip,dst_port,protocol"
+        mitigation_mode = "manual_review"
+        notes.append("Grupo agregado com menor dominancia; exige revisao extra e nao deve nascer agressivo.")
+    if context["evidence_status"] != "complete":
+        notes.append("Evidencia parcial. A regra criada deve ser revisada com cuidado.")
+    return {
+        "vector": _peak_hunter_draft_name("PH_RULE", classification, dst_port, protocol.lower()),
+        "domain": "internal_ip_to_dst" if direction == "transmits" else "internal_ip",
+        "direction": direction,
+        "protocol": protocol,
+        "metric": item.get("metric") or "packets_s",
+        "comparison": "over",
+        "warning_value": round(warning, 2),
+        "critical_value": round(critical, 2),
+        "window_seconds": int(window),
+        "consecutive_windows": 1,
+        "cooldown_minutes": 5,
+        "enabled": False,
+        "status": "draft",
+        "response": "MANUAL_REVIEW",
+        "src_cidr": src_cidr,
+        "dst_cidr": dst_cidr,
+        "src_port": "any",
+        "dst_port": str(dst_port) if dst_port else "any",
+        "group_by": group_by,
+        "input_if": str(item.get("interface_id") or "") if direction == "receives" else "",
+        "output_if": str(item.get("interface_id") or "") if direction == "transmits" else "",
+        "mitigation_mode": mitigation_mode,
+        "mitigation_enabled": False,
+        "warning_response_profile_id": None,
+        "critical_response_profile_id": None,
+        "fallback_response_profile_id": None,
+        "ttl_seconds": 1800,
+        "duration_seconds": 1800,
+        "apply_enabled": False,
+        "notes": " ".join(notes),
+        "source_peak_analysis_id": item.get("id"),
+    }
+
+
+def build_peak_hunter_playbook_draft(item: dict[str, Any]) -> dict[str, Any]:
+    context = _peak_hunter_action_context(item, require_candidate=False, allow_investigation=True)
+    classification = context["classification"]
+    dominant = context["dominant_group"]
+    dst_port = _to_int_or_none(dominant.get("dst_port") or item.get("dominant_dst_port"))
+    protocol = str(dominant.get("protocol") or item.get("dominant_protocol") or item.get("protocol") or "udp").lower()
+    investigation_only = not context["candidate"] or context["evidence_status"] in {"insufficient", "no_peak"}
+    return {
+        "id": None,
+        "name": _peak_hunter_draft_name("PH_PLAYBOOK", classification, dst_port, protocol),
+        "classification": classification,
+        "evidence_requirements_json": {
+            "min_share_packets": 20,
+            "min_packets_s": 100000,
+            "require_unique_src_count": 1,
+            "evidence_status": "complete" if not investigation_only else "manual_investigation",
+        },
+        "candidate_template_json": {
+            "template": "src_customer_32_dst_external_32_proto_dst_port"
+            if classification == "aggregate_udp_without_dominant_vector"
+            else (context["candidate"].get("template") if context["candidate"] else "investigation_only"),
+            "target_selector": "src_and_dst_ip" if classification == "aggregate_udp_without_dominant_vector" else "dst_ip",
+            "protocol": protocol,
+            "dst_port": dst_port,
+        },
+        "safety_rules_json": {
+            "apply_enabled": False,
+            "manual_review": True,
+            "do_not_block_src_only": True,
+            "allow_bgp_announce": False,
+            "investigation_only": investigation_only,
+        },
+        "response_profile_id": None,
+        "detection_rule_id": None,
+        "enabled": False,
+        "created_from_peak_analysis_id": item.get("id"),
+    }
+
+
+def build_peak_hunter_attack_vector_draft(item: dict[str, Any]) -> dict[str, Any]:
+    rule = build_peak_hunter_detection_rule_draft(item)
+    protocol = str(rule.get("protocol") or "ALL").lower()
+    decoder = "UDP" if protocol == "udp" else "TCP" if protocol == "tcp" else "ICMP" if protocol == "icmp" else "IP"
+    return {
+        "name": rule["vector"],
+        "enabled": False,
+        "domain_type": "external_ip" if rule.get("dst_cidr") else "any",
+        "target_cidr": rule.get("dst_cidr") or None,
+        "src_cidr": rule.get("src_cidr") or None,
+        "dst_cidr": rule.get("dst_cidr") or None,
+        "src_port": rule.get("src_port") or "any",
+        "dst_port": rule.get("dst_port") or "any",
+        "protocol": protocol if protocol in {"udp", "tcp", "icmp"} else "any",
+        "direction": "sends" if rule.get("direction") == "transmits" else "receives",
+        "decoder": decoder,
+        "comparison": "over",
+        "threshold_value": rule.get("warning_value") or 0,
+        "threshold_unit": rule.get("metric") or "packets_s",
+        "severity": "warning",
+        "response_action": "alert_only",
+        "window_seconds": rule.get("window_seconds") or 60,
+        "source_peak_analysis_id": item.get("id"),
+    }
+
+
+def _peak_hunter_action_context(
+    item: dict[str, Any],
+    require_candidate: bool = True,
+    allow_investigation: bool = False,
+) -> dict[str, Any]:
+    result = item.get("result_json") if isinstance(item.get("result_json"), dict) else {}
+    dominant = item.get("dominant_group") or result.get("dominant_group") or {}
+    candidates = item.get("candidates") or result.get("candidates") or []
+    candidate = next((entry for entry in candidates if entry.get("action") and entry.get("action") != "alert_only"), None)
+    if candidate is None and candidates:
+        candidate = candidates[0]
+    evidence_status = item.get("evidence_status") or result.get("evidence_status") or ""
+    classification = item.get("classification") or result.get("classification") or "insufficient_flow_evidence"
+    technical_report = item.get("technical_report") or result.get("technical_report") or ""
+    if evidence_status in {"insufficient", "no_peak"} and not allow_investigation:
+        raise ValueError("Caso sem evidencia suficiente para criar acao de mitigacao.")
+    if not dominant and not allow_investigation:
+        raise ValueError("Caso sem grupo dominante seguro para criar acao de mitigacao.")
+    if require_candidate and (not candidate or candidate.get("action") == "alert_only"):
+        raise ValueError("Caso sem candidate seguro; crie apenas playbook de investigacao.")
+    if not classification and not allow_investigation:
+        raise ValueError("classification obrigatoria para criar draft.")
+    if not technical_report and not allow_investigation:
+        raise ValueError("technical_report obrigatorio para criar draft.")
+    return {
+        "dominant_group": dominant,
+        "candidate": candidate or {},
+        "classification": classification,
+        "evidence_status": evidence_status,
+        "technical_report": technical_report,
+    }
+
+
+def _default_connector_id(connectors: list[dict[str, Any]]) -> int | None:
+    active = [
+        connector
+        for connector in connectors
+        if connector.get("enabled", 1) in {True, 1, "1"} and connector.get("is_active", 1) in {True, 1, "1"}
+    ]
+    return int(active[0]["id"]) if len(active) == 1 and active[0].get("id") is not None else None
+
+
+def _peak_hunter_draft_name(prefix: str, classification: Any, dst_port: Any, protocol: Any) -> str:
+    parts = [prefix, _slug_token(classification or "unknown")]
+    if dst_port:
+        parts.append(str(dst_port))
+    if protocol:
+        parts.append(_slug_token(protocol))
+    return "_".join(part for part in parts if part)
+
+
+def _slug_token(value: Any) -> str:
+    return "".join(char if char.isalnum() else "_" for char in str(value or "").strip()).strip("_")
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _ip_cidr32(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "/" in text:
+        return text
+    return f"{text}/32"
 
 
 def dominant_group_label(group: dict[str, Any] | None) -> str:

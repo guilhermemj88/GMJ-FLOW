@@ -12,7 +12,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.services.peak_hunter import PeakHunterRequest, analyze_peak_hunter, ensure_peak_analysis_db, normalize_series
+from app.services.peak_hunter import (
+    PeakHunterRequest,
+    analyze_peak_hunter,
+    build_peak_hunter_detection_rule_draft,
+    build_peak_hunter_playbook_draft,
+    build_peak_hunter_response_profile_draft,
+    ensure_peak_analysis_db,
+    normalize_series,
+)
 
 sys.modules.setdefault("clickhouse_connect", types.SimpleNamespace(get_client=lambda **_kwargs: None))
 from app.services import clickhouse as peak_clickhouse
@@ -114,6 +122,100 @@ class PeakHunterTest(unittest.TestCase):
         result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
         self.assertFalse(result["best_peak"]["apply_enabled"])
         self.assertTrue(all(candidate.get("apply_enabled") is False for candidate in result["candidates"]))
+
+    def test_response_profile_draft_for_dns_outbound_is_manual_disabled(self):
+        result = analyze_peak_hunter(
+            self.request,
+            self._series,
+            lambda _request, _time, window: [
+                {"src_ip": "100.64.0.10", "src_port": 1100, "dst_ip": "8.8.8.8", "dst_port": 53, "protocol": "udp", "packets": 2000, "bytes": 900000, "packets_s": 7000},
+                {"src_ip": "100.64.0.11", "src_port": 1101, "dst_ip": "8.8.8.8", "dst_port": 53, "protocol": "udp", "packets": 2100, "bytes": 910000, "packets_s": 7100},
+            ] if window == 5 else [],
+        )
+        item = self._history_item_from_result(result, item_id=10)
+        draft = build_peak_hunter_response_profile_draft(item, [{"id": 1, "enabled": 1, "is_active": 1}])
+        self.assertEqual(draft["name"], "PH_dns_udp_abuse_outbound_53_udp")
+        self.assertEqual(draft["connector_id"], 1)
+        self.assertEqual(draft["approval_mode"], "manual_approval")
+        self.assertFalse(draft["enabled"])
+        self.assertFalse(draft["apply_enabled"])
+        self.assertEqual(draft["target_selector"], "dst_ip")
+        self.assertEqual(draft["dst_port_selector"], "fixed")
+        self.assertEqual(draft["dst_port_value"], "53")
+
+    def test_response_profile_draft_for_udp_dst_port_avoids_source_only(self):
+        result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
+        draft = build_peak_hunter_response_profile_draft(self._history_item_from_result(result))
+        self.assertEqual(draft["approval_mode"], "manual_approval")
+        self.assertFalse(draft["enabled"])
+        self.assertIn(draft["target_selector"], {"dst_ip", "src_and_dst_ip"})
+        self.assertNotEqual(draft["target_selector"], "src_ip")
+        self.assertEqual(draft["protocol_selector"], "udp")
+        self.assertEqual(draft["dst_port_value"], "65535")
+
+    def test_aggregate_udp_response_profile_draft_is_restricted_and_disabled(self):
+        item = self._history_item_from_result(
+            {
+                "classification": "aggregate_udp_without_dominant_vector",
+                "evidence_status": "complete",
+                "dominant_group": {
+                    "dst_ip": "203.0.113.77",
+                    "dst_port": 9004,
+                    "protocol": "udp",
+                    "share_packets": 22,
+                    "unique_src_count": 1,
+                    "unique_src_ips": ["100.64.0.50"],
+                },
+                "candidates": [{"action": "flowspec_discard", "template": "src_customer_32_dst_external_32_proto_dst_port", "apply_enabled": False}],
+                "technical_report": "Peak Hunter - relatorio tecnico",
+                "baseline": {"p99": 1000},
+                "best_peak": {"peak_value": 100000, "evidence_status": "complete"},
+                "evidence_window_used": 5,
+            },
+            item_id=11,
+        )
+        draft = build_peak_hunter_response_profile_draft(item)
+        self.assertEqual(draft["target_selector"], "src_and_dst_ip")
+        self.assertEqual(draft["dst_port_selector"], "anomaly_dst_port")
+        self.assertFalse(draft["enabled"])
+        self.assertIn("restrito", draft["safety_notes"])
+
+    def test_detection_rule_draft_thresholds_are_based_on_baseline_and_peak(self):
+        result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
+        item = self._history_item_from_result(result)
+        item["baseline_p99"] = 2000
+        draft = build_peak_hunter_detection_rule_draft(item)
+        self.assertEqual(draft["warning_value"], 60000)
+        self.assertEqual(draft["critical_value"], 96000)
+        self.assertEqual(draft["window_seconds"], 5)
+        self.assertFalse(draft["enabled"])
+        self.assertFalse(draft["apply_enabled"])
+        self.assertEqual(draft["mitigation_mode"], "manual_review")
+        self.assertEqual(draft["dst_cidr"], "203.0.113.10/32")
+
+    def test_partial_evidence_draft_never_creates_active_profile(self):
+        item = self._history_item_from_result(
+            {
+                "classification": "udp_flood_outbound_to_single_destination_port",
+                "evidence_status": "partial",
+                "dominant_group": {"dst_ip": "203.0.113.20", "dst_port": 123, "protocol": "udp"},
+                "candidates": [{"action": "flowspec_discard", "template": "dst_external_32_proto_dst_port", "apply_enabled": False}],
+                "technical_report": "Peak Hunter - relatorio tecnico",
+                "baseline": {"p99": 1000},
+                "best_peak": {"peak_value": 2000, "evidence_status": "partial"},
+            }
+        )
+        draft = build_peak_hunter_response_profile_draft(item)
+        self.assertFalse(draft["enabled"])
+        self.assertIn("Evidencia parcial", draft["safety_notes"])
+
+    def test_playbook_draft_is_manual_and_does_not_announce_flowspec(self):
+        result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
+        draft = build_peak_hunter_playbook_draft(self._history_item_from_result(result))
+        self.assertFalse(draft["enabled"])
+        self.assertFalse(draft["safety_rules_json"]["apply_enabled"])
+        self.assertFalse(draft["safety_rules_json"]["allow_bgp_announce"])
+        self.assertTrue(draft["safety_rules_json"]["manual_review"])
 
     def test_auto_threshold_when_empty(self):
         request = PeakHunterRequest(
@@ -717,11 +819,51 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("Backend retornou HTTP", html)
         self.assertIn("Falha de rede/CORS ao chamar", html)
 
+    def test_frontend_peak_hunter_action_buttons_are_conditionally_rendered(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="peakHunterActionToolbar"', html)
+        self.assertIn('data-peak-action="detection-rule"', html)
+        self.assertIn('data-peak-action="response-profile"', html)
+        self.assertIn('data-peak-action="playbook"', html)
+        self.assertIn('data-peak-action="associate-vector"', html)
+        self.assertIn("function peakHunterCanCreateAction", html)
+        self.assertIn("context.classification", html)
+        self.assertIn("(context.dominantGroup || context.candidate)", html)
+        self.assertIn("!['insufficient', 'no_peak'].includes(context.evidenceStatus)", html)
+        self.assertIn("create-response-profile-draft", html)
+        self.assertIn("create-detection-rule-draft", html)
+
     def test_ipv4_mapped_ipv6_normalized_for_candidate(self):
         request = PeakHunterRequest(**{**self.request.__dict__, "threshold": 1000})
         result = analyze_peak_hunter(request, self._series, self._ipv4_mapped_flows)
         self.assertEqual(result["dominant_group"]["dst_ip"], "13.98.137.185")
         self.assertTrue(any("13.98.137.185" in str(candidate) for candidate in result["candidates"]))
+
+    def _history_item_from_result(self, result, item_id=1):
+        best = result.get("best_peak") or {}
+        dominant = result.get("dominant_group") or best.get("dominant_group") or {}
+        return {
+            "id": item_id,
+            "peak_time": best.get("peak_time_utc") or self.base_time.isoformat(),
+            "peak_time_utc": best.get("peak_time_utc") or self.base_time.isoformat().replace("+00:00", "Z"),
+            "sensor": self.request.sensor,
+            "interface_id": self.request.interface_id,
+            "direction": self.request.direction,
+            "metric": self.request.metric,
+            "protocol": self.request.protocol or dominant.get("protocol") or "",
+            "peak_value": best.get("peak_value") or result.get("peak_value") or 120000,
+            "baseline_p95": best.get("baseline_p95") or (result.get("baseline") or {}).get("p95") or 1000,
+            "baseline_p99": best.get("baseline_p99") or (result.get("baseline") or {}).get("p99") or 2000,
+            "evidence_status": result.get("evidence_status") or best.get("evidence_status") or "",
+            "classification": result.get("classification") or best.get("classification") or "",
+            "dominant_group": dominant,
+            "dominant_dst_ip": dominant.get("dst_ip") or "",
+            "dominant_dst_port": dominant.get("dst_port"),
+            "dominant_protocol": dominant.get("protocol") or "",
+            "candidates": result.get("candidates") or best.get("candidates") or [],
+            "technical_report": result.get("technical_report") or "Peak Hunter - relatorio tecnico",
+            "result_json": result,
+        }
 
     def _series(self, request):
         return [
