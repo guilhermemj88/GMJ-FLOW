@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
 import clickhouse_connect
 
 from app.services.peak_hunter import PeakHunterRequest
+
+
+SAMPLE_RATE_MODES = {"sensor_default", "per_interface", "snmp_auto"}
+FLOW_SAMPLE_RATE_FALLBACK = "greatest(toFloat64(sample_rate), 1.0)"
 
 
 class ClickHouseQueryError(RuntimeError):
@@ -46,7 +51,12 @@ def query_clickhouse_context(query_context: str, query: str, parameters: dict[st
 
 def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
     direction_field = "output_if" if request.direction in {"sends", "transmits", "outbound"} else "input_if"
-    value_expr = "sum(bytes) * 8" if request.metric == "bits_s" else "sum(packets)"
+    sample_direction = "output" if direction_field == "output_if" else "input"
+    sample_rate = peak_sample_rate_details(request.sensor, int(request.interface_id), sample_direction)
+    rate_expr = sample_rate["rate_expr"]
+    packets_expr = f"sum(toFloat64(packets) * ({rate_expr}))"
+    bytes_expr = f"sum(toFloat64(bytes) * ({rate_expr}))"
+    value_expr = f"{bytes_expr} * 8" if request.metric == "bits_s" else packets_expr
     divisor = max(int(request.window_seconds or 5), 1)
     filters = [
         "flow_time >= {start:DateTime}",
@@ -71,8 +81,13 @@ def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
         SELECT
             toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS bucket,
             {value_expr} / {{window_seconds:Float64}} AS value,
-            sum(packets) / {{window_seconds:Float64}} AS packets_s,
-            sum(bytes) * 8 / {{window_seconds:Float64}} AS bits_s
+            {packets_expr} / {{window_seconds:Float64}} AS packets_s,
+            {bytes_expr} * 8 / {{window_seconds:Float64}} AS bits_s,
+            sum(packets) AS raw_packets,
+            sum(bytes) AS raw_bytes,
+            max(sample_rate) AS db_sample_rate,
+            {sample_rate['effective_select']} AS effective_sample_rate,
+            '{sample_rate['source']}' AS sample_rate_source
         FROM flow_raw
         WHERE {' AND '.join(filters)}
         GROUP BY bucket
@@ -84,6 +99,11 @@ def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
 
 def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_seconds: int) -> list[dict[str, Any]]:
     direction_field = "output_if" if request.direction in {"sends", "transmits", "outbound"} else "input_if"
+    sample_direction = "output" if direction_field == "output_if" else "input"
+    sample_rate = peak_sample_rate_details(request.sensor, int(request.interface_id), sample_direction)
+    rate_expr = sample_rate["rate_expr"]
+    packets_expr = f"sum(toFloat64(packets) * ({rate_expr}))"
+    bytes_expr = f"sum(toFloat64(bytes) * ({rate_expr}))"
     start = peak_time - timedelta(seconds=window_seconds)
     end = peak_time + timedelta(seconds=window_seconds)
     seconds = max(window_seconds * 2, 1)
@@ -116,11 +136,16 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
             toString(dst_ip) AS dst_ip,
             dst_port,
             proto,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
+            {bytes_expr} AS bytes,
+            {packets_expr} AS packets,
+            sum(bytes) AS raw_bytes,
+            sum(packets) AS raw_packets,
+            max(sample_rate) AS db_sample_rate,
+            {sample_rate['effective_select']} AS effective_sample_rate,
+            '{sample_rate['source']}' AS sample_rate_source,
             sum(flow_count) AS flow_count,
-            sum(packets) / {{seconds:Float64}} AS packets_s,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
+            {packets_expr} / {{seconds:Float64}} AS packets_s,
+            {bytes_expr} * 8 / {{seconds:Float64}} AS bits_s,
             any(input_if) AS input_if,
             any(output_if) AS output_if
         FROM flow_raw
@@ -214,3 +239,119 @@ def _proto_number(value: str) -> int:
     if text in {"esp", "50"}:
         return 50
     return int(text)
+
+
+def peak_sample_rate_details(sensor: str, interface_id: int, direction: str) -> dict[str, Any]:
+    config = sensor_sample_rate_config(resolve_sensor_id(sensor))
+    if not config:
+        return {
+            "rate_expr": FLOW_SAMPLE_RATE_FALLBACK,
+            "effective_select": f"max({FLOW_SAMPLE_RATE_FALLBACK})",
+            "effective_sample_rate": None,
+            "source": "flow_raw",
+        }
+    rate, source = effective_sample_rate_from_config(config, interface_id, direction)
+    literal = sample_rate_literal(rate)
+    return {
+        "rate_expr": literal,
+        "effective_select": literal,
+        "effective_sample_rate": rate,
+        "source": source,
+    }
+
+
+def resolve_sensor_id(sensor: str | None) -> int | None:
+    text = _clean_text(sensor)
+    if not text:
+        return None
+    try:
+        with sqlite_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM sensors
+                WHERE name = ? OR exporter_ip = ? OR CAST(id AS TEXT) = ?
+                ORDER BY active DESC, id
+                LIMIT 1
+                """,
+                (text, text, text),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row["id"]) if row else None
+
+
+def sensor_sample_rate_config(sensor_id: int | None) -> dict[str, Any] | None:
+    if sensor_id is None:
+        return None
+    try:
+        with sqlite_connection() as conn:
+            sensor = conn.execute(
+                """
+                SELECT sample_rate_default_in, sample_rate_default_out, sample_rate_mode
+                FROM sensors
+                WHERE id = ?
+                """,
+                (sensor_id,),
+            ).fetchone()
+            if sensor is None:
+                return None
+            rows = conn.execute(
+                """
+                SELECT if_index, sample_rate_in, sample_rate_out, sample_rate_override
+                FROM sensor_interfaces
+                WHERE sensor_id = ?
+                """,
+                (sensor_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    interfaces: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        if_index = int(row["if_index"] or 0)
+        if if_index <= 0:
+            continue
+        interfaces[if_index] = {
+            "in": max(1, int(row["sample_rate_in"] or 1)),
+            "out": max(1, int(row["sample_rate_out"] or 1)),
+            "override": bool(row["sample_rate_override"]),
+        }
+    mode = _clean_text(sensor["sample_rate_mode"]) or "sensor_default"
+    if mode not in SAMPLE_RATE_MODES:
+        mode = "sensor_default"
+    return {
+        "default_in": max(1, int(sensor["sample_rate_default_in"] or 1)),
+        "default_out": max(1, int(sensor["sample_rate_default_out"] or 1)),
+        "mode": mode,
+        "interfaces": interfaces,
+    }
+
+
+def effective_sample_rate_from_config(config: dict[str, Any], if_index: int | None, direction: str) -> tuple[int, str]:
+    direction_key = "out" if direction == "output" else "in"
+    default_key = "default_out" if direction == "output" else "default_in"
+    default_rate = max(1, int(config.get(default_key) or 1))
+    interfaces = config.get("interfaces") if isinstance(config.get("interfaces"), dict) else {}
+    interface = interfaces.get(int(if_index or 0))
+    mode = _clean_text(config.get("mode")) or "sensor_default"
+    if interface and (interface.get("override") or mode == "per_interface"):
+        return max(1, int(interface.get(direction_key) or default_rate)), "interface"
+    return default_rate, "sensor"
+
+
+def sample_rate_literal(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 1
+    return f"toFloat64({max(1, number)})"
+
+
+def sqlite_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()

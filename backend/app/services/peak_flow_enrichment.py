@@ -34,18 +34,26 @@ def enrich_peak_flows(
                 "protocol": flow["protocol"],
                 "total_packets": 0,
                 "total_bytes": 0,
+                "raw_packets": 0,
+                "raw_bytes": 0,
                 "total_bits": 0,
                 "max_packets_s": 0.0,
                 "max_bits_s": 0.0,
+                "effective_sample_rate": 0.0,
+                "sample_rate_source": "",
                 "unique_src_ips": set(),
                 "flows": [],
             },
         )
         group["total_packets"] += int(flow.get("packets") or 0)
         group["total_bytes"] += int(flow.get("bytes") or 0)
+        group["raw_packets"] += int(flow.get("raw_packets") or 0)
+        group["raw_bytes"] += int(flow.get("raw_bytes") or 0)
         group["total_bits"] += int(flow.get("bytes") or 0) * 8
         group["max_packets_s"] = max(float(group["max_packets_s"]), float(flow.get("packets_s") or 0))
         group["max_bits_s"] = max(float(group["max_bits_s"]), float(flow.get("bits_s") or 0))
+        group["effective_sample_rate"] = max(float(group["effective_sample_rate"]), float(flow.get("effective_sample_rate") or 0))
+        group["sample_rate_source"] = group["sample_rate_source"] or str(flow.get("sample_rate_source") or "")
         if flow.get("src_ip"):
             group["unique_src_ips"].add(flow["src_ip"])
         group["flows"].append(flow)
@@ -58,6 +66,8 @@ def enrich_peak_flows(
             "unique_src_count": len(group["unique_src_ips"]),
             "share_packets": _percent(group["total_packets"], total_packets),
             "share_bits": _percent(group["total_bits"], total_bits),
+            "avg_packets_s": _rate(group["total_packets"], window_seconds),
+            "avg_bits_s": _rate(group["total_bits"], window_seconds),
         }
         public_groups.append(item)
     public_groups.sort(
@@ -124,14 +134,19 @@ def _normalize_flow(flow: dict[str, Any], window_seconds: int) -> dict[str, Any]
     protocol = _protocol_name(flow.get("protocol") or flow.get("proto_name") or flow.get("proto"))
     return {
         "flow_time": _string_time(flow.get("flow_time") or flow.get("first_seen") or flow.get("last_seen")),
-        "src_ip": str(flow.get("src_ip") or "").strip(),
+        "src_ip": _normalize_ip_text(flow.get("src_ip")),
         "src_port": _to_int(flow.get("src_port")),
-        "dst_ip": str(flow.get("dst_ip") or "").strip(),
+        "dst_ip": _normalize_ip_text(flow.get("dst_ip")),
         "dst_port": _to_int(flow.get("dst_port")),
         "protocol": protocol,
         "proto_name": protocol.upper(),
         "bytes": bytes_value,
         "packets": packets,
+        "raw_bytes": int(float(flow.get("raw_bytes") or bytes_value)),
+        "raw_packets": int(float(flow.get("raw_packets") or packets)),
+        "db_sample_rate": float(flow.get("db_sample_rate") or 0),
+        "effective_sample_rate": float(flow.get("effective_sample_rate") or 0),
+        "sample_rate_source": str(flow.get("sample_rate_source") or "").strip(),
         "bits": bytes_value * 8,
         "packets_s": float(flow.get("packets_s") or packets / seconds),
         "bits_s": float(flow.get("bits_s") or (bytes_value * 8) / seconds),
@@ -150,9 +165,15 @@ def _public_group(group: dict[str, Any] | None) -> dict[str, Any] | None:
         "protocol": group["protocol"],
         "total_packets": int(group["total_packets"]),
         "total_bytes": int(group["total_bytes"]),
+        "raw_packets": int(group.get("raw_packets") or 0),
+        "raw_bytes": int(group.get("raw_bytes") or 0),
         "total_bits": int(group["total_bits"]),
         "max_packets_s": round(float(group["max_packets_s"]), 2),
         "max_bits_s": round(float(group["max_bits_s"]), 2),
+        "avg_packets_s": round(float(group.get("avg_packets_s") or 0), 2),
+        "avg_bits_s": round(float(group.get("avg_bits_s") or 0), 2),
+        "effective_sample_rate": round(float(group.get("effective_sample_rate") or 0), 2),
+        "sample_rate_source": group.get("sample_rate_source") or "",
         "unique_src_ips": list(group["unique_src_ips"]),
         "unique_src_count": int(group["unique_src_count"]),
         "share_packets": round(float(group["share_packets"]), 2),
@@ -193,6 +214,17 @@ def _top_endpoints(
 
 def _percent(value: int | float, total: int | float) -> float:
     return (float(value) / float(total) * 100.0) if total else 0.0
+
+
+def _rate(value: int | float, seconds: int | float) -> float:
+    return float(value) / max(float(seconds or 1), 1.0)
+
+
+def _normalize_ip_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("::ffff:"):
+        return text.split(":")[-1]
+    return text
 
 
 def _protocol_name(value: Any) -> str:

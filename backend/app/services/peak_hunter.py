@@ -64,6 +64,7 @@ def analyze_peak_hunter(
         "best_peak": best,
         "evidence_window_used": best.get("evidence_window_used") if best else None,
         "evidence_windows_tried": best.get("evidence_windows_tried") if best else [],
+        "evidence_status": best.get("evidence_status") if best else "insufficient",
         "dominant_group": best.get("dominant_group") if best else None,
         "classification": best.get("classification") if best else "insufficient_flow_evidence",
         "top_groups": best.get("groups") if best else [],
@@ -125,7 +126,11 @@ def normalize_series(rows: list[dict[str, Any]], metric: str) -> list[dict[str, 
     for row in rows:
         value = float(row.get(metric) or row.get("value") or 0)
         time_value = row.get("time") or row.get("bucket") or row.get("ts")
-        series.append({"time": _string_time(time_value), metric: value, "value": value})
+        point = {"time": _string_time(time_value), metric: value, "value": value}
+        for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source"):
+            if field in row:
+                point[field] = row.get(field)
+        series.append(point)
     return sorted(series, key=lambda item: item["time"])
 
 
@@ -210,7 +215,11 @@ def detect_local_peaks(
         if value >= floor and value >= previous_value and value >= next_value:
             p95 = float(baseline.get("p95") or 0)
             score = value / p95 if p95 > 0 else value
-            peaks.append({"peak_time": point["time"], "time": point["time"], "peak_value": value, "score": round(score, 3)})
+            peak = {"peak_time": point["time"], "time": point["time"], "peak_value": value, "score": round(score, 3)}
+            for field in ("raw_packets", "raw_bytes", "db_sample_rate", "effective_sample_rate", "sample_rate_source"):
+                if field in point:
+                    peak[field] = point.get(field)
+            peaks.append(peak)
     peaks.sort(key=lambda item: (float(item["score"]), float(item["peak_value"])), reverse=True)
     return peaks[: max(int(max_peaks or 1), 1)]
 

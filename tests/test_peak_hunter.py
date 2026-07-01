@@ -50,6 +50,7 @@ class PeakHunterTest(unittest.TestCase):
     def test_peak_without_dominant_group(self):
         result = analyze_peak_hunter(self.request, self._series, lambda _request, _time, _window: [])
         self.assertEqual(result["classification"], "insufficient_flow_evidence")
+        self.assertEqual(result["evidence_status"], "insufficient")
         self.assertFalse(result["mitigation_allowed"])
         self.assertEqual(result["recommendation"]["recommended_action"], "alert_only")
 
@@ -104,6 +105,13 @@ class PeakHunterTest(unittest.TestCase):
         self.assertLessEqual(len(result["series"]), 1000)
         self.assertTrue(result["series_downsampled"])
         self.assertEqual(result["series_points"], 1500)
+
+    def test_no_peak_evidence_status_insufficient_not_null(self):
+        request = PeakHunterRequest(**{**self.request.__dict__, "threshold": 999_000_000})
+        result = analyze_peak_hunter(request, self._series, lambda _request, _time, _window: [])
+        self.assertEqual(result["peaks_detected"], 0)
+        self.assertEqual(result["evidence_status"], "insufficient")
+        self.assertEqual(result["classification"], "insufficient_flow_evidence")
 
     def test_peak_analysis_table_created_by_migration(self):
         conn = sqlite3.connect(":memory:")
@@ -258,11 +266,71 @@ class PeakHunterTest(unittest.TestCase):
             self.assertEqual(payload["interface_id"], 140)
             self.assertEqual(payload["start_time"], (self.base_time - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"))
 
+    def test_peak_hunter_uses_sensor_default_out_for_sends(self):
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path)
+            details = peak_clickhouse.peak_sample_rate_details("edge-a", 999, "output")
+            self.assertEqual(details["effective_sample_rate"], 1000)
+            self.assertEqual(details["source"], "sensor")
+
+    def test_peak_hunter_uses_sensor_default_in_for_receives(self):
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path, default_in=2000, default_out=1000)
+            details = peak_clickhouse.peak_sample_rate_details("edge-a", 999, "input")
+            self.assertEqual(details["effective_sample_rate"], 2000)
+            self.assertEqual(details["source"], "sensor")
+
+    def test_peak_hunter_uses_interface_override_when_enabled(self):
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path, interface_out=3000, override=1)
+            details = peak_clickhouse.peak_sample_rate_details("edge-a", 140, "output")
+            self.assertEqual(details["effective_sample_rate"], 3000)
+            self.assertEqual(details["source"], "interface")
+
+    def test_peak_hunter_applies_effective_sample_rate_to_packets_s(self):
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path, interface_out=1000, override=1)
+            request = PeakHunterRequest(**{**self.request.__dict__, "sensor": "edge-a", "interface_id": 140})
+            captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(request))
+            self.assertIn("sum(toFloat64(packets) * (toFloat64(1000)))", captured["query"])
+            self.assertIn("/ {window_seconds:Float64} AS packets_s", captured["query"])
+
+    def test_peak_hunter_applies_effective_sample_rate_to_bits_s(self):
+        with temporary_peak_db() as db_path:
+            create_sensor_schema(db_path, interface_out=1000, override=1)
+            request = PeakHunterRequest(**{**self.request.__dict__, "sensor": "edge-a", "interface_id": 140, "metric": "bits_s"})
+            captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(request))
+            self.assertIn("sum(toFloat64(bytes) * (toFloat64(1000))) * 8", captured["query"])
+
+    def test_peak_hunter_detects_real_peak_with_threshold_40000_and_sample_rate_1000(self):
+        request = PeakHunterRequest(
+            sensor="NE8000-BGP-FIBINET",
+            interface_id=140,
+            direction="sends",
+            metric="packets_s",
+            start_time=self.base_time,
+            end_time=self.base_time + timedelta(minutes=40),
+            protocol="UDP",
+            threshold=40000,
+            sensitivity="high",
+        )
+        result = analyze_peak_hunter(request, self._real_sampled_series, self._real_sampled_flows)
+        self.assertGreater(result["peaks_detected"], 0)
+        self.assertGreater(result["peaks_analyzed"], 0)
+        self.assertAlmostEqual(result["best_peak"]["peak_value"], 1_286_600, delta=1)
+        self.assertEqual(result["dominant_group"]["dst_ip"], "13.98.137.185")
+        self.assertEqual(result["dominant_group"]["dst_port"], 9004)
+        self.assertEqual(result["classification"], "udp_flood_outbound_to_single_destination_port")
+        self.assertEqual(result["evidence_status"], "complete")
+        self.assertEqual(result["dominant_group"]["effective_sample_rate"], 1000)
+        self.assertTrue(all(candidate.get("apply_enabled") is False for candidate in result["candidates"]))
+
     def test_clickhouse_bits_s_query_uses_bytes_times_8(self):
         captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(
             PeakHunterRequest(**{**self.request.__dict__, "metric": "bits_s"})
         ))
-        self.assertIn("sum(bytes) * 8", captured["query"])
+        self.assertIn("toFloat64(bytes)", captured["query"])
+        self.assertIn("* 8", captured["query"])
         self.assertIn("flow_time >=", captured["query"])
 
     def test_clickhouse_query_uses_flow_time_not_time(self):
@@ -282,11 +350,19 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("min(flow_time) AS first_seen", captured["query"])
         self.assertIn("max(flow_time) AS last_seen", captured["query"])
 
+    def test_bits_s_no_output_if_alias_in_where(self):
+        request = PeakHunterRequest(**{**self.request.__dict__, "metric": "bits_s", "direction": "sends"})
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(request, self.base_time, 5))
+        where_sql = captured["query"].split("WHERE", 1)[1].split("GROUP BY", 1)[0]
+        self.assertIn("output_if = {interface_id:UInt32}", where_sql)
+        self.assertNotIn("any(output_if)", where_sql)
+
     def test_clickhouse_error_returns_json(self):
         if peak_hunter_api is None:
             self.skipTest("fastapi nao instalado")
         payload = peak_hunter_api._analysis_error_response(self.request, "clickhouse_query_failed", "boom", "fetch_peak_flows")
         self.assertEqual(payload["error"], "clickhouse_query_failed")
+        self.assertEqual(payload["evidence_status"], "insufficient")
         self.assertEqual(payload["recommendation"]["recommended_action"], "alert_only")
 
     def test_frontend_peak_hunter_uses_relative_api_paths(self):
@@ -302,6 +378,12 @@ class PeakHunterTest(unittest.TestCase):
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Backend retornou HTTP", html)
         self.assertIn("Falha de rede/CORS ao chamar", html)
+
+    def test_ipv4_mapped_ipv6_normalized_for_candidate(self):
+        request = PeakHunterRequest(**{**self.request.__dict__, "threshold": 1000})
+        result = analyze_peak_hunter(request, self._series, self._ipv4_mapped_flows)
+        self.assertEqual(result["dominant_group"]["dst_ip"], "13.98.137.185")
+        self.assertTrue(any("13.98.137.185" in str(candidate) for candidate in result["candidates"]))
 
     def _series(self, request):
         return [
@@ -322,6 +404,27 @@ class PeakHunterTest(unittest.TestCase):
         return [
             {"time": (self.base_time + timedelta(seconds=index * 5)).isoformat(), "packets_s": 1000 + index}
             for index in range(1500)
+        ]
+
+    def _real_sampled_series(self, request):
+        return [
+            {"time": self.base_time.isoformat(), "packets_s": 1000, "raw_packets": 5, "effective_sample_rate": 1000, "sample_rate_source": "interface"},
+            {"time": (self.base_time + timedelta(seconds=5)).isoformat(), "packets_s": 1_286_600, "raw_packets": 6433, "effective_sample_rate": 1000, "sample_rate_source": "interface"},
+            {"time": (self.base_time + timedelta(seconds=10)).isoformat(), "packets_s": 2000, "raw_packets": 10, "effective_sample_rate": 1000, "sample_rate_source": "interface"},
+        ]
+
+    def _real_sampled_flows(self, request, peak_time, window):
+        if window != 5:
+            return []
+        return [
+            {"src_ip": "::ffff:168.232.197.37", "src_port": 1000, "dst_ip": "::ffff:13.98.137.185", "dst_port": 9004, "protocol": "udp", "packets": 650000, "bytes": 50000000, "raw_packets": 3250, "raw_bytes": 250000, "packets_s": 650000, "bits_s": 40000000, "effective_sample_rate": 1000, "sample_rate_source": "interface"},
+            {"src_ip": "::ffff:168.232.197.38", "src_port": 1001, "dst_ip": "::ffff:13.98.137.185", "dst_port": 9004, "protocol": "udp", "packets": 636600, "bytes": 49000000, "raw_packets": 3183, "raw_bytes": 245000, "packets_s": 636600, "bits_s": 39200000, "effective_sample_rate": 1000, "sample_rate_source": "interface"},
+        ]
+
+    def _ipv4_mapped_flows(self, request, peak_time, window):
+        return [
+            {"src_ip": "::ffff:168.232.197.37", "src_port": 1000, "dst_ip": "::ffff:13.98.137.185", "dst_port": 9004, "protocol": "udp", "packets": 1500, "bytes": 900000, "packets_s": 5000},
+            {"src_ip": "::ffff:168.232.197.38", "src_port": 1001, "dst_ip": "::ffff:13.98.137.185", "dst_port": 9004, "protocol": "udp", "packets": 1600, "bytes": 950000, "packets_s": 5500},
         ]
 
     def _series_bits(self, request):
@@ -390,7 +493,7 @@ class temporary_peak_db:
             pass
 
 
-def create_sensor_schema(db_path):
+def create_sensor_schema(db_path, default_in=1000, default_out=1000, interface_in=1000, interface_out=1000, override=1):
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
@@ -399,7 +502,10 @@ def create_sensor_schema(db_path):
                 name TEXT,
                 exporter_ip TEXT,
                 active INTEGER,
-                updated_at TEXT
+                updated_at TEXT,
+                sample_rate_default_in INTEGER,
+                sample_rate_default_out INTEGER,
+                sample_rate_mode TEXT
             )
             """
         )
@@ -411,13 +517,20 @@ def create_sensor_schema(db_path):
                 if_name TEXT,
                 if_descr TEXT,
                 if_alias TEXT,
-                direction TEXT
+                direction TEXT,
+                sample_rate_in INTEGER,
+                sample_rate_out INTEGER,
+                sample_rate_override INTEGER
             )
             """
         )
-        conn.execute("INSERT INTO sensors VALUES (1, 'edge-a', '192.0.2.10', 1, '2026-06-30T12:00:00Z')")
         conn.execute(
-            "INSERT INTO sensor_interfaces VALUES (1, 140, 'Eth-Trunk10.123', 'LINK/CLIENTE', 'alias', 'sends')"
+            "INSERT INTO sensors VALUES (1, 'edge-a', '192.0.2.10', 1, '2026-06-30T12:00:00Z', ?, ?, 'sensor_default')",
+            (default_in, default_out),
+        )
+        conn.execute(
+            "INSERT INTO sensor_interfaces VALUES (1, 140, 'Eth-Trunk10.123', 'LINK/CLIENTE', 'alias', 'sends', ?, ?, ?)",
+            (interface_in, interface_out, override),
         )
 
 
