@@ -1,0 +1,274 @@
+import os
+import sqlite3
+import sys
+import tempfile
+import types
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+SKIP_RUNTIME_IMPORT = sys.version_info < (3, 10)
+
+class HTTPException(Exception):
+    def __init__(self, status_code=500, detail=""):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+class _RouterStub:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def add_middleware(self, *args, **kwargs):
+        pass
+
+    def include_router(self, *args, **kwargs):
+        pass
+
+    def _decorator(self, *args, **kwargs):
+        def wrap(func):
+            return func
+        return wrap
+
+    get = post = put = delete = _decorator
+
+
+def _query(default=None, *args, **kwargs):
+    return default
+
+
+sys.modules.setdefault("clickhouse_connect", types.SimpleNamespace(get_client=lambda **_kwargs: None))
+fastapi_stub = types.ModuleType("fastapi")
+fastapi_stub.FastAPI = _RouterStub
+fastapi_stub.APIRouter = _RouterStub
+fastapi_stub.HTTPException = HTTPException
+fastapi_stub.Query = _query
+fastapi_stub.Request = type("Request", (), {})
+fastapi_stub.Response = type("Response", (), {})
+sys.modules.setdefault("fastapi", fastapi_stub)
+cors_stub = types.ModuleType("fastapi.middleware.cors")
+cors_stub.CORSMiddleware = object
+sys.modules.setdefault("fastapi.middleware", types.ModuleType("fastapi.middleware"))
+sys.modules.setdefault("fastapi.middleware.cors", cors_stub)
+jose_stub = types.ModuleType("jose")
+jose_stub.JWTError = Exception
+jose_stub.jwt = types.SimpleNamespace(encode=lambda *a, **k: "", decode=lambda *a, **k: {})
+sys.modules.setdefault("jose", jose_stub)
+passlib_context_stub = types.ModuleType("passlib.context")
+passlib_context_stub.CryptContext = lambda *a, **k: types.SimpleNamespace(hash=lambda value: value, verify=lambda value, hashed: value == hashed)
+sys.modules.setdefault("passlib", types.ModuleType("passlib"))
+sys.modules.setdefault("passlib.context", passlib_context_stub)
+responses_stub = types.ModuleType("starlette.responses")
+responses_stub.JSONResponse = type("JSONResponse", (), {"__init__": lambda self, *a, **k: None})
+responses_stub.Response = type("Response", (), {"__init__": lambda self, *a, **k: None})
+sys.modules.setdefault("starlette", types.ModuleType("starlette"))
+sys.modules.setdefault("starlette.responses", responses_stub)
+if SKIP_RUNTIME_IMPORT:
+    for _name in (
+        "clickhouse_connect",
+        "fastapi",
+        "fastapi.middleware",
+        "fastapi.middleware.cors",
+        "jose",
+        "passlib",
+        "passlib.context",
+        "starlette",
+        "starlette.responses",
+    ):
+        sys.modules.pop(_name, None)
+
+if not SKIP_RUNTIME_IMPORT:
+    from app import main
+else:
+    main = None
+
+
+class temporary_main_db:
+    def __enter__(self):
+        self.original = os.environ.get("GMJFLOW_DB_PATH")
+        handle = tempfile.NamedTemporaryFile(delete=False)
+        handle.close()
+        self.path = handle.name
+        os.environ["GMJFLOW_DB_PATH"] = self.path
+        main.SENSOR_DB_READY = False
+        main.ensure_sensor_db()
+        return self.path
+
+    def __exit__(self, *_exc):
+        main.SENSOR_DB_READY = False
+        if self.original is None:
+            os.environ.pop("GMJFLOW_DB_PATH", None)
+        else:
+            os.environ["GMJFLOW_DB_PATH"] = self.original
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+
+@unittest.skipIf(SKIP_RUNTIME_IMPORT, "backend/app/main.py requires Python 3.10+ for runtime import tests")
+class BgpMitigationTest(unittest.TestCase):
+    def _connector_and_profile(self, max_duration=3600):
+        conn = main.sqlite_connection()
+        now = main.utc_now_iso()
+        connector_id = conn.execute(
+            """
+            INSERT INTO bgp_connectors (
+                name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+                enabled, is_active, created_at, updated_at
+            )
+            VALUES ('BGP-FIBINET-BORDA', 'flowspec_mitigation', 'exabgp', 'manual_approval', 50, ?, 1, 1, ?, ?)
+            """,
+            (max_duration, now, now),
+        ).lastrowid
+        profile_id = conn.execute(
+            """
+            INSERT INTO bgp_response_profiles (
+                name, enabled, response_type, connector_id, approval_mode, action, default_action,
+                target_selector, protocol_selector, dst_port_selector, require_protocol_or_port,
+                max_duration_seconds, default_duration_seconds, created_at, updated_at
+            )
+            VALUES ('FLOWSPEC_VALID', 1, 'flowspec', ?, 'manual_approval', 'discard', 'discard',
+                    'dst_ip', 'anomaly_protocol', 'anomaly_dst_port', 1, ?, 300, ?, ?)
+            """,
+            (connector_id, max_duration, now, now),
+        ).lastrowid
+        conn.commit()
+        connector = main.fetch_bgp_connector(conn, connector_id)
+        profile = main.fetch_bgp_profile(conn, profile_id)
+        return conn, connector, profile
+
+    def test_announce_command_has_no_ttl_and_expires_at_is_internal(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            payload = main.BgpAnnouncementDryRunPayload(
+                response_profile_id=profile["id"],
+                dst_ip="203.0.113.10",
+                dst_port=53,
+                protocol="udp",
+                duration_seconds=300,
+            )
+            candidate = main.candidate_from_bgp_payload(payload, profile)
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+            item = main.create_bgp_announcement(conn, candidate, connector, profile, validation, "test")
+            self.assertIn("announce flow route", item["announce_command"])
+            self.assertIn("withdraw flow route", item["withdraw_command"])
+            self.assertNotIn("ttl", item["announce_command"].lower())
+            self.assertNotIn("duration", item["announce_command"].lower())
+            self.assertEqual(item["duration_seconds"], 300)
+            self.assertTrue(item["expires_at"])
+
+    def test_manual_announce_blocks_duration_above_max_before_pipe(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile(max_duration=300)
+            candidate = {
+                "response_profile_id": profile["id"],
+                "connector_id": connector["id"],
+                "response_type": "flowspec",
+                "action": "discard",
+                "then_action": "discard",
+                "target_prefix": "203.0.113.10/32",
+                "dst_prefix": "203.0.113.10/32",
+                "protocol": "udp",
+                "dst_port": "53",
+                "duration_seconds": 3600,
+                "mitigation_key": "over-duration",
+            }
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with self.assertRaises(HTTPException) as ctx:
+                    main.apply_mitigation_candidate(conn, candidate, "announce_now", "test")
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertIn("Nenhum anuncio foi enviado", str(ctx.exception.detail))
+
+    def test_scheduler_expires_active_announcement_with_saved_withdraw(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, connector_name, status, route_type, response_type, action,
+                    target_prefix, dst_prefix, protocol, dst_port, duration_seconds,
+                    expires_at, announced_at, announce_command, withdraw_command, rendered_command,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, 'active', 'flowspec', 'flowspec', 'discard',
+                        '203.0.113.10/32', '203.0.113.10/32', 'udp', '53', 60,
+                        ?, ?, 'announce flow route X', 'withdraw flow route X', 'announce flow route X',
+                        ?, ?)
+                """,
+                (connector["id"], connector["name"], past, now, now, now),
+            )
+            conn.commit()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                stats = main.process_expired_bgp_announcements(conn)
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(stats["withdrawn"], 1)
+            self.assertEqual(calls, ["withdraw flow route X"])
+            row = conn.execute("SELECT status FROM bgp_announcements").fetchone()
+            self.assertEqual(row["status"], "expired")
+
+    def test_response_profile_status_connector_validation(self):
+        with temporary_main_db():
+            conn, _connector, profile = self._connector_and_profile()
+            self.assertEqual(profile["connector_name"], "BGP-FIBINET-BORDA")
+            self.assertEqual(profile["profile_status"], "valid")
+            now = main.utc_now_iso()
+            profile_id = conn.execute(
+                """
+                INSERT INTO bgp_response_profiles (
+                    name, enabled, response_type, approval_mode, action, default_action,
+                    target_selector, protocol_selector, created_at, updated_at
+                )
+                VALUES ('NO_CONNECTOR', 1, 'flowspec', 'manual_approval', 'discard', 'discard',
+                        'dst_ip', 'anomaly_protocol', ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            conn.commit()
+            self.assertEqual(main.fetch_bgp_profile(conn, profile_id)["profile_status"], "invalid_connector")
+
+    def test_detection_rule_saves_response_profile_ids(self):
+        with temporary_main_db():
+            conn, _connector, profile = self._connector_and_profile()
+            payload = main.DetectionRulePayload(
+                vector="UDP_TEST",
+                warning_value=100,
+                critical_value=200,
+                warning_response_profile_id=profile["id"],
+                critical_response_profile_id=profile["id"],
+                fallback_response_profile_id=profile["id"],
+                mitigation_mode="response_profile",
+            )
+            data = main.normalize_detection_rule_payload(payload)
+            main.validate_detection_rule_profile_refs(conn, data)
+            self.assertEqual(data["warning_response_profile_id"], profile["id"])
+            self.assertEqual(data["critical_response_profile_id"], profile["id"])
+            self.assertEqual(data["fallback_response_profile_id"], profile["id"])
+            self.assertEqual(data["mitigation_mode"], "response_profile")
+
+    def test_automatic_runner_does_not_call_automatic_announce(self):
+        source = Path(ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        start = source.find("def process_anomaly_mitigation")
+        end = source.find("def anomaly_detection_enabled")
+        self.assertNotIn('"automatic", "worker"', source[start:end])
+        self.assertNotIn("'automatic', 'worker'", source[start:end])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -331,6 +331,8 @@ DATABASE_RETENTION_STOP = threading.Event()
 DATABASE_RETENTION_THREAD: threading.Thread | None = None
 ANOMALY_DETECTION_STOP = threading.Event()
 ANOMALY_DETECTION_THREAD: threading.Thread | None = None
+BGP_EXPIRATION_STOP = threading.Event()
+BGP_EXPIRATION_THREAD: threading.Thread | None = None
 SYSTEM_SETTING_DEFAULTS = {
     "database_retention_enabled": "1",
     "flow_retention_days": "7",
@@ -526,7 +528,7 @@ DETECTION_GROUP_BY_OPTIONS = {
     "asn",
     "interface",
 }
-DETECTION_MITIGATION_MODES = {"detection_only", "manual", "semi_auto", "auto"}
+DETECTION_MITIGATION_MODES = {"detection_only", "manual_review", "response_profile", "manual", "semi_auto", "auto"}
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
@@ -538,8 +540,8 @@ BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "dst_prefix", "src
 BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "fixed", "tcp", "udp", "icmp"}
 BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "fixed"}
 BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "anomaly_tcp_flags", "fixed", "syn", "syn_ack"}
-BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "announced", "rejected", "rejected_by_policy", "withdrawn", "failed", "failed_withdraw"}
-BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "announced"}
+BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "active", "announced", "rejected", "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw"}
+BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "active", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
 BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
@@ -2755,9 +2757,11 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS bgp_announcements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             connector_id INTEGER,
+            connector_name TEXT NOT NULL DEFAULT '',
             response_profile_id INTEGER,
             anomaly_id INTEGER,
             status TEXT NOT NULL DEFAULT 'dry_run',
+            route_type TEXT NOT NULL DEFAULT '',
             response_type TEXT NOT NULL DEFAULT '',
             action TEXT NOT NULL DEFAULT '',
             rate_limit_bps INTEGER,
@@ -2772,10 +2776,17 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             tcp_flags TEXT NOT NULL DEFAULT '',
             duration_seconds INTEGER NOT NULL DEFAULT 0,
             expires_at TEXT,
+            announced_at TEXT,
+            announce_command TEXT NOT NULL DEFAULT '',
+            withdraw_command TEXT NOT NULL DEFAULT '',
             rendered_command TEXT NOT NULL DEFAULT '',
+            match_json TEXT NOT NULL DEFAULT '{}',
+            then_json TEXT NOT NULL DEFAULT '{}',
             validation_errors TEXT NOT NULL DEFAULT '[]',
             validation_warnings TEXT NOT NULL DEFAULT '[]',
             raw_payload TEXT NOT NULL DEFAULT '{}',
+            source TEXT NOT NULL DEFAULT 'manual',
+            source_id TEXT NOT NULL DEFAULT '',
             mitigation_key TEXT NOT NULL DEFAULT '',
             attack_vector_name TEXT NOT NULL DEFAULT '',
             anomaly_source TEXT NOT NULL DEFAULT '',
@@ -2797,6 +2808,15 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    ensure_sqlite_column(conn, "bgp_announcements", "connector_name", "connector_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "route_type", "route_type TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "announced_at", "announced_at TEXT")
+    ensure_sqlite_column(conn, "bgp_announcements", "announce_command", "announce_command TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "withdraw_command", "withdraw_command TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "match_json", "match_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "bgp_announcements", "then_json", "then_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "bgp_announcements", "source", "source TEXT NOT NULL DEFAULT 'manual'")
+    ensure_sqlite_column(conn, "bgp_announcements", "source_id", "source_id TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "last_error", "last_error TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "policy_decision", "policy_decision TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "policy_severity", "policy_severity TEXT NOT NULL DEFAULT ''")
@@ -3052,6 +3072,7 @@ def startup() -> None:
         logger.warning("Nao foi possivel aplicar migracoes ClickHouse no startup: %s", exc)
     start_snmp_polling_thread()
     start_database_retention_thread()
+    start_bgp_expiration_thread()
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
     start_peak_hunter_runner_thread()
@@ -3061,6 +3082,7 @@ def startup() -> None:
 def shutdown() -> None:
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
+    BGP_EXPIRATION_STOP.set()
     ANOMALY_DETECTION_STOP.set()
     ASN_RESOLVER_STOP.set()
     PEAK_HUNTER_RUNNER_STOP.set()
@@ -6123,6 +6145,16 @@ def detection_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[st
 def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     cooldown_seconds = int(item.get("cooldown_seconds") or int(item.get("cooldown_minutes") or 5) * 60)
+    mitigation_mode = normalize_detection_mitigation_mode(item.get("mitigation_mode"))
+    warning_profile_id = int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None
+    critical_profile_id = int(item["critical_response_profile_id"]) if item.get("critical_response_profile_id") is not None else None
+    fallback_profile_id = int(item["fallback_response_profile_id"]) if item.get("fallback_response_profile_id") is not None else None
+    selected_profile_id = critical_profile_id or warning_profile_id or fallback_profile_id
+    profile_status = "valid"
+    profile_status_reason = ""
+    if mitigation_mode != "detection_only" and selected_profile_id is None:
+        profile_status = "invalid_connector"
+        profile_status_reason = "Nenhum Response Profile valido foi selecionado."
     return {
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
@@ -6153,14 +6185,17 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "input_if": item.get("input_if") or "",
         "output_if": item.get("output_if") or "",
         "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
-        "warning_response_profile_id": int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None,
-        "critical_response_profile_id": int(item["critical_response_profile_id"]) if item.get("critical_response_profile_id") is not None else None,
-        "fallback_response_profile_id": int(item["fallback_response_profile_id"]) if item.get("fallback_response_profile_id") is not None else None,
+        "warning_response_profile_id": warning_profile_id,
+        "critical_response_profile_id": critical_profile_id,
+        "fallback_response_profile_id": fallback_profile_id,
         "warning_response_profile_name": item.get("warning_response_profile_name") or "",
         "critical_response_profile_name": item.get("critical_response_profile_name") or "",
         "fallback_response_profile_name": item.get("fallback_response_profile_name") or "",
-        "mitigation_mode": item.get("mitigation_mode") or "detection_only",
+        "mitigation_mode": mitigation_mode,
         "mitigation_enabled": sqlite_bool(item.get("mitigation_enabled")),
+        "profile_status": profile_status,
+        "profile_status_reason": profile_status_reason,
+        "selected_response_profile_id": selected_profile_id,
         "max_auto_prefixlen_v4": int(item.get("max_auto_prefixlen_v4") or 32),
         "max_auto_prefixlen_v6": int(item.get("max_auto_prefixlen_v6") or 128),
         "require_protected_prefix": sqlite_bool(item.get("require_protected_prefix", 1)),
@@ -6327,8 +6362,8 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
         "warning_response_profile_id": data.get("warning_response_profile_id"),
         "critical_response_profile_id": data.get("critical_response_profile_id"),
         "fallback_response_profile_id": data.get("fallback_response_profile_id"),
-        "mitigation_mode": normalize_choice(clean_text(data.get("mitigation_mode")).lower() or "detection_only", DETECTION_MITIGATION_MODES, "mitigation_mode"),
-        "mitigation_enabled": 1 if data.get("mitigation_enabled") else 0,
+        "mitigation_mode": normalize_detection_mitigation_mode(data.get("mitigation_mode")),
+        "mitigation_enabled": 1 if data.get("mitigation_enabled") or normalize_detection_mitigation_mode(data.get("mitigation_mode")) != "detection_only" else 0,
         "max_auto_prefixlen_v4": int(data.get("max_auto_prefixlen_v4") or 32),
         "max_auto_prefixlen_v6": int(data.get("max_auto_prefixlen_v6") or 128),
         "require_protected_prefix": 1 if data.get("require_protected_prefix") else 0,
@@ -6346,7 +6381,22 @@ def validate_detection_rule_profile_refs(conn: sqlite3.Connection, data: dict[st
     for field in ("warning_response_profile_id", "critical_response_profile_id", "fallback_response_profile_id"):
         profile_id = data.get(field)
         if profile_id is not None:
-            fetch_bgp_profile(conn, int(profile_id))
+            profile = fetch_bgp_profile(conn, int(profile_id))
+            if data.get("mitigation_mode") != "detection_only" and response_profile_status(profile) != "valid":
+                raise HTTPException(status_code=400, detail=f"{field} invalido: {response_profile_status(profile)}")
+
+
+def normalize_detection_mitigation_mode(value: Any) -> str:
+    mode = clean_text(value).lower() or "detection_only"
+    aliases = {
+        "manual": "manual_review",
+        "semi_auto": "manual_review",
+        "auto": "response_profile",
+        "automatic": "response_profile",
+        "enabled": "response_profile",
+        "disabled": "detection_only",
+    }
+    return normalize_choice(aliases.get(mode, mode), DETECTION_MITIGATION_MODES, "mitigation_mode")
 
 
 def normalize_detection_port_text(value: Any, field_name: str) -> str:
@@ -6544,6 +6594,8 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "type": response_type,
         "connector_id": item.get("connector_id"),
         "connector_name": item.get("connector_name") or "",
+        "connector_enabled": sqlite_bool(item.get("connector_enabled", 1)) if item.get("connector_id") is not None else False,
+        "connector_active": sqlite_bool(item.get("connector_active", item.get("connector_enabled", 1))) if item.get("connector_id") is not None else False,
         "approval_mode": item.get("approval_mode") or "manual_approval",
         "action": default_action if response_type == "flowspec" else item.get("action") or "discard",
         "default_action": default_action,
@@ -6601,10 +6653,20 @@ def response_profile_status(profile: dict[str, Any]) -> str:
     if not sqlite_bool(profile.get("enabled", True)):
         return "disabled"
     response_type = clean_text(profile.get("response_type") or profile.get("type")).lower()
-    if response_type in {"flowspec", "diversion", "rtbh", "blackhole", "rate_limit"} and not profile.get("connector_id"):
+    requires_connector = response_type in {"flowspec", "diversion", "rtbh", "blackhole", "rate_limit"}
+    if requires_connector and (
+        not profile.get("connector_id")
+        or not clean_text(profile.get("connector_name"))
+        or not sqlite_bool(profile.get("connector_enabled", True))
+        or not sqlite_bool(profile.get("connector_active", True))
+    ):
         return "invalid_connector"
+    if response_type not in BGP_RESPONSE_TYPES:
+        return "invalid_template"
     if response_type == "flowspec" and not clean_text(profile.get("target_selector") or profile.get("target")):
-        return "missing_required_field"
+        return "invalid_template"
+    if response_type == "flowspec" and clean_text(profile.get("action") or profile.get("default_action")) == "rate_limit" and not profile.get("default_rate_limit_bps"):
+        return "invalid_template"
     return "valid"
 
 
@@ -6678,6 +6740,8 @@ def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
 def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_events: bool = False, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     item = dict(row)
     raw_payload = bgp_json_loads(item.get("raw_payload"), {})
+    announce_command = clean_text(item.get("announce_command") or item.get("rendered_command"))
+    withdraw_command = clean_text(item.get("withdraw_command")) or render_bgp_withdraw_command({**item, "announce_command": announce_command, "rendered_command": announce_command})
     action = item.get("action") or raw_payload.get("then_action") or raw_payload.get("action") or ""
     if not action and "discard" in clean_text(item.get("rendered_command")).lower():
         action = "discard"
@@ -6689,6 +6753,7 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "response_profile_id": item.get("response_profile_id"),
         "anomaly_id": item.get("anomaly_id"),
         "status": item.get("status") or "dry_run",
+        "route_type": item.get("route_type") or bgp_route_type_for_response(item.get("response_type")),
         "response_type": item.get("response_type") or "",
         "action": action,
         "then_action": action,
@@ -6704,7 +6769,12 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "tcp_flags": item.get("tcp_flags") or "",
         "duration_seconds": int(item.get("duration_seconds") or 0),
         "expires_at": item.get("expires_at"),
+        "announced_at": item.get("announced_at"),
+        "announce_command": announce_command,
+        "withdraw_command": withdraw_command,
         "rendered_command": item.get("rendered_command") or "",
+        "match_json": bgp_json_loads(item.get("match_json"), {}),
+        "then_json": bgp_json_loads(item.get("then_json"), {}),
         "validation_errors": bgp_json_loads(item.get("validation_errors"), []),
         "validation_warnings": bgp_json_loads(item.get("validation_warnings"), []),
         "last_error": item.get("last_error") or "",
@@ -6715,6 +6785,8 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "policy_required_scope": bgp_json_loads(item.get("policy_required_scope"), []),
         "policy_matched_port_policies": bgp_json_loads(item.get("policy_matched_port_policies"), []),
         "raw_payload": raw_payload,
+        "source": item.get("source") or "manual",
+        "source_id": item.get("source_id") or "",
         "mitigation_key": item.get("mitigation_key") or "",
         "attack_vector_name": item.get("attack_vector_name") or "",
         "anomaly_source": item.get("anomaly_source") or "",
@@ -6898,7 +6970,7 @@ def fetch_bgp_connector(conn: sqlite3.Connection, connector_id: int) -> dict[str
 def fetch_bgp_profile(conn: sqlite3.Connection, profile_id: int) -> dict[str, Any]:
     row = conn.execute(
         """
-        SELECT p.*, c.name AS connector_name
+        SELECT p.*, c.name AS connector_name, c.enabled AS connector_enabled, c.is_active AS connector_active
         FROM bgp_response_profiles p
         LEFT JOIN bgp_connectors c ON c.id = p.connector_id
         WHERE p.id = ?
@@ -6908,6 +6980,18 @@ def fetch_bgp_profile(conn: sqlite3.Connection, profile_id: int) -> dict[str, An
     if row is None:
         raise HTTPException(status_code=404, detail="Perfil de resposta BGP nao encontrado")
     return bgp_response_profile_row_to_dict(row)
+
+
+def validate_profile_connector_for_save(conn: sqlite3.Connection, values: dict[str, Any]) -> None:
+    response_type = clean_text(values.get("response_type")).lower()
+    if response_type not in {"flowspec", "diversion", "rtbh", "blackhole", "rate_limit"}:
+        return
+    connector_id = values.get("connector_id")
+    if connector_id is None:
+        return
+    connector = fetch_bgp_connector(conn, int(connector_id))
+    if not connector.get("enabled") or not connector.get("is_active"):
+        raise HTTPException(status_code=400, detail="Conector BGP selecionado esta desativado ou inativo.")
 
 
 def bgp_port_policy_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -7324,9 +7408,61 @@ def flowspec_candidate_from_announcement(item: sqlite3.Row | dict[str, Any]) -> 
 
 def render_bgp_withdraw_command(item: sqlite3.Row | dict[str, Any]) -> str:
     row = dict(item)
+    if clean_text(row.get("withdraw_command")):
+        return clean_text(row.get("withdraw_command"))
     if (row.get("response_type") or "") == "flowspec" or "flow route" in clean_text(row.get("rendered_command")).lower():
         return render_exabgp_flowspec_command("withdraw", flowspec_candidate_from_announcement(row))
     return re.sub(r"^\s*announce\s+", "withdraw ", clean_text(row.get("rendered_command")), count=1)
+
+
+def bgp_route_type_for_response(response_type: Any) -> str:
+    value = clean_text(response_type).lower()
+    if value == "rtbh":
+        return "blackhole"
+    if value in {"flowspec", "blackhole", "diversion"}:
+        return value
+    if value == "rate_limit":
+        return "flowspec"
+    return value or "flowspec"
+
+
+def bgp_match_json(candidate: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "target_prefix": clean_text(candidate.get("target_prefix")),
+            "src_prefix": clean_text(candidate.get("src_prefix") or candidate.get("src_cidr")),
+            "dst_prefix": clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr")),
+            "protocol": clean_text(candidate.get("protocol")),
+            "src_port": clean_text(candidate.get("src_port")),
+            "dst_port": clean_text(candidate.get("dst_port")),
+            "tcp_flags": clean_text(candidate.get("tcp_flags")),
+        },
+        sort_keys=True,
+    )
+
+
+def bgp_then_json(candidate: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "action": clean_text(candidate.get("action") or candidate.get("then_action")),
+            "rate_limit_bps": candidate.get("rate_limit_bps"),
+            "rate_limit_value_raw": clean_text(candidate.get("rate_limit_value_raw")),
+            "rate_limit_unit": clean_text(candidate.get("rate_limit_unit")),
+        },
+        sort_keys=True,
+    )
+
+
+def bgp_command_pair(candidate: dict[str, Any], connector: dict[str, Any], profile: dict[str, Any]) -> tuple[str, str]:
+    announce_command = render_bgp_announcement(candidate, connector, profile)
+    withdraw_command = render_bgp_withdraw_command(
+        {
+            **candidate,
+            "rendered_command": announce_command,
+            "response_type": candidate.get("response_type") or profile.get("response_type"),
+        }
+    )
+    return announce_command, withdraw_command
 
 
 def exabgp_write_pipe(connector: dict[str, Any], command: str) -> None:
@@ -7721,7 +7857,6 @@ def validate_response_profile_for_anomaly(
     if whitelist_hits:
         errors.append("whitelist_match")
     validation_status = "valid" if not errors else errors[0]
-    apply_enabled = validation_status == "valid" and profile.get("approval_mode") not in {"manual_approval", "detection_only"} and evidence_status == "complete"
     return {
         "validation_status": validation_status,
         "validation_messages": sorted(set(errors + warnings)),
@@ -7730,7 +7865,7 @@ def validate_response_profile_for_anomaly(
         "whitelist_hits": whitelist_hits,
         "manual_approval_required": True,
         "allow_auto": False,
-        "apply_enabled": apply_enabled,
+        "apply_enabled": False,
     }
 
 
@@ -7920,7 +8055,8 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
     now = utc_now_iso()
     duration = int(candidate.get("duration_seconds") or 0)
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration else None
-    rendered = render_bgp_announcement(candidate, connector, profile)
+    announce_command, withdraw_command = bgp_command_pair(candidate, connector, profile)
+    rendered = announce_command
     policy = candidate.get("policy") or evaluate_mitigation_policy(
         {
             **candidate,
@@ -7931,23 +8067,29 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
     cursor = conn.execute(
         """
         INSERT INTO bgp_announcements (
-            connector_id, response_profile_id, anomaly_id, status, response_type, action,
+            connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
             rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
             target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-            duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
-            raw_payload, policy_decision, policy_severity, policy_reasons, policy_warnings,
+            duration_seconds, expires_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
+            validation_errors, validation_warnings,
+            raw_payload, source, source_id, policy_decision, policy_severity, policy_reasons, policy_warnings,
             policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
         )
-        VALUES (?, ?, ?, 'dry_run', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'dry_run', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            connector["id"], profile["id"], anomaly_id, candidate.get("response_type") or "", candidate.get("action") or "",
+            connector["id"], connector.get("name") or "", profile["id"], anomaly_id,
+            bgp_route_type_for_response(candidate.get("response_type") or profile.get("response_type")),
+            candidate.get("response_type") or "", candidate.get("action") or "",
             candidate.get("rate_limit_bps"), candidate.get("rate_limit_value_raw") or "", candidate.get("rate_limit_unit") or "",
             candidate.get("target_prefix") or "", candidate.get("src_prefix") or "", candidate.get("dst_prefix") or "",
             candidate.get("protocol") or "", candidate.get("src_port") or "", candidate.get("dst_port") or "",
-            candidate.get("tcp_flags") or "", duration, expires_at, rendered,
+            candidate.get("tcp_flags") or "", duration, expires_at, announce_command, withdraw_command, rendered,
+            bgp_match_json(candidate), bgp_then_json(candidate),
             json.dumps(validation["errors"], sort_keys=True), json.dumps(validation["warnings"], sort_keys=True),
             json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+            clean_text(candidate.get("source") or "manual"),
+            clean_text(candidate.get("source_id") or anomaly_id or ""),
             policy.get("decision") or "",
             policy.get("severity") or "",
             json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
@@ -8626,7 +8768,18 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
             policy["decision"] = "deny"
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
-        evaluated.append({**candidate, "policy_decision": policy, "rendered_command": rendered})
+        evaluated.append(
+            {
+                **candidate,
+                "policy_decision": policy,
+                "rendered_command": rendered,
+                "announce_command": rendered,
+                "withdraw_command": render_exabgp_flowspec_command("withdraw", candidate) if not rendered.startswith("INVALID:") else "",
+                "apply_enabled": False,
+                "manual_approval_required": True,
+                "allow_auto": False,
+            }
+        )
     return {"anomaly": context["event"], "candidates": evaluated}
 
 
@@ -10000,25 +10153,36 @@ def insert_bgp_mitigation_announcement(
 ) -> dict[str, Any]:
     now = utc_now_iso()
     duration = int(candidate.get("duration_seconds") or 0)
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration and status == "announced" else None
+    active_status = "active" if status == "announced" else status
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration and active_status == "active" else None
+    withdraw_command = render_bgp_withdraw_command(
+        {
+            **candidate,
+            "rendered_command": command,
+            "response_type": candidate.get("response_type") or "flowspec",
+        }
+    )
     cursor = conn.execute(
         """
         INSERT INTO bgp_announcements (
-            connector_id, response_profile_id, anomaly_id, status, response_type, action,
+            connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
             rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
             target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-            duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
-            raw_payload, mitigation_key, attack_vector_name, anomaly_source, last_error,
+            duration_seconds, expires_at, announced_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
+            validation_errors, validation_warnings,
+            raw_payload, source, source_id, mitigation_key, attack_vector_name, anomaly_source, last_error,
             policy_decision, policy_severity, policy_reasons, policy_warnings,
             policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             connector["id"] if connector else candidate.get("connector_id"),
+            connector.get("name") if connector else candidate.get("connector_name") or "",
             profile["id"] if profile else candidate.get("response_profile_id"),
             candidate.get("anomaly_id"),
-            status,
+            active_status,
+            bgp_route_type_for_response(candidate.get("response_type") or "flowspec"),
             candidate.get("action") or candidate.get("then_action") or "discard",
             candidate.get("rate_limit_bps"),
             candidate.get("rate_limit_value_raw") or "",
@@ -10032,10 +10196,17 @@ def insert_bgp_mitigation_announcement(
             candidate.get("tcp_flags") or "",
             duration,
             expires_at,
+            now if active_status == "active" else None,
             command,
+            withdraw_command,
+            command,
+            bgp_match_json(candidate),
+            bgp_then_json(candidate),
             json.dumps(validation.get("errors") or [], sort_keys=True),
             json.dumps(validation.get("warnings") or [], sort_keys=True),
             json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+            clean_text(candidate.get("source") or "response_profile"),
+            clean_text(candidate.get("source_id") or candidate.get("anomaly_id") or ""),
             candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate),
             candidate.get("attack_vector_name") or "",
             candidate.get("anomaly_source") or "",
@@ -10060,6 +10231,7 @@ def insert_bgp_mitigation_announcement(
     else:
         bgp_event(conn, announcement_id, "policy_denied", "Politica negou mitigacao.", policy, created_by)
     event_type = {
+        "active": "announced",
         "announced": "announced",
         "pending_approval": "pending_approval",
         "rejected_by_policy": "rejected_by_policy",
@@ -10085,7 +10257,7 @@ def active_mitigation_exists(conn: sqlite3.Connection, mitigation_key: str) -> b
         SELECT id
         FROM bgp_announcements
         WHERE mitigation_key = ?
-          AND status IN ('dry_run', 'pending_approval', 'announced')
+          AND status IN ('dry_run', 'pending_approval', 'active', 'announced')
         LIMIT 1
         """,
         (mitigation_key,),
@@ -10137,6 +10309,8 @@ def apply_mitigation_candidate(
         "default_duration_seconds": 900,
         "approval_mode": "manual_approval",
     })
+    if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
+        raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
     if policy["decision"] == "deny":
         return insert_bgp_mitigation_announcement(conn, candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by)
     if validation["errors"]:
@@ -10162,7 +10336,7 @@ def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int
         """
         SELECT *
         FROM bgp_announcements
-        WHERE status = 'announced'
+        WHERE status IN ('active', 'announced')
           AND expires_at IS NOT NULL
           AND expires_at <= ?
         ORDER BY expires_at, id
@@ -10176,7 +10350,7 @@ def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int
         item = dict(row)
         connector = fetch_bgp_connector(conn, int(item["connector_id"])) if item.get("connector_id") is not None else None
         command = render_bgp_withdraw_command(item)
-        status = "withdrawn"
+        status = "expired"
         last_error = ""
         if connector and connector.get("backend_type") == "exabgp":
             try:
@@ -10187,25 +10361,51 @@ def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int
         conn.execute(
             """
             UPDATE bgp_announcements
-            SET status = ?, withdrawn_at = CASE WHEN ? = 'withdrawn' THEN ? ELSE withdrawn_at END,
+            SET status = ?, withdrawn_at = CASE WHEN ? = 'expired' THEN ? ELSE withdrawn_at END,
                 updated_at = ?, last_error = ?
             WHERE id = ?
             """,
             (status, status, now, now, last_error, int(item["id"])),
         )
-        if status == "withdrawn":
+        if status == "expired":
             withdrawn += 1
             bgp_event(conn, int(item["id"]), "auto_withdraw", "Duracao expirada; withdraw enviado automaticamente.", {"command": command}, "worker")
-            bgp_event(conn, int(item["id"]), "withdrawn", "Mitigacao retirada automaticamente.", {"command": command}, "worker")
+            bgp_event(conn, int(item["id"]), "expired", "Mitigacao expirada e retirada automaticamente.", {"command": command}, "worker")
         else:
             failed += 1
             bgp_event(conn, int(item["id"]), "failed", last_error or "Falha no withdraw automatico.", {"command": command}, "worker")
     return {"withdrawn": withdrawn, "failed": failed}
 
 
+def bgp_expiration_loop() -> None:
+    interval = int(os.getenv("GMJFLOW_BGP_EXPIRATION_INTERVAL_SECONDS", "30"))
+    interval = max(interval, 5)
+    while not BGP_EXPIRATION_STOP.wait(interval):
+        try:
+            ensure_sensor_db()
+            with sqlite_connection() as conn:
+                process_expired_bgp_announcements(conn)
+                conn.commit()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no scheduler de expiracao BGP: %s", exc)
+
+
+def start_bgp_expiration_thread() -> None:
+    global BGP_EXPIRATION_THREAD
+    if BGP_EXPIRATION_THREAD is not None and BGP_EXPIRATION_THREAD.is_alive():
+        return
+    BGP_EXPIRATION_STOP.clear()
+    BGP_EXPIRATION_THREAD = threading.Thread(
+        target=bgp_expiration_loop,
+        name="gmj-flow-bgp-expiration",
+        daemon=True,
+    )
+    BGP_EXPIRATION_THREAD.start()
+
+
 def process_anomaly_mitigation() -> dict[str, int]:
     ensure_sensor_db()
-    stats = {"checked": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
+    stats = {"checked": 0, "active": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "expired": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
     active = anomaly_list("active", 500)
     with sqlite_connection() as conn:
         expired = process_expired_bgp_announcements(conn)
@@ -10225,9 +10425,7 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 if mode == "disabled":
                     stats["skipped"] += 1
                     continue
-                if mode == "automatic":
-                    item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
-                elif mode in {"manual_approval", "suggest_only"}:
+                if mode in {"automatic", "manual_approval", "suggest_only", "manual_review", "response_profile"}:
                     item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
                 else:
                     stats["skipped"] += 1
@@ -10346,7 +10544,15 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         action = payload_action
         last_error = ""
         status = "dry_run"
+        expires_at = None
+        announced_at = None
+        announce_command = render_exabgp_flowspec_command("announce", candidate)
+        withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
         if action in {"announce", "withdraw"}:
+            if validation["errors"]:
+                if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
+                    raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
+                raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
             if action == "announce" and not all(is_documentation_prefix(prefix) for prefix in [candidate.get("src_prefix"), candidate.get("dst_prefix")] if prefix):
                 if clean_text(payload.confirm).upper() != "ANUNCIAR":
                     raise HTTPException(status_code=400, detail="Confirmacao ANUNCIAR obrigatoria para prefixo nao RFC5737")
@@ -10354,7 +10560,10 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
                 raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp")
             try:
                 exabgp_write_pipe(connector, command)
-                status = "announced" if action == "announce" else "withdrawn"
+                status = "active" if action == "announce" else "withdrawn"
+                if status == "active":
+                    announced_at = utc_now_iso()
+                    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
             except HTTPException as exc:
                 last_error = clean_text(exc.detail)
                 status = "failed"
@@ -10362,17 +10571,19 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         cursor = conn.execute(
             """
             INSERT INTO bgp_announcements (
-                connector_id, response_profile_id, anomaly_id, status, response_type, action,
+                connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
                 rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
                 target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-                duration_seconds, expires_at, rendered_command, validation_errors, validation_warnings,
-                raw_payload, last_error, policy_decision, policy_severity, policy_reasons, policy_warnings,
+                duration_seconds, expires_at, announced_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
+                validation_errors, validation_warnings,
+                raw_payload, source, source_id, last_error, policy_decision, policy_severity, policy_reasons, policy_warnings,
                 policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
             )
-            VALUES (?, NULL, NULL, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, NULL, NULL, ?, 'flowspec', 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 connector_id,
+                connector.get("name") or "",
                 status,
                 candidate.get("action") or "discard",
                 candidate.get("rate_limit_bps"),
@@ -10385,10 +10596,18 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
                 candidate.get("src_port") or "",
                 candidate.get("dst_port") or "",
                 candidate.get("duration_seconds") or 0,
+                expires_at,
+                announced_at,
+                announce_command,
+                withdraw_command,
                 command,
+                bgp_match_json(candidate),
+                bgp_then_json(candidate),
                 json.dumps(validation["errors"], sort_keys=True),
                 json.dumps(validation["warnings"], sort_keys=True),
                 json.dumps(dump_model(payload), sort_keys=True, default=str),
+                "manual",
+                "",
                 last_error,
                 policy.get("decision") or "",
                 policy.get("severity") or "",
@@ -10469,6 +10688,8 @@ def list_bgp_response_profiles(request: Request, include_disabled: bool = True):
             SELECT
                 p.*,
                 c.name AS connector_name,
+                c.enabled AS connector_enabled,
+                c.is_active AS connector_active,
                 COUNT(DISTINCT r.id) AS used_by_rules_count
             FROM bgp_response_profiles p
             LEFT JOIN bgp_connectors c ON c.id = p.connector_id
@@ -10493,8 +10714,7 @@ def create_bgp_response_profile(request: Request, payload: BgpResponseProfilePay
     now = utc_now_iso()
     columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
     with sqlite_connection() as conn:
-        if values["connector_id"]:
-            fetch_bgp_connector(conn, int(values["connector_id"]))
+        validate_profile_connector_for_save(conn, values)
         cursor = conn.execute(
             f"INSERT INTO bgp_response_profiles ({', '.join(columns)}, created_at, updated_at) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
             tuple(values[key] for key in columns) + (now, now),
@@ -10516,17 +10736,45 @@ def test_bgp_response_profile_with_anomaly(request: Request, profile_id: int, pa
     require_admin(request)
     ensure_sensor_db()
     anomaly_id = int(payload.get("anomaly_id") or 0)
-    if anomaly_id <= 0:
-        raise HTTPException(status_code=400, detail="anomaly_id obrigatorio")
     with sqlite_connection() as conn:
         profile = fetch_bgp_profile(conn, profile_id)
-        row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (anomaly_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-        anomaly = anomaly_event_row_to_dict(row)
+        if anomaly_id > 0:
+            row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (anomaly_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+            anomaly = anomaly_event_row_to_dict(row)
+        else:
+            anomaly = {
+                "id": 0,
+                "direction": payload.get("direction") or "transmits",
+                "protocol": payload.get("protocol") or "udp",
+                "src_ip": payload.get("src_ip") or "198.51.100.10",
+                "dst_ip": payload.get("dst_ip") or "203.0.113.20",
+                "target_ip": payload.get("target_ip") or "203.0.113.20",
+                "target_port": int(payload.get("dst_port") or 53),
+                "top_src_ip": payload.get("src_ip") or "198.51.100.10",
+                "top_dst_ip": payload.get("dst_ip") or "203.0.113.20",
+                "top_dst_port": int(payload.get("dst_port") or 53),
+                "decoder": "UDP",
+                "severity": "critical",
+            }
         connector = fetch_bgp_connector(conn, int(profile["connector_id"])) if profile.get("connector_id") else None
-    flow_context = flow_context_from_analysis(deterministic_anomaly_analysis(anomaly_id))
+    flow_context = flow_context_from_analysis(deterministic_anomaly_analysis(anomaly_id)) if anomaly_id > 0 else {
+        "evidence_status": "complete",
+        "dominant_protocol": anomaly["protocol"],
+        "dominant_dst_ip": anomaly["dst_ip"],
+        "dominant_dst_port": anomaly["target_port"],
+        "top_conversations_by_packets": [
+            {"src_ip": anomaly["src_ip"], "dst_ip": anomaly["dst_ip"], "dst_port": anomaly["target_port"], "protocol": anomaly["protocol"]}
+        ],
+    }
     candidate = response_profile_candidate_for_anomaly(profile, anomaly, flow_context)
+    try:
+        candidate["announce_command"] = render_bgp_announcement(candidate, connector or {"default_next_hop": "", "default_community": ""}, profile)
+        candidate["withdraw_command"] = render_bgp_withdraw_command({**candidate, "rendered_command": candidate["announce_command"]})
+    except Exception:
+        candidate.setdefault("announce_command", candidate.get("rendered_command_preview") or "")
+        candidate.setdefault("withdraw_command", "")
     validation = validate_response_profile_for_anomaly(profile, anomaly, flow_context, candidate, connector)
     candidate.update(
         {
@@ -10555,8 +10803,7 @@ def update_bgp_response_profile(request: Request, profile_id: int, payload: BgpR
     columns = ("name", "description", "enabled", "response_type", "connector_id", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
     with sqlite_connection() as conn:
         fetch_bgp_profile(conn, profile_id)
-        if values["connector_id"]:
-            fetch_bgp_connector(conn, int(values["connector_id"]))
+        validate_profile_connector_for_save(conn, values)
         conn.execute(
             f"UPDATE bgp_response_profiles SET {', '.join(f'{column} = ?' for column in columns)}, updated_at = ? WHERE id = ?",
             tuple(values[key] for key in columns) + (utc_now_iso(), profile_id),
@@ -10852,7 +11099,7 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
                 raise HTTPException(status_code=400, detail="Nao e possivel aprovar anuncio com erros de validacao")
             try:
                 exabgp_write_pipe(connector, command)
-                final_status = "announced"
+                final_status = "active"
                 event_type = "announced"
                 message = "Comando announce enviado ao pipe ExaBGP."
             except HTTPException as exc:
@@ -10871,9 +11118,22 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
                 last_error = clean_text(exc.detail)
                 event_type = "withdraw_failed"
                 message = last_error
+        expires_at = row["expires_at"]
+        if final_status == "active":
+            duration = int(row["duration_seconds"] or 0)
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration else None
         conn.execute(
-            f"UPDATE bgp_announcements SET status = ?, updated_at = ?, {column} = ?, last_error = ? WHERE id = ?",
-            (final_status, now, now, last_error, announcement_id),
+            f"""
+            UPDATE bgp_announcements
+            SET status = ?,
+                updated_at = ?,
+                {column} = ?,
+                announced_at = CASE WHEN ? = 'active' THEN ? ELSE announced_at END,
+                expires_at = ?,
+                last_error = ?
+            WHERE id = ?
+            """,
+            (final_status, now, now, final_status, now, expires_at, last_error, announcement_id),
         )
         bgp_event(conn, announcement_id, event_type, message, {"command": command}, bgp_current_user(request))
         conn.commit()
@@ -15511,7 +15771,7 @@ def detect_anomalies_once() -> dict[str, Any]:
                     )
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
-    mitigation = {"checked": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
+    mitigation = {"checked": 0, "active": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "expired": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
     try:
         mitigation = process_anomaly_mitigation()
     except Exception as exc:
@@ -16902,7 +17162,7 @@ def evaluate_anomaly_mitigation(request: Request, event_id: int):
         "mitigation_allowed": bool(payload["candidates"]),
         "recommended_action": "manual_review" if payload["candidates"] else "alert_only",
         "manual_approval_required": True,
-        "apply_enabled": bool(payload["candidates"]),
+        "apply_enabled": False,
         "candidates": payload["candidates"],
     }
 

@@ -2929,7 +2929,11 @@
                   </div>
                   <div class="field">
                     <label for="detectionRuleResponse">Response</label>
-                    <input id="detectionRuleResponse" class="form-control form-control-sm" value="DETECTION_ONLY" disabled>
+                    <select id="detectionRuleResponse" class="form-select form-select-sm">
+                      <option value="DETECTION_ONLY">DETECTION_ONLY</option>
+                      <option value="MANUAL_REVIEW">MANUAL_REVIEW</option>
+                      <option value="ALERT_ONLY">ALERT_ONLY</option>
+                    </select>
                   </div>
                   <div class="field">
                     <label for="detectionRuleSrcCidr">src_cidr</label>
@@ -3005,13 +3009,12 @@
                     <label for="detectionRuleMitigationMode">mitigation_mode</label>
                     <select id="detectionRuleMitigationMode" class="form-select form-select-sm">
                       <option value="detection_only">detection_only</option>
-                      <option value="manual">manual</option>
-                      <option value="semi_auto">semi_auto</option>
-                      <option value="auto">auto</option>
+                      <option value="manual_review">manual_review</option>
+                      <option value="response_profile">response_profile</option>
                     </select>
                   </div>
                   <div class="field">
-                    <label for="detectionRuleDuration">TTL (s)</label>
+                    <label for="detectionRuleDuration">TTL interno (s)</label>
                     <input id="detectionRuleDuration" type="number" min="60" class="form-control form-control-sm" value="7200">
                   </div>
                   <div class="field">
@@ -4315,7 +4318,7 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Teste manual / laboratorio</div>
-            <div class="subtle mb-2">Este comando sera enviado ao pipe ExaBGP quando usar Anunciar agora ou Retirar agora. Um anuncio pode bloquear trafego real.</div>
+            <div class="subtle mb-2">TTL e interno do GMJ-FLOW. Nao e enviado ao BGP. O ExaBGP recebe somente announce ou withdraw.</div>
             <div class="flow-search-grid mb-2">
               <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpDryAction">Acao</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
@@ -4326,7 +4329,7 @@
               <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryThenAction">Acao FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
               <div id="bgpDryRateLimitField" class="field"><label for="bgpDryRateLimit">Limite</label><input id="bgpDryRateLimit" class="form-control form-control-sm" placeholder="ex: 100M, 500K, 1G"><div id="bgpDryRatePreview" class="subtle"></div></div>
-              <div class="field"><label for="bgpDryDuration">Duracao (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpDryDuration">TTL interno (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
               <div class="field"><label for="bgpDryConfirm">Confirmacao</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
             </div>
             <div class="toolbar mb-2">
@@ -4341,7 +4344,7 @@
             <div class="panel-title mb-2">Sugestoes pending_approval</div>
             <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Announcements ativos</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Retirada automatica</th><th>Comandos</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">Historico</div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
           </section>
@@ -7104,7 +7107,7 @@
       setValue('detectionRuleConsecutive', rule?.consecutive_windows || 1);
       setValue('detectionRuleCooldown', rule?.cooldown_minutes ?? 5);
       setBoolSelect('detectionRuleEnabled', rule?.enabled ?? true);
-      setValue('detectionRuleResponse', 'DETECTION_ONLY');
+      setValue('detectionRuleResponse', rule?.response || 'DETECTION_ONLY');
       setValue('detectionRuleSrcCidr', rule?.src_cidr || '');
       setValue('detectionRuleDstCidr', rule?.dst_cidr || '');
       setValue('detectionRuleSrcPort', rule?.src_port || 'any');
@@ -7142,7 +7145,7 @@
         consecutive_windows: numberValue('detectionRuleConsecutive', 1),
         cooldown_minutes: numberValue('detectionRuleCooldown', 5),
         enabled: boolSelectValue('detectionRuleEnabled'),
-        response: 'DETECTION_ONLY',
+        response: selectValue('detectionRuleResponse', 'DETECTION_ONLY'),
         src_cidr: selectValue('detectionRuleSrcCidr').trim(),
         dst_cidr: selectValue('detectionRuleDstCidr').trim(),
         src_port: selectValue('detectionRuleSrcPort', 'any').trim() || 'any',
@@ -7180,7 +7183,7 @@
           <td>${escapeHtml(rule.critical_response_profile_name || rule.critical_response_profile_id || 'ALERT_ONLY')}</td>
           <td><span class="badge-soft ${rule.mitigation_enabled ? 'warn' : 'off'}">${escapeHtml(rule.mitigation_enabled ? rule.mitigation_mode : 'detection_only')}</span></td>
           <td>${rule.use_global_whitelist ? 'Global ON' : 'Global OFF'}</td>
-          <td><span class="badge-soft ${rule.enabled && (!rule.mitigation_enabled || rule.critical_response_profile_id) ? 'ok' : 'off'}">${rule.enabled && (!rule.mitigation_enabled || rule.critical_response_profile_id) ? 'safe' : 'review'}</span></td>
+          <td><span class="badge-soft ${rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'ok' : 'warn'}">${escapeHtml(rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'safe' : (rule.profile_status_reason || 'review'))}</span></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary detection-rule-edit" data-rule-id="${rule.id}" aria-label="Editar regra"><i data-lucide="pencil"></i><span>Editar</span></button>
@@ -7695,7 +7698,12 @@
     }
 
     function bgpProfileOptions(selected = '') {
-      return optionList([['', 'Selecionar']], selected) + optionList(bgpProfiles.filter(item => item.enabled).map(item => [item.id, item.name]), selected);
+      return optionList([['', 'Selecionar']], selected) + optionList(
+        bgpProfiles
+          .filter(item => item.enabled && (item.profile_status === 'valid' || String(item.id) === String(selected)))
+          .map(item => [item.id, `${item.name}${item.profile_status && item.profile_status !== 'valid' ? ` (${item.profile_status})` : ''}`]),
+        selected
+      );
     }
 
     function renderBgpSelects() {
@@ -7880,6 +7888,7 @@
             <td><span class="badge-soft ${item.profile_status === 'valid' ? 'ok' : item.profile_status === 'disabled' ? 'off' : 'warn'}">${escapeHtml(item.profile_status || (item.enabled ? 'valid' : 'disabled'))}</span></td>
             <td><code>${escapeHtml(item.rendered_command_preview || '-').slice(0, 120)}</code></td>
             <td>
+              <button type="button" class="btn btn-sm btn-outline-success bgp-profile-test" data-id="${item.id}"><i data-lucide="play-circle"></i></button>
               <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
               <button type="button" class="btn btn-sm btn-outline-danger bgp-profile-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
             </td>
@@ -7922,7 +7931,9 @@
     }
 
     function bgpCommandDetails(item) {
-      return `<details><summary>Comando</summary><pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(item.rendered_command || '-')}</pre></details>`;
+      return `<details><summary>Comandos</summary><div class="subtle mt-2">TTL interno do GMJ-FLOW; nao enviado ao BGP.</div><pre class="mb-2" style="white-space:pre-wrap">announce:
+${escapeHtml(item.announce_command || item.rendered_command || '-')}</pre><pre class="mb-0" style="white-space:pre-wrap">withdraw:
+${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function parseRateLimitToBps(value) {
@@ -7962,8 +7973,8 @@
 
     function renderBgpAnnouncements() {
       const pending = bgpAnnouncements.filter(item => item.status === 'pending_approval');
-      const active = bgpAnnouncements.filter(item => ['announced', 'dry_run'].includes(item.status));
-      const history = bgpAnnouncements.filter(item => !['announced', 'pending_approval', 'dry_run'].includes(item.status));
+      const active = bgpAnnouncements.filter(item => ['active', 'announced'].includes(item.status));
+      const history = bgpAnnouncements.filter(item => !['active', 'announced', 'pending_approval'].includes(item.status));
       document.getElementById('bgpPendingSuggestionsTable').innerHTML = pending.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -7989,14 +8000,14 @@
           <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
+          <td>${formatDateTime(item.expires_at)}<br><span class="subtle">UTC: ${escapeHtml(item.expires_at || '-')}</span></td>
           <td>${bgpCommandDetails(item)}</td>
           <td>
-            <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-approve" data-id="${item.id}"><i data-lucide="check"></i></button>
             <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-muted">Sem announcements ativos</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem announcements ativos</td></tr>';
       document.getElementById('bgpHistoryAnnouncementsTable').innerHTML = history.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -8284,6 +8295,22 @@
       await loadBgpView();
     }
 
+    async function testBgpProfile(id) {
+      const result = await apiRequest(`/api/bgp/response-profiles/${id}/test-anomaly`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const candidate = result.candidate || {};
+      document.getElementById('bgpDryRunOutput').textContent = [
+        `Profile #${id} ${result.validation?.validation_status || candidate.validation_status || ''}`,
+        'TTL interno do GMJ-FLOW. Nao e enviado ao BGP.',
+        `announce:\n${candidate.rendered_command_preview || candidate.announce_command || '-'}`,
+        `withdraw:\n${candidate.withdraw_command || '-'}`
+      ].filter(Boolean).join('\n\n');
+      setText('bgpStatus', `Teste do profile #${id}: ${result.validation?.validation_status || 'ok'}`);
+    }
+
     function clearBgpProtectedForm() {
       setValue('bgpProtectedId', '');
       setValue('bgpProtectedCidr', '');
@@ -8377,7 +8404,14 @@
         ...(item.policy_reasons || []).map(value => `Motivo: ${value}`),
         ...(item.policy_warnings || []).map(value => `Warning: ${value}`)
       ].filter(Boolean).join('\n');
-      return [`#${item.id} ${item.status}`, policy, errors, warnings, item.rendered_command || item.command || ''].filter(Boolean).join('\n\n');
+      const expires = item.expires_at ? `Retirada automatica em: ${formatDateTime(item.expires_at)}\nUTC: ${item.expires_at}` : '';
+      const commands = [
+        'TTL interno do GMJ-FLOW. Nao e enviado ao BGP.',
+        expires,
+        `announce:\n${item.announce_command || item.rendered_command || item.command || '-'}`,
+        `withdraw:\n${item.withdraw_command || '-'}`
+      ].filter(Boolean).join('\n\n');
+      return [`#${item.id} ${item.status}`, policy, errors, warnings, commands].filter(Boolean).join('\n\n');
     }
 
     function updateBgpDryRateLimitUi() {
@@ -13342,8 +13376,10 @@
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const edit = target?.closest('.bgp-profile-edit');
       const remove = target?.closest('.bgp-profile-delete');
+      const test = target?.closest('.bgp-profile-test');
       if (edit) editBgpProfile(Number(edit.dataset.id));
       if (remove) apiRequest(`/api/bgp/response-profiles/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover profile: ${error.message}`));
+      if (test) testBgpProfile(Number(test.dataset.id)).catch(error => setText('bgpStatus', `Falha ao testar profile: ${error.message}`));
     });
     document.getElementById('bgpProtectedTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
