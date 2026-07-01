@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+
 from app.services.mitigation_candidates import generate_mitigation_candidates
 from app.services.mitigation_playbook import load_playbook
 from app.services.mitigation_validator import validate_mitigation_decision
@@ -54,6 +59,7 @@ def analyze_peak_hunter(
     return {
         "peaks_detected": len(peaks),
         "peaks_analyzed": len(analyzed),
+        "peaks": analyzed,
         "series": response_series,
         "series_points": len(series),
         "series_returned_points": len(response_series),
@@ -85,6 +91,8 @@ def _analyze_peak(
     flow_fetcher: FlowFetcher,
 ) -> dict[str, Any]:
     peak_time = parse_time(peak["time"])
+    peak_time_utc = _format_time_utc_z(peak_time)
+    peak_time_local = _format_time_local(peak_time)
     tried = []
     best_enrichment: dict[str, Any] | None = None
     selected_window = None
@@ -103,6 +111,9 @@ def _analyze_peak(
     candidates, mitigation_allowed = candidates_for_enrichment(request, best_enrichment)
     return {
         **peak,
+        "peak_time_utc": peak_time_utc,
+        "peak_time_local": peak_time_local,
+        "timezone": "America/Sao_Paulo",
         "baseline_p95": baseline["p95"],
         "baseline_p99": baseline["p99"],
         "threshold_used": threshold,
@@ -413,9 +424,15 @@ def peak_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     dominant_group = _json_value(item.get("dominant_group"), {})
     candidates = _json_value(item.get("candidates"), [])
     recommendation = recommendation_for_history(item, candidates)
+    peak_time = parse_optional_time(item.get("peak_time"))
+    peak_time_utc = _format_time_utc_z(peak_time) if peak_time else item.get("peak_time")
+    peak_time_local = _format_time_local(peak_time) if peak_time else ""
     return {
         "id": item.get("id"),
         "peak_time": item.get("peak_time"),
+        "peak_time_utc": peak_time_utc,
+        "peak_time_local": peak_time_local,
+        "timezone": "America/Sao_Paulo",
         "sensor": item.get("sensor") or "",
         "interface_id": item.get("interface_id"),
         "direction": item.get("direction") or "",
@@ -500,7 +517,7 @@ def parse_optional_time(value: Any) -> datetime | None:
 
 def history_record(request: PeakHunterRequest, peak: dict[str, Any], baseline: dict[str, float]) -> dict[str, Any]:
     return {
-        "peak_time": peak.get("peak_time") or peak.get("time"),
+        "peak_time": peak.get("peak_time_utc") or peak.get("peak_time") or peak.get("time"),
         "interface_id": request.interface_id,
         "sensor": request.sensor,
         "direction": request.direction,
@@ -542,9 +559,20 @@ def percentile(ordered_values: list[float], percentile_value: int) -> float:
     return ordered_values[lower] * (1 - weight) + ordered_values[upper] * weight
 
 
+LOCAL_TIMEZONE = ZoneInfo("America/Sao_Paulo") if ZoneInfo is not None else timezone(timedelta(hours=-3))
+
+
+def _format_time_utc_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _format_time_local(value: datetime) -> str:
+    return value.astimezone(LOCAL_TIMEZONE).isoformat()
+
+
 def parse_time(value: Any) -> datetime:
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value).replace("Z", "+00:00")
     parsed = datetime.fromisoformat(text)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

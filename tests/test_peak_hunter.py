@@ -42,6 +42,15 @@ class PeakHunterTest(unittest.TestCase):
         self.assertEqual(result["dominant_group"]["dst_ip"], "203.0.113.10")
         self.assertTrue(result["mitigation_allowed"])
 
+    def test_peak_times_are_utc_z_and_sao_paulo_local(self):
+        result = analyze_peak_hunter(self.request, self._series, self._flows_with_dominant_5s)
+        best = result["best_peak"]
+        self.assertTrue(best["peak_time_utc"].endswith("Z"))
+        self.assertEqual(best["peak_time_utc"], "2026-06-30T12:00:05Z")
+        self.assertEqual(best["peak_time_local"], "2026-06-30T09:00:05-03:00")
+        self.assertEqual(best["timezone"], "America/Sao_Paulo")
+        self.assertTrue(all(peak["peak_time_utc"].endswith("Z") for peak in result["peaks"]))
+
     def test_peak_with_dominant_group_only_in_15s(self):
         result = analyze_peak_hunter(self.request, self._series, self._flows_dominant_only_15s)
         self.assertEqual(result["evidence_window_used"], 15)

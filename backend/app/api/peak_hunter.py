@@ -185,7 +185,7 @@ def _normalize_metric(value: str) -> str:
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _request_window(
@@ -315,6 +315,7 @@ def _analysis_error_response(
         "query_context": query_context,
         "peaks_detected": 0,
         "peaks_analyzed": 0,
+        "peaks": [],
         "series": [],
         "series_points": 0,
         "series_returned_points": 0,
@@ -325,6 +326,7 @@ def _analysis_error_response(
         "evidence_window_used": None,
         "evidence_windows_tried": [],
         "dominant_group": None,
+        "evidence_status": "insufficient",
         "classification": "insufficient_flow_evidence",
         "top_groups": [],
         "top_conversations": [],

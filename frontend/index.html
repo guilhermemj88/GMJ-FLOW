@@ -3450,11 +3450,11 @@
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterStartTime">Inicio</label>
+                <label for="peakHunterStartTime">Inicio (horario local America/Sao_Paulo)</label>
                 <input id="peakHunterStartTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
-                <label for="peakHunterEndTime">Fim</label>
+                <label for="peakHunterEndTime">Fim (horario local America/Sao_Paulo)</label>
                 <input id="peakHunterEndTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
@@ -3500,6 +3500,23 @@
                 <div class="panel-title">Resultado</div>
                 <div id="peakHunterResultStatus" class="metric-readout">Nenhuma analise executada.</div>
               </div>
+              <div class="toolbar">
+                <button id="peakHunterCopyVectorButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="copy"></i><span>Vetor</span>
+                </button>
+                <button id="peakHunterCopyCommandButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="copy"></i><span>Comando</span>
+                </button>
+                <button id="peakHunterCopyReportButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="clipboard-list"></i><span>Relatorio</span>
+                </button>
+                <button id="peakHunterExportJsonlButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="download"></i><span>JSONL</span>
+                </button>
+                <button id="peakHunterExportPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="file-text"></i><span>PDF</span>
+                </button>
+              </div>
             </div>
             <div class="database-metrics-grid mb-3">
               <div class="metric-card">
@@ -3521,25 +3538,50 @@
             </div>
             <div id="peakHunterSummary" class="d-flex flex-wrap gap-2 mb-3"></div>
             <div id="peakHunterDominantReadable" class="metric-readout mb-3">Grupo dominante: -</div>
-            <div class="row g-3">
-              <div class="col-12 col-xl-4">
-                <div class="panel p-3 h-100">
-                  <div class="panel-title mb-2">best_peak</div>
-                  <pre id="peakHunterBestPeak" class="result-box mb-0">-</pre>
+            <div id="peakHunterRecommendationCards" class="database-metrics-grid mb-3"></div>
+            <details>
+              <summary class="subtle">Avancado: JSON bruto</summary>
+              <div class="row g-3 mt-1">
+                <div class="col-12 col-xl-4">
+                  <div class="panel p-3 h-100">
+                    <div class="panel-title mb-2">best_peak</div>
+                    <pre id="peakHunterBestPeak" class="result-box mb-0">-</pre>
+                  </div>
+                </div>
+                <div class="col-12 col-xl-4">
+                  <div class="panel p-3 h-100">
+                    <div class="panel-title mb-2">dominant_group</div>
+                    <pre id="peakHunterDominantGroup" class="result-box mb-0">-</pre>
+                  </div>
+                </div>
+                <div class="col-12 col-xl-4">
+                  <div class="panel p-3 h-100">
+                    <div class="panel-title mb-2">recommendation</div>
+                    <pre id="peakHunterRecommendation" class="result-box mb-0">-</pre>
+                  </div>
                 </div>
               </div>
-              <div class="col-12 col-xl-4">
-                <div class="panel p-3 h-100">
-                  <div class="panel-title mb-2">dominant_group</div>
-                  <pre id="peakHunterDominantGroup" class="result-box mb-0">-</pre>
-                </div>
-              </div>
-              <div class="col-12 col-xl-4">
-                <div class="panel p-3 h-100">
-                  <div class="panel-title mb-2">recommendation</div>
-                  <pre id="peakHunterRecommendation" class="result-box mb-0">-</pre>
-                </div>
-              </div>
+            </details>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Picos detectados</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Horario BRT</th>
+                    <th>Horario UTC</th>
+                    <th class="text-end">Valor</th>
+                    <th class="text-end">Score</th>
+                    <th>Evidencia</th>
+                    <th>Classificacao</th>
+                    <th>Mitigacao</th>
+                  </tr>
+                </thead>
+                <tbody id="peakHunterPeaksTable"></tbody>
+              </table>
             </div>
           </section>
 
@@ -3672,6 +3714,8 @@
                     <th>Classificacao</th>
                     <th>Evidencia</th>
                     <th>Grupo dominante</th>
+                    <th>Template</th>
+                    <th>TTL</th>
                     <th>Acao</th>
                   </tr>
                 </thead>
@@ -4637,6 +4681,7 @@
     let peakHunterSensorOptionsCache = [];
     let peakHunterInterfaceOptionsCache = [];
     let peakHunterLastResult = null;
+    let peakHunterLastHistory = [];
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -5336,6 +5381,39 @@
       URL.revokeObjectURL(url);
     }
 
+    function downloadTextFile(filename, content, type = 'text/plain') {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function copyText(text, statusId = null, successMessage = 'Copiado.') {
+      const value = String(text || '').trim();
+      if (!value) {
+        if (statusId) setText(statusId, 'Nada para copiar.');
+        return;
+      }
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = value;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      }
+      if (statusId) setText(statusId, successMessage);
+    }
+
     function dashboardInterfaceLabel(iface) {
       const name = iface.name || iface.if_alias || iface.if_name || `ifIndex ${iface.if_index}`;
       return `${name} (ifIndex ${formatNumber(iface.if_index)})`;
@@ -5678,6 +5756,83 @@
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return value;
       return date.toLocaleString('pt-BR');
+    }
+
+    function normalizePeakHunterTimestamp(value) {
+      const text = String(value).trim();
+      if (!text) return '';
+      if (/Z$|[+-]\d{2}:\d{2}$/.test(text)) return text;
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(text)) return `${text}Z`;
+      return text;
+    }
+
+    function formatPeakHunterUtc(value) {
+      if (!value) return '-';
+      const iso = normalizePeakHunterTimestamp(value);
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toISOString();
+    }
+
+    function formatPeakHunterLocal(value) {
+      if (!value) return '-';
+      const iso = normalizePeakHunterTimestamp(value);
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return String(value);
+      const options = {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      };
+      const formatted = new Intl.DateTimeFormat('pt-BR', options).format(date);
+      return `${formatted} BRT`;
+    }
+
+    function formatPeakHunterLocalIso(value) {
+      if (!value) return '-';
+      const text = String(value).trim();
+      const match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+      if (!match) return formatPeakHunterLocal(value);
+      return `${match[3]}/${match[2]}/${match[1]}, ${match[4]}:${match[5]}:${match[6] || '00'} BRT`;
+    }
+
+    function parsePeakHunterBrtInputToUtcIso(value) {
+      const text = String(value || '').trim();
+      const match = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+      if (!match) return '';
+      const [, year, month, day, hour, minute] = match;
+      const target = {
+        year: Number(year),
+        month: Number(month),
+        day: Number(day),
+        hour: Number(hour),
+        minute: Number(minute),
+      };
+      let utcMs = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, 0);
+      for (let i = 0; i < 3; i += 1) {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Sao_Paulo',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+          hourCycle: 'h23',
+        }).formatToParts(new Date(utcMs)).reduce((acc, part) => {
+          acc[part.type] = Number(part.value);
+          return acc;
+        }, {});
+        const renderedMs = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0);
+        const targetMs = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, 0);
+        utcMs += targetMs - renderedMs;
+      }
+      return new Date(utcMs).toISOString();
     }
 
     function renderDatabaseTables(items) {
@@ -7961,8 +8116,20 @@
     function peakHunterDatetimeInput(value) {
       const date = value instanceof Date ? value : new Date(value);
       if (!Number.isFinite(date.getTime())) return '';
-      const offsetMs = date.getTimezoneOffset() * 60000;
-      return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+        hourCycle: 'h23',
+      }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+      }, {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
     }
 
     function setPeakHunterRecentWindow(minutes = Number(document.getElementById('peakHunterPeriod')?.value || 15)) {
@@ -7986,7 +8153,7 @@
       document.getElementById('peakHunterThreshold').value = '';
       document.getElementById('peakHunterSensitivity').value = 'medium';
       setText('peakHunterStatus', 'Investigue picos por interface e enriqueça anomalias com top flows.');
-      setText('peakHunterFormHint', 'Use a janela exata do pico observado na interface para buscar flows nos arredores do evento.');
+      setText('peakHunterFormHint', 'Use a janela exata do pico observado na interface para buscar flows nos arredores do evento. Campos de data/hora sao locais (America/Sao_Paulo). A requisicao envia UTC ISO com Z.');
     }
 
     async function loadPeakHunterSensors() {
@@ -8039,8 +8206,10 @@
       const interfaceId = Number(selectedInterface || manualInterface);
       const thresholdText = document.getElementById('peakHunterThreshold').value.trim();
       const protocol = document.getElementById('peakHunterProtocol').value.trim();
-      const start = new Date(document.getElementById('peakHunterStartTime').value);
-      const end = new Date(document.getElementById('peakHunterEndTime').value);
+      const startIso = parsePeakHunterBrtInputToUtcIso(document.getElementById('peakHunterStartTime').value);
+      const endIso = parsePeakHunterBrtInputToUtcIso(document.getElementById('peakHunterEndTime').value);
+      const start = new Date(startIso);
+      const end = new Date(endIso);
       const maxRangeMs = 24 * 60 * 60 * 1000;
       if (!sensor) {
         throw new Error('Selecione um sensor ou informe manualmente em Avancado.');
@@ -8059,8 +8228,8 @@
         interface_id: interfaceId,
         direction: document.getElementById('peakHunterDirection').value,
         metric: document.getElementById('peakHunterMetric').value,
-        start_time: start.toISOString(),
-        end_time: end.toISOString(),
+        start_time: startIso,
+        end_time: endIso,
         sensitivity: document.getElementById('peakHunterSensitivity').value
       };
       if (protocol) payload.protocol = protocol;
@@ -8070,6 +8239,155 @@
         payload.threshold = threshold;
       }
       return payload;
+    }
+
+    function peakHunterRecommendedCandidate(result = peakHunterLastResult) {
+      const best = result?.best_peak || {};
+      const candidates = Array.isArray(result?.candidates) && result.candidates.length ? result.candidates : (best.candidates || []);
+      return candidates.find(candidate => candidate.action && candidate.action !== 'alert_only') || candidates[0] || null;
+    }
+
+    function peakHunterCandidateTemplate(candidate) {
+      return candidate?.template || candidate?.response_profile || candidate?.attack_vector_name || '-';
+    }
+
+    function peakHunterCandidateTtl(candidate) {
+      return candidate?.ttl || candidate?.recommended_ttl || '-';
+    }
+
+    function peakHunterVectorText(result = peakHunterLastResult) {
+      const best = result?.best_peak || {};
+      const candidate = peakHunterRecommendedCandidate(result);
+      const match = candidate?.match || {};
+      const parts = [
+        best.classification || result?.classification,
+        peakHunterCandidateTemplate(candidate),
+        match.protocol ? `proto ${match.protocol}` : '',
+        match.src_ip ? `src ${match.src_ip}` : '',
+        match.dst_ip ? `dst ${match.dst_ip}` : '',
+        match.dst_prefix ? `dst ${match.dst_prefix}` : '',
+        match.dst_port ? `dport ${match.dst_port}` : '',
+      ].filter(Boolean);
+      return parts.join(' | ') || '-';
+    }
+
+    function peakHunterMitigationText(result = peakHunterLastResult) {
+      const candidate = peakHunterRecommendedCandidate(result);
+      if (!candidate) return result?.recommendation?.reason || '-';
+      const pieces = [
+        candidate.action || result?.recommendation?.recommended_action || '-',
+        peakHunterCandidateTemplate(candidate),
+        `TTL ${peakHunterCandidateTtl(candidate)}`,
+        candidate.description || candidate.reason || candidate.mitigation_reason || result?.recommendation?.reason || '',
+      ].filter(Boolean);
+      return pieces.join(' | ');
+    }
+
+    function peakHunterFlowspecCommand(candidate = peakHunterRecommendedCandidate(), allowed = peakHunterLastResult?.mitigation_allowed) {
+      if (!allowed || !candidate || !String(candidate.action || '').startsWith('flowspec')) return '';
+      const match = candidate.match || {};
+      const clauses = [];
+      if (match.src_ip) clauses.push(`source ${match.src_ip};`);
+      if (match.dst_ip) clauses.push(`destination ${match.dst_ip};`);
+      if (match.dst_prefix) clauses.push(`destination ${match.dst_prefix};`);
+      if (match.protocol) clauses.push(`protocol [ ${String(match.protocol).toLowerCase()} ];`);
+      if (match.dst_port) clauses.push(`destination-port =${match.dst_port};`);
+      if (match.tcp_flags) clauses.push(`tcp-flags [ ${match.tcp_flags} ];`);
+      const thenClause = candidate.action === 'flowspec_rate_limit' && match.rate_limit && match.rate_limit !== 'manual'
+        ? `rate-limit ${match.rate_limit}`
+        : 'discard';
+      const body = clauses.length ? clauses.join(' ') : '# preencher match especifico';
+      return `announce flow route peak-hunter-${peakHunterCandidateTemplate(candidate)} { match { ${body} } then ${thenClause}; }`;
+    }
+
+    function peakHunterReportText(result = peakHunterLastResult) {
+      const best = result?.best_peak || {};
+      const candidate = peakHunterRecommendedCandidate(result);
+      const command = peakHunterFlowspecCommand(candidate, result?.mitigation_allowed);
+      return [
+        'Peak Hunter - relatorio operacional',
+        `Horario BRT: ${best.peak_time_local ? formatPeakHunterLocalIso(best.peak_time_local) : formatPeakHunterLocal(best.peak_time_utc || best.peak_time || best.time)}`,
+        `Horario UTC: ${best.peak_time_utc || formatPeakHunterUtc(best.peak_time || best.time)}`,
+        `Picos detectados: ${result?.peaks_detected ?? 0}`,
+        `Picos analisados: ${result?.peaks_analyzed ?? 0}`,
+        `Evidencia: ${best.evidence_status || result?.evidence_status || '-'}`,
+        `Classificacao: ${best.classification || result?.classification || '-'}`,
+        `Grupo dominante: ${peakHunterDominantLabel(result?.dominant_group || best.dominant_group)}`,
+        `Vetor recomendado: ${peakHunterVectorText(result)}`,
+        `Mitigacao recomendada: ${peakHunterMitigationText(result)}`,
+        `apply_enabled: ${candidate?.apply_enabled === false ? 'false' : String(candidate?.apply_enabled ?? 'false')}`,
+        command ? `FlowSpec: ${command}` : 'FlowSpec: indisponivel',
+      ].join('\n');
+    }
+
+    function renderPeakHunterRecommendation(result) {
+      const candidate = peakHunterRecommendedCandidate(result);
+      const command = peakHunterFlowspecCommand(candidate, result.mitigation_allowed);
+      document.getElementById('peakHunterRecommendationCards').innerHTML = [
+        ['Vetor recomendado', peakHunterVectorText(result)],
+        ['Mitigacao recomendada', peakHunterMitigationText(result)],
+        ['FlowSpec', command || (result.mitigation_allowed ? 'Sem comando FlowSpec montado.' : 'Disponivel quando mitigation_allowed=true.')],
+        ['apply_enabled', candidate?.apply_enabled === false ? 'false' : String(candidate?.apply_enabled ?? 'false')],
+      ].map(([label, value]) => `
+        <div class="metric-card">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="metric-value" style="font-size:0.95rem;line-height:1.25;word-break:break-word">${escapeHtml(value)}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderPeakHunterPeaks(peaks, metric) {
+      const rows = Array.isArray(peaks) ? peaks : [];
+      document.getElementById('peakHunterPeaksTable').innerHTML = rows.map((peak, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${escapeHtml(peak.peak_time_local ? formatPeakHunterLocalIso(peak.peak_time_local) : formatPeakHunterLocal(peak.peak_time_utc || peak.peak_time || peak.time))}</td>
+          <td>${escapeHtml(peak.peak_time_utc || formatPeakHunterUtc(peak.peak_time || peak.time))}</td>
+          <td class="text-end">${peakHunterMetricValue(peak.peak_value || peak.value || 0, metric)}</td>
+          <td class="text-end">${escapeHtml(peak.score ?? '-')}</td>
+          <td>${escapeHtml(peak.evidence_status || '-')}</td>
+          <td>${escapeHtml(peak.classification || '-')}</td>
+          <td>${peak.mitigation_allowed ? 'Sim' : 'Nao'}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="8" class="text-muted">Nenhum pico detectado.</td></tr>';
+    }
+
+    function copyPeakHunterVector() {
+      return copyText(peakHunterVectorText(), 'peakHunterStatus', 'Vetor copiado.');
+    }
+
+    function copyPeakHunterCommand() {
+      const command = peakHunterFlowspecCommand();
+      return copyText(command, 'peakHunterStatus', command ? 'Comando copiado.' : 'Sem comando para copiar.');
+    }
+
+    function copyPeakHunterReport() {
+      return copyText(peakHunterReportText(), 'peakHunterStatus', 'Relatorio copiado.');
+    }
+
+    function exportPeakHunterJsonl() {
+      const result = peakHunterLastResult || {};
+      const lines = [
+        { type: 'summary', exported_at: new Date().toISOString(), result },
+        ...((Array.isArray(result.peaks) ? result.peaks : []).map(item => ({ type: 'peak', ...item }))),
+        ...peakHunterLastHistory.map(item => ({ type: 'history', ...item })),
+      ].map(item => JSON.stringify(item));
+      downloadTextFile('gmj-peak-hunter.jsonl', `${lines.join('\n')}\n`, 'application/x-ndjson');
+      setText('peakHunterStatus', 'JSONL exportado.');
+    }
+
+    function exportPeakHunterPdf() {
+      const report = peakHunterReportText();
+      const popup = window.open('', '_blank');
+      if (!popup) {
+        copyPeakHunterReport();
+        return;
+      }
+      popup.document.write(`<!doctype html><title>Peak Hunter</title><pre style="font:13px/1.45 monospace;white-space:pre-wrap">${escapeHtml(report)}</pre>`);
+      popup.document.close();
+      popup.focus();
+      popup.print();
+      setText('peakHunterStatus', 'Relatorio PDF preparado.');
     }
 
     function renderPeakHunterResult(payload) {
@@ -8086,7 +8404,8 @@
       setText('peakHunterResultStatus', result.error_message ? `${result.error || 'erro'}: ${result.error_message}` : (result.best_peak ? `${result.classification || '-'} / janela ${result.evidence_window_used || '-'}s` : 'Sem pico analisado.'));
       setText('peakHunterDominantReadable', `Grupo dominante: ${peakHunterDominantLabel(dominant)}`);
       document.getElementById('peakHunterSummary').innerHTML = [
-        ['Melhor pico', best.peak_time || best.time || '-'],
+        ['Local', best.peak_time_local ? formatPeakHunterLocalIso(best.peak_time_local) : formatPeakHunterLocal(best.peak_time_utc || best.peak_time || best.time || '-')],
+        ['UTC', best.peak_time_utc || formatPeakHunterUtc(best.peak_time || best.time || '-')],
         ['Valor', peakHunterMetricValue(best.peak_value || best.value || 0, metric)],
         ['Baseline p95', peakHunterMetricValue(best.baseline_p95 || result.baseline?.p95 || 0, metric)],
         ['Baseline p99', peakHunterMetricValue(best.baseline_p99 || result.baseline?.p99 || 0, metric)],
@@ -8101,6 +8420,8 @@
       document.getElementById('peakHunterBestPeak').textContent = JSON.stringify(best || null, null, 2);
       document.getElementById('peakHunterDominantGroup').textContent = JSON.stringify(dominant, null, 2);
       document.getElementById('peakHunterRecommendation').textContent = JSON.stringify(result.recommendation || null, null, 2);
+      renderPeakHunterRecommendation(result);
+      renderPeakHunterPeaks(result.peaks || [], metric);
       renderPeakHunterGroups(result.top_groups || best.groups || [], result.classification || best.classification || '-', metric);
       renderPeakHunterConversations(result.top_conversations || best.top_conversations || []);
       renderPeakHunterEndpointTable('peakHunterSourcesTable', result.top_sources || best.top_sources || [], 'src_ip');
@@ -8249,21 +8570,27 @@
         query.set('limit', '100');
         const payload = await apiRequest(`/api/peak-hunter/history?${query}`);
         const items = Array.isArray(payload.items) ? payload.items : [];
+        peakHunterLastHistory = items;
         document.getElementById('peakHunterHistoryStatus').textContent = `${formatNumber(items.length)} investigacoes`;
-        document.getElementById('peakHunterHistoryTable').innerHTML = items.map(item => `
-          <tr>
-            <td>${formatDateTime(item.peak_time)}</td>
-            <td>${escapeHtml(item.sensor || '-')}</td>
-            <td>${escapeHtml(item.interface_id ?? '-')}</td>
-            <td>${escapeHtml(item.direction || '-')}</td>
-            <td>${escapeHtml(item.metric || '-')}</td>
-            <td class="text-end">${peakHunterMetricValue(item.peak_value || 0, item.metric || 'packets_s')}</td>
-            <td>${escapeHtml(item.classification || '-')}</td>
-            <td>${escapeHtml(item.evidence_status || '-')}</td>
-            <td>${escapeHtml(item.dominant_group_label || peakHunterDominantLabel(item.dominant_group))}</td>
-            <td>${escapeHtml(item.recommended_action || '-')}</td>
-          </tr>
-        `).join('') || '<tr><td colspan="10" class="text-muted">Sem historico.</td></tr>';
+        document.getElementById('peakHunterHistoryTable').innerHTML = items.map(item => {
+          const candidate = (Array.isArray(item.candidates) ? item.candidates : []).find(entry => entry.action && entry.action !== 'alert_only') || (item.candidates || [])[0] || {};
+          return `
+            <tr>
+              <td>${escapeHtml(item.peak_time_local ? formatPeakHunterLocalIso(item.peak_time_local) : formatPeakHunterLocal(item.peak_time_utc || item.peak_time))}</td>
+              <td>${escapeHtml(item.sensor || '-')}</td>
+              <td>${escapeHtml(item.interface_id ?? '-')}</td>
+              <td>${escapeHtml(item.direction || '-')}</td>
+              <td>${escapeHtml(item.metric || '-')}</td>
+              <td class="text-end">${peakHunterMetricValue(item.peak_value || 0, item.metric || 'packets_s')}</td>
+              <td>${escapeHtml(item.classification || '-')}</td>
+              <td>${escapeHtml(item.evidence_status || '-')}</td>
+              <td>${escapeHtml(item.dominant_group_label || peakHunterDominantLabel(item.dominant_group))}</td>
+              <td>${escapeHtml(peakHunterCandidateTemplate(candidate))}</td>
+              <td>${escapeHtml(peakHunterCandidateTtl(candidate))}</td>
+              <td>${escapeHtml(candidate.action || item.recommended_action || '-')}</td>
+            </tr>
+          `;
+        }).join('') || '<tr><td colspan="12" class="text-muted">Sem historico.</td></tr>';
       } catch (error) {
         document.getElementById('peakHunterHistoryStatus').textContent = `Falha: ${error.message}`;
       }
@@ -11970,6 +12297,11 @@
     document.getElementById('peakHunterRecentButton').addEventListener('click', () => analyzePeakHunter(true).catch(console.error));
     document.getElementById('peakHunterHistoryRefreshButton').addEventListener('click', () => loadPeakHunterHistory().catch(console.error));
     document.getElementById('peakHunterResetButton').addEventListener('click', resetPeakHunterForm);
+    document.getElementById('peakHunterCopyVectorButton').addEventListener('click', () => copyPeakHunterVector().catch(console.error));
+    document.getElementById('peakHunterCopyCommandButton').addEventListener('click', () => copyPeakHunterCommand().catch(console.error));
+    document.getElementById('peakHunterCopyReportButton').addEventListener('click', () => copyPeakHunterReport().catch(console.error));
+    document.getElementById('peakHunterExportJsonlButton').addEventListener('click', exportPeakHunterJsonl);
+    document.getElementById('peakHunterExportPdfButton').addEventListener('click', exportPeakHunterPdf);
     document.getElementById('saveAiMitigationButton').addEventListener('click', () => saveAiMitigationSettings().catch(console.error));
     document.getElementById('testAiMitigationButton').addEventListener('click', () => testAiMitigation().catch(console.error));
     document.getElementById('aiProfile').addEventListener('change', () => {
