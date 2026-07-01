@@ -347,8 +347,16 @@ class PeakHunterTest(unittest.TestCase):
     def test_clickhouse_illegal_aggregation_not_used(self):
         captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5))
         self.assertNotIn("AS flow_time", captured["query"])
+        self.assertNotRegex(captured["query"], r"\bAS\s+bytes\b")
+        self.assertNotRegex(captured["query"], r"\bAS\s+packets\b")
         self.assertIn("min(flow_time) AS first_seen", captured["query"])
         self.assertIn("max(flow_time) AS last_seen", captured["query"])
+        self.assertIn("AS total_bytes", captured["query"])
+        self.assertIn("AS total_packets", captured["query"])
+        self.assertIn("AS raw_bytes", captured["query"])
+        self.assertIn("AS raw_packets", captured["query"])
+        self.assertIn("total_packets / {seconds:Float64} AS packets_s", captured["query"])
+        self.assertIn("total_bytes * 8 / {seconds:Float64} AS bits_s", captured["query"])
 
     def test_bits_s_no_output_if_alias_in_where(self):
         request = PeakHunterRequest(**{**self.request.__dict__, "metric": "bits_s", "direction": "sends"})
@@ -367,10 +375,13 @@ class PeakHunterTest(unittest.TestCase):
     def test_peak_flows_maps_interface_aliases_to_public_fields(self):
         rows = capture_clickhouse_query(
             lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5),
-            rows=[{"flow_input_if": 11, "flow_output_if": 22}],
+            rows=[{"flow_input_if": 11, "flow_output_if": 22, "total_bytes": 1234, "total_packets": 567, "total_flow_count": 9}],
         )["result"]
         self.assertEqual(rows[0]["input_if"], 11)
         self.assertEqual(rows[0]["output_if"], 22)
+        self.assertEqual(rows[0]["bytes"], 1234)
+        self.assertEqual(rows[0]["packets"], 567)
+        self.assertEqual(rows[0]["flow_count"], 9)
 
     def test_clickhouse_error_returns_json(self):
         if peak_hunter_api is None:

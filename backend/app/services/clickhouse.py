@@ -129,34 +129,42 @@ def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_sec
         "fetch_peak_flows",
         f"""
         SELECT
-            min(flow_time) AS first_seen,
-            max(flow_time) AS last_seen,
-            toString(src_ip) AS src_ip,
-            src_port,
-            toString(dst_ip) AS dst_ip,
-            dst_port,
-            proto,
-            {bytes_expr} AS bytes,
-            {packets_expr} AS packets,
-            sum(bytes) AS raw_bytes,
-            sum(packets) AS raw_packets,
-            max(sample_rate) AS db_sample_rate,
-            {sample_rate['effective_select']} AS effective_sample_rate,
-            '{sample_rate['source']}' AS sample_rate_source,
-            sum(flow_count) AS flow_count,
-            {packets_expr} / {{seconds:Float64}} AS packets_s,
-            {bytes_expr} * 8 / {{seconds:Float64}} AS bits_s,
-            any(input_if) AS flow_input_if,
-            any(output_if) AS flow_output_if
-        FROM flow_raw
-        WHERE {' AND '.join(filters)}
-        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+            *,
+            total_packets / {{seconds:Float64}} AS packets_s,
+            total_bytes * 8 / {{seconds:Float64}} AS bits_s
+        FROM
+        (
+            SELECT
+                toString(src_ip) AS src_ip,
+                src_port,
+                toString(dst_ip) AS dst_ip,
+                dst_port,
+                proto,
+                any(input_if) AS flow_input_if,
+                any(output_if) AS flow_output_if,
+                min(flow_time) AS first_seen,
+                max(flow_time) AS last_seen,
+                sum(bytes) AS raw_bytes,
+                sum(packets) AS raw_packets,
+                max(sample_rate) AS db_sample_rate,
+                {sample_rate['effective_select']} AS effective_sample_rate,
+                '{sample_rate['source']}' AS sample_rate_source,
+                {bytes_expr} AS total_bytes,
+                {packets_expr} AS total_packets,
+                sum(flow_count) AS total_flow_count
+            FROM flow_raw
+            WHERE {' AND '.join(filters)}
+            GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+        )
         ORDER BY {sort_expr} DESC
         LIMIT 200
         """,
         params,
     )
     for row in rows:
+        row["bytes"] = row.get("total_bytes")
+        row["packets"] = row.get("total_packets")
+        row["flow_count"] = row.get("total_flow_count")
         row["input_if"] = row.get("flow_input_if")
         row["output_if"] = row.get("flow_output_if")
     return rows
