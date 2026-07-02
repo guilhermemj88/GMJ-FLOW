@@ -3406,6 +3406,9 @@
                     <th>Duracao</th>
                     <th>Sensor</th>
                     <th>Interface</th>
+                    <th>Origem</th>
+                    <th>Fonte</th>
+                    <th>Regra/Vetor</th>
                     <th>Alvo</th>
                     <th>Direcao</th>
                     <th>Decoder</th>
@@ -8583,21 +8586,39 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('bgpDryRunOutput').textContent = 'Gerando dry-run...';
       const connectorId = Number(selectValue('bgpDryConnector'));
       updateBgpDryRateLimitUi();
+      let protocol = selectValue('bgpDryProtocol').trim().toLowerCase();
+      const dstPort = selectValue('bgpDryDstPort').trim();
+      const srcPort = selectValue('bgpDrySrcPort').trim();
+      if (protocol === 'dns' && dstPort === '53') protocol = 'udp';
+      if ((srcPort || dstPort) && !protocol) {
+        const message = 'Protocolo e obrigatorio quando porta e informada.';
+        setText('bgpStatus', message);
+        document.getElementById('bgpDryRunOutput').textContent = message;
+        return;
+      }
       const payload = {
         action,
         src_cidr: selectValue('bgpDrySrcIp').trim(),
         dst_cidr: selectValue('bgpDryDstIp').trim(),
-        protocol: selectValue('bgpDryProtocol').trim().toLowerCase(),
-        src_port: selectValue('bgpDrySrcPort').trim(),
-        dst_port: selectValue('bgpDryDstPort').trim(),
+        protocol,
+        src_port: srcPort,
+        dst_port: dstPort,
         then_action: selectValue('bgpDryThenAction', 'discard'),
         rate_limit_value_raw: selectValue('bgpDryThenAction', 'discard') === 'rate_limit' ? selectValue('bgpDryRateLimit').trim() : null,
         duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800)),
         confirm: selectValue('bgpDryConfirm').trim()
       };
-      const item = await apiRequest(`/api/bgp/connectors/${connectorId}/test-flowspec`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
-      await loadBgpView();
+      console.log('[manual-flowspec] payload', payload);
+      try {
+        const item = await apiRequest(`/api/bgp/connectors/${connectorId}/manual-flowspec/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
+        setText('bgpStatus', action === 'announce' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado');
+        await loadBgpView();
+      } catch (error) {
+        const text = `Falha no laboratorio FlowSpec: ${error.message}`;
+        setText('bgpStatus', text);
+        document.getElementById('bgpDryRunOutput').textContent = `${text}\n\nPayload enviado:\n${JSON.stringify(payload, null, 2)}`;
+      }
     }
 
     async function openBgpMitigationModal(anomalyId) {
@@ -8633,6 +8654,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const topFlowText = topFlow.src_ip && topFlow.dst_ip
           ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
           : '';
+        const candidateRole = candidate.candidate_role === 'recommended'
+          ? 'Recomendado: destination /32 + udp/53'
+          : candidate.candidate_role === 'conservative'
+            ? 'Conservador: source /32 + destination /32 + udp/53'
+            : candidate.not_recommended || candidate.candidate_role === 'not_recommended'
+              ? 'Nao recomendado: source-only + udp/53'
+              : '';
+        const canAnnounce = !(candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny');
         return `
           <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -8642,13 +8671,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               </div>
               ${mitigationDecisionBadge(policy.decision)}
             </div>
-            <div class="metric-readout mb-2">${escapeHtml(basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
+            <div class="metric-readout mb-2">${escapeHtml(candidateRole || basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
+            ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
             <div class="toolbar">
-              <button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>
+              ${canAnnounce ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>` : ''}
               <button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Criar sugestao</span></button>
               <button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>
             </div>
@@ -10321,6 +10351,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
     }
 
+    function anomalySourceLabel(value) {
+      return {
+        legacy_attack_vector: 'Vetor legado',
+        detection_template_rule: 'Grupo de Vetores',
+        peak_hunter_manual: 'Peak Hunter manual',
+        peak_hunter_automatic: 'Peak Hunter automatico',
+        dashboard_anomaly_summary: 'Dashboard',
+        ai_suggestion: 'IA',
+        manual: 'Manual',
+        unknown: 'Desconhecida'
+      }[value || 'unknown'] || value || 'Desconhecida';
+    }
+
+    function anomalySourceSummary(event) {
+      const details = event.source_details_json || event.source_details || {};
+      if (event.anomaly_source === 'detection_template_rule') {
+        return [details.template_name, details.rule_name || event.source_name].filter(Boolean).join(' / ') || event.source_name || '-';
+      }
+      if (event.anomaly_source === 'peak_hunter_automatic') {
+        return `${event.source_name || 'Peak Hunter automatico'}${details.run_id ? ` / run #${details.run_id}` : ''}`;
+      }
+      if (event.anomaly_source === 'peak_hunter_manual') {
+        return details.peak_analysis_id ? `analise #${details.peak_analysis_id}` : event.source_name || '-';
+      }
+      return event.source_name || event.vector_name || event.attack_vector_name || '-';
+    }
+
     function renderAnomalyTable(items) {
       const tbody = document.getElementById('anomaliesTable');
       const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
@@ -10335,6 +10392,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${anomalyDuration(event)}</td>
           <td>${escapeHtml(event.sensor_name || (event.sensor_id ? `#${event.sensor_id}` : '-'))}</td>
           <td>${event.interface_if_index ?? '-'}</td>
+          <td>${escapeHtml(anomalySourceLabel(event.anomaly_source))}</td>
+          <td>${escapeHtml(anomalySourceSummary(event))}</td>
+          <td>${escapeHtml(event.source_name || event.vector_name || event.attack_vector_name || '-')}</td>
           <td>${escapeHtml(event.target_ip || event.target_cidr || '-')}</td>
           <td>${escapeHtml(event.direction)}</td>
           <td>${escapeHtml(event.decoder)}</td>
@@ -10357,7 +10417,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="18" class="text-muted">Sem anomalias</td></tr>';
+      `).join('') || '<tr><td colspan="21" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -10411,7 +10471,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         : ['aggregated_dst_port', 'aggregated_src_port'].includes(event.mitigation_basis)
           ? 'Mitigacao por destino/porta agregados'
           : event.mitigation_basis || '-';
+      const sourceDetails = event.source_details_json || event.source_details || {};
       const fields = [
+        ['Origem', anomalySourceLabel(event.anomaly_source)],
+        ['Engine', event.source_engine || '-'],
+        ['Fonte', anomalySourceSummary(event)],
+        ['Template', sourceDetails.template_name || sourceDetails.template_id || '-'],
+        ['Peak Analysis ID', sourceDetails.peak_analysis_id || '-'],
+        ['Job/Run', [sourceDetails.job_id ? `job #${sourceDetails.job_id}` : '', sourceDetails.run_id ? `run #${sourceDetails.run_id}` : ''].filter(Boolean).join(' / ') || '-'],
         ['Alvo', target],
         ['Porta alvo', event.target_port || '-'],
         ['Origens unicas', event.unique_src_ips || '-'],

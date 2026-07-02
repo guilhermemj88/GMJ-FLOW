@@ -311,6 +311,119 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertNotIn('"automatic", "worker"', source[start:end])
         self.assertNotIn("'automatic', 'worker'", source[start:end])
 
+    def test_dns_outbound_related_flow_recommends_destination_candidate_first(self):
+        with temporary_main_db():
+            event = {
+                "id": 10,
+                "attack_vector_name": "DNS_QUERY_OUTBOUND_CLIENT",
+                "direction": "sends",
+                "decoder": "DNS",
+                "protocol": "udp",
+                "target_ip": "168.232.196.123",
+                "target_cidr": "168.232.196.123/32",
+                "target_role": "src_ip",
+                "target_port": 53,
+                "estimated_packets": 10000,
+                "estimated_bytes": 1000000,
+            }
+            flows = [{
+                "src_ip": "168.232.196.123",
+                "src_port": 35732,
+                "dst_ip": "75.131.245.200",
+                "dst_port": 53,
+                "proto": 17,
+                "packets": 8000,
+                "bytes": 900000,
+            }]
+            candidates = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})
+            self.assertGreaterEqual(len(candidates), 2)
+            self.assertEqual(candidates[0]["candidate_role"], "recommended")
+            self.assertEqual(candidates[0]["dst_prefix"], "75.131.245.200/32")
+            self.assertEqual(candidates[0]["src_prefix"], "")
+            self.assertEqual(candidates[0]["protocol"], "udp")
+            self.assertEqual(candidates[0]["dst_port"], "53")
+            self.assertIn("destination 75.131.245.200/32; protocol udp; destination-port =53", main.render_exabgp_flowspec_command("announce", candidates[0]))
+            self.assertNotEqual(candidates[0].get("candidate_role"), "not_recommended")
+
+    def test_dns_outbound_source_only_gets_warning_and_is_not_recommended(self):
+        with temporary_main_db():
+            candidate = {
+                "response_type": "flowspec",
+                "action": "discard",
+                "then_action": "discard",
+                "src_prefix": "168.232.196.123/32",
+                "protocol": "udp",
+                "dst_port": "53",
+                "duration_seconds": 1800,
+                "not_recommended": True,
+                "raw_payload": {"anomaly": {"top_flow": {"dst_ip": "75.131.245.200"}}},
+            }
+            policy = main.evaluate_mitigation_policy({**candidate, "requested_mode": "automatic"})
+            self.assertEqual(policy["decision"], "deny")
+            self.assertIn("Source-only DNS outbound", " ".join(policy["warnings"] + policy["reasons"]))
+
+    def test_top_flow_empty_is_enriched_from_related_dns_flow(self):
+        event = {"id": 10, "target_ip": "", "target_port": None, "top_flow": {"src_ip": "", "dst_ip": "", "packets": 0, "bytes": 0}}
+        flows = [
+            {"src_ip": "168.232.196.123", "src_port": 35732, "dst_ip": "75.131.245.200", "dst_port": 53, "proto": 17, "packets": 20, "bytes": 2000},
+            {"src_ip": "168.232.196.123", "src_port": 35733, "dst_ip": "75.131.245.201", "dst_port": 443, "proto": 6, "packets": 100, "bytes": 9000},
+        ]
+        enriched = main.enrich_anomaly_event_from_flows(event, flows)
+        self.assertEqual(enriched["dominant_src_ip"], "168.232.196.123")
+        self.assertEqual(enriched["dominant_dst_ip"], "75.131.245.200")
+        self.assertEqual(enriched["dominant_dst_port"], 53)
+        self.assertEqual(enriched["dominant_protocol"], "udp")
+        self.assertEqual(enriched["target_ip"], "75.131.245.200")
+        self.assertEqual(enriched["target_port"], 53)
+
+    def test_manual_lab_flowspec_does_not_require_enabled_response_profile(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            payload = main.BgpFlowspecTestPayload(
+                action="dry_run",
+                dst_cidr="75.131.245.200",
+                protocol="udp",
+                dst_port="53",
+                duration_seconds=1800,
+            )
+            candidate = main.flowspec_candidate_from_payload(payload)
+            profile = {
+                "enabled": False,
+                "manual_lab": True,
+                "response_type": "flowspec",
+                "require_protocol_or_port": True,
+                "allow_wide_prefix": False,
+                "max_duration_seconds": 1800,
+                "default_duration_seconds": 1800,
+            }
+            validation = main.validate_mitigation_candidate({**candidate, "manual_lab": True}, connector, profile)
+            self.assertNotIn("Perfil de resposta desativado.", validation["errors"])
+            command = main.render_exabgp_flowspec_command("announce", candidate)
+            self.assertEqual(command, "announce flow route { match { destination 75.131.245.200/32; protocol udp; destination-port =53; } then { discard; } }")
+            self.assertNotIn("ttl", command.lower())
+
+    def test_manual_lab_port_without_protocol_has_clear_error(self):
+        with self.assertRaises(HTTPException) as ctx:
+            main.flowspec_candidate_from_payload(
+                main.BgpFlowspecTestPayload(action="dry_run", dst_cidr="75.131.245.200", protocol="", dst_port="53")
+            )
+        self.assertIn("Protocolo e obrigatorio quando porta e informada", str(ctx.exception.detail))
+
+    def test_anomaly_source_backfill_prefers_legacy_vector(self):
+        source = main.anomaly_source_fields_from_row(
+            {
+                "id": 1,
+                "attack_vector_id": 99,
+                "legacy_attack_vector_id": 99,
+                "vector_name": "DNS_QUERY_OUTBOUND_CLIENT",
+                "rule_snapshot_json": "{}",
+                "source_details_json": "{}",
+            }
+        )
+        self.assertEqual(source["anomaly_source"], "legacy_attack_vector")
+        self.assertEqual(source["source_engine"], "legacy_detector")
+        self.assertEqual(source["source_name"], "DNS_QUERY_OUTBOUND_CLIENT")
+
 
 if __name__ == "__main__":
     unittest.main()

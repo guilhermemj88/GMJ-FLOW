@@ -1601,6 +1601,14 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "anomaly_events", "legacy_attack_vector_id", "legacy_attack_vector_id INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "response_profile_id", "response_profile_id INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "rule_snapshot_json", "rule_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "anomaly_events", "anomaly_source", "anomaly_source TEXT NOT NULL DEFAULT 'unknown'")
+    ensure_sqlite_column(conn, "anomaly_events", "source_engine", "source_engine TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "source_id", "source_id TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "source_name", "source_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "source_details_json", "source_details_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "anomaly_events", "peak_analysis_id", "peak_analysis_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "peak_hunter_job_id", "peak_hunter_job_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "peak_hunter_run_id", "peak_hunter_run_id INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "reason", "reason TEXT NOT NULL DEFAULT ''")
@@ -1680,8 +1688,10 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_status ON anomaly_events(status, last_seen_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_dedupe ON anomaly_events(dedupe_key, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_events_source ON anomaly_events(anomaly_source, source_engine)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_anomaly_event_flows_event ON anomaly_event_flows(anomaly_event_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_mitigation_analysis_anomaly ON ai_mitigation_analysis(anomaly_id, created_at)")
+    backfill_anomaly_source_fields(conn)
     seed_default_attack_vectors(conn)
 
 
@@ -7366,6 +7376,10 @@ def flowspec_candidate_from_payload(payload: BgpFlowspecTestPayload) -> dict[str
     if not src_cidr and not dst_cidr:
         raise HTTPException(status_code=400, detail="src_cidr ou dst_cidr obrigatorio")
     protocol = normalize_bgp_protocol(payload.protocol)
+    src_port = normalize_flowspec_port(payload.src_port, "src_port")
+    dst_port = normalize_flowspec_port(payload.dst_port, "dst_port")
+    if (src_port or dst_port) and not protocol:
+        raise HTTPException(status_code=400, detail="Protocolo e obrigatorio quando porta e informada.")
     return {
         "command_action": "announce" if action == "dry_run" else action,
         "requested_action": action,
@@ -7379,8 +7393,8 @@ def flowspec_candidate_from_payload(payload: BgpFlowspecTestPayload) -> dict[str
         "src_prefix": src_cidr,
         "dst_prefix": dst_cidr,
         "protocol": protocol,
-        "src_port": normalize_flowspec_port(payload.src_port, "src_port"),
-        "dst_port": normalize_flowspec_port(payload.dst_port, "dst_port"),
+        "src_port": src_port,
+        "dst_port": dst_port,
         "tcp_flags": "",
         "duration_seconds": int(payload.duration_seconds or 1800),
         "raw_payload": dump_model(payload),
@@ -7569,6 +7583,22 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                 matched.append(policy)
 
     has_scope = bool(src_cidr or dst_cidr)
+    raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+    known_dns_dst = clean_ip(candidate.get("dominant_dst_ip") or raw_anomaly.get("dominant_dst_ip"))
+    raw_top_flow = raw_anomaly.get("top_flow") if isinstance(raw_anomaly.get("top_flow"), dict) else {}
+    known_dns_dst = known_dns_dst or clean_ip(raw_top_flow.get("dst_ip"))
+    dns_outbound_source_only = bool(
+        src_cidr
+        and not dst_cidr
+        and protocol == "udp"
+        and dst_port == "53"
+        and (known_dns_dst or candidate.get("not_recommended"))
+    )
+    if dns_outbound_source_only:
+        decision = "deny" if requested_mode == "automatic" else "require_manual_approval"
+        severity = "danger" if requested_mode == "automatic" else "caution"
+        warnings.append("Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.")
+        reasons.append("Source-only DNS outbound nao e recomendado e nunca deve ser automatico quando ha dst_ip disponivel.")
     scoped_prefixes = [prefix for prefix in (src_cidr, dst_cidr) if prefix]
     has_host_scope = False
     for prefix in scoped_prefixes:
@@ -7901,6 +7931,8 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
     ensure_sensor_db()
     errors: list[str] = []
     warnings: list[str] = []
+    response_profile = response_profile or {}
+    manual_lab = bool(response_profile.get("manual_lab") or candidate.get("manual_lab"))
     if candidate.get("scope_type") == "internal_ip_32":
         target_ip = clean_ip(candidate.get("target_ip") or (candidate.get("raw_payload") or {}).get("anomaly", {}).get("target_ip"))
         target_cidr = clean_text(candidate.get("target_cidr") or candidate.get("target_scope"))
@@ -7916,7 +7948,7 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
         errors.append("Conector BGP desativado.")
     if not response_profile:
         errors.append("Perfil de resposta ausente.")
-    elif not response_profile.get("enabled"):
+    elif not response_profile.get("enabled") and not manual_lab:
         errors.append("Perfil de resposta desativado.")
     if connector and connector.get("mode") == "detection_only":
         errors.append("Conector em detection_only.")
@@ -7967,6 +7999,11 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
                         errors.append(f"FlowSpec {action} amplo bloqueado para {prefix}.")
                 except ValueError:
                     pass
+        raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+        raw_top_flow = raw_anomaly.get("top_flow") if isinstance(raw_anomaly.get("top_flow"), dict) else {}
+        known_dns_dst = clean_ip(candidate.get("dominant_dst_ip") or raw_anomaly.get("dominant_dst_ip") or raw_top_flow.get("dst_ip"))
+        if candidate.get("src_prefix") and not candidate.get("dst_prefix") and candidate.get("protocol") == "udp" and clean_text(candidate.get("dst_port")) == "53" and (known_dns_dst or candidate.get("not_recommended")):
+            warnings.append("Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.")
 
     duration = int(candidate.get("duration_seconds") or 0)
     max_duration = min(
@@ -8170,7 +8207,7 @@ def candidate_from_anomaly(conn: sqlite3.Connection, anomaly_id: int, payload: B
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         event = anomaly_event_row_to_dict(row)
         flow = conn.execute(
-            "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY bytes DESC, packets DESC LIMIT 1",
+            "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 1",
             (anomaly_id,),
         ).fetchone()
         if flow is not None:
@@ -8330,7 +8367,7 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
     if attack_vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
         return ["FLOWSPEC_BLOCK_DST_UDP_SRC_PORT"]
     if attack_vector_name == "DNS_QUERY_OUTBOUND_CLIENT":
-        return ["FLOWSPEC_BLOCK_SRC_DNS"]
+        return ["FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == "DNS_REFLECTION_INBOUND":
         return ["FLOWSPEC_BLOCK_SRC_DNS_RESPONSE", "FLOWSPEC_BLOCK_DST_DNS"]
     if attack_vector_name == "NTP_REFLECTION_INBOUND":
@@ -8476,6 +8513,110 @@ def top_conversation_mitigation_candidate(
     return attach_mitigation_config(conn, candidate, vector)
 
 
+def dns_outbound_reason() -> str:
+    return "Para DNS outbound/upload, a mitigacao recomendada bloqueia o destino DNS observado com maior volume na porta 53, evitando bloquear o cliente interno inteiro."
+
+
+def dns_outbound_candidates(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    confidence: float,
+) -> list[dict[str, Any]]:
+    top_flow = top_udp_flow_for_mitigation(event, flows)
+    src_ip = clean_ip(top_flow.get("src_ip")) or clean_ip(event.get("target_ip"))
+    dst_ip = clean_ip(top_flow.get("dst_ip")) or clean_ip(event.get("dominant_dst_ip")) or clean_ip(event.get("top_flow", {}).get("dst_ip") if isinstance(event.get("top_flow"), dict) else "")
+    try:
+        dst_port = int(top_flow.get("dst_port") or event.get("target_port") or 53)
+    except (TypeError, ValueError):
+        dst_port = 0
+    if not dst_ip or dst_port != 53:
+        return []
+    top_flow_payload = {
+        "src_ip": src_ip,
+        "src_port": int(top_flow.get("src_port") or 0),
+        "dst_ip": dst_ip,
+        "dst_port": 53,
+        "packets": int(top_flow.get("packets") or 0),
+        "bytes": int(top_flow.get("bytes") or 0),
+        "protocol": "udp",
+    }
+    result: list[dict[str, Any]] = []
+    recommended = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", dns_outbound_reason(), confidence)
+    recommended.update(
+        {
+            "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "protocol": "udp",
+            "dst_port": "53",
+            "target_scope": cidr_from_ip_or_cidr(dst_ip),
+            "target_ip": dst_ip,
+            "target_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "candidate_role": "recommended",
+            "mitigation_basis": "dns_outbound_destination",
+            "mitigation_reason": dns_outbound_reason(),
+            "top_flow": top_flow_payload,
+        }
+    )
+    result.append(attach_mitigation_config(conn, recommended, mitigation_vector_config(conn, recommended["attack_vector_name"], event.get("attack_vector_id"))))
+    if src_ip:
+        conservative = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Conservador: limita DNS outbound ao par origem+destino observado em udp/53.", confidence)
+        conservative.update(
+            {
+                "src_cidr": cidr_from_ip_or_cidr(src_ip),
+                "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
+                "protocol": "udp",
+                "dst_port": "53",
+                "target_scope": cidr_from_ip_or_cidr(dst_ip),
+                "target_ip": dst_ip,
+                "target_cidr": cidr_from_ip_or_cidr(dst_ip),
+                "target_port": 53,
+                "target_role": "dst_ip",
+                "candidate_role": "conservative",
+                "mitigation_basis": "dns_outbound_conversation",
+                "mitigation_reason": "Conservador: bloqueia apenas a conversa cliente+destino DNS observado em udp/53.",
+                "top_flow": top_flow_payload,
+            }
+        )
+        result.append(attach_mitigation_config(conn, conservative, mitigation_vector_config(conn, conservative["attack_vector_name"], event.get("attack_vector_id"))))
+        source_only = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Nao recomendado: source-only DNS outbound pode bloquear DNS legitimo do cliente.", confidence)
+        source_only.update(
+            {
+                "src_cidr": cidr_from_ip_or_cidr(src_ip),
+                "protocol": "udp",
+                "dst_port": "53",
+                "target_scope": cidr_from_ip_or_cidr(src_ip),
+                "target_ip": src_ip,
+                "target_cidr": cidr_from_ip_or_cidr(src_ip),
+                "target_port": 53,
+                "target_role": "src_ip",
+                "candidate_role": "not_recommended",
+                "not_recommended": True,
+                "manual_extra_confirmation": True,
+                "never_announce": True,
+                "mitigation_mode": "analysis_only",
+                "mitigation_basis": "dns_outbound_source_only",
+                "mitigation_reason": "Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.",
+                "top_flow": top_flow_payload,
+            }
+        )
+        source_only = attach_mitigation_config(conn, source_only, mitigation_vector_config(conn, source_only["attack_vector_name"], event.get("attack_vector_id")))
+        source_only.update(
+            {
+                "not_recommended": True,
+                "manual_extra_confirmation": True,
+                "never_announce": True,
+                "allow_auto": False,
+                "manual_approval_required": True,
+                "mitigation_mode": "analysis_only",
+                "requested_mode": "manual_approval",
+            }
+        )
+        result.append(source_only)
+    return result
+
+
 def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
     if anomaly_id < 0:
         group = next(
@@ -8507,7 +8648,7 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
     event = anomaly_event_row_to_dict(row)
     flows = []
     for flow in conn.execute(
-        "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY bytes DESC, packets DESC LIMIT 20",
+        "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 20",
         (anomaly_id,),
     ).fetchall():
         item = {
@@ -8519,7 +8660,7 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
         }
         if flow_matches_anomaly_target(item, event):
             flows.append(item)
-    return {"event": event, "flows": flows}
+    return {"event": enrich_anomaly_event_from_flows(event, flows), "flows": flows}
 
 
 def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[dict[str, Any]]:
@@ -8538,6 +8679,18 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
     candidates: list[dict[str, Any]] = []
 
     with sqlite_connection() as conn:
+        try:
+            event_target_port = int(event.get("target_port") or 0)
+        except (TypeError, ValueError):
+            event_target_port = 0
+        if protocol == "udp" and (dst_port == 53 or event_target_port == 53 or decoder == "DNS" or event_vector in {"DNS_QUERY_OUTBOUND_CLIENT", "dns_udp_abuse_outbound", "DNS upload", "dns"}):
+            dns_candidates = dns_outbound_candidates(conn, event, flows, confidence)
+            if dns_candidates:
+                deduped: dict[str, dict[str, Any]] = {}
+                for candidate in dns_candidates:
+                    deduped[candidate["mitigation_key"]] = candidate
+                return list(deduped.values())
+
         if event_vector in UDP_UPLOAD_MANY_CLIENTS_ALIASES or event.get("scope_type") == "external_dst_ip_port":
             event_target = cidr_from_ip_or_cidr(event.get("target_cidr")) or cidr_from_ip_or_cidr(event.get("target_ip")) or cidr_from_ip_or_cidr(dst_ip)
             event_port = int(event.get("target_port") or dst_port or 0)
@@ -8658,11 +8811,8 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
             vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
             candidates.append(attach_mitigation_config(conn, candidate, vector))
 
-        if protocol == "udp" and (dst_port == 53 or decoder == "DNS" and dst_port in {0, 53}) and src_ip:
-            candidate = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Cliente interno com flood DNS outbound em UDP destination-port 53.", confidence)
-            candidate.update({"src_cidr": cidr_from_ip_or_cidr(src_ip), "protocol": "udp", "dst_port": "53", "target_scope": src_ip})
-            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
-            candidates.append(attach_mitigation_config(conn, candidate, vector))
+        if protocol == "udp" and (dst_port == 53 or decoder == "DNS" and dst_port in {0, 53}):
+            candidates.extend(dns_outbound_candidates(conn, event, flows, confidence))
 
         if protocol == "udp" and (src_port == 123 or decoder == "NTP" and src_port in {0, 123}) and target_cidr and target_is_protected:
             candidate = base_mitigation_candidate(event, "NTP_REFLECTION_INBOUND", "NTP reflection inbound: UDP source-port 123 para destino protegido.", confidence)
@@ -9167,6 +9317,17 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     fallback_candidate_block_reason = fallback_analysis_rejection_reason(event, top_flow_by_packets, total_packets, total_bytes) if top_flow_by_packets else ""
     if top_src_ip and top_dst_ip and top_dst_port_value and flow_is_udp(top_flow_by_packets) and not fallback_candidate_block_reason:
         fallback_candidate_reason = "Top flow UDP valido encontrado no ClickHouse/flows relacionados."
+        if top_dst_port_value == 53:
+            candidates.append(
+                fallback_analysis_candidate(
+                    event,
+                    "FALLBACK_DNS_OUTBOUND_DST_UDP53",
+                    dns_outbound_reason(),
+                    "",
+                    top_dst_ip,
+                    top_dst_port_value,
+                )
+            )
         candidates.append(
             fallback_analysis_candidate(
                 event,
@@ -9177,16 +9338,24 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
                 top_dst_port_value,
             )
         )
-        candidates.append(
-            fallback_analysis_candidate(
-                event,
-                "FALLBACK_TOP_SRC_UDP_DST_PORT",
-                "Fallback por top source com trafego UDP para porta alvo.",
-                top_src_ip,
-                "",
-                top_dst_port_value,
-            )
+        source_only = fallback_analysis_candidate(
+            event,
+            "FALLBACK_TOP_SRC_UDP_DST_PORT",
+            "Nao recomendado: source-only DNS outbound pode bloquear DNS legitimo do cliente." if top_dst_port_value == 53 else "Fallback por top source com trafego UDP para porta alvo.",
+            top_src_ip,
+            "",
+            top_dst_port_value,
         )
+        if top_dst_port_value == 53:
+            source_only.update(
+                {
+                    "candidate_role": "not_recommended",
+                    "not_recommended": True,
+                    "manual_extra_confirmation": True,
+                    "mitigation_reason": "Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.",
+                }
+            )
+        candidates.append(source_only)
         top_pair = top_dst_port_pair[0] if top_dst_port_pair else {}
         if int(top_pair.get("unique_src_ips") or 0) >= 3:
             candidates.append(
@@ -10527,6 +10696,7 @@ def check_bgp_connector_router(request: Request, connector_id: int):
     }
 
 
+@app.post("/api/bgp/connectors/{connector_id}/manual-flowspec/dry-run", status_code=201)
 @app.post("/api/bgp/connectors/{connector_id}/test-flowspec", status_code=201)
 def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: BgpFlowspecTestPayload):
     require_admin(request)
@@ -10535,9 +10705,13 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
     payload_then_action = normalize_flowspec_action(payload.then_action or "discard")
     with sqlite_connection() as conn:
         connector = fetch_bgp_connector(conn, connector_id)
+        if not connector.get("enabled") or not connector.get("is_active"):
+            raise HTTPException(status_code=400, detail="Conector BGP desativado.")
         profile = {
             "id": None,
             "name": "LAB-FLOWSPEC",
+            "enabled": True,
+            "manual_lab": True,
             "response_type": "flowspec",
             "approval_mode": "manual_approval",
             "action": payload_then_action,
@@ -10555,6 +10729,7 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         }
         candidate = flowspec_candidate_from_payload(payload)
         candidate["connector_id"] = connector_id
+        candidate["manual_lab"] = True
         candidate["requested_mode"] = "manual_approval" if payload_action in {"announce", "withdraw"} else "dry_run"
         policy = evaluate_mitigation_policy(candidate)
         candidate["policy"] = policy
@@ -10563,7 +10738,7 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         action = payload_action
         last_error = ""
         status = "dry_run"
-        expires_at = None
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
         announced_at = None
         announce_command = render_exabgp_flowspec_command("announce", candidate)
         withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
@@ -13257,6 +13432,173 @@ def attack_vector_suggestion_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> d
     }
 
 
+def anomaly_source_fields_from_row(item: dict[str, Any]) -> dict[str, Any]:
+    details = bgp_json_loads(item.get("source_details_json"), {})
+    snapshot = bgp_json_loads(item.get("rule_snapshot_json"), {})
+    source = clean_text(item.get("anomaly_source"))
+    engine = clean_text(item.get("source_engine"))
+    source_id = clean_text(item.get("source_id"))
+    source_name = clean_text(item.get("source_name"))
+    if not source or source == "unknown":
+        if item.get("detection_template_rule_id") is not None:
+            source = "detection_template_rule"
+        elif item.get("legacy_attack_vector_id") is not None or item.get("attack_vector_id") is not None:
+            source = "legacy_attack_vector"
+        elif item.get("peak_analysis_id") is not None or engine in {"peak_hunter", "peak_hunter_runner"}:
+            analysis_source = clean_text(details.get("analysis_source")).lower()
+            source = "peak_hunter_automatic" if analysis_source == "automatic" or item.get("peak_hunter_run_id") is not None else "peak_hunter_manual"
+        else:
+            source = "unknown"
+    if not engine:
+        engine = {
+            "detection_template_rule": "detection_templates",
+            "legacy_attack_vector": "legacy_detector",
+            "peak_hunter_manual": "peak_hunter",
+            "peak_hunter_automatic": "peak_hunter_runner",
+            "dashboard_anomaly_summary": "dashboard",
+            "ai_suggestion": "ai",
+            "manual": "manual",
+        }.get(source, "")
+    if not source_id:
+        for key in ("detection_template_rule_id", "legacy_attack_vector_id", "attack_vector_id", "peak_analysis_id"):
+            if item.get(key) is not None:
+                source_id = str(item.get(key))
+                break
+    if not source_name:
+        source_name = (
+            clean_text(snapshot.get("rule_name"))
+            or clean_text(snapshot.get("name"))
+            or clean_text(item.get("vector_name"))
+            or clean_text(item.get("attack_vector_name"))
+            or ("Peak Hunter automatic" if source == "peak_hunter_automatic" else "Peak Hunter manual" if source == "peak_hunter_manual" else "")
+        )
+    if item.get("detection_template_id") is not None:
+        details.setdefault("template_id", item.get("detection_template_id"))
+    if item.get("detection_template_rule_id") is not None:
+        details.setdefault("rule_id", item.get("detection_template_rule_id"))
+    if item.get("peak_analysis_id") is not None:
+        details.setdefault("peak_analysis_id", item.get("peak_analysis_id"))
+    if item.get("peak_hunter_job_id") is not None:
+        details.setdefault("job_id", item.get("peak_hunter_job_id"))
+    if item.get("peak_hunter_run_id") is not None:
+        details.setdefault("run_id", item.get("peak_hunter_run_id"))
+    if snapshot and not details.get("rule_snapshot"):
+        details["rule_snapshot"] = snapshot
+    return {
+        "anomaly_source": source or "unknown",
+        "source_engine": engine,
+        "source_id": source_id,
+        "source_name": source_name,
+        "source_details_json": details,
+        "source_details": details,
+    }
+
+
+def backfill_anomaly_source_fields(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, anomaly_source, source_engine, source_id, source_name, source_details_json,
+               attack_vector_id, detection_template_id, detection_template_rule_id,
+               legacy_attack_vector_id, rule_snapshot_json, vector_name
+        FROM anomaly_events
+        WHERE anomaly_source = '' OR anomaly_source = 'unknown' OR source_engine = '' OR source_name = ''
+        LIMIT 10000
+        """
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        source = anomaly_source_fields_from_row(item)
+        conn.execute(
+            """
+            UPDATE anomaly_events
+            SET anomaly_source = ?, source_engine = ?, source_id = ?, source_name = ?, source_details_json = ?
+            WHERE id = ?
+            """,
+            (
+                source["anomaly_source"],
+                source["source_engine"],
+                source["source_id"],
+                source["source_name"],
+                json.dumps(source["source_details_json"], sort_keys=True, default=str),
+                int(item["id"]),
+            ),
+        )
+
+
+def anomaly_source_from_vector(vector: dict[str, Any]) -> dict[str, Any]:
+    if vector.get("detection_template_rule_id") is not None:
+        details = {
+            "template_id": vector.get("detection_template_id") or vector.get("template_id"),
+            "template_name": vector.get("template_name") or "",
+            "rule_id": vector.get("detection_template_rule_id"),
+            "rule_name": vector.get("rule_name") or vector.get("name") or "",
+        }
+        return {
+            "anomaly_source": "detection_template_rule",
+            "source_engine": "detection_templates",
+            "source_id": str(vector.get("detection_template_rule_id")),
+            "source_name": clean_text(vector.get("rule_name") or vector.get("name")),
+            "source_details_json": details,
+        }
+    return {
+        "anomaly_source": "legacy_attack_vector",
+        "source_engine": "legacy_detector",
+        "source_id": str(vector.get("id") or ""),
+        "source_name": clean_text(vector.get("name") or vector.get("detection_key")),
+        "source_details_json": {"attack_vector_id": vector.get("id"), "vector_name": vector.get("name") or vector.get("detection_key") or ""},
+    }
+
+
+def flow_protocol_label(flow: dict[str, Any], fallback: Any = "") -> str:
+    return clean_text(flow.get("protocol") or flow.get("proto_name") or proto_name(flow.get("proto")) or fallback).lower()
+
+
+def select_enriched_top_flow(event: dict[str, Any], flows: list[dict[str, Any]]) -> dict[str, Any]:
+    top_flow = event.get("top_flow") if isinstance(event.get("top_flow"), dict) else {}
+    if clean_ip(top_flow.get("src_ip")) and clean_ip(top_flow.get("dst_ip")) and int(top_flow.get("dst_port") or 0) > 0:
+        return top_flow
+    candidates = [dict(flow) for flow in flows if clean_ip(flow.get("src_ip")) and clean_ip(flow.get("dst_ip"))]
+    dns_candidates = [
+        flow for flow in candidates
+        if int(flow.get("dst_port") or 0) == 53 and flow_protocol_label(flow, event.get("protocol")) in {"udp", "17", "dns"}
+    ]
+    selected = sorted(
+        dns_candidates or candidates,
+        key=lambda flow: (int(float(flow.get("packets") or 0)), int(float(flow.get("bytes") or 0))),
+        reverse=True,
+    )
+    if not selected:
+        return {}
+    flow = selected[0]
+    protocol = flow_protocol_label(flow, event.get("protocol"))
+    if protocol == "17" or protocol == "dns":
+        protocol = "udp"
+    return {
+        "src_ip": clean_ip(flow.get("src_ip")),
+        "src_port": int(flow.get("src_port") or 0),
+        "dst_ip": clean_ip(flow.get("dst_ip")),
+        "dst_port": int(flow.get("dst_port") or 0),
+        "packets": int(float(flow.get("packets") or 0)),
+        "bytes": int(float(flow.get("bytes") or 0)),
+        "protocol": protocol,
+    }
+
+
+def enrich_anomaly_event_from_flows(event: dict[str, Any], flows: list[dict[str, Any]]) -> dict[str, Any]:
+    enriched = dict(event)
+    top_flow = select_enriched_top_flow(enriched, flows)
+    if not top_flow:
+        return enriched
+    enriched["top_flow"] = top_flow
+    enriched["dominant_src_ip"] = clean_ip(top_flow.get("src_ip"))
+    enriched["dominant_dst_ip"] = clean_ip(top_flow.get("dst_ip"))
+    enriched["dominant_dst_port"] = int(top_flow.get("dst_port") or 0) or None
+    enriched["dominant_protocol"] = clean_text(top_flow.get("protocol")).lower()
+    enriched["target_ip"] = enriched.get("target_ip") or enriched["dominant_dst_ip"]
+    enriched["target_port"] = enriched.get("target_port") or enriched["dominant_dst_port"]
+    return enriched
+
+
 def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     target_ip = clean_ip(item.get("target_ip"))
@@ -13265,7 +13607,8 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     target_cidr = item.get("target_cidr") or (host_cidr_for_ip(target_ip) if scope_type == "internal_ip_32" else "")
     invalid_scope = sqlite_bool(item.get("invalid_scope")) or bool(scope_type == "internal_ip_32" and (not target_ip or not is_ipv4_32_cidr(target_cidr)))
     protocol = item.get("protocol") or (proto_name(item.get("proto")) if item.get("proto") is not None else "")
-    return {
+    source = anomaly_source_fields_from_row(item)
+    result = {
         "id": int(item["id"]),
         "attack_vector_id": int(item["attack_vector_id"]) if item.get("attack_vector_id") is not None else None,
         "attack_vector_name": item.get("attack_vector_name") or item.get("vector_name") or "",
@@ -13317,6 +13660,12 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
+    result.update(source)
+    result["dominant_src_ip"] = clean_ip(item.get("top_src_ip"))
+    result["dominant_dst_ip"] = clean_ip(item.get("top_dst_ip"))
+    result["dominant_dst_port"] = int(item["top_dst_port"]) if item.get("top_dst_port") is not None else None
+    result["dominant_protocol"] = protocol
+    return result
 
 
 def fetch_attack_vector_template(conn: sqlite3.Connection, template_id: int) -> dict[str, Any]:
@@ -15482,6 +15831,7 @@ def upsert_anomaly_event(
     estimated_bytes = int(traffic.get("total_bytes") or traffic.get("estimated_bytes") or 0)
     estimated_packets = int(traffic.get("total_packets") or traffic.get("estimated_packets") or 0)
     flow_count = int(traffic.get("flow_count") or 0)
+    source_info = anomaly_source_from_vector(vector)
     if row is None:
         started_at = now
         summary = anomaly_summary(vector, target_ip, observed, threshold, started_at)
@@ -15529,10 +15879,15 @@ def upsert_anomaly_event(
                 flow_count,
                 summary,
                 dedupe_key,
+                anomaly_source,
+                source_engine,
+                source_id,
+                source_name,
+                source_details_json,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 vector["id"],
@@ -15575,6 +15930,11 @@ def upsert_anomaly_event(
                 flow_count,
                 summary,
                 dedupe_key,
+                source_info["anomaly_source"],
+                source_info["source_engine"],
+                source_info["source_id"],
+                source_info["source_name"],
+                json.dumps(source_info["source_details_json"], sort_keys=True, default=str),
                 now,
                 now,
             ),
@@ -16652,6 +17012,12 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         event = {
             "id": consolidated_security_anomaly_id(group["key"]),
             "source": "security_anomalies",
+            "anomaly_source": "dashboard_anomaly_summary",
+            "source_engine": "dashboard",
+            "source_id": "",
+            "source_name": vector,
+            "source_details_json": {"zone_name": zone_name, "detail_count": len(items)},
+            "source_details": {"zone_name": zone_name, "detail_count": len(items)},
             "security_anomaly_ids": [int(item["id"]) for item in items],
             "attack_vector_id": None,
             "attack_vector_name": vector,
@@ -16691,12 +17057,20 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
     return consolidated
 
 
-def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
+def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = None, source_engine: str | None = None) -> list[dict[str, Any]]:
     ensure_sensor_db()
+    values: list[Any] = []
     if status_filter == "active":
-        where = "e.status = 'active'"
+        filters = ["e.status = 'active'"]
     else:
-        where = "e.status <> 'active'"
+        filters = ["e.status <> 'active'"]
+    if clean_text(anomaly_source):
+        filters.append("e.anomaly_source = ?")
+        values.append(clean_text(anomaly_source))
+    if clean_text(source_engine):
+        filters.append("e.source_engine = ?")
+        values.append(clean_text(source_engine))
+    where = " AND ".join(filters)
     with sqlite_connection() as conn:
         rows = conn.execute(
             f"""
@@ -16712,10 +17086,15 @@ def anomaly_list(status_filter: str, limit: int) -> list[dict[str, Any]]:
             ORDER BY e.last_seen_at DESC
             LIMIT ?
             """,
-            (limit,),
+            (*values, limit),
         ).fetchall()
     items = [anomaly_event_row_to_dict(row) for row in rows]
-    items.extend(group["event"] for group in consolidated_security_anomaly_groups(status_filter))
+    consolidated = [group["event"] for group in consolidated_security_anomaly_groups(status_filter)]
+    if clean_text(anomaly_source):
+        consolidated = [item for item in consolidated if clean_text(item.get("anomaly_source")) == clean_text(anomaly_source)]
+    if clean_text(source_engine):
+        consolidated = [item for item in consolidated if clean_text(item.get("source_engine")) == clean_text(source_engine)]
+    items.extend(consolidated)
     return sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
 
 
@@ -16726,6 +17105,7 @@ def anomaly_detail_payload(
     metric_points: list[dict[str, Any]],
     **extra: Any,
 ) -> dict[str, Any]:
+    event = enrich_anomaly_event_from_flows(event, flows)
     target_fields = {
         "target_ip": clean_ip(event.get("target_ip")),
         "target_cidr": clean_text(event.get("target_cidr")),
@@ -16876,15 +17256,15 @@ def anomaly_top_sensors_endpoint(request: Request, range_minutes: int = Query(14
 
 
 @app.get("/api/anomalies/active")
-def active_anomalies(request: Request, limit: int = Query(200, ge=1, le=1000)):
+def active_anomalies(request: Request, limit: int = Query(200, ge=1, le=1000), anomaly_source: str | None = None, source_engine: str | None = None):
     require_admin(request)
-    return {"items": anomaly_list("active", limit)}
+    return {"items": anomaly_list("active", limit, anomaly_source, source_engine)}
 
 
 @app.get("/api/anomalies/history")
-def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000)):
+def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000), anomaly_source: str | None = None, source_engine: str | None = None):
     require_admin(request)
-    return {"items": anomaly_list("history", limit)}
+    return {"items": anomaly_list("history", limit, anomaly_source, source_engine)}
 
 
 @app.get("/api/anomalies/{event_id}")
@@ -17084,6 +17464,23 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
                     ("Motivo mitigacao", event.get("mitigation_reason")),
                     ("Top flow", pdf_text(event.get("top_flow"))),
                     ("Resumo", event.get("summary")),
+                ]
+            ),
+        },
+        {
+            "title": "Origem da anomalia",
+            "headers": ["Campo", "Valor"],
+            "rows": key_value_rows(
+                [
+                    ("Origem", event.get("anomaly_source")),
+                    ("Engine", event.get("source_engine")),
+                    ("Vetor/regra", event.get("source_name") or event.get("vector_name") or event.get("attack_vector_name")),
+                    ("Source ID", event.get("source_id")),
+                    ("Template", (event.get("source_details_json") or event.get("source_details") or {}).get("template_name") or (event.get("source_details_json") or event.get("source_details") or {}).get("template_id")),
+                    ("Regra", (event.get("source_details_json") or event.get("source_details") or {}).get("rule_name") or (event.get("source_details_json") or event.get("source_details") or {}).get("rule_id")),
+                    ("Caso Peak Hunter", (event.get("source_details_json") or event.get("source_details") or {}).get("peak_analysis_id")),
+                    ("Job", (event.get("source_details_json") or event.get("source_details") or {}).get("job_id")),
+                    ("Run", (event.get("source_details_json") or event.get("source_details") or {}).get("run_id")),
                 ]
             ),
         },
