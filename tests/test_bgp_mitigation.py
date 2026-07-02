@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -113,6 +114,9 @@ class temporary_main_db:
 
 @unittest.skipIf(SKIP_RUNTIME_IMPORT, "backend/app/main.py requires Python 3.10+ for runtime import tests")
 class BgpMitigationTest(unittest.TestCase):
+    def _admin_request(self):
+        return types.SimpleNamespace(state=types.SimpleNamespace(user={"role": "admin", "username": "tester"}))
+
     def _connector_and_profile(self, max_duration=3600):
         conn = main.sqlite_connection()
         now = main.utc_now_iso()
@@ -401,6 +405,160 @@ class BgpMitigationTest(unittest.TestCase):
             command = main.render_exabgp_flowspec_command("announce", candidate)
             self.assertEqual(command, "announce flow route { match { destination 75.131.245.200/32; protocol udp; destination-port =53; } then { discard; } }")
             self.assertNotIn("ttl", command.lower())
+
+    def test_manual_flowspec_dry_run_does_not_send_or_create_active_announcement(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                item = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="dry_run",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                    ),
+                )
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(item["status"], "dry_run")
+            self.assertIn("announce flow route", item["announce_command"])
+            self.assertIn("withdraw flow route", item["withdraw_command"])
+            self.assertNotIn("ttl", item["announce_command"].lower())
+            with main.sqlite_connection() as check:
+                count = check.execute("SELECT COUNT(*) AS count FROM bgp_announcements").fetchone()["count"]
+            self.assertEqual(count, 0)
+
+    def test_manual_flowspec_announce_saves_all_columns_and_active_ttl(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                item = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="announce",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                        confirm="ANUNCIAR",
+                    ),
+                )
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(len(main.MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS), 41)
+            self.assertEqual(calls, [item["announce_command"]])
+            self.assertEqual(item["status"], "active")
+            self.assertTrue(item["announced_at"])
+            self.assertTrue(item["expires_at"])
+            self.assertNotIn("ttl", item["announce_command"].lower())
+            self.assertNotIn("duration", item["announce_command"].lower())
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT status, expires_at, announce_command, withdraw_command FROM bgp_announcements").fetchone()
+            self.assertEqual(row["status"], "active")
+            self.assertTrue(row["expires_at"])
+            self.assertEqual(row["announce_command"], item["announce_command"])
+            self.assertEqual(row["withdraw_command"], item["withdraw_command"])
+
+    def test_manual_flowspec_insert_failure_before_announce_sends_nothing(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            calls = []
+            original_pipe = main.exabgp_write_pipe
+            original_insert = main.insert_manual_flowspec_announcement
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            main.insert_manual_flowspec_announcement = lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("insert failed"))
+            try:
+                response = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="announce",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                        confirm="ANUNCIAR",
+                    ),
+                )
+            finally:
+                main.exabgp_write_pipe = original_pipe
+                main.insert_manual_flowspec_announcement = original_insert
+            self.assertEqual(calls, [])
+            self.assertEqual(response.status_code, 500)
+            body = json.loads(response.body.decode("utf-8"))
+            self.assertFalse(body["ok"])
+            self.assertFalse(body["rollback_attempted"])
+
+    def test_manual_flowspec_update_failure_after_announce_rolls_back_with_withdraw(self):
+        class FailingActiveUpdateConnection:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self.inner.__exit__(*exc)
+
+            def execute(self, sql, params=()):
+                if "UPDATE bgp_announcements" in sql and "status = 'active'" in sql:
+                    raise sqlite3.OperationalError("active update failed")
+                return self.inner.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            calls = []
+            original_pipe = main.exabgp_write_pipe
+            original_sqlite_connection = main.sqlite_connection
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            main.sqlite_connection = lambda: FailingActiveUpdateConnection(original_sqlite_connection())
+            try:
+                response = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="announce",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                        confirm="ANUNCIAR",
+                    ),
+                )
+            finally:
+                main.exabgp_write_pipe = original_pipe
+                main.sqlite_connection = original_sqlite_connection
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0].startswith("announce flow route"))
+            self.assertTrue(calls[1].startswith("withdraw flow route"))
+            self.assertEqual(response.status_code, 500)
+            body = json.loads(response.body.decode("utf-8"))
+            self.assertFalse(body["ok"])
+            self.assertTrue(body["rollback_attempted"])
+            self.assertTrue(body["rollback_success"])
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT status, last_error FROM bgp_announcements").fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertIn("rollback withdraw executado", row["last_error"])
 
     def test_manual_lab_port_without_protocol_has_clear_error(self):
         with self.assertRaises(HTTPException) as ctx:

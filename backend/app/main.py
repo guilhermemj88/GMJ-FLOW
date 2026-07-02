@@ -540,7 +540,7 @@ BGP_TARGET_SELECTORS = {"src_ip", "dst_ip", "src_and_dst_ip", "dst_prefix", "src
 BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "fixed", "tcp", "udp", "icmp"}
 BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "fixed"}
 BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "anomaly_tcp_flags", "fixed", "syn", "syn_ack"}
-BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "pending_approval", "active", "announced", "rejected", "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw"}
+BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "prepared", "pending_approval", "active", "announced", "rejected", "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw"}
 BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "active", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
@@ -10625,6 +10625,134 @@ def process_anomaly_mitigation() -> dict[str, int]:
     return stats
 
 
+MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS = (
+    "connector_id", "connector_name", "response_profile_id", "anomaly_id", "status", "route_type", "response_type", "action",
+    "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
+    "target_prefix", "src_prefix", "dst_prefix", "protocol", "src_port", "dst_port", "tcp_flags",
+    "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "rendered_command", "match_json", "then_json",
+    "validation_errors", "validation_warnings",
+    "raw_payload", "source", "source_id", "last_error",
+    "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
+    "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
+)
+
+
+def manual_flowspec_announcement_values(
+    connector: dict[str, Any],
+    candidate: dict[str, Any],
+    payload: BgpFlowspecTestPayload,
+    policy: dict[str, Any],
+    validation: dict[str, list[str]],
+    status: str,
+    announce_command: str,
+    withdraw_command: str,
+    rendered_command: str,
+    created_by: str,
+    expires_at: str | None = None,
+    announced_at: str | None = None,
+    last_error: str = "",
+) -> dict[str, Any]:
+    now = utc_now_iso()
+    return {
+        "connector_id": connector["id"],
+        "connector_name": connector.get("name") or "",
+        "response_profile_id": None,
+        "anomaly_id": None,
+        "status": status,
+        "route_type": "flowspec",
+        "response_type": "flowspec",
+        "action": candidate.get("action") or "discard",
+        "rate_limit_bps": candidate.get("rate_limit_bps"),
+        "rate_limit_value_raw": candidate.get("rate_limit_value_raw") or "",
+        "rate_limit_unit": candidate.get("rate_limit_unit") or "",
+        "target_prefix": candidate.get("target_prefix") or "",
+        "src_prefix": candidate.get("src_prefix") or "",
+        "dst_prefix": candidate.get("dst_prefix") or "",
+        "protocol": candidate.get("protocol") or "",
+        "src_port": candidate.get("src_port") or "",
+        "dst_port": candidate.get("dst_port") or "",
+        "tcp_flags": candidate.get("tcp_flags") or "",
+        "duration_seconds": candidate.get("duration_seconds") or 0,
+        "expires_at": expires_at,
+        "announced_at": announced_at,
+        "announce_command": announce_command,
+        "withdraw_command": withdraw_command,
+        "rendered_command": rendered_command,
+        "match_json": bgp_match_json(candidate),
+        "then_json": bgp_then_json(candidate),
+        "validation_errors": json.dumps(validation["errors"], sort_keys=True),
+        "validation_warnings": json.dumps(validation["warnings"], sort_keys=True),
+        "raw_payload": json.dumps(dump_model(payload), sort_keys=True, default=str),
+        "source": "manual_lab",
+        "source_id": "",
+        "last_error": last_error,
+        "policy_decision": policy.get("decision") or "",
+        "policy_severity": policy.get("severity") or "",
+        "policy_reasons": json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+        "policy_warnings": json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+        "policy_required_scope": json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+        "policy_matched_port_policies": json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+        "created_by": created_by,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def insert_manual_flowspec_announcement(conn: sqlite3.Connection, values: dict[str, Any]) -> int:
+    placeholders = ", ".join("?" for _ in MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS)
+    cursor = conn.execute(
+        f"""
+        INSERT INTO bgp_announcements ({", ".join(MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS)})
+        VALUES ({placeholders})
+        """,
+        tuple(values[column] for column in MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS),
+    )
+    return int(cursor.lastrowid)
+
+
+def manual_flowspec_preview_response(
+    connector: dict[str, Any],
+    candidate: dict[str, Any],
+    payload: BgpFlowspecTestPayload,
+    policy: dict[str, Any],
+    validation: dict[str, list[str]],
+    announce_command: str,
+    withdraw_command: str,
+    expires_at: str | None,
+) -> dict[str, Any]:
+    return {
+        "ok": not bool(validation["errors"]),
+        "id": None,
+        "connector_id": connector["id"],
+        "connector_name": connector.get("name") or "",
+        "status": "dry_run",
+        "route_type": "flowspec",
+        "response_type": "flowspec",
+        "action": candidate.get("action") or "discard",
+        "then_action": candidate.get("then_action") or candidate.get("action") or "discard",
+        "target_prefix": candidate.get("target_prefix") or "",
+        "src_prefix": candidate.get("src_prefix") or "",
+        "dst_prefix": candidate.get("dst_prefix") or "",
+        "protocol": candidate.get("protocol") or "",
+        "src_port": candidate.get("src_port") or "",
+        "dst_port": candidate.get("dst_port") or "",
+        "duration_seconds": int(candidate.get("duration_seconds") or 0),
+        "expires_at": expires_at,
+        "announce_command": announce_command,
+        "withdraw_command": withdraw_command,
+        "rendered_command": announce_command,
+        "command": announce_command,
+        "validation_errors": validation["errors"],
+        "validation_warnings": validation["warnings"],
+        "policy": policy,
+        "policy_decision": policy.get("decision") or "",
+        "policy_severity": policy.get("severity") or "",
+        "policy_reasons": policy.get("reasons") or [],
+        "policy_warnings": policy.get("warnings") or [],
+        "raw_payload": dump_model(payload),
+    }
+
+
 @app.get("/api/bgp/connectors")
 def list_bgp_connectors(request: Request, include_disabled: bool = False):
     require_admin(request)
@@ -10733,90 +10861,150 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         candidate["requested_mode"] = "manual_approval" if payload_action in {"announce", "withdraw"} else "dry_run"
         policy = evaluate_mitigation_policy(candidate)
         candidate["policy"] = policy
-        command = render_exabgp_flowspec_command(candidate["command_action"], candidate)
         validation = validate_mitigation_candidate(candidate, connector, profile)
         action = payload_action
-        last_error = ""
-        status = "dry_run"
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
-        announced_at = None
         announce_command = render_exabgp_flowspec_command("announce", candidate)
         withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
-        if action in {"announce", "withdraw"}:
-            if validation["errors"]:
-                if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
-                    raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
-                raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
-            if action == "announce" and not all(is_documentation_prefix(prefix) for prefix in [candidate.get("src_prefix"), candidate.get("dst_prefix")] if prefix):
-                if clean_text(payload.confirm).upper() != "ANUNCIAR":
-                    raise HTTPException(status_code=400, detail="Confirmacao ANUNCIAR obrigatoria para prefixo nao RFC5737")
-            if connector.get("backend_type") != "exabgp":
-                raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp")
+        if action == "dry_run":
+            return manual_flowspec_preview_response(connector, candidate, payload, policy, validation, announce_command, withdraw_command, expires_at)
+        if validation["errors"]:
+            if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
+                raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
+            raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
+        if action == "announce" and clean_text(payload.confirm).upper() != "ANUNCIAR":
+            raise HTTPException(status_code=400, detail="Confirmacao ANUNCIAR obrigatoria")
+        if connector.get("backend_type") != "exabgp":
+            raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp")
+        created_by = bgp_current_user(request)
+        command = announce_command if action == "announce" else withdraw_command
+        if action == "withdraw":
+            last_error = ""
             try:
-                exabgp_write_pipe(connector, command)
-                status = "active" if action == "announce" else "withdrawn"
-                if status == "active":
-                    announced_at = utc_now_iso()
-                    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
+                exabgp_write_pipe(connector, withdraw_command)
+                status = "withdrawn"
             except HTTPException as exc:
                 last_error = clean_text(exc.detail)
-                status = "failed"
-        now = utc_now_iso()
-        cursor = conn.execute(
-            """
-            INSERT INTO bgp_announcements (
-                connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
-                rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
-                target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-                duration_seconds, expires_at, announced_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
-                validation_errors, validation_warnings,
-                raw_payload, source, source_id, last_error, policy_decision, policy_severity, policy_reasons, policy_warnings,
-                policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
+                status = "failed_withdraw"
+            try:
+                values = manual_flowspec_announcement_values(
+                    connector, candidate, payload, policy, validation, status,
+                    announce_command, withdraw_command, withdraw_command, created_by,
+                    expires_at=None, announced_at=None, last_error=last_error,
+                )
+                announcement_id = insert_manual_flowspec_announcement(conn, values)
+                bgp_event(conn, announcement_id, f"flowspec_{action}", last_error or "Withdraw FlowSpec processado.", {"command": withdraw_command, "policy": policy}, created_by)
+                conn.commit()
+            except sqlite3.Error as exc:
+                logger.error("Erro ao salvar withdraw manual FlowSpec: %s", exc)
+                return JSONResponse({"ok": False, "detail": "Erro ao salvar anúncio FlowSpec", "rollback_attempted": False, "rollback_success": False}, status_code=500)
+            row = conn.execute(
+                """
+                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+                FROM bgp_announcements a
+                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+                WHERE a.id = ?
+                """,
+                (announcement_id,),
+            ).fetchone()
+            return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": not last_error, "command": command, "policy": policy}
+
+        try:
+            values = manual_flowspec_announcement_values(
+                connector, candidate, payload, policy, validation, "prepared",
+                announce_command, withdraw_command, announce_command, created_by,
+                expires_at=expires_at, announced_at=None,
             )
-            VALUES (?, ?, NULL, NULL, ?, 'flowspec', 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                connector_id,
-                connector.get("name") or "",
-                status,
-                candidate.get("action") or "discard",
-                candidate.get("rate_limit_bps"),
-                candidate.get("rate_limit_value_raw") or "",
-                candidate.get("rate_limit_unit") or "",
-                candidate.get("target_prefix") or "",
-                candidate.get("src_prefix") or "",
-                candidate.get("dst_prefix") or "",
-                candidate.get("protocol") or "",
-                candidate.get("src_port") or "",
-                candidate.get("dst_port") or "",
-                candidate.get("duration_seconds") or 0,
-                expires_at,
-                announced_at,
-                announce_command,
-                withdraw_command,
-                command,
-                bgp_match_json(candidate),
-                bgp_then_json(candidate),
-                json.dumps(validation["errors"], sort_keys=True),
-                json.dumps(validation["warnings"], sort_keys=True),
-                json.dumps(dump_model(payload), sort_keys=True, default=str),
-                "manual",
-                "",
-                last_error,
-                policy.get("decision") or "",
-                policy.get("severity") or "",
-                json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
-                json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
-                json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
-                json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
-                bgp_current_user(request),
-                now,
-                now,
-            ),
-        )
-        announcement_id = int(cursor.lastrowid)
-        bgp_event(conn, announcement_id, f"flowspec_{action}", last_error or "Comando FlowSpec processado.", {"command": command, "policy": policy}, bgp_current_user(request))
-        conn.commit()
+            announcement_id = insert_manual_flowspec_announcement(conn, values)
+            bgp_event(conn, announcement_id, "flowspec_prepared", "Anuncio FlowSpec preparado antes do envio ao ExaBGP.", {"command": announce_command, "policy": policy}, created_by)
+            conn.commit()
+        except sqlite3.Error as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            logger.error("Erro ao salvar anuncio FlowSpec antes do envio: %s", exc)
+            return JSONResponse({"ok": False, "detail": "Erro ao salvar anúncio FlowSpec", "rollback_attempted": False, "rollback_success": False}, status_code=500)
+
+        try:
+            exabgp_write_pipe(connector, announce_command)
+        except HTTPException as exc:
+            last_error = clean_text(exc.detail)
+            now = utc_now_iso()
+            conn.execute(
+                """
+                UPDATE bgp_announcements
+                SET status = 'failed', last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (last_error, now, announcement_id),
+            )
+            bgp_event(conn, announcement_id, "announce_failed", last_error or "Falha ao enviar announce FlowSpec.", {"command": announce_command, "policy": policy}, created_by)
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+                FROM bgp_announcements a
+                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+                WHERE a.id = ?
+                """,
+                (announcement_id,),
+            ).fetchone()
+            return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": False, "command": announce_command, "policy": policy}
+
+        announced_at = utc_now_iso()
+        active_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
+        try:
+            conn.execute(
+                """
+                UPDATE bgp_announcements
+                SET status = 'active', announced_at = ?, expires_at = ?, updated_at = ?, last_error = ''
+                WHERE id = ?
+                """,
+                (announced_at, active_expires_at, announced_at, announcement_id),
+            )
+            bgp_event(conn, announcement_id, "flowspec_announce", "Comando FlowSpec anunciado ao ExaBGP.", {"command": announce_command, "policy": policy}, created_by)
+            conn.commit()
+        except sqlite3.Error as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            rollback_success = False
+            rollback_error = ""
+            try:
+                exabgp_write_pipe(connector, withdraw_command)
+                rollback_success = True
+            except HTTPException as rollback_exc:
+                rollback_error = clean_text(rollback_exc.detail)
+            try:
+                recovery_status = "failed" if rollback_success else "failed_withdraw"
+                recovery_error = "Erro ao salvar anuncio ativo apos envio; rollback withdraw executado." if rollback_success else f"Erro ao salvar anuncio ativo apos envio; rollback withdraw falhou: {rollback_error}"
+                recovery_now = utc_now_iso()
+                conn.execute(
+                    """
+                    UPDATE bgp_announcements
+                    SET status = ?, last_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (recovery_status, recovery_error, recovery_now, announcement_id),
+                )
+                bgp_event(conn, announcement_id, "announce_db_failure", recovery_error, {"announce_command": announce_command, "withdraw_command": withdraw_command, "rollback_success": rollback_success}, created_by)
+                conn.commit()
+            except sqlite3.Error as recovery_exc:
+                logger.critical("Falha adicional ao registrar rollback FlowSpec %s: %s", announcement_id, recovery_exc)
+            logger.critical("Erro critico ao ativar anuncio FlowSpec %s apos envio; rollback withdraw tentado=%s sucesso=%s erro_db=%s erro_rollback=%s", announcement_id, True, rollback_success, exc, rollback_error)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "detail": "Erro ao salvar anúncio FlowSpec",
+                    "rollback_attempted": True,
+                    "rollback_success": rollback_success,
+                },
+                status_code=500,
+            )
         row = conn.execute(
             """
             SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
@@ -10827,7 +11015,7 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
             """,
             (announcement_id,),
         ).fetchone()
-        return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "command": command, "policy": policy}
+        return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": True, "command": announce_command, "policy": policy}
 
 
 @app.put("/api/bgp/connectors/{connector_id}")

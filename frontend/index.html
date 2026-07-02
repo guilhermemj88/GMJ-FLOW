@@ -8582,16 +8582,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('bgpDryRatePreview', isRateLimit && raw ? (bps ? `${raw} = ${formatRateLimitBps(bps)}` : 'Limite invalido') : '');
     }
 
-    async function runBgpDryRun(action = 'dry_run') {
+    async function runBgpDryRun(requestedAction = 'dry_run') {
       document.getElementById('bgpDryRunOutput').textContent = 'Gerando dry-run...';
       const connectorId = Number(selectValue('bgpDryConnector'));
       updateBgpDryRateLimitUi();
+      const selectedAction = selectValue('bgpDryAction', 'dry_run');
+      const action = requestedAction === 'dry_run' ? 'dry_run' : selectedAction;
       let protocol = selectValue('bgpDryProtocol').trim().toLowerCase();
       const dstPort = selectValue('bgpDryDstPort').trim();
       const srcPort = selectValue('bgpDrySrcPort').trim();
       if (protocol === 'dns' && dstPort === '53') protocol = 'udp';
       if ((srcPort || dstPort) && !protocol) {
         const message = 'Protocolo e obrigatorio quando porta e informada.';
+        setText('bgpStatus', message);
+        document.getElementById('bgpDryRunOutput').textContent = message;
+        return;
+      }
+      const confirm = selectValue('bgpDryConfirm').trim();
+      if (requestedAction === 'announce' && action !== 'announce') {
+        const message = 'Acao selecionada esta como dry-run only. Preview sera gerado sem anunciar.';
+        setText('bgpStatus', message);
+        document.getElementById('bgpDryRunOutput').textContent = message;
+      }
+      if (action === 'announce' && confirm.toUpperCase() !== 'ANUNCIAR') {
+        const message = 'Confirmacao ANUNCIAR obrigatoria para anunciar agora.';
         setText('bgpStatus', message);
         document.getElementById('bgpDryRunOutput').textContent = message;
         return;
@@ -8606,7 +8620,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         then_action: selectValue('bgpDryThenAction', 'discard'),
         rate_limit_value_raw: selectValue('bgpDryThenAction', 'discard') === 'rate_limit' ? selectValue('bgpDryRateLimit').trim() : null,
         duration_seconds: Math.max(60, numberValue('bgpDryDuration', 1800)),
-        confirm: selectValue('bgpDryConfirm').trim()
+        confirm
       };
       console.log('[manual-flowspec] payload', payload);
       try {

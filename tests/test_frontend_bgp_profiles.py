@@ -37,6 +37,11 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("/manual-flowspec/dry-run", HTML)
         self.assertIn("console.log('[manual-flowspec] payload', payload)", HTML)
 
+    def test_manual_flowspec_dry_run_selection_does_not_send_announce_action(self):
+        self.assertIn("const selectedAction = selectValue('bgpDryAction', 'dry_run');", HTML)
+        self.assertIn("const action = requestedAction === 'dry_run' ? 'dry_run' : selectedAction;", HTML)
+        self.assertIn("Confirmacao ANUNCIAR obrigatoria para anunciar agora.", HTML)
+
     def test_manual_flowspec_blocks_port_without_protocol(self):
         self.assertIn("Protocolo e obrigatorio quando porta e informada.", HTML)
         self.assertIn("if ((srcPort || dstPort) && !protocol)", HTML)
