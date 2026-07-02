@@ -1,0 +1,100 @@
+import unittest
+from pathlib import Path
+
+from backend.app.services.humanize import (
+    format_bits_per_second,
+    format_bytes,
+    format_packets,
+    format_packets_per_second,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MAIN = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+NGINX = (ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+INSTALL = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+
+class SetupInstallPdfTest(unittest.TestCase):
+    def test_pdf_metric_formatters(self):
+        self.assertEqual(format_bits_per_second(213400000), "213.4 Mbps")
+        self.assertEqual(format_bits_per_second(27000000000), "27 Gbps")
+        self.assertEqual(format_packets_per_second(242500), "242.5 Kpps")
+        self.assertEqual(format_packets_per_second(3200000), "3.2 Mpps")
+        self.assertEqual(format_bytes(96030000), "96 MB")
+        self.assertEqual(format_bytes(3800000000), "3.8 GB")
+        self.assertEqual(format_packets(873000), "873 K")
+        self.assertEqual(format_packets(3808000), "3.8 M")
+        self.assertEqual(format_bytes(None), "-")
+        self.assertEqual(format_packets_per_second("invalid"), "-")
+
+    def test_flows_pdf_uses_humanized_metrics_and_summary(self):
+        self.assertIn("def flow_pdf_rows", MAIN)
+        self.assertIn("format_bits_per_second(top_bits.get('bits_s'))", MAIN)
+        self.assertIn("format_packets_per_second(top_pps.get('packets_s'))", MAIN)
+        self.assertIn('"label": "Bits/s"', MAIN)
+        self.assertIn('"label": "Pacotes/s"', MAIN)
+        self.assertNotIn('"headers": ["flow_time", "sensor", "src_ip", "src_port", "dst_ip", "dst_port", "proto_name", "bytes", "packets", "bits_s", "packets_s"]', MAIN)
+
+    def test_nginx_uses_dynamic_docker_resolver(self):
+        self.assertIn("resolver 127.0.0.11 valid=10s ipv6=off;", NGINX)
+        self.assertIn("set $backend_upstream http://backend:8000;", NGINX)
+        self.assertNotIn("proxy_pass http://backend:8000/api/;", NGINX)
+        self.assertNotIn("proxy_pass http://backend:8000/health;", NGINX)
+        self.assertIn("proxy_pass $backend_upstream/api/;", NGINX)
+        self.assertIn("proxy_pass $backend_upstream/health;", NGINX)
+
+    def test_compose_and_scripts_include_autostart_ai_exabgp(self):
+        for service in ("clickhouse:", "backend:", "frontend:", "gmj-flow-ollama:"):
+            self.assertIn(service, COMPOSE)
+        self.assertGreaterEqual(COMPOSE.count("restart: unless-stopped"), 7)
+        self.assertIn("--with-ai", INSTALL)
+        self.assertIn("--with-exabgp", INSTALL)
+        self.assertIn("docker exec gmj-flow-ollama ollama pull", INSTALL)
+        self.assertTrue((ROOT / "scripts" / "install-systemd-service.sh").exists())
+        self.assertTrue((ROOT / "scripts" / "install-exabgp.sh").exists())
+        self.assertTrue((ROOT / "scripts" / "post-install-check.sh").exists())
+        self.assertTrue((ROOT / "deploy" / "systemd" / "gmj-flow.service.template").exists())
+        self.assertTrue((ROOT / "deploy" / "exabgp" / "gmj-flow-exabgp.conf.template").exists())
+
+    def test_system_setup_endpoints_exist(self):
+        for route in (
+            "/api/system/setup/status",
+            "/api/system/ai/status",
+            "/api/system/ai/config",
+            "/api/system/ai/ollama/pull",
+            "/api/system/ai/ollama/models",
+            "/api/system/ai/test",
+            "/api/system/exabgp/status",
+            "/api/system/exabgp/render-config",
+            "/api/system/exabgp/install-instructions",
+        ):
+            self.assertIn(route, MAIN)
+        self.assertIn("require_admin(request)", MAIN)
+        self.assertIn('"ai_allow_auto": "false"', MAIN)
+        self.assertIn('"recommendations"', MAIN)
+
+    def test_containerized_bgp_status_distinguishes_unverified_from_down(self):
+        self.assertIn("def parse_huawei_vrp_peer_state", MAIN)
+        self.assertIn("display bgp peer", MAIN)
+        self.assertIn("display bgp flow peer", MAIN)
+        self.assertIn("def router_ssh_status", MAIN)
+        self.assertIn("def host_agent_status", MAIN)
+        self.assertIn("GMJFLOW_HOST_AGENT_URL", MAIN)
+        self.assertTrue((ROOT / "scripts" / "host-agent.py").exists())
+        self.assertIn('"bgp_state": bgp_state', MAIN)
+        self.assertIn('"flowspec_state": flowspec_state', MAIN)
+        self.assertIn('"pipe_verified": pipes_ok', MAIN)
+        self.assertIn("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.", MAIN)
+
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Pipe ExaBGP", html)
+        self.assertIn("Sessao BGP nao verificada", html)
+        self.assertIn("FlowSpec nao verificado", html)
+        self.assertIn("bgpConnectorRouterCheck", html)
+        self.assertIn("bgpConnectorRouterMgmtIp", html)
+
+
+if __name__ == "__main__":
+    unittest.main()

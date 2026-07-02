@@ -4198,6 +4198,59 @@
               </div>
             </div>
           </section>
+          <section class="row g-3 mt-1">
+            <div class="col-12 col-xl-7">
+              <div class="panel p-3">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                  <div>
+                    <div class="panel-title">Instalação / Setup</div>
+                    <div class="subtle">Checklist de saúde, autostart, collectors, IA, ExaBGP e nginx</div>
+                  </div>
+                  <span id="setupOverallBadge" class="badge-soft off">-</span>
+                </div>
+                <div id="setupChecklist" class="database-metrics-grid"></div>
+                <div id="setupRecommendations" class="result-box mt-2">Sem recomendações carregadas.</div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-5">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">IA Local</div>
+                <div class="subtle mb-2">IA habilitada gera análise e sugestão. Não aplica mitigação automática.</div>
+                <div class="flow-search-grid mb-2">
+                  <div class="field"><label for="systemAiEnabled">IA</label><select id="systemAiEnabled" class="form-select form-select-sm"><option value="false">Desativada</option><option value="true">Ativada</option></select></div>
+                  <div class="field"><label for="systemAiProvider">Provedor</label><select id="systemAiProvider" class="form-select form-select-sm"><option value="ollama">ollama</option></select></div>
+                  <div class="field grid-span-2"><label for="systemAiBaseUrl">Base URL</label><input id="systemAiBaseUrl" class="form-control form-control-sm" placeholder="http://gmj-flow-ollama:11434"></div>
+                  <div class="field grid-span-2"><label for="systemAiModel">Modelo</label><input id="systemAiModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
+                  <div class="field"><label for="systemAiTimeout">Timeout</label><input id="systemAiTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
+                  <div class="field"><label for="systemAiTopFlows">Top flows</label><input id="systemAiTopFlows" type="number" min="1" max="200" class="form-control form-control-sm"></div>
+                  <div class="field"><label for="systemAiContextChars">Contexto</label><input id="systemAiContextChars" type="number" min="1000" max="100000" class="form-control form-control-sm"></div>
+                  <div class="field"><label for="systemAiPullModel">Baixar modelo</label><input id="systemAiPullModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
+                </div>
+                <div class="toolbar mb-2">
+                  <button id="systemAiSaveButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
+                  <button id="systemAiModelsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="list"></i><span>Listar</span></button>
+                  <button id="systemAiPullButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="download"></i><span>Baixar</span></button>
+                  <button id="systemAiTestButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="activity"></i><span>Testar</span></button>
+                </div>
+                <pre id="systemAiOutput" class="result-box">IA local não carregada.</pre>
+              </div>
+            </div>
+          </section>
+          <section class="row g-3 mt-1">
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">Ollama / Modelos</div>
+                <div id="systemOllamaList" class="d-grid gap-2"></div>
+              </div>
+            </div>
+            <div class="col-12 col-xl-6">
+              <div class="panel p-3">
+                <div class="panel-title mb-2">ExaBGP / Autostart</div>
+                <div id="systemExabgpStatus" class="d-grid gap-2"></div>
+                <pre id="systemInstallCommands" class="result-box mt-2">sudo ./scripts/install.sh --with-ai --with-exabgp --install-systemd</pre>
+              </div>
+            </div>
+          </section>
         </section>
 
         <section id="view-bgp" class="app-view">
@@ -4298,6 +4351,11 @@
               <div class="field"><label for="bgpConnectorPipeOut">Pipe output</label><input id="bgpConnectorPipeOut" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.out"></div>
               <div class="field"><label for="bgpConnectorConfigPath">Config path</label><input id="bgpConnectorConfigPath" class="form-control form-control-sm" placeholder="/etc/exabgp/gmj-flow-ne8000.conf"></div>
               <div class="field"><label for="bgpConnectorPassive">Passive/listen</label><select id="bgpConnectorPassive" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterCheck">Router SSH</label><select id="bgpConnectorRouterCheck" class="form-select form-select-sm"><option value="false">Nao verificar</option><option value="true">Verificar</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterVendor">Vendor</label><select id="bgpConnectorRouterVendor" class="form-select form-select-sm"><option value="huawei_vrp">Huawei VRP</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterMgmtIp">Router mgmt IP</label><input id="bgpConnectorRouterMgmtIp" class="form-control form-control-sm" placeholder="192.168.1.1"></div>
+              <div class="field"><label for="bgpConnectorRouterUsername">Router user</label><input id="bgpConnectorRouterUsername" class="form-control form-control-sm" autocomplete="off"></div>
+              <div class="field"><label for="bgpConnectorRouterPassword">Router senha</label><input id="bgpConnectorRouterPassword" type="password" class="form-control form-control-sm" autocomplete="new-password" placeholder="manter vazio para preservar"></div>
               <div class="field"><label for="bgpConnectorEnabled">Ativo</label><select id="bgpConnectorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
@@ -8156,7 +8214,7 @@
         ? 'ok'
         : kind === 'down'
           ? 'down'
-          : kind === 'unknown'
+          : kind === 'unknown' || kind === 'not_verified'
             ? 'warn'
             : 'off';
       return `<span class="badge-soft ${css}">${escapeHtml(label)}</span>`;
@@ -8194,9 +8252,10 @@
 
     function bgpPeerOperationalState(status) {
       const rawState = String(status.exabgp_peer?.state || status.bgp_state || 'unknown').toLowerCase();
-      if (rawState === 'established') return 'UP';
-      if (['idle', 'active', 'connect', 'down'].includes(rawState)) return 'DOWN';
-      return 'UNKNOWN';
+      const aggregate = String(status.bgp_state || rawState).toLowerCase();
+      if (['established', 'up'].includes(aggregate) || rawState === 'established') return 'UP';
+      if (['idle', 'active', 'connect', 'down', 'not_established'].includes(aggregate)) return 'DOWN';
+      return 'NAO VERIFICADO';
     }
 
     function bgpPipeOperationalState(status) {
@@ -8205,10 +8264,10 @@
     }
 
     function bgpFlowspecOperationalState(status, connector) {
-      const bgpState = bgpPeerOperationalState(status);
-      if (bgpState === 'UNKNOWN') return 'UNKNOWN';
-      if (bgpState === 'DOWN') return 'DOWN';
-      return bgpConnectorHasFlowspec(connector, status) ? 'UP' : 'UNKNOWN';
+      const raw = String(status.flowspec_state || 'not_verified').toLowerCase();
+      if (['established', 'up'].includes(raw)) return 'UP';
+      if (['idle', 'active', 'connect', 'down', 'not_established'].includes(raw)) return 'DOWN';
+      return 'NAO VERIFICADO';
     }
 
     function bgpPeerDetails(status) {
@@ -8222,6 +8281,9 @@
         session: status.session || {},
         pipes: status.pipes || {},
         exabgp_peer: status.exabgp_peer || {},
+        router_check: status.router_check || {},
+        host_agent: status.host_agent || {},
+        verification: status.verification || {},
         messages: status.messages || [],
         errors: status.errors || []
       };
@@ -8234,11 +8296,13 @@
         const bgpState = bgpPeerOperationalState(status);
         const flowspecState = bgpFlowspecOperationalState(status, connector);
         const pipeState = bgpPipeOperationalState(status);
+        const bgpKind = bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : 'not_verified';
+        const flowKind = flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : 'not_verified';
         return `
           <tr>
             <td>${escapeHtml(status.name || connector?.name || `#${status.connector_id}`)}</td>
-            <td>${bgpStatusBadge(bgpState, bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : 'unknown')}</td>
-            <td>${bgpStatusBadge(flowspecState, flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : 'unknown')}</td>
+            <td>${bgpStatusBadge(bgpState === 'NAO VERIFICADO' ? 'Sessao BGP nao verificada' : bgpState, bgpKind)}</td>
+            <td>${bgpStatusBadge(flowspecState === 'NAO VERIFICADO' ? 'FlowSpec nao verificado' : flowspecState, flowKind)}</td>
             <td>${bgpStatusBadge(pipeState, pipeState === 'OK' ? 'ok' : 'down')}</td>
             <td>${escapeHtml(formatDateTime(status.last_checked_at) || '-')}</td>
           </tr>
@@ -8547,6 +8611,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpConnectorPipeIn', '');
       setValue('bgpConnectorPipeOut', '');
       setValue('bgpConnectorConfigPath', '');
+      setBoolSelect('bgpConnectorRouterCheck', false);
+      setValue('bgpConnectorRouterVendor', 'huawei_vrp');
+      setValue('bgpConnectorRouterMgmtIp', '');
+      setValue('bgpConnectorRouterUsername', '');
+      setValue('bgpConnectorRouterPassword', '');
       setBoolSelect('bgpConnectorPassive', false);
       setValue('bgpConnectorRole', 'generic_bgp');
       setValue('bgpConnectorBackend', 'dry_run');
@@ -8573,6 +8642,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpConnectorPipeIn', item.exabgp_pipe_in || '');
       setValue('bgpConnectorPipeOut', item.exabgp_pipe_out || '');
       setValue('bgpConnectorConfigPath', item.exabgp_config_path || '');
+      setBoolSelect('bgpConnectorRouterCheck', item.router_check_enabled);
+      setValue('bgpConnectorRouterVendor', item.router_vendor || 'huawei_vrp');
+      setValue('bgpConnectorRouterMgmtIp', item.router_mgmt_ip || '');
+      setValue('bgpConnectorRouterUsername', item.router_username || '');
+      setValue('bgpConnectorRouterPassword', '');
       setBoolSelect('bgpConnectorPassive', item.passive_listen_enabled);
       setBoolSelect('bgpConnectorEnabled', item.enabled);
       renderBgpSelects();
@@ -8597,6 +8671,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         exabgp_pipe_in: selectValue('bgpConnectorPipeIn').trim(),
         exabgp_pipe_out: selectValue('bgpConnectorPipeOut').trim(),
         exabgp_config_path: selectValue('bgpConnectorConfigPath').trim(),
+        router_check_enabled: boolSelectValue('bgpConnectorRouterCheck'),
+        router_vendor: selectValue('bgpConnectorRouterVendor', 'huawei_vrp'),
+        router_mgmt_ip: selectValue('bgpConnectorRouterMgmtIp').trim(),
+        router_username: selectValue('bgpConnectorRouterUsername').trim(),
+        router_password: selectValue('bgpConnectorRouterPassword').trim(),
         enabled: boolSelectValue('bgpConnectorEnabled')
       };
       await apiRequest(id ? `/api/bgp/connectors/${id}` : '/api/bgp/connectors', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -13564,12 +13643,82 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `<div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value ?? '-')}</div>`;
     }
 
+    function setupBadge(label, ok, detail = '') {
+      return `
+        <div class="metric-card">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="metric-value">${ok ? '<span class="badge-soft ok">OK</span>' : '<span class="badge-soft warn">Ação</span>'}</div>
+          <div class="subtle">${escapeHtml(detail || '-')}</div>
+        </div>
+      `;
+    }
+
+    function renderSystemAiStatus(ai) {
+      setBoolSelect('systemAiEnabled', Boolean(ai.enabled));
+      setValue('systemAiProvider', ai.provider || 'ollama');
+      setValue('systemAiBaseUrl', ai.base_url || 'http://gmj-flow-ollama:11434');
+      setValue('systemAiModel', ai.selected_model || ai.model || 'qwen2.5:3b-instruct');
+      setValue('systemAiPullModel', ai.selected_model || ai.model || 'qwen2.5:3b-instruct');
+      setValue('systemAiTimeout', ai.timeout_seconds || 20);
+      setValue('systemAiTopFlows', ai.max_top_flows || 30);
+      setValue('systemAiContextChars', ai.max_context_chars || 12000);
+      setText('systemAiOutput', JSON.stringify({
+        enabled: ai.enabled,
+        provider: ai.provider,
+        model: ai.selected_model,
+        reachable: ai.reachable ?? ai.ollama_reachable,
+        allow_auto: false,
+        require_policy_validation: ai.require_policy_validation
+      }, null, 2));
+    }
+
+    function renderSetupStatus(setup) {
+      const containers = setup.containers || [];
+      const byName = Object.fromEntries(containers.map(item => [item.name, item]));
+      const allCoreRunning = ['gmj-flow-frontend', 'gmj-flow-backend', 'gmj-flow-clickhouse'].every(name => byName[name]?.running);
+      const allRestart = ['gmj-flow-frontend', 'gmj-flow-backend', 'gmj-flow-clickhouse'].every(name => byName[name]?.restart_policy === 'unless-stopped');
+      const modelNames = (setup.ollama?.models || []).map(item => item.name).filter(Boolean);
+      document.getElementById('setupChecklist').innerHTML = [
+        setupBadge('Docker ativo', setup.docker?.active, setup.docker?.version || setup.docker?.error),
+        setupBadge('Docker Compose', setup.compose?.available, setup.compose?.version || setup.compose?.error),
+        setupBadge('Containers core', allCoreRunning, containers.filter(item => item.running).map(item => item.name).join(', ')),
+        setupBadge('Restart policy', allRestart, Object.entries(setup.restart_policy || {}).map(([name, policy]) => `${name}: ${policy}`).join(' | ')),
+        setupBadge('GMJ-FLOW systemd', setup.systemd?.enabled && setup.systemd?.active, `enabled=${Boolean(setup.systemd?.enabled)} active=${Boolean(setup.systemd?.active)}`),
+        setupBadge('Ollama', setup.ollama?.running && setup.ollama?.reachable, setup.ollama?.error || modelNames.join(', ')),
+        setupBadge('Modelo IA', setup.ollama?.model_downloaded, setup.ai?.selected_model || '-'),
+        setupBadge('IA habilitada', setup.ai?.enabled, `allow_auto=false policy=${Boolean(setup.ai?.require_policy_validation)}`),
+        setupBadge('ClickHouse', setup.clickhouse?.healthy, `flows=${setup.clickhouse?.flow_count ?? 0} ultimo=${setup.clickhouse?.newest_flow_time || '-'}`),
+        setupBadge('SQLite', setup.sqlite?.healthy, setup.sqlite?.path || '-'),
+        setupBadge('Collectors', (setup.collectors?.items || []).some(item => item.status === 'ok'), `${(setup.collectors?.items || []).length} item(ns)`),
+        setupBadge('ExaBGP', setup.exabgp?.service?.active || setup.exabgp?.pipes?.backend_mount_visible, setup.exabgp?.install_command || '-'),
+        setupBadge('Nginx DNS', setup.nginx?.dynamic_resolver && !setup.nginx?.direct_backend_proxy, setup.nginx?.path || '-')
+      ].join('');
+      const recs = setup.recommendations || [];
+      setText('setupOverallBadge', recs.length ? `${recs.length} ação(ões)` : 'OK');
+      document.getElementById('setupOverallBadge').className = recs.length ? 'badge-soft warn' : 'badge-soft ok';
+      setText('setupRecommendations', recs.length ? recs.join('\n') : 'Setup sem recomendações críticas.');
+      document.getElementById('systemOllamaList').innerHTML = modelNames.map(name => `<div class="metric-readout"><strong>${escapeHtml(name)}</strong></div>`).join('') || '<div class="subtle">Nenhum modelo listado.</div>';
+      document.getElementById('systemExabgpStatus').innerHTML = [
+        metricChipHtml('Serviço ExaBGP', setup.exabgp?.service?.active ? 'active' : 'inactive/unavailable'),
+        metricChipHtml('Pipes backend', setup.exabgp?.pipes?.backend_mount_visible ? 'visíveis' : 'não visíveis'),
+        metricChipHtml('TCP 179', setup.exabgp?.tcp_179_listening ? 'listening' : 'não detectado'),
+        metricChipHtml('GMJ-FLOW boot', setup.systemd?.enabled ? 'enabled' : 'não instalado')
+      ].join('');
+      setText('systemInstallCommands', [
+        'sudo ./scripts/install.sh --with-ai --with-exabgp --install-systemd',
+        'sudo ./scripts/install-systemd-service.sh --profile ai --with-exabgp',
+        setup.exabgp?.install_command || ''
+      ].filter(Boolean).join('\n'));
+      renderSystemAiStatus(setup.ai || {});
+    }
+
     async function loadSystemView() {
       setText('systemStatus', 'Atualizando recursos...');
-      const [resources, containers, collectors] = await Promise.all([
+      const [resources, containers, collectors, setup] = await Promise.all([
         apiRequest('/api/system/resources'),
         apiRequest('/api/system/containers'),
-        apiRequest('/api/collectors/health')
+        apiRequest('/api/collectors/health'),
+        apiRequest('/api/system/setup/status')
       ]);
       const memory = resources.memory || {};
       const disk = resources.disk || {};
@@ -13593,7 +13742,60 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ${escapeHtml(item.status || '-')} / lag ${formatBytes(item.lag_bytes || 0)} / ultimo flow ${escapeHtml(item.last_flow_time || '-')}
         </div>
       `).join('') || '<div class="subtle">Collectors indisponiveis.</div>';
+      renderSetupStatus(setup);
       setText('systemStatus', 'Recursos atualizados');
+      createIcons();
+    }
+
+    async function saveSystemAiConfig() {
+      setText('systemAiOutput', 'Salvando IA local...');
+      const payload = {
+        enabled: boolSelectValue('systemAiEnabled'),
+        provider: selectValue('systemAiProvider', 'ollama'),
+        base_url: selectValue('systemAiBaseUrl').trim(),
+        model: selectValue('systemAiModel').trim(),
+        timeout_seconds: numberValue('systemAiTimeout', 20),
+        max_top_flows: numberValue('systemAiTopFlows', 30),
+        max_context_chars: numberValue('systemAiContextChars', 12000),
+        allow_auto: false,
+        require_policy_validation: true
+      };
+      const status = await apiRequest('/api/system/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      renderSystemAiStatus(status);
+      setText('systemStatus', 'Configuração IA salva.');
+    }
+
+    async function listSystemAiModels() {
+      setText('systemAiOutput', 'Listando modelos...');
+      const result = await apiRequest('/api/system/ai/ollama/models');
+      setText('systemAiOutput', JSON.stringify(result, null, 2));
+      document.getElementById('systemOllamaList').innerHTML = (result.items || []).map(item => `<div class="metric-readout"><strong>${escapeHtml(item.name || '-')}</strong></div>`).join('') || '<div class="subtle">Nenhum modelo instalado.</div>';
+    }
+
+    async function pullSystemAiModel() {
+      const model = selectValue('systemAiPullModel').trim() || selectValue('systemAiModel').trim();
+      setText('systemAiOutput', `Baixando ${model}...`);
+      const result = await apiRequest('/api/system/ai/ollama/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      setText('systemAiOutput', JSON.stringify(result, null, 2));
+      await listSystemAiModels();
+    }
+
+    async function testSystemAiModel() {
+      setText('systemAiOutput', 'Testando modelo...');
+      const result = await apiRequest('/api/system/ai/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: 'Explique UDP flood outbound em uma frase' })
+      });
+      setText('systemAiOutput', JSON.stringify(result, null, 2));
     }
 
     function showView(view, placeholderTitle = '') {
@@ -13914,6 +14116,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
+    document.getElementById('systemAiSaveButton').addEventListener('click', () => saveSystemAiConfig().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
+    document.getElementById('systemAiModelsButton').addEventListener('click', () => listSystemAiModels().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
+    document.getElementById('systemAiPullButton').addEventListener('click', () => pullSystemAiModel().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
+    document.getElementById('systemAiTestButton').addEventListener('click', () => testSystemAiModel().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
     document.getElementById('anomalyTabActive').addEventListener('click', () => loadAnomalies('active').catch(console.error));
     document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));

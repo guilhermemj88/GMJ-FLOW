@@ -35,6 +35,7 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
@@ -532,6 +533,7 @@ DETECTION_GROUP_BY_OPTIONS = {
 DETECTION_MITIGATION_MODES = {"detection_only", "manual_review", "response_profile", "manual", "semi_auto", "auto"}
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
+GMJFLOW_HOST_AGENT_URL = os.getenv("GMJFLOW_HOST_AGENT_URL", "").strip().rstrip("/")
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
 BGP_MODES = {"detection_only", "dry_run", "manual_approval", "semi_auto", "auto", "automatic"}
 BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion", "blackhole", "rate_limit", "alert_only", "webhook"}
@@ -790,6 +792,37 @@ class AiSettingsPayload(BaseModel):
     max_context_chars: int | None = Field(None, ge=1000, le=100000)
     allow_auto: bool = False
     require_policy_validation: bool = True
+
+
+class SystemAiConfigPayload(BaseModel):
+    enabled: bool = False
+    provider: str = "ollama"
+    base_url: str = "http://gmj-flow-ollama:11434"
+    model: str = "qwen2.5:3b-instruct"
+    allow_auto: bool = False
+    require_policy_validation: bool = True
+    timeout_seconds: int | None = Field(None, ge=1, le=300)
+    max_top_flows: int | None = Field(None, ge=1, le=200)
+    max_context_chars: int | None = Field(None, ge=1000, le=100000)
+
+
+class OllamaPullPayload(BaseModel):
+    model: str = "qwen2.5:3b-instruct"
+
+
+class AiPromptTestPayload(BaseModel):
+    prompt: str = "Explique UDP flood outbound em uma frase"
+
+
+class ExabgpRenderPayload(BaseModel):
+    local_as: int = Field(..., ge=1, le=4294967295)
+    peer_as: int = Field(..., ge=1, le=4294967295)
+    local_address: str
+    router_id: str
+    peer_ip: str
+    passive: bool = True
+    pipe_input: str = "/run/exabgp/exabgp.in"
+    pipe_output: str = "/run/exabgp/exabgp.out"
 
 
 class AttackVectorTemplatePayload(BaseModel):
@@ -7250,6 +7283,129 @@ def exabgp_peer_from_log_heuristic(connector: dict[str, Any]) -> dict[str, Any]:
     return {"state": state, "peer_ip": peer_ip, "source": "exabgp_log_heuristic"}
 
 
+def parse_huawei_vrp_peer_state(text: str, peer_ip: str = "") -> dict[str, Any]:
+    raw = clean_text(text)
+    if not raw:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": ""}
+    lowered = raw.lower()
+    peer_lines = [line for line in raw.splitlines() if not peer_ip or peer_ip in line]
+    target_text = "\n".join(peer_lines) if peer_lines else raw
+    target_lowered = target_text.lower()
+    state = "unknown"
+    if re.search(r"\bbgp\s+current\s+state\s*:\s*established\b", lowered):
+        state = "established"
+    elif re.search(r"\b(established|establ|up)\b", target_lowered):
+        state = "established"
+    elif re.search(r"\b(idle|active|connect|down)\b", target_lowered):
+        state = "down"
+    return {"state": state, "peer_ip": peer_ip, "source": "router_ssh", "raw": raw[-4000:]}
+
+
+def router_ssh_command(connector: dict[str, Any], command: str, timeout: float = 8.0) -> tuple[int, str]:
+    mgmt_ip = clean_text(connector.get("router_mgmt_ip"))
+    username = clean_text(connector.get("router_username"))
+    password = clean_text(connector.get("router_password"))
+    if not mgmt_ip or not username:
+        return 2, "router_mgmt_ip/router_username nao configurados"
+    ssh_bin = shutil.which("ssh")
+    if ssh_bin is None:
+        return 127, "ssh nao encontrado no backend/container"
+    args = [
+        ssh_bin,
+        "-o",
+        "BatchMode=yes" if not password else "BatchMode=no",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        f"ConnectTimeout={max(1, int(timeout))}",
+        f"{username}@{mgmt_ip}",
+        command,
+    ]
+    if password and shutil.which("sshpass"):
+        args = [shutil.which("sshpass") or "sshpass", "-p", password, *args]
+    code, output = bgp_run_command(args, timeout=timeout)
+    if password and output:
+        output = output.replace(password, "***")
+    return code, output
+
+
+def router_ssh_status(connector: dict[str, Any]) -> dict[str, Any]:
+    peer_ip = clean_text(connector.get("peer_ip"))
+    if not connector.get("router_check_enabled"):
+        return {
+            "enabled": False,
+            "method": "router_ssh",
+            "bgp_state": "not_verified",
+            "flowspec_state": "not_verified",
+            "message": "Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.",
+        }
+    if clean_text(connector.get("router_vendor")).lower() not in {"huawei_vrp", "huawei", "vrp"}:
+        return {
+            "enabled": True,
+            "method": "router_ssh",
+            "bgp_state": "unknown",
+            "flowspec_state": "unknown",
+            "message": "Vendor de Router SSH ainda nao suportado; use huawei_vrp.",
+        }
+    bgp_code, bgp_output = router_ssh_command(connector, "display bgp peer")
+    flow_code, flow_output = router_ssh_command(connector, "display bgp flow peer")
+    bgp = parse_huawei_vrp_peer_state(bgp_output, peer_ip) if bgp_code == 0 else {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": bgp_output[-4000:]}
+    flow = parse_huawei_vrp_peer_state(flow_output, peer_ip) if flow_code == 0 else {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": flow_output[-4000:]}
+    return {
+        "enabled": True,
+        "method": "router_ssh",
+        "vendor": "huawei_vrp",
+        "bgp_state": bgp["state"],
+        "flowspec_state": flow["state"],
+        "commands": ["display bgp peer", "display bgp flow peer"],
+        "returncodes": {"bgp": bgp_code, "flowspec": flow_code},
+        "bgp_raw": bgp.get("raw", "")[-2000:],
+        "flowspec_raw": flow.get("raw", "")[-2000:],
+        "message": "" if bgp_code == 0 or flow_code == 0 else clean_text(bgp_output or flow_output),
+    }
+
+
+def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
+    if not GMJFLOW_HOST_AGENT_URL:
+        return {
+            "enabled": False,
+            "method": "host_agent",
+            "message": "Host Agent nao configurado. Defina GMJFLOW_HOST_AGENT_URL para status systemd/ss/logs do host.",
+        }
+    params = urllib.parse.urlencode(
+        {
+            "service": clean_text(connector.get("systemd_service_name")),
+            "peer_ip": clean_text(connector.get("peer_ip")),
+            "listen_port": int(connector.get("listen_port") or 179),
+        }
+    )
+    try:
+        request = urllib.request.Request(f"{GMJFLOW_HOST_AGENT_URL}/bgp/status?{params}", method="GET")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(payload, dict):
+            raise ValueError("Resposta Host Agent invalida")
+        return {"enabled": True, "method": "host_agent", **payload}
+    except Exception as exc:
+        return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
+
+
+def prefer_verified_state(*states: Any) -> str:
+    for state in states:
+        text = clean_text(state).lower()
+        if text in {"established", "up"}:
+            return "established"
+        if text in {"idle", "active", "connect", "down", "not_established"}:
+            return "down"
+    for state in states:
+        text = clean_text(state).lower()
+        if text and text not in {"unknown", "not_verified"}:
+            return text
+    return "not_verified"
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -7324,6 +7480,25 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         heuristic_peer = exabgp_peer_from_log_heuristic(connector)
         if heuristic_peer.get("state") == "established":
             exabgp_peer = heuristic_peer
+    router_status = router_ssh_status(connector)
+    agent_status = host_agent_status(connector)
+    bgp_state = prefer_verified_state(
+        router_status.get("bgp_state"),
+        agent_status.get("bgp_state"),
+        exabgp_peer.get("state"),
+    )
+    flowspec_state = prefer_verified_state(
+        router_status.get("flowspec_state"),
+        agent_status.get("flowspec_state"),
+    )
+    if bgp_state == "not_verified":
+        messages.append("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.")
+    if flowspec_state == "not_verified":
+        messages.append("FlowSpec nao verificado. Configure Router SSH ou Host Agent.")
+    if agent_status.get("enabled") and agent_status.get("message"):
+        messages.append(f"Host Agent: {agent_status['message']}")
+    if router_status.get("enabled") and router_status.get("message"):
+        messages.append(f"Router SSH: {router_status['message']}")
     return {
         "connector_id": connector["id"],
         "name": connector["name"],
@@ -7343,9 +7518,18 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "severity": "ok" if pipes_ok else "down",
         },
         "exabgp_peer": exabgp_peer,
+        "router_check": router_status,
+        "host_agent": agent_status,
+        "verification": {
+            "router_check_enabled": bool(connector.get("router_check_enabled")),
+            "host_agent_enabled": bool(GMJFLOW_HOST_AGENT_URL),
+            "bgp_verified": bgp_state in {"established", "down"},
+            "flowspec_verified": flowspec_state in {"established", "down"},
+            "pipe_verified": pipes_ok,
+        },
         "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
-        "bgp_state": exabgp_peer.get("state") or "unknown",
-        "flowspec_state": "unknown",
+        "bgp_state": bgp_state,
+        "flowspec_state": flowspec_state,
         "last_checked_at": utc_now_iso(),
         "errors": errors,
         "messages": sorted(set(messages)),
@@ -10097,6 +10281,37 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
     return clean_text(content), latency_ms
 
 
+def ai_provider_prompt(config: dict[str, Any], prompt: str) -> tuple[str, int]:
+    base_url = clean_text(config["base_url"]).rstrip("/")
+    provider = clean_text(config["provider"]).lower()
+    started = time.monotonic()
+    if provider == "ollama":
+        endpoint = f"{base_url}/api/generate"
+        body = {"model": config["selected_model"], "prompt": prompt, "stream": False}
+    else:
+        endpoint = f"{base_url}/v1/chat/completions"
+        body = {
+            "model": config["selected_model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    latency_ms = int((time.monotonic() - started) * 1000)
+    if provider == "ollama":
+        content = payload.get("response") or payload.get("message", {}).get("content") or ""
+    else:
+        choices = payload.get("choices") or []
+        content = choices[0].get("message", {}).get("content") if choices else ""
+    return clean_text(content), latency_ms
+
+
 def parse_ai_json_response(text: str) -> dict[str, Any]:
     content = clean_text(text).strip()
     if content.startswith("```"):
@@ -10301,7 +10516,7 @@ def save_ai_settings(request: Request, payload: AiSettingsPayload):
         "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
         "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
         "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
-        "ai_allow_auto": "true" if payload.allow_auto else "false",
+        "ai_allow_auto": "false",
         "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
     }
     with sqlite_connection() as conn:
@@ -10337,6 +10552,372 @@ def ai_test(request: Request):
             "response_preview": "",
             "error_message": str(exc),
         }
+
+
+def system_run_command(args: list[str], timeout: float = 5.0) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+        return {
+            "available": True,
+            "returncode": completed.returncode,
+            "stdout": clean_text(completed.stdout)[-4000:],
+            "stderr": clean_text(completed.stderr)[-4000:],
+        }
+    except FileNotFoundError:
+        return {"available": False, "returncode": None, "stdout": "", "stderr": f"{args[0]} nao encontrado"}
+    except Exception as exc:
+        return {"available": False, "returncode": None, "stdout": "", "stderr": str(exc)}
+
+
+def docker_inspect_containers(names: list[str]) -> list[dict[str, Any]]:
+    items = []
+    for name in names:
+        result = system_run_command(["docker", "inspect", name], timeout=3)
+        if not result["available"] or result["returncode"] != 0:
+            continue
+        try:
+            raw_items = json.loads(result["stdout"])
+        except json.JSONDecodeError:
+            continue
+        if not raw_items:
+            continue
+        item = raw_items[0]
+        state = item.get("State") or {}
+        host_config = item.get("HostConfig") or {}
+        restart_policy = host_config.get("RestartPolicy") or {}
+        config = item.get("Config") or {}
+        labels = config.get("Labels") or {}
+        items.append(
+            {
+                "name": clean_text(item.get("Name")).lstrip("/"),
+                "image": clean_text(config.get("Image")),
+                "running": bool(state.get("Running")),
+                "status": clean_text(state.get("Status")),
+                "health": clean_text((state.get("Health") or {}).get("Status")),
+                "restart_policy": clean_text(restart_policy.get("Name")) or "no",
+                "compose_service": clean_text(labels.get("com.docker.compose.service")),
+                "compose_project": clean_text(labels.get("com.docker.compose.project")),
+                "profiles": clean_text(labels.get("com.docker.compose.project.config_files")),
+            }
+        )
+    return items
+
+
+def systemd_unit_status(name: str) -> dict[str, Any]:
+    if shutil.which("systemctl") is None:
+        return {"available": False, "installed": False, "enabled": False, "active": False, "reason": "systemctl indisponivel no backend/container"}
+    active = system_run_command(["systemctl", "is-active", name], timeout=2)
+    enabled = system_run_command(["systemctl", "is-enabled", name], timeout=2)
+    installed = active["returncode"] in {0, 3} or enabled["returncode"] in {0, 1}
+    return {
+        "available": True,
+        "installed": installed,
+        "enabled": enabled["returncode"] == 0,
+        "active": active["returncode"] == 0,
+        "raw_active": active["stdout"] or active["stderr"],
+        "raw_enabled": enabled["stdout"] or enabled["stderr"],
+    }
+
+
+def ollama_models_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    base_url = clean_text(config.get("base_url")).rstrip("/")
+    if not base_url:
+        return {"reachable": False, "models": [], "error": "base_url vazio"}
+    try:
+        request = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        models = [
+            {
+                "name": clean_text(item.get("name") or item.get("model")),
+                "size": item.get("size"),
+                "modified_at": item.get("modified_at") or "",
+            }
+            for item in payload.get("models", [])
+        ]
+        return {"reachable": True, "models": models, "error": ""}
+    except Exception as exc:
+        return {"reachable": False, "models": [], "error": str(exc)}
+
+
+def nginx_dynamic_resolver_status() -> dict[str, Any]:
+    candidates = [
+        RUNTIME_DIR / "frontend" / "nginx.conf",
+        Path("/etc/nginx/conf.d/default.conf"),
+        Path("frontend/nginx.conf"),
+    ]
+    text = ""
+    path = ""
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                path = str(candidate)
+                break
+        except Exception:
+            continue
+    return {
+        "path": path,
+        "dynamic_resolver": "resolver 127.0.0.11 valid=10s ipv6=off;" in text,
+        "backend_upstream_variable": "set $backend_upstream http://backend:8000;" in text,
+        "direct_backend_proxy": "proxy_pass http://backend:8000" in text,
+    }
+
+
+def setup_clickhouse_status() -> dict[str, Any]:
+    try:
+        flow_summary = clickhouse_flow_summary()
+        return {"healthy": ping_clickhouse(), **flow_summary}
+    except Exception as exc:
+        return {"healthy": False, "error": str(exc), "flow_count": 0, "newest_flow_time": None}
+
+
+def exabgp_system_status_payload() -> dict[str, Any]:
+    pipe_dir = Path("/run/exabgp")
+    pipe_in = pipe_dir / "exabgp.in"
+    pipe_out = pipe_dir / "exabgp.out"
+    service = systemd_unit_status("exabgp-gmj-flow.service")
+    docker_ls = system_run_command(["docker", "exec", "gmj-flow-backend", "test", "-e", "/run/exabgp/exabgp.in"], timeout=3)
+    listening = False
+    if shutil.which("ss") is not None:
+        ss_result = system_run_command(["ss", "-lntp"], timeout=2)
+        listening = ss_result["returncode"] == 0 and ":179" in ss_result["stdout"]
+    return {
+        "installed": shutil.which("exabgp") is not None or service.get("installed", False),
+        "service": service,
+        "config_paths": ["/etc/exabgp/gmj-flow.conf", "/etc/exabgp/gmj-flow-ne8000.conf"],
+        "pipes": {
+            "backend_or_host_in_exists": pipe_in.exists(),
+            "backend_or_host_out_exists": pipe_out.exists(),
+            "backend_mount_visible": docker_ls["returncode"] == 0 if docker_ls["available"] else pipe_in.exists(),
+            "path": "/run/exabgp",
+        },
+        "tcp_179_listening": listening,
+        "install_command": "sudo ./scripts/install-exabgp.sh --local-as 53194 --peer-as 53194 --local-address <IP_LOCAL> --router-id <IP_LOCAL> --peer-ip <PEER_IP> --passive true",
+    }
+
+
+def render_exabgp_config_text(payload: ExabgpRenderPayload) -> str:
+    passive_line = "    passive;" if payload.passive else ""
+    return f"""process watch {{
+    run /bin/cat {payload.pipe_input};
+    encoder text;
+}}
+
+neighbor {payload.peer_ip} {{
+    router-id {payload.router_id};
+    local-address {payload.local_address};
+    local-as {payload.local_as};
+    peer-as {payload.peer_as};
+{passive_line}
+
+    family {{
+        ipv4 flow;
+        ipv6 flow;
+    }}
+
+    api {{
+        processes [ watch ];
+    }}
+}}
+"""
+
+
+@app.get("/api/system/ai/status")
+def system_ai_status(request: Request):
+    status = ai_status(request)
+    models = ollama_models_from_config(
+        {
+            "provider": status.get("provider"),
+            "base_url": status.get("base_url"),
+            "timeout_seconds": status.get("timeout_seconds") or 5,
+        }
+    )
+    return {
+        **status,
+        "models": models["models"],
+        "models_available": [item["name"] for item in models["models"]],
+        "ollama_reachable": models["reachable"],
+        "ollama_error": models["error"],
+        "safety_notice": "IA habilitada gera analise e sugestao. Nao aplica mitigacao automatica.",
+        "restart_required": False,
+    }
+
+
+@app.post("/api/system/ai/config")
+def system_ai_config(request: Request, payload: SystemAiConfigPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    provider = normalize_choice(payload.provider, {"ollama", "llama.cpp", "llamacpp", "openai-compatible"}, "provider")
+    profile = ai_profile("recommended")
+    values = {
+        "ai_mitigation_enabled": "true" if payload.enabled else "false",
+        "ai_provider": provider,
+        "ai_base_url": clean_text(payload.base_url) or "http://gmj-flow-ollama:11434",
+        "ai_model_profile": "recommended",
+        "ai_model": clean_text(payload.model) or profile["default_model"],
+        "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
+        "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
+        "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_allow_auto": "false",
+        "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
+    }
+    with sqlite_connection() as conn:
+        set_system_settings(conn, values)
+        conn.commit()
+    return system_ai_status(request)
+
+
+@app.get("/api/system/ai/ollama/models")
+def system_ai_ollama_models(request: Request):
+    require_admin(request)
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    models = ollama_models_from_config(config)
+    return {"items": models["models"], "reachable": models["reachable"], "error": models["error"]}
+
+
+@app.post("/api/system/ai/ollama/pull")
+def system_ai_ollama_pull(request: Request, payload: OllamaPullPayload):
+    require_admin(request)
+    model = clean_text(payload.model)
+    if not model:
+        raise HTTPException(status_code=400, detail="Modelo obrigatorio")
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    base_url = clean_text(config["base_url"]).rstrip("/")
+    try:
+        body = json.dumps({"name": model, "stream": False}).encode("utf-8")
+        pull_request = urllib.request.Request(f"{base_url}/api/pull", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(pull_request, timeout=900) as response:
+            result = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+        return {"ok": True, "model": model, "result": result, "models": ollama_models_from_config(config)["models"]}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao baixar modelo Ollama: {exc}") from exc
+
+
+@app.post("/api/system/ai/test")
+def system_ai_test(request: Request, payload: AiPromptTestPayload):
+    require_admin(request)
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    prompt = clean_text(payload.prompt) or "Responda OK"
+    try:
+        response_text, latency_ms = ai_provider_prompt({**config, "enabled": True}, prompt)
+        return {"ok": True, "latency_ms": latency_ms, "provider": config["provider"], "model": config["selected_model"], "response_preview": response_text[:1000], "error_message": ""}
+    except Exception as exc:
+        return {"ok": False, "latency_ms": 0, "provider": config["provider"], "model": config["selected_model"], "response_preview": "", "error_message": str(exc)}
+
+
+@app.get("/api/system/exabgp/status")
+def system_exabgp_status(request: Request):
+    require_admin(request)
+    return exabgp_system_status_payload()
+
+
+@app.post("/api/system/exabgp/render-config")
+def system_exabgp_render_config(request: Request, payload: ExabgpRenderPayload):
+    require_admin(request)
+    return {"config": render_exabgp_config_text(payload)}
+
+
+@app.post("/api/system/exabgp/install-instructions")
+def system_exabgp_install_instructions(request: Request, payload: ExabgpRenderPayload):
+    require_admin(request)
+    command = (
+        "sudo ./scripts/install-exabgp.sh "
+        f"--local-as {payload.local_as} --peer-as {payload.peer_as} "
+        f"--local-address {payload.local_address} --router-id {payload.router_id} "
+        f"--peer-ip {payload.peer_ip} --passive {'true' if payload.passive else 'false'}"
+    )
+    return {"commands": [command], "config": render_exabgp_config_text(payload)}
+
+
+@app.get("/api/system/setup/status")
+def system_setup_status(request: Request):
+    require_admin(request)
+    container_names = [
+        "gmj-flow-frontend",
+        "gmj-flow-backend",
+        "gmj-flow-clickhouse",
+        "gmj-flow-pmacct",
+        "gmj-flow-pmacct-parser",
+        "gmj-flow-collector",
+        "gmj-flow-ollama",
+    ]
+    docker_version = system_run_command(["docker", "version", "--format", "{{.Server.Version}}"], timeout=3)
+    compose_version = system_run_command(["docker", "compose", "version", "--short"], timeout=3)
+    containers = docker_inspect_containers(container_names)
+    container_by_name = {item["name"]: item for item in containers}
+    with sqlite_connection() as conn:
+        ai_config = ai_effective_config(conn)
+    ollama_models = ollama_models_from_config(ai_config)
+    clickhouse = setup_clickhouse_status()
+    sqlite_status = {"healthy": False, "path": str(sqlite_path())}
+    try:
+        with sqlite_connection() as conn:
+            conn.execute("SELECT 1").fetchone()
+        sqlite_status["healthy"] = True
+    except Exception as exc:
+        sqlite_status["error"] = str(exc)
+    try:
+        collectors_status = collectors_health(request)
+    except Exception as exc:
+        collectors_status = {"status": "indisponivel", "items": [], "error": str(exc)}
+    nginx_status = nginx_dynamic_resolver_status()
+    systemd_status = systemd_unit_status("gmj-flow.service")
+    exabgp_status = exabgp_system_status_payload()
+    bgp_router_check_configured = False
+    try:
+        with sqlite_connection() as conn:
+            ensure_bgp_db(conn)
+            row = conn.execute("SELECT COUNT(*) AS count FROM bgp_connectors WHERE router_check_enabled = 1 AND router_mgmt_ip != '' AND router_username != ''").fetchone()
+            bgp_router_check_configured = int(row["count"] or 0) > 0
+    except Exception:
+        bgp_router_check_configured = False
+    restart_policy = {
+        item["name"]: item["restart_policy"]
+        for item in containers
+        if item["name"].startswith("gmj-flow") or item["name"].startswith("pmacct")
+    }
+    recommendations: list[str] = []
+    if not container_by_name.get("gmj-flow-ollama", {}).get("running"):
+        recommendations.append("IA local nao esta ativa. Suba com: docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml --profile ai up -d --build")
+    if ai_config["enabled"] and not ollama_models["reachable"]:
+        recommendations.append("IA habilitada, mas o backend nao alcança Ollama.")
+    if ai_config["allow_auto"]:
+        recommendations.append("AI_ALLOW_AUTO esta ativo; mantenha false para exigir aprovacao/manual/politica.")
+    if not systemd_status.get("enabled"):
+        recommendations.append("Instale autostart: sudo ./scripts/install-systemd-service.sh --profile ai")
+    if not nginx_status["dynamic_resolver"] or nginx_status["direct_backend_proxy"]:
+        recommendations.append("Atualize frontend/nginx.conf para usar resolver Docker 127.0.0.11 com variavel backend_upstream.")
+    if not clickhouse.get("healthy"):
+        recommendations.append("ClickHouse indisponivel; valide container gmj-flow-clickhouse e healthcheck.")
+    if exabgp_status.get("pipes", {}).get("backend_mount_visible") and not bgp_router_check_configured and not GMJFLOW_HOST_AGENT_URL:
+        recommendations.append("Pipe ExaBGP OK, mas sessao BGP/FlowSpec real nao verificada. Configure Router SSH no conector ou GMJFLOW_HOST_AGENT_URL para Host Agent.")
+    return {
+        "docker": {"active": docker_version["returncode"] == 0, "version": docker_version["stdout"], "error": docker_version["stderr"]},
+        "compose": {"available": compose_version["returncode"] == 0, "version": compose_version["stdout"], "error": compose_version["stderr"]},
+        "containers": containers,
+        "restart_policy": restart_policy,
+        "systemd": systemd_status,
+        "ai": {**ai_config, "allow_auto": False if ai_config.get("allow_auto") is False else ai_config.get("allow_auto")},
+        "ollama": {
+            "container_exists": "gmj-flow-ollama" in container_by_name,
+            "running": bool(container_by_name.get("gmj-flow-ollama", {}).get("running")),
+            "reachable": ollama_models["reachable"],
+            "models": ollama_models["models"],
+            "model_downloaded": any(item["name"] == ai_config["selected_model"] for item in ollama_models["models"]),
+            "error": ollama_models["error"],
+        },
+        "clickhouse": clickhouse,
+        "sqlite": sqlite_status,
+        "collectors": collectors_status,
+        "exabgp": exabgp_status,
+        "nginx": nginx_status,
+        "frontend": {"expected_url": f"http://localhost:{os.getenv('FRONTEND_PORT', '8080')}", "accessible_from_backend": False},
+        "recommendations": recommendations,
+    }
 
 
 @app.get("/api/anomalies/{event_id}/ai-analysis")
@@ -10888,17 +11469,22 @@ def check_bgp_connector_router(request: Request, connector_id: int):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         connector = fetch_bgp_connector(conn, connector_id)
+    status = router_ssh_status(connector)
     return {
         "connector_id": connector_id,
         "router_check_enabled": bool(connector.get("router_check_enabled")),
         "router_vendor": connector.get("router_vendor") or "huawei_vrp",
-        "bgp_state": "unknown_by_router_cli",
-        "flowspec_state": "unknown_by_router_cli",
+        "bgp_state": status.get("bgp_state", "not_verified"),
+        "flowspec_state": status.get("flowspec_state", "not_verified"),
         "planned_commands": [
-            f"display bgp peer {connector.get('local_address') or ''}".strip(),
+            "display bgp peer",
             "display bgp flow peer",
         ],
-        "message": "Checagem SSH/Netmiko ainda nao habilitada neste ambiente.",
+        "message": status.get("message") or "",
+        "raw": {
+            "bgp": status.get("bgp_raw", ""),
+            "flowspec": status.get("flowspec_raw", ""),
+        },
     }
 
 
@@ -11112,7 +11698,11 @@ def update_bgp_connector(request: Request, connector_id: int, payload: BgpConnec
         "enabled", "is_active", "notes",
     )
     with sqlite_connection() as conn:
-        fetch_bgp_connector(conn, connector_id)
+        current = conn.execute("SELECT router_password FROM bgp_connectors WHERE id = ?", (connector_id,)).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="Conector BGP nao encontrado")
+        if not clean_text(payload.router_password):
+            values["router_password"] = current["router_password"] or ""
         conn.execute(
             f"UPDATE bgp_connectors SET {', '.join(f'{column} = ?' for column in columns)}, updated_at = ? WHERE id = ?",
             tuple(values[column] for column in columns) + (now, connector_id),
@@ -23353,6 +23943,11 @@ def pdf_text(value: Any) -> str:
     return clean_text(value)
 
 
+def pdf_cell_value(field: str, value: Any) -> str:
+    formatted = format_pdf_metric(field, value)
+    return pdf_text(formatted if formatted != "" else value) or "-"
+
+
 def simple_pdf_response(title: str, sections: list[dict[str, Any]], filename: str) -> Response:
     try:
         from reportlab.lib import colors
@@ -23391,15 +23986,21 @@ def simple_pdf_response(title: str, sections: list[dict[str, Any]], filename: st
             story.append(Spacer(1, 0.2 * cm))
         rows = section.get("rows") or []
         headers = section.get("headers") or []
+        columns = section.get("columns") or []
+        if columns:
+            headers = [column.get("label") or column.get("key") for column in columns]
         if headers and rows:
             data = [[paragraph(header, styles["BodyText"]) for header in headers]]
             for row in rows:
                 if isinstance(row, dict):
-                    values = [row.get(header, "") for header in headers]
+                    if columns:
+                        values = [pdf_cell_value(column.get("key", ""), row.get(column.get("key", ""))) for column in columns]
+                    else:
+                        values = [pdf_cell_value(header, row.get(header, "")) for header in headers]
                 else:
                     values = list(row)
                 data.append([paragraph(value, styles["BodyText"]) for value in values])
-            table = Table(data, repeatRows=1)
+            table = Table(data, repeatRows=1, colWidths=section.get("col_widths"))
             table.setStyle(
                 TableStyle(
                     [
@@ -23428,24 +24029,11 @@ def key_value_rows(items: list[tuple[str, Any]]) -> list[list[str]]:
 
 
 def pdf_axis_metric(value: Any, unit: str) -> str:
-    try:
-        number = float(value or 0)
-    except (TypeError, ValueError):
-        number = 0.0
     if unit == "bits_s":
-        for suffix, divisor in (("Gbps", 1_000_000_000), ("Mbps", 1_000_000), ("Kbps", 1_000)):
-            if abs(number) >= divisor:
-                return f"{number / divisor:.1f} {suffix}"
-        return f"{number:.0f} bps"
+        return format_bits_per_second(value)
     if unit == "packets_s":
-        for suffix, divisor in (("Mpps", 1_000_000), ("Kpps", 1_000)):
-            if abs(number) >= divisor:
-                return f"{number / divisor:.1f} {suffix}"
-        return f"{number:.0f} pps"
-    for suffix, divisor in (("M flows/s", 1_000_000), ("K flows/s", 1_000)):
-        if abs(number) >= divisor:
-            return f"{number / divisor:.1f} {suffix}"
-    return f"{number:.0f} flows/s"
+        return format_packets_per_second(value)
+    return format_flows(value)
 
 
 def anomaly_timeseries_chart_flowable(points: list[dict[str, Any]], event: dict[str, Any]) -> Any | None:
@@ -23497,11 +24085,67 @@ def anomaly_timeseries_chart_flowable(points: list[dict[str, Any]], event: dict[
     return drawing
 
 
+def flow_pdf_summary_rows(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[list[str]]:
+    top_bits = max(items, key=lambda item: float(item.get("bits_s") or 0), default={})
+    top_pps = max(items, key=lambda item: float(item.get("packets_s") or 0), default={})
+    top_src = max(items, key=lambda item: float(item.get("bytes") or 0), default={})
+    top_dst = top_bits or top_src
+    top_dst_text = "-"
+    if top_dst:
+        parts = [clean_ip(top_dst.get("dst_ip")) or clean_text(top_dst.get("dst_ip"))]
+        if top_dst.get("dst_port"):
+            parts.append(str(top_dst.get("dst_port")))
+        proto = clean_text(top_dst.get("proto_name") or top_dst.get("protocol"))
+        top_dst_text = ":".join([part for part in parts if part]) + (f" {proto}" if proto else "")
+    return key_value_rows(
+        [
+            ("Maior trafego", f"{format_bits_per_second(top_bits.get('bits_s'))} / {format_packets_per_second(top_pps.get('packets_s'))}"),
+            ("Top origem", clean_ip(top_src.get("src_ip")) or top_src.get("src_ip") or "-"),
+            ("Top destino", top_dst_text or "-"),
+            ("Sensor", payload.get("sensor") or "todos"),
+            ("Registros", len(items)),
+            ("Periodo", f"{payload.get('start') or '-'} ate {payload.get('end') or '-'}"),
+        ]
+    )
+
+
+def flow_pdf_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for item in items:
+        rows.append(
+            {
+                "flow_time": clean_text(item.get("flow_time"))[:19],
+                "sensor": clean_text(item.get("sensor"))[:28],
+                "src_ip": clean_ip(item.get("src_ip")) or clean_text(item.get("src_ip")),
+                "dst_ip": clean_ip(item.get("dst_ip")) or clean_text(item.get("dst_ip")),
+                "dst_port": item.get("dst_port"),
+                "proto_name": clean_text(item.get("proto_name") or item.get("protocol") or item.get("proto")),
+                "bits_s": item.get("bits_s"),
+                "packets_s": item.get("packets_s"),
+            }
+        )
+    return rows
+
+
 def flows_pdf_response(payload: dict[str, Any], row_limit: int = 500) -> Response:
     items = list(payload.get("items") or [])
     limited = items[:row_limit]
-    headers = ["flow_time", "sensor", "src_ip", "src_port", "dst_ip", "dst_port", "proto_name", "bytes", "packets", "bits_s", "packets_s"]
+    columns = [
+        {"key": "flow_time", "label": "Horario"},
+        {"key": "sensor", "label": "Sensor"},
+        {"key": "src_ip", "label": "Origem"},
+        {"key": "dst_ip", "label": "Destino"},
+        {"key": "dst_port", "label": "DPort"},
+        {"key": "proto_name", "label": "Proto"},
+        {"key": "bits_s", "label": "Bits/s"},
+        {"key": "packets_s", "label": "Pacotes/s"},
+    ]
     sections = [
+        {
+            "title": "Resumo",
+            "headers": ["Campo", "Valor"],
+            "rows": flow_pdf_summary_rows(limited, payload),
+        },
         {
             "title": "Filtros aplicados",
             "headers": ["Campo", "Valor"],
@@ -23518,8 +24162,9 @@ def flows_pdf_response(payload: dict[str, Any], row_limit: int = 500) -> Respons
         {
             "title": "Top flows",
             "text": f"Relatorio limitado aos primeiros {len(limited)} registros. Use CSV para extracao completa." if len(items) > len(limited) else "",
-            "headers": headers,
-            "rows": limited,
+            "columns": columns,
+            "rows": flow_pdf_rows(limited),
+            "col_widths": [82, 86, 120, 120, 42, 50, 76, 76],
         },
     ]
     return simple_pdf_response("Flows", sections, "gmj-flow-search.pdf")

@@ -1,105 +1,93 @@
-# Instalacao do GMJ-FLOW em servidor
+# GMJ-FLOW Install
 
-Este guia cobre uma instalacao real em Linux usando Docker Compose.
-
-## Requisitos
-
-- Linux com acesso root.
-- Git.
-- Acesso a internet para instalar Docker, baixar imagens e construir containers.
-- Portas liberadas conforme `.env`:
-  - `FRONTEND_PORT` padrao `8080/tcp`.
-  - `BACKEND_PORT` padrao `8000/tcp`.
-  - `CLICKHOUSE_HTTP_PORT` padrao `8123/tcp`.
-  - `CLICKHOUSE_NATIVE_PORT` padrao `9000/tcp`.
-  - `NETFLOW_PORT` padrao `9995/udp`.
-  - Portas UDP extras por sensor quando collectors dinamicos forem aplicados.
-
-## Instalacao nova
-
-Na raiz do projeto:
+## Instalação simples
 
 ```sh
-sudo ./install.sh
+sudo ./scripts/install.sh
 ```
 
-O instalador:
-
-- valida que esta em Linux e rodando como root;
-- instala Docker se necessario;
-- instala o plugin `docker compose` se necessario;
-- cria `.env` a partir de `.env.example`;
-- gera `GMJFLOW_AUTH_SECRET` quando ainda estiver vazio ou com valor padrao;
-- cria `data/backend`, `data/collectors`, `data/backups` e `data/logs`;
-- sobe a stack com `docker compose --env-file .env up -d --build`;
-- cria o servico `gmj-flow.service` quando systemd estiver disponivel.
-
-Usuario inicial: `admin/admin`. Troque a senha no primeiro login.
-
-## Atualizacao
+## Instalação com IA
 
 ```sh
-sudo scripts/update.sh
+sudo ./scripts/install.sh --with-ai --ollama-model qwen2.5:3b-instruct
 ```
 
-O script executa `git pull`, recria `backend` e `frontend`, e se `docker-compose.collectors.yml` existir tambem reaplica os collectors dinamicos com `--remove-orphans`.
+O instalador habilita `AI_MITIGATION_ENABLED=true`, usa `AI_PROVIDER=ollama`, mantém `AI_ALLOW_AUTO=false` e mantém `AI_REQUIRE_POLICY_VALIDATION=true`.
 
-## Backup
+## Instalação com ExaBGP
 
 ```sh
-sudo scripts/backup.sh
+sudo ./scripts/install-exabgp.sh \
+  --local-as 53194 \
+  --peer-as 53194 \
+  --local-address 192.168.1.22 \
+  --router-id 192.168.1.22 \
+  --peer-ip 186.232.160.37 \
+  --passive true
 ```
 
-O arquivo e criado em `data/backups/gmj-flow-<timestamp>.tar.gz`.
-
-Inclui:
-
-- SQLite `data/backend/gmjflow.db`;
-- `.env`;
-- `data/collectors`;
-- `docker-compose.collectors.yml`;
-- `clickhouse/init.sql`;
-- export logico inicial de `flow_raw` em formato Native quando o container ClickHouse estiver rodando.
-
-O script nao imprime secrets no log. O arquivo `.env` dentro do backup contem secrets e deve ser protegido.
-
-## Restore
+## IA + ExaBGP + autostart
 
 ```sh
-sudo scripts/restore.sh data/backups/gmj-flow-YYYYmmddTHHMMSSZ.tar.gz
+sudo ./scripts/install.sh --with-ai --with-exabgp --install-systemd
 ```
 
-Digite `RESTORE` para confirmar. O restore cria copias `*.pre-restore-<timestamp>` antes de sobrescrever SQLite, `.env`, collectors e compose de collectors.
+## Wizard Web
 
-Depois reinicie:
+Acesse `Sistema > Instalação / Setup` para validar Docker, Compose, restart policy, systemd, Ollama, modelo IA, ExaBGP, pipes, nginx resolver, ClickHouse, SQLite e collectors.
 
-```sh
-docker compose --env-file .env up -d
+Em `Sistema > IA Local`, o operador pode listar modelos, baixar modelo, testar modelo e habilitar/desabilitar IA. A UI não habilita mitigação automática.
+
+## Status BGP / FlowSpec em backend containerizado
+
+Quando o backend roda em container, `systemctl` e `ss` do host podem ficar indisponíveis. Nesse caso:
+
+- Pipe ExaBGP OK significa que o backend consegue escrever no pipe dentro do container.
+- Sessão BGP não verificada não significa DOWN.
+- FlowSpec não verificado não significa DOWN.
+- Para status completo, configure Router SSH no conector BGP ou um Host Agent.
+
+Router SSH para Huawei VRP executa:
+
+```text
+display bgp peer
+display bgp flow peer
 ```
 
-## Systemd
-
-O instalador cria `gmj-flow.service` quando systemd estiver ativo.
-
-Comandos uteis:
+Host Agent opcional:
 
 ```sh
+sudo python3 scripts/host-agent.py --host 127.0.0.1 --port 18080
+GMJFLOW_HOST_AGENT_URL=http://127.0.0.1:18080
+```
+
+O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179` retornando JSON com `bgp_state` e `flowspec_state`.
+
+## Autostart
+
+```sh
+sudo ./scripts/install-systemd-service.sh --profile ai --with-exabgp
 systemctl status gmj-flow
-systemctl restart gmj-flow
-journalctl -u gmj-flow
 ```
 
-## Seguranca
+Os serviços Docker principais também usam `restart: unless-stopped`.
 
-- Altere `GMJFLOW_AUTH_SECRET` somente com a stack parada; tokens antigos serao invalidados.
-- Proteja `.env` e `data/backups`.
-- `GMJFLOW_ENABLE_COLLECTOR_APPLY=false` e o padrao mais conservador.
-- Para aplicar collectors pela interface, o backend monta `./:/app/runtime` e `/var/run/docker.sock:/var/run/docker.sock`. Isso da ao backend poder equivalente a Docker admin no servidor. Habilite apenas em servidor confiavel e com acesso administrativo restrito.
-
-## Desinstalacao
+## Validações
 
 ```sh
-sudo scripts/uninstall.sh
+sudo ./scripts/post-install-check.sh
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml --profile ai config
+curl http://127.0.0.1:8000/health
+docker exec gmj-flow-clickhouse clickhouse-client --query "SELECT count(), max(flow_time) FROM flowdb.flow_raw"
 ```
 
-Digite `UNINSTALL` para parar containers. Digite `DELETE DATA` somente se tambem quiser remover volumes Docker e `./data`.
+## Troubleshooting rápido
+
+- `gmj-flow-ollama` não existe: suba com `--with-ai` ou `--profile ai`.
+- `ollama list` vazio: use `Sistema > IA Local > Baixar` ou `docker exec gmj-flow-ollama ollama pull qwen2.5:3b-instruct`.
+- IA desativada HTTP 409: habilite em `Sistema > IA Local`.
+- Pipe ExaBGP down: rode `sudo ./scripts/install-exabgp.sh ...` e valide `/run/exabgp`.
+- Backend não vê `/run/exabgp`: confirme `docker-compose.exabgp.yml` e recrie o backend.
+- Frontend 502 após recriar backend: confirme `frontend/nginx.conf` com `resolver 127.0.0.11`.
+- GMJ-FLOW não sobe após reboot: instale `gmj-flow.service` e confira `systemctl is-enabled gmj-flow`.
+- PDF com números crus: exporte Flows novamente; o PDF deve mostrar `Mbps`, `Kpps`, `MB`, `K/M/G`.
