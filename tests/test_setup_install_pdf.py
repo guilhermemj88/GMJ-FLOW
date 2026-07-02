@@ -4,6 +4,7 @@ from pathlib import Path
 from backend.app.services.humanize import (
     format_bits_per_second,
     format_bytes,
+    format_pdf_metric,
     format_packets,
     format_packets_per_second,
 )
@@ -26,6 +27,7 @@ class SetupInstallPdfTest(unittest.TestCase):
         self.assertEqual(format_bytes(3800000000), "3.8 GB")
         self.assertEqual(format_packets(873000), "873 K")
         self.assertEqual(format_packets(3808000), "3.8 M")
+        self.assertEqual(format_pdf_metric("bits_s", 213400000), "213.4 Mbps")
         self.assertEqual(format_bytes(None), "-")
         self.assertEqual(format_packets_per_second("invalid"), "-")
 
