@@ -55,6 +55,21 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("Janela de cálculo em segundos", HTML)
         self.assertIn("Duração interna no GMJ-FLOW", HTML)
 
+    def test_traffic_learning_fill_and_save_actions_are_explicit(self):
+        self.assertIn("Preencher regra atual", HTML)
+        self.assertIn("Aplicar e salvar regra", HTML)
+        self.assertIn("function applyTrafficLearningToRule(draftOnly = false)", HTML)
+        self.assertIn("Sugestao aplicada ao formulario. Clique em Salvar regra para persistir.", HTML)
+        self.assertIn("highlightTrafficLearnedFields", HTML)
+        self.assertIn("closeModal('trafficLearningModal')", HTML)
+        self.assertIn("function saveTrafficLearningRule", HTML)
+        self.assertIn("const saved = await saveDetectionRule()", HTML)
+        self.assertIn("Lista de regras atualizada", HTML)
+        self.assertIn("Falha ao salvar regra aprendida", HTML)
+        self.assertIn("trafficLearnSaveButton", HTML)
+        self.assertIn("setValue('detectionRuleMitigationMode', 'manual_review')", HTML)
+        self.assertIn("setBoolSelect('detectionRuleMitigationEnabled', false)", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

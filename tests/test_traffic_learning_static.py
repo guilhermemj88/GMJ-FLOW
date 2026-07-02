@@ -16,7 +16,17 @@ class TrafficLearningStaticTest(unittest.TestCase):
         self.assertIn('exclude_peak_hunter_peaks', MAIN)
         self.assertIn('is_negative_sample', MAIN)
         self.assertIn('"suggested_rule"', MAIN)
+        self.assertIn('"protocol": (clean_text(payload.protocol).upper()', MAIN)
+        self.assertIn('"direction": clean_text(payload.direction) or "both"', MAIN)
+        self.assertIn('"mitigation_mode": "manual_review"', MAIN)
+        self.assertIn('"mitigation_enabled": False', MAIN)
         self.assertIn('"A sugestao nao foi salva automaticamente."', MAIN)
+
+    def test_detection_rule_save_returns_explicit_success_contract(self):
+        self.assertIn("def detection_rule_save_response", MAIN)
+        self.assertIn('"ok": True', MAIN)
+        self.assertIn('"rule_id": rule.get("id")', MAIN)
+        self.assertIn('"message": "Regra salva com sucesso"', MAIN)
 
     def test_peak_hunter_automation_status_contract_exists(self):
         self.assertIn('/automation/status', API)
