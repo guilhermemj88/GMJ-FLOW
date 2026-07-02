@@ -9124,10 +9124,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `;
     }
 
+    function anomalyAiAnalysisEndpoint(anomalyId) {
+      return Number(anomalyId) < 0
+        ? `/api/anomalies/${anomalyId}/ai-analysis/draft`
+        : `/api/anomalies/${anomalyId}/ai-analysis`;
+    }
+
     async function loadBgpAiRecommendation() {
       if (!currentBgpMitigationAnomalyId) return;
       try {
-        currentAiMitigationAnalysis = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/ai-analysis`);
+        const method = Number(currentBgpMitigationAnomalyId) < 0 ? 'POST' : 'GET';
+        currentAiMitigationAnalysis = await apiRequest(anomalyAiAnalysisEndpoint(currentBgpMitigationAnomalyId), { method });
       } catch (error) {
         currentAiMitigationAnalysis = null;
       }
@@ -11012,7 +11019,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadAnomalyAiAnalysis(anomalyId) {
       try {
-        const analysis = await apiRequest(`/api/anomalies/${anomalyId}/ai-analysis`);
+        const method = Number(anomalyId) < 0 ? 'POST' : 'GET';
+        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(anomalyId), { method });
         renderAnomalyAiAnalysis(analysis);
       } catch (error) {
         currentAiMitigationAnalysis = null;
@@ -11025,7 +11033,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('anomalyAiStatus', 'Analisando com IA...');
       document.getElementById('anomalyAiAnalysisBlock').innerHTML = '<div class="subtle">Aguardando provider local...</div>';
       try {
-        const analysis = await apiRequest(`/api/anomalies/${currentAnomalyDetailId}/ai-analysis`, { method: 'POST' });
+        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(currentAnomalyDetailId), { method: 'POST' });
         renderAnomalyAiAnalysis(analysis);
       } catch (error) {
         setText('anomalyAiStatus', `Falha: ${error.message}`);
@@ -13664,9 +13672,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('systemAiContextChars', ai.max_context_chars || 12000);
       setText('systemAiOutput', JSON.stringify({
         enabled: ai.enabled,
+        source: ai.source || ai.config_source,
+        env_enabled: ai.env_enabled,
+        system_settings_enabled: ai.system_settings_enabled,
+        overrides_env: ai.overrides_env,
+        override_message: ai.override_message,
         provider: ai.provider,
         model: ai.selected_model,
         reachable: ai.reachable ?? ai.ollama_reachable,
+        ollama_reachable: ai.ollama_reachable,
         allow_auto: false,
         require_policy_validation: ai.require_policy_validation
       }, null, 2));
@@ -13686,7 +13700,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         setupBadge('GMJ-FLOW systemd', setup.systemd?.enabled && setup.systemd?.active, `enabled=${Boolean(setup.systemd?.enabled)} active=${Boolean(setup.systemd?.active)}`),
         setupBadge('Ollama', setup.ollama?.running && setup.ollama?.reachable, setup.ollama?.error || modelNames.join(', ')),
         setupBadge('Modelo IA', setup.ollama?.model_downloaded, setup.ai?.selected_model || '-'),
-        setupBadge('IA habilitada', setup.ai?.enabled, `allow_auto=false policy=${Boolean(setup.ai?.require_policy_validation)}`),
+        setupBadge('IA habilitada', setup.ai?.enabled, `source=${setup.ai?.source || setup.ai?.config_source || '-'} allow_auto=false policy=${Boolean(setup.ai?.require_policy_validation)}`),
         setupBadge('ClickHouse', setup.clickhouse?.healthy, `flows=${setup.clickhouse?.flow_count ?? 0} ultimo=${setup.clickhouse?.newest_flow_time || '-'}`),
         setupBadge('SQLite', setup.sqlite?.healthy, setup.sqlite?.path || '-'),
         setupBadge('Collectors', (setup.collectors?.items || []).some(item => item.status === 'ok'), `${(setup.collectors?.items || []).length} item(ns)`),

@@ -77,6 +77,29 @@ class SetupInstallPdfTest(unittest.TestCase):
         self.assertIn('"ai_allow_auto": "false"', MAIN)
         self.assertIn('"recommendations"', MAIN)
 
+    def test_ai_status_uses_env_fallback_and_reports_source(self):
+        self.assertIn("def get_persisted_system_settings", MAIN)
+        self.assertIn('if key.startswith("ai_"):', MAIN)
+        self.assertIn('"source": source', MAIN)
+        self.assertIn('"settings_source": settings_source', MAIN)
+        self.assertIn('"overrides_env": overrides_env', MAIN)
+        self.assertIn('"override_message": (', MAIN)
+        self.assertIn('"reachable": provider_reachable', MAIN)
+        self.assertIn('"ollama_reachable": models["reachable"]', MAIN)
+
+    def test_ai_analysis_negative_anomaly_uses_draft_endpoint(self):
+        self.assertIn('"/api/anomalies/{event_id}/ai-analysis/draft"', MAIN)
+        self.assertIn("def draft_ai_analysis", MAIN)
+        self.assertIn("def anomaly_ai_analysis_result", MAIN)
+        self.assertIn("persist=event_id >= 0", MAIN)
+        self.assertIn("return anomaly_ai_analysis_result(event_id, config, persist=False)", MAIN)
+
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function anomalyAiAnalysisEndpoint", html)
+        self.assertIn("Number(anomalyId) < 0", html)
+        self.assertIn("ai-analysis/draft", html)
+        self.assertIn("Number(currentBgpMitigationAnomalyId) < 0 ? 'POST' : 'GET'", html)
+
     def test_containerized_bgp_status_distinguishes_unverified_from_down(self):
         self.assertIn("def parse_huawei_vrp_peer_state", MAIN)
         self.assertIn("display bgp peer", MAIN)

@@ -1368,6 +1368,8 @@ def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
     )
     now = utc_now_iso()
     for key, value in SYSTEM_SETTING_DEFAULTS.items():
+        if key.startswith("ai_"):
+            continue
         conn.execute(
             """
             INSERT INTO system_settings (key, value, updated_at)
@@ -1380,11 +1382,16 @@ def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
         )
 
 
-def get_system_settings(conn: sqlite3.Connection) -> dict[str, str]:
+def get_persisted_system_settings(conn: sqlite3.Connection) -> dict[str, str]:
     ensure_system_settings_table(conn)
     rows = conn.execute("SELECT key, value FROM system_settings").fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def get_system_settings(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = get_persisted_system_settings(conn)
     settings = {key: value for key, value in SYSTEM_SETTING_DEFAULTS.items()}
-    settings.update({row["key"]: row["value"] for row in rows})
+    settings.update(rows)
     return settings
 
 
@@ -9773,19 +9780,53 @@ def ai_int_setting(settings: dict[str, str], key: str, default: int, minimum: in
     return max(minimum, min(value, maximum))
 
 
+def ai_setting_source(raw_settings: dict[str, str], key: str) -> str:
+    return "system_settings" if key in raw_settings else "env"
+
+
 def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     owns_connection = conn is None
     if conn is None:
         conn = sqlite_connection()
     try:
-        settings = get_system_settings(conn)
+        raw_settings = get_persisted_system_settings(conn)
     finally:
         if owns_connection:
             conn.close()
+    settings = {key: value for key, value in SYSTEM_SETTING_DEFAULTS.items()}
+    settings.update(raw_settings)
     profile = ai_profile(settings.get("ai_model_profile"))
     model = clean_text(settings.get("ai_model")) or profile["default_model"]
+    ai_keys = (
+        "ai_mitigation_enabled",
+        "ai_provider",
+        "ai_base_url",
+        "ai_model_profile",
+        "ai_model",
+        "ai_timeout_seconds",
+        "ai_max_top_flows",
+        "ai_max_context_chars",
+        "ai_allow_auto",
+        "ai_require_policy_validation",
+    )
+    settings_source = {key: ai_setting_source(raw_settings, key) for key in ai_keys}
+    env_enabled = clean_text(SYSTEM_SETTING_DEFAULTS["ai_mitigation_enabled"]).lower() in {"1", "true", "yes", "on"}
+    persisted_enabled = setting_bool(raw_settings, "ai_mitigation_enabled") if "ai_mitigation_enabled" in raw_settings else None
+    source = settings_source["ai_mitigation_enabled"]
+    overrides_env = persisted_enabled is not None and persisted_enabled != env_enabled
     return {
         "enabled": setting_bool(settings, "ai_mitigation_enabled"),
+        "source": source,
+        "config_source": source,
+        "settings_source": settings_source,
+        "env_enabled": env_enabled,
+        "system_settings_enabled": persisted_enabled,
+        "overrides_env": overrides_env,
+        "override_message": (
+            f"system_settings.ai_mitigation_enabled={str(persisted_enabled).lower()} sobrescreve ENV AI_MITIGATION_ENABLED={str(env_enabled).lower()}."
+            if overrides_env
+            else ""
+        ),
         "provider": clean_text(settings.get("ai_provider")).lower() or "ollama",
         "base_url": clean_text(settings.get("ai_base_url")) or "http://gmj-flow-ollama:11434",
         "selected_profile": profile["profile_id"],
@@ -9876,8 +9917,6 @@ def ai_disk_warnings() -> list[str]:
 
 
 def ai_provider_reachable(config: dict[str, Any]) -> bool:
-    if not config.get("enabled"):
-        return False
     try:
         base_url = clean_text(config.get("base_url")).rstrip("/")
         provider = clean_text(config.get("provider")).lower()
@@ -10470,6 +10509,93 @@ def save_ai_analysis(
     return ai_analysis_row_to_dict(row) or {}
 
 
+def draft_ai_analysis(
+    anomaly_id: int,
+    config: dict[str, Any],
+    request_payload: dict[str, Any],
+    response_json: dict[str, Any] | None = None,
+    error_message: str = "",
+    prompt: str = "",
+) -> dict[str, Any]:
+    response_json = response_json or {}
+    request_payload_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str)
+    item = ai_analysis_row_to_dict(
+        {
+            "id": None,
+            "anomaly_id": anomaly_id,
+            "provider": config.get("provider") or "",
+            "model": config.get("selected_model") or "",
+            "profile": config.get("selected_profile") or "",
+            "request_payload_json": request_payload_json,
+            "response_json": json.dumps(response_json, ensure_ascii=False, sort_keys=True, default=str),
+            "recommended_candidate_index": response_json.get("recommended_candidate_index"),
+            "confidence": response_json.get("confidence"),
+            "risk": response_json.get("risk") or "",
+            "classification": response_json.get("classification") or "",
+            "manual_approval_required": 1 if response_json.get("manual_approval_required", True) else 0,
+            "allow_auto": 1 if response_json.get("allow_auto") else 0,
+            "reason": response_json.get("reason") or "",
+            "operator_summary": response_json.get("operator_summary") or "",
+            "report_summary": response_json.get("report_summary") or "",
+            "request_payload_chars": len(request_payload_json),
+            "prompt_chars": len(prompt),
+            "candidate_count": len(list(request_payload.get("candidates") or [])),
+            "timeout_seconds": int(config.get("timeout_seconds") or 0),
+            "created_at": utc_now_iso(),
+            "error_message": clean_text(error_message)[:2000],
+        }
+    ) or {}
+    item["draft"] = True
+    item["persisted"] = False
+    return item
+
+
+def anomaly_ai_analysis_result(event_id: int, config: dict[str, Any], persist: bool) -> dict[str, Any]:
+    request_payload = build_ai_mitigation_payload(event_id, config)
+    if not request_payload.get("candidates"):
+        fallback_response = {
+            "recommended_candidate_index": None,
+            "confidence": 0.0,
+            "risk": "high",
+            "classification": "insufficient_flow_evidence",
+            "manual_approval_required": True,
+            "allow_auto": False,
+            "recommended_candidate": "alert_only",
+            "recommended_action": "alert_only",
+            "evidence_status": "insufficient",
+            "mitigation_allowed": False,
+            "reason": "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
+            "operator_summary": "Nao ha evidencia suficiente para recomendar descarte. Confirmar top flows no ClickHouse/roteador.",
+            "report_summary": "Analise IA nao executada: sem candidato seguro para descarte.",
+            "risks": ["Anomalia sem escopo suficiente para recomendacao automatizada."],
+            "checks_before_approve": ["Confirmar top flows diretamente no ClickHouse/roteador.", "Validar sensor, interface e janela da anomalia."],
+        }
+        if not persist:
+            return draft_ai_analysis(event_id, config, request_payload, fallback_response)
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, fallback_response)
+            conn.commit()
+        return saved
+    prompt = ai_prompt_for_payload(request_payload)
+    try:
+        response_text, _latency_ms = ai_provider_chat(config, prompt)
+        parsed = parse_ai_json_response(response_text)
+        validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
+        if not persist:
+            return draft_ai_analysis(event_id, config, request_payload, validated, prompt=prompt)
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, validated, prompt=prompt)
+            conn.commit()
+        return saved
+    except Exception as exc:
+        if not persist:
+            return draft_ai_analysis(event_id, config, request_payload, {}, str(exc), prompt=prompt)
+        with sqlite_connection() as conn:
+            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc), prompt=prompt)
+            conn.commit()
+        return saved
+
+
 @app.get("/api/ai/profiles")
 def ai_profiles(request: Request):
     require_admin(request)
@@ -10733,8 +10859,10 @@ def system_ai_status(request: Request):
             "timeout_seconds": status.get("timeout_seconds") or 5,
         }
     )
+    provider_reachable = models["reachable"] if status.get("provider") == "ollama" else status.get("reachable")
     return {
         **status,
+        "reachable": provider_reachable,
         "models": models["models"],
         "models_available": [item["name"] for item in models["models"]],
         "ollama_reachable": models["reachable"],
@@ -10924,6 +11052,12 @@ def system_setup_status(request: Request):
 def get_anomaly_ai_analysis(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
+    if event_id < 0:
+        with sqlite_connection() as conn:
+            config = ai_effective_config(conn)
+        if not config["enabled"]:
+            raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
+        return anomaly_ai_analysis_result(event_id, config, persist=False)
     with sqlite_connection() as conn:
         analysis = latest_ai_analysis(conn, event_id)
     if analysis is None:
@@ -10947,43 +11081,18 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
-    request_payload = build_ai_mitigation_payload(event_id, config)
-    if not request_payload.get("candidates"):
-        fallback_response = {
-            "recommended_candidate_index": None,
-            "confidence": 0.0,
-            "risk": "high",
-            "classification": "insufficient_flow_evidence",
-            "manual_approval_required": True,
-            "allow_auto": False,
-            "recommended_candidate": "alert_only",
-            "recommended_action": "alert_only",
-            "evidence_status": "insufficient",
-            "mitigation_allowed": False,
-            "reason": "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
-            "operator_summary": "Nao ha evidencia suficiente para recomendar descarte. Confirmar top flows no ClickHouse/roteador.",
-            "report_summary": "Analise IA nao executada: sem candidato seguro para descarte.",
-            "risks": ["Anomalia sem escopo suficiente para recomendacao automatizada."],
-            "checks_before_approve": ["Confirmar top flows diretamente no ClickHouse/roteador.", "Validar sensor, interface e janela da anomalia."],
-        }
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, fallback_response)
-            conn.commit()
-        return saved
-    prompt = ai_prompt_for_payload(request_payload)
-    try:
-        response_text, _latency_ms = ai_provider_chat(config, prompt)
-        parsed = parse_ai_json_response(response_text)
-        validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, validated, prompt=prompt)
-            conn.commit()
-        return saved
-    except Exception as exc:
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc), prompt=prompt)
-            conn.commit()
-        return saved
+    return anomaly_ai_analysis_result(event_id, config, persist=event_id >= 0)
+
+
+@app.api_route("/api/anomalies/{event_id}/ai-analysis/draft", methods=["GET", "POST"])
+def draft_anomaly_ai_analysis(request: Request, event_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        config = ai_effective_config(conn)
+    if not config["enabled"]:
+        raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
+    return anomaly_ai_analysis_result(event_id, config, persist=False)
 
 
 def insert_bgp_mitigation_announcement(
