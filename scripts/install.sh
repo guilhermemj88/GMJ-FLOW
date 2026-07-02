@@ -97,6 +97,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
 fi
 
+if ! grep -q "^GMJFLOW_ENABLE_COLLECTOR_APPLY=" .env; then
+  set_env_value GMJFLOW_ENABLE_COLLECTOR_APPLY true
+fi
+
 current_secret=$(env_value GMJFLOW_AUTH_SECRET "")
 case "$current_secret" in
   ""|"change-me-gmj-flow-auth-secret"|"gmj-flow-dev-secret-change-me")
@@ -108,7 +112,12 @@ mkdir -p data data/backend data/collectors data/backups data/logs
 chmod 750 data data/backend data/collectors data/logs
 chmod 700 data/backups
 
-docker compose --env-file .env up -d --build
+compose_file_args="-f docker-compose.yml"
+if [ -f docker-compose.collectors.yml ]; then
+  compose_file_args="$compose_file_args -f docker-compose.collectors.yml"
+fi
+
+docker compose --env-file .env $compose_file_args up -d --build --remove-orphans
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   docker_bin=$(command -v docker)
@@ -122,8 +131,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=$PROJECT_ROOT
-ExecStart=$docker_bin compose --env-file .env up -d
-ExecStop=$docker_bin compose --env-file .env down
+ExecStart=$docker_bin compose --env-file .env $compose_file_args up -d
+ExecStop=$docker_bin compose --env-file .env $compose_file_args down
 RemainAfterExit=yes
 TimeoutStartSec=0
 

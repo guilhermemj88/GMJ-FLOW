@@ -3659,7 +3659,7 @@ def apply_collectors_script_path() -> Path | None:
 
 
 def collector_apply_enabled() -> bool:
-    return clean_text(os.getenv("GMJFLOW_ENABLE_COLLECTOR_APPLY", "false")).lower() in {
+    return clean_text(os.getenv("GMJFLOW_ENABLE_COLLECTOR_APPLY", "true")).lower() in {
         "1",
         "true",
         "yes",
@@ -3718,6 +3718,55 @@ def run_apply_collectors_script(compose_path: Path) -> dict[str, Any]:
         "stderr": result.stderr,
         "returncode": result.returncode,
     }
+
+
+def docker_container_snapshot() -> dict[str, Any]:
+    command = ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+            cwd=str(RUNTIME_DIR) if RUNTIME_DIR.exists() else None,
+        )
+    except Exception as exc:
+        return {"available": False, "containers": [], "error": str(exc)}
+    if result.returncode != 0:
+        return {"available": False, "containers": [], "error": result.stderr.strip() or result.stdout.strip()}
+    containers = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        name, status, ports = (line.split("\t", 2) + ["", ""])[:3]
+        containers.append({"name": name, "status": status, "ports": ports})
+    return {"available": True, "containers": containers, "error": ""}
+
+
+def docker_container_for_service(snapshot: dict[str, Any], service_name: str) -> dict[str, Any] | None:
+    for item in snapshot.get("containers") or []:
+        name = clean_text(item.get("name"))
+        if name == service_name or f"-{service_name}-" in name or name.endswith(f"-{service_name}-1"):
+            return item
+    return None
+
+
+def docker_service_running(snapshot: dict[str, Any], service_name: str) -> bool | None:
+    if not snapshot.get("available"):
+        return None
+    item = docker_container_for_service(snapshot, service_name)
+    return bool(item and clean_text(item.get("status")).lower().startswith("up"))
+
+
+def docker_udp_port_published(snapshot: dict[str, Any], service_name: str, port: int) -> bool | None:
+    if not snapshot.get("available"):
+        return None
+    item = docker_container_for_service(snapshot, service_name)
+    if not item:
+        return False
+    ports = clean_text(item.get("ports")).lower()
+    return f":{port}->" in ports and f"{port}/udp" in ports
 
 
 def replace_sensor_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]], now: str) -> None:
@@ -18246,6 +18295,7 @@ def pmacct_status_for_file(output_file: str) -> dict[str, Any]:
     checkpoint = read_json_object(offset_path)
     payload = {**checkpoint, **status}
     payload["file"] = clean_text(payload.get("file")) or str(output_path)
+    payload["csv_exists"] = output_path.exists()
     status_issue = ""
     if output_path.exists():
         try:
@@ -18279,11 +18329,86 @@ def pmacct_output_file_from_state_name(path: Path) -> str:
     return str(pmacct_spool_dir() / name)
 
 
+def collector_ingestion_item(
+    row: sqlite3.Row | dict[str, Any] | None,
+    output_file: str,
+    status: dict[str, Any],
+    docker_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    row_payload = dict(row) if row else {}
+    sensor_id = int(row_payload["id"]) if row_payload.get("id") is not None else None
+    listener_port = int(row_payload["listener_port"]) if row_payload.get("listener_port") is not None else None
+    sensor_service = f"pmacct-sensor-{sensor_id}" if sensor_id is not None else ""
+    parser_service = f"pmacct-parser-sensor-{sensor_id}" if sensor_id is not None else ""
+    conf_path = collectors_dir() / f"sensor-{sensor_id}" / "nfacctd.conf" if sensor_id is not None else None
+    file_size_mb = status.get("file_size_mb")
+    offset = int(status.get("offset") or 0)
+    inode = int(status.get("inode") or 0)
+    lag_bytes = int(status.get("lag_bytes") or 0)
+    rows_read = int(status.get("rows_read_last_cycle") or 0)
+    rows_inserted = int(status.get("rows_inserted_last_cycle") or 0)
+    csv_exists = bool(status.get("csv_exists"))
+    parser_reading = bool(rows_read > 0 or offset > 0 or status.get("last_line_ts"))
+    clickhouse_receiving = bool(rows_inserted > 0 or status.get("last_insert_at") or status.get("last_flow_time"))
+    pmacct_running = docker_service_running(docker_snapshot, sensor_service) if sensor_service else None
+    parser_running = docker_service_running(docker_snapshot, parser_service) if parser_service else None
+    udp_published = (
+        docker_udp_port_published(docker_snapshot, sensor_service, listener_port)
+        if sensor_service and listener_port is not None
+        else None
+    )
+    diagnostics = {
+        "nfacctd_conf_exists": bool(conf_path and conf_path.exists()),
+        "nfacctd_conf_path": str(conf_path) if conf_path else "",
+        "pmacct_container": sensor_service,
+        "pmacct_container_running": pmacct_running,
+        "parser_container": parser_service,
+        "parser_container_running": parser_running,
+        "udp_port_published": udp_published,
+        "csv_exists": csv_exists,
+        "parser_reading": parser_reading,
+        "clickhouse_receiving": clickhouse_receiving,
+        "docker_available": bool(docker_snapshot.get("available")),
+        "docker_error": docker_snapshot.get("error") or "",
+    }
+    return {
+        "sensor_id": sensor_id,
+        "sensor": row_payload.get("name") or status.get("sensor") or Path(output_file).stem,
+        "exporter_ip": row_payload.get("exporter_ip") or status.get("exporter_ip") or "",
+        "listener_port": listener_port,
+        "file": status.get("file") or output_file,
+        "file_size_mb": file_size_mb if file_size_mb is not None else 0,
+        "rotate_max_mb": status.get("rotate_max_mb"),
+        "offset": offset,
+        "inode": inode,
+        "lag_bytes": lag_bytes,
+        "last_line_ts": status.get("last_line_ts") or "",
+        "last_insert_at": status.get("last_insert_at") or "",
+        "last_flow_time": status.get("last_flow_time") or "",
+        "rows_read_last_cycle": rows_read,
+        "rows_inserted_last_cycle": rows_inserted,
+        "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
+        "parser_status": status.get("parser_status") or ("ok" if parser_reading else "sem status"),
+        "status_issue": status.get("status_issue") or "",
+        "last_error": status.get("last_error") or "",
+        "last_rotation": status.get("last_rotation"),
+        "updated_at": status.get("updated_at") or "",
+        "nfacctd_conf_exists": diagnostics["nfacctd_conf_exists"],
+        "pmacct_container_running": pmacct_running,
+        "udp_port_published": udp_published,
+        "csv_exists": csv_exists,
+        "parser_reading": parser_reading,
+        "clickhouse_receiving": clickhouse_receiving,
+        "diagnostics": diagnostics,
+    }
+
+
 @app.get("/api/collectors/ingestion/status")
 def collectors_ingestion_status(request: Request):
     require_admin(request)
     ensure_sensor_db()
     items = []
+    docker_snapshot = docker_container_snapshot()
     with sqlite_connection() as conn:
         rows = conn.execute(
             """
@@ -18298,34 +18423,7 @@ def collectors_ingestion_status(request: Request):
         output_file = f"/var/spool/pmacct/sensor-{int(row['id'])}-{int(row['listener_port'])}.csv"
         status = pmacct_status_for_file(output_file)
         seen_files.add(output_file)
-        file_size_mb = status.get("file_size_mb")
-        offset = int(status.get("offset") or 0)
-        inode = int(status.get("inode") or 0)
-        lag_bytes = int(status.get("lag_bytes") or 0)
-        items.append(
-            {
-                "sensor_id": int(row["id"]),
-                "sensor": row["name"],
-                "exporter_ip": row["exporter_ip"],
-                "file": status.get("file") or output_file,
-                "file_size_mb": file_size_mb if file_size_mb is not None else 0,
-                "rotate_max_mb": status.get("rotate_max_mb"),
-                "offset": offset,
-                "inode": inode,
-                "lag_bytes": lag_bytes,
-                "last_line_ts": status.get("last_line_ts") or "",
-                "last_insert_at": status.get("last_insert_at") or "",
-                "last_flow_time": status.get("last_flow_time") or "",
-                "rows_read_last_cycle": int(status.get("rows_read_last_cycle") or 0),
-                "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
-                "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
-                "parser_status": status.get("parser_status") or "sem status",
-                "status_issue": status.get("status_issue") or "",
-                "last_error": status.get("last_error") or "",
-                "last_rotation": status.get("last_rotation"),
-                "updated_at": status.get("updated_at") or "",
-            }
-        )
+        items.append(collector_ingestion_item(row, output_file, status, docker_snapshot))
     state_paths = []
     if pmacct_state_dir().exists():
         state_paths.extend(pmacct_state_dir().glob("*.status.json"))
@@ -18336,31 +18434,19 @@ def collectors_ingestion_status(request: Request):
             continue
         seen_files.add(output_file)
         status = pmacct_status_for_file(output_file)
-        items.append(
-            {
-                "sensor_id": None,
-                "sensor": status.get("sensor") or Path(output_file).stem,
-                "exporter_ip": status.get("exporter_ip") or "",
-                "file": output_file,
-                "file_size_mb": status.get("file_size_mb") or 0,
-                "rotate_max_mb": status.get("rotate_max_mb"),
-                "offset": int(status.get("offset") or 0),
-                "inode": int(status.get("inode") or 0),
-                "lag_bytes": int(status.get("lag_bytes") or 0),
-                "last_line_ts": status.get("last_line_ts") or "",
-                "last_insert_at": status.get("last_insert_at") or "",
-                "last_flow_time": status.get("last_flow_time") or "",
-                "rows_read_last_cycle": int(status.get("rows_read_last_cycle") or 0),
-                "rows_inserted_last_cycle": int(status.get("rows_inserted_last_cycle") or 0),
-                "rows_skipped_last_cycle": int(status.get("rows_skipped_last_cycle") or 0),
-                "parser_status": status.get("parser_status") or "ok",
-                "status_issue": status.get("status_issue") or "",
-                "last_error": status.get("last_error") or "",
-                "last_rotation": status.get("last_rotation"),
-                "updated_at": status.get("updated_at") or "",
-            }
-        )
-    return {"items": items}
+        items.append(collector_ingestion_item(None, output_file, status, docker_snapshot))
+    return {
+        "items": items,
+        "diagnostics": {
+            "docker_available": bool(docker_snapshot.get("available")),
+            "docker_error": docker_snapshot.get("error") or "",
+            "collectors_compose_exists": collectors_compose_path().exists(),
+            "collectors_compose_file": str(collectors_compose_path()),
+            "collectors_dir": str(collectors_dir()),
+            "pmacct_state_dir": str(pmacct_state_dir()),
+            "pmacct_spool_dir": str(pmacct_spool_dir()),
+        },
+    }
 
 
 def unavailable_metric(reason: str = "") -> dict[str, Any]:

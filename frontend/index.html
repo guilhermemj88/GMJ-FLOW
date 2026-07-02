@@ -2026,6 +2026,12 @@
                     <th class="text-end">Tamanho</th>
                     <th class="text-end">Offset</th>
                     <th class="text-end">Lag</th>
+                    <th>nfacctd.conf</th>
+                    <th>pmacct</th>
+                    <th>UDP</th>
+                    <th>CSV</th>
+                    <th>Parser</th>
+                    <th>ClickHouse</th>
                     <th>Último flow</th>
                     <th>Último insert</th>
                     <th>Status</th>
@@ -12458,14 +12464,42 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td class="text-end">${Number(item.file_size_mb || 0).toFixed(1)} MB</td>
             <td class="text-end">${formatNumber(item.offset)}</td>
             <td class="text-end">${formatBytes(item.lag_bytes)}</td>
+            <td>${diagnosticBadge(item.nfacctd_conf_exists, 'Existe', 'Falta')}</td>
+            <td>${diagnosticBadge(item.pmacct_container_running, 'Rodando', 'Parado', 'Indisp')}</td>
+            <td>${diagnosticBadge(item.udp_port_published, 'Publicada', 'Fechada', 'Indisp')}</td>
+            <td>${diagnosticBadge(item.csv_exists, 'Existe', 'Falta')}</td>
+            <td>${diagnosticBadge(item.parser_reading, 'Lendo', 'Sem leitura')}</td>
+            <td>${diagnosticBadge(item.clickhouse_receiving, 'Recebendo', 'Sem insert')}</td>
             <td>${formatDateTime(item.last_flow_time)}</td>
             <td>${formatDateTime(item.last_insert_at)}</td>
-            <td title="${escapeHtml(item.status_issue || item.last_error || '')}">${escapeHtml(item.status_issue || item.parser_status || '-')}</td>
+            <td title="${escapeHtml(ingestionDiagnosticTitle(item))}">${escapeHtml(item.status_issue || item.parser_status || '-')}</td>
           </tr>
-        `).join('') || '<tr><td colspan="8" class="text-muted">Sem status do parser</td></tr>';
+        `).join('') || '<tr><td colspan="14" class="text-muted">Sem status do parser</td></tr>';
       } catch (error) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
       }
+    }
+
+    function diagnosticBadge(value, okLabel, failLabel, unknownLabel = 'Indisp') {
+      if (value === null || value === undefined) {
+        return `<span class="badge-soft off">${escapeHtml(unknownLabel)}</span>`;
+      }
+      return value
+        ? `<span class="badge-soft ok">${escapeHtml(okLabel)}</span>`
+        : `<span class="badge-soft warn">${escapeHtml(failLabel)}</span>`;
+    }
+
+    function ingestionDiagnosticTitle(item) {
+      const diag = item.diagnostics || {};
+      const lines = [
+        `nfacctd.conf: ${diag.nfacctd_conf_path || '-'}`,
+        `pmacct: ${diag.pmacct_container || '-'}`,
+        `parser: ${diag.parser_container || '-'}`,
+        `Docker: ${diag.docker_available ? 'disponivel' : (diag.docker_error || 'indisponivel')}`,
+        item.last_error ? `Erro: ${item.last_error}` : '',
+        item.status_issue ? `Status: ${item.status_issue}` : ''
+      ].filter(Boolean);
+      return lines.join('\n');
     }
 
     async function checkHealth() {
@@ -12758,7 +12792,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function setSensorStatus(message, kind = 'muted') {
       const status = document.getElementById('sensorStatus');
       status.textContent = message;
-      status.className = kind === 'error' ? 'subtle text-danger' : 'subtle';
+      status.className = kind === 'error'
+        ? 'subtle text-danger'
+        : kind === 'warning'
+          ? 'subtle text-warning'
+          : 'subtle';
     }
 
     function fillSensorForm(sensor) {
@@ -12947,11 +12985,34 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         currentSensorId = saved.id;
         await loadSensors();
         await loadDashboardSensors();
-        setSensorStatus(`Sensor ${saved.name} salvo`);
+        await applyCollectorsAfterSave(saved);
         return saved;
       } catch (error) {
         setSensorStatus(`Falha ao salvar sensor: ${error.message}`, 'error');
         return null;
+      }
+    }
+
+    async function applyCollectorsAfterSave(saved) {
+      const status = document.getElementById('collectorApplyStatus');
+      const resultBox = document.getElementById('collectorApplyResult');
+      if (status) status.textContent = 'Preparando collector...';
+      if (resultBox) resultBox.textContent = 'Gerando configurações do collector...';
+      try {
+        const payload = await apiRequest('/api/collectors/apply', { method: 'POST' });
+        if (status) status.textContent = payload.services_updated ? 'Collectors atualizados' : 'Configs geradas';
+        if (resultBox) resultBox.textContent = JSON.stringify(payload, null, 2);
+        setSensorStatus(
+          payload.services_updated
+            ? `Sensor ${saved.name} salvo e collector aplicado.`
+            : 'Sensor salvo, mas collector ainda não aplicado. Clique em Aplicar Coletor.',
+          payload.services_updated ? 'muted' : 'warning'
+        );
+        await loadIngestionStatus();
+      } catch (error) {
+        if (status) status.textContent = 'Falha ao aplicar';
+        if (resultBox) resultBox.textContent = error.message || 'Falha ao aplicar collector';
+        setSensorStatus('Sensor salvo, mas collector ainda não aplicado. Clique em Aplicar Coletor.', 'warning');
       }
     }
 

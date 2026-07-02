@@ -10,8 +10,10 @@ if [ ! -f .env ]; then
 fi
 
 git pull
-docker compose --env-file .env up -d --build backend frontend
 
+compose_file_args="-f docker-compose.yml"
 if [ -f docker-compose.collectors.yml ]; then
-  docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml up -d --build --remove-orphans
+  compose_file_args="$compose_file_args -f docker-compose.collectors.yml"
 fi
+
+docker compose --env-file .env $compose_file_args up -d --build --remove-orphans
