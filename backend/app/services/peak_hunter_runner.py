@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -18,6 +19,14 @@ from app.services.peak_hunter import (
 
 RUNNER_VERSION = "peak-hunter-runner-v1"
 _RUNNER_LOCK = threading.Lock()
+LOGGER = logging.getLogger("gmj-flow")
+RUNNER_STATE: dict[str, Any] = {
+    "scheduler_running": False,
+    "last_tick_at": "",
+    "last_error": "",
+    "last_error_at": "",
+    "last_results_count": 0,
+}
 
 SeriesFetcher = Callable[..., Any]
 FlowFetcher = Callable[..., Any]
@@ -278,6 +287,40 @@ def list_peak_hunter_runs(conn: sqlite3.Connection, limit: int = 200) -> list[di
     return [dict(row) for row in rows]
 
 
+def mark_peak_hunter_scheduler_started() -> None:
+    RUNNER_STATE["scheduler_running"] = True
+    RUNNER_STATE["last_error"] = ""
+
+
+def mark_peak_hunter_scheduler_stopped() -> None:
+    RUNNER_STATE["scheduler_running"] = False
+
+
+def peak_hunter_automation_status(conn: sqlite3.Connection, tick_seconds: int = 60) -> dict[str, Any]:
+    ensure_peak_hunter_automation_db(conn)
+    now = datetime.now(timezone.utc)
+    jobs = [row_to_job(row) for row in conn.execute("SELECT * FROM peak_hunter_jobs ORDER BY enabled DESC, id").fetchall()]
+    enabled_jobs = [job for job in jobs if job.get("enabled")]
+    due_jobs = [job for job in enabled_jobs if job_is_due(job, now)]
+    last_runs = list_peak_hunter_runs(conn, limit=10)
+    last_error = RUNNER_STATE.get("last_error") or next((run.get("error_message") for run in last_runs if run.get("error_message")), "")
+    last_tick = parse_time(RUNNER_STATE.get("last_tick_at"))
+    next_tick = max(0, int(tick_seconds - (now - last_tick).total_seconds())) if last_tick else tick_seconds
+    return {
+        "scheduler_running": bool(RUNNER_STATE.get("scheduler_running")),
+        "scheduler_status": "running" if RUNNER_STATE.get("scheduler_running") else "stopped",
+        "last_tick_at": RUNNER_STATE.get("last_tick_at") or "",
+        "next_tick_in_seconds": next_tick,
+        "jobs_enabled": len(enabled_jobs),
+        "jobs_due": len(due_jobs),
+        "last_error": last_error,
+        "last_runs": last_runs,
+        "cases_saved": sum(int(run.get("cases_saved") or 0) for run in last_runs),
+        "negative_samples_saved": sum(int(run.get("negative_sample_saved") or 0) for run in last_runs),
+        "duplicates_ignored": sum(1 for run in last_runs if run.get("status") == "skipped_duplicate"),
+    }
+
+
 def run_due_peak_hunter_jobs(
     series_fetcher: SeriesFetcher = fetch_interface_series,
     flow_fetcher: FlowFetcher = fetch_peak_flows,
@@ -288,6 +331,8 @@ def run_due_peak_hunter_jobs(
         return []
     try:
         now_dt = now or datetime.now(timezone.utc)
+        RUNNER_STATE["last_tick_at"] = utc_iso(now_dt)
+        LOGGER.info("[peak-hunter-runner] scheduler tick")
         with sqlite_connect() as conn:
             ensure_peak_hunter_automation_db(conn)
             jobs = [row_to_job(row) for row in conn.execute("SELECT * FROM peak_hunter_jobs WHERE enabled = 1").fetchall()]
@@ -295,9 +340,17 @@ def run_due_peak_hunter_jobs(
             for job in jobs:
                 if not job_is_due(job, now_dt):
                     continue
+                LOGGER.info("[peak-hunter-runner] job due id=%s", job.get("id"))
                 results.extend(run_peak_hunter_job(conn, job, series_fetcher, flow_fetcher, interface_fetcher, now_dt))
             conn.commit()
+            RUNNER_STATE["last_results_count"] = len(results)
+            RUNNER_STATE["last_error"] = ""
             return results
+    except Exception as exc:
+        RUNNER_STATE["last_error"] = str(exc)
+        RUNNER_STATE["last_error_at"] = utc_now_iso()
+        LOGGER.warning("[peak-hunter-runner] run failed error=%s", exc)
+        raise
     finally:
         _RUNNER_LOCK.release()
 
@@ -398,6 +451,7 @@ def run_job_combination(
     flow_fetcher: FlowFetcher,
 ) -> dict[str, Any]:
     run_id = create_run(conn, job, interface, direction, metric, start, end)
+    LOGGER.info("[peak-hunter-runner] run started job_id=%s run_id=%s", job.get("id"), run_id)
     cases_saved = 0
     negative_saved = 0
     status = "success"
@@ -436,7 +490,9 @@ def run_job_combination(
     except Exception as exc:
         status = "error"
         error_message = str(exc)
+        LOGGER.warning("[peak-hunter-runner] run failed error=%s", exc)
     finish_run(conn, run_id, status, peaks_detected, cases_saved, negative_saved, error_message)
+    LOGGER.info("[peak-hunter-runner] cases_saved=%s negative_sample_saved=%s skipped_duplicate=%s", cases_saved, negative_saved, 1 if status == "skipped_duplicate" else 0)
     return dict(conn.execute("SELECT * FROM peak_hunter_job_runs WHERE id = ?", (run_id,)).fetchone())
 
 

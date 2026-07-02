@@ -848,6 +848,22 @@
       color: #374151;
     }
 
+    .help-tip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-left: 4px;
+      border: 1px solid rgba(100, 116, 139, .45);
+      border-radius: 50%;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: help;
+      vertical-align: middle;
+    }
+
     .placeholder-panel {
       min-height: 240px;
       display: grid;
@@ -1100,7 +1116,7 @@
           <i data-lucide="activity"></i><span>Peak Hunter</span>
         </button>
         <button id="bgpNavButton" type="button" data-nav-view="bgp">
-          <i data-lucide="shield-check"></i><span>BGP / Mitigacao</span>
+          <i data-lucide="shield-check"></i><span>BGP / Mitigação</span>
         </button>
         <button id="systemNavButton" type="button" data-nav-view="system">
           <i data-lucide="activity"></i><span>Sistema</span>
@@ -1114,8 +1130,8 @@
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas">
           <i data-lucide="bell"></i><span>Alertas</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Configuracoes">
-          <i data-lucide="settings"></i><span>Configuracoes</span>
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Configurações">
+          <i data-lucide="settings"></i><span>Configurações</span>
         </button>
         <button id="logoutButton" type="button">
           <i data-lucide="log-out"></i><span>Sair</span>
@@ -1168,7 +1184,7 @@
               <select id="dashboardZone" class="form-select form-select-sm" aria-label="Grupo de Prefixos / Cliente">
                 <option value="">Grupo de Prefixos / Cliente</option>
               </select>
-              <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone">
+              <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direção da IP Zone">
                 <option value="transmits">Saindo da zona</option>
                 <option value="receives">Entrando na zona</option>
                 <option value="both" selected>Envolvendo a zona</option>
@@ -1318,8 +1334,8 @@
           <section class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
               <div>
-                <div class="panel-title">Historico de Anomalias</div>
-                <div id="dashboardAnomaliesStatus" class="metric-readout">Resumo de analises salvas pelo Peak Hunter.</div>
+                <div class="panel-title">Histórico de Anomalias</div>
+                <div id="dashboardAnomaliesStatus" class="metric-readout">Resumo de análises salvas pelo Peak Hunter.</div>
               </div>
             </div>
             <div class="database-metrics-grid mb-3">
@@ -1365,12 +1381,12 @@
                   <tr>
                     <th>Horario BRT</th>
                     <th>Interface</th>
-                    <th>Direcao</th>
+                    <th>Direção</th>
                     <th>Protocolo</th>
                     <th>Classificacao</th>
                     <th class="text-end">Pico</th>
-                    <th>Evidencia</th>
-                    <th>Acao</th>
+                    <th>Evidência</th>
+                    <th>Ação</th>
                     <th>Origem</th>
                     <th></th>
                   </tr>
@@ -1546,7 +1562,7 @@
               <select id="mapMode" class="form-select form-select-sm" aria-label="Modo do mapa">
                 <option value="flows" selected>Fluxos</option>
                 <option value="active">Anomalias ativas</option>
-                <option value="history">Historico de anomalias</option>
+                <option value="history">Histórico de anomalias</option>
               </select>
               <select id="mapSensor" class="form-select form-select-sm" aria-label="Sensor">
                 <option value="">Todos os sensores</option>
@@ -1557,12 +1573,12 @@
               <select id="mapZone" class="form-select form-select-sm" aria-label="Grupo de Prefixos / Cliente">
                 <option value="">Grupo de Prefixos / Cliente</option>
               </select>
-              <select id="mapZoneDirection" class="form-select form-select-sm" aria-label="Direcao da IP Zone no mapa">
+              <select id="mapZoneDirection" class="form-select form-select-sm" aria-label="Direção da IP Zone no mapa">
                 <option value="transmits">Saindo da zona</option>
                 <option value="receives">Entrando na zona</option>
                 <option value="both" selected>Envolvendo a zona</option>
               </select>
-              <select id="mapDirection" class="form-select form-select-sm" aria-label="Direcao">
+              <select id="mapDirection" class="form-select form-select-sm" aria-label="Direção">
                 <option value="both">Bidirecional</option>
                 <option value="download">Download</option>
                 <option value="upload">Upload</option>
@@ -1574,7 +1590,7 @@
                 <option value="1">ICMP</option>
                 <option value="TCP+SYN">TCP+SYN</option>
               </select>
-              <select id="mapMetric" class="form-select form-select-sm" aria-label="Metrica">
+              <select id="mapMetric" class="form-select form-select-sm" aria-label="Métrica">
                 <option value="bits_s">bits/s</option>
                 <option value="packets_s">packets/s</option>
                 <option value="flows">flows</option>
@@ -1635,7 +1651,7 @@
               <div class="field">
                 <label for="mapAnomalyStatus">Status</label>
                 <select id="mapAnomalyStatus" class="form-select form-select-sm">
-                  <option value="">Historico</option>
+                  <option value="">Histórico</option>
                   <option value="acknowledged">Acknowledged</option>
                   <option value="closed">Closed</option>
                 </select>
@@ -1872,7 +1888,7 @@
                       </select>
                     </div>
                     <div class="field">
-                      <label for="topFlowDirection">Direcao</label>
+                      <label for="topFlowDirection">Direção</label>
                       <select id="topFlowDirection" class="form-select form-select-sm">
                         <option value="both">Ambos</option>
                         <option value="upload">Upload</option>
@@ -2192,7 +2208,7 @@
                   <select id="sensorSampleRateMode" class="form-select form-select-sm">
                     <option value="sensor_default">Padrao do sensor</option>
                     <option value="per_interface">Por interface</option>
-                    <option value="snmp_auto">Automatico por SNMP</option>
+                    <option value="snmp_auto">Automático por SNMP</option>
                   </select>
                 </div>
                 <div class="field">
@@ -2226,7 +2242,7 @@
                 <div class="panel-title">Collector Config</div>
                 <div id="collectorApplyStatus" class="metric-readout">Aguardando aplicacao</div>
               </div>
-              <pre id="collectorApplyResult" class="result-box">Nenhuma configuracao aplicada.</pre>
+              <pre id="collectorApplyResult" class="result-box">Nenhuma configuração aplicada.</pre>
             </section>
           </div>
 
@@ -2437,7 +2453,7 @@
                     <i data-lucide="trash"></i><span>Limpar</span>
                   </button>
                   <div class="field">
-                    <label for="databaseCleanupConfirm">Confirmacao</label>
+                    <label for="databaseCleanupConfirm">Confirmação</label>
                     <input id="databaseCleanupConfirm" class="form-control form-control-sm" placeholder="LIMPAR">
                   </div>
                   <div class="field">
@@ -2516,7 +2532,7 @@
                 <i data-lucide="rotate-ccw"></i><span>Reativar zona</span>
               </button>
               <button id="testIpZoneDetectionButton" type="button" class="btn btn-sm btn-outline-success">
-                <i data-lucide="play-circle"></i><span>Testar deteccao agora</span>
+                <i data-lucide="play-circle"></i><span>Testar detecção agora</span>
               </button>
             </div>
           </div>
@@ -2565,7 +2581,7 @@
                   </div>
                   <div class="field grid-span-3">
                     <label for="ipZoneDescription">Descricao</label>
-                    <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observacoes da zona">
+                    <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observações da zona">
                   </div>
                 </div>
                 <div class="panel p-3 mt-3">
@@ -2584,8 +2600,8 @@
               <section class="panel p-3 mt-3">
                 <div class="d-flex justify-content-between align-items-center gap-2">
                   <div>
-                    <div class="panel-title">Acoes avancadas da zona</div>
-                    <div id="ipZoneAdvancedStatus" class="metric-readout">Exclusao definitiva remove a zona e seus prefixos quando nao ha historico vinculado.</div>
+                    <div class="panel-title">Ações avancadas da zona</div>
+                    <div id="ipZoneAdvancedStatus" class="metric-readout">Exclusao definitiva remove a zona e seus prefixos quando nao ha histórico vinculado.</div>
                   </div>
                   <button id="purgeIpZoneButton" type="button" class="btn btn-sm btn-outline-danger">
                     <i data-lucide="trash-2"></i><span>Excluir definitivamente</span>
@@ -2597,7 +2613,7 @@
                 <div class="d-flex flex-column flex-xl-row justify-content-between gap-2">
                   <div>
                     <div class="panel-title">Diagnostico de cobertura de flow</div>
-                    <div id="ipZoneCoverageStatus" class="metric-readout">Compare trafego por prefixo com input_if/output_if.</div>
+                    <div id="ipZoneCoverageStatus" class="metric-readout">Compare tráfego por prefixo com input_if/output_if.</div>
                   </div>
                   <div class="toolbar">
                     <select id="ipZoneCoverageRange" class="form-select form-select-sm" aria-label="Periodo do diagnostico">
@@ -2747,12 +2763,12 @@
                   </div>
                   <div class="field grid-span-3">
                     <label for="ipZonePrefixDescription">Descricao</label>
-                    <input id="ipZonePrefixDescription" class="form-control form-control-sm" placeholder="Observacoes do prefixo">
+                    <input id="ipZonePrefixDescription" class="form-control form-control-sm" placeholder="Observações do prefixo">
                   </div>
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                    <thead><tr><th>CIDR</th><th>Nome</th><th>Tipo</th><th>Status</th><th>Acoes</th></tr></thead>
+                    <thead><tr><th>CIDR</th><th>Nome</th><th>Tipo</th><th>Status</th><th>Ações</th></tr></thead>
                     <tbody id="ipZonePrefixTable"></tbody>
                   </table>
                 </div>
@@ -2815,7 +2831,7 @@
                       <i data-lucide="plus"></i><span>Nova regra</span>
                     </button>
                     <button id="learnDetectionRuleButton" type="button" class="btn btn-sm btn-outline-secondary">
-                      <i data-lucide="brain"></i><span>Aprender com trafego</span>
+                      <i data-lucide="brain"></i><span>Aprender com o tráfego</span>
                     </button>
                     <button id="migrateLegacyVectorButton" type="button" class="btn btn-sm btn-outline-secondary">
                       <i data-lucide="arrow-right-left"></i><span>Migrar do legado</span>
@@ -3031,7 +3047,7 @@
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th>Warning response</th><th>Critical response</th><th>Mitigation</th><th>Whitelist</th><th>Safe</th><th>Acoes</th></tr></thead>
+                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th>Warning response</th><th>Critical response</th><th>Mitigation</th><th>Whitelist</th><th>Safe</th><th>Ações</th></tr></thead>
                     <tbody id="detectionRuleTable"></tbody>
                   </table>
                 </div>
@@ -3042,7 +3058,7 @@
           <section class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">Whitelist de deteccao</div>
+                <div class="panel-title">Whitelist de detecção</div>
                 <div id="detectionWhitelistStatus" class="metric-readout">Regras de excecao informativa</div>
               </div>
               <div class="toolbar">
@@ -3107,12 +3123,12 @@
               </div>
               <div class="field grid-span-3">
                 <label for="detectionWhitelistDescription">Descricao</label>
-                <input id="detectionWhitelistDescription" class="form-control form-control-sm" placeholder="Observacoes da whitelist">
+                <input id="detectionWhitelistDescription" class="form-control form-control-sm" placeholder="Observações da whitelist">
               </div>
             </div>
             <div class="table-wrap">
               <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                <thead><tr><th>Nome</th><th>Tipo</th><th>Origem</th><th>Destino</th><th>Protocol</th><th>Vector</th><th>Zona</th><th>Status</th><th>Acoes</th></tr></thead>
+                <thead><tr><th>Nome</th><th>Tipo</th><th>Origem</th><th>Destino</th><th>Protocol</th><th>Vector</th><th>Zona</th><th>Status</th><th>Ações</th></tr></thead>
                 <tbody id="detectionWhitelistTable"></tbody>
               </table>
             </div>
@@ -3130,7 +3146,7 @@
                 </select>
                 <input id="candidateRangeMinutes" type="number" min="1" max="259200" step="1" class="form-control form-control-sm" value="120" style="width: 110px;" aria-label="Range minutos">
                 <button id="runZoneDetectionButton" type="button" class="btn btn-sm btn-outline-success">
-                  <i data-lucide="play-circle"></i><span>Testar deteccao agora</span>
+                  <i data-lucide="play-circle"></i><span>Testar detecção agora</span>
                 </button>
                 <button id="createSecurityAnomaliesButton" type="button" class="btn btn-sm btn-success">
                   <i data-lucide="siren"></i><span>Gerar anomalias informativas</span>
@@ -3157,7 +3173,7 @@
             </div>
             <div class="table-wrap d-none">
               <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
-                <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Acoes</th></tr></thead>
+                <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Ações</th></tr></thead>
                 <tbody id="securityAnomalyTable"></tbody>
               </table>
             </div>
@@ -3168,7 +3184,7 @@
           <div class="view-header">
             <div>
               <h1 class="view-title">Vetores de Ataque</h1>
-              <div id="attackVectorStatus" class="subtle">Grupos/templates de vetores, thresholds e regras de deteccao</div>
+              <div id="attackVectorStatus" class="subtle">Grupos/templates de vetores, thresholds e regras de detecção</div>
             </div>
             <div class="toolbar">
               <button id="refreshAttackVectorsButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -3252,7 +3268,7 @@
                   </div>
                   <div class="field grid-span-3">
                     <label for="avTemplateDescription">Descricao</label>
-                    <input id="avTemplateDescription" class="form-control form-control-sm" placeholder="Observacoes do template">
+                    <input id="avTemplateDescription" class="form-control form-control-sm" placeholder="Observações do template">
                   </div>
                 </div>
               </section>
@@ -3265,7 +3281,7 @@
                   </div>
                   <div class="toolbar">
                     <button id="learnAttackVectorsButton" type="button" class="btn btn-sm btn-outline-success">
-                      <i data-lucide="brain-circuit"></i><span>Aprender com trafego</span>
+                      <i data-lucide="brain-circuit"></i><span>Aprender com o tráfego</span>
                     </button>
                     <button id="addVectorButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="plus"></i><span>Adicionar vetor</span>
@@ -3283,14 +3299,14 @@
                         <th>Filtros</th>
                         <th>Sensor</th>
                         <th>Interface</th>
-                        <th>Direcao</th>
+                        <th>Direção</th>
                         <th>Comparacao</th>
                         <th class="text-end">Valor</th>
                         <th>Unidade</th>
                         <th>Decoder</th>
                         <th>Severidade</th>
                         <th>Resposta</th>
-                        <th>Acoes</th>
+                        <th>Ações</th>
                       </tr>
                     </thead>
                     <tbody id="attackVectorTable"></tbody>
@@ -3314,7 +3330,7 @@
                     <select id="attackSuggestionSensorFilter" class="form-select form-select-sm"></select>
                   </div>
                   <div class="field">
-                    <label for="attackSuggestionDirectionFilter">Direcao</label>
+                    <label for="attackSuggestionDirectionFilter">Direção</label>
                     <select id="attackSuggestionDirectionFilter" class="form-select form-select-sm"></select>
                   </div>
                   <div class="field">
@@ -3331,7 +3347,7 @@
                     <thead>
                       <tr>
                         <th>Sensor</th>
-                        <th>Direcao</th>
+                        <th>Direção</th>
                         <th>Decoder</th>
                         <th>Unidade</th>
                         <th class="text-end">p95</th>
@@ -3341,7 +3357,7 @@
                         <th class="text-end">Margem</th>
                         <th>Confianca</th>
                         <th>Motivo</th>
-                        <th>Acoes</th>
+                        <th>Ações</th>
                       </tr>
                     </thead>
                     <tbody id="attackSuggestionTable"></tbody>
@@ -3364,7 +3380,7 @@
               <input id="anomalyIdSearch" class="form-control form-control-sm" style="max-width:140px" placeholder="#ID">
               <div class="tab-strip" role="tablist" aria-label="Filtro de anomalias">
                 <button id="anomalyTabActive" type="button" class="active">Ativas</button>
-                <button id="anomalyTabHistory" type="button">Historico</button>
+                <button id="anomalyTabHistory" type="button">Histórico</button>
               </div>
               <button id="refreshAnomaliesButton" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
@@ -3402,23 +3418,23 @@
                     <th>ID</th>
                     <th>Severidade</th>
                     <th>Inicio</th>
-                    <th>Ultima deteccao</th>
-                    <th>Duracao</th>
+                    <th>Ultima detecção</th>
+                    <th>Duração</th>
                     <th>Sensor</th>
                     <th>Interface</th>
                     <th>Origem</th>
                     <th>Fonte</th>
                     <th>Regra/Vetor</th>
                     <th>Alvo</th>
-                    <th>Direcao</th>
+                    <th>Direção</th>
                     <th>Decoder</th>
-                    <th>Metrica</th>
+                    <th>Métrica</th>
                     <th class="text-end">Threshold</th>
                     <th class="text-end">Pico observado</th>
                     <th class="text-end">Total estimado</th>
                     <th class="text-end">Flows</th>
                     <th>Resumo</th>
-                    <th>Acoes</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="anomaliesTable"></tbody>
@@ -3430,7 +3446,7 @@
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
                 <div class="panel-title">Detalhes por IP /32</div>
-                <div id="securityAnomaliesMainStatus" class="metric-readout">Deteccoes IP Zone sao evidencias por IP /32 vinculadas as anomalias consolidadas.</div>
+                <div id="securityAnomaliesMainStatus" class="metric-readout">Deteccoes IP Zone sao evidências por IP /32 vinculadas as anomalias consolidadas.</div>
               </div>
             </div>
             <div class="table-wrap">
@@ -3453,8 +3469,8 @@
                     <th>Status</th>
                     <th>Response</th>
                     <th>Mensagem</th>
-                    <th>Acao recomendada</th>
-                    <th>Acoes</th>
+                    <th>Ação recomendada</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="securityAnomaliesMainTable"></tbody>
@@ -3478,10 +3494,10 @@
 
           <div class="toolbar mb-3">
             <button type="button" class="btn btn-sm btn-success peak-hunter-tab-button" data-peak-hunter-tab="manual">
-              <i data-lucide="search"></i><span>Analise manual</span>
+              <i data-lucide="search"></i><span>Análise manual</span>
             </button>
             <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="history">
-              <i data-lucide="database"></i><span>Historico / Dataset</span>
+              <i data-lucide="database"></i><span>Histórico / Dataset</span>
             </button>
             <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="automation">
               <i data-lucide="timer"></i><span>Automacao / Coleta</span>
@@ -3492,7 +3508,7 @@
           <section class="panel p-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
               <div>
-                <div class="panel-title">Analise de pico</div>
+                <div class="panel-title">Análise de pico</div>
                 <div class="metric-readout">Peak Hunter não aplica mitigação automaticamente. apply_enabled sempre false.</div>
               </div>
               <span class="badge-soft warn">Manual review</span>
@@ -3510,14 +3526,14 @@
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterDirection">Direcao</label>
+                <label for="peakHunterDirection">Direção</label>
                 <select id="peakHunterDirection" class="form-select form-select-sm">
                   <option value="sends">sends</option>
                   <option value="receives">receives</option>
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterMetric">Metrica</label>
+                <label for="peakHunterMetric">Métrica</label>
                 <select id="peakHunterMetric" class="form-select form-select-sm">
                   <option value="packets_s">packets_s</option>
                   <option value="bits_s">bits_s</option>
@@ -3582,7 +3598,7 @@
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
                 <div class="panel-title">Resultado</div>
-                <div id="peakHunterResultStatus" class="metric-readout">Nenhuma analise executada.</div>
+                <div id="peakHunterResultStatus" class="metric-readout">Nenhuma análise executada.</div>
               </div>
               <div class="toolbar">
                 <button id="peakHunterCopyVectorButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -3612,18 +3628,18 @@
                 <div id="peakHunterPeaksAnalyzed" class="metric-value">-</div>
               </div>
               <div class="metric-card">
-                <div class="metric-label">Evidencia</div>
+                <div class="metric-label">Evidência</div>
                 <div id="peakHunterEvidenceStatus" class="metric-value">-</div>
               </div>
               <div class="metric-card">
-                <div class="metric-label">Mitigacao permitida</div>
+                <div class="metric-label">Mitigação permitida</div>
                 <div id="peakHunterMitigationAllowed" class="metric-value">-</div>
               </div>
             </div>
             <div id="peakHunterSummary" class="d-flex flex-wrap gap-2 mb-3"></div>
             <div id="peakHunterDominantReadable" class="metric-readout mb-3">Grupo dominante: -</div>
             <div id="peakHunterRecommendationCards" class="database-metrics-grid mb-3"></div>
-            <div id="peakHunterEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidencia parcial. A regra criada deve ser revisada com cuidado.</div>
+            <div id="peakHunterEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidência parcial. A regra criada deve ser revisada com cuidado.</div>
             <div id="peakHunterActionToolbar" class="toolbar d-none mb-3">
               <button id="peakHunterCreateRuleButton" type="button" class="btn btn-sm btn-outline-success" data-peak-action="detection-rule" data-source="result">
                 <i data-lucide="list-plus"></i><span>Criar regra</span>
@@ -3676,9 +3692,9 @@
                     <th>Horario UTC</th>
                     <th class="text-end">Valor</th>
                     <th class="text-end">Score</th>
-                    <th>Evidencia</th>
+                    <th>Evidência</th>
                     <th>Classificacao</th>
-                    <th>Mitigacao</th>
+                    <th>Mitigação</th>
                   </tr>
                 </thead>
                 <tbody id="peakHunterPeaksTable"></tbody>
@@ -3797,8 +3813,8 @@
           <section class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">Historico</div>
-                <div id="peakHunterHistoryStatus" class="metric-readout">Ultimas investigacoes salvas.</div>
+                <div class="panel-title">Histórico</div>
+                <div id="peakHunterHistoryStatus" class="metric-readout">Ultimas investigações salvas.</div>
               </div>
               <div class="toolbar">
                 <button id="peakHunterHistoryRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -3819,7 +3835,7 @@
                 <input id="peakHunterHistoryInterfaceId" type="number" min="1" class="form-control form-control-sm">
               </div>
               <div class="field">
-                <label for="peakHunterHistoryEvidence">Evidencia</label>
+                <label for="peakHunterHistoryEvidence">Evidência</label>
                 <select id="peakHunterHistoryEvidence" class="form-select form-select-sm">
                   <option value="">Todas</option>
                   <option value="complete">complete</option>
@@ -3872,15 +3888,15 @@
                     <th>Horario do pico</th>
                     <th>Sensor</th>
                     <th>Interface</th>
-                    <th>Direcao</th>
-                    <th>Metrica</th>
+                    <th>Direção</th>
+                    <th>Métrica</th>
                     <th class="text-end">Pico</th>
                     <th>Classificacao</th>
-                    <th>Evidencia</th>
+                    <th>Evidência</th>
                     <th>Grupo dominante</th>
                     <th>Template</th>
                     <th>TTL</th>
-                    <th>Acao</th>
+                    <th>Ação</th>
                     <th>Origem</th>
                     <th>Job</th>
                     <th>Run</th>
@@ -3896,7 +3912,7 @@
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Detalhe do caso</div>
             <div id="peakHunterHistoryDetailStatus" class="metric-readout mb-3">Selecione uma investigacao.</div>
-            <div id="peakHunterHistoryEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidencia parcial. A regra criada deve ser revisada com cuidado.</div>
+            <div id="peakHunterHistoryEvidenceWarning" class="metric-readout text-warning d-none mb-2">Evidência parcial. A regra criada deve ser revisada com cuidado.</div>
             <div id="peakHunterHistoryActionToolbar" class="toolbar d-none mb-3">
               <button type="button" class="btn btn-sm btn-outline-success" data-peak-action="detection-rule" data-source="history">
                 <i data-lucide="list-plus"></i><span>Criar regra</span>
@@ -3964,7 +3980,7 @@
                 <input id="peakHunterFeedbackTtl" class="form-control form-control-sm">
               </div>
               <div class="field">
-                <label for="peakHunterFeedbackResolved">Resolvido por mitigacao</label>
+                <label for="peakHunterFeedbackResolved">Resolvido por mitigação</label>
                 <select id="peakHunterFeedbackResolved" class="form-select form-select-sm">
                   <option value="0">Nao</option>
                   <option value="1">Sim</option>
@@ -3988,7 +4004,7 @@
             <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
               <div>
                 <div class="panel-title">Automacao / Coleta</div>
-                <div id="peakHunterAutomationStatus" class="metric-readout">Jobs automaticos geram historico e dataset; mitigacao permanece desativada.</div>
+                <div id="peakHunterAutomationStatus" class="metric-readout">Jobs automáticos geram histórico e dataset; mitigação permanece desativada.</div>
               </div>
               <div class="toolbar">
                 <button id="peakHunterAutomationRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -3999,6 +4015,8 @@
                 </button>
               </div>
             </div>
+
+            <div id="peakHunterAutomationStatusCards" class="metric-grid mb-3"></div>
 
             <form id="peakHunterJobForm" class="peak-hunter-form-grid">
               <input id="peakHunterJobId" type="hidden">
@@ -4022,7 +4040,7 @@
                 <input id="peakHunterJobInterfaceId" type="number" min="1" class="form-control form-control-sm" placeholder="Vazio = todas">
               </div>
               <div class="field">
-                <label for="peakHunterJobDirection">Direcao</label>
+                <label for="peakHunterJobDirection">Direção</label>
                 <select id="peakHunterJobDirection" class="form-select form-select-sm">
                   <option value="both">both</option>
                   <option value="sends">sends</option>
@@ -4030,7 +4048,7 @@
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterJobMetric">Metrica</label>
+                <label for="peakHunterJobMetric">Métrica</label>
                 <select id="peakHunterJobMetric" class="form-select form-select-sm">
                   <option value="packets_s">packets_s</option>
                   <option value="bits_s">bits_s</option>
@@ -4102,12 +4120,12 @@
                     <th>Status</th>
                     <th>Sensor</th>
                     <th>Interface</th>
-                    <th>Direcao</th>
-                    <th>Metrica</th>
+                    <th>Direção</th>
+                    <th>Métrica</th>
                     <th>Intervalo</th>
                     <th>Ultimo sucesso</th>
                     <th>Ultimo erro</th>
-                    <th>Acoes</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="peakHunterJobsTable"></tbody>
@@ -4127,8 +4145,8 @@
                     <th>Inicio</th>
                     <th>Sensor</th>
                     <th>Interface</th>
-                    <th>Direcao</th>
-                    <th>Metrica</th>
+                    <th>Direção</th>
+                    <th>Métrica</th>
                     <th class="text-end">Picos</th>
                     <th class="text-end">Casos</th>
                     <th class="text-end">Neg.</th>
@@ -4179,8 +4197,8 @@
         <section id="view-bgp" class="app-view">
           <div class="view-header">
             <div>
-              <h1 class="view-title">BGP / Mitigacao</h1>
-              <div id="bgpStatus" class="subtle">Fase 1: configuracao, validacao e dry-run</div>
+              <h1 class="view-title">BGP / Mitigação</h1>
+              <div id="bgpStatus" class="subtle">Fase 1: configuração, validação e dry-run</div>
             </div>
             <div class="toolbar">
               <button id="bgpPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -4195,8 +4213,8 @@
           <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">IA para mitigacao</div>
-                <div id="aiMitigationStatusText" class="metric-readout">IA desativada por padrao</div>
+                <div class="panel-title">IA para mitigação</div>
+                <div id="aiMitigationStatusText" class="metric-readout">IA desativada por padrão</div>
               </div>
               <div class="toolbar">
                 <button id="saveAiMitigationButton" type="button" class="btn btn-sm btn-success">
@@ -4280,7 +4298,7 @@
               <button id="saveBgpConnectorButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar conector</span></button>
               <button id="clearBgpConnectorButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Role</th><th>Backend</th><th>Modo</th><th>Peer</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpConnectorsTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Role</th><th>Backend</th><th>Modo</th><th>Peer</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpConnectorsTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -4290,9 +4308,9 @@
               <div class="field"><label for="bgpProfileName">Nome</label><input id="bgpProfileName" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpProfileConnector">Conector</label><select id="bgpProfileConnector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileType">Tipo</label><select id="bgpProfileType" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpProfileApproval">Aprovacao</label><select id="bgpProfileApproval" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpProfileAction">Acao</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpProfileRateLimit">Rate-limit padrao</label><input id="bgpProfileRateLimit" class="form-control form-control-sm" placeholder="100M"></div>
+              <div class="field"><label for="bgpProfileApproval">Aprovação</label><select id="bgpProfileApproval" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileAction">Ação</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileRateLimit">Rate-limit padrão</label><input id="bgpProfileRateLimit" class="form-control form-control-sm" placeholder="100M"></div>
               <div class="field"><label for="bgpProfileMinRateLimit">Rate-limit min</label><input id="bgpProfileMinRateLimit" class="form-control form-control-sm" placeholder="10M"></div>
               <div class="field"><label for="bgpProfileMaxRateLimit">Rate-limit max</label><input id="bgpProfileMaxRateLimit" class="form-control form-control-sm" placeholder="1G"></div>
               <div class="field"><label for="bgpProfileTarget">Alvo</label><select id="bgpProfileTarget" class="form-select form-select-sm"></select></div>
@@ -4302,8 +4320,8 @@
               <div class="field"><label for="bgpProfileDstPortSelector">Porta destino</label><select id="bgpProfileDstPortSelector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileDstPortValue">Valor porta</label><input id="bgpProfileDstPortValue" class="form-control form-control-sm" placeholder="53"></div>
               <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpProfileDuration">Duracao padrao (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
-              <div class="field"><label for="bgpProfileMaxDuration">Duracao maxima (s)</label><input id="bgpProfileMaxDuration" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
+              <div class="field"><label for="bgpProfileDuration">Duração padrão (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpProfileMaxDuration">Duração máxima (s)</label><input id="bgpProfileMaxDuration" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
               <div class="field"><label for="bgpProfileEnabled">Ativo</label><select id="bgpProfileEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
@@ -4312,7 +4330,7 @@
               <button id="attachLegacyBgpProfilesButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="link"></i><span>Associar legados ao conector</span></button>
               <label class="d-inline-flex align-items-center gap-1 small mb-0"><input id="activateLegacyBgpProfiles" type="checkbox"> ativar tambem</label>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Acao</th><th>Alvo</th><th>Filtro</th><th>Usado por</th><th>Status</th><th>Preview</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Ação</th><th>Alvo</th><th>Filtro</th><th>Usado por</th><th>Status</th><th>Preview</th><th>Ações</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -4321,7 +4339,7 @@
               <input id="bgpPolicyId" type="hidden">
               <div class="field"><label for="bgpPolicyName">Nome</label><input id="bgpPolicyName" class="form-control form-control-sm" placeholder="DNS_RESPONSE_REFLECTION"></div>
               <div class="field"><label for="bgpPolicyProtocol">Protocolo</label><select id="bgpPolicyProtocol" class="form-select form-select-sm"><option value="udp">udp</option><option value="tcp">tcp</option><option value="icmp">icmp</option><option value="any">any</option></select></div>
-              <div class="field"><label for="bgpPolicyPortKind">Direcao porta</label><select id="bgpPolicyPortKind" class="form-select form-select-sm"><option value="source">source</option><option value="destination">destination</option><option value="both">both</option></select></div>
+              <div class="field"><label for="bgpPolicyPortKind">Direção porta</label><select id="bgpPolicyPortKind" class="form-select form-select-sm"><option value="source">source</option><option value="destination">destination</option><option value="both">both</option></select></div>
               <div class="field"><label for="bgpPolicyPortValue">Porta</label><input id="bgpPolicyPortValue" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpPolicyCritical">Critico</label><select id="bgpPolicyCritical" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
               <div class="field"><label for="bgpPolicyRequireScope">Exige IP/prefixo</label><select id="bgpPolicyRequireScope" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
@@ -4333,7 +4351,7 @@
               <button id="saveBgpPolicyButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar politica</span></button>
               <button id="clearBgpPolicyButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Nova</span></button>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Proto</th><th>Porta</th><th>Critico</th><th>Port-only auto</th><th>Min dst/src</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpPoliciesTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Proto</th><th>Porta</th><th>Critico</th><th>Port-only auto</th><th>Min dst/src</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpPoliciesTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -4349,7 +4367,7 @@
               <button id="saveBgpProtectedButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar prefixo</span></button>
               <button id="clearBgpProtectedButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>CIDR</th><th>Nome</th><th>Motivo</th><th>Status</th><th>Acoes</th></tr></thead><tbody id="bgpProtectedTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>CIDR</th><th>Nome</th><th>Motivo</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpProtectedTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -4357,16 +4375,16 @@
             <div class="subtle mb-2">TTL e interno do GMJ-FLOW. Nao e enviado ao BGP. O ExaBGP recebe somente announce ou withdraw.</div>
             <div class="flow-search-grid mb-2">
               <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpDryAction">Acao</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
+              <div class="field"><label for="bgpDryAction">Ação</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
               <div class="field"><label for="bgpDrySrcIp">Src IP/CIDR</label><input id="bgpDrySrcIp" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryDstIp">Dst IP/CIDR</label><input id="bgpDryDstIp" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
               <div class="field"><label for="bgpDrySrcPort">Src port</label><input id="bgpDrySrcPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryThenAction">Acao FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
+              <div class="field"><label for="bgpDryThenAction">Ação FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
               <div id="bgpDryRateLimitField" class="field"><label for="bgpDryRateLimit">Limite</label><input id="bgpDryRateLimit" class="form-control form-control-sm" placeholder="ex: 100M, 500K, 1G"><div id="bgpDryRatePreview" class="subtle"></div></div>
               <div class="field"><label for="bgpDryDuration">TTL interno (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
-              <div class="field"><label for="bgpDryConfirm">Confirmacao</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
+              <div class="field"><label for="bgpDryConfirm">Confirmação</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
             </div>
             <div class="toolbar mb-2">
               <button id="previewBgpDryRunButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eye"></i><span>Gerar preview</span></button>
@@ -4378,11 +4396,11 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Sugestoes pending_approval</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Comando</th><th>Acoes</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Announcements ativos</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Alvo</th><th>Retirada automatica</th><th>Comandos</th><th>Acoes</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
-            <div class="panel-title mb-2">Historico</div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Acao</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Retirada automatica</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Histórico</div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
           </section>
         </section>
 
@@ -4395,6 +4413,131 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="trafficLearningModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="trafficLearningModalTitle">
+    <div class="gmj-dialog wide">
+      <div class="gmj-dialog-header">
+        <h2 id="trafficLearningModalTitle" class="view-title">Aprender com o tráfego</h2>
+        <button type="button" class="icon-button" data-close-modal="trafficLearningModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="peak-hunter-form-grid mb-3">
+          <div class="field">
+            <label for="trafficLearnScope">Escopo de aprendizado</label>
+            <select id="trafficLearnScope" class="form-select form-select-sm">
+              <option value="total">Tráfego total da zona</option>
+              <option value="prefix">Por prefixo</option>
+              <option value="internal_ip">Por IP interno /32</option>
+              <option value="interface">Por interface</option>
+              <option value="port_protocol">Por porta/protocolo</option>
+              <option value="destination">Por destino externo</option>
+              <option value="dst_asn">Por ASN destino</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnSensor">Sensor</label>
+            <select id="trafficLearnSensor" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnInterface">Interface</label>
+            <select id="trafficLearnInterface" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnZone">Zona/prefixo</label>
+            <select id="trafficLearnZone" class="form-select form-select-sm"></select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnDirection">Direção</label>
+            <select id="trafficLearnDirection" class="form-select form-select-sm">
+              <option value="receives">Entrada na zona</option>
+              <option value="sends">Saída da zona</option>
+              <option value="both">Ambos</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnMetric">Métrica</label>
+            <select id="trafficLearnMetric" class="form-select form-select-sm">
+              <option value="bits_s">bits_s</option>
+              <option value="packets_s">packets_s</option>
+              <option value="flows_s">flows_s</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnProtocol">Protocolo</label>
+            <select id="trafficLearnProtocol" class="form-select form-select-sm">
+              <option value="any">any</option>
+              <option value="udp">udp</option>
+              <option value="tcp">tcp</option>
+              <option value="icmp">icmp</option>
+              <option value="dns">dns</option>
+              <option value="gre">gre</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnPeriod">Período</label>
+            <select id="trafficLearnPeriod" class="form-select form-select-sm">
+              <option value="1h">última 1h</option>
+              <option value="6h">últimas 6h</option>
+              <option value="24h">últimas 24h</option>
+              <option value="7d">últimos 7d</option>
+              <option value="custom">custom</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnStart">Início custom</label>
+            <input id="trafficLearnStart" type="datetime-local" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="trafficLearnEnd">Fim custom</label>
+            <input id="trafficLearnEnd" type="datetime-local" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="trafficLearnExcludeAnomalies">Ignorar anomalias</label>
+            <select id="trafficLearnExcludeAnomalies" class="form-select form-select-sm">
+              <option value="true">Sim</option>
+              <option value="false">Não</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnExcludePeakHunter">Ignorar Peak Hunter</label>
+            <select id="trafficLearnExcludePeakHunter" class="form-select form-select-sm">
+              <option value="true">Sim</option>
+              <option value="false">Não</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnTopPercent">Ignorar top buckets</label>
+            <select id="trafficLearnTopPercent" class="form-select form-select-sm">
+              <option value="1">top 1%</option>
+              <option value="5">top 5%</option>
+              <option value="0">não remover</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="trafficLearnStability">Sensibilidade sugerida</label>
+            <select id="trafficLearnStability" class="form-select form-select-sm">
+              <option value="conservadora">conservadora</option>
+              <option value="media">média</option>
+              <option value="agressiva">agressiva</option>
+            </select>
+          </div>
+        </div>
+        <div id="trafficLearnSummary" class="metric-grid mb-3"></div>
+        <div id="trafficLearnChart" class="bg-light border rounded p-2 mb-3" style="min-height:150px;"></div>
+        <pre id="trafficLearnOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:120px;"></pre>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="trafficLearnCancelButton" type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="trafficLearningModal">Cancelar</button>
+        <div class="toolbar">
+          <button id="trafficLearnAnalyzeButton" type="button" class="btn btn-sm btn-outline-success"><i data-lucide="activity"></i><span>Analisar baseline</span></button>
+          <button id="trafficLearnApplyButton" type="button" class="btn btn-sm btn-success"><i data-lucide="wand-2"></i><span>Aplicar à regra atual</span></button>
+          <button id="trafficLearnDraftButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="file-plus-2"></i><span>Salvar como rascunho</span></button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -4450,10 +4593,10 @@
             <select id="modalVectorInterface" class="form-select form-select-sm"></select>
           </div>
           <div class="field">
-            <label for="modalVectorDirection">Direcao</label>
+            <label for="modalVectorDirection">Direção</label>
             <select id="modalVectorDirection" class="form-select form-select-sm"></select>
           </div>
-          <div class="form-section-title">Filtros de trafego</div>
+          <div class="form-section-title">Filtros de tráfego</div>
           <div class="field">
             <label for="modalVectorProtocol">Protocolo</label>
             <select id="modalVectorProtocol" class="form-select form-select-sm"></select>
@@ -4733,14 +4876,14 @@
         <div class="panel p-3 mt-3">
           <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
             <div>
-              <div class="panel-title">Analise IA</div>
-              <div id="anomalyAiStatus" class="metric-readout">Nenhuma analise carregada.</div>
+              <div class="panel-title">Análise IA</div>
+              <div id="anomalyAiStatus" class="metric-readout">Nenhuma análise carregada.</div>
             </div>
             <button id="runAnomalyAiButton" type="button" class="btn btn-sm btn-outline-secondary">
               <i data-lucide="sparkles"></i><span>Analisar com IA</span>
             </button>
           </div>
-          <div id="anomalyAiAnalysisBlock" class="subtle">Sem analise IA para esta anomalia.</div>
+          <div id="anomalyAiAnalysisBlock" class="subtle">Sem análise IA para esta anomalia.</div>
         </div>
         <div class="row g-3 mt-2">
           <div class="col-12 col-xl-5">
@@ -5131,6 +5274,7 @@
     let peakHunterCurrentDraft = null;
     let peakHunterAutomationJobs = [];
     let peakHunterCurrentJobId = null;
+    let trafficLearningLastResult = null;
     let sensorCache = [];
     let currentSensorId = null;
     let currentInterfaces = [];
@@ -6607,7 +6751,7 @@
     }
 
     function detectionResponseLabel(value) {
-      return String(value || 'DETECTION_ONLY') === 'DETECTION_ONLY' ? 'Deteccao apenas informativa' : String(value || '-');
+      return String(value || 'DETECTION_ONLY') === 'DETECTION_ONLY' ? 'Detecção apenas informativa' : String(value || '-');
     }
 
     function detectionDomainLabel(value) {
@@ -6724,12 +6868,12 @@
       setText(
         'ipZoneAdvancedStatus',
         hasZone
-          ? 'Exclusao definitiva remove a zona e seus prefixos quando nao ha historico vinculado.'
-          : 'Selecione uma zona antes de usar acoes avancadas.'
+          ? 'Exclusao definitiva remove a zona e seus prefixos quando nao ha histórico vinculado.'
+          : 'Selecione uma zona antes de usar ações avancadas.'
       );
     }
 
-    function resetIpZoneCoverage(message = 'Compare trafego por prefixo com input_if/output_if.') {
+    function resetIpZoneCoverage(message = 'Compare tráfego por prefixo com input_if/output_if.') {
       setText('ipZoneCoverageStatus', message);
       document.getElementById('ipZoneCoverageResult')?.classList.add('d-none');
       ['coverageSrcPairs', 'coverageDstPairs', 'coverageGeneralPairs', 'coverageSrcIps', 'coverageDstIps'].forEach(id => {
@@ -6799,7 +6943,7 @@
 
     async function disableIpZone() {
       if (!currentIpZoneId) return;
-      if (!confirm('Desativar esta IP Zone? Os prefixos e historico serao mantidos.')) return;
+      if (!confirm('Desativar esta IP Zone? Os prefixos e histórico serao mantidos.')) return;
       try {
         await apiRequest(`/api/ip-zones/${currentIpZoneId}`, { method: 'DELETE' });
         await loadIpZones();
@@ -6927,7 +7071,7 @@
 
     async function disableIpZonePrefix(prefixId) {
       if (!currentIpZoneId || !prefixId) return;
-      if (!confirm('Desativar este prefixo? Ele ficara oculto por padrao.')) return;
+      if (!confirm('Desativar este prefixo? Ele ficara oculto por padrão.')) return;
       try {
         await apiRequest(`/api/ip-zones/${currentIpZoneId}/prefixes/${prefixId}`, { method: 'DELETE' });
         await loadIpZoneFilters();
@@ -7150,6 +7294,175 @@
       } catch (error) {
         document.getElementById('detectionTemplateStatus').textContent = `Falha ao desativar grupo: ${error.message}`;
       }
+    }
+
+    async function openTrafficLearningModal() {
+      if (!currentDetectionTemplateId) {
+        setText('detectionRuleStatus', 'Selecione um Grupo de Vetores / Template antes de aprender com o tráfego.');
+        return;
+      }
+      trafficLearningLastResult = null;
+      document.getElementById('trafficLearnOutput').textContent = '';
+      document.getElementById('trafficLearnSummary').innerHTML = '';
+      document.getElementById('trafficLearnChart').innerHTML = '';
+      const sensors = peakHunterSensorOptionsCache.length ? peakHunterSensorOptionsCache : (await apiRequest('/api/peak-hunter/options/sensors')).items || [];
+      peakHunterSensorOptionsCache = sensors;
+      document.getElementById('trafficLearnSensor').innerHTML = '<option value="">Sensor</option>' + sensors.map(sensor => {
+        const value = sensor.sensor_name || sensor.sensor_id || '';
+        return `<option value="${escapeHtml(value)}">${escapeHtml(value || '-')}</option>`;
+      }).join('');
+      document.getElementById('trafficLearnZone').innerHTML = '<option value="">Todas</option>' + ipZones.map(zone => `<option value="${escapeHtml(zone.id)}">${escapeHtml(zone.name || zone.cidr || zone.id)}</option>`).join('');
+      document.getElementById('trafficLearnInterface').innerHTML = '<option value="">todas</option>';
+      openModal('trafficLearningModal');
+      createIcons();
+    }
+
+    async function refreshTrafficLearningInterfaces() {
+      const sensor = selectValue('trafficLearnSensor').trim();
+      const select = document.getElementById('trafficLearnInterface');
+      if (!sensor) {
+        select.innerHTML = '<option value="">todas</option>';
+        return;
+      }
+      select.innerHTML = '<option value="">Carregando...</option>';
+      const query = new URLSearchParams({ sensor });
+      const payload = await apiRequest(`/api/peak-hunter/options/interfaces?${query}`);
+      const interfaces = Array.isArray(payload.items) ? payload.items : [];
+      select.innerHTML = '<option value="">todas</option>' + interfaces.map(iface => `<option value="${escapeHtml(iface.interface_id)}">${escapeHtml(iface.label || `ifIndex ${iface.interface_id}`)}</option>`).join('');
+    }
+
+    function trafficLearningPayload() {
+      const period = selectValue('trafficLearnPeriod', '1h');
+      const payload = {
+        scope: selectValue('trafficLearnScope', 'total'),
+        sensor: selectValue('trafficLearnSensor').trim(),
+        interface_id: selectValue('trafficLearnInterface') ? Number(selectValue('trafficLearnInterface')) : null,
+        zone_id: selectValue('trafficLearnZone') ? Number(selectValue('trafficLearnZone')) : null,
+        direction: selectValue('trafficLearnDirection', 'both'),
+        metric: selectValue('trafficLearnMetric', 'packets_s'),
+        protocol: selectValue('trafficLearnProtocol', 'any'),
+        period,
+        exclude_anomaly_windows: boolSelectValue('trafficLearnExcludeAnomalies'),
+        exclude_peak_hunter_peaks: boolSelectValue('trafficLearnExcludePeakHunter'),
+        exclude_top_percent: numberValue('trafficLearnTopPercent', 1),
+        stability_mode: selectValue('trafficLearnStability', 'media'),
+        window_seconds: numberValue('detectionRuleWindow', 60) || 60
+      };
+      if (period === 'custom') {
+        payload.start_time = parsePeakHunterBrtInputToUtcIso(selectValue('trafficLearnStart'));
+        payload.end_time = parsePeakHunterBrtInputToUtcIso(selectValue('trafficLearnEnd'));
+      }
+      return payload;
+    }
+
+    function renderTrafficLearningResult(result) {
+      trafficLearningLastResult = result;
+      const baseline = result.baseline || {};
+      const suggested = result.suggested_rule || {};
+      document.getElementById('trafficLearnSummary').innerHTML = [
+        ['Buckets total', baseline.buckets_total || 0],
+        ['Buckets válidos', baseline.buckets_valid || 0],
+        ['Buckets removidos', baseline.buckets_removed || 0],
+        ['p95', formatNumber(baseline.p95 || 0)],
+        ['p99', formatNumber(baseline.p99 || 0)],
+        ['Max limpo', formatNumber(baseline.max_clean || 0)],
+        ['Warning sugerido', formatNumber(suggested.warning || 0)],
+        ['Critical sugerido', formatNumber(suggested.critical || 0)]
+      ].map(([label, value]) => `<div class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div></div>`).join('');
+      const chartPoints = [...(result.series || []).slice(-80), ...(result.removed_points || []).slice(-20).map(point => ({ ...point, removed: true }))].sort((a, b) => String(a.time).localeCompare(String(b.time)));
+      const maxValue = Math.max(...chartPoints.map(point => Number(point.value || 0)), Number(suggested.critical || 0), 1);
+      document.getElementById('trafficLearnChart').innerHTML = chartPoints.map(point => {
+        const width = Math.max(2, Math.round((Number(point.value || 0) / maxValue) * 100));
+        return `<div title="${escapeHtml(point.time || '')} ${escapeHtml(point.reason || '')}" style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span class="subtle" style="width:120px;">${escapeHtml(String(point.time || '').slice(11, 16))}</span><span style="height:8px;width:${width}%;background:${point.removed ? '#ef4444' : '#2563eb'};display:inline-block;"></span><span class="subtle">${escapeHtml(formatNumber(point.value || 0))}</span></div>`;
+      }).join('') || '<div class="subtle">Sem série para exibir.</div>';
+      document.getElementById('trafficLearnOutput').textContent = JSON.stringify({
+        baseline,
+        suggested_rule: suggested,
+        peak_hunter: result.peak_hunter,
+        notes: (result.notes || []).filter(Boolean)
+      }, null, 2);
+    }
+
+    async function analyzeTrafficLearning() {
+      if (!currentDetectionTemplateId) return;
+      document.getElementById('trafficLearnOutput').textContent = 'Analisando baseline...';
+      const result = await apiRequest(`/api/detection/templates/${currentDetectionTemplateId}/learn-from-traffic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(trafficLearningPayload())
+      });
+      renderTrafficLearningResult(result);
+    }
+
+    function applyTrafficLearningToRule(draftOnly = true) {
+      const suggested = trafficLearningLastResult?.suggested_rule;
+      if (!suggested) {
+        setText('detectionRuleStatus', 'Análise o baseline antes de aplicar a sugestão.');
+        return;
+      }
+      setValue('detectionRuleMetric', suggested.metric || selectValue('trafficLearnMetric', 'packets_s'));
+      setValue('detectionRuleWarning', Math.ceil(Number(suggested.warning || 0)));
+      setValue('detectionRuleCritical', Math.ceil(Number(suggested.critical || 0)));
+      setValue('detectionRuleWindow', suggested.window_seconds || 60);
+      setValue('detectionRuleConsecutive', suggested.consecutive_windows || suggested.consecutive || 2);
+      setValue('detectionRuleCooldown', suggested.cooldown_minutes || 5);
+      setValue('detectionRuleGroupBy', suggested.group_by || '');
+      setValue('detectionRuleMitigationMode', suggested.mitigation_mode || 'manual_review');
+      setBoolSelect('detectionRuleEnabled', false);
+      setText('detectionRuleStatus', draftOnly ? 'Sugestão aplicada como rascunho desativado.' : 'Sugestão aplicada à regra atual como desativada.');
+    }
+
+    function installHelpTooltips() {
+      const tooltips = {
+        detectionRuleVector: 'Nome lógico do vetor de ataque usado em histórico, agrupamento e relatórios.',
+        detectionRuleDomain: 'Domínio define o escopo analisado: IP interno, prefixo, interface, sensor, destino ou ASN.',
+        detectionRuleDirection: 'Direção do tráfego em relação à zona/prefixo/interface. Saída/upload normalmente usa IP interno como origem e destino externo como destino.',
+        detectionRuleProtocol: 'Protocolo usado no filtro da regra, como UDP, TCP, ICMP, DNS ou ALL.',
+        detectionRuleMetric: 'Métrica avaliada pela regra: bits_s, packets_s, flows_s ou contadores derivados.',
+        detectionRuleComparison: 'Operador usado para comparar a métrica observada com os thresholds.',
+        detectionRuleWarning: 'Limite inicial para gerar alerta de severidade menor. Normalmente usado para investigação sem mitigação.',
+        detectionRuleCritical: 'Limite mais alto para gerar anomalia crítica ou candidate de mitigação, sempre respeitando modo manual_review.',
+        detectionRuleWindow: 'Janela de cálculo em segundos. Exemplo: window=60 calcula a taxa média ou total dentro de blocos de 60 segundos.',
+        detectionRuleConsecutive: 'Quantidade de janelas consecutivas acima do threshold necessárias para abrir anomalia. Exemplo: consecutive=2 exige duas janelas seguidas acima do limite.',
+        detectionRuleCooldown: 'Tempo mínimo, em minutos, antes de gerar nova anomalia para a mesma regra/escopo. Evita alertas repetidos.',
+        detectionRuleSrcCidr: 'Filtro de origem. Use CIDR específico quando quiser limitar a regra a uma origem ou prefixo.',
+        detectionRuleDstCidr: 'Filtro de destino. Use CIDR específico quando quiser limitar a regra a um destino ou prefixo.',
+        detectionRuleSrcPort: 'Porta de origem usada no filtro. Aceita any ou valores suportados pela regra.',
+        detectionRuleDstPort: 'Porta de destino usada no filtro. Exemplo: 53 para DNS.',
+        detectionRuleTcpFlags: 'Flags TCP usadas para vetores como SYN flood.',
+        detectionRuleIcmpType: 'Tipo ICMP usado quando o protocolo é ICMP.',
+        detectionRuleIcmpCode: 'Código ICMP usado quando o protocolo é ICMP.',
+        detectionRuleGroupBy: 'Define como o tráfego será agrupado antes de aplicar a regra. Exemplo: src_ip,dst_ip,dst_port,protocol detecta uma conversa específica.',
+        detectionRuleInputIf: 'Interface de entrada usada como filtro adicional.',
+        detectionRuleOutputIf: 'Interface de saída usada como filtro adicional.',
+        detectionRuleWarningProfile: 'Response Profile usado ao atingir warning. Deve ser válido e normalmente exige aprovação manual.',
+        detectionRuleCriticalProfile: 'Response Profile usado ao atingir critical. Deve ser válido e normalmente exige aprovação manual.',
+        detectionRuleFallbackProfile: 'Response Profile alternativo usado quando não há profile específico por severidade.',
+        detectionRuleMitigationEnabled: 'Indica se a regra pode gerar candidate de mitigação. Não significa aplicação automática.',
+        detectionRuleMitigationMode: 'Define se a regra apenas detecta, gera candidate para revisão manual ou usa Response Profile. Não significa aplicação automática.',
+        detectionRuleDuration: 'Duração interna no GMJ-FLOW para retirada automática. O TTL não é enviado ao BGP.',
+        detectionRuleWhitelist: 'Controla se a whitelist global é aplicada antes de abrir anomalia ou candidate.',
+        bgpProfileConnector: 'Conector BGP/ExaBGP usado para enviar announce ou withdraw.',
+        bgpProfileApproval: 'Define se a ação exige aprovação manual. Por segurança, profiles devem usar manual_approval por padrão.',
+        bgpProfileAction: 'Ação principal do profile, como discard, accept ou rate-limit.',
+        bgpProfileTarget: 'Campo usado para montar o FlowSpec, como destino, origem ou origem+destino. Para upload/outbound, evitar bloquear origem interna sozinha.',
+        bgpProfileProtocol: 'Protocolo usado para renderizar o FlowSpec.',
+        bgpProfileSrcPortSelector: 'Porta de origem usada no match FlowSpec.',
+        bgpProfileDstPortSelector: 'Porta de destino usada no match FlowSpec.',
+        bgpProfileRateLimit: 'Valor de rate-limit usado quando action=rate_limit.',
+        bgpProfileDuration: 'TTL interno padrão para retirada automática. Não é enviado ao BGP.',
+        bgpProfileMaxDuration: 'Duração máxima permitida para anúncios gerados pelo profile.',
+        bgpDryDuration: 'TTL interno no GMJ-FLOW para retirada automática. O TTL não é enviado ao BGP.',
+        bgpDryConnector: 'Conector ExaBGP usado no laboratório manual.',
+        bgpDryThenAction: 'Ação FlowSpec renderizada no comando announce.',
+        bgpDryRateLimit: 'Rate-limit do FlowSpec manual quando a ação é rate_limit.',
+        bgpDryConfirm: 'Confirmação ANUNCIAR exigida antes de enviar announce real.'
+      };
+      Object.entries(tooltips).forEach(([id, text]) => {
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (!label || label.querySelector('.help-tip')) return;
+        label.insertAdjacentHTML('beforeend', ` <span class="help-tip" title="${escapeHtml(text)}">?</span>`);
+      });
     }
 
     function resetDetectionRuleForm(rule = null) {
@@ -7602,7 +7915,7 @@
       query.set('sensor_id', String(numberValue('candidateSensor', 1)));
       query.set('zone_id', String(currentIpZoneId));
       query.set('create_anomalies', createAnomalies ? 'true' : 'false');
-      document.getElementById('securityCandidateStatus').textContent = 'Executando deteccao informativa...';
+      document.getElementById('securityCandidateStatus').textContent = 'Executando detecção informativa...';
       try {
         const payload = await apiRequest(`/api/security/vectors/candidates?${query.toString()}`);
         securityCandidates = Array.isArray(payload.items) ? payload.items : [];
@@ -7708,7 +8021,7 @@
         const payload = await apiRequest(path);
         const items = Array.isArray(payload.items) ? payload.items : [];
         renderSecurityAnomaliesMain(items);
-        status.textContent = `${formatNumber(items.length)} eventos IP Zone ${tab === 'history' ? 'no historico' : 'ativos'}`;
+        status.textContent = `${formatNumber(items.length)} eventos IP Zone ${tab === 'history' ? 'no histórico' : 'ativos'}`;
       } catch (error) {
         status.textContent = `Falha IP Zone: ${error.message}`;
         renderSecurityAnomaliesMain([]);
@@ -8030,9 +8343,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function bgpActionImpactText(item) {
       const action = item?.action || item?.then_action;
-      if (action === 'rate_limit') return `Esta regra vai limitar o trafego correspondente a ${formatRateLimitBps(item.rate_limit_bps)}.`;
-      if (action === 'accept') return 'Esta regra vai aceitar explicitamente o trafego correspondente.';
-      return 'Esta regra vai descartar o trafego correspondente.';
+      if (action === 'rate_limit') return `Esta regra vai limitar o tráfego correspondente a ${formatRateLimitBps(item.rate_limit_bps)}.`;
+      if (action === 'accept') return 'Esta regra vai aceitar explicitamente o tráfego correspondente.';
+      return 'Esta regra vai descartar o tráfego correspondente.';
     }
 
     function renderBgpAnnouncements() {
@@ -8085,7 +8398,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(item.last_error || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="10" class="text-muted">Sem historico</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem histórico</td></tr>';
     }
 
     function renderBgpWorkspace() {
@@ -8101,7 +8414,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadBgpView() {
-      setText('bgpStatus', 'Carregando BGP / Mitigacao...');
+      setText('bgpStatus', 'Carregando BGP / Mitigação...');
       const [connectors, profiles, protectedPrefixes, policies, announcements] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles?include_disabled=true'),
@@ -8152,7 +8465,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('aiRamAvailable', status.system_memory_available_gb ? `${status.system_memory_available_gb} GB` : '-');
       setText('aiRecommendation', aiProfileText(status.recommendation));
       setText('aiReachable', status.enabled ? (status.reachable ? 'OK' : 'Offline') : 'Desativada');
-      setText('aiMitigationStatusText', status.enabled ? `IA ativa: ${status.provider} / ${status.selected_model}` : 'IA desativada por padrao');
+      setText('aiMitigationStatusText', status.enabled ? `IA ativa: ${status.provider} / ${status.selected_model}` : 'IA desativada por padrão');
       setText('aiProfileDescription', profile ? `${profile.name}: ${profile.description} RAM modelo ${profile.estimated_model_ram_gb} GB. Livre recomendado: ${profile.recommended_free_ram_gb} GB.` : '');
       setText('aiWarnings', (status.warnings || []).join(' | '));
     }
@@ -8167,7 +8480,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function saveAiMitigationSettings() {
-      setText('aiMitigationStatusText', 'Salvando configuracao IA...');
+      setText('aiMitigationStatusText', 'Salvando configuração IA...');
       const payload = {
         enabled: boolSelectValue('aiEnabled'),
         provider: selectValue('aiProvider', 'ollama'),
@@ -8187,7 +8500,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           body: JSON.stringify(payload)
         });
         renderAiMitigationStatus(status);
-        setText('aiTestOutput', 'Configuracao IA salva.');
+        setText('aiTestOutput', 'Configuração IA salva.');
       } catch (error) {
         setText('aiMitigationStatusText', `Falha ao salvar IA: ${error.message}`);
       }
@@ -8205,10 +8518,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function exportBgpPdf() {
-      setText('bgpStatus', 'Exportando PDF BGP / Mitigacao...');
+      setText('bgpStatus', 'Exportando PDF BGP / Mitigação...');
       try {
         await downloadAuthFile(`${API_BASE}/api/bgp/report.pdf`, 'gmj-bgp-mitigation.pdf');
-        setText('bgpStatus', 'PDF BGP / Mitigacao exportado');
+        setText('bgpStatus', 'PDF BGP / Mitigação exportado');
       } catch (error) {
         setText('bgpStatus', `Falha ao exportar PDF: ${error.message}`);
       }
@@ -8600,12 +8913,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       const confirm = selectValue('bgpDryConfirm').trim();
       if (requestedAction === 'announce' && action !== 'announce') {
-        const message = 'Acao selecionada esta como dry-run only. Preview sera gerado sem anunciar.';
+        const message = 'Ação selecionada esta como dry-run only. Preview sera gerado sem anunciar.';
         setText('bgpStatus', message);
         document.getElementById('bgpDryRunOutput').textContent = message;
       }
       if (action === 'announce' && confirm.toUpperCase() !== 'ANUNCIAR') {
-        const message = 'Confirmacao ANUNCIAR obrigatoria para anunciar agora.';
+        const message = 'Confirmação ANUNCIAR obrigatoria para anunciar agora.';
         setText('bgpStatus', message);
         document.getElementById('bgpDryRunOutput').textContent = message;
         return;
@@ -8640,7 +8953,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       currentAiMitigationAnalysis = null;
       await loadBgpView();
       setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
-      document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="subtle">Avaliando mitigacao sugerida...</div>';
+      document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="subtle">Avaliando mitigação sugerida...</div>';
       document.getElementById('bgpMitigationAiRecommendation').classList.add('d-none');
       document.getElementById('bgpMitigationAiRecommendation').innerHTML = '';
       document.getElementById('bgpMitigationOutput').textContent = '';
@@ -8660,10 +8973,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const isAiRecommended = currentAiMitigationAnalysis && Number(currentAiMitigationAnalysis.recommended_candidate_index) === index && !currentAiMitigationAnalysis.error_message;
         const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
         const basis = candidate.mitigation_basis === 'top_conversation'
-          ? 'Mitigacao por conversa principal'
+          ? 'Mitigação por conversa principal'
           : ['aggregated_dst_port', 'aggregated_src_port'].includes(candidate.mitigation_basis)
-            ? 'Mitigacao por destino/porta agregados'
-            : 'Mitigacao por alvo normalizado';
+            ? 'Mitigação por destino/porta agregados'
+            : 'Mitigação por alvo normalizado';
         const topFlow = candidate.top_flow || {};
         const topFlowText = topFlow.src_ip && topFlow.dst_ip
           ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
@@ -8698,7 +9011,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             </div>
           </div>
         `;
-      }).join('') || '<div class="subtle">Nenhum candidato de mitigacao foi montado para esta anomalia.</div>';
+      }).join('') || '<div class="subtle">Nenhum candidato de mitigação foi montado para esta anomalia.</div>';
       createIcons();
     }
 
@@ -8711,7 +9024,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       box.classList.remove('d-none');
       if (currentAiMitigationAnalysis.error_message) {
-        box.innerHTML = `<div class="panel-title mb-1">Analise IA</div><div class="text-danger">${escapeHtml(currentAiMitigationAnalysis.error_message)}</div>`;
+        box.innerHTML = `<div class="panel-title mb-1">Análise IA</div><div class="text-danger">${escapeHtml(currentAiMitigationAnalysis.error_message)}</div>`;
         return;
       }
       box.innerHTML = `
@@ -8749,7 +9062,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function applyBgpMitigationCandidate(index, mode) {
       if (!currentBgpMitigationAnomalyId) return;
-      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigacao...' : 'Criando sugestao...';
+      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigação...' : 'Criando sugestao...';
       const payload = { candidate_index: Number(index), mode };
       const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
@@ -8979,11 +9292,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         `Horario UTC: ${best.peak_time_utc || formatPeakHunterUtc(best.peak_time || best.time)}`,
         `Picos detectados: ${result?.peaks_detected ?? 0}`,
         `Picos analisados: ${result?.peaks_analyzed ?? 0}`,
-        `Evidencia: ${best.evidence_status || result?.evidence_status || '-'}`,
+        `Evidência: ${best.evidence_status || result?.evidence_status || '-'}`,
         `Classificacao: ${best.classification || result?.classification || '-'}`,
         `Grupo dominante: ${peakHunterDominantLabel(result?.dominant_group || best.dominant_group)}`,
         `Vetor recomendado: ${peakHunterVectorText(result)}`,
-        `Mitigacao recomendada: ${peakHunterMitigationText(result)}`,
+        `Mitigação recomendada: ${peakHunterMitigationText(result)}`,
         `apply_enabled: ${candidate?.apply_enabled === false ? 'false' : String(candidate?.apply_enabled ?? 'false')}`,
         command ? `FlowSpec: ${command}` : 'FlowSpec: indisponivel',
       ].join('\n');
@@ -9033,7 +9346,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const context = peakHunterActionContext(source);
       if (!peakHunterCanCreateAction(source)) {
         const target = source === 'history' ? 'peakHunterHistoryDetailStatus' : 'peakHunterResultStatus';
-        setText(target, 'Caso sem classification/candidate/evidencia suficiente para criar draft.');
+        setText(target, 'Caso sem classification/candidate/evidência suficiente para criar draft.');
         return;
       }
       const endpointByAction = {
@@ -9143,7 +9456,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const command = peakHunterFlowspecCommand(candidate, result.mitigation_allowed);
       document.getElementById('peakHunterRecommendationCards').innerHTML = [
         ['Vetor recomendado', peakHunterVectorText(result)],
-        ['Mitigacao recomendada', peakHunterMitigationText(result)],
+        ['Mitigação recomendada', peakHunterMitigationText(result)],
         ['FlowSpec', command || (result.mitigation_allowed ? 'Sem comando FlowSpec montado.' : 'Disponivel quando mitigation_allowed=true.')],
         ['apply_enabled', candidate?.apply_enabled === false ? 'false' : String(candidate?.apply_enabled ?? 'false')],
       ].map(([label, value]) => `
@@ -9396,22 +9709,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const runs = Array.isArray(payload.items) ? payload.items : [];
       await loadPeakHunterAutomation();
       await loadPeakHunterHistory();
-      setText('peakHunterAutomationStatus', `Job #${jobId} executado: ${formatNumber(runs.length)} combinacoes.`);
+      setText('peakHunterAutomationStatus', `Job #${jobId} executado: ${formatNumber(runs.length)} combinações.`);
     }
 
     async function loadPeakHunterAutomation() {
       try {
-        const [jobsPayload, runsPayload] = await Promise.all([
+        const [statusPayload, jobsPayload, runsPayload] = await Promise.all([
+          apiRequest('/api/peak-hunter/automation/status'),
           apiRequest('/api/peak-hunter/automation/jobs'),
           apiRequest('/api/peak-hunter/automation/runs?limit=100')
         ]);
         peakHunterAutomationJobs = Array.isArray(jobsPayload.items) ? jobsPayload.items : [];
+        renderPeakHunterAutomationStatus(statusPayload);
         renderPeakHunterJobs(peakHunterAutomationJobs);
         renderPeakHunterRuns(Array.isArray(runsPayload.items) ? runsPayload.items : []);
-        setText('peakHunterAutomationStatus', `${formatNumber(peakHunterAutomationJobs.length)} jobs configurados.`);
+        setText('peakHunterAutomationStatus', `${formatNumber(peakHunterAutomationJobs.length)} jobs configurados. Scheduler: ${statusPayload.scheduler_status || '-'}.`);
       } catch (error) {
         setText('peakHunterAutomationStatus', `Falha: ${error.message}`);
       }
+    }
+
+    function renderPeakHunterAutomationStatus(status) {
+      document.getElementById('peakHunterAutomationStatusCards').innerHTML = [
+        ['scheduler_status', status.scheduler_status || (status.scheduler_running ? 'running' : 'stopped')],
+        ['último tick', status.last_tick_at ? formatPeakHunterLocal(status.last_tick_at) : '-'],
+        ['próximo tick', `${formatNumber(status.next_tick_in_seconds || 0)}s`],
+        ['jobs enabled', formatNumber(status.jobs_enabled || 0)],
+        ['jobs due agora', formatNumber(status.jobs_due || 0)],
+        ['casos salvos', formatNumber(status.cases_saved || 0)],
+        ['negativos salvos', formatNumber(status.negative_samples_saved || 0)],
+        ['duplicados ignorados', formatNumber(status.duplicates_ignored || 0)],
+        ['último erro', status.last_error || '-']
+      ].map(([label, value]) => `<div class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div></div>`).join('');
     }
 
     function renderPeakHunterJobs(jobs) {
@@ -9431,7 +9760,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <div class="toolbar">
               <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-job-edit" data-id="${escapeHtml(job.id)}"><i data-lucide="settings"></i><span>Editar</span></button>
               <button type="button" class="btn btn-sm btn-outline-success peak-hunter-job-run" data-id="${escapeHtml(job.id)}"><i data-lucide="play"></i><span>Rodar</span></button>
-              <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-job-history" data-id="${escapeHtml(job.id)}"><i data-lucide="database"></i><span>Historico</span></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-job-history" data-id="${escapeHtml(job.id)}"><i data-lucide="database"></i><span>Histórico</span></button>
             </div>
           </td>
         </tr>
@@ -9455,7 +9784,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end">${formatNumber(run.negative_sample_saved || 0)}</td>
           <td>${escapeHtml(run.error_message || '-')}</td>
         </tr>
-      `).join('') || '<tr><td colspan="12" class="text-muted">Nenhuma execucao registrada.</td></tr>';
+      `).join('') || '<tr><td colspan="12" class="text-muted">Nenhuma execução registrada.</td></tr>';
     }
 
     function renderPeakHunterResult(payload) {
@@ -9479,11 +9808,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Baseline p99', peakHunterMetricValue(best.baseline_p99 || result.baseline?.p99 || 0, metric)],
         ['Score', best.score || '-'],
         ['Threshold', peakHunterMetricValue(best.threshold_used || result.threshold_used || 0, metric)],
-        ['Janela evidencia', result.evidence_window_used ? `${result.evidence_window_used}s` : '-'],
-        ['Status evidencia', evidenceStatus],
+        ['Janela evidência', result.evidence_window_used ? `${result.evidence_window_used}s` : '-'],
+        ['Status evidência', evidenceStatus],
         ['Classificacao', result.classification || best.classification || '-'],
-        ['Mitigacao permitida', result.mitigation_allowed ? 'Sim' : 'Nao'],
-        ['Acao recomendada', result.recommendation?.recommended_action || '-']
+        ['Mitigação permitida', result.mitigation_allowed ? 'Sim' : 'Nao'],
+        ['Ação recomendada', result.recommendation?.recommended_action || '-']
       ].map(([label, value]) => `<div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>`).join('');
       document.getElementById('peakHunterBestPeak').textContent = JSON.stringify(best || null, null, 2);
       document.getElementById('peakHunterDominantGroup').textContent = JSON.stringify(dominant, null, 2);
@@ -9632,7 +9961,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           body: JSON.stringify(peakHunterPayload())
         });
         renderPeakHunterResult(payload);
-        setText('peakHunterStatus', 'Analise concluida. Nenhuma mitigacao foi aplicada.');
+        setText('peakHunterStatus', 'Análise concluida. Nenhuma mitigação foi aplicada.');
         await loadPeakHunterHistory();
       } catch (error) {
         setText('peakHunterStatus', `Falha: ${error.message}`);
@@ -9649,7 +9978,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const payload = await apiRequest(`/api/peak-hunter/history?${query}`);
         const items = Array.isArray(payload.items) ? payload.items : [];
         peakHunterLastHistory = items;
-        document.getElementById('peakHunterHistoryStatus').textContent = `${formatNumber(items.length)} investigacoes`;
+        document.getElementById('peakHunterHistoryStatus').textContent = `${formatNumber(items.length)} investigações`;
         document.getElementById('peakHunterHistoryTable').innerHTML = items.map(item => {
           const candidate = (Array.isArray(item.candidates) ? item.candidates : []).find(entry => entry.action && entry.action !== 'alert_only') || (item.candidates || [])[0] || {};
           return `
@@ -9673,7 +10002,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               <td><button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-history-detail" data-id="${escapeHtml(item.id)}"><i data-lucide="file-search"></i><span>Abrir</span></button></td>
             </tr>
           `;
-        }).join('') || '<tr><td colspan="17" class="text-muted">Sem historico.</td></tr>';
+        }).join('') || '<tr><td colspan="17" class="text-muted">Sem histórico.</td></tr>';
         createIcons();
       } catch (error) {
         document.getElementById('peakHunterHistoryStatus').textContent = `Falha: ${error.message}`;
@@ -10370,7 +10699,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         legacy_attack_vector: 'Vetor legado',
         detection_template_rule: 'Grupo de Vetores',
         peak_hunter_manual: 'Peak Hunter manual',
-        peak_hunter_automatic: 'Peak Hunter automatico',
+        peak_hunter_automatic: 'Peak Hunter automático',
         dashboard_anomaly_summary: 'Dashboard',
         ai_suggestion: 'IA',
         manual: 'Manual',
@@ -10384,10 +10713,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         return [details.template_name, details.rule_name || event.source_name].filter(Boolean).join(' / ') || event.source_name || '-';
       }
       if (event.anomaly_source === 'peak_hunter_automatic') {
-        return `${event.source_name || 'Peak Hunter automatico'}${details.run_id ? ` / run #${details.run_id}` : ''}`;
+        return `${event.source_name || 'Peak Hunter automático'}${details.run_id ? ` / run #${details.run_id}` : ''}`;
       }
       if (event.anomaly_source === 'peak_hunter_manual') {
-        return details.peak_analysis_id ? `analise #${details.peak_analysis_id}` : event.source_name || '-';
+        return details.peak_analysis_id ? `análise #${details.peak_analysis_id}` : event.source_name || '-';
       }
       return event.source_name || event.vector_name || event.attack_vector_name || '-';
     }
@@ -10439,7 +10768,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       anomalyActiveTab = tab;
       document.getElementById('anomalyTabActive').classList.toggle('active', tab === 'active');
       document.getElementById('anomalyTabHistory').classList.toggle('active', tab === 'history');
-      setText('anomalyCurrentTab', tab === 'active' ? 'Ativas' : 'Historico');
+      setText('anomalyCurrentTab', tab === 'active' ? 'Ativas' : 'Histórico');
       document.getElementById('anomalyStatus').textContent = 'Atualizando anomalias...';
       try {
         await updateAnomalySummary();
@@ -10448,7 +10777,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         renderAnomalyTable(anomalyItems);
         await loadAnomalyDashboard();
         await loadSecurityAnomaliesForAnomalyView(tab);
-        document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Historico de anomalias';
+        document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Histórico de anomalias';
       } catch (error) {
         document.getElementById('anomalyStatus').textContent = `Falha: ${error.message}`;
       }
@@ -10481,9 +10810,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} ${topFlow.protocol || 'udp'}`
         : '-';
       const mitigationBasis = event.mitigation_basis === 'top_conversation'
-        ? 'Mitigacao por conversa principal'
+        ? 'Mitigação por conversa principal'
         : ['aggregated_dst_port', 'aggregated_src_port'].includes(event.mitigation_basis)
-          ? 'Mitigacao por destino/porta agregados'
+          ? 'Mitigação por destino/porta agregados'
           : event.mitigation_basis || '-';
       const sourceDetails = event.source_details_json || event.source_details || {};
       const fields = [
@@ -10499,18 +10828,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Destinos unicos', event.unique_dst_ips || '-'],
         ['Portas destino unicas', event.unique_dst_ports || '-'],
         ['Escopo', scope],
-        ['Direcao', formatAnomalyDirectionLabel(event.direction)],
+        ['Direção', formatAnomalyDirectionLabel(event.direction)],
         ['Input if', event.input_if || '-'],
         ['Output if', event.output_if || event.interface_if_index || '-'],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Vetor', event.vector_name || event.attack_vector_name || '-'],
         ['Protocolo', event.protocol || event.decoder || '-'],
-        ['Metrica', event.metric_unit ? unitLabel(event.metric_unit) : '-'],
-        ['Base mitigacao', mitigationBasis],
+        ['Métrica', event.metric_unit ? unitLabel(event.metric_unit) : '-'],
+        ['Base mitigação', mitigationBasis],
         ['Top flow', topFlowText],
         ['Motivo', event.mitigation_reason || '-']
       ];
-      if (event.invalid_scope) fields.push(['Validacao', 'invalid_scope']);
+      if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
       return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
         <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
       `).join('')}</div>`;
@@ -10533,8 +10862,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       currentAiMitigationAnalysis = analysis || null;
       const block = document.getElementById('anomalyAiAnalysisBlock');
       if (!analysis) {
-        setText('anomalyAiStatus', 'Nenhuma analise IA salva.');
-        block.innerHTML = '<div class="subtle">Sem analise IA para esta anomalia.</div>';
+        setText('anomalyAiStatus', 'Nenhuma análise IA salva.');
+        block.innerHTML = '<div class="subtle">Sem análise IA para esta anomalia.</div>';
         return;
       }
       if (analysis.error_message && !analysis.request_payload?.deterministic_analysis) {
@@ -10553,7 +10882,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const commandPreview = analysis.rendered_command_preview || analysis.response?.rendered_command_preview || '';
       setText('anomalyAiStatus', `${analysis.classification || 'unknown'} / risco ${analysis.risk || '-'}`);
       block.innerHTML = `
-        <div class="mb-2"><span class="badge-soft off">Analise IA sem mitigacao automatica</span></div>
+        <div class="mb-2"><span class="badge-soft off">Análise IA sem mitigação automatica</span></div>
         ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
         <div class="d-flex flex-wrap gap-2 mb-2">
           <div class="metric-chip"><span>Anomalia:</span> #${escapeHtml(analysis.anomaly_id || requestPayload.anomaly?.id || '-')}</div>
@@ -10567,7 +10896,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         <div class="subtle mb-2">${escapeHtml(analysis.operator_summary || '-')}</div>
         ${deterministic.source ? `
           <div class="panel p-2 mb-2">
-            <div class="panel-title mb-2">Analise deterministica</div>
+            <div class="panel-title mb-2">Análise deterministica</div>
             <div class="d-flex flex-wrap gap-2 mb-2">
               <div class="metric-chip"><span>Top flow:</span> ${escapeHtml(topFlow.src_ip || '-')}:${escapeHtml(topFlow.src_port || '-')} -> ${escapeHtml(topFlow.dst_ip || '-')}:${escapeHtml(topFlow.dst_port || '-')} ${escapeHtml(topFlow.protocol || '-')}</div>
               <div class="metric-chip"><span>Packets:</span> ${formatNumber(topFlow.packets || 0)}</div>
@@ -11573,7 +11902,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         '<th>Protocolo</th>',
         '<th>Src Port</th>',
         '<th>Dst Port</th>',
-        '<th class="sortable-header" data-top-flow-sort="duration_seconds">Duracao <span class="sort-indicator"></span></th>',
+        '<th class="sortable-header" data-top-flow-sort="duration_seconds">Duração <span class="sort-indicator"></span></th>',
         '<th class="sortable-header" data-top-flow-sort="first_seen">Primeiro <span class="sort-indicator"></span></th>',
         '<th class="sortable-header" data-top-flow-sort="last_seen">Ultimo <span class="sort-indicator"></span></th>',
         '<th class="sortable-header" data-top-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>',
@@ -11968,7 +12297,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const requestedTop = Number(payload.requested_top_n || document.getElementById('mapTopN').value || totalRoutes);
         const locatedRoutes = Number(payload.complete_route_count ?? 0);
         const missingRoutes = Number(payload.incomplete_route_count ?? Math.max(0, totalRoutes - locatedRoutes));
-        const modeLabel = mode === 'active' ? 'anomalias ativas' : mode === 'history' ? 'historico de anomalias' : 'fluxos';
+        const modeLabel = mode === 'active' ? 'anomalias ativas' : mode === 'history' ? 'histórico de anomalias' : 'fluxos';
         const prefix = totalRoutes < requestedTop
           ? `Apenas ${formatNumber(totalRoutes)} rotas encontradas para os filtros atuais`
           : `${formatNumber(totalRoutes)} rotas exibidas de Top ${formatNumber(requestedTop)}`;
@@ -12189,7 +12518,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         updateDashboardZoneLabels();
         setText('bpsReadout', 'Carregando...');
         setText('ppsReadout', 'Carregando...');
-        setText('dashboardAnomaliesStatus', 'Carregando historico...');
+        setText('dashboardAnomaliesStatus', 'Carregando histórico...');
         renderTableMessage('dashboardAnomaliesTable', 10, 'Carregando...');
         await checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
@@ -12288,7 +12617,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
         }
         if (payloads.anomaliesSummary.__error) {
-          setText('dashboardAnomaliesStatus', 'Erro ao carregar historico de anomalias');
+          setText('dashboardAnomaliesStatus', 'Erro ao carregar histórico de anomalias');
           renderChartError(charts.dashboardAnomalyTimeline);
           renderChartError(charts.dashboardAnomalyClassification);
           renderChartError(charts.dashboardAnomalyProtocol);
@@ -12630,7 +12959,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const status = document.getElementById('collectorApplyStatus');
       const resultBox = document.getElementById('collectorApplyResult');
       status.textContent = 'Aplicando...';
-      resultBox.textContent = 'Gerando configuracoes e aplicando collectors...';
+      resultBox.textContent = 'Gerando configurações e aplicando collectors...';
       try {
         const payload = await apiRequest('/api/collectors/apply', { method: 'POST' });
         status.textContent = payload.services_updated ? 'Collectors atualizados' : 'Configs geradas';
@@ -13489,6 +13818,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
     document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
+    document.getElementById('learnDetectionRuleButton').addEventListener('click', () => openTrafficLearningModal().catch(error => setText('detectionRuleStatus', `Falha ao abrir aprendizado: ${error.message}`)));
+    document.getElementById('trafficLearnSensor').addEventListener('change', () => refreshTrafficLearningInterfaces().catch(error => setText('trafficLearnOutput', `Falha ao carregar interfaces: ${error.message}`)));
+    document.getElementById('trafficLearnAnalyzeButton').addEventListener('click', () => analyzeTrafficLearning().catch(error => setText('trafficLearnOutput', `Falha ao analisar baseline: ${error.message}`)));
+    document.getElementById('trafficLearnApplyButton').addEventListener('click', () => applyTrafficLearningToRule(false));
+    document.getElementById('trafficLearnDraftButton').addEventListener('click', () => applyTrafficLearningToRule(true));
     document.getElementById('newDetectionWhitelistButton').addEventListener('click', () => resetDetectionWhitelistForm());
     document.getElementById('saveDetectionWhitelistButton').addEventListener('click', () => saveDetectionWhitelist().catch(console.error));
     document.getElementById('runZoneDetectionButton').addEventListener('click', () => testIpZoneDetection(false).catch(console.error));
@@ -13596,7 +13930,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('peakHunterRunsTable').addEventListener('click', event => {
       const row = event.target.closest('tr');
       const runId = row?.firstElementChild?.textContent?.trim();
-      if (!runId || runId === 'Nenhuma execucao registrada.') return;
+      if (!runId || runId === 'Nenhuma execução registrada.') return;
       setValue('peakHunterHistorySource', 'automatic');
       setValue('peakHunterHistoryRunId', runId);
       showPeakHunterTab('history');
@@ -13887,6 +14221,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     applyDashboardLayout();
     updateMapFilterBadge();
     resetPeakHunterForm();
+    installHelpTooltips();
     createIcons();
     initAuth().then(scheduleDashboardRefresh).catch(console.error);
     setInterval(() => {

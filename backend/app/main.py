@@ -35,8 +35,9 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
-from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, run_due_peak_hunter_jobs
+from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -928,6 +929,29 @@ class DetectionRulePayload(BaseModel):
     extra_whitelist_ids: list[int] = Field(default_factory=list)
     bypass_whitelist: bool = False
     notes: str = ""
+
+
+class DetectionTrafficLearnPayload(BaseModel):
+    scope: str = "total"
+    sensor: str = ""
+    interface_id: int | None = Field(None, ge=1)
+    zone_id: int | None = Field(None, ge=1)
+    direction: str = "both"
+    metric: str = "packets_s"
+    protocol: str = "any"
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    period: str = "1h"
+    src_cidr: str = ""
+    dst_cidr: str = ""
+    src_port: str = ""
+    dst_port: str = ""
+    exclude_anomaly_windows: bool = True
+    exclude_peak_hunter_peaks: bool = True
+    exclude_top_percent: float = Field(1, ge=0, le=100)
+    stability_mode: str = "medium"
+    peak_window_minutes: int = Field(5, ge=1, le=60)
+    window_seconds: int = Field(60, ge=5, le=3600)
 
 
 class DetectionWhitelistPayload(BaseModel):
@@ -3100,6 +3124,7 @@ def shutdown() -> None:
     ANOMALY_DETECTION_STOP.set()
     ASN_RESOLVER_STOP.set()
     PEAK_HUNTER_RUNNER_STOP.set()
+    mark_peak_hunter_scheduler_stopped()
 
 
 def peak_hunter_runner_enabled() -> bool:
@@ -3107,20 +3132,24 @@ def peak_hunter_runner_enabled() -> bool:
 
 
 def peak_hunter_runner_loop() -> None:
-    while not PEAK_HUNTER_RUNNER_STOP.wait(60):
+    while not PEAK_HUNTER_RUNNER_STOP.is_set():
         try:
             run_due_peak_hunter_jobs()
         except Exception as exc:  # pragma: no cover - background resilience.
             logger.warning("Falha no runner automatico do Peak Hunter: %s", exc)
+        PEAK_HUNTER_RUNNER_STOP.wait(60)
 
 
 def start_peak_hunter_runner_thread() -> None:
     global PEAK_HUNTER_RUNNER_THREAD
     if not peak_hunter_runner_enabled():
+        mark_peak_hunter_scheduler_stopped()
         return
     if PEAK_HUNTER_RUNNER_THREAD is not None and PEAK_HUNTER_RUNNER_THREAD.is_alive():
+        mark_peak_hunter_scheduler_started()
         return
     PEAK_HUNTER_RUNNER_STOP.clear()
+    mark_peak_hunter_scheduler_started()
     PEAK_HUNTER_RUNNER_THREAD = threading.Thread(
         target=peak_hunter_runner_loop,
         name="gmj-flow-peak-hunter-runner",
@@ -11995,6 +12024,259 @@ def ip_zone_flow_coverage(
     }
 
 
+LEARNING_SENSITIVITY_FACTORS = {
+    "conservative": {"warning": 1.5, "critical": 2.0},
+    "conservadora": {"warning": 1.5, "critical": 2.0},
+    "medium": {"warning": 2.0, "critical": 3.0},
+    "media": {"warning": 2.0, "critical": 3.0},
+    "aggressive": {"warning": 1.2, "critical": 1.5},
+    "agressiva": {"warning": 1.2, "critical": 1.5},
+}
+
+
+def detection_learning_window(payload: DetectionTrafficLearnPayload) -> tuple[datetime, datetime]:
+    if payload.start_time and payload.end_time:
+        start = utc_dt(payload.start_time)
+        end = utc_dt(payload.end_time)
+    else:
+        minutes = {
+            "1h": 60,
+            "6h": 360,
+            "24h": 1440,
+            "7d": 10080,
+        }.get(clean_text(payload.period).lower() or "1h", 60)
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(minutes=minutes)
+    if start >= end:
+        raise HTTPException(status_code=400, detail="start_time deve ser menor que end_time")
+    return start, end
+
+
+def detection_learning_contaminated_windows(
+    conn: sqlite3.Connection,
+    payload: DetectionTrafficLearnPayload,
+    start: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], int]:
+    windows: list[dict[str, Any]] = []
+    negative_samples = 0
+    if payload.exclude_anomaly_windows:
+        rows = conn.execute(
+            """
+            SELECT id, started_at, COALESCE(ended_at, last_seen_at, started_at) AS ended_at, vector_name
+            FROM anomaly_events
+            WHERE started_at <= ?
+              AND COALESCE(ended_at, last_seen_at, started_at) >= ?
+            ORDER BY started_at
+            LIMIT 1000
+            """,
+            (iso(end), iso(start)),
+        ).fetchall()
+        for row in rows:
+            item_start = parse_datetime_text(row["started_at"])
+            item_end = parse_datetime_text(row["ended_at"]) or item_start
+            if item_start:
+                windows.append({
+                    "start": item_start,
+                    "end": item_end or item_start,
+                    "reason": f"Removido por anomalia #{row['id']} {clean_text(row['vector_name'])}".strip(),
+                    "source": "anomaly_events",
+                })
+    if payload.exclude_peak_hunter_peaks:
+        try:
+            ensure_peak_analysis_db(conn)
+            clauses = [
+                "COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) >= ?",
+                "COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) <= ?",
+            ]
+            values: list[Any] = [iso(start), iso(end)]
+            if clean_text(payload.sensor):
+                clauses.append("sensor = ?")
+                values.append(clean_text(payload.sensor))
+            if payload.interface_id:
+                clauses.append("interface_id = ?")
+                values.append(int(payload.interface_id))
+            if clean_text(payload.direction) not in {"", "both"}:
+                clauses.append("direction = ?")
+                values.append(clean_text(payload.direction))
+            if clean_text(payload.metric):
+                clauses.append("metric = ?")
+                values.append(clean_text(payload.metric))
+            rows = conn.execute(
+                f"""
+                SELECT id, COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) AS peak_at,
+                       evidence_status, classification, is_negative_sample
+                FROM peak_analysis
+                WHERE {' AND '.join(clauses)}
+                ORDER BY peak_at
+                LIMIT 1000
+                """,
+                values,
+            ).fetchall()
+            for row in rows:
+                if bool(row["is_negative_sample"]):
+                    negative_samples += 1
+                    continue
+                if clean_text(row["evidence_status"]) not in {"complete", "partial"}:
+                    continue
+                peak_at = parse_datetime_text(row["peak_at"])
+                if not peak_at:
+                    continue
+                delta = timedelta(minutes=int(payload.peak_window_minutes or 5))
+                windows.append({
+                    "start": peak_at - delta,
+                    "end": peak_at + delta,
+                    "reason": f"Removido por pico detectado pelo Peak Hunter #{row['id']}",
+                    "source": "peak_hunter",
+                    "classification": clean_text(row["classification"]),
+                })
+        except sqlite3.Error:
+            pass
+    return windows, negative_samples
+
+
+def detection_learning_series_points(rows: list[dict[str, Any]], metric: str) -> list[dict[str, Any]]:
+    points = []
+    for row in rows:
+        time_value = row.get("time") or row.get("bucket") or row.get("raw_time_from_clickhouse")
+        bucket = parse_datetime_text(time_value)
+        if bucket is None and isinstance(time_value, datetime):
+            bucket = utc_dt(time_value)
+        if bucket is None:
+            continue
+        value = float(row.get(metric) or row.get("value") or 0)
+        points.append({"time": iso(bucket), "time_dt": bucket, "value": value})
+    return sorted(points, key=lambda item: item["time"])
+
+
+def detection_learning_clean_points(
+    points: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+    exclude_top_percent: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    removed: list[dict[str, Any]] = []
+    clean: list[dict[str, Any]] = []
+    for point in points:
+        matched = next((window for window in windows if window["start"] <= point["time_dt"] <= window["end"]), None)
+        if matched:
+            removed.append({**point, "reason": matched["reason"], "source": matched["source"]})
+        else:
+            clean.append(point)
+    if clean and exclude_top_percent > 0:
+        remove_count = int(len(clean) * (float(exclude_top_percent) / 100.0))
+        if remove_count > 0:
+            top = sorted(clean, key=lambda item: item["value"], reverse=True)[:remove_count]
+            top_times = {item["time"] for item in top}
+            removed.extend({**item, "reason": f"Removido por top {exclude_top_percent:g}% dos buckets", "source": "top_percent"} for item in top)
+            clean = [item for item in clean if item["time"] not in top_times]
+    return clean, removed
+
+
+def detection_learning_baseline(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"avg": 0.0, "median": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0, "max_clean": 0.0, "mad": 0.0}
+    ordered = sorted(values)
+    med = median(ordered)
+    deviations = sorted(abs(value - med) for value in ordered)
+    return {
+        "avg": sum(values) / len(values),
+        "median": med,
+        "p90": percentile(ordered, 0.90),
+        "p95": percentile(ordered, 0.95),
+        "p99": percentile(ordered, 0.99),
+        "max_clean": max(values),
+        "mad": median(deviations) if deviations else 0.0,
+    }
+
+
+def detection_learning_suggested_rule(payload: DetectionTrafficLearnPayload, baseline: dict[str, float]) -> dict[str, Any]:
+    mode = clean_text(payload.stability_mode).lower() or "medium"
+    factors = LEARNING_SENSITIVITY_FACTORS.get(mode, LEARNING_SENSITIVITY_FACTORS["medium"])
+    warning = max(float(baseline["p95"]) * factors["warning"], float(baseline["p99"]) * 0.8)
+    critical = max(float(baseline["p99"]) * factors["critical"], float(baseline["max_clean"]) * 1.2)
+    return {
+        "metric": clean_text(payload.metric) or "packets_s",
+        "warning": round(warning, 3),
+        "critical": round(max(critical, warning), 3),
+        "window_seconds": int(payload.window_seconds or 60),
+        "consecutive": 2,
+        "consecutive_windows": 2,
+        "cooldown_minutes": 5,
+        "group_by": "src_ip,dst_ip,dst_port,protocol" if clean_text(payload.scope) in {"internal_ip", "port_protocol"} else "",
+        "mitigation_mode": "manual_review",
+        "enabled": False,
+    }
+
+
+def learn_detection_template_from_traffic(template_id: int, payload: DetectionTrafficLearnPayload) -> dict[str, Any]:
+    ensure_sensor_db()
+    start, end = detection_learning_window(payload)
+    zone_cidrs: list[str] = []
+    with sqlite_connection() as conn:
+        _ = fetch_detection_template_row(conn, template_id)
+        if payload.zone_id:
+            zone_cidrs = [
+                clean_text(row["cidr"])
+                for row in conn.execute(
+                    "SELECT cidr FROM ip_zone_prefixes WHERE zone_id = ? AND active = 1 ORDER BY id LIMIT 50",
+                    (int(payload.zone_id),),
+                ).fetchall()
+                if clean_text(row["cidr"])
+            ]
+        windows, negative_samples = detection_learning_contaminated_windows(conn, payload, start, end)
+    direction = clean_text(payload.direction)
+    zone_filters: dict[str, Any] = {}
+    if zone_cidrs:
+        if direction in {"sends", "transmits", "outbound"}:
+            zone_filters["src_cidrs"] = zone_cidrs
+        elif direction in {"receives", "inbound"}:
+            zone_filters["dst_cidrs"] = zone_cidrs
+        else:
+            zone_filters["zone_cidrs"] = zone_cidrs
+    rows = fetch_learning_traffic_series({
+        **dump_model(payload),
+        "start_time": start,
+        "end_time": end,
+        "window_seconds": payload.window_seconds,
+        **zone_filters,
+    })
+    points = detection_learning_series_points(rows, payload.metric)
+    clean_points, removed_points = detection_learning_clean_points(points, windows, float(payload.exclude_top_percent or 0))
+    values = [float(point["value"]) for point in clean_points]
+    baseline_values = detection_learning_baseline(values)
+    suggested = detection_learning_suggested_rule(payload, baseline_values)
+    reason_summary: dict[str, int] = {}
+    for point in removed_points:
+        reason_summary[point["reason"]] = reason_summary.get(point["reason"], 0) + 1
+    return {
+        "ok": True,
+        "template_id": template_id,
+        "baseline": {
+            **baseline_values,
+            "buckets_total": len(points),
+            "buckets_valid": len(clean_points),
+            "buckets_removed": len(removed_points),
+            "removed_reason_summary": reason_summary,
+        },
+        "suggested_rule": suggested,
+        "series": [{"time": point["time"], "value": point["value"], "removed": False} for point in clean_points[:1000]],
+        "removed_windows": [
+            {"start": iso(window["start"]), "end": iso(window["end"]), "reason": window["reason"], "source": window["source"]}
+            for window in windows[:200]
+        ],
+        "removed_points": [{"time": point["time"], "value": point["value"], "reason": point["reason"]} for point in removed_points[:1000]],
+        "peak_hunter": {
+            "windows_removed": sum(1 for window in windows if window.get("source") == "peak_hunter"),
+            "negative_samples_used": negative_samples,
+        },
+        "notes": [note for note in [
+            "Janelas com picos do Peak Hunter foram removidas do baseline." if payload.exclude_peak_hunter_peaks else "",
+            "A sugestao nao foi salva automaticamente.",
+            f"Baseline limpo com Peak Hunter: {sum(1 for window in windows if window.get('source') == 'peak_hunter')} janelas removidas, {negative_samples} amostras negativas aproveitadas.",
+        ] if note],
+    }
+
+
 @app.get("/api/detection/templates")
 def list_detection_templates():
     ensure_sensor_db()
@@ -12037,6 +12319,18 @@ def get_detection_template(template_id: int):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         return fetch_detection_template(conn, template_id, include_rules=True)
+
+
+@app.post("/api/detection-templates/{template_id}/learn-from-traffic")
+@app.post("/api/detection/templates/{template_id}/learn-from-traffic")
+def learn_detection_template_from_traffic_endpoint(template_id: int, payload: DetectionTrafficLearnPayload):
+    try:
+        return learn_detection_template_from_traffic(template_id, payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Falha ao aprender baseline de trafego template=%s: %s", template_id, exc)
+        raise HTTPException(status_code=500, detail=f"Falha ao aprender baseline de trafego: {exc}") from exc
 
 
 @app.put("/api/detection/templates/{template_id}")

@@ -40,11 +40,20 @@ class FrontendBgpProfilesTest(unittest.TestCase):
     def test_manual_flowspec_dry_run_selection_does_not_send_announce_action(self):
         self.assertIn("const selectedAction = selectValue('bgpDryAction', 'dry_run');", HTML)
         self.assertIn("const action = requestedAction === 'dry_run' ? 'dry_run' : selectedAction;", HTML)
-        self.assertIn("Confirmacao ANUNCIAR obrigatoria para anunciar agora.", HTML)
+        self.assertIn("Confirmação ANUNCIAR obrigatoria para anunciar agora.", HTML)
 
     def test_manual_flowspec_blocks_port_without_protocol(self):
         self.assertIn("Protocolo e obrigatorio quando porta e informada.", HTML)
         self.assertIn("if ((srcPort || dstPort) && !protocol)", HTML)
+
+    def test_traffic_learning_modal_and_tooltips_exist(self):
+        self.assertIn("Aprender com o tráfego", HTML)
+        self.assertIn('id="trafficLearningModal"', HTML)
+        self.assertIn("openTrafficLearningModal", HTML)
+        self.assertIn("/learn-from-traffic", HTML)
+        self.assertIn("installHelpTooltips", HTML)
+        self.assertIn("Janela de cálculo em segundos", HTML)
+        self.assertIn("Duração interna no GMJ-FLOW", HTML)
 
 
 if __name__ == "__main__":

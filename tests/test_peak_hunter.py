@@ -730,6 +730,22 @@ class PeakHunterTest(unittest.TestCase):
         captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_interface_series(request))
         self.assertEqual(captured["parameters"]["proto"], 17)
 
+    def test_clickhouse_learning_series_contract(self):
+        captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_learning_traffic_series({
+            "sensor": "edge-a",
+            "interface_id": 140,
+            "direction": "sends",
+            "metric": "flows_s",
+            "protocol": "dns",
+            "start_time": self.base_time,
+            "end_time": self.base_time + timedelta(hours=1),
+            "window_seconds": 60,
+        }))
+        self.assertIn("toStartOfInterval(flow_time", captured["query"])
+        self.assertIn("flow_count", captured["query"])
+        self.assertIn("output_if = {interface_id:UInt32}", captured["query"])
+        self.assertIn("src_port = 53 OR dst_port = 53", captured["query"])
+
     def test_clickhouse_illegal_aggregation_not_used(self):
         captured = capture_clickhouse_query(lambda: peak_clickhouse.fetch_peak_flows(self.request, self.base_time, 5))
         self.assertNotIn("AS flow_time", captured["query"])
@@ -783,6 +799,7 @@ class PeakHunterTest(unittest.TestCase):
         self.assertIn("apiRequest('/api/peak-hunter/options/sensors'", html)
         self.assertIn("apiRequest('/api/peak-hunter/analyze'", html)
         self.assertIn("apiRequest(`/api/peak-hunter/history?", html)
+        self.assertIn("apiRequest('/api/peak-hunter/automation/status')", html)
         self.assertIn("apiRequest('/api/peak-hunter/automation/jobs')", html)
         self.assertIn("apiRequest('/api/peak-hunter/automation/runs?limit=100')", html)
         self.assertIn("apiRequest(`/api/peak-hunter/from-anomaly/${anomalyId}`", html)
@@ -790,7 +807,7 @@ class PeakHunterTest(unittest.TestCase):
 
     def test_dashboard_frontend_anomalies_summary_and_interface_titles(self):
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("Historico de Anomalias", html)
+        self.assertIn("Histórico de Anomalias", html)
         self.assertIn("fetchJSON('/api/dashboard/anomalies-summary'", html)
         self.assertIn('id="bpsTitle"', html)
         self.assertIn('id="ppsTitle"', html)

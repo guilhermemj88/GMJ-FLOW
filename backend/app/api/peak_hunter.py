@@ -36,6 +36,7 @@ from app.services.peak_hunter_runner import (
     get_peak_hunter_job,
     list_peak_hunter_jobs,
     list_peak_hunter_runs,
+    peak_hunter_automation_status,
     run_peak_hunter_job_now,
     update_peak_hunter_job,
 )
@@ -328,6 +329,12 @@ def peak_hunter_automation_jobs() -> dict[str, Any]:
     with _sqlite_connect() as conn:
         jobs = list_peak_hunter_jobs(conn)
     return {"items": jobs}
+
+
+@router.get("/automation/status")
+def peak_hunter_automation_status_endpoint() -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        return peak_hunter_automation_status(conn)
 
 
 @router.post("/automation/jobs")

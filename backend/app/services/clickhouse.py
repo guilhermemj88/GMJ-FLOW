@@ -101,6 +101,120 @@ def fetch_interface_series(request: PeakHunterRequest) -> list[dict[str, Any]]:
     )
 
 
+def fetch_learning_traffic_series(filters: dict[str, Any]) -> list[dict[str, Any]]:
+    metric = str(filters.get("metric") or "packets_s").strip()
+    if metric not in {"packets_s", "bits_s", "flows_s"}:
+        raise ClickHouseQueryError("fetch_learning_traffic_series", "metric invalida")
+    window_seconds = max(int(filters.get("window_seconds") or 60), 1)
+    direction = str(filters.get("direction") or "both").strip()
+    protocol = str(filters.get("protocol") or "").strip().lower()
+    clauses = [
+        "flow_time >= {start:DateTime}",
+        "flow_time <= {end:DateTime}",
+    ]
+    params: dict[str, Any] = {
+        "start": filters["start_time"],
+        "end": filters["end_time"],
+        "window_seconds": window_seconds,
+    }
+    sensor = str(filters.get("sensor") or "").strip()
+    if sensor:
+        clauses.append("sensor = {sensor:String}")
+        params["sensor"] = sensor
+    interface_id = filters.get("interface_id")
+    if interface_id not in (None, "", "all"):
+        params["interface_id"] = int(interface_id)
+        if direction in {"sends", "transmits", "outbound"}:
+            clauses.append("output_if = {interface_id:UInt32}")
+        elif direction in {"receives", "inbound"}:
+            clauses.append("input_if = {interface_id:UInt32}")
+        else:
+            clauses.append("(input_if = {interface_id:UInt32} OR output_if = {interface_id:UInt32})")
+    if protocol and protocol not in {"any", "all"}:
+        if protocol == "dns":
+            clauses.append("(proto = 17 AND (src_port = 53 OR dst_port = 53))")
+        else:
+            clauses.append("proto = {proto:UInt8}")
+            params["proto"] = _proto_number(protocol)
+    src_cidr = str(filters.get("src_cidr") or "").strip()
+    if src_cidr:
+        if "/" in src_cidr:
+            clauses.append("isIPAddressInRange(toString(src_ip), {src_cidr:String})")
+            params["src_cidr"] = src_cidr
+        else:
+            clauses.append("toString(src_ip) = {src_cidr:String}")
+            params["src_cidr"] = src_cidr
+    dst_cidr = str(filters.get("dst_cidr") or "").strip()
+    if dst_cidr:
+        if "/" in dst_cidr:
+            clauses.append("isIPAddressInRange(toString(dst_ip), {dst_cidr:String})")
+            params["dst_cidr"] = dst_cidr
+        else:
+            clauses.append("toString(dst_ip) = {dst_cidr:String}")
+            params["dst_cidr"] = dst_cidr
+    zone_cidrs = [str(value).strip() for value in (filters.get("zone_cidrs") or []) if str(value).strip()]
+    if zone_cidrs:
+        parts = []
+        for index, cidr in enumerate(zone_cidrs[:50]):
+            key = f"zone_cidr_{index}"
+            parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
+            parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
+            params[key] = cidr
+        clauses.append(f"({' OR '.join(parts)})")
+    src_cidrs = [str(value).strip() for value in (filters.get("src_cidrs") or []) if str(value).strip()]
+    if src_cidrs:
+        parts = []
+        for index, cidr in enumerate(src_cidrs[:50]):
+            key = f"src_cidr_{index}"
+            parts.append(f"isIPAddressInRange(toString(src_ip), {{{key}:String}})")
+            params[key] = cidr
+        clauses.append(f"({' OR '.join(parts)})")
+    dst_cidrs = [str(value).strip() for value in (filters.get("dst_cidrs") or []) if str(value).strip()]
+    if dst_cidrs:
+        parts = []
+        for index, cidr in enumerate(dst_cidrs[:50]):
+            key = f"dst_cidr_{index}"
+            parts.append(f"isIPAddressInRange(toString(dst_ip), {{{key}:String}})")
+            params[key] = cidr
+        clauses.append(f"({' OR '.join(parts)})")
+    src_port = str(filters.get("src_port") or "").strip()
+    if src_port:
+        clauses.append("src_port = {src_port:UInt16}")
+        params["src_port"] = int(src_port)
+    dst_port = str(filters.get("dst_port") or "").strip()
+    if dst_port:
+        clauses.append("dst_port = {dst_port:UInt16}")
+        params["dst_port"] = int(dst_port)
+    metric_expr = {
+        "packets_s": "sum(toFloat64(packets)) / {window_seconds:Float64}",
+        "bits_s": "sum(toFloat64(bytes)) * 8 / {window_seconds:Float64}",
+        "flows_s": "sum(toFloat64(flow_count)) / {window_seconds:Float64}",
+    }[metric]
+    return query_clickhouse_context(
+        "fetch_learning_traffic_series",
+        f"""
+        WITH toStartOfInterval(flow_time, INTERVAL {{window_seconds:UInt32}} SECOND) AS bucket
+        SELECT
+            bucket,
+            toString(bucket) AS raw_time_from_clickhouse,
+            toTypeName(bucket) AS clickhouse_time_type,
+            'UTC' AS clickhouse_timezone,
+            {metric_expr} AS value,
+            sum(toFloat64(packets)) / {{window_seconds:Float64}} AS packets_s,
+            sum(toFloat64(bytes)) * 8 / {{window_seconds:Float64}} AS bits_s,
+            sum(toFloat64(flow_count)) / {{window_seconds:Float64}} AS flows_s,
+            sum(packets) AS raw_packets,
+            sum(bytes) AS raw_bytes,
+            sum(flow_count) AS raw_flows
+        FROM flow_raw
+        WHERE {' AND '.join(clauses)}
+        GROUP BY bucket
+        ORDER BY bucket
+        """,
+        params,
+    )
+
+
 def fetch_peak_flows(request: PeakHunterRequest, peak_time: datetime, window_seconds: int) -> list[dict[str, Any]]:
     direction_field = "output_if" if request.direction in {"sends", "transmits", "outbound"} else "input_if"
     sample_direction = "output" if direction_field == "output_if" else "input"
