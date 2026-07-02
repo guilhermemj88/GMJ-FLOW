@@ -86,19 +86,39 @@ class SetupInstallPdfTest(unittest.TestCase):
         self.assertIn('"override_message": (', MAIN)
         self.assertIn('"reachable": provider_reachable', MAIN)
         self.assertIn('"ollama_reachable": models["reachable"]', MAIN)
+        self.assertIn('"ai_keep_alive": os.getenv("AI_KEEP_ALIVE", "30m")', MAIN)
+        self.assertIn('"keep_alive": clean_text(settings.get("ai_keep_alive")) or "30m"', MAIN)
 
     def test_ai_analysis_negative_anomaly_uses_draft_endpoint(self):
         self.assertIn('"/api/anomalies/{event_id}/ai-analysis/draft"', MAIN)
         self.assertIn("def draft_ai_analysis", MAIN)
         self.assertIn("def anomaly_ai_analysis_result", MAIN)
-        self.assertIn("persist=event_id >= 0", MAIN)
-        self.assertIn("return anomaly_ai_analysis_result(event_id, config, persist=False)", MAIN)
+        self.assertIn("def valid_draft_ai_payload", MAIN)
+        self.assertIn("missing_draft_payload", MAIN)
+        self.assertIn("return missing_draft_payload_response()", MAIN)
+        self.assertIn("request_payload=payload if event_id < 0 else None", MAIN)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("function anomalyAiAnalysisEndpoint", html)
+        self.assertIn("function anomalyAiDraftPayload", html)
         self.assertIn("Number(anomalyId) < 0", html)
         self.assertIn("ai-analysis/draft", html)
-        self.assertIn("Number(currentBgpMitigationAnomalyId) < 0 ? 'POST' : 'GET'", html)
+        self.assertIn("body: JSON.stringify(anomalyAiDraftPayload(anomalyId))", html)
+
+    def test_ai_ollama_keep_alive_timeout_and_analysis_only_contracts(self):
+        self.assertIn('"keep_alive": config.get("keep_alive") or "30m"', MAIN)
+        self.assertIn('"temperature": 0.1', MAIN)
+        self.assertIn('"num_predict": 500', MAIN)
+        self.assertIn('"num_ctx": 2048', MAIN)
+        self.assertIn("class AiProviderTimeoutError", MAIN)
+        self.assertIn('"error_type": "timeout"', MAIN)
+        self.assertIn("JSONResponse(status_code=504, content=exc.payload)", MAIN)
+        self.assertIn('endpoint=%s anomaly_id=%s is_draft=%s model=%s timeout_seconds=%s', MAIN)
+        self.assertIn('success=false error_type=timeout', MAIN)
+        self.assertIn('mode in {"disabled", "analysis_only"} or candidate.get("never_announce")', MAIN)
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const analysisOnly = candidate.never_announce || candidate.mitigation_mode === 'analysis_only'", html)
+        self.assertIn("Informativo: sem ação de mitigação.", html)
 
     def test_containerized_bgp_status_distinguishes_unverified_from_down(self):
         self.assertIn("def parse_huawei_vrp_peer_state", MAIN)

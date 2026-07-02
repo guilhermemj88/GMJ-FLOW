@@ -4224,6 +4224,7 @@
                   <div class="field"><label for="systemAiTimeout">Timeout</label><input id="systemAiTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
                   <div class="field"><label for="systemAiTopFlows">Top flows</label><input id="systemAiTopFlows" type="number" min="1" max="200" class="form-control form-control-sm"></div>
                   <div class="field"><label for="systemAiContextChars">Contexto</label><input id="systemAiContextChars" type="number" min="1000" max="100000" class="form-control form-control-sm"></div>
+                  <div class="field"><label for="systemAiKeepAlive">Keep alive</label><input id="systemAiKeepAlive" class="form-control form-control-sm" placeholder="30m"></div>
                   <div class="field"><label for="systemAiPullModel">Baixar modelo</label><input id="systemAiPullModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
                 </div>
                 <div class="toolbar mb-2">
@@ -4598,7 +4599,8 @@
         <button id="trafficLearnCancelButton" type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="trafficLearningModal">Cancelar</button>
         <div class="toolbar">
           <button id="trafficLearnAnalyzeButton" type="button" class="btn btn-sm btn-outline-success"><i data-lucide="activity"></i><span>Analisar baseline</span></button>
-          <button id="trafficLearnApplyButton" type="button" class="btn btn-sm btn-success"><i data-lucide="wand-2"></i><span>Aplicar à regra atual</span></button>
+          <button id="trafficLearnApplyButton" type="button" class="btn btn-sm btn-outline-success"><i data-lucide="wand-2"></i><span>Preencher regra atual</span></button>
+          <button id="trafficLearnSaveButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Aplicar e salvar regra</span></button>
           <button id="trafficLearnDraftButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="file-plus-2"></i><span>Salvar como rascunho</span></button>
         </div>
       </div>
@@ -5354,8 +5356,10 @@
     let anomalyItems = [];
     let currentAnomalyDetailId = null;
     let currentAnomalyDetailEvent = null;
+    let currentAnomalyDetailPayload = null;
     let currentBgpMitigationAnomalyId = null;
     let currentBgpMitigationCandidates = [];
+    let currentBgpMitigationEvaluation = null;
     let currentAiMitigationAnalysis = null;
     let aiProfiles = [];
     let bgpConnectors = [];
@@ -7458,22 +7462,75 @@
       renderTrafficLearningResult(result);
     }
 
-    function applyTrafficLearningToRule(draftOnly = true) {
+    function roundedTrafficThreshold(value) {
+      return Math.max(0, Math.ceil(Number(value || 0)));
+    }
+
+    function highlightTrafficLearnedFields() {
+      [
+        'detectionRuleMetric',
+        'detectionRuleWarning',
+        'detectionRuleCritical',
+        'detectionRuleWindow',
+        'detectionRuleConsecutive',
+        'detectionRuleCooldown',
+        'detectionRuleGroupBy',
+        'detectionRuleMitigationMode'
+      ].forEach(id => {
+        const element = document.getElementById(id);
+        if (!element) return;
+        element.classList.add('border-success');
+        setTimeout(() => element.classList.remove('border-success'), 4000);
+      });
+    }
+
+    function applyTrafficLearningToRule(draftOnly = false) {
       const suggested = trafficLearningLastResult?.suggested_rule;
       if (!suggested) {
-        setText('detectionRuleStatus', 'Análise o baseline antes de aplicar a sugestão.');
-        return;
+        setText('detectionRuleStatus', 'Analise o baseline antes de aplicar a sugestao.');
+        return false;
+      }
+      if (!currentDetectionTemplateId) {
+        setText('detectionRuleStatus', 'Selecione um Grupo de Vetores / Template antes de preencher a regra.');
+        return false;
+      }
+      if (!draftOnly && !editingDetectionRuleId && !selectValue('detectionRuleVector').trim()) {
+        setText('detectionRuleStatus', 'Selecione uma regra existente ou informe Vector antes de preencher a regra atual.');
+        return false;
       }
       setValue('detectionRuleMetric', suggested.metric || selectValue('trafficLearnMetric', 'packets_s'));
-      setValue('detectionRuleWarning', Math.ceil(Number(suggested.warning || 0)));
-      setValue('detectionRuleCritical', Math.ceil(Number(suggested.critical || 0)));
+      setValue('detectionRuleDomain', suggested.domain || selectValue('detectionRuleDomain', 'internal_ip'));
+      setValue('detectionRuleDirection', suggested.direction && suggested.direction !== 'both' ? suggested.direction : selectValue('detectionRuleDirection', 'transmits'));
+      setValue('detectionRuleProtocol', suggested.protocol || selectValue('trafficLearnProtocol', 'ALL'));
+      setValue('detectionRuleWarning', roundedTrafficThreshold(suggested.warning));
+      setValue('detectionRuleCritical', roundedTrafficThreshold(suggested.critical));
       setValue('detectionRuleWindow', suggested.window_seconds || 60);
       setValue('detectionRuleConsecutive', suggested.consecutive_windows || suggested.consecutive || 2);
       setValue('detectionRuleCooldown', suggested.cooldown_minutes || 5);
       setValue('detectionRuleGroupBy', suggested.group_by || '');
-      setValue('detectionRuleMitigationMode', suggested.mitigation_mode || 'manual_review');
-      setBoolSelect('detectionRuleEnabled', false);
-      setText('detectionRuleStatus', draftOnly ? 'Sugestão aplicada como rascunho desativado.' : 'Sugestão aplicada à regra atual como desativada.');
+      setValue('detectionRuleSrcCidr', suggested.src_cidr || selectValue('detectionRuleSrcCidr'));
+      setValue('detectionRuleDstCidr', suggested.dst_cidr || selectValue('detectionRuleDstCidr'));
+      setValue('detectionRuleSrcPort', suggested.src_port || selectValue('detectionRuleSrcPort', 'any'));
+      setValue('detectionRuleDstPort', suggested.dst_port || selectValue('detectionRuleDstPort', 'any'));
+      setValue('detectionRuleMitigationMode', 'manual_review');
+      setBoolSelect('detectionRuleMitigationEnabled', false);
+      if (draftOnly) setBoolSelect('detectionRuleEnabled', false);
+      highlightTrafficLearnedFields();
+      closeModal('trafficLearningModal');
+      document.getElementById('detectionRuleVector')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setText('detectionRuleStatus', draftOnly
+        ? 'Sugestao aplicada ao formulario como rascunho desativado. Clique em Salvar regra para persistir.'
+        : 'Sugestao aplicada ao formulario. Clique em Salvar regra para persistir.');
+      return true;
+    }
+
+    async function saveTrafficLearningRule() {
+      if (!applyTrafficLearningToRule(false)) return;
+      setText('detectionRuleStatus', 'Salvando regra com sugestao aprendida...');
+      const saved = await saveDetectionRule();
+      if (saved?.ok) {
+        setText('detectionRuleStatus', `${saved.message || 'Regra salva com sucesso'} #${saved.rule_id || saved.id || '-'}. Lista de regras atualizada.`);
+      }
     }
 
     function installHelpTooltips() {
@@ -7647,15 +7704,17 @@
         : `/api/detection/templates/${currentDetectionTemplateId}/rules`;
       const method = editingDetectionRuleId ? 'PUT' : 'POST';
       try {
-        await apiRequest(path, {
+        const saved = await apiRequest(path, {
           method,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
         await selectDetectionTemplate(currentDetectionTemplateId);
-        document.getElementById('detectionRuleStatus').textContent = 'Regra salva';
+        document.getElementById('detectionRuleStatus').textContent = saved?.message || 'Regra salva';
+        return saved;
       } catch (error) {
         document.getElementById('detectionRuleStatus').textContent = `Falha ao salvar regra: ${error.message}`;
+        throw error;
       }
     }
 
@@ -9035,6 +9094,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function openBgpMitigationModal(anomalyId) {
       currentBgpMitigationAnomalyId = Number(anomalyId);
+      currentBgpMitigationEvaluation = null;
       currentAiMitigationAnalysis = null;
       await loadBgpView();
       setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
@@ -9073,7 +9133,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             : candidate.not_recommended || candidate.candidate_role === 'not_recommended'
               ? 'Nao recomendado: source-only + udp/53'
               : '';
-        const canAnnounce = !(candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny');
+        const analysisOnly = candidate.never_announce || candidate.mitigation_mode === 'analysis_only';
+        const canApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny');
         return `
           <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -9090,8 +9151,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
             <div class="toolbar">
-              ${canAnnounce ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>` : ''}
-              <button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Criar sugestao</span></button>
+              ${canApply ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>` : ''}
+              ${canApply ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Criar sugestao</span></button>` : '<span class="subtle">Informativo: sem ação de mitigação.</span>'}
               <button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>
             </div>
           </div>
@@ -9130,11 +9191,44 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         : `/api/anomalies/${anomalyId}/ai-analysis`;
     }
 
+    function anomalyAiDraftPayload(anomalyId) {
+      const evaluation = currentBgpMitigationEvaluation || {};
+      const detail = currentAnomalyDetailPayload || {};
+      const anomaly = evaluation.anomaly || detail.event || detail.anomaly || currentAnomalyDetailEvent || { id: Number(anomalyId) };
+      const candidates = Array.isArray(evaluation.candidates) ? evaluation.candidates : currentBgpMitigationCandidates;
+      const relatedFlows = Array.isArray(detail.related_flows)
+        ? detail.related_flows
+        : Array.isArray(detail.flows)
+          ? detail.flows
+          : candidates.map(candidate => candidate.top_flow).filter(Boolean);
+      const topConversations = Array.isArray(detail.top_conversations)
+        ? detail.top_conversations
+        : relatedFlows.slice(0, 10);
+      return {
+        anomaly,
+        top_conversations: topConversations,
+        related_flows: relatedFlows,
+        candidates: candidates || [],
+        deterministic_analysis: evaluation.deterministic_analysis || detail.deterministic_analysis || {}
+      };
+    }
+
+    function anomalyAiRequestOptions(anomalyId, forcePost = false) {
+      if (Number(anomalyId) >= 0) return forcePost ? { method: 'POST' } : { method: 'GET' };
+      return {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(anomalyAiDraftPayload(anomalyId))
+      };
+    }
+
     async function loadBgpAiRecommendation() {
       if (!currentBgpMitigationAnomalyId) return;
       try {
-        const method = Number(currentBgpMitigationAnomalyId) < 0 ? 'POST' : 'GET';
-        currentAiMitigationAnalysis = await apiRequest(anomalyAiAnalysisEndpoint(currentBgpMitigationAnomalyId), { method });
+        currentAiMitigationAnalysis = await apiRequest(
+          anomalyAiAnalysisEndpoint(currentBgpMitigationAnomalyId),
+          anomalyAiRequestOptions(currentBgpMitigationAnomalyId)
+        );
       } catch (error) {
         currentAiMitigationAnalysis = null;
       }
@@ -9145,6 +9239,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!currentBgpMitigationAnomalyId) return;
       document.getElementById('bgpMitigationOutput').textContent = 'Avaliando candidatos...';
       const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, { method: 'POST' });
+      currentBgpMitigationEvaluation = payload || {};
       currentBgpMitigationCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
       await loadBgpAiRecommendation();
       renderBgpMitigationCandidates(currentBgpMitigationCandidates);
@@ -11019,8 +11114,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadAnomalyAiAnalysis(anomalyId) {
       try {
-        const method = Number(anomalyId) < 0 ? 'POST' : 'GET';
-        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(anomalyId), { method });
+        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(anomalyId), anomalyAiRequestOptions(anomalyId));
         renderAnomalyAiAnalysis(analysis);
       } catch (error) {
         currentAiMitigationAnalysis = null;
@@ -11033,7 +11127,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('anomalyAiStatus', 'Analisando com IA...');
       document.getElementById('anomalyAiAnalysisBlock').innerHTML = '<div class="subtle">Aguardando provider local...</div>';
       try {
-        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(currentAnomalyDetailId), { method: 'POST' });
+        const analysis = await apiRequest(anomalyAiAnalysisEndpoint(currentAnomalyDetailId), anomalyAiRequestOptions(currentAnomalyDetailId, true));
         renderAnomalyAiAnalysis(analysis);
       } catch (error) {
         setText('anomalyAiStatus', `Falha: ${error.message}`);
@@ -11044,6 +11138,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function openAnomalyDetail(anomalyId) {
       currentAnomalyDetailId = Number(anomalyId);
       currentAnomalyDetailEvent = null;
+      currentAnomalyDetailPayload = null;
       currentAiMitigationAnalysis = null;
       openModal('anomalyDetailModal');
       document.getElementById('anomalyDetailSummary').textContent = 'Carregando...';
@@ -11053,6 +11148,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
         const detail = payload || {};
+        currentAnomalyDetailPayload = detail;
         const event = detail.event || detail.anomaly || detail;
         currentAnomalyDetailEvent = event;
         document.getElementById('anomalyInvestigatePeakButton').disabled = false;
@@ -13670,6 +13766,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('systemAiTimeout', ai.timeout_seconds || 20);
       setValue('systemAiTopFlows', ai.max_top_flows || 30);
       setValue('systemAiContextChars', ai.max_context_chars || 12000);
+      setValue('systemAiKeepAlive', ai.keep_alive || '30m');
       setText('systemAiOutput', JSON.stringify({
         enabled: ai.enabled,
         source: ai.source || ai.config_source,
@@ -13681,6 +13778,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         model: ai.selected_model,
         reachable: ai.reachable ?? ai.ollama_reachable,
         ollama_reachable: ai.ollama_reachable,
+        keep_alive: ai.keep_alive || '30m',
         allow_auto: false,
         require_policy_validation: ai.require_policy_validation
       }, null, 2));
@@ -13771,6 +13869,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         timeout_seconds: numberValue('systemAiTimeout', 20),
         max_top_flows: numberValue('systemAiTopFlows', 30),
         max_context_chars: numberValue('systemAiContextChars', 12000),
+        keep_alive: selectValue('systemAiKeepAlive').trim() || '30m',
         allow_auto: false,
         require_policy_validation: true
       };
@@ -14099,6 +14198,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('trafficLearnSensor').addEventListener('change', () => refreshTrafficLearningInterfaces().catch(error => setText('trafficLearnOutput', `Falha ao carregar interfaces: ${error.message}`)));
     document.getElementById('trafficLearnAnalyzeButton').addEventListener('click', () => analyzeTrafficLearning().catch(error => setText('trafficLearnOutput', `Falha ao analisar baseline: ${error.message}`)));
     document.getElementById('trafficLearnApplyButton').addEventListener('click', () => applyTrafficLearningToRule(false));
+    document.getElementById('trafficLearnSaveButton').addEventListener('click', () => saveTrafficLearningRule().catch(error => setText('detectionRuleStatus', `Falha ao salvar regra aprendida: ${error.message}`)));
     document.getElementById('trafficLearnDraftButton').addEventListener('click', () => applyTrafficLearningToRule(true));
     document.getElementById('newDetectionWhitelistButton').addEventListener('click', () => resetDetectionWhitelistForm());
     document.getElementById('saveDetectionWhitelistButton').addEventListener('click', () => saveDetectionWhitelist().catch(console.error));

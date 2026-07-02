@@ -352,6 +352,7 @@ SYSTEM_SETTING_DEFAULTS = {
     "ai_timeout_seconds": os.getenv("AI_TIMEOUT_SECONDS", "20"),
     "ai_max_top_flows": os.getenv("AI_MAX_TOP_FLOWS", "30"),
     "ai_max_context_chars": os.getenv("AI_MAX_CONTEXT_CHARS", "12000"),
+    "ai_keep_alive": os.getenv("AI_KEEP_ALIVE", "30m"),
     "ai_allow_auto": os.getenv("AI_ALLOW_AUTO", "false"),
     "ai_require_policy_validation": os.getenv("AI_REQUIRE_POLICY_VALIDATION", "true"),
 }
@@ -790,6 +791,7 @@ class AiSettingsPayload(BaseModel):
     timeout_seconds: int | None = Field(None, ge=1, le=300)
     max_top_flows: int | None = Field(None, ge=1, le=200)
     max_context_chars: int | None = Field(None, ge=1000, le=100000)
+    keep_alive: str = "30m"
     allow_auto: bool = False
     require_policy_validation: bool = True
 
@@ -804,6 +806,7 @@ class SystemAiConfigPayload(BaseModel):
     timeout_seconds: int | None = Field(None, ge=1, le=300)
     max_top_flows: int | None = Field(None, ge=1, le=200)
     max_context_chars: int | None = Field(None, ge=1000, le=100000)
+    keep_alive: str = "30m"
 
 
 class OllamaPullPayload(BaseModel):
@@ -9806,6 +9809,7 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "ai_timeout_seconds",
         "ai_max_top_flows",
         "ai_max_context_chars",
+        "ai_keep_alive",
         "ai_allow_auto",
         "ai_require_policy_validation",
     )
@@ -9834,6 +9838,7 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "timeout_seconds": ai_int_setting(settings, "ai_timeout_seconds", profile["timeout_seconds"], 1, 300),
         "max_top_flows": ai_int_setting(settings, "ai_max_top_flows", profile["max_top_flows"], 1, 200),
         "max_context_chars": ai_int_setting(settings, "ai_max_context_chars", profile["max_context_chars"], 1000, 100000),
+        "keep_alive": clean_text(settings.get("ai_keep_alive")) or "30m",
         "allow_auto": setting_bool(settings, "ai_allow_auto"),
         "require_policy_validation": setting_bool(settings, "ai_require_policy_validation"),
     }
@@ -10286,11 +10291,11 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
                 {"role": "user", "content": user_prompt},
             ],
             "format": "json",
+            "keep_alive": config.get("keep_alive") or "30m",
             "options": {
-                "temperature": 0,
-                "num_predict": 256,
+                "temperature": 0.1,
+                "num_predict": 500,
                 "num_ctx": 2048,
-                "top_p": 0.9,
             },
         }
     else:
@@ -10326,7 +10331,17 @@ def ai_provider_prompt(config: dict[str, Any], prompt: str) -> tuple[str, int]:
     started = time.monotonic()
     if provider == "ollama":
         endpoint = f"{base_url}/api/generate"
-        body = {"model": config["selected_model"], "prompt": prompt, "stream": False}
+        body = {
+            "model": config["selected_model"],
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": config.get("keep_alive") or "30m",
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 500,
+                "num_ctx": 2048,
+            },
+        }
     else:
         endpoint = f"{base_url}/v1/chat/completions"
         body = {
@@ -10550,8 +10565,74 @@ def draft_ai_analysis(
     return item
 
 
-def anomaly_ai_analysis_result(event_id: int, config: dict[str, Any], persist: bool) -> dict[str, Any]:
-    request_payload = build_ai_mitigation_payload(event_id, config)
+REQUIRED_DRAFT_AI_FIELDS = ["anomaly", "top_conversations", "related_flows", "candidates"]
+
+
+class AiProviderTimeoutError(Exception):
+    def __init__(self, payload: dict[str, Any]):
+        self.payload = payload
+        super().__init__(payload.get("detail") or "IA local excedeu o timeout configurado.")
+
+
+def ai_exception_is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    reason = getattr(exc, "reason", None)
+    if reason is not None and reason is not exc and ai_exception_is_timeout(reason):
+        return True
+    return "timed out" in clean_text(exc).lower() or "timeout" in clean_text(exc).lower()
+
+
+def missing_draft_payload_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "ok": False,
+            "error_type": "missing_draft_payload",
+            "detail": "Análise IA draft requer payload completo da anomalia temporária.",
+            "required_fields": REQUIRED_DRAFT_AI_FIELDS,
+        },
+    )
+
+
+def valid_draft_ai_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if any(field not in payload for field in REQUIRED_DRAFT_AI_FIELDS):
+        return False
+    return (
+        isinstance(payload.get("anomaly"), dict)
+        and isinstance(payload.get("top_conversations"), list)
+        and isinstance(payload.get("related_flows"), list)
+        and isinstance(payload.get("candidates"), list)
+        and bool(payload.get("candidates"))
+    )
+
+
+def ai_timeout_payload(event_id: int, config: dict[str, Any], request_payload: dict[str, Any], prompt: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error_type": "timeout",
+        "detail": "IA local excedeu o timeout configurado.",
+        "timeout_seconds": int(config.get("timeout_seconds") or 0),
+        "model": config.get("selected_model") or "",
+        "prompt_chars": len(prompt),
+        "request_payload_chars": ai_payload_json_size(request_payload),
+        "keep_alive": config.get("keep_alive") or "30m",
+        "anomaly_id": event_id,
+    }
+
+
+def anomaly_ai_analysis_result(
+    event_id: int,
+    config: dict[str, Any],
+    persist: bool,
+    request_payload: dict[str, Any] | None = None,
+    endpoint: str = "persisted",
+) -> dict[str, Any]:
+    request_payload = request_payload if request_payload is not None else build_ai_mitigation_payload(event_id, config)
+    if not persist:
+        request_payload = compact_ai_payload_for_model(request_payload, int(config["max_context_chars"]))
     if not request_payload.get("candidates"):
         fallback_response = {
             "recommended_candidate_index": None,
@@ -10577,10 +10658,35 @@ def anomaly_ai_analysis_result(event_id: int, config: dict[str, Any], persist: b
             conn.commit()
         return saved
     prompt = ai_prompt_for_payload(request_payload)
+    request_payload_chars = ai_payload_json_size(request_payload)
+    prompt_chars = len(prompt)
+    candidate_count = len(list(request_payload.get("candidates") or []))
+    logger.info(
+        "ai_analysis_call endpoint=%s anomaly_id=%s is_draft=%s model=%s timeout_seconds=%s max_top_flows=%s max_context_chars=%s keep_alive=%s prompt_chars=%s request_payload_chars=%s candidate_count=%s",
+        endpoint,
+        event_id,
+        not persist,
+        config.get("selected_model") or "",
+        int(config.get("timeout_seconds") or 0),
+        int(config.get("max_top_flows") or 0),
+        int(config.get("max_context_chars") or 0),
+        config.get("keep_alive") or "30m",
+        prompt_chars,
+        request_payload_chars,
+        candidate_count,
+    )
+    call_started = time.monotonic()
     try:
         response_text, _latency_ms = ai_provider_chat(config, prompt)
         parsed = parse_ai_json_response(response_text)
         validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
+        logger.info(
+            "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=true error_type= error_message=",
+            endpoint,
+            event_id,
+            not persist,
+            int((time.monotonic() - call_started) * 1000),
+        )
         if not persist:
             return draft_ai_analysis(event_id, config, request_payload, validated, prompt=prompt)
         with sqlite_connection() as conn:
@@ -10588,6 +10694,26 @@ def anomaly_ai_analysis_result(event_id: int, config: dict[str, Any], persist: b
             conn.commit()
         return saved
     except Exception as exc:
+        elapsed_ms = int((time.monotonic() - call_started) * 1000)
+        if ai_exception_is_timeout(exc):
+            payload = ai_timeout_payload(event_id, config, request_payload, prompt)
+            logger.warning(
+                "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=timeout error_message=%s",
+                endpoint,
+                event_id,
+                not persist,
+                elapsed_ms,
+                clean_text(exc)[:500],
+            )
+            raise AiProviderTimeoutError(payload) from exc
+        logger.warning(
+            "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=provider_error error_message=%s",
+            endpoint,
+            event_id,
+            not persist,
+            elapsed_ms,
+            clean_text(exc)[:500],
+        )
         if not persist:
             return draft_ai_analysis(event_id, config, request_payload, {}, str(exc), prompt=prompt)
         with sqlite_connection() as conn:
@@ -10642,6 +10768,7 @@ def save_ai_settings(request: Request, payload: AiSettingsPayload):
         "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
         "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
         "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_keep_alive": clean_text(payload.keep_alive) or "30m",
         "ai_allow_auto": "false",
         "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
     }
@@ -10887,6 +11014,7 @@ def system_ai_config(request: Request, payload: SystemAiConfigPayload):
         "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
         "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
         "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_keep_alive": clean_text(payload.keep_alive) or "30m",
         "ai_allow_auto": "false",
         "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
     }
@@ -11053,11 +11181,7 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
     if event_id < 0:
-        with sqlite_connection() as conn:
-            config = ai_effective_config(conn)
-        if not config["enabled"]:
-            raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
-        return anomaly_ai_analysis_result(event_id, config, persist=False)
+        return missing_draft_payload_response()
     with sqlite_connection() as conn:
         analysis = latest_ai_analysis(conn, event_id)
     if analysis is None:
@@ -11077,22 +11201,45 @@ def get_anomaly_flow_context(request: Request, event_id: int):
 def create_anomaly_ai_analysis(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
+    if event_id < 0:
+        return missing_draft_payload_response()
     with sqlite_connection() as conn:
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
-    return anomaly_ai_analysis_result(event_id, config, persist=event_id >= 0)
+    try:
+        return anomaly_ai_analysis_result(event_id, config, persist=event_id >= 0, endpoint="persisted")
+    except AiProviderTimeoutError as exc:
+        return JSONResponse(status_code=504, content=exc.payload)
 
 
 @app.api_route("/api/anomalies/{event_id}/ai-analysis/draft", methods=["GET", "POST"])
-def draft_anomaly_ai_analysis(request: Request, event_id: int):
+async def draft_anomaly_ai_analysis(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
+    payload: dict[str, Any] = {}
+    if request.method.upper() == "POST":
+        try:
+            raw_payload = await request.json()
+        except Exception:
+            raw_payload = {}
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+    if event_id < 0 and not valid_draft_ai_payload(payload):
+        return missing_draft_payload_response()
     with sqlite_connection() as conn:
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
-    return anomaly_ai_analysis_result(event_id, config, persist=False)
+    try:
+        return anomaly_ai_analysis_result(
+            event_id,
+            config,
+            persist=False,
+            request_payload=payload if event_id < 0 else None,
+            endpoint="draft",
+        )
+    except AiProviderTimeoutError as exc:
+        return JSONResponse(status_code=504, content=exc.payload)
 
 
 def insert_bgp_mitigation_announcement(
@@ -11378,7 +11525,7 @@ def process_anomaly_mitigation() -> dict[str, int]:
                     stats["skipped"] += 1
                     continue
                 mode = clean_text(candidate.get("mitigation_mode")) or "disabled"
-                if mode == "disabled":
+                if mode in {"disabled", "analysis_only"} or candidate.get("never_announce"):
                     stats["skipped"] += 1
                     continue
                 if mode in {"automatic", "manual_approval", "suggest_only", "manual_review", "response_profile"}:
@@ -12944,6 +13091,13 @@ def detection_learning_suggested_rule(payload: DetectionTrafficLearnPayload, bas
     critical = max(float(baseline["p99"]) * factors["critical"], float(baseline["max_clean"]) * 1.2)
     return {
         "metric": clean_text(payload.metric) or "packets_s",
+        "protocol": (clean_text(payload.protocol).upper() if clean_text(payload.protocol).lower() not in {"", "any"} else "ALL"),
+        "direction": clean_text(payload.direction) or "both",
+        "domain": "interface" if payload.interface_id else "subnet" if payload.zone_id else "internal_ip",
+        "src_cidr": clean_text(payload.src_cidr),
+        "dst_cidr": clean_text(payload.dst_cidr),
+        "src_port": clean_text(payload.src_port) or "any",
+        "dst_port": clean_text(payload.dst_port) or "any",
         "warning": round(warning, 3),
         "critical": round(max(critical, warning), 3),
         "window_seconds": int(payload.window_seconds or 60),
@@ -12952,6 +13106,11 @@ def detection_learning_suggested_rule(payload: DetectionTrafficLearnPayload, bas
         "cooldown_minutes": 5,
         "group_by": "src_ip,dst_ip,dst_port,protocol" if clean_text(payload.scope) in {"internal_ip", "port_protocol"} else "",
         "mitigation_mode": "manual_review",
+        "mitigation_enabled": False,
+        "scope": clean_text(payload.scope),
+        "sensor": clean_text(payload.sensor),
+        "interface_id": payload.interface_id,
+        "zone_id": payload.zone_id,
         "enabled": False,
     }
 
@@ -13140,6 +13299,15 @@ def list_detection_rules(template_id: int):
         return {"items": [detection_rule_row_to_dict(row) for row in rows]}
 
 
+def detection_rule_save_response(rule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **rule,
+        "ok": True,
+        "rule_id": rule.get("id"),
+        "message": "Regra salva com sucesso",
+    }
+
+
 @app.post("/api/detection/templates/{template_id}/rules", status_code=201)
 def create_detection_rule(template_id: int, payload: DetectionRulePayload):
     ensure_sensor_db()
@@ -13215,7 +13383,7 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
             ),
         )
         conn.commit()
-        return detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, int(cursor.lastrowid)))
+        return detection_rule_save_response(detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, int(cursor.lastrowid))))
 
 
 @app.put("/api/detection/templates/{template_id}/rules/{rule_id}")
@@ -13323,7 +13491,7 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
             ),
         )
         conn.commit()
-        return detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, rule_id))
+        return detection_rule_save_response(detection_rule_row_to_dict(fetch_detection_rule_row(conn, template_id, rule_id)))
 
 
 @app.delete("/api/detection/templates/{template_id}/rules/{rule_id}")
