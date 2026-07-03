@@ -36,7 +36,16 @@ class _RouterStub:
             return func
         return wrap
 
-    get = post = put = delete = _decorator
+    def on_event(self, *args, **kwargs):
+        return self._decorator(*args, **kwargs)
+
+    def middleware(self, *args, **kwargs):
+        return self._decorator(*args, **kwargs)
+
+    def api_route(self, *args, **kwargs):
+        return self._decorator(*args, **kwargs)
+
+    get = post = put = patch = delete = _decorator
 
 
 def _query(default=None, *args, **kwargs):
@@ -273,6 +282,7 @@ class BgpMitigationTest(unittest.TestCase):
                 type="flowspec",
                 active=True,
                 connector_id=connector["id"],
+                action="discard",
                 default_action="discard",
                 target_selector="dst_ip",
                 protocol_selector="udp",
@@ -286,6 +296,9 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(values["response_type"], "flowspec")
             self.assertEqual(values["enabled"], 1)
             self.assertEqual(values["connector_id"], connector["id"])
+            self.assertEqual(values["action"], "discard")
+            self.assertEqual(values["dst_port_selector"], "fixed")
+            self.assertEqual(values["dst_port_value"], "53")
             self.assertEqual(values["default_duration_seconds"], 1800)
             self.assertEqual(values["max_duration_seconds"], 3600)
 

@@ -1083,6 +1083,7 @@ class BgpResponseProfilePayload(BaseModel):
     community: str = ""
     large_community: str = ""
     require_protocol_or_port: bool = True
+    require_protected_prefix: bool = True
     allow_wide_prefix: bool = False
     max_duration_seconds: int = Field(BGP_DEFAULT_MAX_DURATION_SECONDS, ge=60, le=604800)
     default_duration_seconds: int = Field(1800, ge=60, le=604800)
@@ -7136,7 +7137,7 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "community": clean_text(payload.community),
         "large_community": clean_text(payload.large_community),
         "require_protocol_or_port": 1 if payload.require_protocol_or_port else 0,
-        "require_protected_prefix": 1 if payload.require_protected_prefix else 0,
+        "require_protected_prefix": 1 if getattr(payload, "require_protected_prefix", True) else 0,
         "allow_wide_prefix": 1 if payload.allow_wide_prefix else 0,
         "max_prefixlen_v4": int(payload.max_prefixlen_v4),
         "max_prefixlen_v6": int(payload.max_prefixlen_v6),
