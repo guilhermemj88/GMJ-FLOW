@@ -10632,6 +10632,70 @@ def draft_ai_analysis(
 REQUIRED_DRAFT_AI_FIELDS = ["anomaly", "top_conversations", "related_flows", "candidates"]
 
 
+def normalize_draft_ai_payload(payload: Any, event_id: int | None = None) -> tuple[dict[str, Any], list[str]]:
+    if not isinstance(payload, dict):
+        return {}, ["payload"]
+
+    normalized: dict[str, Any] = dict(payload)
+    anomaly = payload.get("anomaly")
+    if not isinstance(anomaly, dict):
+        return normalized, ["anomaly"]
+
+    sanitized_anomaly = dict(anomaly)
+    normalized["anomaly"] = sanitized_anomaly
+
+    top_conversations = payload.get("top_conversations")
+    normalized["top_conversations"] = top_conversations if isinstance(top_conversations, list) else []
+
+    related_flows = payload.get("related_flows")
+    normalized["related_flows"] = related_flows if isinstance(related_flows, list) else []
+
+    candidates = payload.get("candidates")
+    normalized["candidates"] = candidates if isinstance(candidates, list) else []
+
+    if event_id is not None and event_id < 0:
+        missing_fields: list[str] = []
+        if clean_text(sanitized_anomaly.get("id")) == "":
+            missing_fields.append("anomaly.id")
+        target_ip = clean_text(sanitized_anomaly.get("target_ip") or sanitized_anomaly.get("target_cidr"))
+        if not target_ip:
+            missing_fields.append("anomaly.target_ip_or_target_cidr")
+        if not clean_text(sanitized_anomaly.get("direction")):
+            missing_fields.append("anomaly.direction")
+        if not clean_text(sanitized_anomaly.get("decoder") or sanitized_anomaly.get("protocol")):
+            missing_fields.append("anomaly.decoder_or_protocol")
+        if not clean_text(sanitized_anomaly.get("severity") or sanitized_anomaly.get("observed_value")):
+            missing_fields.append("anomaly.severity_or_observed_value")
+
+        security_anomaly_ids = sanitized_anomaly.get("security_anomaly_ids")
+        if security_anomaly_ids is not None:
+            ids: list[int] = []
+            if isinstance(security_anomaly_ids, (list, tuple, set)):
+                ids = [int(item) for item in security_anomaly_ids if clean_text(item)]
+            else:
+                try:
+                    ids = [int(security_anomaly_ids)]
+                except (TypeError, ValueError):
+                    ids = []
+            if ids:
+                try:
+                    with sqlite_connection() as conn:
+                        rows = conn.execute(
+                            "SELECT id, name, target_ip, target_cidr, severity, protocol, direction, source_name FROM security_anomalies WHERE id IN ({})".format(
+                                ",".join("?" for _ in ids)
+                            ),
+                            tuple(ids),
+                        ).fetchall()
+                    if rows:
+                        sanitized_anomaly["security_anomaly_details"] = [dict(row) for row in rows]
+                except Exception:
+                    pass
+
+        return normalized, missing_fields
+
+    return normalized, []
+
+
 class AiProviderTimeoutError(Exception):
     def __init__(self, payload: dict[str, Any]):
         self.payload = payload
@@ -10647,7 +10711,7 @@ def ai_exception_is_timeout(exc: BaseException) -> bool:
     return "timed out" in clean_text(exc).lower() or "timeout" in clean_text(exc).lower()
 
 
-def missing_draft_payload_response() -> JSONResponse:
+def missing_draft_payload_response(missing_fields: list[str] | None = None) -> JSONResponse:
     return JSONResponse(
         status_code=400,
         content={
@@ -10655,6 +10719,7 @@ def missing_draft_payload_response() -> JSONResponse:
             "error_type": "missing_draft_payload",
             "detail": "Análise IA draft requer payload completo da anomalia temporária.",
             "required_fields": REQUIRED_DRAFT_AI_FIELDS,
+            "missing_fields": sorted(set(missing_fields or [])),
         },
     )
 
@@ -11288,7 +11353,11 @@ async def draft_anomaly_ai_analysis(request: Request, event_id: int):
         except Exception:
             raw_payload = {}
         payload = raw_payload if isinstance(raw_payload, dict) else {}
-    if event_id < 0 and not valid_draft_ai_payload(payload):
+    if event_id < 0:
+        payload, missing_fields = normalize_draft_ai_payload(payload, event_id)
+        if missing_fields:
+            return missing_draft_payload_response(missing_fields)
+    elif not valid_draft_ai_payload(payload):
         return missing_draft_payload_response()
     with sqlite_connection() as conn:
         config = ai_effective_config(conn)

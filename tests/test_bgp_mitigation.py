@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import sqlite3
@@ -7,6 +8,7 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -377,6 +379,47 @@ class BgpMitigationTest(unittest.TestCase):
             blocked_action_result = validate_target("8.8.4.4", True)
             self.assertEqual(blocked_action_result["validation_status"], "protected_prefix_action_not_allowed")
             self.assertIn("protected_prefix_action_not_allowed", blocked_action_result["errors"])
+
+    def test_negative_anomaly_draft_accepts_minimal_payload_without_candidates(self):
+        class _RequestStub:
+            def __init__(self, payload):
+                self._payload = payload
+                self.method = "POST"
+                self.state = types.SimpleNamespace(user={"role": "admin", "username": "tester"})
+
+            async def json(self):
+                return self._payload
+
+        class _JSONResponseStub:
+            def __init__(self, content=None, status_code=200, *args, **kwargs):
+                self.content = content if isinstance(content, dict) else kwargs.get("content", None)
+                self.status_code = status_code
+                self.body = json.dumps(self.content).encode("utf-8") if self.content is not None else b""
+
+        payload = {
+            "anomaly": {
+                "id": -123,
+                "target_ip": "203.0.113.10",
+                "direction": "outbound",
+                "decoder": "IP",
+                "severity": "high",
+            }
+        }
+        with patch.object(main, "ai_effective_config", return_value={"enabled": True, "selected_model": "", "timeout_seconds": 10, "max_context_chars": 1000, "max_top_flows": 10, "keep_alive": "30m"}):
+            with patch.object(main, "JSONResponse", _JSONResponseStub):
+                response = asyncio.run(main.draft_anomaly_ai_analysis(_RequestStub(payload), -123))
+        self.assertTrue(response["draft"])
+        self.assertFalse(response["persisted"])
+        self.assertEqual(response["response"]["recommended_candidate"], "alert_only")
+        self.assertEqual(response["response"]["evidence_status"], "insufficient")
+
+        empty_payload = {}
+        with patch.object(main, "ai_effective_config", return_value={"enabled": True, "selected_model": "", "timeout_seconds": 10, "max_context_chars": 1000, "max_top_flows": 10, "keep_alive": "30m"}):
+            with patch.object(main, "JSONResponse", _JSONResponseStub):
+                response = asyncio.run(main.draft_anomaly_ai_analysis(_RequestStub(empty_payload), -123))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('"error_type": "missing_draft_payload"', response.body.decode("utf-8"))
+        self.assertIn('"missing_fields": ["anomaly"]', response.body.decode("utf-8"))
 
     def test_detection_rule_saves_response_profile_ids(self):
         with temporary_main_db():
