@@ -2274,6 +2274,7 @@
                 <button id="calibrateSampleRateButton" type="button" class="btn btn-sm btn-outline-success">
                   <i data-lucide="activity"></i><span>Calibrar sample rate por SNMP</span>
                 </button>
+                <span id="calibrationWindowLabel" class="badge-soft off">Janela: ultimos 15 min</span>
               </div>
             </div>
             <div class="table-wrap">
@@ -2845,6 +2846,9 @@
                     <button id="cloneDetectionRuleButton" type="button" class="btn btn-sm btn-outline-secondary">
                       <i data-lucide="copy"></i><span>Clonar regra</span>
                     </button>
+                    <button id="runDetectionNowButton" type="button" class="btn btn-sm btn-outline-success">
+                      <i data-lucide="radar"></i><span>Executar deteccao agora</span>
+                    </button>
                     <button id="saveDetectionRuleButton" type="button" class="btn btn-sm btn-success">
                       <i data-lucide="save"></i><span>Salvar regra</span>
                     </button>
@@ -3053,7 +3057,7 @@
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th>Warning response</th><th>Critical response</th><th>Mitigation</th><th>Whitelist</th><th>Safe</th><th>Ações</th></tr></thead>
+                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th>Warning response</th><th>Critical response</th><th>Mitigation</th><th>Whitelist</th><th>Ultimo check</th><th>Safe</th><th>Ações</th></tr></thead>
                     <tbody id="detectionRuleTable"></tbody>
                   </table>
                 </div>
@@ -7661,6 +7665,16 @@
       };
     }
 
+    function detectionRuleRuntimeHtml(rule) {
+      const lastCheck = rule.last_check_at ? formatDateTime(rule.last_check_at) : '-';
+      const lastMatch = rule.last_match_at ? formatDateTime(rule.last_match_at) : '-';
+      const lastAnomaly = rule.last_anomaly_at ? formatDateTime(rule.last_anomaly_at) : '-';
+      const skip = rule.last_skip_reason || '-';
+      const title = `Ultimo check: ${lastCheck}\nUltimo match: ${lastMatch}\nUltima anomalia criada: ${lastAnomaly}\nUltimo motivo de skip: ${skip}`;
+      const badgeClass = rule.last_anomaly_at ? 'ok' : rule.last_skip_reason ? 'warn' : 'off';
+      return `<span class="badge-soft ${badgeClass}" title="${escapeHtml(title)}">${escapeHtml(lastCheck)}</span>`;
+    }
+
     function renderDetectionRuleTable() {
       const tbody = document.getElementById('detectionRuleTable');
       if (!tbody) return;
@@ -7676,6 +7690,7 @@
           <td>${escapeHtml(rule.critical_response_profile_name || rule.critical_response_profile_id || 'ALERT_ONLY')}</td>
           <td><span class="badge-soft ${rule.mitigation_enabled ? 'warn' : 'off'}">${escapeHtml(rule.mitigation_enabled ? rule.mitigation_mode : 'detection_only')}</span></td>
           <td>${rule.use_global_whitelist ? 'Global ON' : 'Global OFF'}</td>
+          <td>${detectionRuleRuntimeHtml(rule)}</td>
           <td><span class="badge-soft ${rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'ok' : 'warn'}">${escapeHtml(rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'safe' : (rule.profile_status_reason || 'review'))}</span></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
@@ -7685,7 +7700,7 @@
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="11" class="text-muted">Sem regras</td></tr>';
+      `).join('') || '<tr><td colspan="12" class="text-muted">Sem regras</td></tr>';
       createIcons();
     }
 
@@ -7726,6 +7741,24 @@
         document.getElementById('detectionRuleStatus').textContent = 'Regra desativada';
       } catch (error) {
         document.getElementById('detectionRuleStatus').textContent = `Falha ao desativar regra: ${error.message}`;
+      }
+    }
+
+    async function runDetectionNow() {
+      setText('detectionRuleStatus', 'Executando deteccao ativa...');
+      try {
+        const payload = await apiRequest('/api/detection/run-now', { method: 'POST' });
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const created = Number(payload.anomalies_created || 0);
+        const matched = items.filter(item => item.matched).length;
+        const skipped = payload.skipped_reasons || {};
+        const skipText = Object.entries(skipped).map(([key, value]) => `${key}: ${formatNumber(value)}`).join(' | ');
+        if (currentDetectionTemplateId) await selectDetectionTemplate(currentDetectionTemplateId);
+        setText('detectionRuleStatus', `${formatNumber(items.length)} regras avaliadas, ${formatNumber(matched)} matches, ${formatNumber(created)} anomalias criadas${skipText ? `; skips ${skipText}` : ''}`);
+        loadSecurityAnomalies().catch(console.error);
+        updateAnomalySummary().catch(console.error);
+      } catch (error) {
+        setText('detectionRuleStatus', `Falha ao executar deteccao: ${error.message}`);
       }
     }
 
@@ -13267,6 +13300,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return iface.calibration || {};
     }
 
+    function calibrationReason(iface) {
+      return iface.calibration_reason || calibrationForInterface(iface).reason || '';
+    }
+
+    function calibrationValueOrReason(iface, field, formatter = value => value) {
+      const calibration = calibrationForInterface(iface);
+      const reason = calibrationReason(iface);
+      if (field === 'snmp' && calibration.snmp_ok === false) return `<span class="text-danger">${escapeHtml(calibration.snmp_error || reason || 'SNMP sem dados')}</span>`;
+      if (field === 'flow' && calibration.flow_ok === false) return `<span class="text-danger">${escapeHtml(calibration.flow_error || reason || 'Sem flow_raw')}</span>`;
+      return formatter(calibration);
+    }
+
     function selectedInterfaceIndexes() {
       return Array.from(document.querySelectorAll('.interface-select:checked'))
         .map(input => Number(input.dataset.index))
@@ -13287,8 +13332,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(iface.stats || 'Basic')}</td>
           <td class="text-end">${formatSpeed(iface.speed_in_bps)}</td>
           <td class="text-end">${formatSpeed(iface.speed_out_bps)}</td>
-          <td class="text-end">${formatPair(iface.snmp_in_bps, iface.snmp_out_bps)}</td>
-          <td class="text-end">${formatPair(calibrationForInterface(iface).flow_in_bps, calibrationForInterface(iface).flow_out_bps)}</td>
+          <td class="text-end">${calibrationValueOrReason(iface, 'snmp', () => formatPair(iface.snmp_in_bps, iface.snmp_out_bps))}</td>
+          <td class="text-end">${calibrationValueOrReason(iface, 'flow', calibration => formatPair(calibration.flow_in_bps, calibration.flow_out_bps))}</td>
           <td class="text-end">${formatPair(calibrationForInterface(iface).estimated_sample_rate_in, calibrationForInterface(iface).estimated_sample_rate_out, value => `${Number(value || 0).toFixed(2)}x`)}</td>
           <td class="text-end">${calibrationForInterface(iface).last_calibrated_at ? formatConfidence(calibrationForInterface(iface).confidence) : '-'}</td>
           <td>${calibrationForInterface(iface).last_calibrated_at ? formatDateTime(calibrationForInterface(iface).last_calibrated_at) : '-'}</td>
@@ -13299,6 +13344,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <div class="d-flex flex-wrap gap-1 justify-content-center">
               <button type="button" class="btn btn-sm btn-outline-secondary apply-calibration-button" data-if-index="${Number(iface.if_index) || 0}">
                 Fator
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary test-snmp-interface-button" data-if-index="${Number(iface.if_index) || 0}">
+                Testar SNMP
+              </button>
+              <button type="button" class="btn btn-sm btn-outline-secondary test-flow-interface-button" data-if-index="${Number(iface.if_index) || 0}">
+                Testar Flow bruto
               </button>
               <button type="button" class="btn btn-sm btn-outline-success sample-rate-1000-button" data-if-index="${Number(iface.if_index) || 0}">
                 1000x
@@ -13505,8 +13556,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             snmp_in_bps: calibration.snmp_in_bps,
             snmp_out_bps: calibration.snmp_out_bps,
             flow_in_bps: calibration.flow_in_bps,
-            flow_out_bps: calibration.flow_out_bps
-          }
+            flow_out_bps: calibration.flow_out_bps,
+            snmp_ok: calibration.snmp_ok,
+            flow_ok: calibration.flow_ok,
+            snmp_error: calibration.snmp_error,
+            flow_error: calibration.flow_error,
+            reason: calibration.reason,
+            saved: calibration.saved
+          },
+          calibration_reason: calibration.reason || ''
         };
       });
     }
@@ -13523,11 +13581,32 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         items.forEach(mergeInterfaceCalibration);
         renderInterfaces();
         const lowConfidence = items.filter(item => item.confidence_low).length;
-        document.getElementById('interfacesStatus').textContent = lowConfidence
-          ? `${formatNumber(items.length)} interfaces calibradas; ${formatNumber(lowConfidence)} com confianca baixa`
-          : `${formatNumber(items.length)} interfaces calibradas`;
+        const saved = items.filter(item => item.saved).length;
+        const failed = items.length - saved;
+        document.getElementById('interfacesStatus').textContent = failed
+          ? `${formatNumber(saved)} calibracoes salvas; ${formatNumber(failed)} sem dados suficientes${lowConfidence ? `; ${formatNumber(lowConfidence)} com confianca baixa` : ''}`
+          : `${formatNumber(saved)} interfaces calibradas`;
       } catch (error) {
         document.getElementById('interfacesStatus').textContent = `Falha na calibracao: ${error.message}`;
+      }
+    }
+
+    async function testInterfaceCalibration(ifIndex, source) {
+      if (!currentSensorId || !ifIndex) return;
+      document.getElementById('interfacesStatus').textContent = source === 'snmp' ? `Testando SNMP ifIndex ${ifIndex}...` : `Testando Flow bruto ifIndex ${ifIndex}...`;
+      try {
+        if (source === 'snmp') {
+          await apiRequest(`/api/sensors/${currentSensorId}/snmp/poll`, { method: 'POST' });
+        }
+        const payload = await apiRequest(`/api/sensors/${currentSensorId}/interfaces/${ifIndex}/calibration-diagnostics?window_minutes=5`);
+        const snmp = payload.snmp || {};
+        const flow = payload.flow || {};
+        const message = source === 'snmp'
+          ? (snmp.ok ? `SNMP OK: IN ${formatBps(snmp.in_bps)} / OUT ${formatBps(snmp.out_bps)}` : `SNMP erro: ${snmp.error || payload.reason || '-'}`)
+          : (flow.ok ? `Flow bruto OK: IN ${formatBps(flow.raw_input_bps)} / OUT ${formatBps(flow.raw_output_bps)} (${formatNumber(flow.rows)} rows, ultimos ${flow.query_range_minutes || 5} min)` : `Flow bruto erro: ${flow.error || payload.reason || '-'}`);
+        document.getElementById('interfacesStatus').textContent = message;
+      } catch (error) {
+        document.getElementById('interfacesStatus').textContent = `Falha no diagnostico: ${error.message}`;
       }
     }
 
@@ -14194,6 +14273,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
     document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
+    document.getElementById('runDetectionNowButton').addEventListener('click', () => runDetectionNow().catch(console.error));
     document.getElementById('learnDetectionRuleButton').addEventListener('click', () => openTrafficLearningModal().catch(error => setText('detectionRuleStatus', `Falha ao abrir aprendizado: ${error.message}`)));
     document.getElementById('trafficLearnSensor').addEventListener('change', () => refreshTrafficLearningInterfaces().catch(error => setText('trafficLearnOutput', `Falha ao carregar interfaces: ${error.message}`)));
     document.getElementById('trafficLearnAnalyzeButton').addEventListener('click', () => analyzeTrafficLearning().catch(error => setText('trafficLearnOutput', `Falha ao analisar baseline: ${error.message}`)));
@@ -14554,12 +14634,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('interfacesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const calibrationButton = target?.closest('.apply-calibration-button');
+      const testSnmpButton = target?.closest('.test-snmp-interface-button');
+      const testFlowButton = target?.closest('.test-flow-interface-button');
       const sample1000Button = target?.closest('.sample-rate-1000-button');
       const sampleResetButton = target?.closest('.sample-rate-reset-button');
       const sampleInheritButton = target?.closest('.sample-rate-inherit-button');
       const investigatePeakButton = target?.closest('.investigate-interface-peak');
       if (calibrationButton) {
         applyCalibrationFactor(Number(calibrationButton.dataset.ifIndex)).catch(console.error);
+      } else if (testSnmpButton) {
+        testInterfaceCalibration(Number(testSnmpButton.dataset.ifIndex), 'snmp').catch(console.error);
+      } else if (testFlowButton) {
+        testInterfaceCalibration(Number(testFlowButton.dataset.ifIndex), 'flow').catch(console.error);
       } else if (sample1000Button) {
         setInterfaceSampleRate(Number(sample1000Button.dataset.ifIndex), 1000, 1000, true).catch(console.error);
       } else if (sampleResetButton) {

@@ -333,6 +333,16 @@ DATABASE_RETENTION_STOP = threading.Event()
 DATABASE_RETENTION_THREAD: threading.Thread | None = None
 ANOMALY_DETECTION_STOP = threading.Event()
 ANOMALY_DETECTION_THREAD: threading.Thread | None = None
+DETECTION_SCHEDULER_LOCK = threading.Lock()
+DETECTION_SCHEDULER_STATUS: dict[str, Any] = {
+    "last_run_at": "",
+    "last_success_at": "",
+    "last_error": "",
+    "rules_enabled": 0,
+    "rules_evaluated_last_run": 0,
+    "anomalies_created_last_run": 0,
+    "skipped_reasons": {},
+}
 BGP_EXPIRATION_STOP = threading.Event()
 BGP_EXPIRATION_THREAD: threading.Thread | None = None
 SYSTEM_SETTING_DEFAULTS = {
@@ -2364,6 +2374,11 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "target_role", "target_role TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "scope_type", "scope_type TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "invalid_scope", "invalid_scope INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "security_anomalies", "anomaly_source", "anomaly_source TEXT NOT NULL DEFAULT 'detection_template_rule'")
+    ensure_sqlite_column(conn, "security_anomalies", "source_engine", "source_engine TEXT NOT NULL DEFAULT 'detection_templates'")
+    ensure_sqlite_column(conn, "security_anomalies", "source_id", "source_id TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "security_anomalies", "source_name", "source_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "security_anomalies", "source_details_json", "source_details_json TEXT NOT NULL DEFAULT '{}'")
     detection_rule_columns = {
         "src_cidr": "src_cidr TEXT NOT NULL DEFAULT ''",
         "dst_cidr": "dst_cidr TEXT NOT NULL DEFAULT ''",
@@ -2394,6 +2409,10 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
         "extra_whitelist_ids": "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'",
         "bypass_whitelist": "bypass_whitelist INTEGER NOT NULL DEFAULT 0",
         "notes": "notes TEXT NOT NULL DEFAULT ''",
+        "last_check_at": "last_check_at TEXT NOT NULL DEFAULT ''",
+        "last_match_at": "last_match_at TEXT NOT NULL DEFAULT ''",
+        "last_anomaly_at": "last_anomaly_at TEXT NOT NULL DEFAULT ''",
+        "last_skip_reason": "last_skip_reason TEXT NOT NULL DEFAULT ''",
     }
     for column_name, definition in detection_rule_columns.items():
         ensure_sqlite_column(conn, "detection_template_rules", column_name, definition)
@@ -4323,8 +4342,24 @@ def poll_snmp_samples(sensor_id: int | None = None, force: bool = True) -> dict[
                     }
                 )
             except SnmpQueryError as exc:
+                logger.warning(
+                    "SNMP error sensor_id=%s snmp_ip=%s ifIndex=%s oid=%s error=%s",
+                    sensor["id"],
+                    sensor.get("snmp_ip") or sensor.get("exporter_ip"),
+                    "*",
+                    ",".join([SNMP_COUNTER_OIDS["if_hc_in_octets"], SNMP_COUNTER_OIDS["if_hc_out_octets"]]),
+                    exc,
+                )
                 results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": str(exc)})
             except Exception as exc:  # pragma: no cover - defensive guard for SNMP stack/runtime surprises.
+                logger.warning(
+                    "SNMP error sensor_id=%s snmp_ip=%s ifIndex=%s oid=%s error=%s",
+                    sensor["id"],
+                    sensor.get("snmp_ip") or sensor.get("exporter_ip"),
+                    "*",
+                    ",".join([SNMP_COUNTER_OIDS["if_hc_in_octets"], SNMP_COUNTER_OIDS["if_hc_out_octets"]]),
+                    exc,
+                )
                 results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": f"erro SNMP: {exc}"})
         conn.commit()
 
@@ -6341,6 +6376,10 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "extra_whitelist_ids": bgp_json_loads(item.get("extra_whitelist_ids"), []),
         "bypass_whitelist": sqlite_bool(item.get("bypass_whitelist")),
         "notes": item.get("notes") or "",
+        "last_check_at": item.get("last_check_at") or "",
+        "last_match_at": item.get("last_match_at") or "",
+        "last_anomaly_at": item.get("last_anomaly_at") or "",
+        "last_skip_reason": item.get("last_skip_reason") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -13889,6 +13928,19 @@ def apply_detection_whitelist(items: list[dict[str, Any]], whitelist: list[dict[
     return filtered
 
 
+def detection_whitelist_hit(candidate: dict[str, Any], whitelist: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for entry in whitelist:
+        if candidate_matches_whitelist(candidate, entry):
+            return entry
+    return None
+
+
+def detection_whitelist_skip_reason(candidate: dict[str, Any], whitelist: dict[str, Any]) -> str:
+    responsible = whitelist.get("src_cidr") or whitelist.get("dst_cidr") or whitelist.get("name") or whitelist.get("id") or ""
+    candidate_ip = candidate.get("src_ip") or candidate.get("dst_ip") or candidate.get("internal_ip") or candidate.get("target_ip") or ""
+    return f"global_whitelist:{responsible}:{candidate_ip}"
+
+
 def query_detection_rule_candidates(
     zone: dict[str, Any],
     template: dict[str, Any],
@@ -13898,6 +13950,7 @@ def query_detection_rule_candidates(
     end_dt: datetime,
     sensor_id: int | None,
     limit: int = 1000,
+    include_unmatched: bool = False,
 ) -> list[dict[str, Any]]:
     warning = rule.get("warning_value")
     critical = rule.get("critical_value")
@@ -13984,7 +14037,8 @@ def query_detection_rule_candidates(
     items = []
     for row in rows_as_dicts(result):
         metric_value = float(row.get("metric_value") or 0)
-        if not comparison_matches(metric_value, warning_threshold, rule.get("comparison") or "over"):
+        matched = comparison_matches(metric_value, warning_threshold, rule.get("comparison") or "over")
+        if not matched and not include_unmatched:
             continue
         severity = "critical" if critical is not None and comparison_matches(metric_value, float(critical), rule.get("comparison") or "over") else "warning"
         first_seen = row.get("first_seen")
@@ -13999,6 +14053,25 @@ def query_detection_rule_candidates(
             "template_id": int(template["id"]),
             "template_name": template["name"],
             "rule_id": int(rule["id"]),
+            "rule_name": rule["vector"],
+            "rule_config": {
+                key: rule.get(key)
+                for key in (
+                    "domain",
+                    "direction",
+                    "protocol",
+                    "metric",
+                    "comparison",
+                    "window_seconds",
+                    "consecutive_windows",
+                    "cooldown_seconds",
+                    "dst_port",
+                    "src_port",
+                    "response",
+                    "mitigation_mode",
+                    "enabled",
+                )
+            },
             "prefix_id": int(prefix["id"]),
             "prefix_cidr": prefix["cidr"],
             "domain": rule["domain"],
@@ -14028,7 +14101,9 @@ def query_detection_rule_candidates(
             "threshold_warning": float(warning_threshold),
             "threshold_critical": float(critical) if critical is not None else None,
             "metric": rule["metric"],
+            "comparison": rule.get("comparison") or "over",
             "metric_value": round(metric_value, 2),
+            "matched": matched,
             "response": rule.get("response") or "DETECTION_ONLY",
         }
         items.append(item)
@@ -14106,6 +14181,26 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
     ).fetchone()
     message = security_anomaly_message(candidate)
     recommended_action = "Verificar origem, cliente e destino. Nenhum bloqueio automatico foi aplicado."
+    source_details = {
+        "template_id": candidate.get("template_id"),
+        "template_name": candidate.get("template_name") or "",
+        "rule_id": candidate.get("rule_id"),
+        "rule_name": candidate.get("rule_name") or candidate.get("vector") or "",
+        "rule_config": candidate.get("rule_config") or {},
+        "threshold": {
+            "warning": candidate.get("threshold_warning"),
+            "critical": candidate.get("threshold_critical"),
+            "metric": candidate.get("metric"),
+            "comparison": candidate.get("comparison") or "over",
+        },
+        "observed": {
+            "metric_value": candidate.get("metric_value"),
+            "packets_s": candidate.get("packets_s"),
+            "bits_s": candidate.get("bits_s"),
+            "flows_s": candidate.get("flows_s"),
+            "flows": candidate.get("flows"),
+        },
+    }
     values = (
         candidate["vector"],
         candidate["severity"],
@@ -14141,6 +14236,11 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         recommended_action,
         candidate.get("response") or "DETECTION_ONLY",
         dedupe_key,
+        "detection_template_rule",
+        "detection_templates",
+        str(candidate.get("rule_id") or ""),
+        candidate.get("rule_name") or candidate.get("vector") or "",
+        json.dumps(source_details, sort_keys=True, default=str),
     )
     if existing is None:
         conn.execute(
@@ -14180,10 +14280,15 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
                 recommended_action,
                 response,
                 dedupe_key,
+                anomaly_source,
+                source_engine,
+                source_id,
+                source_name,
+                source_details_json,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (*values, now, now),
         )
@@ -14225,6 +14330,11 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
             recommended_action = ?,
             response = ?,
             dedupe_key = ?,
+            anomaly_source = ?,
+            source_engine = ?,
+            source_id = ?,
+            source_name = ?,
+            source_details_json = ?,
             updated_at = ?
         WHERE id = ?
         """,
@@ -14288,6 +14398,11 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "message": item.get("message") or "",
         "recommended_action": item.get("recommended_action") or "",
         "response": item.get("response") or "DETECTION_ONLY",
+        "anomaly_source": item.get("anomaly_source") or "detection_template_rule",
+        "source_engine": item.get("source_engine") or "detection_templates",
+        "source_id": item.get("source_id") or (str(item.get("rule_id")) if item.get("rule_id") is not None else ""),
+        "source_name": item.get("source_name") or item.get("vector") or "",
+        "source_details": bgp_json_loads(item.get("source_details_json"), {}),
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
     }
@@ -17495,6 +17610,296 @@ def close_stale_anomaly_events(conn: sqlite3.Connection, now: datetime) -> int:
     return closed
 
 
+def detection_scheduler_interval_seconds() -> int:
+    raw = os.getenv("GMJFLOW_DETECTION_INTERVAL_SECONDS") or os.getenv("GMJFLOW_ANOMALY_INTERVAL_SECONDS") or "60"
+    try:
+        return max(5, int(raw))
+    except ValueError:
+        return 60
+
+
+def update_detection_scheduler_status(**updates: Any) -> None:
+    with DETECTION_SCHEDULER_LOCK:
+        DETECTION_SCHEDULER_STATUS.update(updates)
+
+
+def detection_template_rule_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            r.*,
+            t.name AS template_name,
+            t.active AS template_active,
+            wp.name AS warning_response_profile_name,
+            cp.name AS critical_response_profile_name,
+            fp.name AS fallback_response_profile_name
+        FROM detection_template_rules r
+        JOIN detection_templates t ON t.id = r.template_id
+        LEFT JOIN bgp_response_profiles wp ON wp.id = r.warning_response_profile_id
+        LEFT JOIN bgp_response_profiles cp ON cp.id = r.critical_response_profile_id
+        LEFT JOIN bgp_response_profiles fp ON fp.id = r.fallback_response_profile_id
+        ORDER BY t.id, r.id
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def detection_rule_zone_prefixes(conn: sqlite3.Connection, template_id: int) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT
+            z.id AS zone_id,
+            z.name AS zone_name,
+            z.description AS zone_description,
+            z.active AS zone_active,
+            z.detection_template_id,
+            z.created_at AS zone_created_at,
+            z.updated_at AS zone_updated_at,
+            p.id AS prefix_id,
+            p.cidr AS prefix_cidr,
+            p.name AS prefix_name,
+            p.description AS prefix_description,
+            p.prefix_type,
+            p.active AS prefix_active,
+            p.created_at AS prefix_created_at,
+            p.updated_at AS prefix_updated_at
+        FROM ip_zones z
+        JOIN ip_zone_prefixes p ON p.zone_id = z.id
+        WHERE z.detection_template_id = ?
+          AND z.active = 1
+          AND p.active = 1
+        ORDER BY z.id, p.id
+        """,
+        (template_id,),
+    ).fetchall()
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        zone = {
+            "id": int(row["zone_id"]),
+            "name": row["zone_name"] or "",
+            "description": row["zone_description"] or "",
+            "active": sqlite_bool(row["zone_active"]),
+            "detection_template_id": int(row["detection_template_id"]),
+            "detection_template_name": "",
+            "created_at": row["zone_created_at"],
+            "updated_at": row["zone_updated_at"],
+        }
+        prefix = {
+            "id": int(row["prefix_id"]),
+            "zone_id": int(row["zone_id"]),
+            "zone_name": row["zone_name"] or "",
+            "cidr": row["prefix_cidr"],
+            "name": row["prefix_name"] or "",
+            "description": row["prefix_description"] or "",
+            "prefix_type": row["prefix_type"] or "client",
+            "active": sqlite_bool(row["prefix_active"]),
+            "detection_template_id": int(row["detection_template_id"]),
+            "detection_template_name": "",
+            "created_at": row["prefix_created_at"],
+            "updated_at": row["prefix_updated_at"],
+        }
+        pairs.append((zone, prefix))
+    return pairs
+
+
+def security_anomaly_in_cooldown(conn: sqlite3.Connection, candidate: dict[str, Any], cooldown_seconds: int, now: datetime) -> bool:
+    if cooldown_seconds <= 0:
+        return False
+    row = conn.execute(
+        """
+        SELECT updated_at
+        FROM security_anomalies
+        WHERE dedupe_key = ?
+          AND status = 'active'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (security_anomaly_dedupe_key(candidate),),
+    ).fetchone()
+    if row is None:
+        return False
+    updated = parse_datetime_text(row["updated_at"])
+    return updated is not None and updated > now - timedelta(seconds=cooldown_seconds)
+
+
+def record_detection_rule_runtime(
+    conn: sqlite3.Connection,
+    rule_id: int,
+    checked_at: str,
+    *,
+    matched: bool,
+    anomaly_created: bool,
+    skipped_reason: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE detection_template_rules
+        SET last_check_at = ?,
+            last_match_at = CASE WHEN ? THEN ? ELSE last_match_at END,
+            last_anomaly_at = CASE WHEN ? THEN ? ELSE last_anomaly_at END,
+            last_skip_reason = ?,
+            updated_at = updated_at
+        WHERE id = ?
+        """,
+        (checked_at, 1 if matched else 0, checked_at, 1 if anomaly_created else 0, checked_at, skipped_reason, rule_id),
+    )
+
+
+def evaluate_detection_template_rule(
+    conn: sqlite3.Connection,
+    raw_rule: dict[str, Any],
+    end_dt: datetime,
+    *,
+    create_anomalies: bool = True,
+) -> dict[str, Any]:
+    rule = detection_rule_row_to_dict(raw_rule)
+    template = {
+        "id": int(raw_rule["template_id"]),
+        "name": raw_rule.get("template_name") or "",
+        "active": sqlite_bool(raw_rule.get("template_active")),
+    }
+    window_seconds = max(1, int(rule.get("window_seconds") or 60))
+    start_dt = end_dt - timedelta(seconds=window_seconds)
+    checked_at = iso(end_dt)
+    result: dict[str, Any] = {
+        "template_id": template["id"],
+        "rule_id": rule["id"],
+        "rule_name": rule["vector"],
+        "enabled": bool(rule.get("enabled")) and bool(template.get("active")),
+        "query_range": {"start": iso(start_dt), "end": iso(end_dt), "window_seconds": window_seconds},
+        "rows": 0,
+        "max_metric": 0,
+        "threshold_warning": rule.get("warning_value"),
+        "threshold_critical": rule.get("critical_value"),
+        "matched": False,
+        "anomaly_created": False,
+        "anomalies_created": 0,
+        "skipped_reason": "",
+    }
+    if not template["active"] or not rule["enabled"]:
+        result["skipped_reason"] = "disabled"
+        logger.info("rule skipped: disabled")
+        record_detection_rule_runtime(conn, rule["id"], checked_at, matched=False, anomaly_created=False, skipped_reason="disabled")
+        return result
+
+    logger.info("evaluating template rule id=%s name=%s", rule["id"], rule["vector"])
+    pairs = detection_rule_zone_prefixes(conn, template["id"])
+    if not pairs:
+        result["skipped_reason"] = "no_zone_prefix_match"
+        logger.info("rule skipped: no zone/prefix match")
+        record_detection_rule_runtime(conn, rule["id"], checked_at, matched=False, anomaly_created=False, skipped_reason="no_zone_prefix_match")
+        return result
+
+    skip_reasons: list[str] = []
+    for zone, prefix in pairs:
+        zone["detection_template_name"] = template["name"]
+        prefix["detection_template_name"] = template["name"]
+        whitelist = [] if rule.get("bypass_whitelist") or not rule.get("use_global_whitelist") else active_detection_whitelist(conn, int(zone["id"]))
+        try:
+            observations = query_detection_rule_candidates(
+                zone,
+                template,
+                rule,
+                prefix,
+                start_dt,
+                end_dt,
+                rule.get("sensor_id"),
+                include_unmatched=True,
+            )
+        except Exception as exc:
+            reason = f"query_error:{clean_text(exc)}"
+            skip_reasons.append(reason)
+            logger.warning("Falha ao avaliar detection_template_rule id=%s prefix=%s: %s", rule["id"], prefix["cidr"], exc)
+            continue
+        result["rows"] += len(observations)
+        if observations:
+            result["max_metric"] = max(float(result["max_metric"] or 0), max(float(item.get("metric_value") or 0) for item in observations))
+        matched_items = [item for item in observations if item.get("matched")]
+        if matched_items:
+            result["matched"] = True
+            logger.info("rule matched")
+        for item in matched_items:
+            whitelist_hit = detection_whitelist_hit(item, whitelist)
+            if whitelist_hit:
+                reason = detection_whitelist_skip_reason(item, whitelist_hit)
+                skip_reasons.append(reason)
+                logger.info("rule skipped: global_whitelist %s", reason)
+                continue
+            if security_anomaly_in_cooldown(conn, item, int(rule.get("cooldown_seconds") or 0), end_dt):
+                skip_reasons.append("cooldown")
+                logger.info("rule skipped: cooldown")
+                continue
+            if create_anomalies:
+                action = upsert_security_anomaly(conn, item)
+                if action == "created":
+                    result["anomaly_created"] = True
+                    result["anomalies_created"] += 1
+                    logger.info("anomaly created")
+
+    if result["rows"] == 0 and not result["matched"]:
+        result["skipped_reason"] = "no_flow_rows"
+        logger.info("rule skipped: no flow rows")
+    elif not result["matched"]:
+        result["skipped_reason"] = "threshold_not_met"
+    elif not result["anomaly_created"] and skip_reasons:
+        result["skipped_reason"] = skip_reasons[0]
+    elif not result["anomaly_created"] and create_anomalies:
+        result["skipped_reason"] = "existing_anomaly_updated"
+    record_detection_rule_runtime(
+        conn,
+        rule["id"],
+        checked_at,
+        matched=bool(result["matched"]),
+        anomaly_created=bool(result["anomaly_created"]),
+        skipped_reason=clean_text(result["skipped_reason"]),
+    )
+    return result
+
+
+def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[str, Any]:
+    ensure_sensor_db()
+    end_dt = datetime.now(timezone.utc)
+    started_at = iso(end_dt)
+    results: list[dict[str, Any]] = []
+    skipped_reasons: dict[str, int] = {}
+    anomalies_created = 0
+    enabled_count = 0
+    try:
+        with sqlite_connection() as conn:
+            rows = detection_template_rule_rows(conn)
+            enabled_count = sum(1 for row in rows if sqlite_bool(row.get("enabled")) and sqlite_bool(row.get("template_active")))
+            for row in rows:
+                result = evaluate_detection_template_rule(conn, row, end_dt, create_anomalies=create_anomalies)
+                results.append(result)
+                anomalies_created += int(result.get("anomalies_created") or 0)
+                reason = clean_text(result.get("skipped_reason"))
+                if reason:
+                    key = reason.split(":", 1)[0]
+                    skipped_reasons[key] = skipped_reasons.get(key, 0) + 1
+            conn.commit()
+        update_detection_scheduler_status(
+            last_run_at=started_at,
+            last_success_at=utc_now_iso(),
+            last_error="",
+            rules_enabled=enabled_count,
+            rules_evaluated_last_run=len(results),
+            anomalies_created_last_run=anomalies_created,
+            skipped_reasons=skipped_reasons,
+        )
+        return {
+            "ok": True,
+            "started_at": started_at,
+            "rules_enabled": enabled_count,
+            "rules_evaluated": len(results),
+            "anomalies_created": anomalies_created,
+            "skipped_reasons": skipped_reasons,
+            "items": results,
+        }
+    except Exception as exc:
+        update_detection_scheduler_status(last_run_at=started_at, last_error=clean_text(exc))
+        raise
+
+
 def detect_anomalies_once() -> dict[str, Any]:
     ensure_sensor_db()
     lookback = int(os.getenv("GMJFLOW_ANOMALY_LOOKBACK_SECONDS", "60"))
@@ -17504,6 +17909,13 @@ def detect_anomalies_once() -> dict[str, Any]:
     checked = 0
     triggered = 0
     errors: list[str] = []
+    template_detection = {"ok": True, "rules_evaluated": 0, "anomalies_created": 0, "items": []}
+    try:
+        template_detection = run_detection_template_rules_once(create_anomalies=True)
+    except Exception as exc:
+        message = f"detection_templates: {exc}"
+        errors.append(message)
+        logger.warning("Falha ao avaliar detection_template_rules: %s", exc)
     with sqlite_connection() as conn:
         vectors = active_attack_vectors(conn)
         logger.info("Worker de anomalias avaliando %s vetores ativos", len(vectors))
@@ -17555,16 +17967,19 @@ def detect_anomalies_once() -> dict[str, Any]:
         message = f"mitigacao: {exc}"
         errors.append(message)
         logger.warning("Falha ao processar mitigacao de anomalias: %s", exc)
-    return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "mitigation": mitigation, "errors": errors}
+    return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "template_detection": template_detection, "mitigation": mitigation, "errors": errors}
 
 
 def anomaly_detection_enabled() -> bool:
-    return clean_text(os.getenv("GMJFLOW_ANOMALY_DETECTION_ENABLED", "true")).lower() not in {"0", "false", "no", "off"}
+    value = os.getenv("GMJFLOW_DETECTION_ENABLED")
+    if value is None:
+        value = os.getenv("GMJFLOW_ANOMALY_DETECTION_ENABLED", "true")
+    return clean_text(value).lower() not in {"0", "false", "no", "off"}
 
 
 def anomaly_detection_loop() -> None:
-    interval = int(os.getenv("GMJFLOW_ANOMALY_INTERVAL_SECONDS", "30"))
-    interval = max(interval, 5)
+    interval = detection_scheduler_interval_seconds()
+    logger.info("detection scheduler started interval_seconds=%s", interval)
     while not ANOMALY_DETECTION_STOP.wait(interval):
         try:
             detect_anomalies_once()
@@ -17585,6 +18000,37 @@ def start_anomaly_detection_thread() -> None:
         daemon=True,
     )
     ANOMALY_DETECTION_THREAD.start()
+
+
+@app.get("/api/detection/status")
+def detection_status():
+    enabled = anomaly_detection_enabled()
+    with DETECTION_SCHEDULER_LOCK:
+        status = dict(DETECTION_SCHEDULER_STATUS)
+    return {
+        "enabled": enabled,
+        "scheduler_running": bool(ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive()),
+        "interval_seconds": detection_scheduler_interval_seconds(),
+        "last_run_at": status.get("last_run_at") or "",
+        "last_success_at": status.get("last_success_at") or "",
+        "last_error": status.get("last_error") or "",
+        "rules_enabled": int(status.get("rules_enabled") or 0),
+        "rules_evaluated_last_run": int(status.get("rules_evaluated_last_run") or 0),
+        "anomalies_created_last_run": int(status.get("anomalies_created_last_run") or 0),
+        "skipped_reasons": status.get("skipped_reasons") or {},
+    }
+
+
+@app.post("/api/detection/run-now")
+def detection_run_now():
+    result = run_detection_template_rules_once(create_anomalies=True)
+    return {
+        "ok": True,
+        "enabled": anomaly_detection_enabled(),
+        "scheduler_running": bool(ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive()),
+        "interval_seconds": detection_scheduler_interval_seconds(),
+        **result,
+    }
 
 
 @app.get("/api/attack-vector-templates")
@@ -20495,6 +20941,68 @@ def get_interface_calibration(sensor_id: int, if_index: int):
     return calibration_detail(sensor_id, if_index)
 
 
+@app.get("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration-diagnostics")
+def get_interface_calibration_diagnostics(
+    sensor_id: int,
+    if_index: int,
+    window_minutes: int = Query(5, ge=1, le=60),
+):
+    return calibration_diagnostics(sensor_id, if_index, window_minutes)
+
+
+def apply_poll_error_to_calibration(poll_result: dict[str, Any], calibration: dict[str, Any]) -> dict[str, Any]:
+    if poll_result.get("ok"):
+        return calibration
+    items = poll_result.get("items") if isinstance(poll_result.get("items"), list) else []
+    message = clean_text(next((item.get("message") for item in items if not item.get("ok") and item.get("message")), "SNMP timeout"))
+    if not message:
+        message = "SNMP timeout"
+    return {
+        **calibration,
+        "snmp_ok": False,
+        "snmp_error": message,
+        "reason": message,
+        "saved": False,
+        "last_calibrated_at": "",
+    }
+
+
+def calibration_from_failed_poll(sensor_id: int, if_index: int, window_minutes: int, poll_result: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = calibration_diagnostics(sensor_id, if_index, min(window_minutes, 5))
+    suggested = diagnostics.get("suggested_sample_rate") or {}
+    snmp = diagnostics.get("snmp") or {}
+    flow = diagnostics.get("flow") or {}
+    return apply_poll_error_to_calibration(
+        poll_result,
+        {
+            "sensor_id": sensor_id,
+            "if_index": if_index,
+            "estimated_sample_rate_in": suggested.get("in") or 1.0,
+            "estimated_sample_rate_out": suggested.get("out") or 1.0,
+            "confidence": 0.0,
+            "confidence_in": 0.0,
+            "confidence_out": 0.0,
+            "samples_used": 0,
+            "samples_used_in": 0,
+            "samples_used_out": 0,
+            "snmp_in_bps": snmp.get("in_bps") or 0,
+            "snmp_out_bps": snmp.get("out_bps") or 0,
+            "flow_in_bps": flow.get("raw_input_bps") or 0,
+            "flow_out_bps": flow.get("raw_output_bps") or 0,
+            "last_calibrated_at": "",
+            "method": CALIBRATION_METHOD,
+            "confidence_low": True,
+            "min_confidence": CALIBRATION_MIN_CONFIDENCE,
+            "snmp_ok": False,
+            "flow_ok": bool(flow.get("ok")),
+            "snmp_error": snmp.get("error") or "",
+            "flow_error": flow.get("error") or "",
+            "reason": diagnostics.get("reason") or "",
+            "saved": False,
+        },
+    )
+
+
 @app.post("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration/run")
 def run_interface_calibration(
     sensor_id: int,
@@ -20502,8 +21010,14 @@ def run_interface_calibration(
     window_minutes: int = Query(15, ge=5, le=15),
 ):
     poll_result = poll_snmp_samples(sensor_id=sensor_id, force=True)
-    calibration = calibrate_interface_sample_rate(sensor_id, if_index, window_minutes)
-    return {"ok": True, "poll": poll_result, "calibration": calibration}
+    calibration = (
+        calibrate_interface_sample_rate(sensor_id, if_index, window_minutes)
+        if poll_result.get("ok")
+        else calibration_from_failed_poll(sensor_id, if_index, window_minutes, poll_result)
+    )
+    payload = {"ok": bool(calibration.get("saved")), "poll": poll_result, "calibration": calibration}
+    status_code = 200 if payload["ok"] else 207
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.post("/api/sensors/{sensor_id}/interfaces/calibration/run")
@@ -20524,8 +21038,15 @@ def run_sensor_interfaces_calibration(
             """,
             (sensor_id,),
         ).fetchall()
-    items = [calibrate_interface_sample_rate(sensor_id, int(row["if_index"]), window_minutes) for row in rows]
-    return {"ok": True, "poll": poll_result, "items": items}
+    items = [
+        calibrate_interface_sample_rate(sensor_id, int(row["if_index"]), window_minutes)
+        if poll_result.get("ok")
+        else calibration_from_failed_poll(sensor_id, int(row["if_index"]), window_minutes, poll_result)
+        for row in rows
+    ]
+    ok = bool(items) and all(item.get("saved") for item in items)
+    payload = {"ok": ok, "poll": poll_result, "items": items}
+    return JSONResponse(payload, status_code=200 if ok else 207)
 
 
 @app.post("/api/sensors/{sensor_id}/interfaces/{if_index}/calibration/apply")
@@ -21130,6 +21651,14 @@ def flow_interface_direction_bps(
         "end": end,
         "seconds": seconds,
     }
+    logger.info(
+        "ClickHouse flow_raw calibration query exporter_ip=%s ifIndex=%s range=%s..%s direction=%s",
+        exporter_ip,
+        if_index,
+        iso(start),
+        iso(end),
+        direction,
+    )
     result = query_clickhouse(
         f"""
         SELECT sum(bytes) * 8 / {{seconds:Float64}} AS bps
@@ -21170,6 +21699,149 @@ def robust_ratio_estimate(ratios: list[float]) -> tuple[float, float, int]:
 def median_or_zero(values: list[float]) -> float:
     clean = [float(value) for value in values if value > 0]
     return round(float(median(clean)), 2) if clean else 0.0
+
+
+def calibration_diagnostics(sensor_id: int, if_index: int, window_minutes: int = 5) -> dict[str, Any]:
+    ensure_sensor_db()
+    window_minutes = max(1, min(int(window_minutes or 5), 60))
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(minutes=window_minutes)
+    with sqlite_connection() as conn:
+        sensor = fetch_sensor_without_interfaces(conn, sensor_id)
+        interface = conn.execute(
+            """
+            SELECT *
+            FROM sensor_interfaces
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (sensor_id, if_index),
+        ).fetchone()
+        if interface is None:
+            return {
+                "snmp": {"ok": False, "error": "ifIndex nao encontrado no sensor"},
+                "flow": {"ok": False, "error": "ifIndex nao encontrado no sensor", "rows": 0},
+                "suggested_sample_rate": {"in": 1.0, "out": 1.0, "confidence": 0.0},
+                "reason": "ifIndex nao encontrado no sensor",
+            }
+        sample_rows = conn.execute(
+            """
+            SELECT sample_time, in_octets, out_octets, in_bps, out_bps
+            FROM interface_snmp_samples
+            WHERE sensor_id = ? AND if_index = ?
+            ORDER BY sample_time DESC
+            LIMIT 2
+            """,
+            (sensor_id, if_index),
+        ).fetchall()
+
+    exporter_ip = clean_text(sensor.get("exporter_ip"))
+    if not exporter_ip:
+        return {
+            "snmp": {"ok": False, "error": "Sensor sem exporter_ip configurado"},
+            "flow": {"ok": False, "error": "Sensor sem exporter_ip configurado", "rows": 0},
+            "suggested_sample_rate": {"in": 1.0, "out": 1.0, "confidence": 0.0},
+            "reason": "Sensor sem exporter_ip configurado",
+        }
+
+    snmp_error = ""
+    snmp = {
+        "ok": False,
+        "in_octets_1": 0,
+        "out_octets_1": 0,
+        "in_octets_2": 0,
+        "out_octets_2": 0,
+        "interval_seconds": 0,
+        "in_bps": 0.0,
+        "out_bps": 0.0,
+        "error": "",
+    }
+    if len(sample_rows) < 2:
+        snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
+    else:
+        current = sample_rows[0]
+        previous = sample_rows[1]
+        current_time = parse_datetime_text(current["sample_time"])
+        previous_time = parse_datetime_text(previous["sample_time"])
+        interval = (current_time - previous_time).total_seconds() if current_time and previous_time else 0
+        snmp.update(
+            {
+                "in_octets_1": int(previous["in_octets"] or 0),
+                "out_octets_1": int(previous["out_octets"] or 0),
+                "in_octets_2": int(current["in_octets"] or 0),
+                "out_octets_2": int(current["out_octets"] or 0),
+                "interval_seconds": round(interval, 3),
+                "in_bps": round(float(current["in_bps"] or 0), 2),
+                "out_bps": round(float(current["out_bps"] or 0), 2),
+            }
+        )
+        if interval <= 0 or (float(current["in_bps"] or 0) <= 0 and float(current["out_bps"] or 0) <= 0):
+            snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
+        else:
+            snmp["ok"] = True
+    snmp["error"] = snmp_error
+
+    params = {
+        "exporter_ip": clickhouse_ip_string_param(exporter_ip, "exporter_ip"),
+        "if_index": int(if_index),
+        "start": start,
+        "end": now,
+        "seconds": range_seconds(start, now),
+    }
+    logger.info(
+        "ClickHouse flow_raw calibration query exporter_ip=%s ifIndex=%s range=%s..%s",
+        exporter_ip,
+        if_index,
+        iso(start),
+        iso(now),
+    )
+    flow_error = ""
+    try:
+        result = query_clickhouse(
+            """
+            SELECT
+                count() AS rows,
+                sumIf(bytes, input_if = {if_index:UInt32}) * 8 / {seconds:Float64} AS raw_input_bps,
+                sumIf(bytes, output_if = {if_index:UInt32}) * 8 / {seconds:Float64} AS raw_output_bps
+            FROM flow_raw
+            WHERE flow_time >= {start:DateTime}
+              AND flow_time <= {end:DateTime}
+              AND toString(exporter_ip) = {exporter_ip:String}
+              AND (input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})
+            """,
+            params,
+        )
+        rows = rows_as_dicts(result)
+        row = rows[0] if rows else {}
+    except Exception as exc:
+        row = {}
+        flow_error = f"ClickHouse query sem resultado: {clean_text(exc)}"
+    flow_rows = int(row.get("rows") or 0)
+    raw_input_bps = float(row.get("raw_input_bps") or 0)
+    raw_output_bps = float(row.get("raw_output_bps") or 0)
+    if not flow_error and flow_rows <= 0:
+        flow_error = "Sem flow_raw para exporter/ifIndex na janela"
+    flow = {
+        "ok": not flow_error,
+        "raw_input_bps": round(raw_input_bps, 2),
+        "raw_output_bps": round(raw_output_bps, 2),
+        "rows": flow_rows,
+        "exporter_ip": exporter_ip,
+        "query_range_minutes": window_minutes,
+        "error": flow_error,
+    }
+
+    suggested_in = round(float(snmp["in_bps"]) / raw_input_bps, 2) if raw_input_bps > 0 and float(snmp["in_bps"]) > 0 else 1.0
+    suggested_out = round(float(snmp["out_bps"]) / raw_output_bps, 2) if raw_output_bps > 0 and float(snmp["out_bps"]) > 0 else 1.0
+    confidence = 1.0 if snmp["ok"] and flow["ok"] else 0.0
+    reason = snmp_error or flow_error or ""
+    return {
+        "snmp": snmp,
+        "flow": flow,
+        "suggested_sample_rate": {"in": suggested_in, "out": suggested_out, "confidence": confidence},
+        "reason": reason,
+    }
 
 
 def calibrate_interface_sample_rate(
@@ -21250,7 +21922,13 @@ def calibrate_interface_sample_rate(
     confidences = [value for value, count in ((confidence_in, samples_in), (confidence_out, samples_out)) if count > 0]
     confidence = round(min(confidences), 3) if confidences else 0.0
     samples_used = samples_in + samples_out
-    calibrated_at = iso(now)
+    snmp_ok = bool(snmp_in_values or snmp_out_values)
+    flow_ok = bool(flow_in_values or flow_out_values)
+    snmp_error = "" if snmp_ok else "SNMP sem ifHCInOctets/ifHCOutOctets"
+    flow_error = "" if flow_ok else "Sem flow_raw para exporter/ifIndex na janela"
+    reason = snmp_error or flow_error or ("Confidence 0" if confidence <= 0 else "")
+    should_persist = confidence > 0 and snmp_ok and flow_ok
+    calibrated_at = iso(now) if should_persist else ""
 
     result = {
         "sensor_id": sensor_id,
@@ -21271,54 +21949,61 @@ def calibrate_interface_sample_rate(
         "method": CALIBRATION_METHOD,
         "confidence_low": confidence < CALIBRATION_MIN_CONFIDENCE,
         "min_confidence": CALIBRATION_MIN_CONFIDENCE,
+        "snmp_ok": snmp_ok,
+        "flow_ok": flow_ok,
+        "snmp_error": snmp_error,
+        "flow_error": flow_error,
+        "reason": reason,
+        "saved": should_persist,
     }
 
-    with sqlite_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO sensor_interface_calibration (
-                sensor_id,
-                if_index,
-                estimated_sample_rate_in,
-                estimated_sample_rate_out,
-                confidence,
-                last_calibrated_at,
-                method,
-                samples_used,
-                snmp_in_bps,
-                snmp_out_bps,
-                flow_in_bps,
-                flow_out_bps
+    if should_persist:
+        with sqlite_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO sensor_interface_calibration (
+                    sensor_id,
+                    if_index,
+                    estimated_sample_rate_in,
+                    estimated_sample_rate_out,
+                    confidence,
+                    last_calibrated_at,
+                    method,
+                    samples_used,
+                    snmp_in_bps,
+                    snmp_out_bps,
+                    flow_in_bps,
+                    flow_out_bps
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sensor_id, if_index) DO UPDATE SET
+                    estimated_sample_rate_in = excluded.estimated_sample_rate_in,
+                    estimated_sample_rate_out = excluded.estimated_sample_rate_out,
+                    confidence = excluded.confidence,
+                    last_calibrated_at = excluded.last_calibrated_at,
+                    method = excluded.method,
+                    samples_used = excluded.samples_used,
+                    snmp_in_bps = excluded.snmp_in_bps,
+                    snmp_out_bps = excluded.snmp_out_bps,
+                    flow_in_bps = excluded.flow_in_bps,
+                    flow_out_bps = excluded.flow_out_bps
+                """,
+                (
+                    sensor_id,
+                    if_index,
+                    result["estimated_sample_rate_in"],
+                    result["estimated_sample_rate_out"],
+                    result["confidence"],
+                    result["last_calibrated_at"],
+                    result["method"],
+                    result["samples_used"],
+                    result["snmp_in_bps"],
+                    result["snmp_out_bps"],
+                    result["flow_in_bps"],
+                    result["flow_out_bps"],
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sensor_id, if_index) DO UPDATE SET
-                estimated_sample_rate_in = excluded.estimated_sample_rate_in,
-                estimated_sample_rate_out = excluded.estimated_sample_rate_out,
-                confidence = excluded.confidence,
-                last_calibrated_at = excluded.last_calibrated_at,
-                method = excluded.method,
-                samples_used = excluded.samples_used,
-                snmp_in_bps = excluded.snmp_in_bps,
-                snmp_out_bps = excluded.snmp_out_bps,
-                flow_in_bps = excluded.flow_in_bps,
-                flow_out_bps = excluded.flow_out_bps
-            """,
-            (
-                sensor_id,
-                if_index,
-                result["estimated_sample_rate_in"],
-                result["estimated_sample_rate_out"],
-                result["confidence"],
-                result["last_calibrated_at"],
-                result["method"],
-                result["samples_used"],
-                result["snmp_in_bps"],
-                result["snmp_out_bps"],
-                result["flow_in_bps"],
-                result["flow_out_bps"],
-            ),
-        )
-        conn.commit()
+            conn.commit()
 
     return result
 
