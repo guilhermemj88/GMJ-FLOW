@@ -3721,6 +3721,63 @@ def apply_collectors_script_path() -> Path | None:
     return DEFAULT_COLLECTOR_APPLY_SCRIPT
 
 
+def write_collector_artifacts(
+    sensors: list[dict[str, Any]],
+    output_dir: Path | None = None,
+    compose_path: Path | None = None,
+) -> dict[str, Any]:
+    output_dir = Path(output_dir or collectors_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    configs = []
+    expected_dirs = {f"sensor-{int(sensor['id'])}" for sensor in sensors if sensor.get("id") is not None}
+    for child in output_dir.iterdir():
+        if child.is_dir() and child.name.startswith("sensor-") and child.name not in expected_dirs:
+            shutil.rmtree(child, ignore_errors=True)
+
+    for sensor in sensors:
+        sensor_id = int(sensor["id"])
+        port = int(sensor["listener_port"])
+        sensor_dir = output_dir / f"sensor-{sensor_id}"
+        sensor_dir.mkdir(parents=True, exist_ok=True)
+        config_path = sensor_dir / "nfacctd.conf"
+        allow_path = sensor_dir / "allow.lst"
+        allow_path.write_text(f"{sensor['exporter_ip']}\n", encoding="utf-8")
+        config_path.write_text(nfacctd_config(sensor), encoding="utf-8")
+        configs.append(
+            {
+                "sensor_id": sensor_id,
+                "sensor": sensor["name"],
+                "exporter_ip": sensor["exporter_ip"],
+                "listener_port": port,
+                "nfacctd_config": str(config_path),
+                "allow_file": collector_allow_file_path(sensor_id),
+                "output_file": f"/var/spool/pmacct/sensor-{sensor_id}-{port}.csv",
+                "services": [f"pmacct-sensor-{sensor_id}", f"pmacct-parser-sensor-{sensor_id}"],
+            }
+        )
+
+    compose_path = Path(compose_path or collectors_compose_path())
+    compose_path.parent.mkdir(parents=True, exist_ok=True)
+    compose_path.write_text(compose_for_collectors(sensors), encoding="utf-8")
+    return {
+        "collectors_dir": str(output_dir),
+        "compose_file": str(compose_path),
+        "configs_generated": configs,
+    }
+
+
+def sync_collector_artifacts(conn: sqlite3.Connection) -> dict[str, Any]:
+    sensors = active_collector_sensors(conn)
+    artifacts = write_collector_artifacts(sensors)
+    apply_result = run_apply_collectors_script(Path(artifacts["compose_file"]))
+    return {
+        **artifacts,
+        "services_updated": apply_result["services_updated"],
+        "apply": apply_result,
+        "errors": [] if apply_result["services_updated"] else [apply_result["message"]],
+    }
+
+
 def collector_apply_enabled() -> bool:
     return clean_text(os.getenv("GMJFLOW_ENABLE_COLLECTOR_APPLY", "true")).lower() in {
         "1",
@@ -19631,49 +19688,13 @@ def close_anomaly(request: Request, event_id: int):
 def apply_collectors(request: Request):
     require_admin(request)
     ensure_sensor_db()
-    output_dir = collectors_dir()
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     with sqlite_connection() as conn:
-        sensors = active_collector_sensors(conn)
-
-    configs = []
-    for sensor in sensors:
-        sensor_id = int(sensor["id"])
-        port = int(sensor["listener_port"])
-        sensor_dir = output_dir / f"sensor-{sensor_id}"
-        sensor_dir.mkdir(parents=True, exist_ok=True)
-        config_path = sensor_dir / "nfacctd.conf"
-        allow_path = sensor_dir / "allow.lst"
-        allow_file = collector_allow_file_path(sensor_id)
-        allow_path.write_text(f"{sensor['exporter_ip']}\n", encoding="utf-8")
-        config_path.write_text(nfacctd_config(sensor), encoding="utf-8")
-        configs.append(
-            {
-                "sensor_id": sensor_id,
-                "sensor": sensor["name"],
-                "exporter_ip": sensor["exporter_ip"],
-                "listener_port": port,
-                "nfacctd_config": str(config_path),
-                "allow_file": allow_file,
-                "output_file": f"/var/spool/pmacct/sensor-{sensor_id}-{port}.csv",
-                "services": [f"pmacct-sensor-{sensor_id}", f"pmacct-parser-sensor-{sensor_id}"],
-            }
-        )
-
-    compose_path = collectors_compose_path()
-    compose_path.parent.mkdir(parents=True, exist_ok=True)
-    compose_path.write_text(compose_for_collectors(sensors), encoding="utf-8")
-    apply_result = run_apply_collectors_script(compose_path)
+        result = sync_collector_artifacts(conn)
 
     return {
         "ok": True,
-        "collectors_dir": str(output_dir),
-        "compose_file": str(compose_path),
-        "configs_generated": configs,
-        "services_updated": apply_result["services_updated"],
-        "apply": apply_result,
-        "errors": [] if apply_result["services_updated"] else [apply_result["message"]],
+        **result,
     }
 
 
@@ -20910,6 +20931,10 @@ def create_sensor(payload: SensorPayload):
         sensor_id = int(cursor.lastrowid)
         replace_sensor_interfaces(conn, sensor_id, interfaces, now)
         conn.commit()
+        try:
+            sync_collector_artifacts(conn)
+        except Exception as exc:
+            logger.warning("Falha ao sincronizar collectors ao criar sensor %s: %s", sensor_id, exc)
         return fetch_sensor(conn, sensor_id)
 
 
@@ -20956,6 +20981,10 @@ def update_sensor(sensor_id: int, payload: SensorPayload):
         )
         replace_sensor_interfaces(conn, sensor_id, interfaces, now)
         conn.commit()
+        try:
+            sync_collector_artifacts(conn)
+        except Exception as exc:
+            logger.warning("Falha ao sincronizar collectors ao atualizar sensor %s: %s", sensor_id, exc)
         return fetch_sensor(conn, sensor_id)
 
 
