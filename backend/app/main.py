@@ -8214,6 +8214,30 @@ def validate_response_profile_for_anomaly(
         errors.append("connector_not_found")
     if connector and not connector.get("enabled"):
         errors.append("connector_disabled")
+
+    require_protected = bool(profile.get("require_protected_prefix", True)) or bool(candidate.get("require_protected_prefix", True))
+    if require_protected:
+        prefix_candidates = [clean_text(candidate.get("target_prefix") or candidate.get("dst_prefix") or candidate.get("src_prefix"))]
+        prefix_candidates = [prefix for prefix in prefix_candidates if prefix]
+        if prefix_candidates:
+            target_prefix = prefix_candidates[0]
+            with sqlite_connection() as conn:
+                protected = protected_prefix_match(conn, target_prefix)
+            if not protected:
+                errors.append("target_not_in_protected_prefixes")
+                warnings.append(f"Destino {target_prefix} nao pertence a nenhum prefixo protegido habilitado.")
+            else:
+                response_type = clean_text(profile.get("response_type") or profile.get("type") or candidate.get("response_type") or "flowspec").lower()
+                if response_type == "flowspec" and not protected.get("block_flowspec"):
+                    errors.append("protected_prefix_action_not_allowed")
+                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action flowspec para este profile.")
+                elif response_type == "rtbh" and not protected.get("block_rtbh"):
+                    errors.append("protected_prefix_action_not_allowed")
+                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action rtbh para este profile.")
+                elif response_type == "diversion" and not protected.get("block_diversion"):
+                    errors.append("protected_prefix_action_not_allowed")
+                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action diversion para este profile.")
+
     whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
     if whitelist_hits:
         errors.append("whitelist_match")

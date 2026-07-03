@@ -302,6 +302,82 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(values["default_duration_seconds"], 1800)
             self.assertEqual(values["max_duration_seconds"], 3600)
 
+    def test_response_profile_protected_prefix_validation_applies_to_anomaly_flow(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_protected_prefixes (
+                    name, cidr, enabled, block_rtbh, block_flowspec, block_diversion, created_at, updated_at
+                ) VALUES (?, ?, 1, 1, 1, 1, ?, ?)
+                """,
+                ("DNS-PROTECTED", "8.8.8.8/32", now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO bgp_protected_prefixes (
+                    name, cidr, enabled, block_rtbh, block_flowspec, block_diversion, created_at, updated_at
+                ) VALUES (?, ?, 1, 1, 0, 1, ?, ?)
+                """,
+                ("DNS-BLOCKED-FLOWSPEC", "8.8.4.4/32", now, now),
+            )
+            conn.commit()
+
+            def validate_target(target: str, require_protected: bool, protected_cidr: str | None = None):
+                profile = {
+                    "id": 1,
+                    "name": "RESPONSE_DNS-UPLOAD",
+                    "enabled": True,
+                    "response_type": "flowspec",
+                    "connector_id": 1,
+                    "connector_name": "TEST-CONNECTOR",
+                    "connector_enabled": True,
+                    "connector_active": True,
+                    "target_selector": "dst_ip",
+                    "protocol_selector": "udp",
+                    "dst_port_selector": "fixed",
+                    "dst_port_value": "53",
+                    "action": "discard",
+                    "default_action": "discard",
+                    "require_protected_prefix": require_protected,
+                }
+                anomaly = {
+                    "direction": "outbound",
+                    "top_src_ip": "198.51.100.10",
+                    "top_dst_ip": target,
+                    "protocol": "udp",
+                    "top_dst_port": 53,
+                }
+                flow_context = {
+                    "evidence_status": "sufficient",
+                    "dominant_dst_ip": target,
+                    "dominant_dst_port": 53,
+                    "dominant_protocol": "udp",
+                }
+                candidate = main.response_profile_candidate_for_anomaly(profile, anomaly, flow_context)
+                candidate["require_protected_prefix"] = require_protected
+                return main.validate_response_profile_for_anomaly(profile, anomaly, flow_context, candidate, {"id": 1, "enabled": True})
+
+            protected_result = validate_target("8.8.8.8", True)
+            self.assertEqual(protected_result["validation_status"], "valid")
+            self.assertEqual(protected_result["errors"], [])
+            self.assertFalse(protected_result["apply_enabled"])
+            self.assertFalse(protected_result["allow_auto"])
+
+            outside_result = validate_target("203.0.113.10", True)
+            self.assertEqual(outside_result["validation_status"], "target_not_in_protected_prefixes")
+            self.assertIn("target_not_in_protected_prefixes", outside_result["errors"])
+            self.assertIn("Destino 203.0.113.10/32 nao pertence a nenhum prefixo protegido habilitado.", outside_result["validation_messages"])
+
+            disabled_requirement_result = validate_target("203.0.113.10", False)
+            self.assertEqual(disabled_requirement_result["validation_status"], "valid")
+            self.assertEqual(disabled_requirement_result["errors"], [])
+
+            blocked_action_result = validate_target("8.8.4.4", True)
+            self.assertEqual(blocked_action_result["validation_status"], "protected_prefix_action_not_allowed")
+            self.assertIn("protected_prefix_action_not_allowed", blocked_action_result["errors"])
+
     def test_detection_rule_saves_response_profile_ids(self):
         with temporary_main_db():
             conn, _connector, profile = self._connector_and_profile()
