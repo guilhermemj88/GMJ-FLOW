@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -49,6 +50,30 @@ def mitigation_payload(vector: str = "DNS_INTERNAL_IP_HIGH_BITS") -> dict:
             }
         ],
     }
+
+
+class FakeClickHouseResult:
+    def __init__(self, rows):
+        self.column_names = [
+            "flow_time",
+            "sensor",
+            "exporter_ip",
+            "src_ip",
+            "src_port",
+            "dst_ip",
+            "dst_port",
+            "proto",
+            "input_if",
+            "output_if",
+            "packets",
+            "bytes",
+            "flow_count",
+            "first_seen",
+            "last_seen",
+            "bits_s",
+            "packets_s",
+        ]
+        self.result_rows = rows
 
 
 class AiMitigationRefactorTest(unittest.TestCase):
@@ -170,6 +195,112 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 self.assertEqual(int(row["total"]), 1)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dns_internal_src_ip_related_flows_use_src_ip_udp53_without_dst_ip(self):
+        calls = []
+        flow_time = datetime(2026, 1, 1, 12, 4, tzinfo=timezone.utc)
+        row = (
+            flow_time,
+            "sensor-a",
+            "::ffff:192.0.2.10",
+            "::ffff:186.232.175.250",
+            41000,
+            "::ffff:45.228.1.10",
+            53,
+            17,
+            10,
+            20,
+            248952,
+            282_000_000,
+            123,
+            flow_time,
+            flow_time,
+            6_266_666.67,
+            5532.27,
+        )
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            return FakeClickHouseResult([row])
+
+        event = {
+            "id": 25,
+            "vector_name": "DNS_INTERNAL_IP_HIGH_BITS",
+            "target_ip": "186.232.175.250",
+            "target_role": "src_ip",
+            "protocol": "DNS",
+            "direction": "transmits",
+            "status": "active",
+            "started_at": "2026-01-01T12:00:00Z",
+            "last_seen_at": "2026-01-01T12:05:00Z",
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            enrichment = backend_main.enrich_anomaly_with_flows(event, range_margin_seconds=120, limit=50)
+
+        self.assertEqual(len(enrichment["flows"]), 1)
+        flow = enrichment["flows"][0]
+        self.assertEqual(flow["src_ip"], "186.232.175.250")
+        self.assertEqual(flow["dst_port"], 53)
+        self.assertEqual(flow["proto"], 17)
+        self.assertEqual(flow["protocol"], "UDP")
+        self.assertEqual(flow["bytes"], 282_000_000)
+        self.assertEqual(flow["packets"], 248952)
+        self.assertEqual(flow["exporter_ip"], "192.0.2.10")
+        self.assertEqual(flow["input_if"], 10)
+        self.assertEqual(flow["output_if"], 20)
+        self.assertEqual(enrichment["flow_evidence"]["evidence_status"], "complete")
+        self.assertEqual(calls[0][1]["target_ip_plain"], "186.232.175.250")
+        self.assertIn("toString(src_ip)", calls[0][0])
+        self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
+        self.assertIn("dst_port = 53", calls[0][0])
+        self.assertNotIn("toString(dst_ip) = {target_ip", calls[0][0])
+
+    def test_dns_related_flows_fallback_to_udp_when_udp53_empty(self):
+        calls = []
+        flow_time = datetime(2026, 1, 1, 12, 4, tzinfo=timezone.utc)
+        udp_row = (
+            flow_time,
+            "sensor-a",
+            "::ffff:192.0.2.10",
+            "::ffff:186.232.175.250",
+            41000,
+            "::ffff:45.228.1.11",
+            5353,
+            17,
+            10,
+            20,
+            10,
+            1000,
+            1,
+            flow_time,
+            flow_time,
+            22.2,
+            0.2,
+        )
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            return FakeClickHouseResult([] if len(calls) == 1 else [udp_row])
+
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            enrichment = backend_main.enrich_anomaly_with_flows(
+                {
+                    "vector_name": "DNS_INTERNAL_IP_HIGH_BITS",
+                    "target_ip": "186.232.175.250",
+                    "target_role": "src_ip",
+                    "protocol": "DNS",
+                    "direction": "transmits",
+                    "started_at": "2026-01-01T12:00:00Z",
+                    "last_seen_at": "2026-01-01T12:05:00Z",
+                },
+                limit=50,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("dst_port = 53", calls[0][0])
+        self.assertNotIn("dst_port = 53", calls[1][0])
+        self.assertEqual(len(enrichment["flows"]), 1)
+        self.assertEqual(enrichment["flows"][0]["dst_port"], 5353)
 
 
 if __name__ == "__main__":

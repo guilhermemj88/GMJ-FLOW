@@ -9652,14 +9652,17 @@ def anomaly_flow_query_window(event: dict[str, Any], range_margin_seconds: int) 
         or clickhouse_datetime(event.get("first_seen"))
         or datetime.now(timezone.utc) - timedelta(minutes=5)
     )
-    end = (
-        clickhouse_datetime(event.get("ended_at") or event.get("last_seen_at"))
-        or clickhouse_datetime(event.get("last_seen"))
-        or datetime.now(timezone.utc)
-    )
+    if clean_text(event.get("status")).lower() == "active":
+        end = clickhouse_datetime(event.get("last_seen_at")) or clickhouse_datetime(event.get("last_seen")) or datetime.now(timezone.utc)
+    else:
+        end = (
+            clickhouse_datetime(event.get("ended_at") or event.get("last_seen_at"))
+            or clickhouse_datetime(event.get("last_seen"))
+            or datetime.now(timezone.utc)
+        )
     if end < start:
         end = start + timedelta(minutes=5)
-    margin = max(0, int(range_margin_seconds))
+    margin = max(300, int(range_margin_seconds))
     return start - timedelta(seconds=margin), end + timedelta(seconds=margin)
 
 
@@ -9729,6 +9732,58 @@ def dns_outbound_mitigation_candidates(event: dict[str, Any], evidence: dict[str
     ]
 
 
+def clickhouse_ip_matches_expr(column: str, param_prefix: str) -> str:
+    return (
+        f"(toString({column}) = {{{param_prefix}:String}} "
+        f"OR toString({column}) = {{{param_prefix}_plain:String}} "
+        f"OR endsWith(toString({column}), {{{param_prefix}_plain:String}}))"
+    )
+
+
+def anomaly_flow_target_filter(target_role: str) -> str:
+    src_match = clickhouse_ip_matches_expr("src_ip", "target_ip")
+    dst_match = clickhouse_ip_matches_expr("dst_ip", "target_ip")
+    if target_role == "dst_ip":
+        return dst_match
+    if target_role == "src_ip":
+        return src_match
+    return f"({src_match} OR {dst_match})"
+
+
+def anomaly_flow_query(
+    filters: list[str],
+    dns_dst_port_filter: bool,
+) -> str:
+    effective_filters = list(filters)
+    if dns_dst_port_filter:
+        effective_filters.append("dst_port = 53")
+    return f"""
+        SELECT
+            max(flow_time) AS flow_time,
+            any(sensor) AS sensor,
+            any(toString(exporter_ip)) AS exporter_ip,
+            toString(src_ip) AS src_ip,
+            src_port,
+            toString(dst_ip) AS dst_ip,
+            dst_port,
+            proto,
+            any(input_if) AS input_if,
+            any(output_if) AS output_if,
+            sum(packets) AS packets,
+            sum(bytes) AS bytes,
+            sum(flow_count) AS flow_count,
+            min(flow_time) AS first_seen,
+            max(flow_time) AS last_seen,
+            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
+            sum(packets) / {{seconds:Float64}} AS packets_s
+        FROM flow_raw
+        WHERE {' AND '.join(f'({item})' for item in effective_filters)}
+        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+        ORDER BY packets_s DESC, bits_s DESC
+        LIMIT {{limit:UInt32}}
+    """
+
+
 def enrich_anomaly_with_flows(
     anomaly: dict[str, Any],
     range_margin_seconds: int = 120,
@@ -9753,6 +9808,7 @@ def enrich_anomaly_with_flows(
         "start": start_dt,
         "end": end_dt,
         "target_ip": clickhouse_ip_string_param(target_ip, "target_ip"),
+        "target_ip_plain": target_ip,
         "seconds": max(range_seconds(start_dt, end_dt), 1),
         "limit": max(1, int(limit)),
     }
@@ -9760,15 +9816,9 @@ def enrich_anomaly_with_flows(
         "flow_time >= {start:DateTime}",
         "flow_time <= {end:DateTime}",
     ]
-    if target_role == "dst_ip":
-        filters.append("toString(dst_ip) = {target_ip:String}")
-    elif target_role == "src_ip":
-        filters.append("toString(src_ip) = {target_ip:String}")
-    else:
-        filters.append("(toString(src_ip) = {target_ip:String} OR toString(dst_ip) = {target_ip:String})")
+    filters.append(anomaly_flow_target_filter(target_role))
     if dns_like:
         filters.append("proto = 17")
-        filters.append("dst_port = 53")
     elif decoder in {"UDP", "NTP", "SSDP", "CLDAP", "CHARGEN", "UDP+QUIC"} or "UDP" in decoder:
         filters.append("proto = 17")
     elif decoder.startswith("TCP") or decoder in {"HTTP", "HTTPS"}:
@@ -9780,33 +9830,11 @@ def enrich_anomaly_with_flows(
     if event.get("interface_if_index") is not None:
         params["interface_if_index"] = int(event.get("interface_if_index") or 0)
         filters.append("(input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})")
-    query = f"""
-        SELECT
-            max(flow_time) AS flow_time,
-            any(sensor) AS sensor,
-            any(toString(exporter_ip)) AS exporter_ip,
-            toString(src_ip) AS src_ip,
-            src_port,
-            toString(dst_ip) AS dst_ip,
-            dst_port,
-            proto,
-            any(input_if) AS input_if,
-            any(output_if) AS output_if,
-            sum(packets) AS packets,
-            sum(bytes) AS bytes,
-            sum(flow_count) AS flow_count,
-            min(flow_time) AS first_seen,
-            max(flow_time) AS last_seen,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
-            sum(packets) / {{seconds:Float64}} AS packets_s
-        FROM flow_raw
-        WHERE {' AND '.join(f'({item})' for item in filters)}
-        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
-        ORDER BY packets_s DESC, bits_s DESC
-        LIMIT {{limit:UInt32}}
-    """
     try:
-        flows = [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(query, params))]
+        rows = rows_as_dicts(query_clickhouse(anomaly_flow_query(filters, dns_dst_port_filter=dns_like), params))
+        if dns_like and not rows:
+            rows = rows_as_dicts(query_clickhouse(anomaly_flow_query(filters, dns_dst_port_filter=False), params))
+        flows = [compact_flow_row(row) for row in rows]
     except Exception as exc:
         evidence = aggregate_flow_evidence([], start_dt, end_dt)
         evidence["evidence_status"] = "flow_enrichment_failed"
