@@ -2,17 +2,17 @@
 services:
   pmacct-sensor-1:
     build:
-      context: ./collector/pmacct
+      context: "${GMJFLOW_PROJECT_DIR}/collector/pmacct"
     command: ["nfacctd", "-f", "/app/data/collectors/sensor-1/nfacctd.conf"]
     ports:
       - "${NETFLOW_PORT-9995}:9995/udp"
     volumes:
-      - ./data/collectors:/app/data/collectors:ro
+      - "${GMJFLOW_PROJECT_DIR}/data/collectors:/app/data/collectors:ro"
       - pmacct_spool:/var/spool/pmacct
     restart: unless-stopped
   pmacct-parser-sensor-1:
     build:
-      context: ./collector/pmacct
+      context: "${GMJFLOW_PROJECT_DIR}/collector/pmacct"
     command: ["python3", "/opt/gmj-flow/parse_pmacct.py"]
     environment:
       CLICKHOUSE_HOST: "${CLICKHOUSE_HOST-clickhouse}"
@@ -45,3 +45,7 @@ services:
 
 volumes:
   pmacct_spool:
+networks:
+  default:
+    external: true
+    name: "${GMJFLOW_DOCKER_NETWORK}"

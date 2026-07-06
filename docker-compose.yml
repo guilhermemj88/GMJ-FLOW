@@ -2,6 +2,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
     container_name: gmj-flow-clickhouse
+    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE-flowdb}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
@@ -22,6 +23,7 @@ services:
     build:
       context: ./backend
     container_name: gmj-flow-backend
+    restart: unless-stopped
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
@@ -35,7 +37,9 @@ services:
       GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
       GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
       GMJFLOW_RUNTIME_DIR: "${GMJFLOW_RUNTIME_DIR-/app/runtime}"
-      GMJFLOW_COLLECTORS_DIR: "${GMJFLOW_COLLECTORS_DIR-/app/runtime/data/collectors}"
+      GMJFLOW_PROJECT_DIR: "${GMJFLOW_PROJECT_DIR-}"
+      GMJFLOW_DOCKER_NETWORK: "${GMJFLOW_DOCKER_NETWORK-gmj-flow_default}"
+      GMJFLOW_COLLECTORS_DIR: "${GMJFLOW_COLLECTORS_DIR-}"
       GMJFLOW_COLLECTOR_APPLY_SCRIPT: "${GMJFLOW_COLLECTOR_APPLY_SCRIPT-/app/runtime/scripts/apply_collectors.sh}"
       GMJFLOW_ENABLE_COLLECTOR_APPLY: "${GMJFLOW_ENABLE_COLLECTOR_APPLY-false}"
       GMJFLOW_SNMP_POLLING_ENABLED: "${GMJFLOW_SNMP_POLLING_ENABLED-1}"
@@ -79,6 +83,7 @@ services:
   frontend:
     image: nginx:1.27-alpine
     container_name: gmj-flow-frontend
+    restart: unless-stopped
     ports:
       - "${FRONTEND_PORT-8080}:80"
     volumes:
@@ -141,6 +146,7 @@ services:
     build:
       context: ./collector
     container_name: gmj-flow-collector
+    restart: unless-stopped
     profiles:
       - tools
     environment:
