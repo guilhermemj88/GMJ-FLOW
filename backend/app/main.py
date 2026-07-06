@@ -3628,8 +3628,39 @@ def collector_data_host_dir(project_dir: str | None = None) -> str:
     return host_path_join(project_dir or collector_project_host_dir(), "data", "collectors")
 
 
-def collector_build_context(project_dir: str | None = None) -> str:
-    return host_path_join(project_dir or collector_project_host_dir(), "collector", "pmacct")
+def collector_build_context() -> str:
+    return str(RUNTIME_DIR / "collector" / "pmacct")
+
+
+def local_collector_build_source_dir() -> Path:
+    runtime_source = RUNTIME_DIR / "collector" / "pmacct"
+    if runtime_source.exists():
+        return runtime_source
+    return Path(__file__).resolve().parents[2] / "collector" / "pmacct"
+
+
+def sync_collector_build_context() -> dict[str, Any]:
+    source_dir = local_collector_build_source_dir()
+    target_dir = Path(collector_build_context())
+    target_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for filename in ("Dockerfile", "parse_pmacct.py", "nfacctd.conf", "allow.lst"):
+        source = source_dir / filename
+        target = target_dir / filename
+        try:
+            same_file = source.exists() and target.exists() and source.resolve() == target.resolve()
+        except OSError:
+            same_file = False
+        if same_file:
+            copied.append(filename)
+        elif source.exists():
+            shutil.copy2(source, target)
+            copied.append(filename)
+    return {
+        "source_dir": str(source_dir),
+        "build_context": str(target_dir),
+        "files": copied,
+    }
 
 
 def detected_clickhouse_network_name() -> str:
@@ -3715,7 +3746,7 @@ print_startup_delay[flows]: 1
 
 def compose_for_collectors(sensors: list[dict[str, Any]]) -> str:
     project_dir = collector_project_host_dir()
-    build_context = collector_build_context(project_dir)
+    build_context = collector_build_context()
     data_host_dir = collector_data_host_dir(project_dir)
     docker_network = collector_docker_network_name()
     lines = [
@@ -3806,6 +3837,7 @@ def write_collector_artifacts(
 ) -> dict[str, Any]:
     output_dir = Path(output_dir or collectors_dir())
     output_dir.mkdir(parents=True, exist_ok=True)
+    build_context = sync_collector_build_context()
     configs = []
     expected_dirs = {f"sensor-{int(sensor['id'])}" for sensor in sensors if sensor.get("id") is not None}
     for child in output_dir.iterdir():
@@ -3840,6 +3872,7 @@ def write_collector_artifacts(
     return {
         "collectors_dir": str(output_dir),
         "compose_file": str(compose_path),
+        "build_context": build_context,
         "configs_generated": configs,
     }
 
