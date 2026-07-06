@@ -10859,15 +10859,25 @@ def mitigation_ai_confidence_score(value: Any) -> float:
         return 0.55
 
 
+def mitigation_candidate_reviewable(candidate: dict[str, Any]) -> bool:
+    action = clean_text(candidate.get("action") or candidate.get("then_action")).lower()
+    if action in {"accept", "allow"}:
+        return False
+    return True
+
+
 def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
+    reviewable_indexes: list[int] = []
     for index, candidate in enumerate(candidates):
-        action = clean_text(candidate.get("action") or candidate.get("then_action")).lower()
+        if not mitigation_candidate_reviewable(candidate):
+            continue
+        reviewable_indexes.append(index)
         mode = clean_text(candidate.get("mitigation_mode")).lower()
         if ai_bool(candidate.get("never_announce")) or mode == "analysis_only":
             continue
-        if action in {"accept", "allow"}:
-            continue
         return index
+    if len(reviewable_indexes) == 1:
+        return reviewable_indexes[0]
     return None
 
 

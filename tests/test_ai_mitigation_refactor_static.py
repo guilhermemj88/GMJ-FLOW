@@ -96,6 +96,25 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(result["classification"], "udp_flood_outbound")
         self.assertEqual(result["reason"], "Fallback deterministico: IA local falhou ou excedeu timeout.")
 
+    def test_deterministic_fallback_points_to_single_manual_review_candidate(self):
+        payload = mitigation_payload("DNS_INTERNAL_IP_HIGH_BITS")
+        payload["candidates"][0].update(
+            {
+                "mitigation_mode": "analysis_only",
+                "never_announce": True,
+                "action": "discard",
+                "manual_approval_required": True,
+                "allow_auto": False,
+                "risk": "medium",
+            }
+        )
+        result = backend_main.deterministic_mitigation_fallback(payload, "invalid json")
+        self.assertEqual(result["recommended_candidate_index"], 0)
+        self.assertEqual(result["recommended_action"], "manual_review")
+        self.assertEqual(result["risk"], "medium")
+        self.assertFalse(result["allow_auto"])
+        self.assertTrue(result["manual_approval_required"])
+
     def test_call_ollama_mitigation_ai_uses_num_predict_without_format_json(self):
         captured = {}
 
