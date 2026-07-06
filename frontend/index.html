@@ -10941,11 +10941,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return event.source_name || event.vector_name || event.attack_vector_name || '-';
     }
 
+    function anomalyActionId(event) {
+      return Number(event?.action_id || event?.security_anomaly_id || event?.id || 0);
+    }
+
     function renderAnomalyTable(items) {
       const tbody = document.getElementById('anomaliesTable');
       const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
-      const visibleItems = idSearch ? items.filter(event => String(event.id || '') === idSearch) : items;
-      tbody.innerHTML = visibleItems.map(event => `
+      const visibleItems = idSearch ? items.filter(event => String(anomalyActionId(event) || event.id || '') === idSearch) : items;
+      tbody.innerHTML = visibleItems.map(event => {
+        const actionId = anomalyActionId(event);
+        return `
         <tr>
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
           <td>#${escapeHtml(event.id || '-')}</td>
@@ -10969,18 +10975,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(event.summary || '-')}</td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
-              <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${event.id}">
+              <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}">
                 <i data-lucide="eye"></i><span>Ver detalhes</span>
               </button>
-              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${event.id}">
+              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}">
                 <i data-lucide="shield-check"></i><span>Mitigar</span>
               </button>
-              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${event.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
-              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${event.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="21" class="text-muted">Sem anomalias</td></tr>';
+      `;
+      }).join('') || '<tr><td colspan="21" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -11148,6 +11155,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function loadAnomalyAiAnalysis(anomalyId) {
       try {
         const analysis = await apiRequest(anomalyAiAnalysisEndpoint(anomalyId), anomalyAiRequestOptions(anomalyId));
+        if (analysis && analysis.available === false) {
+          renderAnomalyAiAnalysis(null);
+          return;
+        }
         renderAnomalyAiAnalysis(analysis);
       } catch (error) {
         currentAiMitigationAnalysis = null;

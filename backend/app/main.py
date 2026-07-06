@@ -9163,20 +9163,16 @@ def dns_outbound_candidates(
 
 def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
     if anomaly_id < 0:
-        group = next(
-            (
-                item
-                for status_filter in ("active", "history")
-                for item in consolidated_security_anomaly_groups(status_filter)
-                if int(item["event"]["id"]) == anomaly_id
-            ),
-            None,
-        )
+        group = find_consolidated_security_anomaly_group(anomaly_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         event = group["event"]
         details = [item for item in group["items"] if security_item_matches_event_target(item, event)]
         return {"event": event, "flows": details, "security_anomalies": details}
+    security_item = resolve_security_anomaly_identifier(conn, anomaly_id, raise_not_found=False)
+    if security_item is not None:
+        event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+        return {"event": event, "flows": [security_item], "security_anomalies": [security_item]}
     row = conn.execute(
         """
         SELECT e.*, v.name AS attack_vector_name, v.domain_type AS attack_domain_type, s.name AS sensor_name
@@ -11794,9 +11790,15 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
     if event_id < 0:
         return missing_draft_payload_response()
     with sqlite_connection() as conn:
-        analysis = latest_ai_analysis(conn, event_id)
+        security_item = resolve_security_anomaly_identifier(conn, event_id)
+        anomaly_id = int(security_item["id"])
+        analysis = latest_ai_analysis(conn, anomaly_id)
     if analysis is None:
-        raise HTTPException(status_code=404, detail="Analise IA nao encontrada")
+        return {
+            "anomaly_id": anomaly_id,
+            "available": False,
+            "error_message": "Nenhuma analise IA salva para esta anomalia.",
+        }
     return analysis
 
 
@@ -11804,6 +11806,11 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
 def get_anomaly_flow_context(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
+    if event_id >= 0:
+        with sqlite_connection() as conn:
+            security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+            if security_item is not None:
+                event_id = int(security_item["id"])
     analysis = deterministic_anomaly_analysis(event_id)
     return flow_context_from_analysis(analysis)
 
@@ -11815,11 +11822,13 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
     if event_id < 0:
         return missing_draft_payload_response()
     with sqlite_connection() as conn:
+        security_item = resolve_security_anomaly_identifier(conn, event_id)
+        anomaly_id = int(security_item["id"])
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
     try:
-        return anomaly_ai_analysis_result(event_id, config, persist=event_id >= 0, endpoint="persisted")
+        return anomaly_ai_analysis_result(anomaly_id, config, persist=True, endpoint="persisted")
     except AiProviderTimeoutError as exc:
         return JSONResponse(status_code=504, content=exc.payload)
 
@@ -14941,6 +14950,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
 
 def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    anomaly_id = int(item["id"])
     domain = item.get("domain") or ""
     direction = item.get("direction") or ""
     fallback_target = item.get("target_ip") or item.get("src_ip") or item.get("dst_ip") or ""
@@ -14959,7 +14969,9 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         scope_type = item.get("scope_type") or ""
         invalid_scope = sqlite_bool(item.get("invalid_scope"))
     return {
-        "id": int(item["id"]),
+        "id": anomaly_id,
+        "action_id": anomaly_id,
+        "security_anomaly_id": anomaly_id,
         "vector": item["vector"],
         "severity": item["severity"],
         "status": item.get("status") or "active",
@@ -15001,6 +15013,135 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "source_details": bgp_json_loads(item.get("source_details_json"), {}),
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
+    }
+
+
+def security_anomaly_not_found(identifier: int) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "message": "Anomalia de seguranca nao encontrada",
+            "identifier": identifier,
+            "tables_checked": ["security_anomalies"],
+        },
+    )
+
+
+def resolve_security_anomaly_identifier(
+    conn: sqlite3.Connection,
+    identifier: int,
+    allow_source_id: bool = True,
+    raise_not_found: bool = True,
+) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM security_anomalies WHERE id = ?", (int(identifier),)).fetchone()
+    if row is not None:
+        item = security_anomaly_row_to_dict(row)
+        item["resolved_by"] = "id"
+        return item
+    if allow_source_id:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM security_anomalies
+            WHERE source_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (str(identifier),),
+        ).fetchone()
+        if row is not None:
+            item = security_anomaly_row_to_dict(row)
+            item["resolved_by"] = "source_id"
+            item["requested_identifier"] = int(identifier)
+            return item
+    if raise_not_found:
+        raise security_anomaly_not_found(int(identifier))
+    return None
+
+
+def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id: int | None = None) -> dict[str, Any]:
+    if not items:
+        raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+    representative = max(items, key=lambda item: (severity_rank(item.get("severity")), float(item.get("packets_s") or 0), float(item.get("bits_s") or 0)))
+    real_id = int(preferred_id or representative["id"])
+    first_seen_values = [parse_datetime_text(item.get("first_seen")) for item in items]
+    last_seen_values = [parse_datetime_text(item.get("last_seen")) for item in items]
+    first_seen_values = [value for value in first_seen_values if value is not None]
+    last_seen_values = [value for value in last_seen_values if value is not None]
+    started_at = iso(min(first_seen_values)) if first_seen_values else clean_text(representative.get("created_at")) or utc_now_iso()
+    last_seen_at = iso(max(last_seen_values)) if last_seen_values else clean_text(representative.get("updated_at")) or started_at
+    status = clean_text(representative.get("status") or "active")
+    peak_packets = max(float(item.get("packets_s") or 0) for item in items)
+    peak_bits = max(float(item.get("bits_s") or 0) for item in items)
+    peak_flows = max(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+    if peak_packets > 0:
+        metric_unit = "packets_s"
+        peak_value = peak_packets
+        observed_value = sum(float(item.get("packets_s") or 0) for item in items)
+    elif peak_bits > 0:
+        metric_unit = "bits_s"
+        peak_value = peak_bits
+        observed_value = sum(float(item.get("bits_s") or 0) for item in items)
+    else:
+        metric_unit = "flows_s"
+        peak_value = peak_flows
+        observed_value = sum(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+    src_ips = {clean_ip(item.get("src_ip")) for item in items if clean_text(item.get("src_ip"))}
+    dst_ips = {clean_ip(item.get("dst_ip")) for item in items if clean_text(item.get("dst_ip"))}
+    vector = clean_text(representative.get("vector")) or clean_text(representative.get("source_name")) or "Deteccao IP Zone"
+    decoder = clean_text(representative.get("protocol")) or "ALL"
+    zone_name = clean_text(representative.get("zone_name")) or "IP Zone"
+    target_ip = clean_ip(representative.get("target_ip")) or clean_ip(representative.get("src_ip")) or clean_ip(representative.get("dst_ip"))
+    target_cidr = clean_text(representative.get("target_cidr")) or (host_cidr_for_ip(target_ip) if target_ip else clean_text(representative.get("prefix_cidr")))
+    source_details = dict(representative.get("source_details") or {})
+    source_details.setdefault("security_anomaly_id", real_id)
+    source_details.setdefault("security_anomaly_ids", [int(item["id"]) for item in items])
+    return {
+        "id": real_id,
+        "action_id": real_id,
+        "security_anomaly_id": real_id,
+        "security_anomaly_ids": [int(item["id"]) for item in items],
+        "legacy_event_id": consolidated_security_anomaly_id(security_consolidation_key(representative)),
+        "source": "security_anomalies",
+        "anomaly_source": clean_text(representative.get("anomaly_source")) or "detection_template_rule",
+        "source_engine": clean_text(representative.get("source_engine")) or "detection_templates",
+        "source_id": clean_text(representative.get("source_id")),
+        "source_name": clean_text(representative.get("source_name")) or vector,
+        "source_details_json": source_details,
+        "source_details": source_details,
+        "attack_vector_id": None,
+        "attack_vector_name": vector,
+        "sensor_id": None,
+        "sensor_name": "Deteccoes IP Zone",
+        "interface_if_index": None,
+        "target_ip": target_ip,
+        "target_cidr": target_cidr,
+        "target_role": clean_text(representative.get("target_role")),
+        "zone_id": representative.get("zone_id"),
+        "zone_name": zone_name,
+        "vector_name": vector,
+        "scope_type": clean_text(representative.get("scope_type")),
+        "invalid_scope": bool(representative.get("invalid_scope")),
+        "direction": clean_text(representative.get("direction")) or "-",
+        "decoder": decoder,
+        "severity": max((clean_text(item.get("severity")) or "info" for item in items), key=severity_rank),
+        "metric_unit": metric_unit,
+        "threshold_value": 0.0,
+        "observed_value": observed_value,
+        "peak_value": peak_value,
+        "started_at": started_at,
+        "last_seen_at": last_seen_at,
+        "ended_at": None if status == "active" else last_seen_at,
+        "status": status,
+        "estimated_bytes": int(sum(float(item.get("bytes") or 0) for item in items)),
+        "estimated_packets": int(sum(float(item.get("packets") or 0) for item in items)),
+        "flow_count": int(sum(float(item.get("flows") or 0) for item in items)),
+        "summary": clean_text(representative.get("message")) or f"{decoder} detectado em {target_cidr or target_ip or zone_name}",
+        "created_at": min((clean_text(item.get("created_at")) for item in items if clean_text(item.get("created_at"))), default=started_at),
+        "updated_at": max((clean_text(item.get("updated_at")) for item in items if clean_text(item.get("updated_at"))), default=last_seen_at),
+        "detail_count": len(items),
+        "unique_src_ips": len(src_ips),
+        "unique_dst_ips": len(dst_ips),
     }
 
 
@@ -19395,7 +19536,11 @@ def legacy_consolidated_security_anomaly_id(key: tuple[Any, ...]) -> int:
 
 def consolidated_group_matches_event_id(group: dict[str, Any], event_id: int) -> bool:
     event = group.get("event") or {}
-    return int(event.get("id") or 0) == event_id or legacy_consolidated_security_anomaly_id(group.get("key") or ()) == event_id
+    return (
+        int(event.get("id") or 0) == event_id
+        or int(event.get("legacy_event_id") or 0) == event_id
+        or legacy_consolidated_security_anomaly_id(group.get("key") or ()) == event_id
+    )
 
 
 def find_consolidated_security_anomaly_group(event_id: int) -> dict[str, Any] | None:
@@ -19489,15 +19634,20 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
             if scope_type == "internal_ip_32" and target_cidr
             else f"{decoder} detectado em {affected_count} IPs da zona {zone_name}"
         )
+        representative_id = int(representative["id"])
+        legacy_event_id = consolidated_security_anomaly_id(group["key"])
         event = {
-            "id": consolidated_security_anomaly_id(group["key"]),
+            "id": representative_id,
+            "action_id": representative_id,
+            "security_anomaly_id": representative_id,
+            "legacy_event_id": legacy_event_id,
             "source": "security_anomalies",
             "anomaly_source": "dashboard_anomaly_summary",
             "source_engine": "dashboard",
-            "source_id": "",
+            "source_id": clean_text(representative.get("source_id")),
             "source_name": vector,
-            "source_details_json": {"zone_name": zone_name, "detail_count": len(items)},
-            "source_details": {"zone_name": zone_name, "detail_count": len(items)},
+            "source_details_json": {"zone_name": zone_name, "detail_count": len(items), "legacy_event_id": legacy_event_id},
+            "source_details": {"zone_name": zone_name, "detail_count": len(items), "legacy_event_id": legacy_event_id},
             "security_anomaly_ids": [int(item["id"]) for item in items],
             "attack_vector_id": None,
             "attack_vector_name": vector,
@@ -19806,6 +19956,37 @@ def anomaly_detail(request: Request, event_id: int):
             mitigation_candidates=enrichment.get("mitigation_candidates") or [],
         )
     with sqlite_connection() as conn:
+        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+        if security_item is not None:
+            event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+            conversations = {}
+            key = f"{security_item.get('src_ip') or '-'} -> {security_item.get('dst_ip') or '-'} {security_item.get('protocol') or 'ALL'}"
+            conversations[key] = {
+                "conversation": key,
+                "bytes": int(float(security_item.get("bytes") or 0)),
+                "packets": int(float(security_item.get("packets") or 0)),
+                "flow_count": int(float(security_item.get("flows") or 0)),
+            }
+            minute = clean_text(security_item.get("last_seen") or security_item.get("updated_at"))[:16]
+            metric_points = [{
+                "time": minute,
+                "bits_s": float(security_item.get("bits_s") or 0),
+                "packets_s": float(security_item.get("packets_s") or 0),
+                "flows_s": float(security_item.get("flows_s") or security_item.get("flows") or 0),
+            }]
+            enrichment = enrich_anomaly_with_flows(event, range_margin_seconds=120, limit=50)
+            flows = list(enrichment.get("flows") or [])
+            if flows:
+                event = dict(enrichment.get("event") or event)
+            return anomaly_detail_payload(
+                event,
+                flows,
+                sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
+                metric_points,
+                security_anomalies=[security_item],
+                flow_evidence=enrichment.get("flow_evidence"),
+                mitigation_candidates=enrichment.get("mitigation_candidates") or [],
+            )
         row = conn.execute(
             """
             SELECT
@@ -20109,15 +20290,7 @@ def acknowledge_anomaly(request: Request, event_id: int):
     ensure_sensor_db()
     now = utc_now_iso()
     if event_id < 0:
-        group = next(
-            (
-                item
-                for status_filter in ("active", "history")
-                for item in consolidated_security_anomaly_groups(status_filter)
-                if int(item["event"]["id"]) == event_id
-            ),
-            None,
-        )
+        group = find_consolidated_security_anomaly_group(event_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         ids = [int(item["id"]) for item in group["items"]]
@@ -20127,12 +20300,21 @@ def acknowledge_anomaly(request: Request, event_id: int):
                 f"UPDATE security_anomalies SET status = 'acknowledged', updated_at = ? WHERE id IN ({placeholders})",
                 [now, *ids],
             )
-            conn.commit()
+        conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
+        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+        if security_item is not None:
+            anomaly_id = int(security_item["id"])
+            conn.execute(
+                "UPDATE security_anomalies SET status = 'acknowledged', updated_at = ? WHERE id = ?",
+                (now, anomaly_id),
+            )
+            conn.commit()
+            return {"ok": True, "id": anomaly_id, "action_id": anomaly_id}
         row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+            raise security_anomaly_not_found(event_id)
         conn.execute(
             """
             UPDATE anomaly_events
@@ -20153,15 +20335,7 @@ def close_anomaly(request: Request, event_id: int):
     ensure_sensor_db()
     now = utc_now_iso()
     if event_id < 0:
-        group = next(
-            (
-                item
-                for status_filter in ("active", "history")
-                for item in consolidated_security_anomaly_groups(status_filter)
-                if int(item["event"]["id"]) == event_id
-            ),
-            None,
-        )
+        group = find_consolidated_security_anomaly_group(event_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         ids = [int(item["id"]) for item in group["items"]]
@@ -20171,12 +20345,21 @@ def close_anomaly(request: Request, event_id: int):
                 f"UPDATE security_anomalies SET status = 'closed', updated_at = ? WHERE id IN ({placeholders})",
                 [now, *ids],
             )
-            conn.commit()
+        conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
+        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+        if security_item is not None:
+            anomaly_id = int(security_item["id"])
+            conn.execute(
+                "UPDATE security_anomalies SET status = 'closed', updated_at = ? WHERE id = ?",
+                (now, anomaly_id),
+            )
+            conn.commit()
+            return {"ok": True, "id": anomaly_id, "action_id": anomaly_id}
         row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+            raise security_anomaly_not_found(event_id)
         conn.execute(
             """
             UPDATE anomaly_events
