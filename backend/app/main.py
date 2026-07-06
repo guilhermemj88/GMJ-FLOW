@@ -364,6 +364,7 @@ SYSTEM_SETTING_DEFAULTS = {
     "ai_timeout_seconds": os.getenv("AI_TIMEOUT_SECONDS", "20"),
     "ai_max_top_flows": os.getenv("AI_MAX_TOP_FLOWS", "30"),
     "ai_max_context_chars": os.getenv("AI_MAX_CONTEXT_CHARS", "12000"),
+    "ai_num_predict": os.getenv("AI_NUM_PREDICT", "160"),
     "ai_keep_alive": os.getenv("AI_KEEP_ALIVE", "30m"),
     "ai_allow_auto": os.getenv("AI_ALLOW_AUTO", "false"),
     "ai_require_policy_validation": os.getenv("AI_REQUIRE_POLICY_VALIDATION", "true"),
@@ -803,6 +804,7 @@ class AiSettingsPayload(BaseModel):
     timeout_seconds: int | None = Field(None, ge=1, le=300)
     max_top_flows: int | None = Field(None, ge=1, le=200)
     max_context_chars: int | None = Field(None, ge=1000, le=100000)
+    num_predict: int | None = Field(None, ge=32, le=1024)
     keep_alive: str = "30m"
     allow_auto: bool = False
     require_policy_validation: bool = True
@@ -818,6 +820,7 @@ class SystemAiConfigPayload(BaseModel):
     timeout_seconds: int | None = Field(None, ge=1, le=300)
     max_top_flows: int | None = Field(None, ge=1, le=200)
     max_context_chars: int | None = Field(None, ge=1000, le=100000)
+    num_predict: int | None = Field(None, ge=32, le=1024)
     keep_alive: str = "30m"
 
 
@@ -10330,6 +10333,7 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "ai_timeout_seconds",
         "ai_max_top_flows",
         "ai_max_context_chars",
+        "ai_num_predict",
         "ai_keep_alive",
         "ai_allow_auto",
         "ai_require_policy_validation",
@@ -10359,6 +10363,7 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "timeout_seconds": ai_int_setting(settings, "ai_timeout_seconds", profile["timeout_seconds"], 1, 300),
         "max_top_flows": ai_int_setting(settings, "ai_max_top_flows", profile["max_top_flows"], 1, 200),
         "max_context_chars": ai_int_setting(settings, "ai_max_context_chars", profile["max_context_chars"], 1000, 100000),
+        "num_predict": ai_int_setting(settings, "ai_num_predict", 160, 32, 1024),
         "keep_alive": clean_text(settings.get("ai_keep_alive")) or "30m",
         "allow_auto": setting_bool(settings, "ai_allow_auto"),
         "require_policy_validation": setting_bool(settings, "ai_require_policy_validation"),
@@ -10810,13 +10815,229 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
     return compact_ai_payload_for_model(payload, int(config["max_context_chars"]))
 
 
-def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
+MITIGATION_AI_CLASSIFICATIONS = {"dns_abuse_outbound", "udp_flood_outbound", "tcp_syn_flood", "icmp_flood", "unknown"}
+MITIGATION_AI_RISKS = {"low", "medium", "high", "none"}
+MITIGATION_AI_CONFIDENCE_LABELS = {"low", "medium", "high"}
+
+
+def mitigation_ai_classification(anomaly: dict[str, Any], candidate: dict[str, Any] | None = None) -> str:
+    text = " ".join(
+        clean_text(value)
+        for value in (
+            anomaly.get("vector_name"),
+            anomaly.get("attack_vector_name"),
+            anomaly.get("decoder"),
+            anomaly.get("protocol"),
+            anomaly.get("summary"),
+            (candidate or {}).get("attack_vector_name"),
+            (candidate or {}).get("template"),
+        )
+        if clean_text(value)
+    ).lower()
+    if "dns" in text:
+        return "dns_abuse_outbound"
+    if "syn" in text:
+        return "tcp_syn_flood"
+    if "icmp" in text:
+        return "icmp_flood"
+    if "udp" in text:
+        return "udp_flood_outbound"
+    return "unknown"
+
+
+def mitigation_ai_confidence_score(value: Any) -> float:
+    text = clean_text(value).lower()
+    if text == "high":
+        return 0.85
+    if text == "medium":
+        return 0.55
+    if text == "low":
+        return 0.25
+    try:
+        return max(0.0, min(float(value or 0), 1.0))
+    except (TypeError, ValueError):
+        return 0.55
+
+
+def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
+    for index, candidate in enumerate(candidates):
+        action = clean_text(candidate.get("action") or candidate.get("then_action")).lower()
+        mode = clean_text(candidate.get("mitigation_mode")).lower()
+        if ai_bool(candidate.get("never_announce")) or mode == "analysis_only":
+            continue
+        if action in {"accept", "allow"}:
+            continue
+        return index
+    return None
+
+
+def compact_mitigation_ai_candidate(candidate: dict[str, Any], index: int) -> dict[str, Any]:
+    compacted = compact_ai_candidate(candidate, index, text_limit=180)
+    for key in ("attack_vector_name", "template", "response_type", "target_prefix", "src_prefix", "dst_prefix", "target_scope"):
+        value = candidate.get(key)
+        if ai_keep_value(value):
+            compacted[key] = value
+    compacted["candidate_index"] = index
+    compacted["allow_auto"] = False
+    compacted["manual_approval_required"] = True
+    compacted["apply_enabled"] = False
+    return compacted
+
+
+def mitigation_ai_playbook(anomaly: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    classification = mitigation_ai_classification(anomaly, candidates[0] if candidates else None)
+    return {
+        "classification_hint": classification,
+        "manual_review_required": True,
+        "allow_auto": False,
+        "choose_only_existing_candidate": True,
+        "never_create_new_rule": True,
+        "never_block_client_ip_only": True,
+        "apply_enabled": False,
+    }
+
+
+def build_mitigation_ai_prompt(request_payload: dict[str, Any]) -> str:
+    anomaly = compact_anomaly_for_ai(dict(request_payload.get("anomaly") or {}))
+    candidates = [
+        compact_mitigation_ai_candidate(candidate, index)
+        for index, candidate in enumerate(list(request_payload.get("candidates") or []))
+        if isinstance(candidate, dict)
+    ]
+    prompt_payload = {
+        "anomaly": anomaly,
+        "playbook": mitigation_ai_playbook(anomaly, candidates),
+        "candidates": candidates,
+    }
     instruction = (
-        "Escolha um candidate existente. Responda apenas JSON valido com "
-        "recommended_candidate_index, confidence, risk, classification, reason, "
-        "operator_summary, checks_before_approve, manual_approval_required, allow_auto."
+        "Voce e um assistente de mitigacao DDoS para ISP. "
+        "Nao crie FlowSpec, blackhole, ACL, rate-limit ou regra nova. "
+        "Escolha somente um candidate_index existente. "
+        "Todo bloqueio exige aprovacao manual. Nunca recomende bloqueio somente do IP do cliente. "
+        "allow_auto deve ser false. Responda somente JSON curto com: "
+        "recommended_candidate_index, confidence(low|medium|high), risk(low|medium|high|none), "
+        "classification(dns_abuse_outbound|udp_flood_outbound|tcp_syn_flood|icmp_flood|unknown), "
+        "reason, operator_summary."
     )
-    return instruction + "\nPayload: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return instruction + "\nPayload: " + json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    content = clean_text(text)
+    try:
+        return parse_ai_json_response(content)
+    except Exception:
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(content[start : end + 1])
+    raise ValueError("Resposta da IA nao contem JSON valido.")
+
+
+def call_ollama_mitigation_ai(config: dict[str, Any], prompt: str) -> str:
+    if clean_text(config.get("provider")).lower() != "ollama":
+        raise ValueError("Provider de mitigacao IA suportado neste endpoint: ollama")
+    base_url = clean_text(config["base_url"]).rstrip("/")
+    endpoint = f"{base_url}/api/generate"
+    body = {
+        "model": config["selected_model"],
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": config.get("keep_alive") or "30m",
+        "options": {
+            "temperature": 0.1,
+            "num_predict": int(config.get("num_predict") or 160),
+            "num_ctx": 2048,
+        },
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError("Resposta Ollama invalida.")
+    return clean_text(payload.get("response") or payload.get("message", {}).get("content") or "")
+
+
+def normalize_mitigation_ai_response(value: dict[str, Any] | str, request_payload: dict[str, Any]) -> dict[str, Any]:
+    parsed = extract_json_object(value) if isinstance(value, str) else dict(value or {})
+    candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
+    if not candidates:
+        raise ValueError("Nao ha candidates para escolher.")
+    try:
+        index = int(parsed.get("recommended_candidate_index"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("recommended_candidate_index invalido.") from exc
+    if index < 0 or index >= len(candidates):
+        raise ValueError("recommended_candidate_index fora da lista de candidates.")
+    confidence_label = clean_text(parsed.get("confidence")).lower()
+    if confidence_label not in MITIGATION_AI_CONFIDENCE_LABELS:
+        confidence_label = "medium"
+    risk = clean_text(parsed.get("risk")).lower()
+    if risk not in MITIGATION_AI_RISKS:
+        risk = clean_text(candidates[index].get("risk")).lower() if clean_text(candidates[index].get("risk")).lower() in MITIGATION_AI_RISKS else "medium"
+    classification = clean_text(parsed.get("classification")).lower()
+    if classification not in MITIGATION_AI_CLASSIFICATIONS:
+        classification = mitigation_ai_classification(dict(request_payload.get("anomaly") or {}), candidates[index])
+    reason = ai_compact_text(parsed.get("reason") or "Candidate existente escolhido para revisao manual.", 300)
+    operator_summary = ai_compact_text(parsed.get("operator_summary") or reason, 500)
+    return {
+        "recommended_candidate_index": index,
+        "confidence": mitigation_ai_confidence_score(confidence_label),
+        "confidence_label": confidence_label,
+        "risk": risk,
+        "classification": classification,
+        "reason": reason,
+        "operator_summary": operator_summary,
+        "report_summary": operator_summary,
+        "manual_approval_required": True,
+        "allow_auto": False,
+        "recommended_action": "manual_review",
+        "mitigation_allowed": False,
+        "checks_before_approve": ["Revisar candidate existente e confirmar top flows antes de qualquer aprovacao manual."],
+        "risks": [],
+    }
+
+
+def deterministic_mitigation_fallback(request_payload: dict[str, Any], error_message: str = "") -> dict[str, Any]:
+    anomaly = dict(request_payload.get("anomaly") or {})
+    candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
+    index = first_safe_mitigation_candidate_index(candidates)
+    candidate = candidates[index] if index is not None else {}
+    vector = clean_text(anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or anomaly.get("protocol") or "unknown")
+    target = clean_text(anomaly.get("target_cidr") or anomaly.get("target_ip") or candidate.get("target_scope") or candidate.get("dst_cidr") or candidate.get("src_cidr") or "-")
+    metric = clean_text(anomaly.get("metric_unit") or "metric")
+    value = anomaly.get("peak_value") if anomaly.get("peak_value") not in (None, "") else anomaly.get("observed_value")
+    risk = clean_text(candidate.get("risk")).lower()
+    if risk not in MITIGATION_AI_RISKS:
+        risk = "medium" if index is not None else "none"
+    classification = mitigation_ai_classification(anomaly, candidate)
+    operator_summary = f"{vector} em {target}; pico {value or '-'} {metric}. Revisar candidate existente manualmente."[:500]
+    return {
+        "recommended_candidate_index": index,
+        "confidence": 0.55 if index is not None else 0.0,
+        "confidence_label": "medium" if index is not None else "low",
+        "risk": risk,
+        "classification": classification,
+        "reason": "Fallback deterministico: IA local falhou ou excedeu timeout.",
+        "operator_summary": operator_summary,
+        "report_summary": operator_summary,
+        "manual_approval_required": True,
+        "allow_auto": False,
+        "recommended_action": "manual_review" if index is not None else "alert_only",
+        "mitigation_allowed": False,
+        "ai_error": clean_text(error_message)[:500],
+        "checks_before_approve": ["Confirmar top flows no ClickHouse/roteador antes de qualquer aprovacao manual."],
+        "risks": [],
+    }
+
+
+def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
+    return build_mitigation_ai_prompt(payload)
 
 
 def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int]:
@@ -10836,7 +11057,7 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
             "keep_alive": config.get("keep_alive") or "30m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": 500,
+                "num_predict": int(config.get("num_predict") or 160),
                 "num_ctx": 2048,
             },
         }
@@ -10880,7 +11101,7 @@ def ai_provider_prompt(config: dict[str, Any], prompt: str) -> tuple[str, int]:
             "keep_alive": config.get("keep_alive") or "30m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": 500,
+                "num_predict": int(config.get("num_predict") or 160),
                 "num_ctx": 2048,
             },
         }
@@ -11273,36 +11494,12 @@ def anomaly_ai_analysis_result(
     request_payload = request_payload if request_payload is not None else build_ai_mitigation_payload(event_id, config)
     if not persist:
         request_payload = compact_ai_payload_for_model(request_payload, int(config["max_context_chars"]))
-    if not request_payload.get("candidates"):
-        fallback_response = {
-            "recommended_candidate_index": None,
-            "confidence": 0.0,
-            "risk": "high",
-            "classification": "insufficient_flow_evidence",
-            "manual_approval_required": True,
-            "allow_auto": False,
-            "recommended_candidate": "alert_only",
-            "recommended_action": "alert_only",
-            "evidence_status": "insufficient",
-            "mitigation_allowed": False,
-            "reason": "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
-            "operator_summary": "Nao ha evidencia suficiente para recomendar descarte. Confirmar top flows no ClickHouse/roteador.",
-            "report_summary": "Analise IA nao executada: sem candidato seguro para descarte.",
-            "risks": ["Anomalia sem escopo suficiente para recomendacao automatizada."],
-            "checks_before_approve": ["Confirmar top flows diretamente no ClickHouse/roteador.", "Validar sensor, interface e janela da anomalia."],
-        }
-        if not persist:
-            return draft_ai_analysis(event_id, config, request_payload, fallback_response)
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, fallback_response)
-            conn.commit()
-        return saved
-    prompt = ai_prompt_for_payload(request_payload)
+    prompt = build_mitigation_ai_prompt(request_payload)
     request_payload_chars = ai_payload_json_size(request_payload)
     prompt_chars = len(prompt)
     candidate_count = len(list(request_payload.get("candidates") or []))
     logger.info(
-        "ai_analysis_call endpoint=%s anomaly_id=%s is_draft=%s model=%s timeout_seconds=%s max_top_flows=%s max_context_chars=%s keep_alive=%s prompt_chars=%s request_payload_chars=%s candidate_count=%s",
+        "ai_analysis_call endpoint=%s anomaly_id=%s is_draft=%s model=%s timeout_seconds=%s max_top_flows=%s max_context_chars=%s num_predict=%s keep_alive=%s prompt_chars=%s request_payload_chars=%s candidate_count=%s",
         endpoint,
         event_id,
         not persist,
@@ -11310,16 +11507,18 @@ def anomaly_ai_analysis_result(
         int(config.get("timeout_seconds") or 0),
         int(config.get("max_top_flows") or 0),
         int(config.get("max_context_chars") or 0),
+        int(config.get("num_predict") or 160),
         config.get("keep_alive") or "30m",
         prompt_chars,
         request_payload_chars,
         candidate_count,
     )
     call_started = time.monotonic()
+    response_json: dict[str, Any]
+    error_message = ""
     try:
-        response_text, _latency_ms = ai_provider_chat(config, prompt)
-        parsed = parse_ai_json_response(response_text)
-        validated = validate_ai_analysis_response(parsed, list(request_payload.get("candidates") or []), config)
+        response_text = call_ollama_mitigation_ai(config, prompt)
+        response_json = normalize_mitigation_ai_response(response_text, request_payload)
         logger.info(
             "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=true error_type= error_message=",
             endpoint,
@@ -11327,39 +11526,26 @@ def anomaly_ai_analysis_result(
             not persist,
             int((time.monotonic() - call_started) * 1000),
         )
-        if not persist:
-            return draft_ai_analysis(event_id, config, request_payload, validated, prompt=prompt)
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, validated, prompt=prompt)
-            conn.commit()
-        return saved
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - call_started) * 1000)
-        if ai_exception_is_timeout(exc):
-            payload = ai_timeout_payload(event_id, config, request_payload, prompt)
-            logger.warning(
-                "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=timeout error_message=%s",
-                endpoint,
-                event_id,
-                not persist,
-                elapsed_ms,
-                clean_text(exc)[:500],
-            )
-            raise AiProviderTimeoutError(payload) from exc
+        error_message = clean_text(exc)
+        error_type = "timeout" if ai_exception_is_timeout(exc) else "provider_error"
         logger.warning(
-            "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=provider_error error_message=%s",
+            "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=%s error_message=%s fallback=true",
             endpoint,
             event_id,
             not persist,
             elapsed_ms,
-            clean_text(exc)[:500],
+            error_type,
+            error_message[:500],
         )
-        if not persist:
-            return draft_ai_analysis(event_id, config, request_payload, {}, str(exc), prompt=prompt)
-        with sqlite_connection() as conn:
-            saved = save_ai_analysis(conn, event_id, config, request_payload, {}, str(exc), prompt=prompt)
-            conn.commit()
-        return saved
+        response_json = deterministic_mitigation_fallback(request_payload, error_message)
+    if not persist:
+        return draft_ai_analysis(event_id, config, request_payload, response_json, error_message, prompt=prompt)
+    with sqlite_connection() as conn:
+        saved = save_ai_analysis(conn, event_id, config, request_payload, response_json, error_message, prompt=prompt)
+        conn.commit()
+    return saved
 
 
 @app.get("/api/ai/profiles")
@@ -11408,6 +11594,7 @@ def save_ai_settings(request: Request, payload: AiSettingsPayload):
         "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
         "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
         "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_num_predict": str(payload.num_predict or SYSTEM_SETTING_DEFAULTS["ai_num_predict"]),
         "ai_keep_alive": clean_text(payload.keep_alive) or "30m",
         "ai_allow_auto": "false",
         "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
@@ -11654,6 +11841,7 @@ def system_ai_config(request: Request, payload: SystemAiConfigPayload):
         "ai_timeout_seconds": str(payload.timeout_seconds or profile["timeout_seconds"]),
         "ai_max_top_flows": str(payload.max_top_flows or profile["max_top_flows"]),
         "ai_max_context_chars": str(payload.max_context_chars or profile["max_context_chars"]),
+        "ai_num_predict": str(payload.num_predict or SYSTEM_SETTING_DEFAULTS["ai_num_predict"]),
         "ai_keep_alive": clean_text(payload.keep_alive) or "30m",
         "ai_allow_auto": "false",
         "ai_require_policy_validation": "true" if payload.require_policy_validation else "false",
@@ -11860,10 +12048,7 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
-    try:
-        return anomaly_ai_analysis_result(anomaly_id, config, persist=True, endpoint="persisted")
-    except AiProviderTimeoutError as exc:
-        return JSONResponse(status_code=504, content=exc.payload)
+    return anomaly_ai_analysis_result(anomaly_id, config, persist=True, endpoint="persisted")
 
 
 @app.api_route("/api/anomalies/{event_id}/ai-analysis/draft", methods=["GET", "POST"])
@@ -11890,16 +12075,13 @@ async def draft_anomaly_ai_analysis(request: Request, event_id: int):
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
     request_payload = draft_payload_with_flow_enrichment(normalized_payload, event_id, config) if normalized_payload is not None else None
-    try:
-        return anomaly_ai_analysis_result(
-            event_id,
-            config,
-            persist=False,
-            request_payload=request_payload,
-            endpoint="draft",
-        )
-    except AiProviderTimeoutError as exc:
-        return JSONResponse(status_code=504, content=exc.payload)
+    return anomaly_ai_analysis_result(
+        event_id,
+        config,
+        persist=False,
+        request_payload=request_payload,
+        endpoint="draft",
+    )
 
 
 def insert_bgp_mitigation_announcement(
