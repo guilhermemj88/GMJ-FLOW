@@ -12,15 +12,18 @@ if [ ! -f "$COMPOSE_OVERRIDE" ]; then
   exit 2
 fi
 
-if [ ! -f "docker-compose.yml" ]; then
-  echo "docker-compose.yml not found. Run from the GMJ-FLOW project root." >&2
+docker compose -f "$COMPOSE_OVERRIDE" config >/dev/null
+
+SERVICES=$(
+  docker compose -f "$COMPOSE_OVERRIDE" config --services \
+    | awk '/^pmacct-sensor-[0-9]+$/ || /^pmacct-parser-sensor-[0-9]+$/ { print }'
+)
+
+if [ -z "$SERVICES" ]; then
+  echo "no collector services found in $COMPOSE_OVERRIDE" >&2
   exit 2
 fi
 
-if [ ! -f ".env" ]; then
-  echo ".env not found. Create it from .env.example before applying collectors." >&2
-  exit 2
-fi
-
-docker compose --env-file .env -f docker-compose.yml -f "$COMPOSE_OVERRIDE" config >/dev/null
-docker compose --env-file .env -f docker-compose.yml -f "$COMPOSE_OVERRIDE" up -d --build --remove-orphans
+# Apply only runtime collector services. --no-deps prevents Compose from
+# resolving dependencies outside this runtime collector compose.
+docker compose -f "$COMPOSE_OVERRIDE" up -d --build --no-deps $SERVICES

@@ -186,6 +186,8 @@ HTML = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
 INSTALL = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 UPDATE = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+APPLY_COLLECTORS = (ROOT / "scripts" / "apply_collectors.sh").read_text(encoding="utf-8")
+ROOT_COLLECTORS_COMPOSE = (ROOT / "docker-compose.collectors.yml").read_text(encoding="utf-8")
 
 
 class CollectorApplyStaticTest(unittest.TestCase):
@@ -229,6 +231,234 @@ class CollectorApplyStaticTest(unittest.TestCase):
             self.assertIn("-f docker-compose.collectors.yml", script)
             self.assertIn("--remove-orphans", script)
 
+    def test_collector_apply_only_starts_pmacct_services_without_dependencies(self):
+        self.assertIn("config --services", APPLY_COLLECTORS)
+        self.assertIn("/^pmacct-sensor-[0-9]+$/", APPLY_COLLECTORS)
+        self.assertIn("/^pmacct-parser-sensor-[0-9]+$/", APPLY_COLLECTORS)
+        apply_line = next(line for line in APPLY_COLLECTORS.splitlines() if " up -d " in line)
+        self.assertIn("--no-deps", apply_line)
+        self.assertIn("$SERVICES", apply_line)
+        self.assertIn('docker compose -f "$COMPOSE_OVERRIDE"', apply_line)
+        self.assertNotIn("docker-compose.yml", APPLY_COLLECTORS)
+        self.assertNotIn("--env-file", APPLY_COLLECTORS)
+        self.assertNotIn("clickhouse", apply_line)
+        self.assertNotIn("backend", apply_line)
+
+    def test_collector_apply_response_command_is_script_not_core_service(self):
+        command_block = MAIN[MAIN.find("def run_apply_collectors_script"):MAIN.find("def docker_container_snapshot")]
+        self.assertIn('"docker", "compose", "-f", str(compose_path)', command_block)
+        self.assertIn('"--no-deps"', command_block)
+        self.assertIn('"command": command_text', command_block)
+        self.assertNotIn("gmj-flow-clickhouse", command_block)
+        self.assertNotIn("gmj-flow-backend", command_block)
+
+    def test_root_runtime_collectors_compose_is_safe(self):
+        self.assertIn("pmacct-sensor-1:", ROOT_COLLECTORS_COMPOSE)
+        self.assertIn("pmacct-parser-sensor-1:", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("\n  pmacct:", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("\n  pmacct-parser:", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("\n  clickhouse:", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("\n  backend:", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("depends_on:\n      clickhouse:", ROOT_COLLECTORS_COMPOSE)
+
+    def test_generated_runtime_compose_has_only_pmacct_services(self):
+        compose_text = backend_main.compose_for_collectors(
+            [
+                {"id": 1, "name": "sensor-a", "exporter_ip": "192.0.2.10", "listener_port": 9995},
+                {"id": 2, "name": "sensor-b", "exporter_ip": "192.0.2.11", "listener_port": 9996},
+            ]
+        )
+        self.assertIn("pmacct-sensor-1:", compose_text)
+        self.assertIn("pmacct-parser-sensor-1:", compose_text)
+        self.assertIn("pmacct-sensor-2:", compose_text)
+        self.assertIn("pmacct-parser-sensor-2:", compose_text)
+        self.assertNotIn("\n  clickhouse:", compose_text)
+        self.assertNotIn("\n  backend:", compose_text)
+        self.assertNotIn("clickhouse:\n", compose_text)
+        self.assertNotIn("depends_on:\n      clickhouse:", compose_text)
+        services_block = compose_text.split("\nvolumes:", 1)[0]
+        service_lines = [line for line in services_block.splitlines() if line.startswith("  ") and line.endswith(":") and not line.startswith("    ")]
+        self.assertEqual(
+            service_lines,
+            [
+                "  pmacct-sensor-1:",
+                "  pmacct-parser-sensor-1:",
+                "  pmacct-sensor-2:",
+                "  pmacct-parser-sensor-2:",
+            ],
+        )
+
+    def test_write_collector_artifacts_writes_safe_runtime_compose(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            output_dir = tmp_path / "collectors"
+            compose_path = tmp_path / "docker-compose.collectors.yml"
+            backend_main.write_collector_artifacts(
+                [
+                    {"id": 1, "name": "sensor-a", "exporter_ip": "192.0.2.10", "listener_port": 9995},
+                    {"id": 2, "name": "sensor-b", "exporter_ip": "192.0.2.11", "listener_port": 9996},
+                ],
+                output_dir=output_dir,
+                compose_path=compose_path,
+            )
+            compose_text = compose_path.read_text(encoding="utf-8")
+            self.assertNotIn("\n  pmacct:", compose_text)
+            self.assertNotIn("\n  pmacct-parser:", compose_text)
+            self.assertNotIn("\n  clickhouse:", compose_text)
+            self.assertNotIn("\n  backend:", compose_text)
+            self.assertNotIn("depends_on:\n      clickhouse:", compose_text)
+            service_lines = [
+                line for line in compose_text.split("\nvolumes:", 1)[0].splitlines()
+                if line.startswith("  ") and line.endswith(":") and not line.startswith("    ")
+            ]
+            self.assertEqual(
+                service_lines,
+                [
+                    "  pmacct-sensor-1:",
+                    "  pmacct-parser-sensor-1:",
+                    "  pmacct-sensor-2:",
+                    "  pmacct-parser-sensor-2:",
+                ],
+            )
+
+    def test_sync_collector_artifacts_writes_safe_runtime_compose_used_by_apply_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            output_dir = tmp_path / "collectors"
+            compose_path = tmp_path / "docker-compose.collectors.yml"
+            sensors = [
+                {"id": 1, "name": "sensor-a", "exporter_ip": "192.0.2.10", "listener_port": 9995},
+                {"id": 2, "name": "sensor-b", "exporter_ip": "192.0.2.11", "listener_port": 9996},
+            ]
+            apply_result = {
+                "services_updated": True,
+                "message": "Collectors atualizados",
+                "command": "docker compose -f /app/runtime/docker-compose.collectors.yml up -d --build --no-deps pmacct-sensor-1 pmacct-parser-sensor-1 pmacct-sensor-2 pmacct-parser-sensor-2",
+                "stdout": "",
+                "stderr": "",
+                "returncode": 0,
+            }
+
+            with mock.patch.object(backend_main, "collectors_dir", return_value=output_dir), \
+                 mock.patch.object(backend_main, "collectors_compose_path", return_value=compose_path), \
+                 mock.patch.object(backend_main, "active_collector_sensors", return_value=sensors), \
+                 mock.patch.object(backend_main, "backup_collector_artifacts", return_value={}), \
+                 mock.patch.object(backend_main, "run_apply_collectors_script", return_value=apply_result) as apply_mock:
+                result = backend_main.sync_collector_artifacts(mock.Mock())
+
+            apply_mock.assert_called_once_with(compose_path)
+            compose_text = compose_path.read_text(encoding="utf-8")
+            self.assertTrue(result["services_updated"])
+            self.assertNotIn("\n  pmacct:", compose_text)
+            self.assertNotIn("\n  pmacct-parser:", compose_text)
+            self.assertNotIn("\n  clickhouse:", compose_text)
+            self.assertNotIn("\n  backend:", compose_text)
+            self.assertNotIn("depends_on:\n      clickhouse:", compose_text)
+            service_lines = [
+                line for line in compose_text.split("\nvolumes:", 1)[0].splitlines()
+                if line.startswith("  ") and line.endswith(":") and not line.startswith("    ")
+            ]
+            self.assertEqual(
+                service_lines,
+                [
+                    "  pmacct-sensor-1:",
+                    "  pmacct-parser-sensor-1:",
+                    "  pmacct-sensor-2:",
+                    "  pmacct-parser-sensor-2:",
+                ],
+            )
+
+    def test_run_apply_collectors_uses_runtime_compose_and_explicit_pmacct_services(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            compose_path = Path(tmpdir) / "docker-compose.collectors.yml"
+            compose_path.write_text("services: {}\n", encoding="utf-8")
+            services_stdout = "\n".join(
+                [
+                    "pmacct-sensor-1",
+                    "pmacct-parser-sensor-1",
+                    "pmacct-sensor-2",
+                    "pmacct-parser-sensor-2",
+                    "",
+                ]
+            )
+            results = [
+                types.SimpleNamespace(returncode=0, stdout=services_stdout, stderr=""),
+                types.SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ]
+            with mock.patch.object(backend_main, "collector_apply_enabled", return_value=True), \
+                 mock.patch.object(backend_main.subprocess, "run", side_effect=results) as run_mock:
+                result = backend_main.run_apply_collectors_script(compose_path)
+
+            expected = [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_path),
+                "up",
+                "-d",
+                "--build",
+                "--no-deps",
+                "pmacct-sensor-1",
+                "pmacct-parser-sensor-1",
+                "pmacct-sensor-2",
+                "pmacct-parser-sensor-2",
+            ]
+            self.assertTrue(result["services_updated"])
+            self.assertEqual(run_mock.call_args_list[1][0][0], expected)
+            self.assertEqual(result["command"], " ".join(expected))
+            self.assertNotIn("clickhouse", result["command"])
+            self.assertNotIn("backend", result["command"])
+
+    def test_subnet_detection_query_does_not_emit_empty_string_ip_aliases(self):
+        zone = {"id": 1, "name": "clientes"}
+        template = {"id": 1, "name": "CLIENTES-PUBLICOS-DEFAULT"}
+        rule = {
+            "id": 5,
+            "vector": "PREFIX_SUBNET_HIGH_PPS",
+            "domain": "subnet",
+            "direction": "transmits",
+            "protocol": "UDP",
+            "metric": "packets_s",
+            "warning_value": 10,
+            "critical_value": 100,
+            "comparison": "over",
+            "window_seconds": 60,
+            "consecutive_windows": 1,
+            "cooldown_seconds": 300,
+            "src_port": "",
+            "dst_port": "",
+            "response": "DETECTION_ONLY",
+            "mitigation_mode": "detection_only",
+            "enabled": True,
+        }
+        captured_queries = []
+
+        def fake_query(query, params):
+            captured_queries.append(query)
+            return types.SimpleNamespace(column_names=[], result_rows=[])
+
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="toFloat64(1)"):
+            for prefix_cidr in ("203.0.113.0/24", "2001:db8::/32"):
+                backend_main.query_detection_rule_candidates(
+                    zone,
+                    template,
+                    rule,
+                    {"id": 1, "cidr": prefix_cidr},
+                    backend_main.datetime(2026, 1, 1, tzinfo=backend_main.timezone.utc),
+                    backend_main.datetime(2026, 1, 1, 0, 1, tzinfo=backend_main.timezone.utc),
+                    None,
+                )
+
+        self.assertEqual(len(captured_queries), 2)
+        for query in captured_queries:
+            self.assertNotIn("'' AS src_ip", query)
+            self.assertNotIn("'' AS dst_ip", query)
+            self.assertNotIn("'' AS internal_ip", query)
+            self.assertIn("NULL AS src_ip", query)
+            self.assertIn("NULL AS dst_ip", query)
+            self.assertIn("NULL AS internal_ip", query)
+
     def test_sensor_save_generates_collector_files_for_enabled_collectors(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -256,11 +486,21 @@ class CollectorApplyStaticTest(unittest.TestCase):
                 created = backend_main.create_sensor(sensor_payload)
 
             self.assertEqual(created["name"], "sensor-a")
-            self.assertTrue((backend_main.COLLECTORS_DIR / "sensor-1" / "nfacctd.conf").exists())
-            self.assertTrue((backend_main.COLLECTORS_DIR / "sensor-1" / "allow.lst").exists())
-            self.assertIn("192.0.2.10", (backend_main.COLLECTORS_DIR / "sensor-1" / "allow.lst").read_text(encoding="utf-8"))
-            self.assertIn("nfacctd_port: 9995", (backend_main.COLLECTORS_DIR / "sensor-1" / "nfacctd.conf").read_text(encoding="utf-8"))
+            sensor_id = int(created["id"])
+            sensor_dir = backend_main.COLLECTORS_DIR / f"sensor-{sensor_id}"
+            config_path = sensor_dir / "nfacctd.conf"
+            allow_path = sensor_dir / "allow.lst"
+            self.assertTrue(config_path.exists())
+            self.assertTrue(allow_path.exists())
+            self.assertIn("192.0.2.10", allow_path.read_text(encoding="utf-8"))
+            self.assertIn("nfacctd_port: 9995", config_path.read_text(encoding="utf-8"))
             self.assertTrue(backend_main.COLLECTORS_COMPOSE_PATH.exists())
+            compose_text = backend_main.COLLECTORS_COMPOSE_PATH.read_text(encoding="utf-8")
+            self.assertIn(f"pmacct-sensor-{sensor_id}", compose_text)
+            self.assertIn(f"pmacct-parser-sensor-{sensor_id}", compose_text)
+            self.assertNotIn("clickhouse:", compose_text)
+            self.assertNotIn("backend:", compose_text)
+            self.assertNotIn("depends_on:\n      clickhouse:", compose_text)
 
 
 if __name__ == "__main__":
