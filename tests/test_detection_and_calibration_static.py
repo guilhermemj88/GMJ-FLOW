@@ -249,10 +249,12 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
             "raw_packets", "raw_bytes", "sample_rate", "packets", "bytes", "flow_count", "first_flow_time", "last_flow_time", "bits_s", "packets_s",
         ]
         row = ("s1", "192.0.2.1", "186.232.171.235", 40000, "34.40.46.199", 9044, 17, 1, 2, 900_000, 9_000_000, 1, 900_000, 9_000_000, 20, flow_time, flow_time, 1_200_000, 15_000)
+        dns_row = ("s1", "192.0.2.1", "186.232.171.235", 52706, "8.8.8.8", 53, 17, 1, 2, 9_000_000, 90_000_000, 1, 9_000_000, 90_000_000, 20, flow_time, flow_time, 12_000_000, 150_000)
+        quic_row = ("s1", "192.0.2.1", "186.232.171.235", 52707, "35.233.3.154", 443, 17, 1, 2, 8_000_000, 80_000_000, 1, 8_000_000, 80_000_000, 20, flow_time, flow_time, 10_000_000, 130_000)
 
         def fake_query_clickhouse(query, params):
             calls.append((query, dict(params)))
-            return FakeClickHouseResult(columns, [row])
+            return FakeClickHouseResult(columns, [dns_row, quic_row, row])
 
         event = {
             "id": 501,
@@ -265,6 +267,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
             "top_dst_port": 9044,
             "protocol": "UDP",
             "direction": "transmits",
+            "source_details": {"rule_config": {"dst_port": "!53"}},
             "started_at": "2026-07-07T12:00:00Z",
             "last_seen_at": "2026-07-07T12:01:00Z",
         }
@@ -274,8 +277,14 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(len(enrichment["flows"]), 1)
         self.assertEqual(enrichment["flows"][0]["dst_ip"], "34.40.46.199")
         self.assertEqual(enrichment["flows"][0]["dst_port"], 9044)
+        self.assertTrue(all(flow["dst_port"] == 9044 for flow in enrichment["flow_evidence"]["related_flows"]))
+        self.assertTrue(all(flow["dst_port"] != 53 for flow in enrichment["flow_evidence"]["related_flows"]))
+        self.assertEqual(enrichment["flow_evidence"]["top_conversations"][0]["dst_ip"], "34.40.46.199")
+        self.assertEqual(enrichment["flow_evidence"]["top_conversations"][0]["dst_port"], 9044)
         self.assertIn("dst_port = {top_dst_port:UInt16}", calls[0][0])
         self.assertIn("top_dst_ip", calls[0][0])
+        self.assertIn("top_src_ip", calls[0][0])
+        self.assertIn("dst_port != 53", calls[0][0])
         self.assertEqual(calls[0][1]["top_dst_port"], 9044)
 
     def test_ip_zone_anomaly_ui_shows_dst_port_and_mitigates_security_item(self):

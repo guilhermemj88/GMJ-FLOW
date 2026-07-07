@@ -9736,7 +9736,20 @@ def aggregate_packets(rows: list[dict[str, Any]], key_func: Any, label_func: Any
             continue
         item = grouped.setdefault(
             key,
-            {"key": label_func(row), "packets": 0, "bytes": 0, "flows": 0, "src_ips": set(), "dst_ips": set(), "dst_ports": set()},
+            {
+                "key": label_func(row),
+                "packets": 0,
+                "bytes": 0,
+                "flows": 0,
+                "src_ips": set(),
+                "dst_ips": set(),
+                "dst_ports": set(),
+                "src_ip": clean_ip(row.get("src_ip")),
+                "dst_ip": clean_ip(row.get("dst_ip")),
+                "src_port": int(row.get("src_port") or 0) if clean_text(row.get("src_port")).isdigit() else 0,
+                "dst_port": int(row.get("dst_port") or 0) if clean_text(row.get("dst_port")).isdigit() else 0,
+                "protocol": clean_text(row.get("protocol") or row.get("proto_name") or row.get("proto")).upper(),
+            },
         )
         item["packets"] += int(row.get("packets") or 0)
         item["bytes"] += int(row.get("bytes") or 0)
@@ -9758,6 +9771,11 @@ def aggregate_packets(rows: list[dict[str, Any]], key_func: Any, label_func: Any
                 "unique_src_ips": len(item["src_ips"]),
                 "unique_dst_ips": len(item["dst_ips"]),
                 "unique_dst_ports": len(item["dst_ports"]),
+                "src_ip": item.get("src_ip") or "",
+                "dst_ip": item.get("dst_ip") or "",
+                "src_port": item.get("src_port") or 0,
+                "dst_port": item.get("dst_port") or 0,
+                "protocol": item.get("protocol") or "",
             }
         )
     return sorted(items, key=lambda item: (item["packets"], item["bytes"]), reverse=True)[:limit]
@@ -10308,9 +10326,15 @@ def enrich_anomaly_with_flows(
         filters.append("proto = 17")
     elif decoder.startswith("TCP") or decoder in {"HTTP", "HTTPS"}:
         filters.append("proto = 6")
-    exact_top_dst_ip = clean_ip(event.get("top_dst_ip"))
-    exact_top_dst_port = int(event.get("top_dst_port") or event.get("target_port") or 0)
-    if clean_text(event.get("vector_name") or event.get("attack_vector_name") or event.get("source_name")).upper() in OUTBOUND_DST_PORT_VECTORS:
+    outbound_scope = outbound_dst_port_scope(event)
+    exact_top_src_ip = outbound_scope["src_ip"]
+    exact_top_dst_ip = outbound_scope["dst_ip"]
+    exact_top_dst_port = int(outbound_scope["dst_port"] or 0)
+    if outbound_scope["vector"] in OUTBOUND_DST_PORT_VECTORS:
+        if exact_top_src_ip:
+            params["top_src_ip"] = clickhouse_ip_string_param(exact_top_src_ip, "top_src_ip")
+            params["top_src_ip_plain"] = exact_top_src_ip
+            filters.append(clickhouse_ip_matches_expr("src_ip", "top_src_ip"))
         if exact_top_dst_ip:
             params["top_dst_ip"] = clickhouse_ip_string_param(exact_top_dst_ip, "top_dst_ip")
             params["top_dst_ip_plain"] = exact_top_dst_ip
@@ -10318,6 +10342,8 @@ def enrich_anomaly_with_flows(
         if exact_top_dst_port > 0:
             params["top_dst_port"] = exact_top_dst_port
             filters.append("dst_port = {top_dst_port:UInt16}")
+        for excluded_port in sorted(detection_excluded_ports(outbound_scope.get("rule_dst_port"))):
+            filters.append(f"dst_port != {excluded_port}")
     sensor_name = clean_text(event.get("sensor_name"))
     if sensor_name and sensor_name != "Deteccoes IP Zone":
         params["sensor"] = sensor_name
@@ -10374,11 +10400,16 @@ def enrich_anomaly_with_flows(
         proto_filter = dynamic_protocol_filter_for_decoder(decoder, dns_like, schema)
         if proto_filter:
             dynamic_filters.append(proto_filter)
-        if clean_text(event.get("vector_name") or event.get("attack_vector_name") or event.get("source_name")).upper() in OUTBOUND_DST_PORT_VECTORS:
+        if outbound_scope["vector"] in OUTBOUND_DST_PORT_VECTORS:
+            if exact_top_src_ip and mapping["src_ip"]:
+                dynamic_filters.append(dynamic_clickhouse_ip_matches_expr(mapping["src_ip"], "top_src_ip", schema))
             if exact_top_dst_ip and mapping["dst_ip"]:
                 dynamic_filters.append(dynamic_clickhouse_ip_matches_expr(mapping["dst_ip"], "top_dst_ip", schema))
             if exact_top_dst_port > 0 and mapping["dst_port"]:
                 dynamic_filters.append(f"{mapping['dst_port']} = {{top_dst_port:UInt16}}")
+            if mapping["dst_port"]:
+                for excluded_port in sorted(detection_excluded_ports(outbound_scope.get("rule_dst_port"))):
+                    dynamic_filters.append(f"{mapping['dst_port']} != {excluded_port}")
         sensor_col = mapping["sensor"]
         if sensor_name and sensor_name != "Deteccoes IP Zone" and sensor_col:
             dynamic_filters.append(f"{sensor_col} = {{sensor:String}}")
@@ -10413,7 +10444,7 @@ def enrich_anomaly_with_flows(
             rows = run_standard_attempt("wide_dns_udp53", wide_start, wide_end, True)
         if dns_like and not rows:
             rows = run_standard_attempt("wide_dns_udp_any_port", wide_start, wide_end, False)
-        flows = [compact_flow_row(row) for row in rows]
+        flows = filter_flows_for_outbound_dst_port_event(event, [compact_flow_row(row) for row in rows])
     except Exception as exc:
         record_attempt("standard_exception", start_dt, end_dt, dns_like, error=clean_text(exc), schema_mode="standard")
         try:
@@ -10426,7 +10457,7 @@ def enrich_anomaly_with_flows(
                 rows = run_dynamic_attempt("adaptive_wide_dns_udp53", wide_start, wide_end, True, schema, dynamic_filters)
             if dns_like and not rows:
                 rows = run_dynamic_attempt("adaptive_wide_dns_udp_any_port", wide_start, wide_end, False, schema, dynamic_filters)
-            flows = [compact_flow_row(row) for row in rows]
+            flows = filter_flows_for_outbound_dst_port_event(event, [compact_flow_row(row) for row in rows])
         except Exception as adaptive_exc:
             record_attempt("adaptive_exception", start_dt, end_dt, dns_like, error=clean_text(adaptive_exc), schema_mode="adaptive")
             evidence = aggregate_flow_evidence([], start_dt, end_dt)
@@ -10445,6 +10476,17 @@ def enrich_anomaly_with_flows(
             return {"event": event, "flow_evidence": evidence, "flows": [], "mitigation_candidates": []}
     evidence = aggregate_flow_evidence(flows, selected_start_dt, selected_end_dt)
     evidence["enrichment_attempts"] = attempts[-10:]
+    if outbound_scope["vector"] in OUTBOUND_DST_PORT_VECTORS:
+        evidence["strict_conversation_filter"] = bool(outbound_scope["strict"])
+        evidence["conversation_scope"] = {
+            "src_ip": outbound_scope["src_ip"],
+            "dst_ip": outbound_scope["dst_ip"],
+            "dst_port": outbound_scope["dst_port"],
+            "protocol": outbound_scope["protocol"],
+            "excluded_dst_ports": sorted(detection_excluded_ports(outbound_scope.get("rule_dst_port"))),
+        }
+        if not outbound_scope["strict"]:
+            evidence["evidence_status"] = "incomplete_conversation_scope" if flows else "no_flow_rows"
     if not flows:
         logger.info(
             "flow_enrichment_no_rows anomaly_id=%s target_ip=%s target_role=%s window=%s..%s attempts=%s",
@@ -10548,7 +10590,7 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
         LIMIT {{limit:UInt32}}
     """
     try:
-        rows = [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(query, params))]
+        rows = filter_flows_for_outbound_dst_port_event(event, [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(query, params))])
     except Exception as exc:
         warnings.append(f"Falha ao consultar ClickHouse para fallback IA: {exc}")
         return [], warnings
@@ -10560,7 +10602,7 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
             relaxed_interface = " AND (input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})"
         relaxed_query = query.replace(sensor_filter, "").replace(proto_filter, "").replace(interface_filter, relaxed_interface)
         try:
-            rows = [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(relaxed_query, relaxed_params))]
+            rows = filter_flows_for_outbound_dst_port_event(event, [compact_flow_row(row) for row in rows_as_dicts(query_clickhouse(relaxed_query, relaxed_params))])
             if rows:
                 warnings.append("Fallback IA usou consulta ClickHouse relaxada sem sensor/protocolo.")
         except Exception as exc:
@@ -10569,7 +10611,7 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
 
 
 def analysis_flows_from_context(context: dict[str, Any]) -> list[dict[str, Any]]:
-    flows = [compact_flow_row(dict(flow)) for flow in list(context.get("flows") or [])]
+    flows = filter_flows_for_outbound_dst_port_event(context.get("event") or {}, [compact_flow_row(dict(flow)) for flow in list(context.get("flows") or [])])
     strong = [
         flow for flow in flows
         if valid_udp_analysis_flow(flow)
@@ -15806,6 +15848,89 @@ def detection_port_filter_condition(column: str, value: Any, field_name: str) ->
     return f"{column} {operator} ({', '.join(ports)})"
 
 
+def outbound_dst_port_event_vector(event: dict[str, Any]) -> str:
+    return clean_text(event.get("vector") or event.get("vector_name") or event.get("attack_vector_name") or event.get("source_name")).upper()
+
+
+def event_source_details(event: dict[str, Any]) -> dict[str, Any]:
+    details = event.get("source_details") or event.get("source_details_json") or {}
+    if isinstance(details, str):
+        details = bgp_json_loads(details, {})
+    return details if isinstance(details, dict) else {}
+
+
+def outbound_dst_port_scope(event: dict[str, Any]) -> dict[str, Any]:
+    details = event_source_details(event)
+    rule_config = details.get("rule_config") if isinstance(details.get("rule_config"), dict) else {}
+    try:
+        dst_port = int(event.get("top_dst_port") or event.get("target_port") or details.get("top_dst_port") or details.get("target_port") or 0)
+    except (TypeError, ValueError):
+        dst_port = 0
+    protocol = outbound_dst_port_protocol({**details, **event})
+    return {
+        "vector": outbound_dst_port_event_vector(event),
+        "src_ip": clean_ip(event.get("top_src_ip") or details.get("top_src_ip") or event.get("src_ip") or event.get("target_ip")),
+        "dst_ip": clean_ip(event.get("top_dst_ip") or details.get("top_dst_ip") or event.get("dst_ip")),
+        "dst_port": dst_port,
+        "protocol": protocol,
+        "rule_dst_port": clean_text(rule_config.get("dst_port")),
+        "strict": bool(dst_port > 0 and clean_ip(event.get("top_dst_ip") or details.get("top_dst_ip") or event.get("dst_ip"))),
+    }
+
+
+def flow_protocol_matches_scope(flow: dict[str, Any], protocol: str) -> bool:
+    expected = clean_text(protocol).lower()
+    if not expected:
+        return True
+    actual = clean_text(flow.get("protocol") or flow.get("proto_name") or flow.get("decoder")).lower()
+    if actual:
+        if expected == "udp" and actual in {"udp", "dns"}:
+            return True
+        if expected == "tcp" and actual == "tcp":
+            return True
+    try:
+        proto = int(flow.get("proto") or 0)
+    except (TypeError, ValueError):
+        proto = 0
+    return (expected == "udp" and proto == 17) or (expected == "tcp" and proto == 6)
+
+
+def detection_excluded_ports(value: Any) -> set[int]:
+    try:
+        normalized = normalize_detection_port_text(value, "dst_port")
+    except HTTPException:
+        return set()
+    if not normalized.startswith("!"):
+        return set()
+    return {int(port) for port in normalized[1:].split(",") if port}
+
+
+def flow_matches_outbound_dst_port_scope(flow: dict[str, Any], event: dict[str, Any]) -> bool:
+    scope = outbound_dst_port_scope(event)
+    if scope["vector"] not in OUTBOUND_DST_PORT_VECTORS:
+        return True
+    try:
+        flow_dst_port = int(flow.get("dst_port") or 0)
+    except (TypeError, ValueError):
+        flow_dst_port = 0
+    if flow_dst_port in detection_excluded_ports(scope.get("rule_dst_port")):
+        return False
+    if scope["strict"]:
+        if scope["src_ip"] and clean_ip(flow.get("src_ip")) != scope["src_ip"]:
+            return False
+        if clean_ip(flow.get("dst_ip")) != scope["dst_ip"]:
+            return False
+        if flow_dst_port != int(scope["dst_port"] or 0):
+            return False
+        if not flow_protocol_matches_scope(flow, scope.get("protocol")):
+            return False
+    return True
+
+
+def filter_flows_for_outbound_dst_port_event(event: dict[str, Any], flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [flow for flow in flows if flow_matches_outbound_dst_port_scope(flow, event)]
+
+
 def query_detection_rule_candidates(
     zone: dict[str, Any],
     template: dict[str, Any],
@@ -19139,6 +19264,8 @@ def sample_flow_where_for_event(
 
 
 def flow_matches_anomaly_target(flow: dict[str, Any], event: dict[str, Any]) -> bool:
+    if not flow_matches_outbound_dst_port_scope(flow, event):
+        return False
     if event.get("scope_type") != "internal_ip_32":
         return True
     target_ip = clean_ip(event.get("target_ip"))
@@ -19153,6 +19280,15 @@ def flow_matches_anomaly_target(flow: dict[str, Any], event: dict[str, Any]) -> 
 
 
 def security_item_matches_event_target(item: dict[str, Any], event: dict[str, Any]) -> bool:
+    if outbound_dst_port_event_vector(event) in OUTBOUND_DST_PORT_VECTORS:
+        scope = outbound_dst_port_scope(event)
+        if scope["strict"]:
+            if scope["src_ip"] and clean_ip(item.get("src_ip") or item.get("target_ip")) != scope["src_ip"]:
+                return False
+            if clean_ip(item.get("dst_ip")) != scope["dst_ip"]:
+                return False
+            if int(item.get("top_dst_port") or item.get("target_port") or 0) != int(scope["dst_port"] or 0):
+                return False
     if event.get("scope_type") != "internal_ip_32":
         return True
     target_ip = clean_ip(event.get("target_ip"))
