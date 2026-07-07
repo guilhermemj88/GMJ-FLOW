@@ -1,10 +1,49 @@
+import os
+import shutil
+import sqlite3
+import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
+
+from tests.test_collector_apply_static import backend_main
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
 FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+
+
+class FakeClickHouseResult:
+    def __init__(self, columns, rows):
+        self.column_names = columns
+        self.result_rows = rows
+
+
+def outbound_dst_port_rule(vector="UDP_INTERNAL_IP_DST_HIGH_PPS", protocol="UDP"):
+    return {
+        "id": 101,
+        "vector": vector,
+        "domain": "internal_ip",
+        "direction": "transmits",
+        "protocol": protocol,
+        "metric": "packets_s",
+        "comparison": "over",
+        "warning_value": 10_000,
+        "critical_value": 50_000,
+        "window_seconds": 60,
+        "consecutive_windows": 1,
+        "cooldown_seconds": 0,
+        "dst_port": "any",
+        "src_port": "any",
+        "response": "MANUAL_REVIEW",
+        "mitigation_mode": "manual_review",
+        "enabled": True,
+        "group_by": "src_ip,dst_ip,dst_port,proto",
+        "use_global_whitelist": False,
+        "bypass_whitelist": True,
+    }
 
 
 class DetectionAndCalibrationStaticTest(unittest.TestCase):
@@ -69,6 +108,127 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("Testar Flow bruto", FRONTEND)
         self.assertIn("Janela: ultimos 15 min", FRONTEND)
         self.assertIn("calibration-diagnostics?window_minutes=5", FRONTEND)
+
+    def test_outbound_dst_port_rule_creates_one_candidate_per_destination_port(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "bytes", "packets", "flows",
+            "bits_s", "packets_s", "flows_s", "unique_dst_ips", "unique_dst_ports", "unique_src_ports",
+            "first_seen", "last_seen", "metric_value",
+        ]
+        rows = [
+            ("186.232.171.235", "34.40.46.199", "186.232.171.235", "UDP", 9044, 9_000_000, 900_000, 20, 1_200_000, 15_000, 0.33, 1, 1, 2, flow_time, flow_time, 15_000),
+            ("186.232.171.235", "35.1.2.3", "186.232.171.235", "UDP", 9443, 7_200_000, 720_000, 12, 960_000, 12_000, 0.2, 1, 1, 1, flow_time, flow_time, 12_000),
+        ]
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            return FakeClickHouseResult(columns, rows)
+
+        zone = {"id": 1, "name": "CGN"}
+        template = {"id": 10, "name": "Outbound abuse", "active": True}
+        prefix = {"id": 7, "cidr": "186.232.171.0/24"}
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            items = backend_main.query_detection_rule_candidates(
+                zone, template, outbound_dst_port_rule(), prefix, flow_time, flow_time, None
+            )
+
+        self.assertEqual(len(items), 2)
+        self.assertIn("dst_port AS dst_port", calls[0][0])
+        self.assertIn("GROUP BY bucket, src_ip, dst_ip, internal_ip, protocol, dst_port", calls[0][0])
+        self.assertEqual({(item["src_ip"], item["dst_ip"], item["top_dst_port"]) for item in items}, {
+            ("186.232.171.235", "34.40.46.199", 9044),
+            ("186.232.171.235", "35.1.2.3", 9443),
+        })
+        self.assertTrue(all(item["target_ip"] == "186.232.171.235" for item in items))
+        self.assertTrue(all(item["mitigation_basis"] == "dst_ip,dst_port,protocol" for item in items))
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    for item in items:
+                        backend_main.upsert_security_anomaly(conn, item)
+                    rows_db = conn.execute("SELECT * FROM security_anomalies ORDER BY dst_ip, source_details_json").fetchall()
+                self.assertEqual(len(rows_db), 2)
+                dedupe = [row["dedupe_key"] for row in rows_db]
+                self.assertEqual(len(set(dedupe)), 2)
+                converted = [backend_main.security_anomaly_row_to_dict(row) for row in rows_db]
+                self.assertEqual({item["top_dst_port"] for item in converted}, {9044, 9443})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_outbound_dst_port_related_flows_are_exact_destination_port(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "sensor", "exporter_ip", "src_ip", "src_port", "dst_ip", "dst_port", "proto", "input_if", "output_if",
+            "raw_packets", "raw_bytes", "sample_rate", "packets", "bytes", "flow_count", "first_flow_time", "last_flow_time", "bits_s", "packets_s",
+        ]
+        row = ("s1", "192.0.2.1", "186.232.171.235", 40000, "34.40.46.199", 9044, 17, 1, 2, 900_000, 9_000_000, 1, 900_000, 9_000_000, 20, flow_time, flow_time, 1_200_000, 15_000)
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            return FakeClickHouseResult(columns, [row])
+
+        event = {
+            "id": 501,
+            "vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS",
+            "target_ip": "186.232.171.235",
+            "target_cidr": "186.232.171.235/32",
+            "target_role": "src_ip",
+            "top_src_ip": "186.232.171.235",
+            "top_dst_ip": "34.40.46.199",
+            "top_dst_port": 9044,
+            "protocol": "UDP",
+            "direction": "transmits",
+            "started_at": "2026-07-07T12:00:00Z",
+            "last_seen_at": "2026-07-07T12:01:00Z",
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            enrichment = backend_main.enrich_anomaly_with_flows(event, range_margin_seconds=0, limit=10)
+
+        self.assertEqual(len(enrichment["flows"]), 1)
+        self.assertEqual(enrichment["flows"][0]["dst_ip"], "34.40.46.199")
+        self.assertEqual(enrichment["flows"][0]["dst_port"], 9044)
+        self.assertIn("dst_port = {top_dst_port:UInt16}", calls[0][0])
+        self.assertIn("top_dst_ip", calls[0][0])
+        self.assertEqual(calls[0][1]["top_dst_port"], 9044)
+
+    def test_outbound_dst_port_udp_and_tcp_candidates_are_destination_only(self):
+        for vector, protocol, port, profile in (
+            ("UDP_INTERNAL_IP_DST_HIGH_PPS", "UDP", 9044, "FLOWSPEC_BLOCK_DST_UDP_PORT"),
+            ("TCP_INTERNAL_IP_DST_HIGH_PPS", "TCP", 443, "FLOWSPEC_BLOCK_DST_TCP_PORT"),
+        ):
+            event = {
+                "vector_name": vector,
+                "attack_vector_name": vector,
+                "target_ip": "186.232.171.235",
+                "top_src_ip": "186.232.171.235",
+                "top_dst_ip": "34.40.46.199",
+                "top_dst_port": port,
+                "protocol": protocol,
+                "direction": "transmits",
+            }
+            candidate = backend_main.outbound_dst_port_candidate(event, 0.8)
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate["profile"], profile)
+            self.assertEqual(candidate["dst_prefix"], "34.40.46.199/32")
+            self.assertEqual(candidate["protocol"], protocol.lower())
+            self.assertEqual(candidate["dst_port"], str(port))
+            self.assertEqual(candidate.get("src_prefix") or "", "")
+            self.assertEqual(candidate.get("src_port") or "", "")
+            self.assertNotIn("source ", candidate["rendered_command_preview"])
+            self.assertNotIn("source-port", candidate["rendered_command_preview"])
+            self.assertIn(f"destination-port ={port};", candidate["rendered_command_preview"])
+
+        missing = backend_main.outbound_dst_port_candidate({"vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS", "top_dst_ip": "34.40.46.199", "protocol": "UDP"}, 0.8)
+        self.assertIsNone(missing)
 
 
 if __name__ == "__main__":
