@@ -9998,32 +9998,49 @@ def dynamic_anomaly_flow_query(
         proto_select = clickhouse_protocol_number_expr(mapping["protocol"])
     else:
         proto_select = "0"
-    flow_count_expr = clickhouse_optional_sum_expr(mapping["flow_count"], "flow_count", schema, "count()")
     effective_filters = list(filters)
     if dns_dst_port_filter and mapping["dst_port"]:
         effective_filters.append(f"{mapping['dst_port']} = 53")
     return f"""
         SELECT
-            {clickhouse_optional_any_expr(mapping["sensor"], "sensor", schema)},
-            {clickhouse_optional_any_expr(mapping["exporter_ip"], "exporter_ip", schema)},
-            {src_ip_expr} AS src_ip,
-            {mapping["src_port"] or "0"} AS src_port,
-            {dst_ip_expr} AS dst_ip,
-            {mapping["dst_port"] or "0"} AS dst_port,
-            {proto_select} AS proto,
-            {clickhouse_optional_any_expr(mapping["input_if"], "input_if", schema, "0")},
-            {clickhouse_optional_any_expr(mapping["output_if"], "output_if", schema, "0")},
-            {clickhouse_optional_sum_expr(mapping["packets"], "packets", schema)},
-            {clickhouse_optional_sum_expr(mapping["bytes"], "bytes", schema)},
-            {flow_count_expr},
-            {clickhouse_optional_min_expr(mapping["first_seen"], "first_flow_time", f"min({time_col})")},
-            {clickhouse_optional_max_expr(mapping["last_seen"], "last_flow_time", f"max({time_col})")},
-            sum({mapping["bytes"] or "0"}) * 8 / {{seconds:Float64}} AS bits_s,
-            sum({mapping["packets"] or "0"}) / {{seconds:Float64}} AS packets_s
-        FROM flow_raw
-        WHERE {' AND '.join(f'({item})' for item in effective_filters)}
-        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
-        ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC
+            sensor,
+            exporter_ip,
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+            proto,
+            input_if,
+            output_if,
+            total_packets AS packets,
+            total_bytes AS bytes,
+            total_flow_count AS flow_count,
+            first_flow_time,
+            last_flow_time,
+            round(total_bytes * 8 / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS bits_s,
+            round(total_packets / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS packets_s
+        FROM
+        (
+            SELECT
+                {clickhouse_optional_any_expr(mapping["sensor"], "sensor", schema)},
+                {clickhouse_optional_any_expr(mapping["exporter_ip"], "exporter_ip", schema)},
+                {src_ip_expr} AS src_ip,
+                {mapping["src_port"] or "0"} AS src_port,
+                {dst_ip_expr} AS dst_ip,
+                {mapping["dst_port"] or "0"} AS dst_port,
+                {proto_select} AS proto,
+                {clickhouse_optional_any_expr(mapping["input_if"], "input_if", schema, "0")},
+                {clickhouse_optional_any_expr(mapping["output_if"], "output_if", schema, "0")},
+                {clickhouse_optional_sum_expr(mapping["packets"], "total_packets", schema)},
+                {clickhouse_optional_sum_expr(mapping["bytes"], "total_bytes", schema)},
+                {clickhouse_optional_sum_expr(mapping["flow_count"], "total_flow_count", schema, "count()")},
+                {clickhouse_optional_min_expr(mapping["first_seen"], "first_flow_time", f"min({time_col})")},
+                {clickhouse_optional_max_expr(mapping["last_seen"], "last_flow_time", f"max({time_col})")}
+            FROM flow_raw
+            WHERE {' AND '.join(f'({item})' for item in effective_filters)}
+            GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+        )
+        ORDER BY total_packets DESC, total_bytes DESC
         LIMIT {{limit:UInt32}}
     """
 
@@ -10068,26 +10085,44 @@ def anomaly_flow_query(
         effective_filters.append("dst_port = 53")
     return f"""
         SELECT
-            any(sensor) AS sensor,
-            any(toString(exporter_ip)) AS exporter_ip,
-            toString(src_ip) AS src_ip,
+            sensor,
+            exporter_ip,
+            src_ip,
             src_port,
-            toString(dst_ip) AS dst_ip,
+            dst_ip,
             dst_port,
             proto,
-            any(input_if) AS input_if,
-            any(output_if) AS output_if,
-            sum(packets) AS packets,
-            sum(bytes) AS bytes,
-            sum(flow_count) AS flow_count,
-            min(flow_time) AS first_flow_time,
-            max(flow_time) AS last_flow_time,
-            sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
-            sum(packets) / {{seconds:Float64}} AS packets_s
-        FROM flow_raw
-        WHERE {' AND '.join(f'({item})' for item in effective_filters)}
-        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
-        ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC
+            input_if,
+            output_if,
+            total_packets AS packets,
+            total_bytes AS bytes,
+            total_flow_count AS flow_count,
+            first_flow_time,
+            last_flow_time,
+            round(total_bytes * 8 / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS bits_s,
+            round(total_packets / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS packets_s
+        FROM
+        (
+            SELECT
+                any(sensor) AS sensor,
+                any(toString(exporter_ip)) AS exporter_ip,
+                toString(src_ip) AS src_ip,
+                src_port,
+                toString(dst_ip) AS dst_ip,
+                dst_port,
+                proto,
+                any(input_if) AS input_if,
+                any(output_if) AS output_if,
+                sum(packets) AS total_packets,
+                sum(bytes) AS total_bytes,
+                sum(flow_count) AS total_flow_count,
+                min(flow_time) AS first_flow_time,
+                max(flow_time) AS last_flow_time
+            FROM flow_raw
+            WHERE {' AND '.join(f'({item})' for item in effective_filters)}
+            GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+        )
+        ORDER BY total_packets DESC, total_bytes DESC
         LIMIT {{limit:UInt32}}
     """
 
@@ -10310,26 +10345,44 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
         interface_filter = " AND (input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})"
     query = f"""
         SELECT
-            toString(src_ip) AS src_ip,
+            src_ip,
             src_port,
-            toString(dst_ip) AS dst_ip,
+            dst_ip,
             dst_port,
             proto,
             input_if,
             output_if,
-            sum(packets) AS packets,
-            sum(bytes) AS bytes,
-            sum(flow_count) AS flows,
-            min(flow_time) AS first_seen,
-            max(flow_time) AS last_seen
-        FROM flow_raw
-        WHERE flow_time >= {{start:DateTime}}
-          AND flow_time <= {{end:DateTime}}
-          {sensor_filter}
-          {proto_filter}
-          {interface_filter}
-        GROUP BY src_ip, src_port, dst_ip, dst_port, proto, input_if, output_if
-        ORDER BY packets DESC, bytes DESC
+            total_packets AS packets,
+            total_bytes AS bytes,
+            total_flow_count AS flows,
+            first_seen,
+            last_seen,
+            round(total_bytes * 8 / greatest(dateDiff('second', first_seen, last_seen), 60), 2) AS bits_s,
+            round(total_packets / greatest(dateDiff('second', first_seen, last_seen), 60), 2) AS packets_s
+        FROM
+        (
+            SELECT
+                toString(src_ip) AS src_ip,
+                src_port,
+                toString(dst_ip) AS dst_ip,
+                dst_port,
+                proto,
+                input_if,
+                output_if,
+                sum(packets) AS total_packets,
+                sum(bytes) AS total_bytes,
+                sum(flow_count) AS total_flow_count,
+                min(flow_time) AS first_seen,
+                max(flow_time) AS last_seen
+            FROM flow_raw
+            WHERE flow_time >= {{start:DateTime}}
+              AND flow_time <= {{end:DateTime}}
+              {sensor_filter}
+              {proto_filter}
+              {interface_filter}
+            GROUP BY src_ip, src_port, dst_ip, dst_port, proto, input_if, output_if
+        )
+        ORDER BY total_packets DESC, total_bytes DESC
         LIMIT {{limit:UInt32}}
     """
     try:

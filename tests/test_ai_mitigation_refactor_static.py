@@ -109,6 +109,18 @@ class FakeClickHouseResult:
 
 
 class AiMitigationRefactorTest(unittest.TestCase):
+    def assert_safe_flow_aggregation_query(self, query: str):
+        for forbidden in (
+            "sum(bytes) AS bytes",
+            "sum(packets) AS packets",
+            "sum(bytes) *",
+            "sum(packets) /",
+        ):
+            self.assertNotIn(forbidden, query)
+        self.assertIn("total_packets AS packets", query)
+        self.assertIn("total_bytes AS bytes", query)
+        self.assertIn("total_flow_count AS flow_count", query)
+
     def test_prompt_is_compact_safe_and_uses_existing_candidates_only(self):
         prompt = backend_main.build_mitigation_ai_prompt(mitigation_payload())
         self.assertIn("Escolha somente um candidate_index existente", prompt)
@@ -482,7 +494,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("toString(src_ip)", calls[0][0])
         self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
         self.assertIn("dst_port = 53", calls[0][0])
-        self.assertIn("ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC", calls[0][0])
+        self.assertIn("sum(packets) AS total_packets", calls[0][0])
+        self.assertIn("sum(bytes) AS total_bytes", calls[0][0])
+        self.assertIn("sum(flow_count) AS total_flow_count", calls[0][0])
+        self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", calls[0][0])
+        self.assert_safe_flow_aggregation_query(calls[0][0])
         self.assertNotIn("toString(dst_ip) = {target_ip", calls[0][0])
 
     def test_dns_enrichment_uses_adaptive_flow_raw_schema_aliases(self):
@@ -539,6 +555,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
             self.assertIn("toString(dst_addr)", query)
             self.assertIn("l4_dst_port = 53", query)
             self.assertIn("lower(toString(protocol))", query)
+            self.assertIn("sum(pkts) AS total_packets", query)
+            self.assertIn("sum(octets) AS total_bytes", query)
+            self.assertIn("sum(records) AS total_flow_count", query)
+            self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", query)
+            self.assert_safe_flow_aggregation_query(query)
             return Result(
                 [
                     "sensor",
