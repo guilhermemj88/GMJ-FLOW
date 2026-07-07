@@ -3183,7 +3183,7 @@
             </div>
             <div class="table-wrap d-none">
               <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
-                <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Ações</th></tr></thead>
+                <thead><tr><th>Status</th><th>Severidade</th><th>Zona</th><th>Vetor</th><th>Origem</th><th>Destino</th><th>Dst porta</th><th>Protocol</th><th class="text-end">packets/s</th><th class="text-end">bits/s</th><th>Mensagem</th><th>Ações</th></tr></thead>
                 <tbody id="securityAnomalyTable"></tbody>
               </table>
             </div>
@@ -3470,6 +3470,7 @@
                     <th>Vector</th>
                     <th>Origem /32</th>
                     <th>Destino</th>
+                    <th>Dst porta</th>
                     <th>Protocolo</th>
                     <th class="text-end">packets/s</th>
                     <th class="text-end">bits/s</th>
@@ -8095,36 +8096,63 @@
       setText('securityAnomalyWarningCount', formatNumber(summary.warning_count || 0));
     }
 
+    function securityAnomalySourceDetails(item) {
+      return item?.source_details_json || item?.source_details || {};
+    }
+
+    function securityAnomalyDstIp(item) {
+      const details = securityAnomalySourceDetails(item);
+      return item?.dst_ip || details.top_dst_ip || '';
+    }
+
+    function securityAnomalyDstPort(item) {
+      const details = securityAnomalySourceDetails(item);
+      return item?.top_dst_port || item?.target_port || details.top_dst_port || details.target_port || '';
+    }
+
+    function securityAnomalyActionId(item) {
+      return Number(item?.action_id || item?.security_anomaly_id || item?.id || 0);
+    }
+
     function renderSecurityAnomalies(items) {
       const tbody = document.getElementById('securityAnomalyTable');
       if (!tbody) return;
-      tbody.innerHTML = items.map(item => `
+      tbody.innerHTML = items.map(item => {
+        const actionId = securityAnomalyActionId(item);
+        const dstPort = securityAnomalyDstPort(item);
+        return `
         <tr>
           <td><span class="badge-soft ${item.status === 'active' ? 'ok' : 'off'}">${escapeHtml(item.status || '-')}</span></td>
           <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
           <td>${escapeHtml(item.zone_name || '-')}</td>
           <td>${escapeHtml(item.vector || '-')}</td>
           <td>${ipLink(item.src_ip)}</td>
-          <td>${ipLink(item.dst_ip)}</td>
+          <td>${ipLink(securityAnomalyDstIp(item))}</td>
+          <td class="text-end">${dstPort ? formatNumber(dstPort) : '-'}</td>
           <td>${escapeHtml(item.protocol || '-')}</td>
           <td class="text-end">${formatPps(item.packets_s)}</td>
           <td class="text-end">${formatBps(item.bits_s)}</td>
           <td>${escapeHtml(item.message || '-')}</td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-success security-anomaly-mitigate" data-anomaly-id="${actionId}"><i data-lucide="shield-check"></i><span>Mitigar</span></button>
               <button type="button" class="btn btn-outline-secondary security-anomaly-ack" data-anomaly-id="${item.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
               <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="11" class="text-muted">Sem anomalias informativas ativas</td></tr>';
+      `;
+      }).join('') || '<tr><td colspan="12" class="text-muted">Sem anomalias informativas ativas</td></tr>';
       createIcons();
     }
 
     function renderSecurityAnomaliesMain(items) {
       const tbody = document.getElementById('securityAnomaliesMainTable');
       if (!tbody) return;
-      tbody.innerHTML = items.map(item => `
+      tbody.innerHTML = items.map(item => {
+        const actionId = securityAnomalyActionId(item);
+        const dstPort = securityAnomalyDstPort(item);
+        return `
         <tr>
           <td>${formatDateTime(item.last_seen || item.updated_at || item.created_at)}</td>
           <td>${escapeHtml(item.zone_name || '-')}</td>
@@ -8132,7 +8160,8 @@
           <td>${escapeHtml(detectionDomainLabel(item.domain))}</td>
           <td>${escapeHtml(item.vector || '-')}</td>
           <td>${ipLink(item.src_ip)}</td>
-          <td>${ipLink(item.dst_ip)}</td>
+          <td>${ipLink(securityAnomalyDstIp(item))}</td>
+          <td class="text-end">${dstPort ? formatNumber(dstPort) : '-'}</td>
           <td>${escapeHtml(item.protocol || '-')}</td>
           <td class="text-end">${formatPps(item.packets_s)}</td>
           <td class="text-end">${formatBps(item.bits_s)}</td>
@@ -8145,12 +8174,14 @@
           <td>${escapeHtml(item.recommended_action || '-')}</td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-outline-success security-anomaly-mitigate" data-anomaly-id="${actionId}"><i data-lucide="shield-check"></i><span>Mitigar</span></button>
               <button type="button" class="btn btn-outline-secondary security-anomaly-ack" data-anomaly-id="${item.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
               <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="18" class="text-muted">Sem deteccoes IP Zone</td></tr>';
+      `;
+      }).join('') || '<tr><td colspan="19" class="text-muted">Sem deteccoes IP Zone</td></tr>';
       createIcons();
     }
 
@@ -14505,9 +14536,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     document.getElementById('securityAnomalyTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const mitigate = target?.closest('.security-anomaly-mitigate');
       const ack = target?.closest('.security-anomaly-ack');
       const close = target?.closest('.security-anomaly-close');
-      if (ack) {
+      if (mitigate) {
+        openBgpMitigationModal(Number(mitigate.dataset.anomalyId)).catch(console.error);
+      } else if (ack) {
         updateSecurityAnomalyStatus(Number(ack.dataset.anomalyId), 'ack').catch(console.error);
       } else if (close) {
         updateSecurityAnomalyStatus(Number(close.dataset.anomalyId), 'close').catch(console.error);
@@ -14516,9 +14550,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     document.getElementById('securityAnomaliesMainTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const mitigate = target?.closest('.security-anomaly-mitigate');
       const ack = target?.closest('.security-anomaly-ack');
       const close = target?.closest('.security-anomaly-close');
-      if (ack) {
+      if (mitigate) {
+        openBgpMitigationModal(Number(mitigate.dataset.anomalyId)).catch(console.error);
+      } else if (ack) {
         updateSecurityAnomalyStatus(Number(ack.dataset.anomalyId), 'ack').catch(console.error);
       } else if (close) {
         updateSecurityAnomalyStatus(Number(close.dataset.anomalyId), 'close').catch(console.error);

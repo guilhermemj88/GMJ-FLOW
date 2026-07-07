@@ -129,7 +129,8 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         zone = {"id": 1, "name": "CGN"}
         template = {"id": 10, "name": "Outbound abuse", "active": True}
         prefix = {"id": 7, "cidr": "186.232.171.0/24"}
-        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="greatest(sample_rate, 1)"):
             items = backend_main.query_detection_rule_candidates(
                 zone, template, outbound_dst_port_rule(), prefix, flow_time, flow_time, None
             )
@@ -199,6 +200,18 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("dst_port = {top_dst_port:UInt16}", calls[0][0])
         self.assertIn("top_dst_ip", calls[0][0])
         self.assertEqual(calls[0][1]["top_dst_port"], 9044)
+
+    def test_ip_zone_anomaly_ui_shows_dst_port_and_mitigates_security_item(self):
+        self.assertIn("<th>Dst porta</th>", FRONTEND)
+        self.assertIn("function securityAnomalyDstPort(item)", FRONTEND)
+        self.assertIn("item?.top_dst_port || item?.target_port || details.top_dst_port || details.target_port", FRONTEND)
+        self.assertIn("function securityAnomalyDstIp(item)", FRONTEND)
+        self.assertIn("item?.dst_ip || details.top_dst_ip", FRONTEND)
+        self.assertIn("function securityAnomalyActionId(item)", FRONTEND)
+        self.assertIn("security-anomaly-mitigate", FRONTEND)
+        self.assertIn('data-anomaly-id="${actionId}"', FRONTEND)
+        self.assertIn("openBgpMitigationModal(Number(mitigate.dataset.anomalyId))", FRONTEND)
+        self.assertIn('"target_port": int(source_details.get("target_port") or source_details.get("top_dst_port") or 0)', SOURCE)
 
     def test_outbound_dst_port_udp_and_tcp_candidates_are_destination_only(self):
         for vector, protocol, port, profile in (
