@@ -9580,8 +9580,10 @@ def compact_flow_row(row: dict[str, Any]) -> dict[str, Any]:
         proto_number = int(row.get("proto") or 0)
     except (TypeError, ValueError):
         proto_number = PROTO_NUMBERS.get(proto_label.lower(), 0)
+    first_flow_time = row.get("first_flow_time") or row.get("first_seen") or row.get("flow_time")
+    last_flow_time = row.get("last_flow_time") or row.get("last_seen") or row.get("flow_time")
     return {
-        "flow_time": iso(row["flow_time"]) if isinstance(row.get("flow_time"), datetime) else clean_text(row.get("flow_time") or row.get("last_seen") or row.get("first_seen")),
+        "flow_time": iso(last_flow_time) if isinstance(last_flow_time, datetime) else clean_text(last_flow_time),
         "sensor": clean_text(row.get("sensor")),
         "exporter_ip": clean_ip(row.get("exporter_ip")),
         "src_ip": clean_ip(row.get("src_ip")),
@@ -9600,8 +9602,8 @@ def compact_flow_row(row: dict[str, Any]) -> dict[str, Any]:
         "flows": int(float(row.get("flows") or row.get("flow_count") or 0)),
         "bits_s": round(float(row.get("bits_s") or 0), 2),
         "packets_s": round(float(row.get("packets_s") or 0), 2),
-        "first_seen": iso(row["first_seen"]) if isinstance(row.get("first_seen"), datetime) else clean_text(row.get("first_seen") or row.get("flow_time")),
-        "last_seen": iso(row["last_seen"]) if isinstance(row.get("last_seen"), datetime) else clean_text(row.get("last_seen") or row.get("flow_time")),
+        "first_seen": iso(first_flow_time) if isinstance(first_flow_time, datetime) else clean_text(first_flow_time),
+        "last_seen": iso(last_flow_time) if isinstance(last_flow_time, datetime) else clean_text(last_flow_time),
     }
 
 
@@ -10002,7 +10004,6 @@ def dynamic_anomaly_flow_query(
         effective_filters.append(f"{mapping['dst_port']} = 53")
     return f"""
         SELECT
-            max({time_col}) AS flow_time,
             {clickhouse_optional_any_expr(mapping["sensor"], "sensor", schema)},
             {clickhouse_optional_any_expr(mapping["exporter_ip"], "exporter_ip", schema)},
             {src_ip_expr} AS src_ip,
@@ -10015,8 +10016,8 @@ def dynamic_anomaly_flow_query(
             {clickhouse_optional_sum_expr(mapping["packets"], "packets", schema)},
             {clickhouse_optional_sum_expr(mapping["bytes"], "bytes", schema)},
             {flow_count_expr},
-            {clickhouse_optional_min_expr(mapping["first_seen"], "first_seen", f"min({time_col})")},
-            {clickhouse_optional_max_expr(mapping["last_seen"], "last_seen", f"max({time_col})")},
+            {clickhouse_optional_min_expr(mapping["first_seen"], "first_flow_time", f"min({time_col})")},
+            {clickhouse_optional_max_expr(mapping["last_seen"], "last_flow_time", f"max({time_col})")},
             sum({mapping["bytes"] or "0"}) * 8 / {{seconds:Float64}} AS bits_s,
             sum({mapping["packets"] or "0"}) / {{seconds:Float64}} AS packets_s
         FROM flow_raw
@@ -10067,7 +10068,6 @@ def anomaly_flow_query(
         effective_filters.append("dst_port = 53")
     return f"""
         SELECT
-            max(flow_time) AS flow_time,
             any(sensor) AS sensor,
             any(toString(exporter_ip)) AS exporter_ip,
             toString(src_ip) AS src_ip,
@@ -10080,8 +10080,8 @@ def anomaly_flow_query(
             sum(packets) AS packets,
             sum(bytes) AS bytes,
             sum(flow_count) AS flow_count,
-            min(flow_time) AS first_seen,
-            max(flow_time) AS last_seen,
+            min(flow_time) AS first_flow_time,
+            max(flow_time) AS last_flow_time,
             sum(bytes) * 8 / {{seconds:Float64}} AS bits_s,
             sum(packets) / {{seconds:Float64}} AS packets_s
         FROM flow_raw
@@ -11076,6 +11076,8 @@ def compact_flow_context_for_ai(flow_context: dict[str, Any]) -> dict[str, Any]:
         "unique_src_ips",
         "unique_dst_ips",
         "unique_dst_ports",
+        "query_range",
+        "enrichment_attempts",
         "dominant_dst_ip",
         "dominant_dst_port",
         "dominant_protocol",

@@ -88,7 +88,6 @@ def create_bgp_connector_profile():
 class FakeClickHouseResult:
     def __init__(self, rows):
         self.column_names = [
-            "flow_time",
             "sensor",
             "exporter_ip",
             "src_ip",
@@ -101,8 +100,8 @@ class FakeClickHouseResult:
             "packets",
             "bytes",
             "flow_count",
-            "first_seen",
-            "last_seen",
+            "first_flow_time",
+            "last_flow_time",
             "bits_s",
             "packets_s",
         ]
@@ -353,11 +352,73 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("if len(columns) != len(values):", function_source)
         self.assertIn('placeholders = ", ".join("?" for _ in columns)', function_source)
 
+    def test_dns_flow_query_builders_do_not_use_aggregate_flow_time_alias(self):
+        query = backend_main.anomaly_flow_query(
+            [
+                "flow_time >= {start:DateTime}",
+                "flow_time <= {end:DateTime}",
+                "toString(src_ip) = {target_ip_plain:String}",
+                "proto = 17",
+            ],
+            dns_dst_port_filter=True,
+        )
+        self.assertNotIn("AS flow_time", query)
+        self.assertNotIn("max(flow_time) AS flow_time", query)
+        self.assertIn("min(flow_time) AS first_flow_time", query)
+        self.assertIn("max(flow_time) AS last_flow_time", query)
+        where_clause = query.split("WHERE", 1)[1].split("GROUP BY", 1)[0]
+        self.assertNotIn("max(", where_clause)
+        self.assertNotIn("first_flow_time", where_clause)
+        self.assertNotIn("last_flow_time", where_clause)
+
+        schema = {
+            "flow_time": "DateTime64(3)",
+            "src_ip": "IPv6",
+            "dst_ip": "IPv6",
+            "src_port": "UInt16",
+            "dst_port": "UInt16",
+            "proto": "UInt8",
+            "packets": "UInt64",
+            "bytes": "UInt64",
+            "flow_count": "UInt64",
+        }
+        dynamic_query = backend_main.dynamic_anomaly_flow_query(
+            [
+                "flow_time >= {start:DateTime}",
+                "flow_time <= {end:DateTime}",
+                "toString(src_ip) = {target_ip_plain:String}",
+                "proto = 17",
+            ],
+            dns_dst_port_filter=True,
+            schema=schema,
+        )
+        self.assertNotIn("AS flow_time", dynamic_query)
+        self.assertNotIn("max(flow_time) AS flow_time", dynamic_query)
+        self.assertIn("min(flow_time) AS first_flow_time", dynamic_query)
+        self.assertIn("max(flow_time) AS last_flow_time", dynamic_query)
+        dynamic_where = dynamic_query.split("WHERE", 1)[1].split("GROUP BY", 1)[0]
+        self.assertNotIn("max(", dynamic_where)
+        self.assertNotIn("first_flow_time", dynamic_where)
+        self.assertNotIn("last_flow_time", dynamic_where)
+
+    def test_ai_payload_preserves_enrichment_attempts(self):
+        payload = backend_main.compact_ai_payload_for_model(
+            {
+                "anomaly": {"id": 64, "target_ip": "186.232.169.225"},
+                "flow_evidence": {
+                    "evidence_status": "complete",
+                    "enrichment_attempts": [{"label": "standard_dns_udp53", "rows": 1}],
+                },
+                "candidates": [],
+            },
+            5000,
+        )
+        self.assertEqual(payload["flow_evidence"]["enrichment_attempts"][0]["label"], "standard_dns_udp53")
+
     def test_dns_internal_src_ip_related_flows_use_src_ip_udp53_without_dst_ip(self):
         calls = []
         flow_time = datetime(2026, 1, 1, 12, 4, tzinfo=timezone.utc)
         row = (
-            flow_time,
             "sensor-a",
             "::ffff:192.0.2.10",
             "::ffff:186.232.175.250",
@@ -449,7 +510,6 @@ class AiMitigationRefactorTest(unittest.TestCase):
             ("records", "UInt64"),
         ]
         row = (
-            flow_time,
             "sensor-a",
             "::ffff:192.0.2.10",
             "::ffff:186.232.169.225",
@@ -481,7 +541,6 @@ class AiMitigationRefactorTest(unittest.TestCase):
             self.assertIn("lower(toString(protocol))", query)
             return Result(
                 [
-                    "flow_time",
                     "sensor",
                     "exporter_ip",
                     "src_ip",
@@ -494,8 +553,8 @@ class AiMitigationRefactorTest(unittest.TestCase):
                     "packets",
                     "bytes",
                     "flow_count",
-                    "first_seen",
-                    "last_seen",
+                    "first_flow_time",
+                    "last_flow_time",
                     "bits_s",
                     "packets_s",
                 ],
@@ -759,7 +818,6 @@ class AiMitigationRefactorTest(unittest.TestCase):
         calls = []
         flow_time = datetime(2026, 1, 1, 12, 4, tzinfo=timezone.utc)
         udp_row = (
-            flow_time,
             "sensor-a",
             "::ffff:192.0.2.10",
             "::ffff:186.232.175.250",
