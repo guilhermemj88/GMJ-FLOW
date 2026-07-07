@@ -488,9 +488,9 @@ class CollectorApplyStaticTest(unittest.TestCase):
             self.assertNotIn("'' AS src_ip", query)
             self.assertNotIn("'' AS dst_ip", query)
             self.assertNotIn("'' AS internal_ip", query)
-            self.assertIn("NULL AS src_ip", query)
-            self.assertIn("NULL AS dst_ip", query)
-            self.assertIn("NULL AS internal_ip", query)
+            self.assertIn("CAST(NULL, 'Nullable(String)') AS src_ip", query)
+            self.assertIn("CAST(NULL, 'Nullable(String)') AS dst_ip", query)
+            self.assertIn("CAST(NULL, 'Nullable(String)') AS internal_ip", query)
 
     def test_sensor_save_generates_collector_files_for_enabled_collectors(self):
         tmpdir = tempfile.mkdtemp()
@@ -521,10 +521,11 @@ class CollectorApplyStaticTest(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=False), \
                  mock.patch.object(backend_main, "COLLECTORS_DIR", collectors_dir), \
                  mock.patch.object(backend_main, "COLLECTORS_COMPOSE_PATH", compose_path), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
                  mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
                  mock.patch.object(backend_main, "run_apply_collectors_script", return_value={"services_updated": True, "message": "ok", "stdout": "", "stderr": "", "returncode": 0}):
+                backend_main.ensure_sensor_db()
                 with backend_main.sqlite_connection() as conn:
-                    backend_main.ensure_sensor_db()
                     conn.execute("DELETE FROM sensors")
                     conn.commit()
                 created = backend_main.create_sensor(sensor_payload)

@@ -604,6 +604,86 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(row["announce_command"], item["announce_command"])
             self.assertEqual(row["withdraw_command"], item["withdraw_command"])
 
+    def test_flowspec_peer_is_verified_when_active_flowspec_exists_and_bgp_is_up(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, status, route_type, response_type, action,
+                    announce_command, withdraw_command, rendered_command, created_at, updated_at
+                )
+                VALUES (?, 'active', 'flowspec', 'flowspec', 'discard',
+                        'announce flow route { match { destination 203.0.113.10/32; protocol udp; destination-port =53; } then { discard; } }',
+                        'withdraw flow route { match { destination 203.0.113.10/32; protocol udp; destination-port =53; } then { discard; } }',
+                        'announce flow route { match { destination 203.0.113.10/32; protocol udp; destination-port =53; } then { discard; } }',
+                        ?, ?)
+                """,
+                (connector["id"], now, now),
+            )
+            conn.commit()
+            conn.close()
+            with patch.object(main, "router_ssh_status", return_value={"enabled": True, "bgp_state": "established", "flowspec_state": "not_verified", "message": ""}), \
+                 patch.object(main, "host_agent_status", return_value={"enabled": False, "message": ""}):
+                status = main.bgp_connector_status(connector)
+            self.assertEqual(status["flowspec_state"], "established")
+            self.assertTrue(status["verification"]["flowspec_verified"])
+            self.assertEqual(status["verification"]["flowspec_active_announcements"], 1)
+
+    def test_ai_pending_approval_is_registered_without_writing_pipe(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            calls = []
+            payload = {
+                "anomaly": {
+                    "id": 51,
+                    "vector_name": "DNS_INTERNAL_IP_HIGH_BITS",
+                    "target_ip": "186.232.163.237",
+                    "metric_unit": "bits_s",
+                    "peak_value": 120_000_000,
+                },
+                "candidates": [
+                    {
+                        "candidate_index": 0,
+                        "connector_id": connector["id"],
+                        "response_profile_id": profile["id"],
+                        "response_type": "flowspec",
+                        "action": "discard",
+                        "dst_prefix": "92.38.143.209/32",
+                        "protocol": "udp",
+                        "dst_port": "53",
+                        "duration_seconds": 900,
+                        "manual_approval_required": True,
+                        "allow_auto": False,
+                    }
+                ],
+            }
+            response = {
+                "recommended_candidate_index": 0,
+                "manual_approval_required": True,
+                "allow_auto": False,
+                "reason": "Fallback deterministico: IA local falhou ou excedeu timeout.",
+            }
+            original_pipe = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                item = main.persist_ai_pending_bgp_approval(conn, 51, payload, response, created_by="test-ai")
+                conn.commit()
+            finally:
+                main.exabgp_write_pipe = original_pipe
+                conn.close()
+            self.assertIsNotNone(item)
+            self.assertEqual(calls, [])
+            self.assertEqual(item["status"], "pending_approval")
+            self.assertEqual(item["anomaly_id"], 51)
+            self.assertIn("announce flow route", item["announce_command"])
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT status, source, source_id FROM bgp_announcements WHERE anomaly_id = 51").fetchone()
+            self.assertEqual(row["status"], "pending_approval")
+            self.assertEqual(row["source"], "ai_mitigation")
+            self.assertEqual(row["source_id"], "51")
+
     def test_manual_flowspec_insert_failure_before_announce_sends_nothing(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()

@@ -302,6 +302,12 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(len(enrichment["flows"]), 1)
         self.assertEqual(enrichment["flows"][0]["dst_port"], 5353)
 
+    def test_anomaly_detail_reuses_flow_enrichment_for_related_flows(self):
+        source = Path(backend_main.__file__).read_text(encoding="utf-8")
+        detail_source = source[source.find('def anomaly_detail(request: Request, event_id: int):'):source.find('def anomaly_pdf_response')]
+        self.assertIn("conversations_from_flow_evidence(enrichment.get(\"flow_evidence\"))", detail_source)
+        self.assertIn("flows = enriched_flows", detail_source)
+
 
 if __name__ == "__main__":
     unittest.main()

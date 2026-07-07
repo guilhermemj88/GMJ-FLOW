@@ -43,11 +43,17 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
     def test_subnet_detection_uses_null_ip_fields_and_prefix_scope(self):
         query_builder = SOURCE[SOURCE.find("def query_detection_rule_candidates"):SOURCE.find("def security_anomaly_dedupe_key")]
         self.assertIn('if grouping == "subnet":', query_builder)
-        self.assertIn('src_expr = "NULL"', query_builder)
-        self.assertIn('dst_expr = "NULL"', query_builder)
-        self.assertIn('internal_expr = "NULL"', query_builder)
+        self.assertIn("src_expr = \"CAST(NULL, 'Nullable(String)')\"", query_builder)
+        self.assertIn("dst_expr = \"CAST(NULL, 'Nullable(String)')\"", query_builder)
+        self.assertIn("internal_expr = \"CAST(NULL, 'Nullable(String)')\"", query_builder)
         self.assertIn('"target_cidr": prefix["cidr"]', query_builder)
         self.assertIn('"scope_type": "subnet"', query_builder)
+
+    def test_anomaly_threshold_uses_metric_unit_not_pps_default(self):
+        self.assertIn("configured_metric = clean_text(rule_config.get(\"metric\")", SOURCE)
+        self.assertIn('"metric_unit": metric_unit', SOURCE)
+        self.assertIn('"threshold_value": threshold_value', SOURCE)
+        self.assertIn("formatMetricValue(event.threshold_value, event.metric_unit)", FRONTEND)
 
     def test_calibration_does_not_persist_failed_or_zero_confidence_results(self):
         calibration = SOURCE[SOURCE.find("def calibrate_interface_sample_rate"):SOURCE.find("def calibration_detail")]

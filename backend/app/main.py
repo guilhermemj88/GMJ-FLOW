@@ -7700,6 +7700,27 @@ def prefer_verified_state(*states: Any) -> str:
     return "not_verified"
 
 
+def active_flowspec_announcement_count(connector: dict[str, Any]) -> int:
+    connector_id = connector.get("id")
+    if connector_id is None:
+        return 0
+    try:
+        with sqlite_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM bgp_announcements
+                WHERE connector_id = ?
+                  AND response_type = 'flowspec'
+                  AND status IN ('active', 'announced')
+                """,
+                (int(connector_id),),
+            ).fetchone()
+        return int(row["count"] or 0) if row is not None else 0
+    except Exception:
+        return 0
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -7785,6 +7806,15 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         router_status.get("flowspec_state"),
         agent_status.get("flowspec_state"),
     )
+    active_flowspec_count = active_flowspec_announcement_count(connector)
+    if (
+        flowspec_state == "not_verified"
+        and active_flowspec_count > 0
+        and connector.get("role") == "flowspec_mitigation"
+        and (bgp_state == "established" or exabgp_peer.get("state") == "established" or pipes_ok)
+    ):
+        flowspec_state = "established"
+        messages.append("FlowSpec inferido por anuncio ativo registrado no GMJ-FLOW.")
     if bgp_state == "not_verified":
         messages.append("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.")
     if flowspec_state == "not_verified":
@@ -7819,6 +7849,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "host_agent_enabled": bool(GMJFLOW_HOST_AGENT_URL),
             "bgp_verified": bgp_state in {"established", "down"},
             "flowspec_verified": flowspec_state in {"established", "down"},
+            "flowspec_active_announcements": active_flowspec_count,
             "pipe_verified": pipes_ok,
         },
         "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
@@ -11366,6 +11397,96 @@ def draft_ai_analysis(
     return item
 
 
+def ai_recommended_candidate(request_payload: dict[str, Any], response_json: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        index = int(response_json.get("recommended_candidate_index"))
+    except (TypeError, ValueError):
+        return None
+    candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
+    if index < 0 or index >= len(candidates):
+        return None
+    candidate = dict(candidates[index])
+    if not mitigation_candidate_reviewable(candidate):
+        return None
+    return candidate
+
+
+def persist_ai_pending_bgp_approval(
+    conn: sqlite3.Connection,
+    anomaly_id: int,
+    request_payload: dict[str, Any],
+    response_json: dict[str, Any],
+    created_by: str = "ai",
+) -> dict[str, Any] | None:
+    candidate = ai_recommended_candidate(request_payload, response_json)
+    if candidate is None:
+        return None
+    candidate["manual_approval_required"] = True
+    candidate["allow_auto"] = False
+    candidate["apply_enabled"] = False
+    candidate["requested_mode"] = "manual_approval"
+    candidate["response_type"] = candidate.get("response_type") or "flowspec"
+    candidate["action"] = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
+    candidate["then_action"] = candidate["action"]
+    candidate["src_prefix"] = candidate.get("src_prefix") or candidate.get("src_cidr") or ""
+    candidate["dst_prefix"] = candidate.get("dst_prefix") or candidate.get("dst_cidr") or ""
+    candidate["target_prefix"] = candidate.get("target_prefix") or candidate.get("target_scope") or candidate["dst_prefix"] or candidate["src_prefix"]
+    if candidate["target_prefix"] and not candidate["src_prefix"] and not candidate["dst_prefix"]:
+        candidate["dst_prefix"] = candidate["target_prefix"]
+    candidate["protocol"] = normalize_bgp_protocol(candidate.get("protocol")) if candidate.get("protocol") else ""
+    candidate["dst_port"] = normalize_bgp_port_text(candidate.get("dst_port")) if candidate.get("dst_port") else ""
+    candidate["src_port"] = normalize_bgp_port_text(candidate.get("src_port")) if candidate.get("src_port") else ""
+    candidate["duration_seconds"] = int(candidate.get("duration_seconds") or 900)
+    candidate["anomaly_id"] = anomaly_id
+    candidate["source"] = "ai_mitigation"
+    candidate["source_id"] = str(anomaly_id)
+    anomaly = dict(request_payload.get("anomaly") or {})
+    candidate["attack_vector_name"] = candidate.get("attack_vector_name") or anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or ""
+    candidate["anomaly_source"] = anomaly.get("anomaly_source") or anomaly.get("source") or ""
+    candidate["mitigation_key"] = candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate)
+    if active_mitigation_exists(conn, candidate["mitigation_key"]):
+        return None
+
+    connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else default_bgp_connector(conn)
+    profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else default_bgp_profile(conn)
+    if connector is None:
+        return None
+    if connector:
+        candidate["connector_id"] = connector["id"]
+        candidate["connector_name"] = connector.get("name") or ""
+    if profile:
+        candidate["response_profile_id"] = profile["id"]
+    raw_candidate = {key: value for key, value in candidate.items() if key != "raw_payload"}
+    candidate["raw_payload"] = {
+        "anomaly": anomaly,
+        "ai_response": response_json,
+        "candidate": raw_candidate,
+    }
+    validation_profile = profile or {
+        "enabled": True,
+        "response_type": "flowspec",
+        "require_protocol_or_port": True,
+        "allow_wide_prefix": False,
+        "max_duration_seconds": BGP_DEFAULT_MAX_DURATION_SECONDS,
+        "default_duration_seconds": 900,
+        "approval_mode": "manual_approval",
+    }
+    validation = validate_mitigation_candidate(candidate, connector, validation_profile)
+    policy = evaluate_mitigation_policy({**candidate, "requested_mode": "manual_approval"})
+    command = render_exabgp_flowspec_command("announce", candidate)
+    return insert_bgp_mitigation_announcement(
+        conn,
+        candidate,
+        connector,
+        profile,
+        policy,
+        validation,
+        "pending_approval",
+        command,
+        created_by,
+    )
+
+
 REQUIRED_DRAFT_AI_FIELDS = ["anomaly"]
 
 
@@ -11582,6 +11703,9 @@ def anomaly_ai_analysis_result(
         return draft_ai_analysis(event_id, config, request_payload, response_json, error_message, prompt=prompt)
     with sqlite_connection() as conn:
         saved = save_ai_analysis(conn, event_id, config, request_payload, response_json, error_message, prompt=prompt)
+        pending = persist_ai_pending_bgp_approval(conn, event_id, request_payload, response_json, created_by="ai")
+        if pending is not None:
+            saved["pending_approval"] = pending
         conn.commit()
     return saved
 
@@ -14803,9 +14927,9 @@ def query_detection_rule_candidates(
     membership_filter, src_expr, dst_expr, internal_expr = detection_direction_sql(rule["direction"], prefix_param)
     grouping = detection_rule_grouping(rule)
     if grouping == "subnet":
-        src_expr = "NULL"
-        dst_expr = "NULL"
-        internal_expr = "NULL"
+        src_expr = "CAST(NULL, 'Nullable(String)')"
+        dst_expr = "CAST(NULL, 'Nullable(String)')"
+        internal_expr = "CAST(NULL, 'Nullable(String)')"
     elif grouping == "internal_ip_to_dst" and rule["direction"] == "transmits":
         dst_expr = "toString(dst_ip)"
 
@@ -15327,7 +15451,20 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
     peak_packets = max(float(item.get("packets_s") or 0) for item in items)
     peak_bits = max(float(item.get("bits_s") or 0) for item in items)
     peak_flows = max(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
-    if peak_packets > 0:
+    source_details = dict(representative.get("source_details") or {})
+    rule_config = source_details.get("rule_config") if isinstance(source_details.get("rule_config"), dict) else {}
+    configured_metric = clean_text(rule_config.get("metric") or source_details.get("metric"))
+    if configured_metric not in {"packets_s", "bits_s", "flows_s"}:
+        configured_metric = ""
+    if configured_metric == "bits_s":
+        metric_unit = "bits_s"
+        peak_value = peak_bits
+        observed_value = sum(float(item.get("bits_s") or 0) for item in items)
+    elif configured_metric == "flows_s":
+        metric_unit = "flows_s"
+        peak_value = peak_flows
+        observed_value = sum(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+    elif configured_metric == "packets_s" or peak_packets > 0:
         metric_unit = "packets_s"
         peak_value = peak_packets
         observed_value = sum(float(item.get("packets_s") or 0) for item in items)
@@ -15339,6 +15476,13 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         metric_unit = "flows_s"
         peak_value = peak_flows
         observed_value = sum(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
+    threshold_details = source_details.get("threshold") if isinstance(source_details.get("threshold"), dict) else {}
+    threshold_value = (
+        threshold_details.get("warning")
+        or source_details.get("threshold_warning")
+        or source_details.get("threshold_value")
+        or 0.0
+    )
     src_ips = {clean_ip(item.get("src_ip")) for item in items if clean_text(item.get("src_ip"))}
     dst_ips = {clean_ip(item.get("dst_ip")) for item in items if clean_text(item.get("dst_ip"))}
     vector = clean_text(representative.get("vector")) or clean_text(representative.get("source_name")) or "Deteccao IP Zone"
@@ -15346,7 +15490,6 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
     zone_name = clean_text(representative.get("zone_name")) or "IP Zone"
     target_ip = clean_ip(representative.get("target_ip")) or clean_ip(representative.get("src_ip")) or clean_ip(representative.get("dst_ip"))
     target_cidr = clean_text(representative.get("target_cidr")) or (host_cidr_for_ip(target_ip) if target_ip else clean_text(representative.get("prefix_cidr")))
-    source_details = dict(representative.get("source_details") or {})
     source_details.setdefault("security_anomaly_id", real_id)
     source_details.setdefault("security_anomaly_ids", [int(item["id"]) for item in items])
     return {
@@ -15379,7 +15522,7 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         "decoder": decoder,
         "severity": max((clean_text(item.get("severity")) or "info" for item in items), key=severity_rank),
         "metric_unit": metric_unit,
-        "threshold_value": 0.0,
+        "threshold_value": threshold_value,
         "observed_value": observed_value,
         "peak_value": peak_value,
         "started_at": started_at,
@@ -20021,6 +20164,24 @@ def anomaly_detail_payload(
     }
 
 
+def conversations_from_flow_evidence(flow_evidence: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    conversations: dict[str, dict[str, Any]] = {}
+    evidence = flow_evidence or {}
+    for item in list(evidence.get("top_conversations") or []):
+        if not isinstance(item, dict):
+            continue
+        key = clean_text(item.get("key") or item.get("conversation"))
+        if not key:
+            continue
+        conversations[key] = {
+            "conversation": key,
+            "bytes": int(item.get("bytes") or 0),
+            "packets": int(item.get("packets") or 0),
+            "flow_count": int(item.get("flows") or item.get("flow_count") or 0),
+        }
+    return conversations
+
+
 @app.get("/api/anomalies/summary")
 def anomaly_summary_endpoint(request: Request):
     require_admin(request)
@@ -20190,15 +20351,9 @@ def anomaly_detail(request: Request, event_id: int):
         flows = list(enrichment.get("flows") or [])
         if flows:
             event = dict(enrichment.get("event") or event)
-            conversations = {
-                item.get("key") or item.get("conversation"): {
-                    "conversation": item.get("key") or item.get("conversation"),
-                    "bytes": int(item.get("bytes") or 0),
-                    "packets": int(item.get("packets") or 0),
-                    "flow_count": int(item.get("flows") or item.get("flow_count") or 0),
-                }
-                for item in (enrichment.get("flow_evidence") or {}).get("top_conversations", [])
-            }
+            enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
+            if enriched_conversations:
+                conversations = enriched_conversations
         return anomaly_detail_payload(
             event,
             flows,
@@ -20231,6 +20386,9 @@ def anomaly_detail(request: Request, event_id: int):
             flows = list(enrichment.get("flows") or [])
             if flows:
                 event = dict(enrichment.get("event") or event)
+                enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
+                if enriched_conversations:
+                    conversations = enriched_conversations
             return anomaly_detail_payload(
                 event,
                 flows,
@@ -20343,11 +20501,11 @@ def anomaly_detail(request: Request, event_id: int):
         enriched_flows = list(enrichment.get("flows") or [])
         if enriched_flows:
             event = dict(enrichment.get("event") or event)
-            flows = []
-            conversations = {}
+            flows = enriched_flows
+            enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
+            if enriched_conversations:
+                conversations = enriched_conversations
             points_by_minute = {}
-            for flow in enriched_flows:
-                add_detail_flow(flow)
         flow_evidence = enrichment.get("flow_evidence")
     top_conversations = sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20]
     metric_points = []
