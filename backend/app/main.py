@@ -7989,6 +7989,7 @@ def flowspec_candidate_from_payload(payload: BgpFlowspecTestPayload) -> dict[str
 
 
 def render_exabgp_flowspec_command(command_action: str, candidate: dict[str, Any]) -> str:
+    candidate = sanitize_flowspec_block_dst_dns_candidate(dict(candidate))
     match_parts: list[str] = []
     if candidate.get("src_prefix"):
         match_parts.append(f"source {candidate['src_prefix']};")
@@ -8047,6 +8048,7 @@ def bgp_route_type_for_response(response_type: Any) -> str:
 
 
 def bgp_match_json(candidate: dict[str, Any]) -> str:
+    candidate = sanitize_flowspec_block_dst_dns_candidate(dict(candidate))
     return json.dumps(
         {
             "target_prefix": clean_text(candidate.get("target_prefix")),
@@ -8444,6 +8446,7 @@ def response_profile_candidate_for_anomaly(
         "evidence_status": flow_context.get("evidence_status") or "insufficient",
         "raw_payload": {"anomaly": anomaly, "flow_context": flow_context, "response_profile": {"id": profile.get("id"), "name": profile.get("name")}},
     }
+    candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
     try:
         candidate["rendered_command_preview"] = render_bgp_announcement(candidate, {"default_next_hop": "", "default_community": ""}, profile)
     except Exception as exc:
@@ -9033,6 +9036,7 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     candidate.update(action_settings)
     candidate["response_type"] = "flowspec"
     candidate["tcp_flags"] = candidate.get("tcp_flags") or ""
+    candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
     candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
     return candidate
 
@@ -9847,6 +9851,7 @@ def build_dns_udp_abuse_candidates(event: dict[str, Any], evidence: dict[str, An
             "top_flow": flow,
             "policy_skip_reason": reason_code,
         }
+        candidate = sanitize_flowspec_block_dst_dns_candidate(candidate)
         try:
             candidate["rendered_command_preview"] = render_exabgp_flowspec_command("announce", candidate)
         except Exception as exc:
@@ -11468,6 +11473,9 @@ def mitigation_candidate_can_create_pending(candidate: dict[str, Any]) -> bool:
         return False
     if "FLOWSPEC_BLOCK_SRC_DNS" in profile_names_for_candidate(candidate):
         return False
+    dns_ok, _ = validate_dns_outbound_pending_candidate(candidate)
+    if not dns_ok:
+        return False
     return mitigation_candidate_reviewable(candidate) and not (
         ai_bool(candidate.get("never_announce"))
         or ai_bool(candidate.get("not_recommended"))
@@ -11531,6 +11539,32 @@ def profile_names_for_candidate(candidate: dict[str, Any], profile: dict[str, An
     return {name.upper() for name in names if name}
 
 
+def is_flowspec_block_dst_dns_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
+    return "FLOWSPEC_BLOCK_DST_DNS" in profile_names_for_candidate(candidate, profile)
+
+
+def sanitize_flowspec_block_dst_dns_candidate(
+    candidate: dict[str, Any],
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not is_flowspec_block_dst_dns_candidate(candidate, profile):
+        return candidate
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr") or candidate.get("target_prefix") or candidate.get("target_scope"))
+    if dst_prefix:
+        candidate["dst_prefix"] = dst_prefix
+        candidate["dst_cidr"] = dst_prefix
+        candidate["target_prefix"] = dst_prefix
+        candidate["target_scope"] = dst_prefix
+    candidate["protocol"] = "udp"
+    candidate["dst_port"] = "53"
+    candidate["src_prefix"] = ""
+    candidate["src_cidr"] = ""
+    candidate["src_port"] = ""
+    candidate["tcp_flags"] = ""
+    candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or clean_text((profile or {}).get("name")) or "FLOWSPEC_BLOCK_DST_DNS"
+    return candidate
+
+
 def validate_dns_outbound_pending_candidate(
     candidate: dict[str, Any],
     anomaly: dict[str, Any] | None = None,
@@ -11546,6 +11580,7 @@ def validate_dns_outbound_pending_candidate(
         return False, "dns_outbound_cannot_use_flowspec_block_src_dns"
     if "FLOWSPEC_BLOCK_DST_DNS" not in profile_names:
         return False, "dns_outbound_requires_flowspec_block_dst_dns"
+    candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
     dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
     src_prefix = clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
     if not dst_prefix:
@@ -12092,7 +12127,6 @@ def persist_ai_pending_bgp_approval(
     anomaly = dict(request_payload.get("anomaly") or {})
     candidate["attack_vector_name"] = candidate.get("attack_vector_name") or anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or ""
     candidate["anomaly_source"] = anomaly.get("anomaly_source") or anomaly.get("source") or ""
-    candidate["mitigation_key"] = candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate)
 
     connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else default_bgp_connector(conn)
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
@@ -12122,6 +12156,8 @@ def persist_ai_pending_bgp_approval(
     if profile:
         candidate["response_profile_id"] = profile["id"]
         candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or profile.get("name") or ""
+    candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
+    candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
     dns_ok, dns_error = validate_dns_outbound_pending_candidate(candidate, anomaly, response_json, profile)
     if not dns_ok:
         logger.warning(
