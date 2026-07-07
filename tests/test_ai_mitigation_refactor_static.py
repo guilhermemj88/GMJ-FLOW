@@ -97,11 +97,11 @@ class FakeClickHouseResult:
             "proto",
             "input_if",
             "output_if",
-            "packets",
-            "bytes",
             "raw_packets",
             "raw_bytes",
             "sample_rate",
+            "packets",
+            "bytes",
             "flow_count",
             "first_flow_time",
             "last_flow_time",
@@ -118,13 +118,15 @@ class AiMitigationRefactorTest(unittest.TestCase):
             "sum(packets) AS packets",
             "sum(bytes) *",
             "sum(packets) /",
+            "sum(packets *",
+            "sum(bytes *",
         ):
             self.assertNotIn(forbidden, query)
-        self.assertIn("total_packets AS packets", query)
-        self.assertIn("total_bytes AS bytes", query)
         self.assertIn("raw_packets", query)
         self.assertIn("raw_bytes", query)
         self.assertIn("sample_rate", query)
+        self.assertIn("raw_packets * sample_rate AS packets", query)
+        self.assertIn("raw_bytes * sample_rate AS bytes", query)
         self.assertIn("total_flow_count AS flow_count", query)
 
     def test_prompt_is_compact_safe_and_uses_existing_candidates_only(self):
@@ -466,9 +468,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             20,
             248952,
             282_000_000,
+            1,
             248952,
             282_000_000,
-            1,
             123,
             flow_time,
             flow_time,
@@ -523,13 +525,14 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("toString(src_ip)", calls[0][0])
         self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
         self.assertIn("dst_port = 53", calls[0][0])
-        self.assertIn("sum(packets * greatest(sample_rate, 1)) AS total_packets", calls[0][0])
-        self.assertIn("sum(bytes * greatest(sample_rate, 1)) AS total_bytes", calls[0][0])
         self.assertIn("sum(packets) AS raw_packets", calls[0][0])
         self.assertIn("sum(bytes) AS raw_bytes", calls[0][0])
-        self.assertIn("max(greatest(sample_rate, 1)) AS sample_rate", calls[0][0])
+        self.assertIn("AS sample_rate", calls[0][0])
+        self.assertIn("raw_packets * sample_rate AS packets", calls[0][0])
+        self.assertIn("raw_bytes * sample_rate AS bytes", calls[0][0])
+        self.assertIn("round((raw_packets * sample_rate) / 60, 2) AS packets_s", calls[0][0])
         self.assertIn("sum(flow_count) AS total_flow_count", calls[0][0])
-        self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", calls[0][0])
+        self.assertIn("ORDER BY packets DESC, bytes DESC", calls[0][0])
         self.assert_safe_flow_aggregation_query(calls[0][0])
         self.assertNotIn("toString(dst_ip) = {target_ip", calls[0][0])
 
@@ -568,11 +571,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
             17,
             10,
             20,
-            1_332_224,
-            97_361_920,
             2602,
             190_160,
             512,
+            1_332_224,
+            97_361_920,
             321,
             flow_time,
             flow_time,
@@ -591,13 +594,14 @@ class AiMitigationRefactorTest(unittest.TestCase):
             self.assertIn("toString(dst_addr)", query)
             self.assertIn("l4_dst_port = 53", query)
             self.assertIn("lower(toString(protocol))", query)
-            self.assertIn("sum(pkts * greatest(sample_rate, 1)) AS total_packets", query)
-            self.assertIn("sum(octets * greatest(sample_rate, 1)) AS total_bytes", query)
             self.assertIn("sum(pkts) AS raw_packets", query)
             self.assertIn("sum(octets) AS raw_bytes", query)
             self.assertIn("max(greatest(sample_rate, 1)) AS sample_rate", query)
+            self.assertIn("raw_packets * sample_rate AS packets", query)
+            self.assertIn("raw_bytes * sample_rate AS bytes", query)
+            self.assertIn("round((raw_packets * sample_rate) / 60, 2) AS packets_s", query)
             self.assertIn("sum(records) AS total_flow_count", query)
-            self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", query)
+            self.assertIn("ORDER BY packets DESC, bytes DESC", query)
             self.assert_safe_flow_aggregation_query(query)
             return Result(
                 [
@@ -610,11 +614,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
                     "proto",
                     "input_if",
                     "output_if",
-                    "packets",
-                    "bytes",
                     "raw_packets",
                     "raw_bytes",
                     "sample_rate",
+                    "packets",
+                    "bytes",
                     "flow_count",
                     "first_flow_time",
                     "last_flow_time",
@@ -898,9 +902,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             20,
             10,
             1000,
+            1,
             10,
             1000,
-            1,
             1,
             flow_time,
             flow_time,

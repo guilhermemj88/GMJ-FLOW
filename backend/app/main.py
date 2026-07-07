@@ -9947,6 +9947,13 @@ def clickhouse_optional_sample_rate_expr(column: str, alias: str = "sample_rate"
     return f"1 AS {alias}"
 
 
+def flow_enrichment_standard_sample_rate_expr() -> str:
+    try:
+        return clickhouse_sample_rate_expr(None, "output", None)
+    except Exception:
+        return "greatest(sample_rate, 1)"
+
+
 def clickhouse_optional_min_expr(column: str, alias: str, fallback_expr: str) -> str:
     if column:
         return f"min({column}) AS {alias}"
@@ -10034,16 +10041,16 @@ def dynamic_anomaly_flow_query(
             proto,
             input_if,
             output_if,
-            total_packets AS packets,
-            total_bytes AS bytes,
             raw_packets,
             raw_bytes,
             sample_rate,
+            raw_packets * sample_rate AS packets,
+            raw_bytes * sample_rate AS bytes,
             total_flow_count AS flow_count,
             first_flow_time,
             last_flow_time,
-            round(total_bytes * 8 / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS bits_s,
-            round(total_packets / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS packets_s
+            round((raw_bytes * sample_rate) * 8 / 60, 2) AS bits_s,
+            round((raw_packets * sample_rate) / 60, 2) AS packets_s
         FROM
         (
             SELECT
@@ -10056,8 +10063,6 @@ def dynamic_anomaly_flow_query(
                 {proto_select} AS proto,
                 {clickhouse_optional_any_expr(mapping["input_if"], "input_if", schema, "0")},
                 {clickhouse_optional_any_expr(mapping["output_if"], "output_if", schema, "0")},
-                {clickhouse_optional_estimated_sum_expr(mapping["packets"], mapping["sample_rate"], "total_packets")},
-                {clickhouse_optional_estimated_sum_expr(mapping["bytes"], mapping["sample_rate"], "total_bytes")},
                 {clickhouse_optional_sum_expr(mapping["packets"], "raw_packets", schema)},
                 {clickhouse_optional_sum_expr(mapping["bytes"], "raw_bytes", schema)},
                 {clickhouse_optional_sample_rate_expr(mapping["sample_rate"])},
@@ -10068,7 +10073,7 @@ def dynamic_anomaly_flow_query(
             WHERE {' AND '.join(f'({item})' for item in effective_filters)}
             GROUP BY src_ip, src_port, dst_ip, dst_port, proto
         )
-        ORDER BY total_packets DESC, total_bytes DESC
+        ORDER BY packets DESC, bytes DESC
         LIMIT {{limit:UInt32}}
     """
 
@@ -10108,47 +10113,46 @@ def anomaly_flow_query(
     filters: list[str],
     dns_dst_port_filter: bool,
 ) -> str:
+    sample_rate_expr = flow_enrichment_standard_sample_rate_expr()
     effective_filters = list(filters)
     if dns_dst_port_filter:
         effective_filters.append("dst_port = 53")
     return f"""
         SELECT
-            sensor,
-            exporter_ip,
+            sensor_value AS sensor,
+            exporter_ip_value AS exporter_ip,
             src_ip,
             src_port,
             dst_ip,
             dst_port,
             proto,
-            input_if,
-            output_if,
-            total_packets AS packets,
-            total_bytes AS bytes,
+            input_if_value AS input_if,
+            output_if_value AS output_if,
             raw_packets,
             raw_bytes,
             sample_rate,
+            raw_packets * sample_rate AS packets,
+            raw_bytes * sample_rate AS bytes,
             total_flow_count AS flow_count,
             first_flow_time,
             last_flow_time,
-            round(total_bytes * 8 / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS bits_s,
-            round(total_packets / greatest(dateDiff('second', first_flow_time, last_flow_time), 60), 2) AS packets_s
+            round((raw_bytes * sample_rate) * 8 / 60, 2) AS bits_s,
+            round((raw_packets * sample_rate) / 60, 2) AS packets_s
         FROM
         (
             SELECT
-                any(sensor) AS sensor,
-                any(toString(exporter_ip)) AS exporter_ip,
+                any(sensor) AS sensor_value,
+                any(toString(exporter_ip)) AS exporter_ip_value,
                 toString(src_ip) AS src_ip,
                 src_port,
                 toString(dst_ip) AS dst_ip,
                 dst_port,
                 proto,
-                any(input_if) AS input_if,
-                any(output_if) AS output_if,
-                sum(packets * greatest(sample_rate, 1)) AS total_packets,
-                sum(bytes * greatest(sample_rate, 1)) AS total_bytes,
+                any(input_if) AS input_if_value,
+                any(output_if) AS output_if_value,
                 sum(packets) AS raw_packets,
                 sum(bytes) AS raw_bytes,
-                max(greatest(sample_rate, 1)) AS sample_rate,
+                max({sample_rate_expr}) AS sample_rate,
                 sum(flow_count) AS total_flow_count,
                 min(flow_time) AS first_flow_time,
                 max(flow_time) AS last_flow_time
@@ -10156,7 +10160,7 @@ def anomaly_flow_query(
             WHERE {' AND '.join(f'({item})' for item in effective_filters)}
             GROUP BY src_ip, src_port, dst_ip, dst_port, proto
         )
-        ORDER BY total_packets DESC, total_bytes DESC
+        ORDER BY packets DESC, bytes DESC
         LIMIT {{limit:UInt32}}
     """
 
@@ -10377,6 +10381,7 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
     if interface_if_index > 0:
         params["interface_if_index"] = interface_if_index
         interface_filter = " AND (input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})"
+    sample_rate_expr = flow_enrichment_standard_sample_rate_expr()
     query = f"""
         SELECT
             src_ip,
@@ -10386,16 +10391,16 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
             proto,
             input_if,
             output_if,
-            total_packets AS packets,
-            total_bytes AS bytes,
             raw_packets,
             raw_bytes,
             sample_rate,
+            raw_packets * sample_rate AS packets,
+            raw_bytes * sample_rate AS bytes,
             total_flow_count AS flows,
             first_seen,
             last_seen,
-            round(total_bytes * 8 / greatest(dateDiff('second', first_seen, last_seen), 60), 2) AS bits_s,
-            round(total_packets / greatest(dateDiff('second', first_seen, last_seen), 60), 2) AS packets_s
+            round((raw_bytes * sample_rate) * 8 / 60, 2) AS bits_s,
+            round((raw_packets * sample_rate) / 60, 2) AS packets_s
         FROM
         (
             SELECT
@@ -10406,11 +10411,9 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
                 proto,
                 input_if,
                 output_if,
-                sum(packets * greatest(sample_rate, 1)) AS total_packets,
-                sum(bytes * greatest(sample_rate, 1)) AS total_bytes,
                 sum(packets) AS raw_packets,
                 sum(bytes) AS raw_bytes,
-                max(greatest(sample_rate, 1)) AS sample_rate,
+                max({sample_rate_expr}) AS sample_rate,
                 sum(flow_count) AS total_flow_count,
                 min(flow_time) AS first_seen,
                 max(flow_time) AS last_seen
@@ -10422,7 +10425,7 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
               {interface_filter}
             GROUP BY src_ip, src_port, dst_ip, dst_port, proto, input_if, output_if
         )
-        ORDER BY total_packets DESC, total_bytes DESC
+        ORDER BY packets DESC, bytes DESC
         LIMIT {{limit:UInt32}}
     """
     try:
@@ -11100,9 +11103,7 @@ def normalize_string_list(value: Any, max_items: int = 10, max_chars: int = 500)
 
 def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None = None, text_limit: int = 320) -> dict[str, Any]:
     compacted: dict[str, Any] = {}
-    index = candidate.get("candidate_index")
-    if index in (None, "") and candidate_index is not None:
-        index = candidate_index
+    index = candidate_index if candidate_index is not None else candidate.get("candidate_index")
     compacted["candidate_index"] = index
     policy = candidate.get("policy_decision") if isinstance(candidate.get("policy_decision"), dict) else {}
     policy_allows_auto = policy.get("decision") == "allow_auto"
@@ -11116,8 +11117,17 @@ def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None 
     for key in (
         "source",
         "mitigation_mode",
+        "profile",
+        "response_profile_name",
+        "src_prefix",
         "src_cidr",
+        "dst_prefix",
         "dst_cidr",
+        "target_prefix",
+        "target_scope",
+        "target_ip",
+        "target_cidr",
+        "target_role",
         "protocol",
         "src_port",
         "dst_port",
@@ -11127,6 +11137,8 @@ def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None 
         value = candidate.get(key)
         if ai_keep_value(value):
             compacted[key] = value
+    if compacted.get("profile") and not compacted.get("response_profile_name"):
+        compacted["response_profile_name"] = compacted.get("profile")
     if not compacted.get("action") and ai_keep_value(candidate.get("then_action")):
         compacted["action"] = candidate.get("then_action")
     for key in ("reason", "rendered_command_preview"):
@@ -11145,6 +11157,7 @@ def compact_ai_flow(flow: dict[str, Any]) -> dict[str, Any]:
         "dst_ip",
         "dst_port",
         "protocol",
+        "proto",
         "proto_name",
         "decoder",
         "bits_s",
@@ -11295,6 +11308,7 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
         "flow_context": compact_flow_context_for_ai(dict(payload.get("flow_context") or {})),
         "flow_evidence": compact_flow_context_for_ai(flow_evidence_source),
         "related_flows": compact_ai_flow_list(related_flow_source, 10),
+        "related_flows_count": 0,
         "top_conversations": compact_ai_flow_list(top_conversation_source, 10),
         "candidates": [
             compact_ai_candidate(candidate, index)
@@ -11309,6 +11323,7 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
         },
         "context_truncated": raw_size > max_context_chars,
     }
+    compacted["related_flows_count"] = len(compacted["related_flows"])
     if not compacted["top_conversations"] and compacted["related_flows"]:
         compacted["top_conversations"] = [dict(compacted["related_flows"][0])]
     budget = max_context_chars + 1000
@@ -11334,8 +11349,11 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
         compacted["anomaly"]["summary"] = ai_compact_text(compacted["anomaly"]["summary"], 160)
     if ai_payload_json_size(compacted) <= budget:
         return compacted
-    compacted["related_flows"] = []
-    compacted["top_conversations"] = []
+    compacted["related_flows"] = compact_ai_flow_list(related_flow_source, 5)
+    compacted["related_flows_count"] = len(compacted["related_flows"])
+    compacted["top_conversations"] = compact_ai_flow_list(top_conversation_source, 5)
+    if not compacted["top_conversations"] and compacted["related_flows"]:
+        compacted["top_conversations"] = [dict(compacted["related_flows"][0])]
     if ai_payload_json_size(compacted) <= budget:
         return compacted
     compacted["candidates"] = [
@@ -12077,7 +12095,25 @@ def persist_ai_pending_bgp_approval(
     candidate["mitigation_key"] = candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate)
 
     connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else default_bgp_connector(conn)
-    profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else default_bgp_profile(conn)
+    profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+    if profile is None:
+        requested_profile_name = clean_text(candidate.get("response_profile_name") or candidate.get("profile"))
+        if requested_profile_name:
+            profile_row = conn.execute(
+                """
+                SELECT p.*, c.name AS connector_name, c.enabled AS connector_enabled, c.is_active AS connector_active
+                FROM bgp_response_profiles p
+                LEFT JOIN bgp_connectors c ON c.id = p.connector_id
+                WHERE upper(p.name) = upper(?)
+                ORDER BY p.enabled DESC, p.id ASC
+                LIMIT 1
+                """,
+                (requested_profile_name,),
+            ).fetchone()
+            if profile_row is not None:
+                profile = bgp_response_profile_row_to_dict(profile_row)
+    if profile is None:
+        profile = default_bgp_profile(conn)
     if connector is None:
         return None
     if connector:
