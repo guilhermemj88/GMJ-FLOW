@@ -2482,6 +2482,7 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
         "SELECT COUNT(*) AS count FROM detection_template_rules WHERE template_id = ?",
         (template_id,),
     ).fetchone()["count"]
+    ensure_outbound_dst_port_rules_exclude_dns(conn)
     if int(count or 0) > 0:
         return
 
@@ -2520,6 +2521,20 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
             """,
             (template_id, vector, domain, direction, protocol, metric, warning, critical, now, now),
         )
+
+
+def ensure_outbound_dst_port_rules_exclude_dns(conn: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE detection_template_rules
+        SET dst_port = '!53',
+            updated_at = ?
+        WHERE upper(vector) IN ('UDP_INTERNAL_IP_DST_HIGH_PPS', 'TCP_INTERNAL_IP_DST_HIGH_PPS')
+          AND lower(coalesce(dst_port, 'any')) IN ('', 'any', 'all', '*')
+        """,
+        (now,),
+    )
 
 
 def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
@@ -6834,16 +6849,22 @@ def normalize_detection_port_text(value: Any, field_name: str) -> str:
     text = clean_text(value or "any").lower()
     if text in {"", "any", "all", "*"}:
         return "any"
+    excluded = text.startswith("!")
+    if excluded:
+        text = text[1:].strip()
+        if not text:
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido")
     parts = [part.strip() for part in text.split(",") if part.strip()]
     normalized: list[str] = []
     for part in parts:
-        if not part.isdigit():
+        if part.startswith("!") or not part.isdigit():
             raise HTTPException(status_code=400, detail=f"{field_name} invalido")
         port = int(part)
         if port < 1 or port > 65535:
             raise HTTPException(status_code=400, detail=f"{field_name} invalido")
         normalized.append(str(port))
-    return ",".join(normalized) if normalized else "any"
+    port_text = ",".join(dict.fromkeys(normalized))
+    return f"!{port_text}" if excluded and port_text else port_text or "any"
 
 
 def normalize_detection_whitelist_payload(conn: sqlite3.Connection, payload: DetectionWhitelistPayload) -> dict[str, Any]:
@@ -9161,6 +9182,8 @@ def outbound_dst_port_candidate(event: dict[str, Any], confidence: float) -> dic
     except (TypeError, ValueError):
         dst_port = 0
     if not dst_ip or dst_port <= 0:
+        return None
+    if dst_port == 53:
         return None
     dst_cidr = host_cidr_for_ip(dst_ip)
     profile = "FLOWSPEC_BLOCK_DST_TCP_PORT" if protocol == "tcp" else "FLOWSPEC_BLOCK_DST_UDP_PORT"
@@ -15770,6 +15793,19 @@ def outbound_dst_port_protocol(rule_or_event: dict[str, Any]) -> str:
     return protocol
 
 
+def detection_port_filter_condition(column: str, value: Any, field_name: str) -> str:
+    normalized = normalize_detection_port_text(value, field_name)
+    if normalized == "any":
+        return ""
+    excluded = normalized.startswith("!")
+    raw_ports = normalized[1:] if excluded else normalized
+    ports = [str(int(port)) for port in raw_ports.split(",") if port]
+    if not ports:
+        return ""
+    operator = "NOT IN" if excluded else "IN"
+    return f"{column} {operator} ({', '.join(ports)})"
+
+
 def query_detection_rule_candidates(
     zone: dict[str, Any],
     template: dict[str, Any],
@@ -15817,6 +15853,9 @@ def query_detection_rule_candidates(
         membership_filter,
         protocol_filter,
     ]
+    src_port_filter = detection_port_filter_condition("src_port", rule.get("src_port"), "src_port")
+    dst_port_filter = detection_port_filter_condition("dst_port", rule.get("dst_port"), "dst_port")
+    filters.extend(filter(None, [src_port_filter, dst_port_filter]))
     if sensor_id is not None:
         params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(int(sensor_id)), "exporter_ip")
         filters.append("toString(exporter_ip) = {exporter_ip:String}")

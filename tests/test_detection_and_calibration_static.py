@@ -21,7 +21,7 @@ class FakeClickHouseResult:
         self.result_rows = rows
 
 
-def outbound_dst_port_rule(vector="UDP_INTERNAL_IP_DST_HIGH_PPS", protocol="UDP"):
+def outbound_dst_port_rule(vector="UDP_INTERNAL_IP_DST_HIGH_PPS", protocol="UDP", dst_port="any"):
     return {
         "id": 101,
         "vector": vector,
@@ -35,7 +35,7 @@ def outbound_dst_port_rule(vector="UDP_INTERNAL_IP_DST_HIGH_PPS", protocol="UDP"
         "window_seconds": 60,
         "consecutive_windows": 1,
         "cooldown_seconds": 0,
-        "dst_port": "any",
+        "dst_port": dst_port,
         "src_port": "any",
         "response": "MANUAL_REVIEW",
         "mitigation_mode": "manual_review",
@@ -108,6 +108,83 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("Testar Flow bruto", FRONTEND)
         self.assertIn("Janela: ultimos 15 min", FRONTEND)
         self.assertIn("calibration-diagnostics?window_minutes=5", FRONTEND)
+
+    def test_detection_port_parser_accepts_exclusions(self):
+        cases = {
+            "any": "any",
+            "53": "53",
+            "53,123": "53,123",
+            "!53": "!53",
+            "!53,123": "!53,123",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(backend_main.normalize_detection_port_text(raw, "dst_port"), expected)
+
+    def test_outbound_dst_port_exclusion_filters_dns_and_allows_other_udp(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "bytes", "packets", "flows",
+            "bits_s", "packets_s", "flows_s", "unique_dst_ips", "unique_dst_ports", "unique_src_ports",
+            "first_seen", "last_seen", "metric_value",
+        ]
+        dns_row = ("186.232.171.235", "8.8.8.8", "186.232.171.235", "UDP", 53, 9_000_000, 900_000, 20, 1_200_000, 15_000, 0.33, 1, 1, 2, flow_time, flow_time, 15_000)
+        udp_row = ("186.232.171.235", "34.40.46.199", "186.232.171.235", "UDP", 9044, 9_000_000, 900_000, 20, 1_200_000, 15_000, 0.33, 1, 1, 2, flow_time, flow_time, 15_000)
+
+        query_rows = [[dns_row], [udp_row]]
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            self.assertIn("dst_port NOT IN (53)", query)
+            rows = query_rows.pop(0)
+            if "dst_port NOT IN (53)" in query:
+                rows = [row for row in rows if row[4] != 53]
+            return FakeClickHouseResult(columns, rows)
+
+        zone = {"id": 1, "name": "CGN"}
+        template = {"id": 10, "name": "Outbound abuse", "active": True}
+        prefix = {"id": 7, "cidr": "186.232.171.0/24"}
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="greatest(sample_rate, 1)"):
+            dns_items = backend_main.query_detection_rule_candidates(
+                zone, template, outbound_dst_port_rule(dst_port="!53"), prefix, flow_time, flow_time, None
+            )
+            udp_items = backend_main.query_detection_rule_candidates(
+                zone, template, outbound_dst_port_rule(dst_port="!53"), prefix, flow_time, flow_time, None
+            )
+
+        self.assertEqual(dns_items, [])
+        self.assertEqual(len(udp_items), 1)
+        self.assertEqual(udp_items[0]["top_dst_port"], 9044)
+        self.assertNotEqual(udp_items[0]["dst_ip"], "8.8.8.8")
+        self.assertEqual(len(calls), 2)
+
+    def test_dns_detection_rule_still_matches_udp53(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "bytes", "packets", "flows",
+            "bits_s", "packets_s", "flows_s", "unique_dst_ips", "unique_dst_ports", "unique_src_ports",
+            "first_seen", "last_seen", "metric_value",
+        ]
+        dns_row = ("186.232.171.235", "8.8.8.8", "186.232.171.235", "DNS", 0, 9_000_000, 900_000, 20, 1_200_000, 15_000, 0.33, 1, 1, 2, flow_time, flow_time, 15_000)
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            return FakeClickHouseResult(columns, [dns_row])
+
+        rule = outbound_dst_port_rule(vector="DNS_INTERNAL_IP_HIGH_PPS", protocol="DNS")
+        rule["group_by"] = "src_ip"
+        zone = {"id": 1, "name": "CGN"}
+        template = {"id": 10, "name": "DNS", "active": True}
+        prefix = {"id": 7, "cidr": "186.232.171.0/24"}
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="greatest(sample_rate, 1)"):
+            items = backend_main.query_detection_rule_candidates(zone, template, rule, prefix, flow_time, flow_time, None)
+
+        self.assertEqual(len(items), 1)
+        self.assertIn("src_port = 53 OR dst_port = 53", calls[0][0])
+        self.assertNotIn("dst_port NOT IN (53)", calls[0][0])
 
     def test_outbound_dst_port_rule_creates_one_candidate_per_destination_port(self):
         calls = []
@@ -242,6 +319,14 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
         missing = backend_main.outbound_dst_port_candidate({"vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS", "top_dst_ip": "34.40.46.199", "protocol": "UDP"}, 0.8)
         self.assertIsNone(missing)
+        dns_port = backend_main.outbound_dst_port_candidate({
+            "vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS",
+            "top_dst_ip": "8.8.8.8",
+            "top_dst_port": 53,
+            "protocol": "UDP",
+            "direction": "transmits",
+        }, 0.8)
+        self.assertIsNone(dns_port)
 
 
 if __name__ == "__main__":
