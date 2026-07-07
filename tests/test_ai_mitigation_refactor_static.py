@@ -424,6 +424,113 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC", calls[0][0])
         self.assertNotIn("toString(dst_ip) = {target_ip", calls[0][0])
 
+    def test_dns_enrichment_uses_adaptive_flow_raw_schema_aliases(self):
+        calls = []
+        flow_time = datetime(2026, 1, 1, 12, 4, tzinfo=timezone.utc)
+
+        class Result:
+            def __init__(self, columns, rows):
+                self.column_names = columns
+                self.result_rows = rows
+
+        schema_columns = [
+            ("timestamp", "DateTime"),
+            ("sensor_name", "String"),
+            ("router_ip", "IPv6"),
+            ("src_addr", "IPv6"),
+            ("l4_src_port", "UInt16"),
+            ("dst_addr", "IPv6"),
+            ("l4_dst_port", "UInt16"),
+            ("protocol", "String"),
+            ("ingress_if", "UInt32"),
+            ("egress_if", "UInt32"),
+            ("pkts", "UInt64"),
+            ("octets", "UInt64"),
+            ("records", "UInt64"),
+        ]
+        row = (
+            flow_time,
+            "sensor-a",
+            "::ffff:192.0.2.10",
+            "::ffff:186.232.169.225",
+            53001,
+            "::ffff:92.38.143.209",
+            53,
+            17,
+            10,
+            20,
+            1_324_566,
+            94_797_270,
+            321,
+            flow_time,
+            flow_time,
+            12_639_636.0,
+            22_076.1,
+        )
+
+        def fake_query_clickhouse(query, params=None):
+            calls.append((query, dict(params or {})))
+            if "DESCRIBE TABLE flow_raw" in query:
+                return Result(["name", "type"], schema_columns)
+            if "max(flow_time)" in query or "toString(src_ip)" in query:
+                raise Exception("Unknown identifier flow_time")
+            self.assertIn("timestamp >= {start:DateTime}", query)
+            self.assertIn("toString(src_addr)", query)
+            self.assertIn("toString(dst_addr)", query)
+            self.assertIn("l4_dst_port = 53", query)
+            self.assertIn("lower(toString(protocol))", query)
+            return Result(
+                [
+                    "flow_time",
+                    "sensor",
+                    "exporter_ip",
+                    "src_ip",
+                    "src_port",
+                    "dst_ip",
+                    "dst_port",
+                    "proto",
+                    "input_if",
+                    "output_if",
+                    "packets",
+                    "bytes",
+                    "flow_count",
+                    "first_seen",
+                    "last_seen",
+                    "bits_s",
+                    "packets_s",
+                ],
+                [row],
+            )
+
+        event = {
+            "id": 64,
+            "vector_name": "DNS_INTERNAL_IP_HIGH_PPS",
+            "target_ip": "186.232.169.225",
+            "target_role": "src_ip",
+            "protocol": "DNS",
+            "direction": "transmits",
+            "started_at": "2026-01-01T12:00:00Z",
+            "last_seen_at": "2026-01-01T12:05:00Z",
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            enrichment = backend_main.enrich_anomaly_with_flows(event, range_margin_seconds=120, limit=50)
+
+        self.assertEqual(enrichment["flow_evidence"]["evidence_status"], "complete")
+        self.assertEqual(enrichment["flow_evidence"]["unique_dst_ips"], 1)
+        self.assertEqual(enrichment["flow_evidence"]["dominant_dst_port"], 53)
+        self.assertEqual(enrichment["flow_evidence"]["dominant_protocol"], "UDP")
+        self.assertEqual(enrichment["flow_evidence"]["enrichment_attempts"][-1]["schema_mode"], "adaptive")
+        flow = enrichment["flows"][0]
+        self.assertEqual(flow["src_ip"], "186.232.169.225")
+        self.assertEqual(flow["src_port"], 53001)
+        self.assertEqual(flow["dst_ip"], "92.38.143.209")
+        self.assertEqual(flow["dst_port"], 53)
+        self.assertEqual(flow["proto"], 17)
+        self.assertEqual(flow["protocol"], "UDP")
+        self.assertEqual(flow["packets_s"], 22076.1)
+        self.assertEqual(flow["bits_s"], 12639636.0)
+        self.assertEqual(enrichment["mitigation_candidates"][0]["dst_prefix"], "92.38.143.209/32")
+
     def test_dns_aggregate_without_dst_ip_has_no_candidate_or_pending(self):
         tmpdir = tempfile.mkdtemp()
         try:

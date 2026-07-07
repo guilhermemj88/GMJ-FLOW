@@ -9874,6 +9874,190 @@ def anomaly_flow_target_filter(target_role: str) -> str:
     return f"({src_match} OR {dst_match})"
 
 
+def clickhouse_flow_raw_schema() -> dict[str, str]:
+    try:
+        rows = rows_as_dicts(query_clickhouse("DESCRIBE TABLE flow_raw"))
+    except Exception:
+        rows = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT name, type
+                FROM system.columns
+                WHERE database = currentDatabase()
+                  AND table = 'flow_raw'
+                """
+            )
+        )
+    schema: dict[str, str] = {}
+    for row in rows:
+        name = clean_text(row.get("name") or row.get("column") or row.get("field"))
+        if name:
+            schema[name] = clean_text(row.get("type") or row.get("data_type"))
+    return schema
+
+
+def first_clickhouse_column(schema: dict[str, str], names: tuple[str, ...], default: str = "") -> str:
+    for name in names:
+        if name in schema:
+            return name
+    return default
+
+
+def clickhouse_ip_expr(column: str, schema: dict[str, str] | None = None) -> str:
+    column_type = clean_text((schema or {}).get(column)).lower()
+    if "ipv" in column_type:
+        return f"toString({column})"
+    if "uint" in column_type and "128" in column_type:
+        return f"IPv6NumToString({column})"
+    return f"toString({column})"
+
+
+def clickhouse_optional_any_expr(column: str, alias: str, schema: dict[str, str], default: str = "''") -> str:
+    if column:
+        return f"any({column}) AS {alias}"
+    return f"{default} AS {alias}"
+
+
+def clickhouse_optional_sum_expr(column: str, alias: str, schema: dict[str, str], default: str = "0") -> str:
+    if column:
+        return f"sum({column}) AS {alias}"
+    return f"{default} AS {alias}"
+
+
+def clickhouse_optional_min_expr(column: str, alias: str, fallback_expr: str) -> str:
+    if column:
+        return f"min({column}) AS {alias}"
+    return f"{fallback_expr} AS {alias}"
+
+
+def clickhouse_optional_max_expr(column: str, alias: str, fallback_expr: str) -> str:
+    if column:
+        return f"max({column}) AS {alias}"
+    return f"{fallback_expr} AS {alias}"
+
+
+def clickhouse_protocol_filter(proto_column: str, protocol_column: str, proto_value: int, protocol_names: tuple[str, ...]) -> str:
+    clauses: list[str] = []
+    if proto_column:
+        clauses.append(f"{proto_column} = {proto_value}")
+    if protocol_column:
+        names = ", ".join(f"'{name}'" for name in protocol_names)
+        clauses.append(f"lower(toString({protocol_column})) IN ({names})")
+    return "(" + " OR ".join(clauses) + ")" if clauses else ""
+
+
+def clickhouse_protocol_number_expr(protocol_column: str) -> str:
+    value = f"lower(toString({protocol_column}))"
+    return (
+        f"multiIf({value} IN ('udp', 'dns', '17'), 17, "
+        f"{value} IN ('tcp', '6'), 6, "
+        f"{value} IN ('icmp', '1'), 1, "
+        f"toUInt8OrZero(toString({protocol_column})))"
+    )
+
+
+def clickhouse_flow_raw_mapping(schema: dict[str, str]) -> dict[str, str]:
+    return {
+        "time": first_clickhouse_column(schema, ("flow_time", "timestamp", "time", "ts", "event_time", "created_at")),
+        "first_seen": first_clickhouse_column(schema, ("first_seen", "start_time", "flow_start", "started_at")),
+        "last_seen": first_clickhouse_column(schema, ("last_seen", "end_time", "flow_end", "ended_at")),
+        "sensor": first_clickhouse_column(schema, ("sensor", "sensor_name", "agent_name")),
+        "exporter_ip": first_clickhouse_column(schema, ("exporter_ip", "router_ip", "agent_ip", "device_ip")),
+        "src_ip": first_clickhouse_column(schema, ("src_ip", "src_addr", "source_ip", "source_addr", "ipv4_src_addr")),
+        "dst_ip": first_clickhouse_column(schema, ("dst_ip", "dst_addr", "destination_ip", "destination_addr", "ipv4_dst_addr")),
+        "src_port": first_clickhouse_column(schema, ("src_port", "source_port", "l4_src_port")),
+        "dst_port": first_clickhouse_column(schema, ("dst_port", "destination_port", "l4_dst_port")),
+        "proto": first_clickhouse_column(schema, ("proto", "protocol_num", "ip_proto", "l4_proto")),
+        "protocol": first_clickhouse_column(schema, ("protocol", "proto_name", "l4_protocol")),
+        "input_if": first_clickhouse_column(schema, ("input_if", "input_snmp", "in_if", "ingress_if")),
+        "output_if": first_clickhouse_column(schema, ("output_if", "output_snmp", "out_if", "egress_if")),
+        "packets": first_clickhouse_column(schema, ("packets", "packet_count", "pkts", "in_packets")),
+        "bytes": first_clickhouse_column(schema, ("bytes", "octets", "bytes_count", "in_bytes")),
+        "flow_count": first_clickhouse_column(schema, ("flow_count", "flows", "records")),
+    }
+
+
+def dynamic_anomaly_flow_query(
+    filters: list[str],
+    dns_dst_port_filter: bool,
+    schema: dict[str, str],
+) -> str:
+    mapping = clickhouse_flow_raw_mapping(schema)
+    time_col = mapping["time"]
+    src_ip_col = mapping["src_ip"]
+    dst_ip_col = mapping["dst_ip"]
+    if not time_col or not src_ip_col or not dst_ip_col:
+        raise ValueError("flow_raw sem colunas minimas de tempo/src/dst para enrichment.")
+    src_ip_expr = clickhouse_ip_expr(src_ip_col, schema)
+    dst_ip_expr = clickhouse_ip_expr(dst_ip_col, schema)
+    if mapping["proto"]:
+        proto_select = mapping["proto"]
+    elif mapping["protocol"]:
+        proto_select = clickhouse_protocol_number_expr(mapping["protocol"])
+    else:
+        proto_select = "0"
+    flow_count_expr = clickhouse_optional_sum_expr(mapping["flow_count"], "flow_count", schema, "count()")
+    effective_filters = list(filters)
+    if dns_dst_port_filter and mapping["dst_port"]:
+        effective_filters.append(f"{mapping['dst_port']} = 53")
+    return f"""
+        SELECT
+            max({time_col}) AS flow_time,
+            {clickhouse_optional_any_expr(mapping["sensor"], "sensor", schema)},
+            {clickhouse_optional_any_expr(mapping["exporter_ip"], "exporter_ip", schema)},
+            {src_ip_expr} AS src_ip,
+            {mapping["src_port"] or "0"} AS src_port,
+            {dst_ip_expr} AS dst_ip,
+            {mapping["dst_port"] or "0"} AS dst_port,
+            {proto_select} AS proto,
+            {clickhouse_optional_any_expr(mapping["input_if"], "input_if", schema, "0")},
+            {clickhouse_optional_any_expr(mapping["output_if"], "output_if", schema, "0")},
+            {clickhouse_optional_sum_expr(mapping["packets"], "packets", schema)},
+            {clickhouse_optional_sum_expr(mapping["bytes"], "bytes", schema)},
+            {flow_count_expr},
+            {clickhouse_optional_min_expr(mapping["first_seen"], "first_seen", f"min({time_col})")},
+            {clickhouse_optional_max_expr(mapping["last_seen"], "last_seen", f"max({time_col})")},
+            sum({mapping["bytes"] or "0"}) * 8 / {{seconds:Float64}} AS bits_s,
+            sum({mapping["packets"] or "0"}) / {{seconds:Float64}} AS packets_s
+        FROM flow_raw
+        WHERE {' AND '.join(f'({item})' for item in effective_filters)}
+        GROUP BY src_ip, src_port, dst_ip, dst_port, proto
+        ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC
+        LIMIT {{limit:UInt32}}
+    """
+
+
+def dynamic_clickhouse_ip_matches_expr(column: str, param_prefix: str, schema: dict[str, str]) -> str:
+    expr = clickhouse_ip_expr(column, schema)
+    return (
+        f"({expr} = {{{param_prefix}:String}} "
+        f"OR {expr} = {{{param_prefix}_plain:String}} "
+        f"OR endsWith({expr}, {{{param_prefix}_plain:String}}))"
+    )
+
+
+def dynamic_anomaly_flow_target_filter(target_role: str, schema: dict[str, str]) -> str:
+    mapping = clickhouse_flow_raw_mapping(schema)
+    src_match = dynamic_clickhouse_ip_matches_expr(mapping["src_ip"], "target_ip", schema)
+    dst_match = dynamic_clickhouse_ip_matches_expr(mapping["dst_ip"], "target_ip", schema)
+    if target_role == "dst_ip":
+        return dst_match
+    if target_role == "src_ip":
+        return src_match
+    return f"({src_match} OR {dst_match})"
+
+
+def dynamic_protocol_filter_for_decoder(decoder: str, dns_like: bool, schema: dict[str, str]) -> str:
+    mapping = clickhouse_flow_raw_mapping(schema)
+    if dns_like or decoder in {"UDP", "NTP", "SSDP", "CLDAP", "CHARGEN", "UDP+QUIC"} or "UDP" in decoder:
+        return clickhouse_protocol_filter(mapping["proto"], mapping["protocol"], 17, ("udp", "dns", "17"))
+    if decoder.startswith("TCP") or decoder in {"HTTP", "HTTPS"}:
+        return clickhouse_protocol_filter(mapping["proto"], mapping["protocol"], 6, ("tcp", "6"))
+    if decoder == "ICMP":
+        return clickhouse_protocol_filter(mapping["proto"], mapping["protocol"], 1, ("icmp", "1"))
+    return ""
+
+
 def anomaly_flow_query(
     filters: list[str],
     dns_dst_port_filter: bool,
@@ -9954,17 +10138,131 @@ def enrich_anomaly_with_flows(
     if event.get("interface_if_index") is not None:
         params["interface_if_index"] = int(event.get("interface_if_index") or 0)
         filters.append("(input_if = {interface_if_index:UInt32} OR output_if = {interface_if_index:UInt32})")
+    attempts: list[dict[str, Any]] = []
+    selected_start_dt = start_dt
+    selected_end_dt = end_dt
+
+    def attempt_params(attempt_start: datetime, attempt_end: datetime) -> dict[str, Any]:
+        return {
+            **params,
+            "start": attempt_start,
+            "end": attempt_end,
+            "seconds": max(range_seconds(attempt_start, attempt_end), 1),
+        }
+
+    def record_attempt(label: str, attempt_start: datetime, attempt_end: datetime, dns_port: bool, rows_count: int | None = None, error: str = "", schema_mode: str = "standard") -> None:
+        attempts.append(
+            {
+                "label": label,
+                "schema_mode": schema_mode,
+                "dns_dst_port_filter": dns_port,
+                "start": iso(attempt_start),
+                "end": iso(attempt_end),
+                "rows": rows_count,
+                "error": error[:500],
+                "filter_summary": f"target_role={target_role or 'both'} target_ip={target_ip} dns_dst_port_filter={dns_port} decoder={decoder or '-'}",
+            }
+        )
+
+    def run_standard_attempt(label: str, attempt_start: datetime, attempt_end: datetime, dns_port: bool) -> list[dict[str, Any]]:
+        nonlocal selected_start_dt, selected_end_dt
+        attempt_query = anomaly_flow_query(filters, dns_dst_port_filter=dns_port)
+        attempt_rows = rows_as_dicts(query_clickhouse(attempt_query, attempt_params(attempt_start, attempt_end)))
+        record_attempt(label, attempt_start, attempt_end, dns_port, len(attempt_rows), schema_mode="standard")
+        if attempt_rows:
+            selected_start_dt = attempt_start
+            selected_end_dt = attempt_end
+        return attempt_rows
+
+    def dynamic_filters_for_schema(schema: dict[str, str]) -> list[str]:
+        mapping = clickhouse_flow_raw_mapping(schema)
+        time_col = mapping["time"]
+        if not time_col or not mapping["src_ip"] or not mapping["dst_ip"]:
+            raise ValueError("flow_raw sem colunas minimas de tempo/src/dst para enrichment.")
+        dynamic_filters = [
+            f"{time_col} >= {{start:DateTime}}",
+            f"{time_col} <= {{end:DateTime}}",
+            dynamic_anomaly_flow_target_filter(target_role, schema),
+        ]
+        proto_filter = dynamic_protocol_filter_for_decoder(decoder, dns_like, schema)
+        if proto_filter:
+            dynamic_filters.append(proto_filter)
+        sensor_col = mapping["sensor"]
+        if sensor_name and sensor_name != "Deteccoes IP Zone" and sensor_col:
+            dynamic_filters.append(f"{sensor_col} = {{sensor:String}}")
+        input_col = mapping["input_if"]
+        output_col = mapping["output_if"]
+        if event.get("interface_if_index") is not None and (input_col or output_col):
+            interface_parts = []
+            if input_col:
+                interface_parts.append(f"{input_col} = {{interface_if_index:UInt32}}")
+            if output_col:
+                interface_parts.append(f"{output_col} = {{interface_if_index:UInt32}}")
+            dynamic_filters.append("(" + " OR ".join(interface_parts) + ")")
+        return dynamic_filters
+
+    def run_dynamic_attempt(label: str, attempt_start: datetime, attempt_end: datetime, dns_port: bool, schema: dict[str, str], dynamic_filters: list[str]) -> list[dict[str, Any]]:
+        nonlocal selected_start_dt, selected_end_dt
+        attempt_query = dynamic_anomaly_flow_query(dynamic_filters, dns_dst_port_filter=dns_port, schema=schema)
+        attempt_rows = rows_as_dicts(query_clickhouse(attempt_query, attempt_params(attempt_start, attempt_end)))
+        record_attempt(label, attempt_start, attempt_end, dns_port, len(attempt_rows), schema_mode="adaptive")
+        if attempt_rows:
+            selected_start_dt = attempt_start
+            selected_end_dt = attempt_end
+        return attempt_rows
+
+    wide_start = start_dt - timedelta(minutes=30)
+    wide_end = end_dt + timedelta(minutes=30)
     try:
-        rows = rows_as_dicts(query_clickhouse(anomaly_flow_query(filters, dns_dst_port_filter=dns_like), params))
+        rows = run_standard_attempt("standard_dns_udp53" if dns_like else "standard", start_dt, end_dt, dns_like)
         if dns_like and not rows:
-            rows = rows_as_dicts(query_clickhouse(anomaly_flow_query(filters, dns_dst_port_filter=False), params))
+            rows = run_standard_attempt("standard_dns_udp_any_port", start_dt, end_dt, False)
+        if dns_like and not rows:
+            rows = run_standard_attempt("wide_dns_udp53", wide_start, wide_end, True)
+        if dns_like and not rows:
+            rows = run_standard_attempt("wide_dns_udp_any_port", wide_start, wide_end, False)
         flows = [compact_flow_row(row) for row in rows]
     except Exception as exc:
-        evidence = aggregate_flow_evidence([], start_dt, end_dt)
-        evidence["evidence_status"] = "flow_enrichment_failed"
-        evidence["enrichment_error"] = clean_text(exc)
-        return {"event": event, "flow_evidence": evidence, "flows": [], "mitigation_candidates": []}
-    evidence = aggregate_flow_evidence(flows, start_dt, end_dt)
+        record_attempt("standard_exception", start_dt, end_dt, dns_like, error=clean_text(exc), schema_mode="standard")
+        try:
+            schema = clickhouse_flow_raw_schema()
+            dynamic_filters = dynamic_filters_for_schema(schema)
+            rows = run_dynamic_attempt("adaptive_dns_udp53" if dns_like else "adaptive", start_dt, end_dt, dns_like, schema, dynamic_filters)
+            if dns_like and not rows:
+                rows = run_dynamic_attempt("adaptive_dns_udp_any_port", start_dt, end_dt, False, schema, dynamic_filters)
+            if dns_like and not rows:
+                rows = run_dynamic_attempt("adaptive_wide_dns_udp53", wide_start, wide_end, True, schema, dynamic_filters)
+            if dns_like and not rows:
+                rows = run_dynamic_attempt("adaptive_wide_dns_udp_any_port", wide_start, wide_end, False, schema, dynamic_filters)
+            flows = [compact_flow_row(row) for row in rows]
+        except Exception as adaptive_exc:
+            record_attempt("adaptive_exception", start_dt, end_dt, dns_like, error=clean_text(adaptive_exc), schema_mode="adaptive")
+            evidence = aggregate_flow_evidence([], start_dt, end_dt)
+            evidence["evidence_status"] = "flow_enrichment_failed"
+            evidence["enrichment_error"] = clean_text(adaptive_exc) or clean_text(exc)
+            evidence["enrichment_attempts"] = attempts[-10:]
+            logger.warning(
+                "flow_enrichment_failed anomaly_id=%s target_ip=%s target_role=%s window=%s..%s attempts=%s",
+                event.get("id"),
+                target_ip,
+                target_role,
+                iso(start_dt),
+                iso(end_dt),
+                attempts[-10:],
+            )
+            return {"event": event, "flow_evidence": evidence, "flows": [], "mitigation_candidates": []}
+    evidence = aggregate_flow_evidence(flows, selected_start_dt, selected_end_dt)
+    evidence["enrichment_attempts"] = attempts[-10:]
+    if not flows:
+        logger.info(
+            "flow_enrichment_no_rows anomaly_id=%s target_ip=%s target_role=%s window=%s..%s attempts=%s",
+            event.get("id"),
+            target_ip,
+            target_role,
+            iso(start_dt),
+            iso(end_dt),
+            attempts[-10:],
+        )
     enriched_event = enrich_anomaly_event_from_flows(event, flows)
     if flows:
         enriched_event["unique_src_ips"] = evidence["unique_src_ips"]
