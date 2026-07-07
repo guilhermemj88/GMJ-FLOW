@@ -9148,7 +9148,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const container = document.getElementById('bgpMitigationCandidates');
       container.innerHTML = candidates.map((candidate, index) => {
         const policy = candidate.policy_decision || {};
-        const isAiRecommended = currentAiMitigationAnalysis && Number(currentAiMitigationAnalysis.recommended_candidate_index) === index && !currentAiMitigationAnalysis.error_message;
+        const aiCandidateIndex = currentAiMitigationAnalysis?.recommended_candidate_index;
+        const aiCandidateCount = Number(currentAiMitigationAnalysis?.candidate_count ?? candidates.length);
+        const isAiRecommended = Number.isInteger(Number(aiCandidateIndex)) && aiCandidateIndex !== null && aiCandidateIndex !== undefined && aiCandidateCount > 0 && Number(aiCandidateIndex) === index && !currentAiMitigationAnalysis.error_message;
         const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
         const basis = candidate.mitigation_basis === 'top_conversation'
           ? 'Mitigação por conversa principal'
@@ -9206,10 +9208,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         box.innerHTML = `<div class="panel-title mb-1">Análise IA</div><div class="text-danger">${escapeHtml(currentAiMitigationAnalysis.error_message)}</div>`;
         return;
       }
+      const candidateIndex = currentAiMitigationAnalysis.recommended_candidate_index;
+      const candidateCount = Number(currentAiMitigationAnalysis.candidate_count ?? -1);
+      const candidateText = Number.isInteger(Number(candidateIndex)) && candidateIndex !== null && candidateIndex !== undefined && candidateCount !== 0
+        ? `#${Number(candidateIndex) + 1}`
+        : 'sem candidato';
       box.innerHTML = `
         <div class="panel-title mb-1">Recomendacao IA</div>
         <div class="d-flex flex-wrap gap-2 mb-2">
-          <div class="metric-chip"><span>Candidato:</span> #${Number(currentAiMitigationAnalysis.recommended_candidate_index ?? -1) + 1}</div>
+          <div class="metric-chip"><span>Candidato:</span> ${escapeHtml(candidateText)}</div>
           <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(currentAiMitigationAnalysis.classification || '-')}</div>
           <div class="metric-chip"><span>Risco:</span> ${escapeHtml(currentAiMitigationAnalysis.risk || '-')}</div>
           <div class="metric-chip"><span>Confianca:</span> ${(Number(currentAiMitigationAnalysis.confidence || 0) * 100).toFixed(1)}%</div>
@@ -11107,6 +11114,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const topSrc = deterministic.top_src_ip_by_packets || {};
       const topDstPort = deterministic.top_dst_port_pair_by_packets || deterministic.top_dst_port_by_packets || {};
       const commandPreview = analysis.rendered_command_preview || analysis.response?.rendered_command_preview || '';
+      const candidateIndex = analysis.recommended_candidate_index;
+      const candidateCount = Number(analysis.candidate_count ?? fallbackCandidates.length);
+      const candidateText = Number.isInteger(Number(candidateIndex)) && candidateIndex !== null && candidateIndex !== undefined && candidateCount > 0
+        ? `#${Number(candidateIndex) + 1}`
+        : 'sem candidato';
       setText('anomalyAiStatus', `${analysis.classification || 'unknown'} / risco ${analysis.risk || '-'}`);
       block.innerHTML = `
         <div class="mb-2"><span class="badge-soft off">Análise IA sem mitigação automatica</span></div>
@@ -11116,7 +11128,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(analysis.classification || '-')}</div>
           <div class="metric-chip"><span>Risco:</span> ${escapeHtml(analysis.risk || '-')}</div>
           <div class="metric-chip"><span>Confianca:</span> ${(Number(analysis.confidence || 0) * 100).toFixed(1)}%</div>
-          <div class="metric-chip"><span>Candidato:</span> #${Number(analysis.recommended_candidate_index ?? -1) + 1}</div>
+          <div class="metric-chip"><span>Candidato:</span> ${escapeHtml(candidateText)}</div>
           <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')} / ${escapeHtml(analysis.profile || '-')}</div>
         </div>
         <div class="metric-readout mb-2">${escapeHtml(analysis.reason || '-')}</div>

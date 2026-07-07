@@ -154,7 +154,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(result["classification"], "udp_flood_outbound")
         self.assertEqual(result["reason"], "Fallback deterministico: IA local falhou ou excedeu timeout.")
 
-    def test_deterministic_fallback_points_to_single_manual_review_candidate(self):
+    def test_deterministic_fallback_does_not_select_analysis_only_candidate(self):
         payload = mitigation_payload("DNS_INTERNAL_IP_HIGH_BITS")
         payload["candidates"][0].update(
             {
@@ -167,11 +167,12 @@ class AiMitigationRefactorTest(unittest.TestCase):
             }
         )
         result = backend_main.deterministic_mitigation_fallback(payload, "invalid json")
-        self.assertEqual(result["recommended_candidate_index"], 0)
-        self.assertEqual(result["recommended_action"], "manual_review")
-        self.assertEqual(result["risk"], "medium")
+        self.assertIsNone(result["recommended_candidate_index"])
+        self.assertEqual(result["recommended_action"], "alert_only")
+        self.assertEqual(result["risk"], "none")
         self.assertFalse(result["allow_auto"])
         self.assertTrue(result["manual_approval_required"])
+        self.assertIn("sem candidato", result["reason"])
 
     def test_call_ollama_mitigation_ai_uses_num_predict_without_format_json(self):
         captured = {}
@@ -405,11 +406,69 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(flow["input_if"], 10)
         self.assertEqual(flow["output_if"], 20)
         self.assertEqual(enrichment["flow_evidence"]["evidence_status"], "complete")
+        self.assertEqual(len(enrichment["mitigation_candidates"]), 1)
+        candidate = enrichment["mitigation_candidates"][0]
+        self.assertEqual(candidate["profile"], "FLOWSPEC_BLOCK_DST_DNS")
+        self.assertEqual(candidate["dst_prefix"], "45.228.1.10/32")
+        self.assertEqual(candidate["protocol"], "udp")
+        self.assertEqual(candidate["dst_port"], "53")
+        self.assertTrue(candidate["manual_approval_required"])
+        self.assertFalse(candidate["allow_auto"])
+        self.assertTrue(candidate["manual_only"])
+        self.assertIn("announce flow route", candidate["rendered_command_preview"])
         self.assertEqual(calls[0][1]["target_ip_plain"], "186.232.175.250")
         self.assertIn("toString(src_ip)", calls[0][0])
         self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
         self.assertIn("dst_port = 53", calls[0][0])
+        self.assertIn("ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC", calls[0][0])
         self.assertNotIn("toString(dst_ip) = {target_ip", calls[0][0])
+
+    def test_dns_aggregate_without_dst_ip_has_no_candidate_or_pending(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                create_bgp_connector_profile()
+                payload = {
+                    "anomaly": {
+                        "id": 66,
+                        "target_ip": "186.232.169.225",
+                        "vector_name": "DNS_INTERNAL_IP_HIGH_PPS",
+                        "protocol": "DNS",
+                        "metric_unit": "packets_s",
+                        "peak_value": 22_076.1,
+                    },
+                    "related_flows": [
+                        {
+                            "src_ip": "186.232.169.225",
+                            "protocol": "DNS",
+                            "packets_s": 22076.1,
+                            "bits_s": 12639636.0,
+                        }
+                    ],
+                    "candidates": [],
+                }
+                with mock.patch.object(backend_main, "call_ollama_mitigation_ai", side_effect=TimeoutError("timed out")):
+                    result = backend_main.anomaly_ai_analysis_result(
+                        66,
+                        mitigation_config(),
+                        persist=True,
+                        request_payload=payload,
+                        endpoint="persisted",
+                    )
+                self.assertIsNone(result["recommended_candidate_index"])
+                self.assertEqual(result["candidate_count"], 0)
+                self.assertEqual(result["recommended_action"], "alert_only")
+                self.assertNotIn("pending_approval", result)
+                self.assertIn("Nao foi criada sugestao de FlowSpec", result["operator_summary"])
+                with backend_main.sqlite_connection() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 66").fetchone()["total"]
+                self.assertEqual(int(total), 0)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_dns_related_flows_fallback_to_udp_when_udp53_empty(self):
         calls = []

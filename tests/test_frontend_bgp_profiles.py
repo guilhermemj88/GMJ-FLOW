@@ -46,6 +46,11 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("Protocolo e obrigatorio quando porta e informada.", HTML)
         self.assertIn("if ((srcPort || dstPort) && !protocol)", HTML)
 
+    def test_ai_recommendation_does_not_render_null_candidate_as_one(self):
+        self.assertIn("candidateText = Number.isInteger(Number(candidateIndex))", HTML)
+        self.assertIn(": 'sem candidato'", HTML)
+        self.assertIn("aiCandidateIndex !== null", HTML)
+
     def test_traffic_learning_modal_and_tooltips_exist(self):
         self.assertIn("Aprender com o tráfego", HTML)
         self.assertIn('id="trafficLearningModal"', HTML)

@@ -9737,30 +9737,120 @@ def aggregate_flow_evidence(flows: list[dict[str, Any]], start_dt: datetime, end
     }
 
 
-def dns_outbound_mitigation_candidates(event: dict[str, Any], evidence: dict[str, Any]) -> list[dict[str, Any]]:
+DNS_CANDIDATE_MIN_PPS = 5_000
+DNS_CANDIDATE_MIN_BPS = 50_000_000
+DNS_CANDIDATE_MIN_SHARE = 0.30
+
+
+def dns_candidate_destination_allowed(dst_ip: str) -> tuple[bool, str]:
+    if not dst_ip:
+        return False, "missing_dst_ip"
+    if is_internal_ip_text(dst_ip):
+        return False, "dst_ip_internal"
+    dst_cidr = host_cidr_for_ip(dst_ip)
+    try:
+        with sqlite_connection() as conn:
+            if protected_prefix_match(conn, dst_cidr):
+                return False, "dst_ip_protected"
+            candidate = {
+                "dst_cidr": dst_cidr,
+                "dst_prefix": dst_cidr,
+                "protocol": "udp",
+                "dst_port": "53",
+                "use_global_whitelist": True,
+            }
+            if mitigation_candidate_whitelist_hits(candidate):
+                return False, "dst_ip_whitelisted"
+    except Exception:
+        return True, ""
+    return True, ""
+
+
+def build_dns_udp_abuse_candidates(event: dict[str, Any], evidence: dict[str, Any]) -> list[dict[str, Any]]:
     target_ip = clean_ip(event.get("target_ip"))
     if not target_ip:
         top_flow = evidence.get("top_flow") if isinstance(evidence.get("top_flow"), dict) else {}
         target_ip = clean_ip(top_flow.get("src_ip"))
-    if not target_ip or int(evidence.get("dominant_dst_port") or 0) != 53:
+    if not target_ip:
         return []
-    return [
-        {
+    total_packets = max(int(evidence.get("total_packets") or 0), 1)
+    candidates: list[dict[str, Any]] = []
+    flows = list(evidence.get("top_flows_by_pps") or evidence.get("related_flows") or [])
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        dst_ip = clean_ip(flow.get("dst_ip"))
+        src_ip = clean_ip(flow.get("src_ip"))
+        if not dst_ip or dst_ip == target_ip or dst_ip == src_ip:
+            continue
+        try:
+            dst_port = int(flow.get("dst_port") or 0)
+        except (TypeError, ValueError):
+            dst_port = 0
+        if dst_port != 53 or not flow_is_udp(flow):
+            continue
+        packets_s = float(flow.get("packets_s") or 0)
+        bits_s = float(flow.get("bits_s") or 0)
+        packets = int(flow.get("packets") or 0)
+        share = packets / total_packets if total_packets else 0.0
+        if packets_s < DNS_CANDIDATE_MIN_PPS and bits_s < DNS_CANDIDATE_MIN_BPS:
+            continue
+        allowed, reason_code = dns_candidate_destination_allowed(dst_ip)
+        if not allowed:
+            continue
+        dst_cidr = host_cidr_for_ip(dst_ip)
+        src_port = int(flow.get("src_port") or 0)
+        candidate = {
             "source": "flow_enrichment",
-            "template": "dns_outbound_source_udp53",
-            "candidate_index": 0,
-            "src_cidr": host_cidr_for_ip(target_ip),
-            "dst_cidr": "",
-            "protocol": "udp",
-            "dst_port": "53",
+            "template": "dns_udp_abuse_outbound",
+            "profile": "FLOWSPEC_BLOCK_DST_DNS",
+            "candidate_index": len(candidates),
+            "candidate_role": "recommended",
+            "response_type": "flowspec",
             "action": "discard",
-            "recommended_action": "manual_review",
+            "then_action": "discard",
+            "dst_cidr": dst_cidr,
+            "dst_prefix": dst_cidr,
+            "target_prefix": dst_cidr,
+            "target_scope": dst_cidr,
+            "target_ip": dst_ip,
+            "target_cidr": dst_cidr,
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "protocol": "udp",
+            "src_port": str(src_port) if src_port else "",
+            "dst_port": "53",
+            "duration_seconds": 1800,
             "manual_approval_required": True,
             "allow_auto": False,
-            "never_announce": True,
-            "reason": "DNS UDP/53 outbound e porta critica; revisar manualmente antes de qualquer FlowSpec.",
+            "manual_only": True,
+            "apply_enabled": False,
+            "recommended_action": "manual_review",
+            "risk": "medium",
+            "packets": packets,
+            "bytes": int(flow.get("bytes") or 0),
+            "packets_s": packets_s,
+            "bits_s": bits_s,
+            "flow_count": int(flow.get("flow_count") or flow.get("flows") or 0),
+            "share_top_flow_percent": round(share * 100, 2),
+            "mitigation_basis": "dns_outbound_destination",
+            "mitigation_reason": dns_outbound_reason(),
+            "reason": f"Destino DNS {dst_ip} concentrou {format_packets_per_second(packets_s)} / {format_bits_per_second(bits_s)} do trafego da anomalia.",
+            "top_flow": flow,
+            "policy_skip_reason": reason_code,
         }
-    ]
+        try:
+            candidate["rendered_command_preview"] = render_exabgp_flowspec_command("announce", candidate)
+        except Exception as exc:
+            candidate["rendered_command_preview"] = f"INVALID: {clean_text(exc)}"
+        candidates.append(candidate)
+        if len(candidates) >= 10:
+            break
+    return candidates
+
+
+def dns_outbound_mitigation_candidates(event: dict[str, Any], evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    return build_dns_udp_abuse_candidates(event, evidence)
 
 
 def clickhouse_ip_matches_expr(column: str, param_prefix: str) -> str:
@@ -9810,7 +9900,7 @@ def anomaly_flow_query(
         FROM flow_raw
         WHERE {' AND '.join(f'({item})' for item in effective_filters)}
         GROUP BY src_ip, src_port, dst_ip, dst_port, proto
-        ORDER BY packets_s DESC, bits_s DESC
+        ORDER BY packets_s DESC, bits_s DESC, packets DESC, bytes DESC
         LIMIT {{limit:UInt32}}
     """
 
@@ -10538,6 +10628,7 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "classification": item.get("classification") or "",
         "manual_approval_required": sqlite_bool(item.get("manual_approval_required")),
         "allow_auto": sqlite_bool(item.get("allow_auto")),
+        "recommended_action": response.get("recommended_action") if isinstance(response, dict) else "",
         "reason": item.get("reason") or "",
         "operator_summary": item.get("operator_summary") or "",
         "report_summary": item.get("report_summary") or "",
@@ -10925,18 +11016,20 @@ def mitigation_candidate_reviewable(candidate: dict[str, Any]) -> bool:
     return True
 
 
+def mitigation_candidate_can_create_pending(candidate: dict[str, Any]) -> bool:
+    mode = clean_text(candidate.get("mitigation_mode")).lower()
+    return mitigation_candidate_reviewable(candidate) and not (
+        ai_bool(candidate.get("never_announce"))
+        or ai_bool(candidate.get("not_recommended"))
+        or ai_bool(candidate.get("manual_extra_confirmation"))
+        or mode == "analysis_only"
+    )
+
+
 def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
-    reviewable_indexes: list[int] = []
     for index, candidate in enumerate(candidates):
-        if not mitigation_candidate_reviewable(candidate):
-            continue
-        reviewable_indexes.append(index)
-        mode = clean_text(candidate.get("mitigation_mode")).lower()
-        if ai_bool(candidate.get("never_announce")) or mode == "analysis_only":
-            continue
-        return index
-    if len(reviewable_indexes) == 1:
-        return reviewable_indexes[0]
+        if mitigation_candidate_can_create_pending(candidate):
+            return index
     return None
 
 
@@ -11056,6 +11149,7 @@ def normalize_mitigation_ai_response(value: dict[str, Any] | str, request_payloa
     operator_summary = ai_compact_text(parsed.get("operator_summary") or reason, 500)
     return {
         "recommended_candidate_index": index,
+        "candidate_count": len(candidates),
         "confidence": mitigation_ai_confidence_score(confidence_label),
         "confidence_label": confidence_label,
         "risk": risk,
@@ -11085,14 +11179,21 @@ def deterministic_mitigation_fallback(request_payload: dict[str, Any], error_mes
     if risk not in MITIGATION_AI_RISKS:
         risk = "medium" if index is not None else "none"
     classification = mitigation_ai_classification(anomaly, candidate)
-    operator_summary = f"{vector} em {target}; pico {value or '-'} {metric}. Revisar candidate existente manualmente."[:500]
+    if index is None:
+        operator_summary = (
+            f"Trafego {vector} alto detectado em {target}; pico {value or '-'} {metric}, "
+            "mas sem dst_ip/dst_port confiavel nos related_flows. Nao foi criada sugestao de FlowSpec."
+        )[:500]
+    else:
+        operator_summary = f"{vector} em {target}; pico {value or '-'} {metric}. Revisar candidate existente manualmente."[:500]
     return {
         "recommended_candidate_index": index,
+        "candidate_count": len(candidates),
         "confidence": 0.55 if index is not None else 0.0,
         "confidence_label": "medium" if index is not None else "low",
         "risk": risk,
         "classification": classification,
-        "reason": "Fallback deterministico: IA local falhou ou excedeu timeout.",
+        "reason": "Fallback deterministico: IA local falhou ou excedeu timeout." if index is not None else "Fallback deterministico: sem candidato de mitigacao seguro.",
         "operator_summary": operator_summary,
         "report_summary": operator_summary,
         "manual_approval_required": True,
@@ -11406,7 +11507,7 @@ def ai_recommended_candidate(request_payload: dict[str, Any], response_json: dic
     if index < 0 or index >= len(candidates):
         return None
     candidate = dict(candidates[index])
-    if not mitigation_candidate_reviewable(candidate):
+    if not mitigation_candidate_can_create_pending(candidate):
         return None
     return candidate
 
