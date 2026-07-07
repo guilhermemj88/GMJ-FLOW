@@ -73,7 +73,7 @@ def create_bgp_connector_profile():
             target_selector, protocol_selector, dst_port_selector, require_protocol_or_port,
             max_duration_seconds, default_duration_seconds, created_at, updated_at
         )
-        VALUES ('FLOWSPEC-DNS', 1, 'flowspec', ?, 'manual_approval', 'discard', 'discard',
+        VALUES ('FLOWSPEC_BLOCK_DST_DNS', 1, 'flowspec', ?, 'manual_approval', 'discard', 'discard',
                 'dst_ip', 'fixed', 'fixed', 1, 3600, 900, ?, ?)
         """,
         (connector_id, now, now),
@@ -416,6 +416,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertFalse(candidate["allow_auto"])
         self.assertTrue(candidate["manual_only"])
         self.assertIn("announce flow route", candidate["rendered_command_preview"])
+        self.assertIn("protocol =udp;", candidate["rendered_command_preview"])
         self.assertEqual(calls[0][1]["target_ip_plain"], "186.232.175.250")
         self.assertIn("toString(src_ip)", calls[0][0])
         self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
@@ -469,6 +470,183 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 self.assertEqual(int(total), 0)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dns_outbound_source_only_candidate_does_not_create_pending(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                connector, profile = create_bgp_connector_profile()
+                payload = {
+                    "anomaly": {
+                        "id": 67,
+                        "target_ip": "186.232.169.225",
+                        "target_cidr": "186.232.169.225/32",
+                        "vector_name": "DNS_INTERNAL_IP_HIGH_PPS",
+                        "protocol": "DNS",
+                        "metric_unit": "packets_s",
+                        "peak_value": 22_076.1,
+                    },
+                    "candidates": [{
+                        "candidate_index": 0,
+                        "connector_id": connector["id"],
+                        "response_profile_id": profile["id"],
+                        "profile": "FLOWSPEC_BLOCK_SRC_DNS",
+                        "response_type": "flowspec",
+                        "action": "discard",
+                        "src_prefix": "186.232.169.225/32",
+                        "target_prefix": "186.232.169.225/32",
+                        "protocol": "udp",
+                        "dst_port": "53",
+                        "duration_seconds": 900,
+                        "manual_approval_required": True,
+                        "allow_auto": False,
+                    }],
+                }
+                with mock.patch.object(backend_main, "call_ollama_mitigation_ai", side_effect=TimeoutError("timed out")):
+                    result = backend_main.anomaly_ai_analysis_result(
+                        67,
+                        mitigation_config(),
+                        persist=True,
+                        request_payload=payload,
+                        endpoint="persisted",
+                    )
+                self.assertIsNone(result["recommended_candidate_index"])
+                self.assertEqual(result["recommended_action"], "alert_only")
+                self.assertEqual(result["candidate_count"], 1)
+                self.assertNotIn("pending_approval", result)
+                with backend_main.sqlite_connection() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 67").fetchone()["total"]
+                self.assertEqual(int(total), 0)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dns_outbound_src_dns_profile_is_rejected_at_pending_persistence(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                connector, profile = create_bgp_connector_profile()
+                with backend_main.sqlite_connection() as conn:
+                    conn.execute("UPDATE bgp_response_profiles SET name = 'FLOWSPEC_BLOCK_SRC_DNS' WHERE id = ?", (profile["id"],))
+                    conn.commit()
+                payload = {
+                    "anomaly": {
+                        "id": 68,
+                        "target_ip": "186.232.169.225",
+                        "target_cidr": "186.232.169.225/32",
+                        "vector_name": "DNS_INTERNAL_IP_HIGH_BITS",
+                        "protocol": "DNS",
+                        "metric_unit": "bits_s",
+                        "peak_value": 120_000_000,
+                    },
+                    "candidates": [{
+                        "candidate_index": 0,
+                        "connector_id": connector["id"],
+                        "response_profile_id": profile["id"],
+                        "response_type": "flowspec",
+                        "action": "discard",
+                        "dst_prefix": "92.38.143.209/32",
+                        "target_prefix": "92.38.143.209/32",
+                        "protocol": "udp",
+                        "dst_port": "53",
+                        "duration_seconds": 900,
+                        "manual_approval_required": True,
+                        "allow_auto": False,
+                    }],
+                }
+                with mock.patch.object(backend_main, "call_ollama_mitigation_ai", side_effect=TimeoutError("timed out")):
+                    result = backend_main.anomaly_ai_analysis_result(
+                        68,
+                        mitigation_config(),
+                        persist=True,
+                        request_payload=payload,
+                        endpoint="persisted",
+                    )
+                self.assertEqual(result["recommended_candidate_index"], 0)
+                self.assertIn("pending_approval_error", result)
+                self.assertIn("dns_outbound_cannot_use_flowspec_block_src_dns", result["pending_approval_error"])
+                self.assertNotIn("pending_approval", result)
+                with backend_main.sqlite_connection() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 68").fetchone()["total"]
+                self.assertEqual(int(total), 0)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dns_outbound_candidate_policy_rejects_source_only_and_src_profile(self):
+        source_only = {
+            "template": "dns_udp_abuse_outbound",
+            "profile": "FLOWSPEC_BLOCK_DST_DNS",
+            "response_type": "flowspec",
+            "action": "discard",
+            "src_prefix": "186.232.169.225/32",
+            "protocol": "udp",
+            "dst_port": "53",
+            "manual_approval_required": True,
+            "allow_auto": False,
+        }
+        ok, reason = backend_main.validate_dns_outbound_pending_candidate(
+            source_only,
+            {"vector_name": "DNS_INTERNAL_IP_HIGH_PPS", "target_ip": "186.232.169.225"},
+            {"classification": "dns_abuse_outbound"},
+            {"name": "FLOWSPEC_BLOCK_DST_DNS"},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "dns_outbound_requires_external_dst_prefix")
+        self.assertFalse(backend_main.mitigation_candidate_can_create_pending(source_only))
+        rendered = backend_main.render_exabgp_flowspec_command("announce", source_only)
+        self.assertIn("source 186.232.169.225/32;", rendered)
+        self.assertIn("protocol =udp;", rendered)
+        self.assertNotIn("destination ", rendered)
+
+        src_profile = {
+            **source_only,
+            "src_prefix": "",
+            "dst_prefix": "92.38.143.209/32",
+            "target_prefix": "92.38.143.209/32",
+            "profile": "FLOWSPEC_BLOCK_SRC_DNS",
+        }
+        ok, reason = backend_main.validate_dns_outbound_pending_candidate(
+            src_profile,
+            {"vector_name": "DNS_INTERNAL_IP_HIGH_PPS"},
+            {"classification": "dns_abuse_outbound"},
+            {"name": "FLOWSPEC_BLOCK_SRC_DNS"},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "dns_outbound_cannot_use_flowspec_block_src_dns")
+        self.assertFalse(backend_main.mitigation_candidate_can_create_pending(src_profile))
+
+    def test_dns_outbound_valid_candidate_uses_dst_profile_and_external_dst_prefix(self):
+        candidate = {
+            "template": "dns_udp_abuse_outbound",
+            "profile": "FLOWSPEC_BLOCK_DST_DNS",
+            "response_type": "flowspec",
+            "action": "discard",
+            "dst_prefix": "92.38.143.209/32",
+            "target_prefix": "92.38.143.209/32",
+            "protocol": "udp",
+            "dst_port": "53",
+            "manual_approval_required": True,
+            "allow_auto": False,
+        }
+        ok, reason = backend_main.validate_dns_outbound_pending_candidate(
+            candidate,
+            {"vector_name": "DNS_INTERNAL_IP_HIGH_PPS", "target_ip": "186.232.169.225"},
+            {"classification": "dns_abuse_outbound"},
+            {"name": "FLOWSPEC_BLOCK_DST_DNS"},
+        )
+        self.assertTrue(ok, reason)
+        self.assertTrue(backend_main.mitigation_candidate_can_create_pending(candidate))
+        rendered = backend_main.render_exabgp_flowspec_command("announce", candidate)
+        self.assertIn("destination 92.38.143.209/32;", rendered)
+        self.assertIn("protocol =udp;", rendered)
+        self.assertIn("destination-port =53;", rendered)
 
     def test_dns_related_flows_fallback_to_udp_when_udp53_empty(self):
         calls = []

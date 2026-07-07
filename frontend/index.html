@@ -9169,7 +9169,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               ? 'Nao recomendado: source-only + udp/53'
               : '';
         const analysisOnly = candidate.never_announce || candidate.mitigation_mode === 'analysis_only';
-        const canApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny');
+        const dnsSourceOnly = String(candidate.protocol || '').toLowerCase() === 'udp'
+          && String(candidate.dst_port || candidate.dstPort || '') === '53'
+          && Boolean(candidate.src_prefix || candidate.src_cidr)
+          && !Boolean(candidate.dst_prefix || candidate.dst_cidr);
+        const dnsSrcProfile = ['FLOWSPEC_BLOCK_SRC_DNS'].includes(String(candidate.profile || candidate.response_profile_name || '').toUpperCase());
+        const dnsWithoutDestination = dnsSourceOnly || dnsSrcProfile;
+        const canApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny' || dnsWithoutDestination);
         return `
           <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -9181,7 +9187,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             </div>
             <div class="metric-readout mb-2">${escapeHtml(candidateRole || basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
-            ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
+            ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>

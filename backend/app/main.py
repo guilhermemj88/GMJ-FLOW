@@ -7995,7 +7995,7 @@ def render_exabgp_flowspec_command(command_action: str, candidate: dict[str, Any
     if candidate.get("dst_prefix"):
         match_parts.append(f"destination {candidate['dst_prefix']};")
     if candidate.get("protocol"):
-        match_parts.append(f"protocol {candidate['protocol']};")
+        match_parts.append(f"protocol ={candidate['protocol']};")
     if candidate.get("src_port"):
         match_parts.append(f"source-port ={candidate['src_port']};")
     if candidate.get("dst_port"):
@@ -8615,6 +8615,9 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
         known_dns_dst = clean_ip(candidate.get("dominant_dst_ip") or raw_anomaly.get("dominant_dst_ip") or raw_top_flow.get("dst_ip"))
         if candidate.get("src_prefix") and not candidate.get("dst_prefix") and candidate.get("protocol") == "udp" and clean_text(candidate.get("dst_port")) == "53" and (known_dns_dst or candidate.get("not_recommended")):
             warnings.append("Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.")
+        dns_ok, dns_error = validate_dns_outbound_pending_candidate(candidate, raw_anomaly, {}, response_profile)
+        if not dns_ok:
+            errors.append(f"DNS outbound invalido: {dns_error}.")
 
     duration = int(candidate.get("duration_seconds") or 0)
     max_duration = min(
@@ -11018,12 +11021,119 @@ def mitigation_candidate_reviewable(candidate: dict[str, Any]) -> bool:
 
 def mitigation_candidate_can_create_pending(candidate: dict[str, Any]) -> bool:
     mode = clean_text(candidate.get("mitigation_mode")).lower()
+    if (
+        clean_text(candidate.get("protocol")).lower() == "udp"
+        and clean_text(candidate.get("dst_port")) == "53"
+        and clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
+        and not clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    ):
+        return False
+    if "FLOWSPEC_BLOCK_SRC_DNS" in profile_names_for_candidate(candidate):
+        return False
     return mitigation_candidate_reviewable(candidate) and not (
         ai_bool(candidate.get("never_announce"))
         or ai_bool(candidate.get("not_recommended"))
         or ai_bool(candidate.get("manual_extra_confirmation"))
         or mode == "analysis_only"
     )
+
+
+DNS_OUTBOUND_POLICY_TOKENS = {
+    "dns_internal_ip_high_pps",
+    "dns_internal_ip_high_bits",
+    "dns_abuse_outbound",
+    "dns_udp_abuse_outbound",
+    "dns_query_outbound_client",
+}
+
+
+def mitigation_candidate_text(*items: dict[str, Any]) -> str:
+    fields = (
+        "classification",
+        "template",
+        "attack_vector_name",
+        "vector_name",
+        "decoder",
+        "protocol",
+        "direction",
+        "source",
+        "profile",
+        "response_profile_name",
+    )
+    return " ".join(
+        clean_text(item.get(field)).lower()
+        for item in items
+        if isinstance(item, dict)
+        for field in fields
+        if clean_text(item.get(field))
+    )
+
+
+def is_dns_outbound_mitigation_context(
+    candidate: dict[str, Any],
+    anomaly: dict[str, Any] | None = None,
+    response_json: dict[str, Any] | None = None,
+) -> bool:
+    text = mitigation_candidate_text(candidate, anomaly or {}, response_json or {})
+    if any(token in text for token in DNS_OUTBOUND_POLICY_TOKENS):
+        return True
+    if "dns" in text and any(token in text for token in ("outbound", "transmits", "sends", "src_ip")):
+        return True
+    return False
+
+
+def profile_names_for_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> set[str]:
+    names = {
+        clean_text(candidate.get("profile")),
+        clean_text(candidate.get("response_profile_name")),
+        clean_text(candidate.get("response_profile")),
+    }
+    if profile:
+        names.add(clean_text(profile.get("name")))
+    return {name.upper() for name in names if name}
+
+
+def validate_dns_outbound_pending_candidate(
+    candidate: dict[str, Any],
+    anomaly: dict[str, Any] | None = None,
+    response_json: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    if not is_dns_outbound_mitigation_context(candidate, anomaly, response_json):
+        return True, ""
+    if clean_text(candidate.get("protocol")).lower() != "udp" or clean_text(candidate.get("dst_port")) != "53":
+        return True, ""
+    profile_names = profile_names_for_candidate(candidate, profile)
+    if "FLOWSPEC_BLOCK_SRC_DNS" in profile_names:
+        return False, "dns_outbound_cannot_use_flowspec_block_src_dns"
+    if "FLOWSPEC_BLOCK_DST_DNS" not in profile_names:
+        return False, "dns_outbound_requires_flowspec_block_dst_dns"
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    src_prefix = clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
+    if not dst_prefix:
+        return False, "dns_outbound_requires_external_dst_prefix"
+    try:
+        dst_network = ip_network(dst_prefix, strict=False)
+        if dst_network.prefixlen != dst_network.max_prefixlen:
+            return False, "dns_outbound_dst_prefix_must_be_host"
+        if is_internal_ip_text(str(dst_network.network_address)):
+            return False, "dns_outbound_dst_prefix_must_be_external"
+    except ValueError:
+        return False, "dns_outbound_dst_prefix_invalid"
+    if src_prefix and not dst_prefix:
+        return False, "dns_outbound_source_only_forbidden"
+    target_prefix = clean_text(candidate.get("target_prefix") or candidate.get("target_scope"))
+    client_prefixes = {
+        clean_text(candidate.get("src_prefix") or candidate.get("src_cidr")),
+        host_cidr_for_ip(clean_ip((anomaly or {}).get("target_ip"))) if clean_ip((anomaly or {}).get("target_ip")) else "",
+        clean_text((anomaly or {}).get("target_cidr")),
+    }
+    if target_prefix and target_prefix in {prefix for prefix in client_prefixes if prefix} and not dst_prefix:
+        return False, "dns_outbound_target_client_without_destination_forbidden"
+    command = render_exabgp_flowspec_command("announce", candidate).lower()
+    if "source " in command and "destination-port =53" in command and "destination " not in command:
+        return False, "dns_outbound_source_dns_without_destination_forbidden"
+    return True, ""
 
 
 def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
@@ -11545,8 +11655,6 @@ def persist_ai_pending_bgp_approval(
     candidate["attack_vector_name"] = candidate.get("attack_vector_name") or anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or ""
     candidate["anomaly_source"] = anomaly.get("anomaly_source") or anomaly.get("source") or ""
     candidate["mitigation_key"] = candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate)
-    if active_mitigation_exists(conn, candidate["mitigation_key"]):
-        return None
 
     connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else default_bgp_connector(conn)
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else default_bgp_profile(conn)
@@ -11557,6 +11665,26 @@ def persist_ai_pending_bgp_approval(
         candidate["connector_name"] = connector.get("name") or ""
     if profile:
         candidate["response_profile_id"] = profile["id"]
+        candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or profile.get("name") or ""
+    dns_ok, dns_error = validate_dns_outbound_pending_candidate(candidate, anomaly, response_json, profile)
+    if not dns_ok:
+        logger.warning(
+            "ai_pending_bgp_approval_rejected anomaly_id=%s reason=%s candidate=%s",
+            anomaly_id,
+            dns_error,
+            {
+                "src_prefix": candidate.get("src_prefix"),
+                "dst_prefix": candidate.get("dst_prefix"),
+                "target_prefix": candidate.get("target_prefix"),
+                "protocol": candidate.get("protocol"),
+                "dst_port": candidate.get("dst_port"),
+                "profile": candidate.get("profile"),
+                "response_profile_name": candidate.get("response_profile_name"),
+            },
+        )
+        raise ValueError(f"pending approval DNS outbound bloqueado: {dns_error}")
+    if active_mitigation_exists(conn, candidate["mitigation_key"]):
+        return None
     raw_candidate = {key: value for key, value in candidate.items() if key != "raw_payload"}
     candidate["raw_payload"] = {
         "anomaly": anomaly,

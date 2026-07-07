@@ -51,6 +51,12 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn(": 'sem candidato'", HTML)
         self.assertIn("aiCandidateIndex !== null", HTML)
 
+    def test_dns_source_only_candidate_is_not_actionable_in_ui(self):
+        self.assertIn("dnsSourceOnly", HTML)
+        self.assertIn("dnsWithoutDestination", HTML)
+        self.assertIn("FLOWSPEC_BLOCK_SRC_DNS", HTML)
+        self.assertIn("policy.decision === 'deny' || dnsWithoutDestination", HTML)
+
     def test_traffic_learning_modal_and_tooltips_exist(self):
         self.assertIn("Aprender com o tráfego", HTML)
         self.assertIn('id="trafficLearningModal"', HTML)
