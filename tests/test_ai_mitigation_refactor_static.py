@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -50,6 +51,38 @@ def mitigation_payload(vector: str = "DNS_INTERNAL_IP_HIGH_BITS") -> dict:
             }
         ],
     }
+
+
+def create_bgp_connector_profile():
+    now = backend_main.utc_now_iso()
+    conn = backend_main.sqlite_connection()
+    connector_id = conn.execute(
+        """
+        INSERT INTO bgp_connectors (
+            name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+            enabled, is_active, created_at, updated_at
+        )
+        VALUES ('BGP-NE40-VNT', 'flowspec_mitigation', 'exabgp', 'manual_approval', 50, 3600, 1, 1, ?, ?)
+        """,
+        (now, now),
+    ).lastrowid
+    profile_id = conn.execute(
+        """
+        INSERT INTO bgp_response_profiles (
+            name, enabled, response_type, connector_id, approval_mode, action, default_action,
+            target_selector, protocol_selector, dst_port_selector, require_protocol_or_port,
+            max_duration_seconds, default_duration_seconds, created_at, updated_at
+        )
+        VALUES ('FLOWSPEC-DNS', 1, 'flowspec', ?, 'manual_approval', 'discard', 'discard',
+                'dst_ip', 'fixed', 'fixed', 1, 3600, 900, ?, ?)
+        """,
+        (connector_id, now, now),
+    ).lastrowid
+    conn.commit()
+    connector = backend_main.fetch_bgp_connector(conn, int(connector_id))
+    profile = backend_main.fetch_bgp_profile(conn, int(profile_id))
+    conn.close()
+    return connector, profile
 
 
 class FakeClickHouseResult:
@@ -195,6 +228,129 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 self.assertEqual(int(row["total"]), 1)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ai_timeout_fallback_creates_pending_approval_without_pipe_write(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                connector, profile = create_bgp_connector_profile()
+                payload = {
+                    "anomaly": {
+                        "id": 64,
+                        "target_ip": "186.232.163.237",
+                        "target_cidr": "186.232.163.237/32",
+                        "vector_name": "DNS_INTERNAL_IP_HIGH_BITS",
+                        "metric_unit": "bits_s",
+                        "peak_value": 120_000_000,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_index": 0,
+                            "connector_id": connector["id"],
+                            "response_profile_id": profile["id"],
+                            "response_type": "flowspec",
+                            "action": "discard",
+                            "dst_prefix": "92.38.143.209/32",
+                            "protocol": "udp",
+                            "dst_port": "53",
+                            "duration_seconds": 900,
+                            "manual_approval_required": True,
+                            "allow_auto": False,
+                        }
+                    ],
+                }
+                pipe_calls = []
+                with mock.patch.object(backend_main, "call_ollama_mitigation_ai", side_effect=TimeoutError("timed out")), \
+                     mock.patch.object(backend_main, "exabgp_write_pipe", side_effect=lambda _connector, command: pipe_calls.append(command)):
+                    result = backend_main.anomaly_ai_analysis_result(
+                        64,
+                        mitigation_config(),
+                        persist=True,
+                        request_payload=payload,
+                        endpoint="persisted",
+                    )
+
+                self.assertEqual(result["anomaly_id"], 64)
+                self.assertEqual(result["recommended_candidate_index"], 0)
+                self.assertEqual(result["pending_approval"]["status"], "pending_approval")
+                self.assertEqual(pipe_calls, [])
+                with backend_main.sqlite_connection() as conn:
+                    row = conn.execute("SELECT * FROM bgp_announcements WHERE anomaly_id = 64").fetchone()
+                self.assertEqual(row["status"], "pending_approval")
+                self.assertEqual(row["connector_id"], connector["id"])
+                self.assertEqual(row["response_profile_id"], profile["id"])
+                self.assertEqual(row["route_type"], "flowspec")
+                self.assertEqual(row["response_type"], "flowspec")
+                self.assertEqual(row["action"], "discard")
+                self.assertEqual(row["dst_prefix"], "92.38.143.209/32")
+                self.assertEqual(row["protocol"], "udp")
+                self.assertEqual(row["dst_port"], "53")
+                self.assertIn("announce flow route", row["announce_command"])
+                self.assertIn("withdraw flow route", row["withdraw_command"])
+                self.assertIn('"dst_prefix"', row["match_json"])
+                self.assertIn('"action"', row["then_json"])
+                self.assertEqual(row["policy_decision"], "require_manual_approval")
+                self.assertTrue(row["created_at"])
+                self.assertTrue(row["updated_at"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ai_pending_approval_failure_returns_controlled_error(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                connector, profile = create_bgp_connector_profile()
+                payload = {
+                    "anomaly": {"id": 65, "target_ip": "186.232.163.237", "vector_name": "DNS_INTERNAL_IP_HIGH_BITS", "metric_unit": "bits_s", "peak_value": 120_000_000},
+                    "candidates": [{
+                        "candidate_index": 0,
+                        "connector_id": connector["id"],
+                        "response_profile_id": profile["id"],
+                        "response_type": "flowspec",
+                        "action": "discard",
+                        "dst_prefix": "92.38.143.209/32",
+                        "protocol": "udp",
+                        "dst_port": "53",
+                        "duration_seconds": 900,
+                        "manual_approval_required": True,
+                        "allow_auto": False,
+                    }],
+                }
+                with mock.patch.object(backend_main, "call_ollama_mitigation_ai", side_effect=TimeoutError("timed out")), \
+                     mock.patch.object(backend_main, "insert_bgp_mitigation_announcement", side_effect=sqlite3.OperationalError("42 values for 44 columns")):
+                    result = backend_main.anomaly_ai_analysis_result(
+                        65,
+                        mitigation_config(),
+                        persist=True,
+                        request_payload=payload,
+                        endpoint="persisted",
+                    )
+                self.assertEqual(result["anomaly_id"], 65)
+                self.assertIn("pending_approval_error", result)
+                self.assertIn("42 values for 44 columns", result["pending_approval_error"])
+                with backend_main.sqlite_connection() as conn:
+                    ai_total = conn.execute("SELECT COUNT(*) AS total FROM ai_mitigation_analysis WHERE anomaly_id = 65").fetchone()["total"]
+                    bgp_total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 65").fetchone()["total"]
+                self.assertEqual(int(ai_total), 1)
+                self.assertEqual(int(bgp_total), 0)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_bgp_mitigation_insert_uses_balanced_dynamic_columns(self):
+        source = Path(backend_main.__file__).read_text(encoding="utf-8")
+        function_source = source[source.find("def insert_bgp_mitigation_announcement"):source.find("def active_mitigation_exists")]
+        self.assertIn("columns = [", function_source)
+        self.assertIn("values = [", function_source)
+        self.assertIn("if len(columns) != len(values):", function_source)
+        self.assertIn('placeholders = ", ".join("?" for _ in columns)', function_source)
 
     def test_dns_internal_src_ip_related_flows_use_src_ip_udp53_without_dst_ip(self):
         calls = []

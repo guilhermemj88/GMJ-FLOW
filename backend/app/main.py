@@ -11703,9 +11703,24 @@ def anomaly_ai_analysis_result(
         return draft_ai_analysis(event_id, config, request_payload, response_json, error_message, prompt=prompt)
     with sqlite_connection() as conn:
         saved = save_ai_analysis(conn, event_id, config, request_payload, response_json, error_message, prompt=prompt)
-        pending = persist_ai_pending_bgp_approval(conn, event_id, request_payload, response_json, created_by="ai")
-        if pending is not None:
-            saved["pending_approval"] = pending
+        try:
+            conn.execute("SAVEPOINT ai_pending_approval")
+            pending = persist_ai_pending_bgp_approval(conn, event_id, request_payload, response_json, created_by="ai")
+            conn.execute("RELEASE SAVEPOINT ai_pending_approval")
+            if pending is not None:
+                saved["pending_approval"] = pending
+        except Exception as exc:
+            try:
+                conn.execute("ROLLBACK TO SAVEPOINT ai_pending_approval")
+                conn.execute("RELEASE SAVEPOINT ai_pending_approval")
+            except sqlite3.Error:
+                pass
+            logger.exception(
+                "Falha ao criar pending_approval BGP para analise IA anomaly_id=%s candidate_index=%s",
+                event_id,
+                response_json.get("recommended_candidate_index"),
+            )
+            saved["pending_approval_error"] = clean_text(exc)[:1000]
         conn.commit()
     return saved
 
@@ -12269,65 +12284,71 @@ def insert_bgp_mitigation_announcement(
             "response_type": candidate.get("response_type") or "flowspec",
         }
     )
+    columns = [
+        "connector_id", "connector_name", "response_profile_id", "anomaly_id", "status", "route_type", "response_type", "action",
+        "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
+        "target_prefix", "src_prefix", "dst_prefix", "protocol", "src_port", "dst_port", "tcp_flags",
+        "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "rendered_command", "match_json", "then_json",
+        "validation_errors", "validation_warnings",
+        "raw_payload", "source", "source_id", "mitigation_key", "attack_vector_name", "anomaly_source", "last_error",
+        "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
+        "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
+    ]
+    values = [
+        connector["id"] if connector else candidate.get("connector_id"),
+        connector.get("name") if connector else candidate.get("connector_name") or "",
+        profile["id"] if profile else candidate.get("response_profile_id"),
+        candidate.get("anomaly_id"),
+        active_status,
+        bgp_route_type_for_response(candidate.get("response_type") or "flowspec"),
+        candidate.get("response_type") or "flowspec",
+        candidate.get("action") or candidate.get("then_action") or "discard",
+        candidate.get("rate_limit_bps"),
+        candidate.get("rate_limit_value_raw") or "",
+        candidate.get("rate_limit_unit") or "",
+        candidate.get("target_prefix") or "",
+        candidate.get("src_prefix") or "",
+        candidate.get("dst_prefix") or "",
+        candidate.get("protocol") or "",
+        candidate.get("src_port") or "",
+        candidate.get("dst_port") or "",
+        candidate.get("tcp_flags") or "",
+        duration,
+        expires_at,
+        now if active_status == "active" else None,
+        command,
+        withdraw_command,
+        command,
+        bgp_match_json(candidate),
+        bgp_then_json(candidate),
+        json.dumps(validation.get("errors") or [], sort_keys=True),
+        json.dumps(validation.get("warnings") or [], sort_keys=True),
+        json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+        clean_text(candidate.get("source") or "response_profile"),
+        clean_text(candidate.get("source_id") or candidate.get("anomaly_id") or ""),
+        candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate),
+        candidate.get("attack_vector_name") or "",
+        candidate.get("anomaly_source") or "",
+        last_error,
+        policy.get("decision") or "",
+        policy.get("severity") or "",
+        json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+        created_by,
+        now,
+        now,
+    ]
+    if len(columns) != len(values):
+        raise RuntimeError(f"bgp_announcements insert mismatch: {len(columns)} columns, {len(values)} values")
+    placeholders = ", ".join("?" for _ in columns)
     cursor = conn.execute(
-        """
-        INSERT INTO bgp_announcements (
-            connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
-            rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
-            target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-            duration_seconds, expires_at, announced_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
-            validation_errors, validation_warnings,
-            raw_payload, source, source_id, mitigation_key, attack_vector_name, anomaly_source, last_error,
-            policy_decision, policy_severity, policy_reasons, policy_warnings,
-            policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, 'flowspec', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO bgp_announcements ({", ".join(columns)})
+        VALUES ({placeholders})
         """,
-        (
-            connector["id"] if connector else candidate.get("connector_id"),
-            connector.get("name") if connector else candidate.get("connector_name") or "",
-            profile["id"] if profile else candidate.get("response_profile_id"),
-            candidate.get("anomaly_id"),
-            active_status,
-            bgp_route_type_for_response(candidate.get("response_type") or "flowspec"),
-            candidate.get("action") or candidate.get("then_action") or "discard",
-            candidate.get("rate_limit_bps"),
-            candidate.get("rate_limit_value_raw") or "",
-            candidate.get("rate_limit_unit") or "",
-            candidate.get("target_prefix") or "",
-            candidate.get("src_prefix") or "",
-            candidate.get("dst_prefix") or "",
-            candidate.get("protocol") or "",
-            candidate.get("src_port") or "",
-            candidate.get("dst_port") or "",
-            candidate.get("tcp_flags") or "",
-            duration,
-            expires_at,
-            now if active_status == "active" else None,
-            command,
-            withdraw_command,
-            command,
-            bgp_match_json(candidate),
-            bgp_then_json(candidate),
-            json.dumps(validation.get("errors") or [], sort_keys=True),
-            json.dumps(validation.get("warnings") or [], sort_keys=True),
-            json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
-            clean_text(candidate.get("source") or "response_profile"),
-            clean_text(candidate.get("source_id") or candidate.get("anomaly_id") or ""),
-            candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate),
-            candidate.get("attack_vector_name") or "",
-            candidate.get("anomaly_source") or "",
-            last_error,
-            policy.get("decision") or "",
-            policy.get("severity") or "",
-            json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
-            created_by,
-            now,
-            now,
-        ),
+        tuple(values),
     )
     announcement_id = int(cursor.lastrowid)
     bgp_event(conn, announcement_id, "candidate_created", "Candidato de mitigacao registrado.", {"candidate": candidate}, created_by)
