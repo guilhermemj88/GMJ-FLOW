@@ -9242,9 +9242,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const detail = currentAnomalyDetailPayload || {};
       const anomaly = evaluation.anomaly || detail.event || detail.anomaly || currentAnomalyDetailEvent || { id: Number(anomalyId) };
       const candidates = Array.isArray(evaluation.candidates) ? evaluation.candidates : currentBgpMitigationCandidates;
-      const relatedFlows = Array.isArray(detail.related_flows)
+      const evidenceFlows = detail.flow_evidence && Array.isArray(detail.flow_evidence.related_flows)
+        ? detail.flow_evidence.related_flows
+        : [];
+      const relatedFlows = Array.isArray(detail.related_flows) && detail.related_flows.length
         ? detail.related_flows
-        : Array.isArray(detail.flows)
+        : evidenceFlows.length
+          ? evidenceFlows
+          : Array.isArray(detail.flows)
           ? detail.flows
           : candidates.map(candidate => candidate.top_flow).filter(Boolean);
       const topConversations = Array.isArray(detail.top_conversations)
@@ -11232,7 +11237,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           </tr>
         `;
         }).join('') || '<tr><td colspan="3" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
-        const flows = Array.isArray(detail.related_flows) ? detail.related_flows : Array.isArray(detail.flows) ? detail.flows : [];
+        const evidenceFlows = detail.flow_evidence && Array.isArray(detail.flow_evidence.related_flows) ? detail.flow_evidence.related_flows : [];
+        const flows = Array.isArray(detail.related_flows) && detail.related_flows.length ? detail.related_flows : evidenceFlows.length ? evidenceFlows : Array.isArray(detail.flows) ? detail.flows : [];
         document.getElementById('anomalyFlowTable').innerHTML = flows.map(relatedFlow => {
           const flow = relatedFlow || {};
           return `

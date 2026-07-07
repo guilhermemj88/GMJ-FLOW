@@ -9598,6 +9598,9 @@ def compact_flow_row(row: dict[str, Any]) -> dict[str, Any]:
         "output_if": int(row.get("output_if") or 0),
         "packets": int(float(row.get("packets") or 0)),
         "bytes": int(float(row.get("bytes") or 0)),
+        "raw_packets": int(float(row.get("raw_packets") or 0)),
+        "raw_bytes": int(float(row.get("raw_bytes") or 0)),
+        "sample_rate": int(float(row.get("sample_rate") or 0)),
         "flow_count": int(float(row.get("flow_count") or row.get("flows") or 0)),
         "flows": int(float(row.get("flows") or row.get("flow_count") or 0)),
         "bits_s": round(float(row.get("bits_s") or 0), 2),
@@ -9926,6 +9929,24 @@ def clickhouse_optional_sum_expr(column: str, alias: str, schema: dict[str, str]
     return f"{default} AS {alias}"
 
 
+def clickhouse_flow_raw_sample_rate_expr(column: str) -> str:
+    if column:
+        return f"greatest({column}, 1)"
+    return "1"
+
+
+def clickhouse_optional_estimated_sum_expr(value_column: str, sample_rate_column: str, alias: str, default: str = "0") -> str:
+    if value_column:
+        return f"sum({value_column} * {clickhouse_flow_raw_sample_rate_expr(sample_rate_column)}) AS {alias}"
+    return f"{default} AS {alias}"
+
+
+def clickhouse_optional_sample_rate_expr(column: str, alias: str = "sample_rate") -> str:
+    if column:
+        return f"max({clickhouse_flow_raw_sample_rate_expr(column)}) AS {alias}"
+    return f"1 AS {alias}"
+
+
 def clickhouse_optional_min_expr(column: str, alias: str, fallback_expr: str) -> str:
     if column:
         return f"min({column}) AS {alias}"
@@ -9976,6 +9997,7 @@ def clickhouse_flow_raw_mapping(schema: dict[str, str]) -> dict[str, str]:
         "packets": first_clickhouse_column(schema, ("packets", "packet_count", "pkts", "in_packets")),
         "bytes": first_clickhouse_column(schema, ("bytes", "octets", "bytes_count", "in_bytes")),
         "flow_count": first_clickhouse_column(schema, ("flow_count", "flows", "records")),
+        "sample_rate": first_clickhouse_column(schema, ("sample_rate", "sampling_rate", "sampling", "sample_interval")),
     }
 
 
@@ -10014,6 +10036,9 @@ def dynamic_anomaly_flow_query(
             output_if,
             total_packets AS packets,
             total_bytes AS bytes,
+            raw_packets,
+            raw_bytes,
+            sample_rate,
             total_flow_count AS flow_count,
             first_flow_time,
             last_flow_time,
@@ -10031,8 +10056,11 @@ def dynamic_anomaly_flow_query(
                 {proto_select} AS proto,
                 {clickhouse_optional_any_expr(mapping["input_if"], "input_if", schema, "0")},
                 {clickhouse_optional_any_expr(mapping["output_if"], "output_if", schema, "0")},
-                {clickhouse_optional_sum_expr(mapping["packets"], "total_packets", schema)},
-                {clickhouse_optional_sum_expr(mapping["bytes"], "total_bytes", schema)},
+                {clickhouse_optional_estimated_sum_expr(mapping["packets"], mapping["sample_rate"], "total_packets")},
+                {clickhouse_optional_estimated_sum_expr(mapping["bytes"], mapping["sample_rate"], "total_bytes")},
+                {clickhouse_optional_sum_expr(mapping["packets"], "raw_packets", schema)},
+                {clickhouse_optional_sum_expr(mapping["bytes"], "raw_bytes", schema)},
+                {clickhouse_optional_sample_rate_expr(mapping["sample_rate"])},
                 {clickhouse_optional_sum_expr(mapping["flow_count"], "total_flow_count", schema, "count()")},
                 {clickhouse_optional_min_expr(mapping["first_seen"], "first_flow_time", f"min({time_col})")},
                 {clickhouse_optional_max_expr(mapping["last_seen"], "last_flow_time", f"max({time_col})")}
@@ -10096,6 +10124,9 @@ def anomaly_flow_query(
             output_if,
             total_packets AS packets,
             total_bytes AS bytes,
+            raw_packets,
+            raw_bytes,
+            sample_rate,
             total_flow_count AS flow_count,
             first_flow_time,
             last_flow_time,
@@ -10113,8 +10144,11 @@ def anomaly_flow_query(
                 proto,
                 any(input_if) AS input_if,
                 any(output_if) AS output_if,
-                sum(packets) AS total_packets,
-                sum(bytes) AS total_bytes,
+                sum(packets * greatest(sample_rate, 1)) AS total_packets,
+                sum(bytes * greatest(sample_rate, 1)) AS total_bytes,
+                sum(packets) AS raw_packets,
+                sum(bytes) AS raw_bytes,
+                max(greatest(sample_rate, 1)) AS sample_rate,
                 sum(flow_count) AS total_flow_count,
                 min(flow_time) AS first_flow_time,
                 max(flow_time) AS last_flow_time
@@ -10354,6 +10388,9 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
             output_if,
             total_packets AS packets,
             total_bytes AS bytes,
+            raw_packets,
+            raw_bytes,
+            sample_rate,
             total_flow_count AS flows,
             first_seen,
             last_seen,
@@ -10369,8 +10406,11 @@ def query_clickhouse_flows_for_analysis(event: dict[str, Any], limit: int = 100)
                 proto,
                 input_if,
                 output_if,
-                sum(packets) AS total_packets,
-                sum(bytes) AS total_bytes,
+                sum(packets * greatest(sample_rate, 1)) AS total_packets,
+                sum(bytes * greatest(sample_rate, 1)) AS total_bytes,
+                sum(packets) AS raw_packets,
+                sum(bytes) AS raw_bytes,
+                max(greatest(sample_rate, 1)) AS sample_rate,
                 sum(flow_count) AS total_flow_count,
                 min(flow_time) AS first_seen,
                 max(flow_time) AS last_seen
@@ -11097,7 +11137,27 @@ def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None 
 
 
 def compact_ai_flow(flow: dict[str, Any]) -> dict[str, Any]:
-    keys = ("flow_time", "sensor", "src_ip", "src_port", "dst_ip", "dst_port", "protocol", "proto_name", "decoder", "bits_s", "packets_s", "input_if", "output_if", "packets", "bytes", "flow_count")
+    keys = (
+        "flow_time",
+        "sensor",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "protocol",
+        "proto_name",
+        "decoder",
+        "bits_s",
+        "packets_s",
+        "input_if",
+        "output_if",
+        "packets",
+        "bytes",
+        "raw_packets",
+        "raw_bytes",
+        "sample_rate",
+        "flow_count",
+    )
     compacted: dict[str, Any] = {}
     for key in keys:
         value = flow.get(key)
@@ -11222,13 +11282,20 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
     max_context_chars = max(1000, int(max_context_chars or 1000))
     raw_size = ai_payload_json_size(payload)
     raw_candidates = list(payload.get("candidates") or [])
+    flow_evidence_source = dict(payload.get("flow_evidence") or payload.get("flow_context") or {})
+    related_flow_source = list(payload.get("related_flows") or [])
+    if not related_flow_source and isinstance(flow_evidence_source.get("related_flows"), list):
+        related_flow_source = list(flow_evidence_source.get("related_flows") or [])
+    top_conversation_source = list(payload.get("top_conversations") or [])
+    if not top_conversation_source and isinstance(flow_evidence_source.get("top_conversations"), list):
+        top_conversation_source = list(flow_evidence_source.get("top_conversations") or [])
     compacted: dict[str, Any] = {
         "anomaly": compact_anomaly_for_ai(dict(payload.get("anomaly") or {})),
         "deterministic_analysis": compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {})),
         "flow_context": compact_flow_context_for_ai(dict(payload.get("flow_context") or {})),
-        "flow_evidence": compact_flow_context_for_ai(dict(payload.get("flow_evidence") or payload.get("flow_context") or {})),
-        "related_flows": compact_ai_flow_list(list(payload.get("related_flows") or []), 10),
-        "top_conversations": compact_ai_flow_list(list(payload.get("top_conversations") or []), 10),
+        "flow_evidence": compact_flow_context_for_ai(flow_evidence_source),
+        "related_flows": compact_ai_flow_list(related_flow_source, 10),
+        "top_conversations": compact_ai_flow_list(top_conversation_source, 10),
         "candidates": [
             compact_ai_candidate(candidate, index)
             for index, candidate in enumerate(raw_candidates)

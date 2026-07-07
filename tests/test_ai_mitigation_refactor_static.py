@@ -99,6 +99,9 @@ class FakeClickHouseResult:
             "output_if",
             "packets",
             "bytes",
+            "raw_packets",
+            "raw_bytes",
+            "sample_rate",
             "flow_count",
             "first_flow_time",
             "last_flow_time",
@@ -119,6 +122,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             self.assertNotIn(forbidden, query)
         self.assertIn("total_packets AS packets", query)
         self.assertIn("total_bytes AS bytes", query)
+        self.assertIn("raw_packets", query)
+        self.assertIn("raw_bytes", query)
+        self.assertIn("sample_rate", query)
         self.assertIn("total_flow_count AS flow_count", query)
 
     def test_prompt_is_compact_safe_and_uses_existing_candidates_only(self):
@@ -420,12 +426,30 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 "flow_evidence": {
                     "evidence_status": "complete",
                     "enrichment_attempts": [{"label": "standard_dns_udp53", "rows": 1}],
+                    "related_flows": [
+                        {
+                            "src_ip": "186.232.169.225",
+                            "dst_ip": "92.38.143.209",
+                            "dst_port": 53,
+                            "proto": 17,
+                            "protocol": "UDP",
+                            "packets": 1_332_224,
+                            "raw_packets": 2602,
+                            "sample_rate": 512,
+                            "packets_s": 22203.73,
+                        }
+                    ],
                 },
                 "candidates": [],
             },
             5000,
         )
         self.assertEqual(payload["flow_evidence"]["enrichment_attempts"][0]["label"], "standard_dns_udp53")
+        self.assertEqual(len(payload["related_flows"]), 1)
+        self.assertEqual(payload["related_flows"][0]["dst_ip"], "92.38.143.209")
+        self.assertEqual(payload["related_flows"][0]["packets_s"], 22203.73)
+        self.assertEqual(payload["related_flows"][0]["raw_packets"], 2602)
+        self.assertEqual(payload["related_flows"][0]["sample_rate"], 512)
 
     def test_dns_internal_src_ip_related_flows_use_src_ip_udp53_without_dst_ip(self):
         calls = []
@@ -442,6 +466,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             20,
             248952,
             282_000_000,
+            248952,
+            282_000_000,
+            1,
             123,
             flow_time,
             flow_time,
@@ -475,6 +502,8 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(flow["protocol"], "UDP")
         self.assertEqual(flow["bytes"], 282_000_000)
         self.assertEqual(flow["packets"], 248952)
+        self.assertEqual(flow["raw_packets"], 248952)
+        self.assertEqual(flow["sample_rate"], 1)
         self.assertEqual(flow["exporter_ip"], "192.0.2.10")
         self.assertEqual(flow["input_if"], 10)
         self.assertEqual(flow["output_if"], 20)
@@ -494,8 +523,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("toString(src_ip)", calls[0][0])
         self.assertIn("endsWith(toString(src_ip), {target_ip_plain:String})", calls[0][0])
         self.assertIn("dst_port = 53", calls[0][0])
-        self.assertIn("sum(packets) AS total_packets", calls[0][0])
-        self.assertIn("sum(bytes) AS total_bytes", calls[0][0])
+        self.assertIn("sum(packets * greatest(sample_rate, 1)) AS total_packets", calls[0][0])
+        self.assertIn("sum(bytes * greatest(sample_rate, 1)) AS total_bytes", calls[0][0])
+        self.assertIn("sum(packets) AS raw_packets", calls[0][0])
+        self.assertIn("sum(bytes) AS raw_bytes", calls[0][0])
+        self.assertIn("max(greatest(sample_rate, 1)) AS sample_rate", calls[0][0])
         self.assertIn("sum(flow_count) AS total_flow_count", calls[0][0])
         self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", calls[0][0])
         self.assert_safe_flow_aggregation_query(calls[0][0])
@@ -524,6 +556,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
             ("pkts", "UInt64"),
             ("octets", "UInt64"),
             ("records", "UInt64"),
+            ("sample_rate", "UInt32"),
         ]
         row = (
             "sensor-a",
@@ -535,13 +568,16 @@ class AiMitigationRefactorTest(unittest.TestCase):
             17,
             10,
             20,
-            1_324_566,
-            94_797_270,
+            1_332_224,
+            97_361_920,
+            2602,
+            190_160,
+            512,
             321,
             flow_time,
             flow_time,
-            12_639_636.0,
-            22_076.1,
+            12_981_589.33,
+            22_203.73,
         )
 
         def fake_query_clickhouse(query, params=None):
@@ -555,8 +591,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
             self.assertIn("toString(dst_addr)", query)
             self.assertIn("l4_dst_port = 53", query)
             self.assertIn("lower(toString(protocol))", query)
-            self.assertIn("sum(pkts) AS total_packets", query)
-            self.assertIn("sum(octets) AS total_bytes", query)
+            self.assertIn("sum(pkts * greatest(sample_rate, 1)) AS total_packets", query)
+            self.assertIn("sum(octets * greatest(sample_rate, 1)) AS total_bytes", query)
+            self.assertIn("sum(pkts) AS raw_packets", query)
+            self.assertIn("sum(octets) AS raw_bytes", query)
+            self.assertIn("max(greatest(sample_rate, 1)) AS sample_rate", query)
             self.assertIn("sum(records) AS total_flow_count", query)
             self.assertIn("ORDER BY total_packets DESC, total_bytes DESC", query)
             self.assert_safe_flow_aggregation_query(query)
@@ -573,6 +612,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
                     "output_if",
                     "packets",
                     "bytes",
+                    "raw_packets",
+                    "raw_bytes",
+                    "sample_rate",
                     "flow_count",
                     "first_flow_time",
                     "last_flow_time",
@@ -607,9 +649,15 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(flow["dst_port"], 53)
         self.assertEqual(flow["proto"], 17)
         self.assertEqual(flow["protocol"], "UDP")
-        self.assertEqual(flow["packets_s"], 22076.1)
-        self.assertEqual(flow["bits_s"], 12639636.0)
+        self.assertEqual(flow["packets"], 1332224)
+        self.assertEqual(flow["raw_packets"], 2602)
+        self.assertEqual(flow["sample_rate"], 512)
+        self.assertEqual(flow["packets_s"], 22203.73)
+        self.assertEqual(flow["bits_s"], 12981589.33)
         self.assertEqual(enrichment["mitigation_candidates"][0]["dst_prefix"], "92.38.143.209/32")
+        self.assertEqual(enrichment["mitigation_candidates"][0]["profile"], "FLOWSPEC_BLOCK_DST_DNS")
+        self.assertFalse(enrichment["mitigation_candidates"][0]["allow_auto"])
+        self.assertTrue(enrichment["mitigation_candidates"][0]["manual_approval_required"])
 
     def test_dns_aggregate_without_dst_ip_has_no_candidate_or_pending(self):
         tmpdir = tempfile.mkdtemp()
@@ -850,6 +898,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             20,
             10,
             1000,
+            10,
+            1000,
+            1,
             1,
             flow_time,
             flow_time,
@@ -886,6 +937,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
         detail_source = source[source.find('def anomaly_detail(request: Request, event_id: int):'):source.find('def anomaly_pdf_response')]
         self.assertIn("conversations_from_flow_evidence(enrichment.get(\"flow_evidence\"))", detail_source)
         self.assertIn("flows = enriched_flows", detail_source)
+
+    def test_frontend_related_flows_falls_back_to_flow_evidence(self):
+        html = Path("frontend/index.html").read_text(encoding="utf-8")
+        self.assertIn("detail.flow_evidence.related_flows", html)
+        self.assertIn("const evidenceFlows", html)
 
 
 if __name__ == "__main__":
