@@ -1378,6 +1378,16 @@ def ensure_sqlite_column(conn: sqlite3.Connection, table: str, column: str, ddl:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def sqlite_insert_dict(conn: sqlite3.Connection, table: str, values: dict[str, Any]) -> sqlite3.Cursor:
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
         raise ValueError("invalid sqlite table name")
@@ -1647,7 +1657,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
-    ensure_sqlite_column(conn, "attack_vectors", "display_name", "display_name TEXT NOT NULL DEFAULT ''")
+    ensure_vector_display_name_columns(conn)
     ensure_sqlite_column(conn, "attack_vectors", "src_cidr", "src_cidr TEXT")
     ensure_sqlite_column(conn, "attack_vectors", "dst_cidr", "dst_cidr TEXT")
     ensure_sqlite_column(conn, "attack_vectors", "src_port", "src_port TEXT NOT NULL DEFAULT 'any'")
@@ -2446,7 +2456,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     }
     for column_name, definition in detection_rule_columns.items():
         ensure_sqlite_column(conn, "detection_template_rules", column_name, definition)
-    backfill_detection_display_names(conn)
+    ensure_vector_display_name_columns(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS detection_template_rule_responses (
@@ -6590,6 +6600,8 @@ def vector_display_name_from_metadata(display_name: Any, source_name: Any, vecto
 
 def backfill_detection_display_names(conn: sqlite3.Connection) -> None:
     for table, column in (("attack_vectors", "name"), ("detection_template_rules", "vector")):
+        if not sqlite_table_exists(conn, table):
+            continue
         rows = conn.execute(
             f"SELECT id, {column} AS vector FROM {table} WHERE display_name = '' OR display_name IS NULL"
         ).fetchall()
@@ -6600,6 +6612,14 @@ def backfill_detection_display_names(conn: sqlite3.Connection) -> None:
                     f"UPDATE {table} SET display_name = ? WHERE id = ? AND (display_name = '' OR display_name IS NULL)",
                     (display_name, int(row["id"])),
                 )
+
+
+def ensure_vector_display_name_columns(conn: sqlite3.Connection) -> None:
+    if sqlite_table_exists(conn, "attack_vectors"):
+        ensure_sqlite_column(conn, "attack_vectors", "display_name", "display_name TEXT NOT NULL DEFAULT ''")
+    if sqlite_table_exists(conn, "detection_template_rules"):
+        ensure_sqlite_column(conn, "detection_template_rules", "display_name", "display_name TEXT NOT NULL DEFAULT ''")
+    backfill_detection_display_names(conn)
 
 
 def fetch_detection_template_row(conn: sqlite3.Connection, template_id: int) -> sqlite3.Row:

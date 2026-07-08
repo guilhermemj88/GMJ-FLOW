@@ -519,6 +519,49 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(normalized["display_name"], "Meu UDP custom")
         self.assertEqual(normalized["vector"], "NEW_CUSTOM_UDP_VECTOR")
 
+    def test_detection_template_rules_display_name_migration_from_real_schema(self):
+        with sqlite3.connect(":memory:") as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """
+                CREATE TABLE detection_template_rules (
+                    id INTEGER PRIMARY KEY,
+                    template_id INTEGER NOT NULL,
+                    vector TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    protocol TEXT,
+                    metric TEXT NOT NULL,
+                    comparison TEXT NOT NULL DEFAULT 'over',
+                    warning_value REAL,
+                    critical_value REAL,
+                    window_seconds INTEGER NOT NULL DEFAULT 60,
+                    consecutive_windows INTEGER NOT NULL DEFAULT 1,
+                    cooldown_minutes INTEGER NOT NULL DEFAULT 5,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    response TEXT NOT NULL DEFAULT 'DETECTION_ONLY',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO detection_template_rules (
+                    id, template_id, vector, domain, direction, protocol, metric,
+                    warning_value, critical_value, created_at, updated_at
+                )
+                VALUES (1, 1, 'PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK', 'internal_ip',
+                    'transmits', 'UDP', 'packets_s', 45000, 60000,
+                    '2026-07-07T12:00:00Z', '2026-07-07T12:00:00Z')
+                """
+            )
+            backend_main.ensure_vector_display_name_columns(conn)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(detection_template_rules)").fetchall()}
+            self.assertIn("display_name", columns)
+            display_name = conn.execute("SELECT display_name FROM detection_template_rules WHERE id = 1").fetchone()["display_name"]
+            self.assertEqual(display_name, "UDP flood por IP")
+
     def test_attack_vector_and_anomaly_display_name_fallbacks(self):
         vector = backend_main.attack_vector_row_to_dict({
             "id": 1,
