@@ -359,6 +359,111 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(backend_main.anomaly_type_label("DNS_INTERNAL_IP_TO_DST_HIGH_PPS"), "DNS alto por destino")
         self.assertIn("UDP alto", backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_UNKNOWN_HIGH_UDP_PPS"))
 
+    def test_vector_display_name_backfill_and_payloads(self):
+        with sqlite3.connect(":memory:") as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("CREATE TABLE attack_vectors (id INTEGER PRIMARY KEY, name TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '')")
+            conn.execute("CREATE TABLE detection_template_rules (id INTEGER PRIMARY KEY, vector TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '')")
+            conn.execute("INSERT INTO attack_vectors (id, name, display_name) VALUES (1, 'PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK', '')")
+            conn.execute("INSERT INTO detection_template_rules (id, vector, display_name) VALUES (1, 'DNS_INTERNAL_IP_HIGH_BITS', '')")
+            backend_main.backfill_detection_display_names(conn)
+            self.assertEqual(conn.execute("SELECT display_name FROM attack_vectors WHERE id = 1").fetchone()["display_name"], "UDP flood por IP")
+            self.assertEqual(conn.execute("SELECT display_name FROM detection_template_rules WHERE id = 1").fetchone()["display_name"], "DNS alto em bits")
+
+        payload = backend_main.DetectionRulePayload(
+            vector="NEW_CUSTOM_UDP_VECTOR",
+            display_name="Meu UDP custom",
+            warning_value=10,
+        )
+        normalized = backend_main.normalize_detection_rule_payload(payload)
+        self.assertEqual(normalized["display_name"], "Meu UDP custom")
+        self.assertEqual(normalized["vector"], "NEW_CUSTOM_UDP_VECTOR")
+
+    def test_attack_vector_and_anomaly_display_name_fallbacks(self):
+        vector = backend_main.attack_vector_row_to_dict({
+            "id": 1,
+            "template_id": 1,
+            "template_name": "Default",
+            "name": "UDP_INTERNAL_IP_DST_HIGH_PPS",
+            "display_name": "",
+            "enabled": 1,
+            "domain_type": "any",
+            "target_cidr": None,
+            "src_cidr": "",
+            "dst_cidr": "",
+            "src_port": "any",
+            "dst_port": "any",
+            "protocol": "any",
+            "src_asn": "",
+            "dst_asn": "",
+            "tcp_flags": "any",
+            "window_seconds": 60,
+            "sensor_id": None,
+            "sensor_name": "",
+            "interface_if_index": None,
+            "direction": "receives",
+            "decoder": "UDP",
+            "comparison": "over",
+            "threshold_value": 10,
+            "threshold_unit": "packets_s",
+            "severity": "warning",
+            "response_action": "alert_only",
+            "parent_enabled": 1,
+            "created_at": "2026-07-07T12:00:00Z",
+            "updated_at": "2026-07-07T12:00:00Z",
+        })
+        self.assertEqual(vector["display_name"], "UDP destino/porta")
+        self.assertEqual(vector["friendly_name"], "UDP destino/porta")
+        self.assertEqual(vector["name"], "UDP_INTERNAL_IP_DST_HIGH_PPS")
+
+        anomaly = backend_main.security_anomaly_row_to_dict({
+            "id": 9,
+            "vector": "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",
+            "severity": "critical",
+            "status": "active",
+            "zone_id": 1,
+            "zone_name": "Cliente",
+            "template_id": 1,
+            "template_name": "Default",
+            "rule_id": 7,
+            "prefix_id": 1,
+            "prefix_cidr": "186.232.0.0/16",
+            "domain": "internal_ip",
+            "direction": "transmits",
+            "src_ip": "186.232.1.10",
+            "dst_ip": "",
+            "target_ip": "186.232.1.10",
+            "target_cidr": "186.232.1.10/32",
+            "target_role": "source",
+            "scope_type": "internal_ip_32",
+            "invalid_scope": 0,
+            "protocol": "UDP",
+            "packets_s": 1000,
+            "bits_s": 0,
+            "flows": 1,
+            "flows_s": 1,
+            "packets": 1000,
+            "bytes": 1000,
+            "unique_dst_ips": 1,
+            "unique_dst_ports": 1,
+            "unique_src_ports": 1,
+            "first_seen": "2026-07-07T12:00:00Z",
+            "last_seen": "2026-07-07T12:01:00Z",
+            "message": "",
+            "recommended_action": "",
+            "response": "DETECTION_ONLY",
+            "dedupe_key": "x",
+            "anomaly_source": "detection_template_rule",
+            "source_engine": "detection_templates",
+            "source_id": "7",
+            "source_name": "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",
+            "source_details_json": "{}",
+            "created_at": "2026-07-07T12:00:00Z",
+            "updated_at": "2026-07-07T12:01:00Z",
+        })
+        self.assertEqual(anomaly["type_label"], "UDP flood por IP")
+        self.assertEqual(anomaly["technical_vector"], "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK")
+
     def test_anomaly_main_table_is_compact_and_keeps_technical_names_in_detail(self):
         anomaly_header = FRONTEND[
             FRONTEND.find('<tbody id="anomaliesTable"></tbody>') - 900:
@@ -375,10 +480,23 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("<th>Tipo</th>", anomaly_header)
         self.assertIn("<th>Alvo</th>", anomaly_header)
         self.assertNotIn("Regra/Vetor", anomaly_header)
+        self.assertEqual(anomaly_header.count("<th>Status</th>"), 1)
+        self.assertEqual(anomaly_header.count("<th>Severidade</th>"), 1)
+        self.assertEqual(anomaly_header.count("<th>ID</th>"), 1)
         self.assertIn("anomalyTypeLabel(event)", render_source)
         self.assertIn("anomalyCompactSummary(event)", render_source)
-        self.assertIn("Regra tecnica", detail_source)
+        self.assertIn("['Nome', anomalyTypeLabel(event)]", detail_source)
         self.assertIn("Vetor tecnico", detail_source)
+
+    def test_attack_vector_display_name_ui_fields_and_payloads(self):
+        self.assertIn('id="detectionRuleDisplayName"', FRONTEND)
+        self.assertIn('id="modalVectorDisplayName"', FRONTEND)
+        self.assertIn("display_name: selectValue('detectionRuleDisplayName')", FRONTEND)
+        self.assertIn("display_name: selectValue('modalVectorDisplayName')", FRONTEND)
+        self.assertIn("syncFriendlyNameFromTechnical('detectionRuleVector', 'detectionRuleDisplayName')", FRONTEND)
+        self.assertIn("syncFriendlyNameFromTechnical('modalVectorName', 'modalVectorDisplayName')", FRONTEND)
+        self.assertIn('${escapeHtml(vectorDisplayName(rule, rule.vector))}<div class="subtle">${escapeHtml(rule.vector)}</div>', FRONTEND)
+        self.assertIn('${escapeHtml(vectorDisplayName(vector, vector.name))}<div class="subtle">${escapeHtml(vector.name)}</div>', FRONTEND)
 
     def test_anomaly_timeseries_window_expands_zero_duration(self):
         first = datetime(2026, 7, 7, 14, 12, 49, tzinfo=timezone.utc)

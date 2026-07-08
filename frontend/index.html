@@ -2891,6 +2891,10 @@
                     <input id="detectionRuleVector" class="form-control form-control-sm" placeholder="PREFIX_INTERNAL_IP_HIGH_UDP_PPS">
                   </div>
                   <div class="field">
+                    <label for="detectionRuleDisplayName">Nome amigável</label>
+                    <input id="detectionRuleDisplayName" class="form-control form-control-sm" placeholder="UDP alto por IP">
+                  </div>
+                  <div class="field">
                     <label for="detectionRuleDomain">Domain</label>
                     <select id="detectionRuleDomain" class="form-select form-select-sm">
                       <option value="internal_ip">Internal IP (/32 dentro da zona)</option>
@@ -3455,9 +3459,6 @@
               <table class="table table-sm table-hover align-middle mb-0 anomaly-table">
                 <thead>
                   <tr>
-                    <th>Status</th>
-                    <th>ID</th>
-                    <th>Severidade</th>
                     <th>Status</th>
                     <th>Severidade</th>
                     <th>ID</th>
@@ -4657,6 +4658,10 @@
           <div class="field">
             <label for="modalVectorName">Nome</label>
             <input id="modalVectorName" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="modalVectorDisplayName">Nome amigável</label>
+            <input id="modalVectorDisplayName" class="form-control form-control-sm" placeholder="UDP flood por IP">
           </div>
           <div class="field">
             <label for="modalVectorEnabled">Ativo</label>
@@ -7572,6 +7577,7 @@
 
     function installHelpTooltips() {
       const tooltips = {
+        detectionRuleDisplayName: 'Nome amigavel mostrado em Vetores de Ataque e Anomalias. O vector tecnico continua preservado.',
         detectionRuleVector: 'Nome lógico do vetor de ataque usado em histórico, agrupamento e relatórios.',
         detectionRuleDomain: 'Domínio define o escopo analisado: IP interno, prefixo, interface, sensor, destino ou ASN.',
         detectionRuleDirection: 'Direção do tráfego em relação à zona/prefixo/interface. Saída/upload normalmente usa IP interno como origem e destino externo como destino.',
@@ -7626,6 +7632,9 @@
     function resetDetectionRuleForm(rule = null) {
       editingDetectionRuleId = rule?.id || null;
       setValue('detectionRuleVector', rule?.vector || '');
+      setValue('detectionRuleDisplayName', rule?.display_name || automaticVectorDisplayName(rule?.vector || ''));
+      const displayNameInput = document.getElementById('detectionRuleDisplayName');
+      if (displayNameInput) displayNameInput.dataset.autoSuggestion = automaticVectorDisplayName(rule?.vector || '');
       setValue('detectionRuleDomain', rule?.domain || 'internal_ip');
       setValue('detectionRuleDirection', rule?.direction || 'transmits');
       setValue('detectionRuleProtocol', rule?.protocol || 'ALL');
@@ -7664,6 +7673,7 @@
       const criticalText = selectValue('detectionRuleCritical').trim();
       return {
         vector: selectValue('detectionRuleVector').trim(),
+        display_name: selectValue('detectionRuleDisplayName').trim() || automaticVectorDisplayName(selectValue('detectionRuleVector').trim()),
         domain: selectValue('detectionRuleDomain', 'internal_ip'),
         direction: selectValue('detectionRuleDirection', 'transmits'),
         protocol: selectValue('detectionRuleProtocol', 'ALL'),
@@ -7714,7 +7724,7 @@
       document.getElementById('detectionRuleStatus').textContent = currentDetectionTemplateId ? `${formatNumber(detectionRules.length)} regras` : 'Selecione um template';
       tbody.innerHTML = detectionRules.map(rule => `
         <tr>
-          <td>${escapeHtml(rule.vector)}</td>
+          <td>${escapeHtml(vectorDisplayName(rule, rule.vector))}<div class="subtle">${escapeHtml(rule.vector)}</div></td>
           <td>${escapeHtml(detectionDomainLabel(rule.domain))}</td>
           <td>${escapeHtml(detectionDirectionLabel(rule.direction))}</td>
           <td>${escapeHtml(rule.protocol || 'ALL')}</td>
@@ -10579,7 +10589,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       tbody.innerHTML = attackVectors.map(vector => `
         <tr>
           <td><span class="badge-soft ${vector.enabled ? 'ok' : 'off'}">${vector.enabled ? 'Ativo' : 'Off'}</span></td>
-          <td>${escapeHtml(vector.name)}</td>
+          <td>${escapeHtml(vectorDisplayName(vector, vector.name))}<div class="subtle">${escapeHtml(vector.name)}</div></td>
           <td>${escapeHtml(vector.domain_type)}</td>
           <td>${escapeHtml(vector.target_cidr || '-')}</td>
           <td>${escapeHtml(attackFilterSummary(vector))}</td>
@@ -10802,6 +10812,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('attackVectorModalTitle').textContent = editingAttackVectorId ? 'Editar vetor' : 'Adicionar vetor';
       populateAttackVectorSelects(vector || {});
       setValue('modalVectorName', vector?.name || '');
+      setValue('modalVectorDisplayName', vector?.display_name || automaticVectorDisplayName(vector?.name || ''));
+      const displayNameInput = document.getElementById('modalVectorDisplayName');
+      if (displayNameInput) displayNameInput.dataset.autoSuggestion = automaticVectorDisplayName(vector?.name || '');
       setBoolSelect('modalVectorEnabled', vector?.enabled ?? true);
       setValue('modalVectorTarget', vector?.target_cidr || '');
       setValue('modalVectorSrcCidr', vector?.src_cidr || '');
@@ -10821,6 +10834,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return {
         template_id: currentAttackTemplateId,
         name: selectValue('modalVectorName').trim(),
+        display_name: selectValue('modalVectorDisplayName').trim() || automaticVectorDisplayName(selectValue('modalVectorName').trim()),
         enabled: boolSelectValue('modalVectorEnabled'),
         domain_type: selectValue('modalVectorDomain', 'any'),
         target_cidr: selectValue('modalVectorTarget').trim() || null,
@@ -11102,10 +11116,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return event.source_name || event.vector_name || event.attack_vector_name || '-';
     }
 
-    const ANOMALY_TYPE_LABELS = {
+    const VECTOR_DISPLAY_NAME_FALLBACKS = {
+      DNS_INTERNAL_IP_HIGH_BITS: 'DNS alto em bits',
+      DNS_INTERNAL_IP_HIGH_PPS: 'DNS alto por IP',
+      DNS_INTERNAL_IP_TO_DST_HIGH_PPS: 'DNS alto por destino',
+      PREFIX_INTERNAL_IP_HIGH_FLOW_RATE: 'Flow alto por IP',
       PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK: 'UDP flood por IP',
       PREFIX_INTERNAL_IP_HIGH_UDP_PPS: 'UDP alto por IP',
+      PREFIX_INTERNAL_IP_TO_DST_HIGH_FLOW_RATE: 'Flow alto por destino',
+      PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_HIGH_PORT_PPS: 'UDP porta alta por destino',
       PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS: 'UDP alto por destino',
+      PREFIX_SUBNET_HIGH_PPS: 'PPS alto por subnet',
       DNS_INTERNAL_IP_TO_DST_HIGH_PPS: 'DNS alto por destino',
       UDP_INTERNAL_IP_DST_HIGH_PPS: 'UDP destino/porta',
       TCP_INTERNAL_IP_DST_HIGH_PPS: 'TCP destino/porta',
@@ -11114,10 +11135,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       PREFIX_INTERNAL_IP_TO_DST_HIGH_TCP_PPS: 'TCP alto por destino'
     };
 
-    function anomalyTypeLabel(event) {
-      if (event.type_label) return event.type_label;
-      const raw = String(event.vector_name || event.attack_vector_name || event.vector || event.source_name || event.decoder || 'Anomalia').toUpperCase();
-      if (ANOMALY_TYPE_LABELS[raw]) return ANOMALY_TYPE_LABELS[raw];
+    function automaticVectorDisplayName(rawValue) {
+      const raw = String(rawValue || '').toUpperCase();
+      if (!raw) return '';
+      if (VECTOR_DISPLAY_NAME_FALLBACKS[raw]) return VECTOR_DISPLAY_NAME_FALLBACKS[raw];
       return raw
         .replace(/^PREFIX_INTERNAL_IP_TO_DST_/, '')
         .replace(/^PREFIX_INTERNAL_IP_/, '')
@@ -11130,6 +11151,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         .toLowerCase()
         .replace(/\b(udp|tcp|dns|pps|ip)\b/g, token => token.toUpperCase())
         .replace(/^./, char => char.toUpperCase());
+    }
+
+    function vectorDisplayName(item = {}, technicalValue = '') {
+      const technical = technicalValue || item.vector || item.name || item.vector_name || item.attack_vector_name || item.source_name || '';
+      return item.display_name || item.friendly_name || item.label || item.type_label || automaticVectorDisplayName(technical) || technical || 'Anomalia';
+    }
+
+    function syncFriendlyNameFromTechnical(technicalInputId, displayInputId) {
+      const technicalInput = document.getElementById(technicalInputId);
+      const displayInput = document.getElementById(displayInputId);
+      if (!technicalInput || !displayInput) return;
+      const previousSuggestion = displayInput.dataset.autoSuggestion || '';
+      const currentDisplay = displayInput.value.trim();
+      const nextSuggestion = automaticVectorDisplayName(technicalInput.value.trim());
+      if (!currentDisplay || currentDisplay === previousSuggestion) {
+        displayInput.value = nextSuggestion;
+      }
+      displayInput.dataset.autoSuggestion = nextSuggestion;
+    }
+
+    function anomalyTypeLabel(event) {
+      return vectorDisplayName(event, event.vector_name || event.attack_vector_name || event.vector || event.source_name || event.decoder);
     }
 
     function anomalyTargetText(event) {
@@ -11243,7 +11286,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           : event.mitigation_basis || '-';
       const sourceDetails = event.source_details_json || event.source_details || {};
       const fields = [
-        ['Tipo', anomalyTypeLabel(event)],
+        ['Nome', anomalyTypeLabel(event)],
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],
@@ -14507,6 +14550,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('saveDetectionTemplateButton').addEventListener('click', () => saveDetectionTemplate().catch(console.error));
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
     document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
+    document.getElementById('detectionRuleVector').addEventListener('input', () => syncFriendlyNameFromTechnical('detectionRuleVector', 'detectionRuleDisplayName'));
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
     document.getElementById('runDetectionNowButton').addEventListener('click', () => runDetectionNow().catch(console.error));
     document.getElementById('learnDetectionRuleButton').addEventListener('click', () => openTrafficLearningModal().catch(error => setText('detectionRuleStatus', `Falha ao abrir aprendizado: ${error.message}`)));
@@ -14541,6 +14585,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('attackSuggestionUnitFilter').addEventListener('change', renderAttackSuggestionTable);
     document.getElementById('addVectorButton').addEventListener('click', () => openAttackVectorModal());
     document.getElementById('saveAttackVectorButton').addEventListener('click', () => saveAttackVector().catch(console.error));
+    document.getElementById('modalVectorName').addEventListener('input', () => syncFriendlyNameFromTechnical('modalVectorName', 'modalVectorDisplayName'));
     document.getElementById('modalVectorSensor').addEventListener('change', () => populateAttackVectorInterfaces());
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));

@@ -856,6 +856,7 @@ class AttackVectorTemplatePayload(BaseModel):
 class AttackVectorPayload(BaseModel):
     template_id: int = Field(..., ge=1)
     name: str
+    display_name: str = ""
     enabled: bool = True
     domain_type: str = "any"
     target_cidr: str | None = None
@@ -940,6 +941,7 @@ class DetectionTemplatePayload(BaseModel):
 
 class DetectionRulePayload(BaseModel):
     vector: str
+    display_name: str = ""
     domain: str = "internal_ip"
     direction: str = "transmits"
     protocol: str = "ALL"
@@ -1475,6 +1477,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             template_id INTEGER NOT NULL,
             name TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
             enabled INTEGER NOT NULL DEFAULT 1,
             domain_type TEXT NOT NULL DEFAULT 'any',
             target_cidr TEXT,
@@ -1629,6 +1632,7 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
+    ensure_sqlite_column(conn, "attack_vectors", "display_name", "display_name TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vectors", "src_cidr", "src_cidr TEXT")
     ensure_sqlite_column(conn, "attack_vectors", "dst_cidr", "dst_cidr TEXT")
     ensure_sqlite_column(conn, "attack_vectors", "src_port", "src_port TEXT NOT NULL DEFAULT 'any'")
@@ -2119,7 +2123,7 @@ def seed_mitigation_attack_vectors(conn: sqlite3.Connection, template_id: int) -
         conn.execute(
             """
             INSERT INTO attack_vectors (
-                template_id, name, enabled, domain_type, target_cidr, src_cidr, dst_cidr,
+                template_id, name, display_name, enabled, domain_type, target_cidr, src_cidr, dst_cidr,
                 src_port, dst_port, protocol, src_asn, dst_asn, tcp_flags, window_seconds,
                 sensor_id, interface_if_index, direction, decoder, comparison, threshold_value,
                 threshold_unit, severity, response_action, detection_key, mitigation_enabled,
@@ -2128,13 +2132,14 @@ def seed_mitigation_attack_vectors(conn: sqlite3.Connection, template_id: int) -
                 max_active_announcements, duration_seconds, min_confidence_for_auto, notes,
                 parent_enabled, created_at, updated_at
             )
-            VALUES (?, ?, 1, 'internal_ip', NULL, NULL, NULL, ?, ?, ?, '', '', 'any', 60,
+            VALUES (?, ?, ?, 1, 'internal_ip', NULL, NULL, NULL, ?, ?, ?, '', '', 'any', 60,
                     NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', ?, 1,
                     NULL, NULL, ?, 32, 128, 1, 300, 10, ?, NULL, ?, 1, ?, ?)
             """,
             (
                 template_id,
                 item["name"],
+                automatic_vector_display_name(item["name"]),
                 item["src_port"],
                 item["dst_port"],
                 item["protocol"],
@@ -2214,6 +2219,7 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
             INSERT INTO attack_vectors (
                 template_id,
                 name,
+                display_name,
                 enabled,
                 domain_type,
                 target_cidr,
@@ -2239,9 +2245,9 @@ def seed_default_attack_vectors(conn: sqlite3.Connection) -> None:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, 1, ?, NULL, NULL, NULL, 'any', 'any', 'any', '', '', 'any', 60, NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', 1, ?, ?)
+            VALUES (?, ?, ?, 1, ?, NULL, NULL, NULL, 'any', 'any', 'any', '', '', 'any', 60, NULL, NULL, ?, ?, 'over', ?, ?, ?, 'alert_only', 1, ?, ?)
             """,
-            (template_id, name, domain_type, direction, decoder, value, unit, severity, now, now),
+            (template_id, name, automatic_vector_display_name(name), domain_type, direction, decoder, value, unit, severity, now, now),
         )
 
 
@@ -2264,6 +2270,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             template_id INTEGER NOT NULL,
             vector TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
             domain TEXT NOT NULL,
             direction TEXT NOT NULL,
             protocol TEXT,
@@ -2387,6 +2394,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "source_name", "source_name TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "source_details_json", "source_details_json TEXT NOT NULL DEFAULT '{}'")
     detection_rule_columns = {
+        "display_name": "display_name TEXT NOT NULL DEFAULT ''",
         "src_cidr": "src_cidr TEXT NOT NULL DEFAULT ''",
         "dst_cidr": "dst_cidr TEXT NOT NULL DEFAULT ''",
         "src_port": "src_port TEXT NOT NULL DEFAULT 'any'",
@@ -2423,6 +2431,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     }
     for column_name, definition in detection_rule_columns.items():
         ensure_sqlite_column(conn, "detection_template_rules", column_name, definition)
+    backfill_detection_display_names(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS detection_template_rule_responses (
@@ -2502,6 +2511,7 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
             INSERT INTO detection_template_rules (
                 template_id,
                 vector,
+                display_name,
                 domain,
                 direction,
                 protocol,
@@ -2517,9 +2527,9 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'over', ?, ?, 60, 1, 5, 1, 'DETECTION_ONLY', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'over', ?, ?, 60, 1, 5, 1, 'DETECTION_ONLY', ?, ?)
             """,
-            (template_id, vector, domain, direction, protocol, metric, warning, critical, now, now),
+            (template_id, vector, automatic_vector_display_name(vector), domain, direction, protocol, metric, warning, critical, now, now),
         )
 
 
@@ -6525,6 +6535,60 @@ def normalize_detection_vector(value: Any) -> str:
     return vector
 
 
+DEFAULT_VECTOR_DISPLAY_NAMES = {
+    "DNS_INTERNAL_IP_HIGH_BITS": "DNS alto em bits",
+    "DNS_INTERNAL_IP_HIGH_PPS": "DNS alto por IP",
+    "DNS_INTERNAL_IP_TO_DST_HIGH_PPS": "DNS alto por destino",
+    "PREFIX_INTERNAL_IP_HIGH_FLOW_RATE": "Flow alto por IP",
+    "PREFIX_INTERNAL_IP_HIGH_UDP_PPS": "UDP alto por IP",
+    "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK": "UDP flood por IP",
+    "PREFIX_INTERNAL_IP_TO_DST_HIGH_FLOW_RATE": "Flow alto por destino",
+    "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_HIGH_PORT_PPS": "UDP porta alta por destino",
+    "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS": "UDP alto por destino",
+    "PREFIX_SUBNET_HIGH_PPS": "PPS alto por subnet",
+    "UDP_INTERNAL_IP_DST_HIGH_PPS": "UDP destino/porta",
+    "TCP_INTERNAL_IP_DST_HIGH_PPS": "TCP destino/porta",
+}
+
+
+def automatic_vector_display_name(value: Any) -> str:
+    vector = clean_text(value).upper()
+    if not vector:
+        return ""
+    if vector in DEFAULT_VECTOR_DISPLAY_NAMES:
+        return DEFAULT_VECTOR_DISPLAY_NAMES[vector]
+    return anomaly_type_label(vector) if "anomaly_type_label" in globals() else vector.replace("_", " ").title()
+
+
+def effective_vector_display_name(display_name: Any, vector: Any) -> str:
+    return clean_text(display_name) or automatic_vector_display_name(vector) or clean_text(vector)
+
+
+def vector_display_name_from_metadata(display_name: Any, source_name: Any, vector: Any) -> str:
+    explicit = clean_text(display_name)
+    if explicit:
+        return explicit
+    technical = clean_text(vector).upper()
+    source = clean_text(source_name)
+    if source and source.upper() != technical:
+        return source
+    return automatic_vector_display_name(technical) or source or technical
+
+
+def backfill_detection_display_names(conn: sqlite3.Connection) -> None:
+    for table, column in (("attack_vectors", "name"), ("detection_template_rules", "vector")):
+        rows = conn.execute(
+            f"SELECT id, {column} AS vector FROM {table} WHERE display_name = '' OR display_name IS NULL"
+        ).fetchall()
+        for row in rows:
+            display_name = automatic_vector_display_name(row["vector"])
+            if display_name:
+                conn.execute(
+                    f"UPDATE {table} SET display_name = ? WHERE id = ? AND (display_name = '' OR display_name IS NULL)",
+                    (display_name, int(row["id"])),
+                )
+
+
 def fetch_detection_template_row(conn: sqlite3.Connection, template_id: int) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM detection_templates WHERE id = ?", (template_id,)).fetchone()
     if row is None:
@@ -6597,6 +6661,8 @@ def detection_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[st
 
 def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    vector = item["vector"]
+    display_name = effective_vector_display_name(item.get("display_name"), vector)
     cooldown_seconds = int(item.get("cooldown_seconds") or int(item.get("cooldown_minutes") or 5) * 60)
     mitigation_mode = normalize_detection_mitigation_mode(item.get("mitigation_mode"))
     warning_profile_id = int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None
@@ -6611,7 +6677,10 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
     return {
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
-        "vector": item["vector"],
+        "vector": vector,
+        "display_name": display_name,
+        "friendly_name": display_name,
+        "label": display_name,
         "domain": item["domain"],
         "direction": item["direction"],
         "protocol": item.get("protocol") or "ALL",
@@ -6768,6 +6837,7 @@ def normalize_detection_template_payload(payload: DetectionTemplatePayload) -> d
 
 def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str, Any]:
     data = dump_model(payload)
+    vector = normalize_detection_vector(data.get("vector"))
     domain = normalize_choice(clean_text(data.get("domain")).lower() or "internal_ip", DETECTION_DOMAINS, "domain")
     direction = normalize_choice(clean_text(data.get("direction")).lower() or "transmits", DETECTION_DIRECTIONS, "direction")
     direction = DETECTION_DIRECTION_ALIASES.get(direction, direction)
@@ -6789,7 +6859,8 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
     if warning_value is not None and critical_value is not None and float(critical_value) < float(warning_value):
         raise HTTPException(status_code=400, detail="critical_value deve ser maior ou igual ao warning_value")
     return {
-        "vector": normalize_detection_vector(data.get("vector")),
+        "vector": vector,
+        "display_name": clean_text(data.get("display_name")) or automatic_vector_display_name(vector),
         "domain": domain,
         "direction": direction,
         "protocol": normalize_detection_protocol(data.get("protocol")),
@@ -9485,7 +9556,7 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
         return {"event": event, "flows": [security_item], "security_anomalies": [security_item]}
     row = conn.execute(
         """
-        SELECT e.*, v.name AS attack_vector_name, v.domain_type AS attack_domain_type, s.name AS sensor_name
+        SELECT e.*, v.name AS attack_vector_name, v.display_name AS attack_vector_display_name, v.domain_type AS attack_domain_type, s.name AS sensor_name
         FROM anomaly_events e
         LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
         LEFT JOIN sensors s ON s.id = e.sensor_id
@@ -15443,7 +15514,7 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
         cursor = conn.execute(
             """
             INSERT INTO detection_template_rules (
-                template_id, vector, domain, direction, protocol, metric, comparison,
+                template_id, vector, display_name, domain, direction, protocol, metric, comparison,
                 warning_value, critical_value, window_seconds, consecutive_windows,
                 cooldown_minutes, cooldown_seconds, enabled, response, src_cidr,
                 dst_cidr, src_port, dst_port, tcp_flags, icmp_type, icmp_code,
@@ -15456,11 +15527,12 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 template_id,
                 data["vector"],
+                data["display_name"],
                 data["domain"],
                 data["direction"],
                 data["protocol"],
@@ -15522,6 +15594,7 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
             """
             UPDATE detection_template_rules
             SET vector = ?,
+                display_name = ?,
                 domain = ?,
                 direction = ?,
                 protocol = ?,
@@ -15568,6 +15641,7 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
             """,
             (
                 data["vector"],
+                data["display_name"],
                 data["domain"],
                 data["direction"],
                 data["protocol"],
@@ -16276,9 +16350,11 @@ def query_detection_rule_candidates(
             "template_name": template["name"],
             "rule_id": int(rule["id"]),
             "rule_name": rule["vector"],
+            "display_name": rule.get("display_name") or automatic_vector_display_name(rule["vector"]),
             "rule_config": {
                 key: rule.get(key)
                 for key in (
+                    "display_name",
                     "domain",
                     "direction",
                     "protocol",
@@ -16432,11 +16508,13 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         candidate["bits_s"] = max(float(existing["bits_s"] or 0), float(candidate.get("bits_s") or 0))
     message = security_anomaly_message(candidate)
     recommended_action = "Verificar origem, cliente e destino. Nenhum bloqueio automatico foi aplicado."
+    candidate_display_name = effective_vector_display_name(candidate.get("display_name"), candidate.get("rule_name") or candidate.get("vector"))
     source_details = {
         "template_id": candidate.get("template_id"),
         "template_name": candidate.get("template_name") or "",
         "rule_id": candidate.get("rule_id"),
         "rule_name": candidate.get("rule_name") or candidate.get("vector") or "",
+        "display_name": candidate_display_name,
         "rule_config": candidate.get("rule_config") or {},
         "threshold_warning": candidate.get("threshold_warning"),
         "threshold_critical": candidate.get("threshold_critical"),
@@ -16504,7 +16582,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "detection_template_rule",
         "detection_templates",
         str(candidate.get("rule_id") or ""),
-        candidate.get("rule_name") or candidate.get("vector") or "",
+        candidate_display_name,
         json.dumps(source_details, sort_keys=True, default=str),
     )
     if existing is None:
@@ -16681,7 +16759,12 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
     }
-    result["type_label"] = anomaly_type_label(result.get("vector") or result.get("source_name") or result.get("protocol"))
+    result["display_name"] = vector_display_name_from_metadata(
+        source_details.get("display_name"),
+        result.get("source_name"),
+        result.get("vector") or result.get("technical_vector") or result.get("protocol"),
+    )
+    result["type_label"] = result["display_name"] or anomaly_type_label(result.get("vector") or result.get("source_name") or result.get("protocol"))
     result["technical_vector"] = result.get("vector") or ""
     result["technical_rule"] = result.get("source_name") or result.get("vector") or ""
     result["compact_summary"] = anomaly_short_summary({
@@ -17304,11 +17387,16 @@ def attack_vector_template_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dic
 
 def attack_vector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
+    name = item["name"]
+    display_name = effective_vector_display_name(item.get("display_name"), name)
     return {
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
         "template_name": item.get("template_name", ""),
-        "name": item["name"],
+        "name": name,
+        "display_name": display_name,
+        "friendly_name": display_name,
+        "label": display_name,
         "enabled": sqlite_bool(item["enabled"]),
         "domain_type": item["domain_type"],
         "target_cidr": item.get("target_cidr"),
@@ -17481,25 +17569,28 @@ def backfill_anomaly_source_fields(conn: sqlite3.Connection) -> None:
 
 def anomaly_source_from_vector(vector: dict[str, Any]) -> dict[str, Any]:
     if vector.get("detection_template_rule_id") is not None:
+        display_name = effective_vector_display_name(vector.get("display_name"), vector.get("rule_name") or vector.get("name"))
         details = {
             "template_id": vector.get("detection_template_id") or vector.get("template_id"),
             "template_name": vector.get("template_name") or "",
             "rule_id": vector.get("detection_template_rule_id"),
             "rule_name": vector.get("rule_name") or vector.get("name") or "",
+            "display_name": display_name,
         }
         return {
             "anomaly_source": "detection_template_rule",
             "source_engine": "detection_templates",
             "source_id": str(vector.get("detection_template_rule_id")),
-            "source_name": clean_text(vector.get("rule_name") or vector.get("name")),
+            "source_name": display_name,
             "source_details_json": details,
         }
+    display_name = effective_vector_display_name(vector.get("display_name"), vector.get("name") or vector.get("detection_key"))
     return {
         "anomaly_source": "legacy_attack_vector",
         "source_engine": "legacy_detector",
         "source_id": str(vector.get("id") or ""),
-        "source_name": clean_text(vector.get("name") or vector.get("detection_key")),
-        "source_details_json": {"attack_vector_id": vector.get("id"), "vector_name": vector.get("name") or vector.get("detection_key") or ""},
+        "source_name": display_name,
+        "source_details_json": {"attack_vector_id": vector.get("id"), "vector_name": vector.get("name") or vector.get("detection_key") or "", "display_name": display_name},
     }
 
 
@@ -17615,7 +17706,13 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "updated_at": item["updated_at"],
     }
     result.update(source)
-    result["type_label"] = anomaly_type_label(result.get("vector_name") or result.get("attack_vector_name") or result.get("decoder"))
+    source_details = result.get("source_details_json") or result.get("source_details") or {}
+    result["display_name"] = vector_display_name_from_metadata(
+        item.get("attack_vector_display_name") or source_details.get("display_name"),
+        result.get("source_name"),
+        result.get("vector_name") or result.get("attack_vector_name") or result.get("decoder"),
+    )
+    result["type_label"] = result["display_name"] or anomaly_type_label(result.get("vector_name") or result.get("attack_vector_name") or result.get("decoder"))
     result["technical_vector"] = result.get("vector_name") or result.get("attack_vector_name") or ""
     result["technical_rule"] = result.get("source_name") or result.get("vector_name") or result.get("attack_vector_name") or ""
     result["compact_summary"] = anomaly_short_summary(result)
@@ -17682,6 +17779,7 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
     name = clean_text(data.get("name"))
     if not name:
         raise HTTPException(status_code=400, detail="Nome do vetor obrigatorio")
+    display_name = clean_text(data.get("display_name")) or automatic_vector_display_name(name)
     domain_type = normalize_choice(data.get("domain_type") or "any", ATTACK_DOMAIN_TYPES, "domain_type")
     direction = normalize_choice(data.get("direction") or "receives", ATTACK_DIRECTIONS, "direction")
     decoder = clean_text(data.get("decoder") or "IP").upper()
@@ -17741,6 +17839,7 @@ def normalize_attack_vector_payload(conn: sqlite3.Connection, payload: AttackVec
     return {
         "template_id": int(data["template_id"]),
         "name": name,
+        "display_name": display_name,
         "enabled": 1 if data.get("enabled") else 0,
         "domain_type": domain_type,
         "target_cidr": target_cidr,
@@ -18606,6 +18705,7 @@ def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int)
         INSERT INTO attack_vectors (
             template_id,
             name,
+            display_name,
             enabled,
             domain_type,
             target_cidr,
@@ -18622,11 +18722,12 @@ def apply_attack_vector_suggestion(conn: sqlite3.Connection, suggestion_id: int)
             created_at,
             updated_at
         )
-        VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, 'over', ?, ?, 'warning', 'alert_only', 1, ?, ?)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'over', ?, ?, 'warning', 'alert_only', 1, ?, ?)
         """,
         (
             suggestion["template_id"],
             name,
+            automatic_vector_display_name(name),
             suggestion["domain_type"],
             suggestion["target_cidr"],
             suggestion["sensor_id"],
@@ -20651,6 +20752,7 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
                 INSERT INTO attack_vectors (
                     template_id,
                     name,
+                    display_name,
                     enabled,
                     domain_type,
                     target_cidr,
@@ -20676,11 +20778,12 @@ def duplicate_attack_vector_template(request: Request, template_id: int):
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_template_id,
                     vector["name"],
+                    vector.get("display_name") or automatic_vector_display_name(vector["name"]),
                     1 if vector["enabled"] else 0,
                     vector["domain_type"],
                     vector["target_cidr"],
@@ -20814,6 +20917,7 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
             INSERT INTO attack_vectors (
                 template_id,
                 name,
+                display_name,
                 enabled,
                 domain_type,
                 target_cidr,
@@ -20855,11 +20959,12 @@ def create_attack_vector(request: Request, payload: AttackVectorPayload):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 data["template_id"],
                 data["name"],
+                data["display_name"],
                 data["enabled"],
                 data["domain_type"],
                 data["target_cidr"],
@@ -20990,6 +21095,7 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
             UPDATE attack_vectors
             SET template_id = ?,
                 name = ?,
+                display_name = ?,
                 enabled = ?,
                 domain_type = ?,
                 target_cidr = ?,
@@ -21034,6 +21140,7 @@ def update_attack_vector(request: Request, vector_id: int, payload: AttackVector
             (
                 data["template_id"],
                 data["name"],
+                data["display_name"],
                 data["enabled"],
                 data["domain_type"],
                 data["target_cidr"],
@@ -21103,6 +21210,7 @@ def duplicate_attack_vector(request: Request, vector_id: int):
             INSERT INTO attack_vectors (
                 template_id,
                 name,
+                display_name,
                 enabled,
                 domain_type,
                 target_cidr,
@@ -21128,11 +21236,12 @@ def duplicate_attack_vector(request: Request, vector_id: int):
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 vector["template_id"],
                 f"{vector['name']} (copia)",
+                vector.get("display_name") or automatic_vector_display_name(vector["name"]),
                 1 if vector["enabled"] else 0,
                 vector["domain_type"],
                 vector["target_cidr"],
@@ -21426,6 +21535,7 @@ def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = No
             SELECT
                 e.*,
                 v.name AS attack_vector_name,
+                v.display_name AS attack_vector_display_name,
                 v.domain_type AS attack_domain_type,
                 s.name AS sensor_name
             FROM anomaly_events e
@@ -21993,6 +22103,7 @@ def anomaly_detail(request: Request, event_id: int):
             SELECT
                 e.*,
                 v.name AS attack_vector_name,
+                v.display_name AS attack_vector_display_name,
                 v.domain_type AS attack_domain_type,
                 s.name AS sensor_name
             FROM anomaly_events e
