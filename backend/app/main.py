@@ -7999,6 +7999,13 @@ def active_flowspec_announcement_count(connector: dict[str, Any]) -> int:
         return 0
 
 
+def exabgp_pipe_mount_error(pipe_path: str) -> str:
+    path = clean_text(pipe_path)
+    if path.startswith("/run/exabgp/") and not Path(path).exists():
+        return "Pipe /run/exabgp não montado no container backend"
+    return ""
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -8064,10 +8071,14 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
 
     pipe_in = clean_text(connector.get("exabgp_pipe_in"))
     pipe_out = clean_text(connector.get("exabgp_pipe_out"))
+    pipe_mount_error = exabgp_pipe_mount_error(pipe_in) or exabgp_pipe_mount_error(pipe_out)
     input_exists = bool(pipe_in and Path(pipe_in).exists())
     output_exists = bool(pipe_out and Path(pipe_out).exists())
     input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
     pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
+    if pipe_mount_error:
+        messages.append(pipe_mount_error)
+        errors.append(pipe_mount_error)
     exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
     if exabgp_peer.get("state") == "unknown":
         heuristic_peer = exabgp_peer_from_log_heuristic(connector)
@@ -8118,6 +8129,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "ok": pipes_ok,
             "status": "ok" if pipes_ok else "down",
             "severity": "ok" if pipes_ok else "down",
+            "message": "" if pipes_ok else pipe_mount_error,
         },
         "exabgp_peer": exabgp_peer,
         "router_check": router_status,
@@ -8369,6 +8381,9 @@ def exabgp_write_pipe(connector: dict[str, Any], command: str) -> None:
     pipe_path = clean_text(connector.get("exabgp_pipe_in"))
     if not pipe_path:
         raise HTTPException(status_code=400, detail="exabgp_pipe_in nao configurado")
+    mount_error = exabgp_pipe_mount_error(pipe_path)
+    if mount_error:
+        raise HTTPException(status_code=400, detail=mount_error)
     try:
         fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
         try:
@@ -13128,6 +13143,8 @@ def exabgp_system_status_payload() -> dict[str, Any]:
     pipe_out = pipe_dir / "exabgp.out"
     service = systemd_unit_status("exabgp-gmj-flow.service")
     docker_ls = system_run_command(["docker", "exec", "gmj-flow-backend", "test", "-e", "/run/exabgp/exabgp.in"], timeout=3)
+    backend_mount_visible = docker_ls["returncode"] == 0 if docker_ls["available"] else pipe_in.exists()
+    pipe_message = "" if backend_mount_visible else "Pipe /run/exabgp não montado no container backend"
     listening = False
     if shutil.which("ss") is not None:
         ss_result = system_run_command(["ss", "-lntp"], timeout=2)
@@ -13139,8 +13156,9 @@ def exabgp_system_status_payload() -> dict[str, Any]:
         "pipes": {
             "backend_or_host_in_exists": pipe_in.exists(),
             "backend_or_host_out_exists": pipe_out.exists(),
-            "backend_mount_visible": docker_ls["returncode"] == 0 if docker_ls["available"] else pipe_in.exists(),
+            "backend_mount_visible": backend_mount_visible,
             "path": "/run/exabgp",
+            "message": pipe_message,
         },
         "tcp_179_listening": listening,
         "install_command": "sudo ./scripts/install-exabgp.sh --local-as 53194 --peer-as 53194 --local-address <IP_LOCAL> --router-id <IP_LOCAL> --peer-ip <PEER_IP> --passive true",
@@ -21347,13 +21365,13 @@ def severity_rank(value: Any) -> int:
 
 def security_anomaly_items_status(items: list[dict[str, Any]], status_filter: str = "") -> str:
     statuses = [clean_text(item.get("status")).lower() for item in items if clean_text(item.get("status"))]
-    if status_filter == "active" or "active" in statuses:
+    if "active" in statuses:
         return "active"
     if "acknowledged" in statuses:
         return "acknowledged"
     if "closed" in statuses:
         return "closed"
-    return statuses[0] if statuses else ("active" if status_filter == "active" else "closed")
+    return statuses[0] if statuses else ""
 
 
 def consolidated_security_anomaly_id(key: tuple[Any, ...]) -> int:
@@ -21581,6 +21599,10 @@ def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = No
     if clean_text(source_engine):
         consolidated = [item for item in consolidated if clean_text(item.get("source_engine")) == clean_text(source_engine)]
     items.extend(consolidated)
+    if status_filter == "active":
+        items = [item for item in items if clean_text(item.get("status")).lower() == "active"]
+    else:
+        items = [item for item in items if clean_text(item.get("status")).lower() != "active"]
     return sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
 
 

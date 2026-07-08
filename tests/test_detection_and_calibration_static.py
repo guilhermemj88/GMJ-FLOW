@@ -732,6 +732,26 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("function niceAnomalyAxisMax", FRONTEND)
         self.assertIn("anomalyMetricChartWarning", FRONTEND)
         self.assertIn("timeseries_query_mode", FRONTEND)
+        self.assertIn("function anomalyOperationalStatus", FRONTEND)
+        self.assertIn("function displayAnomalyItems", FRONTEND)
+        self.assertIn("function syncAnomalyListItemFromDetail", FRONTEND)
+        self.assertIn("anomalyItems.splice(index, 1)", FRONTEND)
+        self.assertNotIn("event.status = rowSnapshot.status", FRONTEND)
+        self.assertIn('clean_text(item.get("status")).lower() == "active"', SOURCE)
+        self.assertEqual(
+            backend_main.security_anomaly_items_status([{"status": "acknowledged"}], "active"),
+            "acknowledged",
+        )
+
+    def test_exabgp_pipe_mount_override_and_clear_status_message(self):
+        compose = (ROOT / "docker-compose.exabgp-pipe.yml").read_text(encoding="utf-8")
+        install_doc = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
+        self.assertIn("/run/exabgp:/run/exabgp", compose)
+        self.assertIn("-f docker-compose.exabgp-pipe.yml", install_doc)
+        self.assertIn("--force-recreate backend frontend", install_doc)
+        self.assertIn("Pipe /run/exabgp não montado no container backend", SOURCE)
+        self.assertIn("def exabgp_pipe_mount_error", SOURCE)
+        self.assertIn('"message": "" if pipes_ok else pipe_mount_error', SOURCE)
 
     def test_attack_vector_display_name_ui_fields_and_payloads(self):
         self.assertIn('id="detectionRuleDisplayName"', FRONTEND)

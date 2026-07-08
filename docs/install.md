@@ -26,6 +26,18 @@ sudo ./scripts/install-exabgp.sh \
   --passive true
 ```
 
+Se o ExaBGP roda no host e cria `/run/exabgp/exabgp.in` e `/run/exabgp/exabgp.out`,
+use o override opcional versionado para montar os pipes no backend:
+
+```sh
+docker compose --env-file .env \
+  -f docker-compose.yml \
+  -f docker-compose.exabgp-pipe.yml \
+  --profile ai up -d --build --force-recreate backend frontend
+```
+
+Esse override nao e obrigatorio para instalacoes sem ExaBGP no host.
+
 ## IA + ExaBGP + autostart
 
 ```sh
@@ -87,7 +99,7 @@ docker exec gmj-flow-clickhouse clickhouse-client --query "SELECT count(), max(f
 - `ollama list` vazio: use `Sistema > IA Local > Baixar` ou `docker exec gmj-flow-ollama ollama pull qwen2.5:3b-instruct`.
 - IA desativada HTTP 409: habilite em `Sistema > IA Local`.
 - Pipe ExaBGP down: rode `sudo ./scripts/install-exabgp.sh ...` e valide `/run/exabgp`.
-- Backend não vê `/run/exabgp`: confirme `docker-compose.exabgp.yml` e recrie o backend.
+- Backend nao ve `/run/exabgp`: use `-f docker-compose.exabgp-pipe.yml` e recrie `backend frontend`.
 - Frontend 502 após recriar backend: confirme `frontend/nginx.conf` com `resolver 127.0.0.11`.
 - GMJ-FLOW não sobe após reboot: instale `gmj-flow.service` e confira `systemctl is-enabled gmj-flow`.
 - PDF com números crus: exporte Flows novamente; o PDF deve mostrar `Mbps`, `Kpps`, `MB`, `K/M/G`.
