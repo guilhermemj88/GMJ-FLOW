@@ -12,6 +12,10 @@ from tests.test_collector_apply_static import backend_main
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+PEAK_HUNTER_API = (ROOT / "backend" / "app" / "api" / "peak_hunter.py").read_text(encoding="utf-8")
+PEAK_HUNTER_SERVICE = (ROOT / "backend" / "app" / "services" / "peak_hunter.py").read_text(encoding="utf-8")
+PEAK_HUNTER_RUNNER = (ROOT / "backend" / "app" / "services" / "peak_hunter_runner.py").read_text(encoding="utf-8")
+CLICKHOUSE_SERVICE = (ROOT / "backend" / "app" / "services" / "clickhouse.py").read_text(encoding="utf-8")
 FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
 
@@ -87,6 +91,13 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("internal_expr = \"CAST(NULL, 'Nullable(String)')\"", query_builder)
         self.assertIn('"target_cidr": prefix["cidr"]', query_builder)
         self.assertIn('"scope_type": "subnet"', query_builder)
+        self.assertIn("flow_raw.src_ip", SOURCE)
+        self.assertIn("flow_raw.dst_ip", SOURCE)
+        self.assertNotIn("isIPAddressInRange(toString(src_ip), {prefix_cidr:String})", query_builder)
+        for cidr in ("45.5.248.0/23", "168.232.197.0/24", "179.189.80.0/22", "2804:7540::/32"):
+            self.assertEqual(backend_main.clickhouse_cidr_string_param(cidr), cidr)
+        membership_filter, *_ = backend_main.detection_direction_sql("transmits", "prefix_cidr")
+        self.assertIn("isIPAddressInRange(CAST(toString(flow_raw.src_ip) AS String), {prefix_cidr:String})", membership_filter)
 
     def test_anomaly_threshold_uses_metric_unit_not_pps_default(self):
         self.assertIn("configured_metric = clean_text(rule_config.get(\"metric\")", SOURCE)
@@ -140,6 +151,147 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
                 with backend_main.sqlite_connection() as conn:
                     self.assertEqual(int(conn.execute("PRAGMA busy_timeout").fetchone()[0]), 30000)
                     self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sqlite_lock_hot_paths_use_cached_ensure_and_busy_timeout(self):
+        self.assertIn("SYSTEM_SETTINGS_READY_KEYS", SOURCE)
+        self.assertIn("def sqlite_operational_error_handler", SOURCE)
+        self.assertIn('"sqlite_busy"', SOURCE)
+        self.assertIn("PEAK_ANALYSIS_READY_KEYS", PEAK_HUNTER_SERVICE)
+        self.assertIn("_ensure_peak_analysis_db_uncached(conn)", PEAK_HUNTER_SERVICE)
+        self.assertIn("sqlite3.connect(os.getenv(\"GMJFLOW_DB_PATH\", \"/app/data/gmjflow.db\"), timeout=30, check_same_thread=False)", PEAK_HUNTER_API)
+        for source in (SOURCE, PEAK_HUNTER_API, PEAK_HUNTER_RUNNER, CLICKHOUSE_SERVICE):
+            self.assertIn("PRAGMA busy_timeout=30000", source)
+            self.assertIn("PRAGMA journal_mode=WAL", source)
+            self.assertIn("PRAGMA synchronous=NORMAL", source)
+
+    def test_response_profile_target_modes_and_auto_dns_profile_are_persisted(self):
+        self.assertIn("BGP_MITIGATION_TARGET_MODES", SOURCE)
+        self.assertIn("mitigation_target_mode TEXT NOT NULL DEFAULT 'sensor_origin'", SOURCE)
+        self.assertIn("selected_connector_ids TEXT NOT NULL DEFAULT '[]'", SOURCE)
+        self.assertIn("FLOWSPEC_AUTO_BLOCK_DST_DNS", SOURCE)
+        self.assertIn('"approval_mode": "auto"', SOURCE)
+        self.assertIn('"target_selector": "dst_ip"', SOURCE)
+        self.assertIn('"dst_port_value": "53"', SOURCE)
+        self.assertIn("resolve_mitigation_target_connectors", SOURCE)
+        self.assertIn("active_flowspec_connectors", SOURCE)
+        self.assertIn("connector_candidate[\"mitigation_key\"] = mitigation_key_for_candidate(connector_candidate)", SOURCE)
+        self.assertIn("return [\"FLOWSPEC_AUTO_BLOCK_DST_DNS\"", SOURCE)
+
+    def test_exabgp_connectors_config_renders_multiple_neighbors_and_pipes(self):
+        connectors = [
+            {
+                "id": 1,
+                "name": "BGP-FIBINET-BORDA",
+                "role": "flowspec_mitigation",
+                "backend_type": "exabgp",
+                "enabled": True,
+                "is_active": True,
+                "peer_ip": "179.189.80.0",
+                "local_address": "198.51.100.10",
+                "router_id": "198.51.100.10",
+                "local_asn": 270943,
+                "peer_asn": 270943,
+                "passive_listen_enabled": True,
+                "listen_port": 179,
+                "exabgp_pipe_in": "/run/exabgp/exabgp.in",
+            },
+            {
+                "id": 2,
+                "name": "BGP-GM-BORDA",
+                "role": "flowspec_mitigation",
+                "backend_type": "exabgp",
+                "enabled": True,
+                "is_active": True,
+                "peer_ip": "45.5.249.0",
+                "local_address": "198.51.100.10",
+                "router_id": "198.51.100.10",
+                "local_asn": 271034,
+                "peer_asn": 271034,
+                "passive_listen_enabled": True,
+                "listen_port": 179,
+                "exabgp_pipe_in": "/run/exabgp/gm-teste.in",
+            },
+        ]
+        config = backend_main.render_exabgp_connectors_config_text(connectors)
+        self.assertIn("process watch-1", config)
+        self.assertIn("process watch-2", config)
+        self.assertIn("run /bin/cat /run/exabgp/exabgp.in;", config)
+        self.assertIn("run /bin/cat /run/exabgp/gm-teste.in;", config)
+        self.assertIn("neighbor 179.189.80.0", config)
+        self.assertIn("neighbor 45.5.249.0", config)
+        self.assertIn("local-as 270943;", config)
+        self.assertIn("local-as 271034;", config)
+        self.assertIn("processes [ watch-1 ];", config)
+        self.assertIn("processes [ watch-2 ];", config)
+        self.assertIn('@app.get("/api/system/exabgp/render-connectors-config")', SOURCE)
+
+    def test_selected_connector_profile_creates_one_pending_announcement_per_connector(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                now = "2026-07-08T12:00:00Z"
+                with backend_main.sqlite_connection() as conn:
+                    connector_ids = []
+                    for name, pipe in (("BGP-FIBINET-BORDA", "/run/exabgp/exabgp.in"), ("BGP-GM-BORDA", "/run/exabgp/gm-teste.in")):
+                        connector_ids.append(int(conn.execute(
+                            """
+                            INSERT INTO bgp_connectors (
+                                name, role, backend_type, mode, exabgp_pipe_in,
+                                max_active_rules, max_duration_seconds, enabled, is_active, created_at, updated_at
+                            )
+                            VALUES (?, 'flowspec_mitigation', 'exabgp', 'manual_approval', ?, 50, 3600, 1, 1, ?, ?)
+                            """,
+                            (name, pipe, now, now),
+                        ).lastrowid))
+                    profile_id = int(conn.execute(
+                        """
+                        INSERT INTO bgp_response_profiles (
+                            name, enabled, response_type, connector_id, mitigation_target_mode, selected_connector_ids,
+                            approval_mode, action, default_action, target_selector, protocol_selector,
+                            dst_port_selector, dst_port_value, require_protocol_or_port,
+                            bypass_whitelist, max_duration_seconds, default_duration_seconds, created_at, updated_at
+                        )
+                        VALUES ('FLOWSPEC_SELECTED_DNS', 1, 'flowspec', NULL, 'selected_connectors', ?,
+                            'manual_approval', 'discard', 'discard', 'dst_ip', 'udp',
+                            'fixed', '123', 1, 1, 3600, 900, ?, ?)
+                        """,
+                        (backend_main.json.dumps(connector_ids), now, now),
+                    ).lastrowid)
+                    candidate = {
+                        "response_profile_id": profile_id,
+                        "response_type": "flowspec",
+                        "action": "discard",
+                        "target_prefix": "203.0.113.10/32",
+                        "dst_prefix": "203.0.113.10/32",
+                        "protocol": "udp",
+                        "dst_port": "123",
+                        "duration_seconds": 900,
+                        "mitigation_mode": "manual_approval",
+                        "use_global_whitelist": False,
+                        "bypass_whitelist": True,
+                        "attack_vector_name": "DNS_QUERY_OUTBOUND_CLIENT",
+                        "anomaly_id": 77,
+                    }
+                    candidate["mitigation_key"] = backend_main.mitigation_key_for_candidate(candidate)
+                    result = backend_main.apply_mitigation_candidate(conn, candidate, "manual_approval", "test")
+                    conn.commit()
+                    rows = conn.execute("SELECT * FROM bgp_announcements ORDER BY connector_id").fetchall()
+
+                self.assertTrue(result["multi_connector"])
+                self.assertEqual(result["count"], 2)
+                self.assertEqual([int(row["connector_id"]) for row in rows], connector_ids)
+                for row in rows:
+                    self.assertEqual(row["status"], "pending_approval")
+                    self.assertIn("announce flow route", row["announce_command"])
+                    self.assertIn("withdraw flow route", row["withdraw_command"])
+                    self.assertEqual(row["dst_prefix"], "203.0.113.10/32")
+                    self.assertEqual(row["dst_port"], "123")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

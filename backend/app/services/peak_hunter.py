@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List
@@ -20,6 +21,8 @@ from app.services.peak_flow_enrichment import enrich_peak_flows
 FlowFetcher = Callable[["PeakHunterRequest", datetime, int], List[Dict[str, Any]]]
 SeriesFetcher = Callable[["PeakHunterRequest"], List[Dict[str, Any]]]
 MAX_RESPONSE_SERIES_POINTS = 1000
+PEAK_ANALYSIS_DB_LOCK = threading.RLock()
+PEAK_ANALYSIS_READY_KEYS: set[str] = set()
 
 
 @dataclass
@@ -414,7 +417,27 @@ def _display_local(value: Any) -> str:
     return local.strftime("%d/%m/%Y %H:%M:%S BRT")
 
 
+def _sqlite_database_key(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        value = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+        return str(value or "").strip() or f"memory:{id(conn)}"
+    except Exception:
+        return f"connection:{id(conn)}"
+
+
 def ensure_peak_analysis_db(conn: sqlite3.Connection) -> None:
+    db_key = _sqlite_database_key(conn)
+    if db_key in PEAK_ANALYSIS_READY_KEYS:
+        return
+    with PEAK_ANALYSIS_DB_LOCK:
+        if db_key in PEAK_ANALYSIS_READY_KEYS:
+            return
+        _ensure_peak_analysis_db_uncached(conn)
+        PEAK_ANALYSIS_READY_KEYS.add(db_key)
+
+
+def _ensure_peak_analysis_db_uncached(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS peak_analysis (

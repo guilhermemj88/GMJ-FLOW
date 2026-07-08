@@ -108,8 +108,7 @@ def analyze_peak_hunter_endpoint(payload: PeakHunterPayload) -> dict[str, Any]:
     )
 
     def save(record: dict[str, Any]) -> None:
-        with sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db")) as conn:
-            conn.row_factory = sqlite3.Row
+        with _sqlite_connect() as conn:
             record.update(_interface_metadata(record.get("sensor") or "", int(record.get("interface_id") or 0)))
             saved_id = save_peak_analysis(conn, record)
             conn.commit()
@@ -471,8 +470,16 @@ def _request_window(
 
 
 def _sqlite_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
+    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
