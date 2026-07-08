@@ -483,14 +483,19 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": "/opt/gmj-flow"}, clear=False):
             self.assertEqual(
                 backend_main.collector_build_context(),
-                "/opt/gmj-flow/runtime/collector/pmacct",
+                "/opt/gmj-flow/collector/pmacct",
             )
             compose = backend_main.compose_for_collectors([{"id": 1, "name": "sensor-1", "listener_port": 9995, "exporter_ip": ""}])
-            self.assertIn('context: "/opt/gmj-flow/runtime/collector/pmacct"', compose)
+            self.assertIn('context: "/opt/gmj-flow/collector/pmacct"', compose)
             self.assertNotIn("context: /app/runtime/collector/pmacct", compose)
+            self.assertNotIn("/opt/gmj-flow/runtime/collector/pmacct", compose)
         with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": ""}, clear=False), \
              mock.patch.object(backend_main, "detected_runtime_mount_source", return_value=""):
-            self.assertEqual(backend_main.collector_build_context(), str(Path("runtime") / "collector" / "pmacct"))
+            build_context = Path(backend_main.collector_build_context())
+            self.assertEqual(build_context.name, "pmacct")
+            self.assertEqual(build_context.parent.name, "collector")
+            self.assertTrue((build_context / "Dockerfile").exists())
+            self.assertTrue((build_context / "parse_pmacct.py").exists())
         self.assertNotEqual(backend_main.collector_build_context(), "/app/runtime/collector/pmacct")
 
 

@@ -192,6 +192,14 @@ APPLY_COLLECTORS = (ROOT / "scripts" / "apply_collectors.sh").read_text(encoding
 ROOT_COLLECTORS_COMPOSE = (ROOT / "docker-compose.collectors.yml").read_text(encoding="utf-8")
 
 
+def create_collector_build_context_fixture(project_dir: Path) -> Path:
+    build_context = Path(backend_main.host_path_join(str(project_dir), "collector", "pmacct"))
+    build_context.mkdir(parents=True, exist_ok=True)
+    (build_context / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+    (build_context / "parse_pmacct.py").write_text("print('ok')\n", encoding="utf-8")
+    return build_context
+
+
 def assert_safe_runtime_compose(test_case, compose_text, project_dir=None, network_name="gmj-flow_default", build_context=None):
     test_case.assertIn("pmacct-sensor-1:", compose_text)
     test_case.assertIn("pmacct-parser-sensor-1:", compose_text)
@@ -206,12 +214,13 @@ def assert_safe_runtime_compose(test_case, compose_text, project_dir=None, netwo
     test_case.assertIn("external: true", compose_text)
     test_case.assertIn(f'name: "{network_name}"', compose_text)
     expected_build_context = build_context or (
-        backend_main.host_path_join(str(project_dir), "runtime", "collector", "pmacct")
+        backend_main.host_path_join(str(project_dir), "collector", "pmacct")
         if project_dir is not None
         else backend_main.collector_build_context()
     )
     test_case.assertIn(f"context: {backend_main.yaml_quote(expected_build_context)}", compose_text)
     test_case.assertNotIn("context: /app/runtime/collector/pmacct", compose_text)
+    test_case.assertNotIn("/runtime/collector/pmacct", compose_text)
     if project_dir is not None:
         collectors_volume = backend_main.host_path_join(str(project_dir), "data", "collectors")
         test_case.assertTrue(
@@ -220,6 +229,8 @@ def assert_safe_runtime_compose(test_case, compose_text, project_dir=None, netwo
             or str(expected_build_context).startswith("\\")
         )
         test_case.assertTrue(Path(collectors_volume).is_absolute())
+        test_case.assertTrue((Path(expected_build_context) / "Dockerfile").exists())
+        test_case.assertTrue((Path(expected_build_context) / "parse_pmacct.py").exists())
         test_case.assertIn(backend_main.yaml_quote(f"{collectors_volume}:/app/data/collectors:ro"), compose_text)
 
 
@@ -293,20 +304,23 @@ class CollectorApplyStaticTest(unittest.TestCase):
         self.assertNotIn("\n  clickhouse:", ROOT_COLLECTORS_COMPOSE)
         self.assertNotIn("\n  backend:", ROOT_COLLECTORS_COMPOSE)
         self.assertNotIn("depends_on:\n      clickhouse:", ROOT_COLLECTORS_COMPOSE)
-        self.assertIn("context: /app/runtime/collector/pmacct", ROOT_COLLECTORS_COMPOSE)
+        self.assertIn("context: ${GMJFLOW_PROJECT_DIR}/collector/pmacct", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("/app/runtime/collector/pmacct", ROOT_COLLECTORS_COMPOSE)
+        self.assertNotIn("${GMJFLOW_PROJECT_DIR}/runtime/collector/pmacct", ROOT_COLLECTORS_COMPOSE)
         self.assertIn("${GMJFLOW_PROJECT_DIR}/data/collectors:/app/data/collectors:ro", ROOT_COLLECTORS_COMPOSE)
         self.assertIn("external: true", ROOT_COLLECTORS_COMPOSE)
 
     def test_generated_runtime_compose_has_only_pmacct_services(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
              mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": tmpdir, "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default", "GMJFLOW_COLLECTORS_DIR": ""}, clear=False):
+            create_collector_build_context_fixture(Path(tmpdir))
             compose_text = backend_main.compose_for_collectors(
                 [
                     {"id": 1, "name": "sensor-a", "exporter_ip": "192.0.2.10", "listener_port": 9995},
                     {"id": 2, "name": "sensor-b", "exporter_ip": "192.0.2.11", "listener_port": 9996},
                 ]
             )
-        assert_safe_runtime_compose(self, compose_text, tmpdir)
+            assert_safe_runtime_compose(self, compose_text, tmpdir)
         self.assertNotIn("clickhouse:\n", compose_text)
         services_block = compose_text.split("\nvolumes:", 1)[0]
         service_lines = [line for line in services_block.splitlines() if line.startswith("  ") and line.endswith(":") and not line.startswith("    ")]
@@ -325,7 +339,7 @@ class CollectorApplyStaticTest(unittest.TestCase):
             tmp_path = Path(tmpdir)
             output_dir = tmp_path / "data" / "collectors"
             compose_path = tmp_path / "docker-compose.collectors.yml"
-            build_context = tmp_path / "runtime" / "collector" / "pmacct"
+            build_context = create_collector_build_context_fixture(tmp_path)
             with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": tmpdir, "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default", "GMJFLOW_COLLECTORS_DIR": ""}, clear=False):
                 with mock.patch.object(backend_main, "collector_build_context", return_value=str(build_context)), \
                      mock.patch.object(backend_main, "collector_build_context_sync_path", return_value=build_context):
@@ -376,8 +390,8 @@ class CollectorApplyStaticTest(unittest.TestCase):
             }
 
             with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": tmpdir, "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default", "GMJFLOW_COLLECTORS_DIR": ""}, clear=False), \
-                 mock.patch.object(backend_main, "collector_build_context", return_value=str(tmp_path / "runtime" / "collector" / "pmacct")), \
-                 mock.patch.object(backend_main, "collector_build_context_sync_path", return_value=tmp_path / "runtime" / "collector" / "pmacct"), \
+                 mock.patch.object(backend_main, "collector_build_context", return_value=str(create_collector_build_context_fixture(tmp_path))), \
+                 mock.patch.object(backend_main, "collector_build_context_sync_path", return_value=tmp_path / "collector" / "pmacct"), \
                  mock.patch.object(backend_main, "collectors_compose_path", return_value=compose_path), \
                  mock.patch.object(backend_main, "active_collector_sensors", return_value=sensors), \
                  mock.patch.object(backend_main, "backup_collector_artifacts", return_value={}), \
@@ -388,13 +402,13 @@ class CollectorApplyStaticTest(unittest.TestCase):
             compose_text = compose_path.read_text(encoding="utf-8")
             self.assertTrue(result["services_updated"])
             self.assertEqual(result["collectors_dir"], str(output_dir))
-            self.assertEqual(result["build_context"]["build_context"], str(tmp_path / "runtime" / "collector" / "pmacct"))
-            self.assertEqual(result["build_context"]["sync_path"], str(tmp_path / "runtime" / "collector" / "pmacct"))
+            self.assertEqual(result["build_context"]["build_context"], str(tmp_path / "collector" / "pmacct"))
+            self.assertEqual(result["build_context"]["sync_path"], str(tmp_path / "collector" / "pmacct"))
             self.assertIn("Dockerfile", result["build_context"]["files"])
             self.assertIn("parse_pmacct.py", result["build_context"]["files"])
             self.assertTrue((output_dir / "sensor-1" / "nfacctd.conf").exists())
             self.assertTrue((output_dir / "sensor-2" / "allow.lst").exists())
-            assert_safe_runtime_compose(self, compose_text, tmpdir, build_context=str(tmp_path / "runtime" / "collector" / "pmacct"))
+            assert_safe_runtime_compose(self, compose_text, tmpdir, build_context=str(tmp_path / "collector" / "pmacct"))
             service_lines = [
                 line for line in compose_text.split("\nvolumes:", 1)[0].splitlines()
                 if line.startswith("  ") and line.endswith(":") and not line.startswith("    ")

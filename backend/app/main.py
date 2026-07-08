@@ -3661,8 +3661,11 @@ def collector_data_host_dir(project_dir: str | None = None) -> str:
 def collector_build_context() -> str:
     project_dir = clean_text(os.getenv("GMJFLOW_PROJECT_DIR")) or detected_runtime_mount_source()
     if project_dir:
-        return host_path_join(project_dir, "runtime", "collector", "pmacct")
-    return str(Path("runtime") / "collector" / "pmacct")
+        return host_path_join(project_dir, "collector", "pmacct")
+    source_dir = Path(__file__).resolve().parents[2] / "collector" / "pmacct"
+    if (source_dir / "Dockerfile").exists():
+        return str(source_dir)
+    return str(Path("collector") / "pmacct")
 
 
 def collector_build_context_sync_path() -> Path:
