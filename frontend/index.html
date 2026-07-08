@@ -733,6 +733,55 @@
       font-size: .84rem;
     }
 
+    .anomaly-table {
+      table-layout: fixed;
+      min-width: 1040px;
+    }
+
+    .anomaly-table th,
+    .anomaly-table td {
+      padding-left: .45rem;
+      padding-right: .45rem;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    .anomaly-table .anomaly-type-cell,
+    .anomaly-table .anomaly-target-cell {
+      white-space: normal;
+    }
+
+    .anomaly-col-status { width: 86px; }
+    .anomaly-col-severity { width: 94px; }
+    .anomaly-col-id { width: 66px; }
+    .anomaly-col-type { width: 220px; }
+    .anomaly-col-target { width: 160px; }
+    .anomaly-col-peak { width: 96px; }
+    .anomaly-col-total { width: 112px; }
+    .anomaly-col-last { width: 134px; }
+    .anomaly-col-actions { width: 112px; }
+
+    .anomaly-actions {
+      display: inline-flex;
+      gap: .25rem;
+      justify-content: flex-end;
+      width: 100%;
+    }
+
+    .anomaly-actions .btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .anomaly-actions .btn svg {
+      width: 15px;
+      height: 15px;
+    }
+
     .legacy-section {
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -3457,6 +3506,17 @@
           <section class="panel p-3 mt-3">
             <div class="table-wrap">
               <table class="table table-sm table-hover align-middle mb-0 anomaly-table">
+                <colgroup>
+                  <col class="anomaly-col-status">
+                  <col class="anomaly-col-severity">
+                  <col class="anomaly-col-id">
+                  <col class="anomaly-col-type">
+                  <col class="anomaly-col-target">
+                  <col class="anomaly-col-peak">
+                  <col class="anomaly-col-total">
+                  <col class="anomaly-col-last">
+                  <col class="anomaly-col-actions">
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Status</th>
@@ -4980,6 +5040,7 @@
           </div>
         </div>
         <div id="anomalyMetricChart" class="anomaly-chart"></div>
+        <div id="anomalyMetricChartWarning" class="subtle mt-2"></div>
         <div class="panel p-3 mt-3">
           <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
             <div>
@@ -11197,6 +11258,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return Number(event?.action_id || event?.security_anomaly_id || event?.id || 0);
     }
 
+    function anomalyRowByActionId(anomalyId) {
+      const targetId = Number(anomalyId);
+      return (Array.isArray(anomalyItems) ? anomalyItems : []).find(item => anomalyActionId(item) === targetId) || null;
+    }
+
     function renderAnomalyTable(items) {
       const tbody = document.getElementById('anomaliesTable');
       const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
@@ -11208,24 +11274,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
           <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
           <td>#${escapeHtml(event.id || '-')}</td>
-          <td>
+          <td class="anomaly-type-cell">
             ${escapeHtml(anomalyTypeLabel(event))}
             <div class="subtle">${escapeHtml(anomalyCompactSummary(event))}</div>
           </td>
-          <td>${escapeHtml(anomalyTargetText(event))}</td>
+          <td class="anomaly-target-cell">${escapeHtml(anomalyTargetText(event))}</td>
           <td class="text-end">${formatMetricValue(event.peak_value, event.metric_unit)}</td>
           <td class="text-end">${formatBytes(event.estimated_bytes)}</td>
           <td>${formatDateTime(event.last_seen_at)}<div class="subtle">${anomalyDuration(event)}</div></td>
           <td>
-            <div class="btn-group btn-group-sm" role="group">
-              <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}">
-                <i data-lucide="eye"></i><span>Ver detalhes</span>
+            <div class="anomaly-actions" role="group">
+              <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}" title="Ver detalhes" aria-label="Ver detalhes">
+                <i data-lucide="eye"></i>
               </button>
-              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}">
-                <i data-lucide="shield-check"></i><span>Mitigar</span>
+              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}" title="Mitigar" aria-label="Mitigar">
+                <i data-lucide="shield-check"></i>
               </button>
-              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
-              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" title="Reconhecer" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" title="Encerrar" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
             </div>
           </td>
         </tr>
@@ -11253,19 +11319,40 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
-    function anomalyMetricOption(points, unit) {
+    function niceAnomalyAxisMax(value) {
+      const raw = Math.max(1, Number(value) || 0);
+      const exponent = Math.floor(Math.log10(raw));
+      const base = Math.pow(10, exponent);
+      const ratio = raw / base;
+      const niceRatio = ratio <= 1 ? 1 : ratio <= 2 ? 2 : ratio <= 3 ? 3 : ratio <= 5 ? 5 : 10;
+      return niceRatio * base;
+    }
+
+    function anomalyMetricOption(points, event = {}) {
+      const unit = event.metric_unit || 'bits_s';
       const valueKey = unit === 'packets_s' ? 'packets_s' : unit === 'flows_s' ? 'flows_s' : 'bits_s';
+      const values = points.map(point => Number(point[valueKey] || 0));
+      const finiteValues = values.filter(value => Number.isFinite(value));
+      const maxValue = Math.max(0, Number(event.peak_value || 0), Number(event.threshold_value || 0), ...finiteValues);
+      const axisMax = niceAnomalyAxisMax(maxValue * 1.2);
       return {
         color: ['#b91c1c'],
         tooltip: { trigger: 'axis', valueFormatter: value => formatMetricValue(value, unit) },
-        grid: { left: 46, right: 18, top: 18, bottom: 42 },
+        grid: { left: 58, right: 18, top: 18, bottom: 42 },
         xAxis: { type: 'category', data: points.map(point => point.time) },
-        yAxis: { type: 'value', axisLabel: { formatter: value => formatMetricValue(value, unit) } },
+        yAxis: {
+          type: 'value',
+          min: 0,
+          max: axisMax,
+          splitNumber: 4,
+          axisLabel: { formatter: value => formatMetricValue(value, unit) }
+        },
         series: [{
           type: 'line',
           smooth: true,
           areaStyle: { opacity: .12 },
-          data: points.map(point => Number(point[valueKey] || 0))
+          symbolSize: points.length <= 1 ? 9 : 5,
+          data: values
         }]
       };
     }
@@ -11312,6 +11399,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Flows', formatNumber(event.flow_count || 0)],
         ['Serie', detail.timeseries_scope === 'specific_conversation' ? 'conversa especifica' : detail.timeseries_scope === 'target_total' ? 'total do alvo' : detail.timeseries_source || '-'],
         ['Pontos serie', detail.timeseries_points ? `${detail.timeseries_points}${detail.timeseries_warning ? ` / ${detail.timeseries_warning}` : ''}` : '-'],
+        ['Modo serie', detail.timeseries_query_mode || '-'],
         ['Base mitigação', mitigationBasis],
         ['Top flow', topFlowText],
         ['Resumo completo', event.summary || '-'],
@@ -11450,16 +11538,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       currentAnomalyDetailEvent = null;
       currentAnomalyDetailPayload = null;
       currentAiMitigationAnalysis = null;
+      const rowSnapshot = anomalyRowByActionId(anomalyId);
       openModal('anomalyDetailModal');
       document.getElementById('anomalyDetailSummary').textContent = 'Carregando...';
       document.getElementById('anomalyScopeSummary').innerHTML = '';
+      document.getElementById('anomalyMetricChartWarning').textContent = '';
       document.getElementById('anomalyInvestigatePeakButton').disabled = true;
       renderAnomalyAiAnalysis(null);
       try {
         const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
+        if (currentAnomalyDetailId !== Number(anomalyId)) return;
         const detail = payload || {};
         currentAnomalyDetailPayload = detail;
         const event = detail.event || detail.anomaly || detail;
+        if (rowSnapshot?.status && event.status !== rowSnapshot.status) {
+          event.status = rowSnapshot.status;
+        }
         currentAnomalyDetailEvent = event;
         document.getElementById('anomalyInvestigatePeakButton').disabled = false;
         document.getElementById('anomalyDetailModalTitle').textContent = `#${event.id || anomalyId} ${anomalyTypeLabel(event)}`;
@@ -11499,7 +11593,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         }).join('') || '<tr><td colspan="8" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
         const rawPoints = Array.isArray(detail.timeseries) ? detail.timeseries : detail.metric_points;
         const points = normalizedAnomalyMetricPoints(rawPoints, event);
-        charts.anomalyMetric.setOption(anomalyMetricOption(points, event.metric_unit || 'bits_s'), true);
+        document.getElementById('anomalyMetricChartWarning').textContent = detail.timeseries_warning === 'only_one_point' || points.length === 1
+          ? 'somente 1 ponto disponivel'
+          : '';
+        charts.anomalyMetric.setOption(anomalyMetricOption(points, event), true);
         setTimeout(() => charts.anomalyMetric.resize(), 50);
         await loadAnomalyAiAnalysis(anomalyId);
       } catch (error) {

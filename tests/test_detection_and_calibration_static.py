@@ -647,9 +647,64 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(anomaly["type_label"], "UDP flood por IP")
         self.assertEqual(anomaly["technical_vector"], "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK")
 
+    def test_consolidated_security_anomaly_status_and_display_name_are_stable(self):
+        items = [
+            {
+                "id": 10,
+                "vector": "DNS_INTERNAL_IP_HIGH_PPS",
+                "source_name": "DNS alto por IP",
+                "source_details": {"display_name": "DNS alto por IP"},
+                "status": "acknowledged",
+                "severity": "critical",
+                "packets_s": 60000,
+                "bits_s": 0,
+                "flows_s": 0,
+                "flows": 0,
+                "packets": 3600000,
+                "bytes": 0,
+                "first_seen": "2026-07-07T14:12:00Z",
+                "last_seen": "2026-07-07T14:12:00Z",
+                "created_at": "2026-07-07T14:12:00Z",
+                "updated_at": "2026-07-07T14:12:00Z",
+                "protocol": "UDP",
+                "direction": "transmits",
+                "target_ip": "45.5.248.195",
+                "target_cidr": "45.5.248.195/32",
+                "scope_type": "internal_ip_32",
+            },
+            {
+                "id": 11,
+                "vector": "DNS_INTERNAL_IP_HIGH_PPS",
+                "source_name": "DNS alto por IP",
+                "source_details": {"display_name": "DNS alto por IP"},
+                "status": "active",
+                "severity": "warning",
+                "packets_s": 30000,
+                "bits_s": 0,
+                "flows_s": 0,
+                "flows": 0,
+                "packets": 1800000,
+                "bytes": 0,
+                "first_seen": "2026-07-07T14:13:00Z",
+                "last_seen": "2026-07-07T14:13:00Z",
+                "created_at": "2026-07-07T14:13:00Z",
+                "updated_at": "2026-07-07T14:13:00Z",
+                "protocol": "UDP",
+                "direction": "transmits",
+                "target_ip": "45.5.248.195",
+                "target_cidr": "45.5.248.195/32",
+                "scope_type": "internal_ip_32",
+            },
+        ]
+        event = backend_main.security_anomaly_event_from_items(items, preferred_id=10)
+        self.assertEqual(event["status"], "active")
+        self.assertEqual(event["display_name"], "DNS alto por IP")
+        self.assertEqual(event["type_label"], "DNS alto por IP")
+        self.assertEqual(event["technical_vector"], "DNS_INTERNAL_IP_HIGH_PPS")
+
     def test_anomaly_main_table_is_compact_and_keeps_technical_names_in_detail(self):
         anomaly_header = FRONTEND[
-            FRONTEND.find('<tbody id="anomaliesTable"></tbody>') - 900:
+            FRONTEND.find('<tbody id="anomaliesTable"></tbody>') - 1400:
             FRONTEND.find('<tbody id="anomaliesTable"></tbody>')
         ]
         render_source = FRONTEND[
@@ -670,6 +725,13 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("anomalyCompactSummary(event)", render_source)
         self.assertIn("['Nome', anomalyTypeLabel(event)]", detail_source)
         self.assertIn("Vetor tecnico", detail_source)
+        self.assertIn("<colgroup>", anomaly_header)
+        self.assertIn('class="anomaly-col-type"', anomaly_header)
+        self.assertIn("table-layout: fixed", FRONTEND)
+        self.assertIn("anomaly-actions", FRONTEND)
+        self.assertIn("function niceAnomalyAxisMax", FRONTEND)
+        self.assertIn("anomalyMetricChartWarning", FRONTEND)
+        self.assertIn("timeseries_query_mode", FRONTEND)
 
     def test_attack_vector_display_name_ui_fields_and_payloads(self):
         self.assertIn('id="detectionRuleDisplayName"', FRONTEND)
@@ -781,6 +843,65 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         flow_query = queries[-1]
         self.assertIn("top_dst_ip", flow_query)
         self.assertIn("dst_port = {top_dst_port:UInt16}", flow_query)
+
+    def test_timeseries_falls_back_from_single_top_flow_point_to_target_total(self):
+        flow_queries = []
+        columns = ["time", "bits_s", "packets_s", "flows_s", "bytes", "packets", "flows"]
+        base = datetime(2026, 7, 7, 14, 10, tzinfo=timezone.utc)
+
+        def fake_query_clickhouse(query, params=None):
+            if "DESCRIBE TABLE flow_raw" in query:
+                return FakeClickHouseResult(
+                    ["name", "type"],
+                    [
+                        ("flow_time", "DateTime"),
+                        ("src_ip", "IPv6"),
+                        ("dst_ip", "IPv6"),
+                        ("dst_port", "UInt16"),
+                        ("proto", "UInt8"),
+                        ("packets", "UInt64"),
+                        ("bytes", "UInt64"),
+                        ("sample_rate", "UInt32"),
+                        ("flow_count", "UInt64"),
+                    ],
+                )
+            flow_queries.append(query)
+            if "top_dst_ip" in query or "dst_port = {top_dst_port" in query:
+                return FakeClickHouseResult(columns, [
+                    (base, 368000.0, 46000.0, 1.0, 2760000, 2760000, 60),
+                ])
+            self.assertIn("proto = 17", query)
+            self.assertNotIn("top_dst_ip", query)
+            self.assertNotIn("dst_port = {top_dst_port", query)
+            return FakeClickHouseResult(columns, [
+                (base - timedelta(minutes=1), 240000.0, 30000.0, 1.0, 1800000, 1800000, 60),
+                (base, 368000.0, 46000.0, 1.0, 2760000, 2760000, 60),
+                (base + timedelta(minutes=1), 280000.0, 35000.0, 1.0, 2100000, 2100000, 60),
+            ])
+
+        event = {
+            "vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS",
+            "target_ip": "45.5.248.195",
+            "target_cidr": "45.5.248.195/32",
+            "target_role": "src_ip",
+            "direction": "transmits",
+            "protocol": "UDP",
+            "peak_value": 46000,
+            "threshold_value": 45000,
+            "metric_unit": "packets_s",
+            "top_dst_ip": "213.33.167.222",
+            "top_dst_port": 80,
+            "started_at": "2026-07-07T14:12:49Z",
+            "last_seen_at": "2026-07-07T14:12:50Z",
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            result = backend_main.anomaly_detail_timeseries(event)
+        self.assertEqual(result["source"], "flow_raw")
+        self.assertEqual(result["scope"], "target_total")
+        self.assertEqual(result["query_mode"], "target_protocol")
+        self.assertEqual(result["points_count"], 3)
+        self.assertEqual(result["warning"], "")
+        self.assertEqual(len(flow_queries), 2)
 
     def test_collector_build_context_uses_host_project_dir(self):
         with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": "/opt/gmj-flow"}, clear=False):

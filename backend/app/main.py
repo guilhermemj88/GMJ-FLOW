@@ -16860,7 +16860,7 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
     last_seen_values = [value for value in last_seen_values if value is not None]
     started_at = iso(min(first_seen_values)) if first_seen_values else clean_text(representative.get("created_at")) or utc_now_iso()
     last_seen_at = iso(max(last_seen_values)) if last_seen_values else clean_text(representative.get("updated_at")) or started_at
-    status = clean_text(representative.get("status") or "active")
+    status = security_anomaly_items_status(items)
     peak_packets = max(float(item.get("packets_s") or 0) for item in items)
     peak_bits = max(float(item.get("bits_s") or 0) for item in items)
     peak_flows = max(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
@@ -16899,6 +16899,12 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
     src_ips = {clean_ip(item.get("src_ip")) for item in items if clean_text(item.get("src_ip"))}
     dst_ips = {clean_ip(item.get("dst_ip")) for item in items if clean_text(item.get("dst_ip"))}
     vector = clean_text(representative.get("vector")) or clean_text(representative.get("source_name")) or "Deteccao IP Zone"
+    display_name = vector_display_name_from_metadata(
+        source_details.get("display_name"),
+        representative.get("source_name"),
+        vector,
+    )
+    source_details.setdefault("display_name", display_name)
     decoder = clean_text(representative.get("protocol")) or "ALL"
     zone_name = clean_text(representative.get("zone_name")) or "IP Zone"
     target_ip = clean_ip(representative.get("target_ip")) or clean_ip(representative.get("src_ip")) or clean_ip(representative.get("dst_ip"))
@@ -16918,11 +16924,17 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         "anomaly_source": clean_text(representative.get("anomaly_source")) or "detection_template_rule",
         "source_engine": clean_text(representative.get("source_engine")) or "detection_templates",
         "source_id": clean_text(representative.get("source_id")),
-        "source_name": clean_text(representative.get("source_name")) or vector,
+        "source_name": clean_text(representative.get("source_name")) or display_name or vector,
         "source_details_json": source_details,
         "source_details": source_details,
         "attack_vector_id": None,
         "attack_vector_name": vector,
+        "display_name": display_name,
+        "friendly_name": display_name,
+        "label": display_name,
+        "type_label": display_name or anomaly_type_label(vector),
+        "technical_vector": vector,
+        "technical_rule": vector,
         "sensor_id": None,
         "sensor_name": "Deteccoes IP Zone",
         "interface_if_index": None,
@@ -21333,6 +21345,17 @@ def severity_rank(value: Any) -> int:
     return {"info": 0, "warning": 1, "critical": 2}.get(clean_text(value).lower(), 0)
 
 
+def security_anomaly_items_status(items: list[dict[str, Any]], status_filter: str = "") -> str:
+    statuses = [clean_text(item.get("status")).lower() for item in items if clean_text(item.get("status"))]
+    if status_filter == "active" or "active" in statuses:
+        return "active"
+    if "acknowledged" in statuses:
+        return "acknowledged"
+    if "closed" in statuses:
+        return "closed"
+    return statuses[0] if statuses else ("active" if status_filter == "active" else "closed")
+
+
 def consolidated_security_anomaly_id(key: tuple[Any, ...]) -> int:
     text = "|".join(clean_text(item) for item in key)
     return int(zlib.crc32(text.encode("utf-8")) & 0x7FFFFFFF) or 1
@@ -21411,7 +21434,7 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         last_seen_values = [value for value in last_seen_values if value is not None]
         started_at = iso(min(first_seen_values)) if first_seen_values else clean_text(representative.get("created_at")) or utc_now_iso()
         last_seen_at = iso(max(last_seen_values)) if last_seen_values else clean_text(representative.get("updated_at")) or started_at
-        status = clean_text(representative.get("status") or ("active" if status_filter == "active" else "closed"))
+        status = security_anomaly_items_status(items, status_filter)
         peak_packets = max(float(item.get("packets_s") or 0) for item in items)
         peak_bits = max(float(item.get("bits_s") or 0) for item in items)
         peak_flows = max(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
@@ -21432,6 +21455,13 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         zone_name = clean_text(representative.get("zone_name")) or "IP Zone"
         decoder = clean_text(representative.get("protocol")) or "ALL"
         vector = clean_text(representative.get("vector")) or clean_text(representative.get("template_name")) or "Deteccao IP Zone"
+        representative_source_details = dict(representative.get("source_details") or {})
+        display_name = vector_display_name_from_metadata(
+            representative_source_details.get("display_name"),
+            representative.get("source_name"),
+            vector,
+        )
+        representative_source_details.setdefault("display_name", display_name)
         target_ip = clean_ip(representative.get("target_ip")) or clean_ip(representative.get("src_ip")) or clean_ip(representative.get("dst_ip"))
         target_cidr = clean_text(representative.get("target_cidr")) or (host_cidr_for_ip(target_ip) if representative.get("scope_type") == "internal_ip_32" else clean_text(representative.get("prefix_cidr")))
         target_role = clean_text(representative.get("target_role")) or target_role_for_zone_direction(representative.get("direction"))
@@ -21451,15 +21481,31 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
             "security_anomaly_id": representative_id,
             "legacy_event_id": legacy_event_id,
             "source": "security_anomalies",
-            "anomaly_source": "dashboard_anomaly_summary",
-            "source_engine": "dashboard",
+            "anomaly_source": clean_text(representative.get("anomaly_source")) or "detection_template_rule",
+            "source_engine": clean_text(representative.get("source_engine")) or "detection_templates",
             "source_id": clean_text(representative.get("source_id")),
-            "source_name": vector,
-            "source_details_json": {"zone_name": zone_name, "detail_count": len(items), "legacy_event_id": legacy_event_id},
-            "source_details": {"zone_name": zone_name, "detail_count": len(items), "legacy_event_id": legacy_event_id},
+            "source_name": clean_text(representative.get("source_name")) or display_name or vector,
+            "source_details_json": {
+                **representative_source_details,
+                "zone_name": zone_name,
+                "detail_count": len(items),
+                "legacy_event_id": legacy_event_id,
+            },
+            "source_details": {
+                **representative_source_details,
+                "zone_name": zone_name,
+                "detail_count": len(items),
+                "legacy_event_id": legacy_event_id,
+            },
             "security_anomaly_ids": [int(item["id"]) for item in items],
             "attack_vector_id": None,
             "attack_vector_name": vector,
+            "display_name": display_name,
+            "friendly_name": display_name,
+            "label": display_name,
+            "type_label": display_name or anomaly_type_label(vector),
+            "technical_vector": vector,
+            "technical_rule": vector,
             "sensor_id": None,
             "sensor_name": "Deteccoes IP Zone",
             "interface_if_index": None,
@@ -21581,6 +21627,7 @@ def anomaly_detail_payload(
         "timeseries_scope": timeseries_info.get("scope"),
         "timeseries_points": timeseries_info.get("points_count", len(metric_points)),
         "timeseries_warning": timeseries_info.get("warning", ""),
+        "timeseries_query_mode": timeseries_info.get("query_mode", ""),
         "timeseries_window_start": timeseries_info.get("window_start", ""),
         "timeseries_window_end": timeseries_info.get("window_end", ""),
         "timeseries_attempts": timeseries_info.get("attempts", []),
@@ -21676,7 +21723,12 @@ def anomaly_timeseries_protocol_filter(mapping: dict[str, str], event: dict[str,
     })
 
 
-def anomaly_timeseries_flow_raw(event: dict[str, Any], start_dt: datetime, end_dt: datetime) -> tuple[list[dict[str, Any]], str]:
+def anomaly_timeseries_flow_raw(
+    event: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    query_mode: str = "auto",
+) -> tuple[list[dict[str, Any]], str]:
     schema = clickhouse_flow_raw_schema()
     mapping = clickhouse_flow_raw_mapping(schema)
     time_col = mapping["time"]
@@ -21688,9 +21740,9 @@ def anomaly_timeseries_flow_raw(event: dict[str, Any], start_dt: datetime, end_d
     if target_filter:
         filters.append(target_filter)
     protocol_filter = anomaly_timeseries_protocol_filter(mapping, event)
-    if protocol_filter:
+    if protocol_filter and query_mode != "target_only":
         filters.append(protocol_filter)
-    specific_scope = anomaly_timeseries_specific_scope(event)
+    specific_scope = query_mode == "auto" and anomaly_timeseries_specific_scope(event)
     if specific_scope:
         top_dst_ip = clean_ip(event.get("top_dst_ip") or event.get("dominant_dst_ip"))
         top_dst_port = int(event.get("top_dst_port") or event.get("target_port") or event.get("dominant_dst_port") or 0)
@@ -21822,12 +21874,20 @@ def anomaly_detail_timeseries(event: dict[str, Any], fallback_points: list[dict[
     points: list[dict[str, Any]] = []
     source = "none"
     scope = "target_total"
-    try:
-        points, scope = anomaly_timeseries_flow_raw(event, start_dt, end_dt)
-        source = "flow_raw"
-        attempts.append("flow_raw")
-    except Exception as exc:
-        attempts.append(f"flow_raw_error:{clean_text(exc)[:120]}")
+    query_mode = "none"
+    for mode in ("auto", "target_protocol", "target_only"):
+        try:
+            fallback, fallback_scope = anomaly_timeseries_flow_raw(event, start_dt, end_dt, mode)
+            attempts.append(f"flow_raw:{mode}")
+            if len(fallback) > len(points):
+                points = fallback
+                scope = fallback_scope
+                source = "flow_raw"
+                query_mode = mode
+            if len(points) > 1:
+                break
+        except Exception as exc:
+            attempts.append(f"flow_raw_{mode}_error:{clean_text(exc)[:120]}")
     if len(points) <= 1:
         try:
             fallback = anomaly_timeseries_flow_tops(event, start_dt, end_dt)
@@ -21836,6 +21896,7 @@ def anomaly_detail_timeseries(event: dict[str, Any], fallback_points: list[dict[
                 points = fallback
                 source = "flow_tops_1m"
                 scope = "target_total"
+                query_mode = "target_total"
         except Exception as exc:
             attempts.append(f"flow_tops_1m_error:{clean_text(exc)[:120]}")
     if len(points) <= 1:
@@ -21845,11 +21906,13 @@ def anomaly_detail_timeseries(event: dict[str, Any], fallback_points: list[dict[
             if len(fallback) > len(points):
                 points = fallback
                 source = "anomaly_events"
+                query_mode = "saved_events"
         except Exception as exc:
             attempts.append(f"anomaly_events_error:{clean_text(exc)[:120]}")
     if not points and fallback_points:
         points = list(fallback_points)
         source = "saved_snapshot"
+        query_mode = "saved_snapshot"
     warning = "only_one_point" if len(points) == 1 else ""
     return {
         "points": points,
@@ -21857,6 +21920,7 @@ def anomaly_detail_timeseries(event: dict[str, Any], fallback_points: list[dict[
         "scope": scope,
         "points_count": len(points),
         "warning": warning,
+        "query_mode": query_mode,
         "window_start": iso(start_dt),
         "window_end": iso(end_dt),
         "attempts": attempts[-6:],
@@ -22002,6 +22066,43 @@ def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000), an
     return {"items": anomaly_list("history", limit, anomaly_source, source_engine)}
 
 
+def consolidated_security_anomaly_detail_payload(group: dict[str, Any]) -> dict[str, Any]:
+    event = group["event"]
+    details = [item for item in group["items"] if security_item_matches_event_target(item, event)]
+    conversations = {}
+    points_by_time: dict[str, dict[str, Any]] = {}
+    for item in details:
+        key = f"{item.get('src_ip') or '-'} -> {item.get('dst_ip') or '-'} {item.get('protocol') or 'ALL'}"
+        conversation = conversations.setdefault(
+            key,
+            {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0},
+        )
+        conversation["bytes"] += int(float(item.get("bytes") or 0))
+        conversation["packets"] += int(float(item.get("packets") or 0))
+        conversation["flow_count"] += int(float(item.get("flows") or 0))
+        minute = clean_text(item.get("last_seen") or item.get("updated_at"))[:16]
+        point = points_by_time.setdefault(minute, {"time": minute, "bits_s": 0.0, "packets_s": 0.0, "flows_s": 0.0})
+        point["bits_s"] += float(item.get("bits_s") or 0)
+        point["packets_s"] += float(item.get("packets_s") or 0)
+        point["flows_s"] += float(item.get("flows_s") or item.get("flows") or 0)
+    enrichment = enrich_anomaly_with_flows(event, range_margin_seconds=120, limit=50)
+    flows = list(enrichment.get("flows") or [])
+    if flows:
+        event = dict(enrichment.get("event") or event)
+        enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
+        if enriched_conversations:
+            conversations = enriched_conversations
+    return anomaly_detail_payload(
+        event,
+        flows,
+        sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
+        sorted(points_by_time.values(), key=lambda item: item["time"]),
+        security_anomalies=details,
+        flow_evidence=enrichment.get("flow_evidence"),
+        mitigation_candidates=enrichment.get("mitigation_candidates") or [],
+    )
+
+
 @app.get("/api/anomalies/{event_id}")
 def anomaly_detail(request: Request, event_id: int):
     require_admin(request)
@@ -22010,40 +22111,10 @@ def anomaly_detail(request: Request, event_id: int):
         group = find_consolidated_security_anomaly_group(event_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-        event = group["event"]
-        details = [item for item in group["items"] if security_item_matches_event_target(item, event)]
-        conversations = {}
-        points_by_time: dict[str, dict[str, Any]] = {}
-        for item in details:
-            key = f"{item.get('src_ip') or '-'} -> {item.get('dst_ip') or '-'} {item.get('protocol') or 'ALL'}"
-            conversation = conversations.setdefault(
-                key,
-                {"conversation": key, "bytes": 0, "packets": 0, "flow_count": 0},
-            )
-            conversation["bytes"] += int(float(item.get("bytes") or 0))
-            conversation["packets"] += int(float(item.get("packets") or 0))
-            conversation["flow_count"] += int(float(item.get("flows") or 0))
-            minute = clean_text(item.get("last_seen") or item.get("updated_at"))[:16]
-            point = points_by_time.setdefault(minute, {"time": minute, "bits_s": 0.0, "packets_s": 0.0, "flows_s": 0.0})
-            point["bits_s"] += float(item.get("bits_s") or 0)
-            point["packets_s"] += float(item.get("packets_s") or 0)
-            point["flows_s"] += float(item.get("flows_s") or item.get("flows") or 0)
-        enrichment = enrich_anomaly_with_flows(event, range_margin_seconds=120, limit=50)
-        flows = list(enrichment.get("flows") or [])
-        if flows:
-            event = dict(enrichment.get("event") or event)
-            enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
-            if enriched_conversations:
-                conversations = enriched_conversations
-        return anomaly_detail_payload(
-            event,
-            flows,
-            sorted(conversations.values(), key=lambda item: item["bytes"], reverse=True)[:20],
-            sorted(points_by_time.values(), key=lambda item: item["time"]),
-            security_anomalies=details,
-            flow_evidence=enrichment.get("flow_evidence"),
-            mitigation_candidates=enrichment.get("mitigation_candidates") or [],
-        )
+        return consolidated_security_anomaly_detail_payload(group)
+    group = find_consolidated_security_anomaly_group(event_id)
+    if group is not None:
+        return consolidated_security_anomaly_detail_payload(group)
     with sqlite_connection() as conn:
         security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
         if security_item is not None:
