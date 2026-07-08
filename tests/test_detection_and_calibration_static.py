@@ -3,7 +3,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -353,6 +353,145 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("Preview completo", FRONTEND)
         self.assertIn("validation_status", FRONTEND)
         self.assertIn("used_by_rules", FRONTEND)
+
+    def test_anomaly_human_labels_and_fallbacks(self):
+        self.assertEqual(backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK"), "UDP flood por IP")
+        self.assertEqual(backend_main.anomaly_type_label("DNS_INTERNAL_IP_TO_DST_HIGH_PPS"), "DNS alto por destino")
+        self.assertIn("UDP alto", backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_UNKNOWN_HIGH_UDP_PPS"))
+
+    def test_anomaly_main_table_is_compact_and_keeps_technical_names_in_detail(self):
+        anomaly_header = FRONTEND[
+            FRONTEND.find('<tbody id="anomaliesTable"></tbody>') - 900:
+            FRONTEND.find('<tbody id="anomaliesTable"></tbody>')
+        ]
+        render_source = FRONTEND[
+            FRONTEND.find("function renderAnomalyTable"):
+            FRONTEND.find("async function loadAnomalies")
+        ]
+        detail_source = FRONTEND[
+            FRONTEND.find("function anomalyScopeHtml"):
+            FRONTEND.find("function normalizedAnomalyMetricPoints")
+        ]
+        self.assertIn("<th>Tipo</th>", anomaly_header)
+        self.assertIn("<th>Alvo</th>", anomaly_header)
+        self.assertNotIn("Regra/Vetor", anomaly_header)
+        self.assertIn("anomalyTypeLabel(event)", render_source)
+        self.assertIn("anomalyCompactSummary(event)", render_source)
+        self.assertIn("Regra tecnica", detail_source)
+        self.assertIn("Vetor tecnico", detail_source)
+
+    def test_anomaly_timeseries_window_expands_zero_duration(self):
+        first = datetime(2026, 7, 7, 14, 12, 49, tzinfo=timezone.utc)
+        start, end = backend_main.anomaly_timeseries_window({
+            "started_at": first.isoformat().replace("+00:00", "Z"),
+            "last_seen_at": first.isoformat().replace("+00:00", "Z"),
+        })
+        self.assertEqual(start, first - timedelta(minutes=15))
+        self.assertGreaterEqual((end - first).total_seconds(), 3600)
+
+    def test_general_ip_anomaly_timeseries_uses_flow_raw_without_top_flow_filter(self):
+        calls = []
+        columns = ["time", "bits_s", "packets_s", "flows_s", "bytes", "packets", "flows"]
+        base = datetime(2026, 7, 7, 14, 10, tzinfo=timezone.utc)
+
+        def fake_query_clickhouse(query, params=None):
+            calls.append((query, dict(params or {})))
+            if "DESCRIBE TABLE flow_raw" in query:
+                return FakeClickHouseResult(
+                    ["name", "type"],
+                    [
+                        ("flow_time", "DateTime"),
+                        ("src_ip", "IPv6"),
+                        ("dst_ip", "IPv6"),
+                        ("proto", "UInt8"),
+                        ("packets", "UInt64"),
+                        ("bytes", "UInt64"),
+                        ("sample_rate", "UInt32"),
+                        ("flow_count", "UInt64"),
+                    ],
+                )
+            self.assertIn("FROM flow_raw", query)
+            self.assertIn("proto = 17", query)
+            self.assertNotIn("top_dst_port", query)
+            self.assertNotIn("dst_port = {top_dst_port", query)
+            self.assertNotIn("protocol =", query)
+            return FakeClickHouseResult(columns, [
+                (base, 8000.0, 1000.0, 1.0, 60000, 60000, 60),
+                (base + timedelta(minutes=1), 16000.0, 2000.0, 1.5, 120000, 120000, 90),
+                (base + timedelta(minutes=2), 24000.0, 3000.0, 2.0, 180000, 180000, 120),
+            ])
+
+        event = {
+            "vector_name": "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",
+            "target_ip": "45.5.248.195",
+            "target_cidr": "45.5.248.195/32",
+            "target_role": "src_ip",
+            "direction": "transmits",
+            "protocol": "UDP",
+            "started_at": "2026-07-07T14:12:49Z",
+            "last_seen_at": "2026-07-07T14:12:49Z",
+            "top_dst_ip": "213.33.167.222",
+            "top_dst_port": 80,
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            result = backend_main.anomaly_detail_timeseries(event)
+        self.assertEqual(result["source"], "flow_raw")
+        self.assertEqual(result["scope"], "target_total")
+        self.assertEqual(result["points_count"], 3)
+        self.assertEqual(result["warning"], "")
+
+    def test_destination_port_timeseries_can_filter_specific_conversation(self):
+        queries = []
+
+        def fake_query_clickhouse(query, params=None):
+            queries.append(query)
+            if "DESCRIBE TABLE flow_raw" in query:
+                return FakeClickHouseResult(
+                    ["name", "type"],
+                    [
+                        ("flow_time", "DateTime"),
+                        ("src_ip", "IPv6"),
+                        ("dst_ip", "IPv6"),
+                        ("dst_port", "UInt16"),
+                        ("proto", "UInt8"),
+                        ("packets", "UInt64"),
+                        ("bytes", "UInt64"),
+                        ("sample_rate", "UInt32"),
+                        ("flow_count", "UInt64"),
+                    ],
+                )
+            return FakeClickHouseResult(["time", "bits_s", "packets_s", "flows_s", "bytes", "packets", "flows"], [])
+
+        event = {
+            "vector_name": "UDP_INTERNAL_IP_DST_HIGH_PPS",
+            "target_ip": "45.5.248.195",
+            "target_role": "src_ip",
+            "direction": "transmits",
+            "protocol": "UDP",
+            "top_dst_ip": "213.33.167.222",
+            "top_dst_port": 80,
+            "started_at": "2026-07-07T14:12:49Z",
+            "last_seen_at": "2026-07-07T14:13:49Z",
+        }
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            backend_main.anomaly_timeseries_flow_raw(event, *backend_main.anomaly_timeseries_window(event))
+        flow_query = queries[-1]
+        self.assertIn("top_dst_ip", flow_query)
+        self.assertIn("dst_port = {top_dst_port:UInt16}", flow_query)
+
+    def test_collector_build_context_uses_host_project_dir(self):
+        with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": "/opt/gmj-flow"}, clear=False):
+            self.assertEqual(
+                backend_main.collector_build_context(),
+                "/opt/gmj-flow/runtime/collector/pmacct",
+            )
+            compose = backend_main.compose_for_collectors([{"id": 1, "name": "sensor-1", "listener_port": 9995, "exporter_ip": ""}])
+            self.assertIn('context: "/opt/gmj-flow/runtime/collector/pmacct"', compose)
+            self.assertNotIn("context: /app/runtime/collector/pmacct", compose)
+        with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": ""}, clear=False), \
+             mock.patch.object(backend_main, "detected_runtime_mount_source", return_value=""):
+            self.assertEqual(backend_main.collector_build_context(), str(Path("runtime") / "collector" / "pmacct"))
+        self.assertNotEqual(backend_main.collector_build_context(), "/app/runtime/collector/pmacct")
 
 
 if __name__ == "__main__":

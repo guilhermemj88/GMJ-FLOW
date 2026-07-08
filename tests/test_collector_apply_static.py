@@ -205,8 +205,13 @@ def assert_safe_runtime_compose(test_case, compose_text, project_dir=None, netwo
     test_case.assertIn("networks:", compose_text)
     test_case.assertIn("external: true", compose_text)
     test_case.assertIn(f'name: "{network_name}"', compose_text)
-    expected_build_context = build_context or backend_main.collector_build_context()
+    expected_build_context = build_context or (
+        backend_main.host_path_join(str(project_dir), "runtime", "collector", "pmacct")
+        if project_dir is not None
+        else backend_main.collector_build_context()
+    )
     test_case.assertIn(f"context: {backend_main.yaml_quote(expected_build_context)}", compose_text)
+    test_case.assertNotIn("context: /app/runtime/collector/pmacct", compose_text)
     if project_dir is not None:
         collectors_volume = backend_main.host_path_join(str(project_dir), "data", "collectors")
         test_case.assertTrue(
@@ -322,7 +327,8 @@ class CollectorApplyStaticTest(unittest.TestCase):
             compose_path = tmp_path / "docker-compose.collectors.yml"
             build_context = tmp_path / "runtime" / "collector" / "pmacct"
             with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": tmpdir, "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default", "GMJFLOW_COLLECTORS_DIR": ""}, clear=False):
-                with mock.patch.object(backend_main, "collector_build_context", return_value=str(build_context)):
+                with mock.patch.object(backend_main, "collector_build_context", return_value=str(build_context)), \
+                     mock.patch.object(backend_main, "collector_build_context_sync_path", return_value=build_context):
                     backend_main.write_collector_artifacts(
                         [
                             {"id": 1, "name": "sensor-a", "exporter_ip": "192.0.2.10", "listener_port": 9995},
@@ -371,6 +377,7 @@ class CollectorApplyStaticTest(unittest.TestCase):
 
             with mock.patch.dict(os.environ, {"GMJFLOW_PROJECT_DIR": tmpdir, "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default", "GMJFLOW_COLLECTORS_DIR": ""}, clear=False), \
                  mock.patch.object(backend_main, "collector_build_context", return_value=str(tmp_path / "runtime" / "collector" / "pmacct")), \
+                 mock.patch.object(backend_main, "collector_build_context_sync_path", return_value=tmp_path / "runtime" / "collector" / "pmacct"), \
                  mock.patch.object(backend_main, "collectors_compose_path", return_value=compose_path), \
                  mock.patch.object(backend_main, "active_collector_sensors", return_value=sensors), \
                  mock.patch.object(backend_main, "backup_collector_artifacts", return_value={}), \
@@ -382,6 +389,7 @@ class CollectorApplyStaticTest(unittest.TestCase):
             self.assertTrue(result["services_updated"])
             self.assertEqual(result["collectors_dir"], str(output_dir))
             self.assertEqual(result["build_context"]["build_context"], str(tmp_path / "runtime" / "collector" / "pmacct"))
+            self.assertEqual(result["build_context"]["sync_path"], str(tmp_path / "runtime" / "collector" / "pmacct"))
             self.assertIn("Dockerfile", result["build_context"]["files"])
             self.assertIn("parse_pmacct.py", result["build_context"]["files"])
             self.assertTrue((output_dir / "sensor-1" / "nfacctd.conf").exists())

@@ -3458,23 +3458,14 @@
                     <th>Status</th>
                     <th>ID</th>
                     <th>Severidade</th>
-                    <th>Inicio</th>
-                    <th>Ultima detecção</th>
-                    <th>Duração</th>
-                    <th>Sensor</th>
-                    <th>Interface</th>
-                    <th>Origem</th>
-                    <th>Fonte</th>
-                    <th>Regra/Vetor</th>
+                    <th>Status</th>
+                    <th>Severidade</th>
+                    <th>ID</th>
+                    <th>Tipo</th>
                     <th>Alvo</th>
-                    <th>Direção</th>
-                    <th>Decoder</th>
-                    <th>Métrica</th>
-                    <th class="text-end">Threshold</th>
-                    <th class="text-end">Pico observado</th>
+                    <th class="text-end">Pico</th>
                     <th class="text-end">Total estimado</th>
-                    <th class="text-end">Flows</th>
-                    <th>Resumo</th>
+                    <th>Ultima detecção</th>
                     <th>Ações</th>
                   </tr>
                 </thead>
@@ -11111,6 +11102,54 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return event.source_name || event.vector_name || event.attack_vector_name || '-';
     }
 
+    const ANOMALY_TYPE_LABELS = {
+      PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK: 'UDP flood por IP',
+      PREFIX_INTERNAL_IP_HIGH_UDP_PPS: 'UDP alto por IP',
+      PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS: 'UDP alto por destino',
+      DNS_INTERNAL_IP_TO_DST_HIGH_PPS: 'DNS alto por destino',
+      UDP_INTERNAL_IP_DST_HIGH_PPS: 'UDP destino/porta',
+      TCP_INTERNAL_IP_DST_HIGH_PPS: 'TCP destino/porta',
+      DNS_INTERNAL_IP_HIGH_PPS: 'DNS alto por IP',
+      PREFIX_INTERNAL_IP_HIGH_TCP_PPS: 'TCP alto por IP',
+      PREFIX_INTERNAL_IP_TO_DST_HIGH_TCP_PPS: 'TCP alto por destino'
+    };
+
+    function anomalyTypeLabel(event) {
+      if (event.type_label) return event.type_label;
+      const raw = String(event.vector_name || event.attack_vector_name || event.vector || event.source_name || event.decoder || 'Anomalia').toUpperCase();
+      if (ANOMALY_TYPE_LABELS[raw]) return ANOMALY_TYPE_LABELS[raw];
+      return raw
+        .replace(/^PREFIX_INTERNAL_IP_TO_DST_/, '')
+        .replace(/^PREFIX_INTERNAL_IP_/, '')
+        .replace(/HIGH_UDP_PPS_ATTACK/g, 'UDP flood')
+        .replace(/HIGH_UDP_PPS/g, 'UDP alto')
+        .replace(/HIGH_TCP_PPS/g, 'TCP alto')
+        .replace(/HIGH_PPS/g, 'alto PPS')
+        .replace(/TO_DST/g, 'por destino')
+        .replace(/_/g, ' ')
+        .toLowerCase()
+        .replace(/\b(udp|tcp|dns|pps|ip)\b/g, token => token.toUpperCase())
+        .replace(/^./, char => char.toUpperCase());
+    }
+
+    function anomalyTargetText(event) {
+      return event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : '') || event.top_src_ip || event.dominant_src_ip || '-';
+    }
+
+    function anomalyCompactSummary(event) {
+      if (event.compact_summary) return event.compact_summary;
+      const direction = normalizeAnomalyDirection(event.direction) === 'transmits' ? 'saindo' : normalizeAnomalyDirection(event.direction) === 'receives' ? 'entrando' : 'trafego';
+      const proto = String(event.protocol || event.decoder || 'IP').toUpperCase();
+      return `${anomalyTargetText(event)} ${direction} ${proto} - ${formatMetricValue(event.peak_value, event.metric_unit)}`;
+    }
+
+    function normalizeAnomalyDirection(value) {
+      const text = String(value || '').toLowerCase();
+      if (['sends', 'transmits', 'outbound', 'saindo'].includes(text)) return 'transmits';
+      if (['receives', 'inbound', 'entrando'].includes(text)) return 'receives';
+      return text || 'both';
+    }
+
     function anomalyActionId(event) {
       return Number(event?.action_id || event?.security_anomaly_id || event?.id || 0);
     }
@@ -11124,25 +11163,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         return `
         <tr>
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
-          <td>#${escapeHtml(event.id || '-')}</td>
           <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
-          <td>${formatDateTime(event.started_at)}</td>
-          <td>${formatDateTime(event.last_seen_at)}</td>
-          <td>${anomalyDuration(event)}</td>
-          <td>${escapeHtml(event.sensor_name || (event.sensor_id ? `#${event.sensor_id}` : '-'))}</td>
-          <td>${event.interface_if_index ?? '-'}</td>
-          <td>${escapeHtml(anomalySourceLabel(event.anomaly_source))}</td>
-          <td>${escapeHtml(anomalySourceSummary(event))}</td>
-          <td>${escapeHtml(event.source_name || event.vector_name || event.attack_vector_name || '-')}</td>
-          <td>${escapeHtml(event.target_ip || event.target_cidr || '-')}</td>
-          <td>${escapeHtml(event.direction)}</td>
-          <td>${escapeHtml(event.decoder)}</td>
-          <td>${escapeHtml(unitLabel(event.metric_unit))}</td>
-          <td class="text-end">${formatMetricValue(event.threshold_value, event.metric_unit)}</td>
+          <td>#${escapeHtml(event.id || '-')}</td>
+          <td>
+            ${escapeHtml(anomalyTypeLabel(event))}
+            <div class="subtle">${escapeHtml(anomalyCompactSummary(event))}</div>
+          </td>
+          <td>${escapeHtml(anomalyTargetText(event))}</td>
           <td class="text-end">${formatMetricValue(event.peak_value, event.metric_unit)}</td>
           <td class="text-end">${formatBytes(event.estimated_bytes)}</td>
-          <td class="text-end">${formatNumber(event.flow_count)}</td>
-          <td>${escapeHtml(event.summary || '-')}</td>
+          <td>${formatDateTime(event.last_seen_at)}<div class="subtle">${anomalyDuration(event)}</div></td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}">
@@ -11157,7 +11187,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           </td>
         </tr>
       `;
-      }).join('') || '<tr><td colspan="21" class="text-muted">Sem anomalias</td></tr>';
+      }).join('') || '<tr><td colspan="9" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -11197,7 +11227,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       };
     }
 
-    function anomalyScopeHtml(anomaly) {
+    function anomalyScopeHtml(anomaly, detail = {}) {
       const event = anomaly || {};
       const hasTarget = Boolean(event.target_cidr || event.target_ip);
       const target = event.target_cidr || (event.target_ip ? `${event.target_ip}/32` : 'Nao definido');
@@ -11213,9 +11243,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           : event.mitigation_basis || '-';
       const sourceDetails = event.source_details_json || event.source_details || {};
       const fields = [
+        ['Tipo', anomalyTypeLabel(event)],
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],
+        ['Regra tecnica', event.technical_rule || sourceDetails.rule_name || event.source_name || '-'],
+        ['Vetor tecnico', event.technical_vector || event.vector_name || event.attack_vector_name || '-'],
         ['Template', sourceDetails.template_name || sourceDetails.template_id || '-'],
         ['Peak Analysis ID', sourceDetails.peak_analysis_id || '-'],
         ['Job/Run', [sourceDetails.job_id ? `job #${sourceDetails.job_id}` : '', sourceDetails.run_id ? `run #${sourceDetails.run_id}` : ''].filter(Boolean).join(' / ') || '-'],
@@ -11229,11 +11262,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Input if', event.input_if || '-'],
         ['Output if', event.output_if || event.interface_if_index || '-'],
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
-        ['Vetor', event.vector_name || event.attack_vector_name || '-'],
+        ['Decoder', event.decoder || '-'],
         ['Protocolo', event.protocol || event.decoder || '-'],
         ['Métrica', event.metric_unit ? unitLabel(event.metric_unit) : '-'],
+        ['Threshold', formatMetricValue(event.threshold_value, event.metric_unit)],
+        ['Flows', formatNumber(event.flow_count || 0)],
+        ['Serie', detail.timeseries_scope === 'specific_conversation' ? 'conversa especifica' : detail.timeseries_scope === 'target_total' ? 'total do alvo' : detail.timeseries_source || '-'],
+        ['Pontos serie', detail.timeseries_points ? `${detail.timeseries_points}${detail.timeseries_warning ? ` / ${detail.timeseries_warning}` : ''}` : '-'],
         ['Base mitigação', mitigationBasis],
         ['Top flow', topFlowText],
+        ['Resumo completo', event.summary || '-'],
         ['Motivo', event.mitigation_reason || '-']
       ];
       if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
@@ -11245,7 +11283,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function normalizedAnomalyMetricPoints(points, event) {
       const unit = event.metric_unit || 'bits_s';
       const valueKey = unit === 'packets_s' ? 'packets_s' : unit === 'flows_s' ? 'flows_s' : 'bits_s';
-      const items = Array.isArray(points) ? points.slice() : [];
+      const merged = new Map();
+      (Array.isArray(points) ? points : []).forEach(point => {
+        const time = String(point?.time || point?.bucket || point?.timestamp || '').replace('T', ' ').slice(0, 16);
+        if (!time) return;
+        const current = merged.get(time) || { time, bits_s: 0, packets_s: 0, flows_s: 0 };
+        current.bits_s += Number(point.bits_s || 0);
+        current.packets_s += Number(point.packets_s || 0);
+        current.flows_s += Number(point.flows_s || 0);
+        merged.set(time, current);
+      });
+      const items = Array.from(merged.values()).sort((left, right) => String(left.time).localeCompare(String(right.time)));
       const peak = Number(event.peak_value || event.observed_value || 0);
       const maxPoint = items.reduce((max, point) => Math.max(max, Number(point[valueKey] || 0)), 0);
       if (peak > 0 && (!items.length || maxPoint < peak * 0.5)) {
@@ -11371,9 +11419,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const event = detail.event || detail.anomaly || detail;
         currentAnomalyDetailEvent = event;
         document.getElementById('anomalyInvestigatePeakButton').disabled = false;
-        document.getElementById('anomalyDetailModalTitle').textContent = `#${event.id || anomalyId} ${event.attack_vector_name || event.vector_name || event.decoder || 'Anomalia'}`;
-        document.getElementById('anomalyDetailSummary').textContent = `#${event.id || anomalyId} ${event.summary || '-'}`;
-        document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event);
+        document.getElementById('anomalyDetailModalTitle').textContent = `#${event.id || anomalyId} ${anomalyTypeLabel(event)}`;
+        document.getElementById('anomalyDetailSummary').textContent = `#${event.id || anomalyId} ${anomalyCompactSummary(event)}`;
+        document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event, detail);
         setText('anomalyDetailStatus', event.status || '-');
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
         setText('anomalyDetailThreshold', formatMetricValue(event.threshold_value, event.metric_unit));

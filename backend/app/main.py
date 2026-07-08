@@ -3659,7 +3659,14 @@ def collector_data_host_dir(project_dir: str | None = None) -> str:
 
 
 def collector_build_context() -> str:
-    return str(RUNTIME_DIR / "collector" / "pmacct")
+    project_dir = clean_text(os.getenv("GMJFLOW_PROJECT_DIR")) or detected_runtime_mount_source()
+    if project_dir:
+        return host_path_join(project_dir, "runtime", "collector", "pmacct")
+    return str(Path("runtime") / "collector" / "pmacct")
+
+
+def collector_build_context_sync_path() -> Path:
+    return RUNTIME_DIR / "collector" / "pmacct"
 
 
 def local_collector_build_source_dir() -> Path:
@@ -3671,7 +3678,7 @@ def local_collector_build_source_dir() -> Path:
 
 def sync_collector_build_context() -> dict[str, Any]:
     source_dir = local_collector_build_source_dir()
-    target_dir = Path(collector_build_context())
+    target_dir = collector_build_context_sync_path()
     target_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
     for filename in ("Dockerfile", "parse_pmacct.py", "nfacctd.conf", "allow.lst"):
@@ -3688,7 +3695,8 @@ def sync_collector_build_context() -> dict[str, Any]:
             copied.append(filename)
     return {
         "source_dir": str(source_dir),
-        "build_context": str(target_dir),
+        "build_context": collector_build_context(),
+        "sync_path": str(target_dir),
         "files": copied,
     }
 
@@ -9936,6 +9944,60 @@ def anomaly_vector_text(event: dict[str, Any]) -> str:
     ).upper()
 
 
+ANOMALY_TYPE_LABELS = {
+    "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK": "UDP flood por IP",
+    "PREFIX_INTERNAL_IP_HIGH_UDP_PPS": "UDP alto por IP",
+    "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS": "UDP alto por destino",
+    "DNS_INTERNAL_IP_TO_DST_HIGH_PPS": "DNS alto por destino",
+    "UDP_INTERNAL_IP_DST_HIGH_PPS": "UDP destino/porta",
+    "TCP_INTERNAL_IP_DST_HIGH_PPS": "TCP destino/porta",
+    "DNS_INTERNAL_IP_HIGH_PPS": "DNS alto por IP",
+    "PREFIX_INTERNAL_IP_HIGH_TCP_PPS": "TCP alto por IP",
+    "PREFIX_INTERNAL_IP_TO_DST_HIGH_TCP_PPS": "TCP alto por destino",
+}
+
+
+def anomaly_type_label(value: Any) -> str:
+    text = clean_text(value).upper()
+    if not text:
+        return "Anomalia"
+    if text in ANOMALY_TYPE_LABELS:
+        return ANOMALY_TYPE_LABELS[text]
+    simplified = text
+    for prefix in ("PREFIX_INTERNAL_IP_TO_DST_", "PREFIX_INTERNAL_IP_", "INTERNAL_IP_TO_DST_", "INTERNAL_IP_"):
+        if simplified.startswith(prefix):
+            simplified = simplified[len(prefix):]
+            break
+    replacements = (
+        ("HIGH_UDP_PPS_ATTACK", "UDP flood"),
+        ("HIGH_TCP_PPS_ATTACK", "TCP flood"),
+        ("HIGH_DNS_PPS_ATTACK", "DNS flood"),
+        ("HIGH_UDP_PPS", "UDP alto"),
+        ("HIGH_TCP_PPS", "TCP alto"),
+        ("HIGH_DNS_PPS", "DNS alto"),
+        ("HIGH_PPS", "alto PPS"),
+        ("TO_DST", "por destino"),
+        ("DST", "destino"),
+        ("SRC", "origem"),
+        ("PPS", "pps"),
+    )
+    for old, new in replacements:
+        simplified = simplified.replace(old, new.upper())
+    words = [part for part in simplified.replace("_", " ").split() if part and part not in {"ATTACK"}]
+    label = " ".join(words).lower()
+    for token in ("udp", "tcp", "dns", "pps", "ip"):
+        label = re.sub(rf"\b{token}\b", token.upper() if token != "ip" else "IP", label)
+    return label[:1].upper() + label[1:] if label else text
+
+
+def anomaly_short_summary(event: dict[str, Any]) -> str:
+    target = clean_text(event.get("target_cidr") or (host_cidr_for_ip(event.get("target_ip")) if clean_ip(event.get("target_ip")) else "") or event.get("target_ip") or event.get("top_src_ip") or "-")
+    direction = "saindo" if normalize_anomaly_direction(event.get("direction")) == "transmits" else "entrando" if normalize_anomaly_direction(event.get("direction")) == "receives" else "trafego"
+    protocol = clean_text(event.get("protocol") or event.get("decoder")).upper() or "IP"
+    peak = format_metric(event.get("peak_value") or event.get("observed_value") or 0, event.get("metric_unit") or "packets_s")
+    return f"{target} {direction} {protocol} - {peak}"
+
+
 def anomaly_flow_query_window(event: dict[str, Any], range_margin_seconds: int) -> tuple[datetime, datetime]:
     start = (
         clickhouse_datetime(event.get("started_at"))
@@ -10132,16 +10194,23 @@ def anomaly_flow_target_filter(target_role: str) -> str:
 
 
 def clickhouse_flow_raw_schema() -> dict[str, str]:
+    return clickhouse_table_schema("flow_raw")
+
+
+def clickhouse_table_schema(table_name: str) -> dict[str, str]:
+    table = clean_text(table_name)
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+        return {}
     try:
-        rows = rows_as_dicts(query_clickhouse("DESCRIBE TABLE flow_raw"))
+        rows = rows_as_dicts(query_clickhouse(f"DESCRIBE TABLE {table}"))
     except Exception:
         rows = rows_as_dicts(
             query_clickhouse(
-                """
+                f"""
                 SELECT name, type
                 FROM system.columns
                 WHERE database = currentDatabase()
-                  AND table = 'flow_raw'
+                  AND table = '{table}'
                 """
             )
         )
@@ -16342,6 +16411,22 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         """,
         (dedupe_key,),
     ).fetchone()
+    if existing is not None:
+        candidate = dict(candidate)
+        current_first = parse_datetime_text(existing["first_seen"])
+        incoming_first = parse_datetime_text(candidate.get("first_seen"))
+        current_last = parse_datetime_text(existing["last_seen"])
+        incoming_last = parse_datetime_text(candidate.get("last_seen"))
+        if current_first and incoming_first:
+            candidate["first_seen"] = iso(min(current_first, incoming_first))
+        elif current_first:
+            candidate["first_seen"] = existing["first_seen"]
+        if current_last and incoming_last:
+            candidate["last_seen"] = iso(max(current_last, incoming_last))
+        elif current_last:
+            candidate["last_seen"] = existing["last_seen"]
+        candidate["packets_s"] = max(float(existing["packets_s"] or 0), float(candidate.get("packets_s") or 0))
+        candidate["bits_s"] = max(float(existing["bits_s"] or 0), float(candidate.get("bits_s") or 0))
     message = security_anomaly_message(candidate)
     recommended_action = "Verificar origem, cliente e destino. Nenhum bloqueio automatico foi aplicado."
     source_details = {
@@ -16541,7 +16626,7 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         scope_type = item.get("scope_type") or ""
         invalid_scope = sqlite_bool(item.get("invalid_scope"))
     source_details = bgp_json_loads(item.get("source_details_json"), {})
-    return {
+    result = {
         "id": anomaly_id,
         "action_id": anomaly_id,
         "security_anomaly_id": anomaly_id,
@@ -16593,6 +16678,15 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
     }
+    result["type_label"] = anomaly_type_label(result.get("vector") or result.get("source_name") or result.get("protocol"))
+    result["technical_vector"] = result.get("vector") or ""
+    result["technical_rule"] = result.get("source_name") or result.get("vector") or ""
+    result["compact_summary"] = anomaly_short_summary({
+        **result,
+        "peak_value": result.get("packets_s") if result.get("packets_s") else result.get("bits_s"),
+        "metric_unit": "packets_s" if result.get("packets_s") else "bits_s",
+    })
+    return result
 
 
 def security_anomaly_not_found(identifier: int) -> HTTPException:
@@ -17518,6 +17612,10 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "updated_at": item["updated_at"],
     }
     result.update(source)
+    result["type_label"] = anomaly_type_label(result.get("vector_name") or result.get("attack_vector_name") or result.get("decoder"))
+    result["technical_vector"] = result.get("vector_name") or result.get("attack_vector_name") or ""
+    result["technical_rule"] = result.get("source_name") or result.get("vector_name") or result.get("attack_vector_name") or ""
+    result["compact_summary"] = anomaly_short_summary(result)
     result["dominant_src_ip"] = clean_ip(item.get("top_src_ip"))
     result["dominant_dst_ip"] = clean_ip(item.get("top_dst_ip"))
     result["dominant_dst_port"] = int(item["top_dst_port"]) if item.get("top_dst_port") is not None else None
@@ -21355,9 +21453,13 @@ def anomaly_detail_payload(
 ) -> dict[str, Any]:
     event = enrich_anomaly_event_from_flows(event, flows)
     flow_evidence = extra.pop("flow_evidence", None)
+    timeseries_info = extra.pop("timeseries_info", None)
     if flow_evidence is None:
         start_dt, end_dt = anomaly_flow_query_window(event, 0)
         flow_evidence = aggregate_flow_evidence(flows, start_dt, end_dt)
+    if timeseries_info is None:
+        timeseries_info = anomaly_detail_timeseries(event, metric_points)
+    metric_points = list(timeseries_info.get("points") or metric_points or [])
     target_fields = {
         "target_ip": clean_ip(event.get("target_ip")),
         "target_cidr": clean_text(event.get("target_cidr")),
@@ -21381,6 +21483,13 @@ def anomaly_detail_payload(
         "unique_dst_ports": flow_evidence.get("unique_dst_ports", event.get("unique_dst_ports")),
         "metric_points": metric_points,
         "timeseries": metric_points,
+        "timeseries_source": timeseries_info.get("source"),
+        "timeseries_scope": timeseries_info.get("scope"),
+        "timeseries_points": timeseries_info.get("points_count", len(metric_points)),
+        "timeseries_warning": timeseries_info.get("warning", ""),
+        "timeseries_window_start": timeseries_info.get("window_start", ""),
+        "timeseries_window_end": timeseries_info.get("window_end", ""),
+        "timeseries_attempts": timeseries_info.get("attempts", []),
         **target_fields,
         **extra,
     }
@@ -21402,6 +21511,262 @@ def conversations_from_flow_evidence(flow_evidence: dict[str, Any] | None) -> di
             "flow_count": int(item.get("flows") or item.get("flow_count") or 0),
         }
     return conversations
+
+
+def anomaly_timeseries_window(event: dict[str, Any]) -> tuple[datetime, datetime]:
+    first = (
+        clickhouse_datetime(event.get("started_at"))
+        or clickhouse_datetime(event.get("first_seen"))
+        or clickhouse_datetime(event.get("created_at"))
+        or datetime.now(timezone.utc)
+    )
+    last = (
+        clickhouse_datetime(event.get("last_seen_at"))
+        or clickhouse_datetime(event.get("last_seen"))
+        or clickhouse_datetime(event.get("ended_at"))
+        or first
+    )
+    if last > first:
+        return first - timedelta(minutes=15), last + timedelta(minutes=15)
+    now = datetime.now(timezone.utc)
+    end = now if now <= first + timedelta(hours=2) else first + timedelta(minutes=60)
+    if end <= first:
+        end = first + timedelta(minutes=60)
+    return first - timedelta(minutes=15), end
+
+
+def anomaly_timeseries_specific_scope(event: dict[str, Any]) -> bool:
+    vector = clean_text(event.get("vector") or event.get("vector_name") or event.get("attack_vector_name") or event.get("source_name")).upper()
+    if vector in OUTBOUND_DST_PORT_VECTORS:
+        return True
+    if "TO_DST" in vector or "_DST_" in vector or vector.endswith("_DST_HIGH_PPS"):
+        return True
+    return bool(not vector and (event.get("target_port") or event.get("top_dst_port") or event.get("dominant_dst_port")))
+
+
+def anomaly_timeseries_target_filter(mapping: dict[str, str], schema: dict[str, str], event: dict[str, Any], params: dict[str, Any]) -> str:
+    target_ip = clean_ip(event.get("target_ip") or event.get("src_ip") or event.get("top_src_ip"))
+    target_cidr = clean_text(event.get("target_cidr"))
+    role = clean_text(event.get("target_role"))
+    direction = normalize_anomaly_direction(event.get("direction"))
+    if not role:
+        role = "src_ip" if direction == "transmits" else "dst_ip" if direction == "receives" else ""
+    columns = []
+    if role == "src_ip":
+        columns = [mapping["src_ip"]]
+    elif role == "dst_ip":
+        columns = [mapping["dst_ip"]]
+    else:
+        columns = [mapping["src_ip"], mapping["dst_ip"]]
+    columns = [column for column in columns if column]
+    if target_ip:
+        params["target_ip"] = target_ip
+        params["target_ip_canonical"] = clickhouse_ip_string_param(target_ip, "target_ip")
+        return "(" + " OR ".join(
+            f"({clickhouse_ip_expr(column, schema)} = {{target_ip:String}} OR {clickhouse_ip_expr(column, schema)} = {{target_ip_canonical:String}} OR endsWith({clickhouse_ip_expr(column, schema)}, {{target_ip:String}}))"
+            for column in columns
+        ) + ")"
+    if target_cidr:
+        params["target_cidr"] = clickhouse_cidr_string_param(target_cidr, "target_cidr")
+        return "(" + " OR ".join(f"isIPAddressInRange({clickhouse_ip_expr(column, schema)}, {{target_cidr:String}})" for column in columns) + ")"
+    return ""
+
+
+def anomaly_timeseries_protocol_filter(mapping: dict[str, str], event: dict[str, Any]) -> str:
+    decoder = clean_text(event.get("decoder") or event.get("protocol")).upper()
+    vector = anomaly_vector_text(event)
+    dns_like = "DNS" in vector or decoder == "DNS"
+    return dynamic_protocol_filter_for_decoder(decoder, dns_like, {
+        "proto": mapping.get("proto") or "",
+        "protocol": mapping.get("protocol") or "",
+    })
+
+
+def anomaly_timeseries_flow_raw(event: dict[str, Any], start_dt: datetime, end_dt: datetime) -> tuple[list[dict[str, Any]], str]:
+    schema = clickhouse_flow_raw_schema()
+    mapping = clickhouse_flow_raw_mapping(schema)
+    time_col = mapping["time"]
+    if not time_col or not mapping["src_ip"] or not mapping["dst_ip"]:
+        raise ValueError("flow_raw sem colunas minimas para timeseries")
+    params: dict[str, Any] = {"start": start_dt, "end": end_dt}
+    filters = [f"{time_col} >= {{start:DateTime}}", f"{time_col} <= {{end:DateTime}}"]
+    target_filter = anomaly_timeseries_target_filter(mapping, schema, event, params)
+    if target_filter:
+        filters.append(target_filter)
+    protocol_filter = anomaly_timeseries_protocol_filter(mapping, event)
+    if protocol_filter:
+        filters.append(protocol_filter)
+    specific_scope = anomaly_timeseries_specific_scope(event)
+    if specific_scope:
+        top_dst_ip = clean_ip(event.get("top_dst_ip") or event.get("dominant_dst_ip"))
+        top_dst_port = int(event.get("top_dst_port") or event.get("target_port") or event.get("dominant_dst_port") or 0)
+        if top_dst_ip and mapping["dst_ip"]:
+            params["top_dst_ip"] = top_dst_ip
+            params["top_dst_ip_canonical"] = clickhouse_ip_string_param(top_dst_ip, "top_dst_ip")
+            dst_expr = clickhouse_ip_expr(mapping["dst_ip"], schema)
+            filters.append(f"({dst_expr} = {{top_dst_ip:String}} OR {dst_expr} = {{top_dst_ip_canonical:String}} OR endsWith({dst_expr}, {{top_dst_ip:String}}))")
+        if top_dst_port > 0 and mapping["dst_port"]:
+            params["top_dst_port"] = top_dst_port
+            filters.append(f"{mapping['dst_port']} = {{top_dst_port:UInt16}}")
+    packets_expr = f"{mapping['packets']} * {clickhouse_flow_raw_sample_rate_expr(mapping['sample_rate'])}" if mapping["packets"] else "0"
+    bytes_expr = f"{mapping['bytes']} * {clickhouse_flow_raw_sample_rate_expr(mapping['sample_rate'])}" if mapping["bytes"] else "0"
+    flows_expr = mapping["flow_count"] or "1"
+    query = f"""
+        SELECT
+            toStartOfMinute({time_col}) AS time,
+            round(sum({bytes_expr}) * 8 / 60, 2) AS bits_s,
+            round(sum({packets_expr}) / 60, 2) AS packets_s,
+            round(sum({flows_expr}) / 60, 2) AS flows_s,
+            sum({bytes_expr}) AS bytes,
+            sum({packets_expr}) AS packets,
+            sum({flows_expr}) AS flows
+        FROM flow_raw
+        WHERE {' AND '.join(f'({item})' for item in filters)}
+        GROUP BY time
+        ORDER BY time
+    """
+    rows = rows_as_dicts(query_clickhouse(query, params))
+    points = [anomaly_timeseries_point(row) for row in rows]
+    scope = "specific_conversation" if specific_scope else "target_total"
+    return points, scope
+
+
+def anomaly_timeseries_flow_tops(event: dict[str, Any], start_dt: datetime, end_dt: datetime) -> list[dict[str, Any]]:
+    schema = clickhouse_table_schema("flow_tops_1m")
+    if not {"minute", "dimension", "key"} <= set(schema):
+        raise ValueError("flow_tops_1m sem colunas minimas")
+    target_ip = clean_ip(event.get("target_ip") or event.get("src_ip") or event.get("top_src_ip"))
+    target_cidr = clean_text(event.get("target_cidr"))
+    if not target_ip and target_cidr:
+        try:
+            target_ip = str(ip_network(target_cidr, strict=False).network_address)
+        except ValueError:
+            target_ip = ""
+    if not target_ip:
+        raise ValueError("flow_tops_1m sem target_ip")
+    role = clean_text(event.get("target_role")) or ("src_ip" if normalize_anomaly_direction(event.get("direction")) == "transmits" else "dst_ip")
+    dimension = "dst_ip" if role == "dst_ip" else "src_ip"
+    rows = rows_as_dicts(
+        query_clickhouse(
+            """
+            SELECT
+                minute AS time,
+                round(sum(bytes) * 8 / 60, 2) AS bits_s,
+                round(sum(packets) / 60, 2) AS packets_s,
+                round(sum(flows) / 60, 2) AS flows_s,
+                sum(bytes) AS bytes,
+                sum(packets) AS packets,
+                sum(flows) AS flows
+            FROM flow_tops_1m
+            WHERE minute >= {start:DateTime}
+              AND minute <= {end:DateTime}
+              AND dimension = {dimension:String}
+              AND key = {target_ip:String}
+            GROUP BY time
+            ORDER BY time
+            """,
+            {"start": start_dt, "end": end_dt, "dimension": dimension, "target_ip": target_ip},
+        )
+    )
+    return [anomaly_timeseries_point(row) for row in rows]
+
+
+def anomaly_timeseries_anomaly_events(event: dict[str, Any], start_dt: datetime, end_dt: datetime) -> list[dict[str, Any]]:
+    schema = clickhouse_table_schema("anomaly_events")
+    if not schema:
+        raise ValueError("ClickHouse anomaly_events indisponivel")
+    time_col = first_clickhouse_column(schema, ("last_seen_at", "last_seen", "created_at", "event_time", "timestamp"))
+    if not time_col:
+        raise ValueError("anomaly_events sem coluna de tempo")
+    value_col = first_clickhouse_column(schema, ("peak_value", "observed_value", "packets_s", "metric_value"))
+    target_col = first_clickhouse_column(schema, ("target_ip", "src_ip", "internal_ip", "top_src_ip"))
+    params: dict[str, Any] = {"start": start_dt, "end": end_dt}
+    filters = [f"{time_col} >= {{start:DateTime}}", f"{time_col} <= {{end:DateTime}}"]
+    target_ip = clean_ip(event.get("target_ip") or event.get("src_ip") or event.get("top_src_ip"))
+    if target_ip and target_col:
+        params["target_ip"] = target_ip
+        filters.append(f"toString({target_col}) = {{target_ip:String}}")
+    value_expr = value_col or "0"
+    rows = rows_as_dicts(
+        query_clickhouse(
+            f"""
+            SELECT
+                toStartOfMinute({time_col}) AS time,
+                max({value_expr}) AS packets_s,
+                0 AS bits_s,
+                0 AS flows_s,
+                0 AS bytes,
+                max({value_expr}) * 60 AS packets,
+                0 AS flows
+            FROM anomaly_events
+            WHERE {' AND '.join(f'({item})' for item in filters)}
+            GROUP BY time
+            ORDER BY time
+            """,
+            params,
+        )
+    )
+    return [anomaly_timeseries_point(row) for row in rows]
+
+
+def anomaly_timeseries_point(row: dict[str, Any]) -> dict[str, Any]:
+    raw_time = row.get("time")
+    return {
+        "time": iso(raw_time)[:16] if isinstance(raw_time, datetime) else clean_text(raw_time)[:16],
+        "bits_s": round(float(row.get("bits_s") or 0), 2),
+        "packets_s": round(float(row.get("packets_s") or 0), 2),
+        "flows_s": round(float(row.get("flows_s") or 0), 2),
+        "bytes": int(float(row.get("bytes") or 0)),
+        "packets": int(float(row.get("packets") or 0)),
+        "flows": int(float(row.get("flows") or 0)),
+    }
+
+
+def anomaly_detail_timeseries(event: dict[str, Any], fallback_points: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    start_dt, end_dt = anomaly_timeseries_window(event)
+    attempts: list[str] = []
+    points: list[dict[str, Any]] = []
+    source = "none"
+    scope = "target_total"
+    try:
+        points, scope = anomaly_timeseries_flow_raw(event, start_dt, end_dt)
+        source = "flow_raw"
+        attempts.append("flow_raw")
+    except Exception as exc:
+        attempts.append(f"flow_raw_error:{clean_text(exc)[:120]}")
+    if len(points) <= 1:
+        try:
+            fallback = anomaly_timeseries_flow_tops(event, start_dt, end_dt)
+            attempts.append("flow_tops_1m")
+            if len(fallback) > len(points):
+                points = fallback
+                source = "flow_tops_1m"
+                scope = "target_total"
+        except Exception as exc:
+            attempts.append(f"flow_tops_1m_error:{clean_text(exc)[:120]}")
+    if len(points) <= 1:
+        try:
+            fallback = anomaly_timeseries_anomaly_events(event, start_dt, end_dt)
+            attempts.append("anomaly_events")
+            if len(fallback) > len(points):
+                points = fallback
+                source = "anomaly_events"
+        except Exception as exc:
+            attempts.append(f"anomaly_events_error:{clean_text(exc)[:120]}")
+    if not points and fallback_points:
+        points = list(fallback_points)
+        source = "saved_snapshot"
+    warning = "only_one_point" if len(points) == 1 else ""
+    return {
+        "points": points,
+        "source": source,
+        "scope": scope,
+        "points_count": len(points),
+        "warning": warning,
+        "window_start": iso(start_dt),
+        "window_end": iso(end_dt),
+        "attempts": attempts[-6:],
+    }
 
 
 @app.get("/api/anomalies/summary")
