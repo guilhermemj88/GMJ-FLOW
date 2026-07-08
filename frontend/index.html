@@ -616,6 +616,37 @@
       word-break: break-word;
     }
 
+    .bgp-profile-details summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: #475569;
+    }
+
+    .bgp-profile-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: .5rem .85rem;
+      margin-top: .75rem;
+    }
+
+    .bgp-profile-detail-grid div {
+      min-width: 0;
+    }
+
+    .bgp-profile-detail-grid span {
+      display: block;
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #64748b;
+    }
+
+    .bgp-profile-detail-grid code,
+    .bgp-profile-details pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .nav-badge {
       margin-left: auto;
       min-width: 22px;
@@ -4400,7 +4431,16 @@
               <button id="attachLegacyBgpProfilesButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="link"></i><span>Associar legados ao conector</span></button>
               <label class="d-inline-flex align-items-center gap-1 small mb-0"><input id="activateLegacyBgpProfiles" type="checkbox"> ativar tambem</label>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Ação</th><th>Alvo</th><th>Filtro</th><th>Usado por</th><th>Status</th><th>Preview</th><th>Ações</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
+            <div id="bgpProfileFilters" class="toolbar mb-2">
+              <button type="button" class="btn btn-sm btn-outline-secondary active" data-filter="all">Todos</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="valid">Validos</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="active">Ativos</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="invalid">Invalidos</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="unsafe">Unsafe/deprecated</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="used">Usados por regras</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="unused">Nao usados</button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Connector</th><th>Acao</th><th>Match</th><th>Aprovacao</th><th>Status</th><th>Usado por</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -5369,6 +5409,7 @@
     let aiProfiles = [];
     let bgpConnectors = [];
     let bgpProfiles = [];
+    let bgpProfileFilter = 'all';
     let bgpProtectedPrefixes = [];
     let bgpAnnouncements = [];
     let bgpPortPolicies = [];
@@ -8437,34 +8478,92 @@
       setText('bgpPeerStatusText', bgpConnectorStatuses.length ? `${bgpConnectorStatuses.length} conector(es) verificado(s)` : '-');
     }
 
+    function bgpProfileStatusClass(status) {
+      const value = String(status || '').toLowerCase();
+      if (value === 'valid') return 'ok';
+      if (value === 'disabled') return 'off';
+      if (value === 'invalid_connector') return 'down';
+      return 'warn';
+    }
+
+    function bgpProfileMatchesFilter(item) {
+      const status = String(item.validation_status || item.profile_status || '').toLowerCase();
+      const used = Number(item.used_by_count ?? item.used_by_rules_count ?? 0) > 0;
+      if (bgpProfileFilter === 'valid') return status === 'valid';
+      if (bgpProfileFilter === 'active') return status === 'valid' && Boolean(item.enabled ?? item.active);
+      if (bgpProfileFilter === 'invalid') return status === 'invalid_connector' || status.startsWith('invalid');
+      if (bgpProfileFilter === 'unsafe') return status === 'unsafe' || status === 'deprecated' || item.is_deprecated || item.uses_source_port;
+      if (bgpProfileFilter === 'used') return used;
+      if (bgpProfileFilter === 'unused') return !used;
+      return true;
+    }
+
+    function bgpProfileDetailCell(label, value) {
+      return `<div><span>${escapeHtml(label)}</span>${escapeHtml(value || '-')}</div>`;
+    }
+
+    function bgpProfileDetails(item, connector) {
+      const usedRules = (item.used_by_rules || []).map(rule => rule.vector || rule.name || '').filter(Boolean).join(', ');
+      const validation = [item.validation_status || item.profile_status || '-', item.validation_reason || item.profile_status_reason || ''].filter(Boolean).join(' - ');
+      return `
+        <tr id="bgpProfileDetails-${item.id}" class="d-none">
+          <td colspan="9">
+            <div class="bgp-profile-details">
+              <div class="bgp-profile-detail-grid">
+                ${bgpProfileDetailCell('Connector', item.connector_name || connector?.name || '-')}
+                ${bgpProfileDetailCell('Tipo', item.response_type)}
+                ${bgpProfileDetailCell('Alvo', item.target_selector)}
+                ${bgpProfileDetailCell('Protocolo', item.protocol_selector)}
+                ${bgpProfileDetailCell('Porta origem', `${item.src_port_selector || 'any'} ${item.src_port_value || ''}`.trim())}
+                ${bgpProfileDetailCell('Porta destino', `${item.dst_port_selector || 'any'} ${item.dst_port_value || ''}`.trim())}
+                ${bgpProfileDetailCell('TCP flags', `${item.tcp_flags_selector || 'any'} ${item.tcp_flags_value || ''}`.trim())}
+                ${bgpProfileDetailCell('Duracao padrao/max', `${item.default_duration_seconds || '-'} / ${item.max_duration_seconds || '-'}`)}
+                ${bgpProfileDetailCell('Aprovacao', item.approval_mode || '-')}
+                ${bgpProfileDetailCell('Rate-limit min/default/max', `${item.min_rate_limit_bps || '-'} / ${item.default_rate_limit_raw || item.default_rate_limit_bps || '-'} / ${item.max_rate_limit_bps || '-'}`)}
+                ${bgpProfileDetailCell('Usado por regras', usedRules || '-')}
+                ${bgpProfileDetailCell('Validacao', validation)}
+              </div>
+              <div class="mt-2"><span class="subtle">Preview completo</span><pre class="bg-light border rounded p-2 mt-1 mb-0">${escapeHtml(item.rendered_command_preview || item.preview || '-')}</pre></div>
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+
     function renderBgpProfiles() {
-      document.getElementById('bgpProfilesTable').innerHTML = bgpProfiles.map(item => {
+      const filters = document.querySelectorAll('#bgpProfileFilters [data-filter]');
+      filters.forEach(button => button.classList.toggle('active', button.dataset.filter === bgpProfileFilter));
+      const items = bgpProfiles.filter(bgpProfileMatchesFilter);
+      document.getElementById('bgpProfilesTable').innerHTML = items.map(item => {
         const connector = bgpConnectors.find(connector => Number(connector.id) === Number(item.connector_id));
-        const filter = [
-          item.protocol_selector,
-          item.src_port_selector !== 'any' ? `src:${item.src_port_selector}${item.src_port_value ? `=${item.src_port_value}` : ''}` : '',
-          item.dst_port_selector !== 'any' ? `dst:${item.dst_port_selector}${item.dst_port_value ? `=${item.dst_port_value}` : ''}` : '',
-          item.tcp_flags_selector !== 'any' ? item.tcp_flags_selector : ''
-        ].filter(Boolean).join(' / ');
+        const status = item.validation_status || item.profile_status || (item.enabled ? 'valid' : 'disabled');
+        const usedCount = Number(item.used_by_count ?? item.used_by_rules_count ?? 0);
+        const requiresConnector = ['flowspec', 'diversion', 'rtbh', 'blackhole', 'rate_limit'].includes(String(item.response_type || '').toLowerCase());
+        const canActivate = status !== 'invalid_connector' && (item.enabled || !requiresConnector || item.connector_id);
+        const toggleLabel = item.enabled ? 'Desativar' : 'Ativar';
+        const toggleClass = item.enabled ? 'btn-outline-warning' : 'btn-outline-success';
         return `
           <tr>
             <td>${escapeHtml(item.name)}</td>
             <td>${escapeHtml(item.response_type)}</td>
             <td>${escapeHtml(item.connector_name || connector?.name || '-')}</td>
             <td>${escapeHtml(bgpActionLabel(item))}</td>
-            <td>${escapeHtml(item.target_selector)}</td>
-            <td>${escapeHtml(filter || '-')}</td>
-            <td class="text-end">${formatNumber(item.used_by_rules_count || 0)}</td>
-            <td><span class="badge-soft ${item.profile_status === 'valid' ? 'ok' : item.profile_status === 'disabled' ? 'off' : 'warn'}">${escapeHtml(item.profile_status || (item.enabled ? 'valid' : 'disabled'))}</span></td>
-            <td><code>${escapeHtml(item.rendered_command_preview || '-').slice(0, 120)}</code></td>
+            <td><code>${escapeHtml(item.display_match || item.compact_preview || '-')}</code></td>
+            <td>${escapeHtml(item.approval_mode || '-')}</td>
+            <td><span class="badge-soft ${bgpProfileStatusClass(status)}" title="${escapeHtml(item.validation_reason || item.profile_status_reason || '')}">${escapeHtml(status)}</span></td>
+            <td class="text-end">${formatNumber(usedCount)}</td>
             <td>
-              <button type="button" class="btn btn-sm btn-outline-success bgp-profile-test" data-id="${item.id}"><i data-lucide="play-circle"></i></button>
-              <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-edit" data-id="${item.id}"><i data-lucide="pencil"></i></button>
-              <button type="button" class="btn btn-sm btn-outline-danger bgp-profile-delete" data-id="${item.id}"><i data-lucide="trash-2"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-details-toggle" data-id="${item.id}" title="Detalhes"><i data-lucide="list"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-edit" data-id="${item.id}" title="Editar"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-profile-clone" data-id="${item.id}" title="Clonar"><i data-lucide="copy"></i></button>
+              <button type="button" class="btn btn-sm ${toggleClass} bgp-profile-toggle" data-id="${item.id}" ${canActivate ? '' : 'disabled'} title="${toggleLabel}"><i data-lucide="power"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-success bgp-profile-test" data-id="${item.id}" title="Validar"><i data-lucide="play-circle"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-danger bgp-profile-delete" data-id="${item.id}" title="Excluir/Arquivar"><i data-lucide="trash-2"></i></button>
             </td>
           </tr>
+          ${bgpProfileDetails(item, connector)}
         `;
-      }).join('') || '<tr><td colspan="10" class="text-muted">Sem profiles</td></tr>';
+      }).join('') || '<tr><td colspan="9" class="text-muted">Sem profiles</td></tr>';
     }
 
     function renderBgpProtected() {
@@ -8856,6 +8955,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileConnector', item.connector_id || '');
     }
 
+    function cloneBgpProfile(id) {
+      const item = bgpProfiles.find(profile => Number(profile.id) === Number(id));
+      if (!item) return;
+      editBgpProfile(id);
+      setValue('bgpProfileId', '');
+      setValue('bgpProfileName', `${item.name || 'PROFILE'}_CLONE`);
+      setText('bgpStatus', `Profile ${item.name} clonado no formulario.`);
+    }
+
     function collectBgpProfilePayload() {
       const id = selectValue('bgpProfileId');
       return {
@@ -8907,6 +9015,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    async function toggleBgpProfile(id) {
+      const item = bgpProfiles.find(profile => Number(profile.id) === Number(id));
+      if (!item) return;
+      const payload = bgpProfilePayloadFromItem(item, item.connector_id, !Boolean(item.enabled ?? item.active));
+      await apiRequest(`/api/bgp/response-profiles/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      await loadBgpView();
+      setText('bgpStatus', `Profile ${item.name} ${payload.enabled ? 'ativado' : 'desativado'}.`);
+    }
+
     function bgpProfilePayloadFromItem(item, connectorId, activate) {
       return {
         name: item.name,
@@ -8915,7 +9036,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         active: activate ? true : Boolean(item.enabled ?? item.active),
         response_type: item.response_type || item.type || 'flowspec',
         type: item.response_type || item.type || 'flowspec',
-        connector_id: Number(connectorId),
+        connector_id: connectorId ? Number(connectorId) : null,
         approval_mode: item.approval_mode || 'manual_approval',
         action: item.default_action || item.action || 'discard',
         default_action: item.default_action || item.action || 'discard',
@@ -14612,6 +14733,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
     document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
     document.getElementById('attachLegacyBgpProfilesButton').addEventListener('click', () => attachLegacyBgpProfiles().catch(error => setText('bgpStatus', `Falha ao associar profiles legados: ${error.message}`)));
+    document.getElementById('bgpProfileFilters').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const button = target?.closest('[data-filter]');
+      if (!button) return;
+      bgpProfileFilter = button.dataset.filter || 'all';
+      renderBgpProfiles();
+      createIcons();
+    });
     document.getElementById('saveBgpProtectedButton').addEventListener('click', () => saveBgpProtected().catch(error => setText('bgpStatus', `Falha ao salvar prefixo: ${error.message}`)));
     document.getElementById('clearBgpProtectedButton').addEventListener('click', clearBgpProtectedForm);
     document.getElementById('saveBgpPolicyButton').addEventListener('click', () => saveBgpPolicy().catch(error => setText('bgpStatus', `Falha ao salvar politica: ${error.message}`)));
@@ -14641,10 +14770,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
     document.getElementById('bgpProfilesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const details = target?.closest('.bgp-profile-details-toggle');
       const edit = target?.closest('.bgp-profile-edit');
+      const clone = target?.closest('.bgp-profile-clone');
+      const toggle = target?.closest('.bgp-profile-toggle');
       const remove = target?.closest('.bgp-profile-delete');
       const test = target?.closest('.bgp-profile-test');
+      if (details) document.getElementById(`bgpProfileDetails-${details.dataset.id}`)?.classList.toggle('d-none');
       if (edit) editBgpProfile(Number(edit.dataset.id));
+      if (clone) cloneBgpProfile(Number(clone.dataset.id));
+      if (toggle) toggleBgpProfile(Number(toggle.dataset.id)).catch(error => setText('bgpStatus', `Falha ao ativar/desativar profile: ${error.message}`));
       if (remove) apiRequest(`/api/bgp/response-profiles/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover profile: ${error.message}`));
       if (test) testBgpProfile(Number(test.dataset.id)).catch(error => setText('bgpStatus', `Falha ao testar profile: ${error.message}`));
     });

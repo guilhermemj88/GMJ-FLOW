@@ -85,6 +85,62 @@ def create_bgp_connector_profile():
     return connector, profile
 
 
+def response_profile_fixture(**overrides) -> dict:
+    base = {
+        "id": 1,
+        "name": "FLOWSPEC_BLOCK_DST_DNS",
+        "description": "",
+        "enabled": 1,
+        "response_type": "flowspec",
+        "connector_id": 10,
+        "connector_name": "BGP-FIBINET-BORDA",
+        "connector_enabled": 1,
+        "connector_active": 1,
+        "approval_mode": "manual_approval",
+        "action": "discard",
+        "default_action": "discard",
+        "target_selector": "dst_ip",
+        "protocol_selector": "udp",
+        "fixed_protocol": "",
+        "src_port_selector": "any",
+        "src_port_value": "",
+        "dst_port_selector": "fixed",
+        "dst_port_value": "53",
+        "tcp_flags_selector": "any",
+        "tcp_flags_value": "",
+        "rate_limit_bps": None,
+        "rate_limit_value_raw": "",
+        "rate_limit_unit": "",
+        "default_rate_limit_bps": None,
+        "default_rate_limit_raw": "",
+        "max_rate_limit_bps": None,
+        "min_rate_limit_bps": None,
+        "bgp_community": "",
+        "action_metadata": "",
+        "use_global_whitelist": 1,
+        "extra_whitelist_ids": "[]",
+        "bypass_whitelist": 0,
+        "redirect_target": "",
+        "next_hop": "",
+        "community": "",
+        "large_community": "",
+        "require_protocol_or_port": 1,
+        "require_protected_prefix": 1,
+        "allow_wide_prefix": 0,
+        "max_prefixlen_v4": 32,
+        "max_prefixlen_v6": 128,
+        "max_duration_seconds": 3600,
+        "default_duration_seconds": 900,
+        "notes": "",
+        "used_by_rules_count": 0,
+        "used_by_rules_raw": "",
+        "created_at": "2026-07-08T00:00:00Z",
+        "updated_at": "2026-07-08T00:00:00Z",
+    }
+    base.update(overrides)
+    return backend_main.bgp_response_profile_row_to_dict(base)
+
+
 class FakeClickHouseResult:
     def __init__(self, rows):
         self.column_names = [
@@ -1021,6 +1077,46 @@ class AiMitigationRefactorTest(unittest.TestCase):
         html = Path("frontend/index.html").read_text(encoding="utf-8")
         self.assertIn("detail.flow_evidence.related_flows", html)
         self.assertIn("const evidenceFlows", html)
+
+    def test_safe_destination_profiles_validate_for_dns_udp_and_tcp(self):
+        cases = [
+            ("FLOWSPEC_BLOCK_DST_DNS", "udp", "fixed", "53", "dst udp/53"),
+            ("FLOWSPEC_BLOCK_DST_UDP_PORT", "udp", "anomaly_dst_port", "", "dst udp/<anom_dst_port>"),
+            ("FLOWSPEC_BLOCK_DST_TCP_PORT", "tcp", "anomaly_dst_port", "", "dst tcp/<anom_dst_port>"),
+        ]
+        for name, protocol, dst_selector, dst_value, display_match in cases:
+            profile = response_profile_fixture(
+                name=name,
+                protocol_selector=protocol,
+                dst_port_selector=dst_selector,
+                dst_port_value=dst_value,
+            )
+            self.assertEqual(profile["validation_status"], "valid")
+            self.assertTrue(profile["is_safe_default"])
+            self.assertEqual(profile["display_match"], display_match)
+            self.assertEqual(profile["approval_mode"], "manual_approval")
+            self.assertNotIn("source-port", profile["rendered_command_preview"])
+
+    def test_unsafe_and_deprecated_profiles_are_classified_explicitly(self):
+        src_dns = response_profile_fixture(name="FLOWSPEC_BLOCK_SRC_DNS", target_selector="src_ip")
+        self.assertEqual(src_dns["validation_status"], "deprecated")
+        self.assertTrue(src_dns["is_deprecated"])
+        self.assertFalse(src_dns["is_safe_default"])
+
+        src_port = response_profile_fixture(
+            name="FLOWSPEC_BLOCK_DST_UDP_SRC_PORT",
+            src_port_selector="anomaly_src_port",
+            dst_port_selector="any",
+            dst_port_value="",
+        )
+        self.assertEqual(src_port["validation_status"], "unsafe")
+        self.assertTrue(src_port["uses_source_port"])
+
+    def test_flowspec_profile_without_connector_is_invalid_connector(self):
+        profile = response_profile_fixture(connector_id=None, connector_name="", connector_enabled=None, connector_active=None)
+        self.assertEqual(profile["validation_status"], "invalid_connector")
+        self.assertEqual(profile["profile_status"], "invalid_connector")
+        self.assertIn("Connector", profile["validation_reason"])
 
 
 if __name__ == "__main__":

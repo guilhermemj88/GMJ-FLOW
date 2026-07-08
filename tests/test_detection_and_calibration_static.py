@@ -337,6 +337,23 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         }, 0.8)
         self.assertIsNone(dns_port)
 
+    def test_response_profiles_ui_is_compact_and_uses_details_for_preview(self):
+        response_profiles_section = FRONTEND[
+            FRONTEND.find('<div class="panel-title mb-2">Response Profiles</div>'):
+            FRONTEND.find('<div class="panel-title mb-2">Politica de seguranca</div>')
+        ]
+        self.assertIn('id="bgpProfileFilters"', response_profiles_section)
+        self.assertIn('data-filter="valid"', response_profiles_section)
+        self.assertIn('data-filter="unsafe"', response_profiles_section)
+        self.assertIn("<th>Match</th>", response_profiles_section)
+        self.assertIn("<th>Aprovacao</th>", response_profiles_section)
+        self.assertNotIn("<th>Preview</th>", response_profiles_section)
+        self.assertIn("item.display_match || item.compact_preview", FRONTEND)
+        self.assertIn("bgp-profile-details-toggle", FRONTEND)
+        self.assertIn("Preview completo", FRONTEND)
+        self.assertIn("validation_status", FRONTEND)
+        self.assertIn("used_by_rules", FRONTEND)
+
 
 if __name__ == "__main__":
     unittest.main()

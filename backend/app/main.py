@@ -7095,33 +7095,163 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
-    result["profile_status"] = response_profile_status(result)
+    validation = response_profile_validation_summary(result)
+    result.update(validation)
+    result["profile_status"] = validation["validation_status"]
+    result["profile_status_reason"] = validation["validation_reason"]
     result["operational_description"] = response_profile_operational_description(result)
     result["rendered_command_preview"] = response_profile_placeholder_preview(result)
     result["preview"] = result["rendered_command_preview"]
+    result["display_match"] = response_profile_display_match(result)
+    result["compact_preview"] = response_profile_compact_preview(result)
     result["used_by_rules_count"] = int(item.get("used_by_rules_count") or 0)
+    result["used_by_count"] = result["used_by_rules_count"]
+    used_by_rules_raw = clean_text(item.get("used_by_rules_raw"))
+    result["used_by_rules"] = [
+        {"vector": rule}
+        for rule in sorted({part.strip() for part in used_by_rules_raw.split(",") if part.strip()})
+    ]
     return result
 
 
-def response_profile_status(profile: dict[str, Any]) -> str:
-    if not sqlite_bool(profile.get("enabled", True)):
-        return "disabled"
+FLOWSPEC_DEPRECATED_PROFILE_NAMES = {
+    "FLOWSPEC_BLOCK_SRC_DNS",
+    "FLOWSPEC_BLOCK_SRC_DNS_RESPONSE",
+    "FLOWSPEC_BLOCK_SRC_IP_ALL",
+}
+
+FLOWSPEC_SAFE_DEFAULT_PROFILE_NAMES = {
+    "FLOWSPEC_BLOCK_DST_DNS",
+    "FLOWSPEC_BLOCK_DST_UDP_PORT",
+    "FLOWSPEC_BLOCK_DST_TCP_PORT",
+}
+
+
+def response_profile_validation_summary(profile: dict[str, Any]) -> dict[str, Any]:
     response_type = clean_text(profile.get("response_type") or profile.get("type")).lower()
+    name = clean_text(profile.get("name")).upper()
+    target = clean_text(profile.get("target_selector") or profile.get("target"))
+    src_port_selector = clean_text(profile.get("src_port_selector") or profile.get("src_port_mode") or "any")
+    dst_port_selector = clean_text(profile.get("dst_port_selector") or profile.get("dst_port_mode") or "any")
+    protocol = clean_text(profile.get("fixed_protocol")) or clean_text(profile.get("protocol_selector") or profile.get("protocol_mode"))
+    action = clean_text(profile.get("action") or profile.get("default_action"))
     requires_connector = response_type in {"flowspec", "diversion", "rtbh", "blackhole", "rate_limit"}
-    if requires_connector and (
-        not profile.get("connector_id")
-        or not clean_text(profile.get("connector_name"))
-        or not sqlite_bool(profile.get("connector_enabled", True))
-        or not sqlite_bool(profile.get("connector_active", True))
-    ):
-        return "invalid_connector"
-    if response_type not in BGP_RESPONSE_TYPES:
-        return "invalid_template"
-    if response_type == "flowspec" and not clean_text(profile.get("target_selector") or profile.get("target")):
-        return "invalid_template"
-    if response_type == "flowspec" and clean_text(profile.get("action") or profile.get("default_action")) == "rate_limit" and not profile.get("default_rate_limit_bps"):
-        return "invalid_template"
-    return "valid"
+    connector_ok = (
+        bool(profile.get("connector_id"))
+        and clean_text(profile.get("connector_name"))
+        and sqlite_bool(profile.get("connector_enabled", True))
+        and sqlite_bool(profile.get("connector_active", True))
+    )
+    is_deprecated = name in FLOWSPEC_DEPRECATED_PROFILE_NAMES or (response_type == "flowspec" and target in {"src_ip", "src_prefix", "anomaly_src_ip"})
+    uses_source_port = response_type == "flowspec" and (name == "FLOWSPEC_BLOCK_DST_UDP_SRC_PORT" or src_port_selector not in {"", "any"})
+    unsafe_reasons: list[str] = []
+    if is_deprecated:
+        unsafe_reasons.append("source-only FlowSpec is deprecated for default mitigation")
+    if uses_source_port:
+        unsafe_reasons.append("source-port FlowSpec is unsafe for default UDP/TCP mitigation")
+
+    status = "valid"
+    reason = "Profile valid for manual approval flow."
+    if not sqlite_bool(profile.get("enabled", True)):
+        status = "disabled"
+        reason = "Profile disabled."
+    elif requires_connector and not connector_ok:
+        status = "invalid_connector"
+        reason = "Connector missing, disabled, inactive, or not found."
+    elif response_type not in BGP_RESPONSE_TYPES:
+        status = "unsafe"
+        reason = "Unknown response_type."
+    elif response_type == "flowspec" and not target:
+        status = "unsafe"
+        reason = "FlowSpec target selector is empty."
+    elif response_type == "flowspec" and action == "rate_limit" and not profile.get("default_rate_limit_bps"):
+        status = "unsafe"
+        reason = "FlowSpec rate-limit requires a default rate limit."
+    elif is_deprecated:
+        status = "deprecated"
+        reason = "; ".join(unsafe_reasons)
+    elif uses_source_port:
+        status = "unsafe"
+        reason = "; ".join(unsafe_reasons)
+
+    expected_safe: dict[str, tuple[str, str, str, str]] = {
+        "FLOWSPEC_BLOCK_DST_DNS": ("discard", "dst_ip", "udp", "fixed"),
+        "FLOWSPEC_BLOCK_DST_UDP_PORT": ("discard", "dst_ip", "udp", "anomaly_dst_port"),
+        "FLOWSPEC_BLOCK_DST_TCP_PORT": ("discard", "dst_ip", "tcp", "anomaly_dst_port"),
+    }
+    if name in expected_safe:
+        expected_action, expected_target, expected_protocol, expected_dst_port = expected_safe[name]
+        safe_shape = (
+            response_type == "flowspec"
+            and action == expected_action
+            and target == expected_target
+            and protocol == expected_protocol
+            and dst_port_selector == expected_dst_port
+            and src_port_selector in {"", "any"}
+            and not clean_text(profile.get("src_port_value"))
+            and (name != "FLOWSPEC_BLOCK_DST_DNS" or clean_text(profile.get("dst_port_value")) == "53")
+        )
+        if status == "valid" and not safe_shape:
+            status = "unsafe"
+            reason = f"{name} does not match the required destination-only FlowSpec shape."
+
+    return {
+        "validation_status": status,
+        "validation_reason": reason,
+        "is_safe_default": status == "valid" and name in FLOWSPEC_SAFE_DEFAULT_PROFILE_NAMES,
+        "is_deprecated": bool(is_deprecated),
+        "uses_source_port": bool(uses_source_port),
+    }
+
+
+def response_profile_status(profile: dict[str, Any]) -> str:
+    return response_profile_validation_summary(profile)["validation_status"]
+
+
+def response_profile_display_match(profile: dict[str, Any]) -> str:
+    response_type = clean_text(profile.get("response_type") or profile.get("type")).lower()
+    target = clean_text(profile.get("target_selector") or profile.get("target") or "dst_ip")
+    if response_type == "diversion":
+        return "redirect/diversion"
+    if response_type not in {"flowspec", "rate_limit"}:
+        return target or response_type or "-"
+    target_label = {
+        "src_ip": "src",
+        "src_prefix": "src",
+        "anomaly_src_ip": "src",
+        "dst_ip": "dst",
+        "dst_prefix": "dst",
+        "anomaly_dst_ip": "dst",
+        "src_and_dst_ip": "src+dst",
+        "conversation": "src+dst",
+        "target_ip": "dst",
+        "target_cidr": "dst",
+    }.get(target, target.replace("_ip", ""))
+    protocol = clean_text(profile.get("fixed_protocol")) or clean_text(profile.get("protocol_selector") or profile.get("protocol_mode"))
+    if protocol in {"manual", "anomaly_protocol", "fixed", ""}:
+        protocol = "any" if protocol != "fixed" else clean_text(profile.get("fixed_protocol") or "any")
+    src_selector = clean_text(profile.get("src_port_selector") or "any")
+    dst_selector = clean_text(profile.get("dst_port_selector") or "any")
+    src_value = clean_text(profile.get("src_port_value"))
+    dst_value = clean_text(profile.get("dst_port_value"))
+    if dst_selector == "fixed" and dst_value:
+        port = dst_value
+    elif dst_selector == "anomaly_dst_port":
+        port = "<anom_dst_port>"
+    elif src_selector == "fixed" and src_value:
+        port = src_value
+        target_label = "src" if target_label == "dst" else target_label
+    elif src_selector == "anomaly_src_port":
+        port = "<anom_src_port>"
+        target_label = "src" if target_label == "dst" else target_label
+    else:
+        port = "any"
+    return f"{target_label} {protocol}/{port}"
+
+
+def response_profile_compact_preview(profile: dict[str, Any]) -> str:
+    action = clean_text(profile.get("action") or profile.get("default_action") or "-")
+    return f"{response_profile_display_match(profile)} -> {action}"
 
 
 def response_profile_operational_description(profile: dict[str, Any]) -> str:
@@ -13908,7 +14038,8 @@ def list_bgp_response_profiles(request: Request, include_disabled: bool = True):
                 c.name AS connector_name,
                 c.enabled AS connector_enabled,
                 c.is_active AS connector_active,
-                COUNT(DISTINCT r.id) AS used_by_rules_count
+                COUNT(DISTINCT r.id) AS used_by_rules_count,
+                GROUP_CONCAT(DISTINCT r.vector) AS used_by_rules_raw
             FROM bgp_response_profiles p
             LEFT JOIN bgp_connectors c ON c.id = p.connector_id
             LEFT JOIN detection_template_rules r ON (
@@ -13921,7 +14052,16 @@ def list_bgp_response_profiles(request: Request, include_disabled: bool = True):
             ORDER BY p.name, p.id
             """
         ).fetchall()
-    return {"items": [bgp_response_profile_row_to_dict(row) for row in rows]}
+    status_order = {
+        "valid": 0,
+        "disabled": 1,
+        "invalid_connector": 2,
+        "unsafe": 3,
+        "deprecated": 4,
+    }
+    items = [bgp_response_profile_row_to_dict(row) for row in rows]
+    items.sort(key=lambda item: (status_order.get(item.get("validation_status"), 5), clean_text(item.get("name")).upper(), int(item.get("id") or 0)))
+    return {"items": items}
 
 
 @app.post("/api/bgp/response-profiles", status_code=201)
