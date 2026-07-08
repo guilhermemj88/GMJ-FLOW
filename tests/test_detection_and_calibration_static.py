@@ -640,11 +640,94 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("<th>Match</th>", response_profiles_section)
         self.assertIn("<th>Aprovacao</th>", response_profiles_section)
         self.assertNotIn("<th>Preview</th>", response_profiles_section)
+        self.assertIn('id="bgpProfileTargetMode"', response_profiles_section)
+        self.assertIn('id="bgpProfileSelectedConnectors"', response_profiles_section)
+        self.assertIn("Destino da mitigacao", response_profiles_section)
+        self.assertIn("Sensor de origem", FRONTEND)
+        self.assertIn("Resolvido pelo sensor", FRONTEND)
+        self.assertIn("Todos os conectores", FRONTEND)
+        self.assertIn("Usar lista abaixo", FRONTEND)
+        self.assertIn("Conectores selecionados", FRONTEND)
+        self.assertIn("mitigation_target_mode: targetMode", FRONTEND)
+        self.assertIn("selected_connector_ids: targetMode === 'selected_connectors' ? selectedConnectorIds : []", FRONTEND)
+        self.assertIn("allow_automatic: ['auto', 'automatic'].includes(approvalMode)", FRONTEND)
+        self.assertIn("bgpProfileConnectorLabel(item, connector)", FRONTEND)
         self.assertIn("item.display_match || item.compact_preview", FRONTEND)
         self.assertIn("bgp-profile-details-toggle", FRONTEND)
         self.assertIn("Preview completo", FRONTEND)
         self.assertIn("validation_status", FRONTEND)
         self.assertIn("used_by_rules", FRONTEND)
+
+    def test_auto_dns_profile_counts_when_used_by_critical_detection_rule(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            now = "2026-07-08T12:00:00Z"
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    profile = conn.execute("SELECT * FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'").fetchone()
+                    self.assertIsNotNone(profile)
+                    self.assertEqual(profile["mitigation_target_mode"], "sensor_origin")
+                    self.assertEqual(profile["approval_mode"], "auto")
+                    self.assertEqual(profile["target_selector"], "dst_ip")
+                    self.assertEqual(profile["protocol_selector"], "udp")
+                    self.assertEqual(profile["dst_port_selector"], "fixed")
+                    self.assertEqual(profile["dst_port_value"], "53")
+                    template_id = int(conn.execute(
+                        "INSERT INTO detection_templates (name, description, active, created_at, updated_at) VALUES ('Default', '', 1, ?, ?)",
+                        (now, now),
+                    ).lastrowid)
+                    conn.execute(
+                        """
+                        INSERT INTO detection_template_rules (
+                            template_id, vector, display_name, domain, direction, protocol, metric, comparison,
+                            warning_value, critical_value, window_seconds, consecutive_windows, cooldown_minutes,
+                            enabled, response, critical_response_profile_id, mitigation_mode, mitigation_enabled,
+                            created_at, updated_at
+                        )
+                        VALUES (?, 'DNS_INTERNAL_IP_TO_DST_HIGH_PPS', 'DNS alto por destino', 'internal_ip',
+                            'transmits', 'DNS', 'packets_s', 'over', 5000, 15000, 60, 1, 5,
+                            1, 'DETECTION_ONLY', ?, 'response_profile', 1, ?, ?)
+                        """,
+                        (template_id, int(profile["id"]), now, now),
+                    )
+                    conn.commit()
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            p.*,
+                            c.name AS connector_name,
+                            c.enabled AS connector_enabled,
+                            c.is_active AS connector_active,
+                            COUNT(DISTINCT r.id) AS used_by_rules_count,
+                            GROUP_CONCAT(DISTINCT r.vector) AS used_by_rules_raw
+                        FROM bgp_response_profiles p
+                        LEFT JOIN bgp_connectors c ON c.id = p.connector_id
+                        LEFT JOIN detection_template_rules r ON (
+                            r.warning_response_profile_id = p.id
+                            OR r.critical_response_profile_id = p.id
+                            OR r.fallback_response_profile_id = p.id
+                        )
+                        WHERE p.id = ?
+                        GROUP BY p.id
+                        """,
+                        (int(profile["id"]),),
+                    ).fetchone()
+                    item = backend_main.bgp_response_profile_row_to_dict(rows)
+                self.assertEqual(item["profile_status"], "valid")
+                self.assertEqual(item["connector_id"], None)
+                self.assertIn("destination <anomaly.dominant_dst_ip>/32;", item["rendered_command_preview"])
+                self.assertIn("protocol udp;", item["rendered_command_preview"])
+                self.assertIn("destination-port =53;", item["rendered_command_preview"])
+                self.assertNotIn("source ", item["rendered_command_preview"])
+                self.assertNotIn("source-port", item["rendered_command_preview"])
+                self.assertEqual(item["used_by_rules_count"], 1)
+                self.assertEqual(item["used_by_rules"][0]["vector"], "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_anomaly_human_labels_and_fallbacks(self):
         self.assertEqual(backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK"), "UDP flood por IP")

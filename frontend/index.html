@@ -4459,7 +4459,9 @@
             <div class="flow-search-grid mb-2">
               <input id="bgpProfileId" type="hidden">
               <div class="field"><label for="bgpProfileName">Nome</label><input id="bgpProfileName" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProfileTargetMode">Destino da mitigacao</label><select id="bgpProfileTargetMode" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileConnector">Conector</label><select id="bgpProfileConnector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileSelectedConnectors">Conectores selecionados</label><select id="bgpProfileSelectedConnectors" class="form-select form-select-sm" multiple size="3"></select></div>
               <div class="field"><label for="bgpProfileType">Tipo</label><select id="bgpProfileType" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileApproval">Aprovação</label><select id="bgpProfileApproval" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileAction">Ação</label><select id="bgpProfileAction" class="form-select form-select-sm"></select></div>
@@ -5566,6 +5568,12 @@
       ['auto', 'auto'],
       ['detection_only', 'detection_only'],
       ['automatic', 'automatic']
+    ];
+    const BGP_TARGET_MODE_OPTIONS = [
+      ['sensor_origin', 'Sensor de origem'],
+      ['fixed_connector', 'Conector fixo'],
+      ['all_connectors', 'Todos os conectores'],
+      ['selected_connectors', 'Conectores selecionados']
     ];
     const BGP_TYPE_OPTIONS = [
       ['flowspec', 'flowspec'],
@@ -7667,7 +7675,9 @@
         detectionRuleMitigationMode: 'Define se a regra apenas detecta, gera candidate para revisão manual ou usa Response Profile. Não significa aplicação automática.',
         detectionRuleDuration: 'Duração interna no GMJ-FLOW para retirada automática. O TTL não é enviado ao BGP.',
         detectionRuleWhitelist: 'Controla se a whitelist global é aplicada antes de abrir anomalia ou candidate.',
-        bgpProfileConnector: 'Conector BGP/ExaBGP usado para enviar announce ou withdraw.',
+        bgpProfileTargetMode: 'Define para onde a mitigacao sera enviada: sensor de origem, conector fixo, todos ou uma lista selecionada.',
+        bgpProfileConnector: 'Usado somente no modo Conector fixo. Sensor de origem e resolvido no momento da mitigacao.',
+        bgpProfileSelectedConnectors: 'Usado somente no modo Conectores selecionados.',
         bgpProfileApproval: 'Define se a ação exige aprovação manual. Por segurança, profiles devem usar manual_approval por padrão.',
         bgpProfileAction: 'Ação principal do profile, como discard, accept ou rate-limit.',
         bgpProfileTarget: 'Campo usado para montar o FlowSpec, como destino, origem ou origem+destino. Para upload/outbound, evitar bloquear origem interna sozinha.',
@@ -8359,6 +8369,19 @@
       return optionList([['', 'Selecionar']], selected) + optionList(bgpConnectors.map(item => [item.id, item.name]), selected);
     }
 
+    function bgpConnectorMultiOptions(selectedIds = []) {
+      const selected = new Set((selectedIds || []).map(id => String(id)));
+      return bgpConnectors.map(item => `
+        <option value="${escapeHtml(item.id)}" ${selected.has(String(item.id)) ? 'selected' : ''}>${escapeHtml(item.name)}</option>
+      `).join('');
+    }
+
+    function selectedValues(id) {
+      const el = document.getElementById(id);
+      if (!el) return [];
+      return Array.from(el.selectedOptions || []).map(option => option.value).filter(Boolean);
+    }
+
     function firstActiveBgpConnectorId() {
       const connector = bgpConnectors.find(item => item.enabled !== false && item.is_active !== false);
       return connector?.id || '';
@@ -8373,11 +8396,54 @@
       );
     }
 
+    function bgpProfileTargetMode(item = {}) {
+      return item.mitigation_target_mode || 'sensor_origin';
+    }
+
+    function bgpProfileConnectorLabel(item = {}, connector = null) {
+      const mode = bgpProfileTargetMode(item);
+      if (mode === 'sensor_origin') return 'Sensor de origem';
+      if (mode === 'all_connectors') return 'Todos';
+      if (mode === 'selected_connectors') {
+        const selectedIds = Array.isArray(item.selected_connector_ids) ? item.selected_connector_ids : [];
+        const names = selectedIds
+          .map(id => bgpConnectors.find(connectorItem => Number(connectorItem.id) === Number(id))?.name || `#${id}`)
+          .filter(Boolean);
+        return names.length ? names.join(', ') : 'Conectores selecionados';
+      }
+      return item.connector_name || connector?.name || item.connector_id || '-';
+    }
+
+    function updateBgpProfileTargetModeUi() {
+      const mode = selectValue('bgpProfileTargetMode', 'sensor_origin');
+      const connector = document.getElementById('bgpProfileConnector');
+      const selected = document.getElementById('bgpProfileSelectedConnectors');
+      if (connector) {
+        const currentConnector = connector.value;
+        if (mode === 'fixed_connector') {
+          connector.innerHTML = bgpConnectorOptions(currentConnector);
+          connector.disabled = false;
+        } else if (mode === 'sensor_origin') {
+          connector.innerHTML = optionList([['', 'Resolvido pelo sensor']], '');
+          connector.disabled = true;
+        } else if (mode === 'all_connectors') {
+          connector.innerHTML = optionList([['', 'Todos']], '');
+          connector.disabled = true;
+        } else {
+          connector.innerHTML = optionList([['', 'Usar lista abaixo']], '');
+          connector.disabled = true;
+        }
+      }
+      if (selected) selected.disabled = mode !== 'selected_connectors';
+    }
+
     function renderBgpSelects() {
       document.getElementById('bgpConnectorRole').innerHTML = optionList(BGP_ROLE_OPTIONS, selectValue('bgpConnectorRole') || 'generic_bgp');
       document.getElementById('bgpConnectorBackend').innerHTML = optionList(BGP_BACKEND_OPTIONS, selectValue('bgpConnectorBackend') || 'dry_run');
       document.getElementById('bgpConnectorMode').innerHTML = optionList(BGP_MODE_OPTIONS, selectValue('bgpConnectorMode') || 'dry_run');
+      document.getElementById('bgpProfileTargetMode').innerHTML = optionList(BGP_TARGET_MODE_OPTIONS, selectValue('bgpProfileTargetMode') || 'sensor_origin');
       document.getElementById('bgpProfileConnector').innerHTML = bgpConnectorOptions(selectValue('bgpProfileConnector'));
+      document.getElementById('bgpProfileSelectedConnectors').innerHTML = bgpConnectorMultiOptions(selectedValues('bgpProfileSelectedConnectors'));
       document.getElementById('bgpProfileType').innerHTML = optionList(BGP_TYPE_OPTIONS, selectValue('bgpProfileType') || 'flowspec');
       document.getElementById('bgpProfileApproval').innerHTML = optionList(BGP_MODE_OPTIONS, selectValue('bgpProfileApproval') || 'manual_approval');
       document.getElementById('bgpProfileAction').innerHTML = optionList(BGP_ACTION_OPTIONS, selectValue('bgpProfileAction') || 'discard');
@@ -8397,6 +8463,7 @@
       if (document.getElementById('bgpMitigationConnector')) {
         document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
       }
+      updateBgpProfileTargetModeUi();
     }
 
     function renderBgpConnectors() {
@@ -8572,7 +8639,8 @@
           <td colspan="9">
             <div class="bgp-profile-details">
               <div class="bgp-profile-detail-grid">
-                ${bgpProfileDetailCell('Connector', item.connector_name || connector?.name || '-')}
+                ${bgpProfileDetailCell('Destino da mitigacao', bgpProfileConnectorLabel(item, connector))}
+                ${bgpProfileDetailCell('Conector fixo', item.connector_name || connector?.name || '-')}
                 ${bgpProfileDetailCell('Tipo', item.response_type)}
                 ${bgpProfileDetailCell('Alvo', item.target_selector)}
                 ${bgpProfileDetailCell('Protocolo', item.protocol_selector)}
@@ -8601,14 +8669,15 @@
         const status = item.validation_status || item.profile_status || (item.enabled ? 'valid' : 'disabled');
         const usedCount = Number(item.used_by_count ?? item.used_by_rules_count ?? 0);
         const requiresConnector = ['flowspec', 'diversion', 'rtbh', 'blackhole', 'rate_limit'].includes(String(item.response_type || '').toLowerCase());
-        const canActivate = status !== 'invalid_connector' && (item.enabled || !requiresConnector || item.connector_id);
+        const fixedConnectorRequired = bgpProfileTargetMode(item) === 'fixed_connector';
+        const canActivate = status !== 'invalid_connector' && (item.enabled || !requiresConnector || !fixedConnectorRequired || item.connector_id);
         const toggleLabel = item.enabled ? 'Desativar' : 'Ativar';
         const toggleClass = item.enabled ? 'btn-outline-warning' : 'btn-outline-success';
         return `
           <tr>
             <td>${escapeHtml(item.name)}</td>
             <td>${escapeHtml(item.response_type)}</td>
-            <td>${escapeHtml(item.connector_name || connector?.name || '-')}</td>
+            <td>${escapeHtml(bgpProfileConnectorLabel(item, connector))}</td>
             <td>${escapeHtml(bgpActionLabel(item))}</td>
             <td><code>${escapeHtml(item.display_match || item.compact_preview || '-')}</code></td>
             <td>${escapeHtml(item.approval_mode || '-')}</td>
@@ -8970,7 +9039,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function clearBgpProfileForm() {
       setValue('bgpProfileId', '');
       setValue('bgpProfileName', '');
-      setValue('bgpProfileConnector', firstActiveBgpConnectorId());
+      setValue('bgpProfileTargetMode', 'sensor_origin');
+      setValue('bgpProfileConnector', '');
+      setValue('bgpProfileSelectedConnectors', '');
       setValue('bgpProfileType', 'flowspec');
       setValue('bgpProfileApproval', 'manual_approval');
       setValue('bgpProfileAction', 'discard');
@@ -8988,7 +9059,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileMaxDuration', 3600);
       setBoolSelect('bgpProfileEnabled', true);
       renderBgpSelects();
-      setValue('bgpProfileConnector', firstActiveBgpConnectorId());
+      updateBgpProfileTargetModeUi();
     }
 
     function editBgpProfile(id) {
@@ -8996,6 +9067,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!item) return;
       setValue('bgpProfileId', item.id);
       setValue('bgpProfileName', item.name);
+      setValue('bgpProfileTargetMode', bgpProfileTargetMode(item));
       setValue('bgpProfileConnector', item.connector_id || '');
       setValue('bgpProfileType', item.response_type);
       setValue('bgpProfileApproval', item.approval_mode);
@@ -9014,7 +9086,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileMaxDuration', item.max_duration_seconds || 3600);
       setBoolSelect('bgpProfileEnabled', item.enabled ?? item.active);
       renderBgpSelects();
+      document.getElementById('bgpProfileSelectedConnectors').innerHTML = bgpConnectorMultiOptions(item.selected_connector_ids || []);
       setValue('bgpProfileConnector', item.connector_id || '');
+      updateBgpProfileTargetModeUi();
     }
 
     function cloneBgpProfile(id) {
@@ -9028,14 +9102,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function collectBgpProfilePayload() {
       const id = selectValue('bgpProfileId');
+      const targetMode = selectValue('bgpProfileTargetMode', 'sensor_origin');
+      const selectedConnectorIds = selectedValues('bgpProfileSelectedConnectors').map(Number).filter(Boolean);
+      const approvalMode = selectValue('bgpProfileApproval', 'manual_approval');
+      if (targetMode === 'fixed_connector' && !selectValue('bgpProfileConnector')) {
+        throw new Error('Conector fixo exige selecionar um conector.');
+      }
+      if (targetMode === 'selected_connectors' && !selectedConnectorIds.length) {
+        throw new Error('Conectores selecionados exige ao menos um conector.');
+      }
       return {
         name: selectValue('bgpProfileName').trim(),
         enabled: boolSelectValue('bgpProfileEnabled'),
         active: boolSelectValue('bgpProfileEnabled'),
         response_type: selectValue('bgpProfileType', 'flowspec'),
         type: selectValue('bgpProfileType', 'flowspec'),
-        connector_id: selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null,
-        approval_mode: selectValue('bgpProfileApproval', 'manual_approval'),
+        connector_id: targetMode === 'fixed_connector' && selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null,
+        mitigation_target_mode: targetMode,
+        selected_connector_ids: targetMode === 'selected_connectors' ? selectedConnectorIds : [],
+        approval_mode: approvalMode,
+        allow_automatic: ['auto', 'automatic'].includes(approvalMode),
         action: selectValue('bgpProfileAction', 'discard'),
         default_action: selectValue('bgpProfileAction', 'discard'),
         default_rate_limit_raw: selectValue('bgpProfileRateLimit').trim(),
@@ -9091,6 +9177,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function bgpProfilePayloadFromItem(item, connectorId, activate) {
+      const targetMode = item.mitigation_target_mode || (connectorId ? 'fixed_connector' : 'sensor_origin');
+      const selectedConnectorIds = Array.isArray(item.selected_connector_ids) ? item.selected_connector_ids.map(Number).filter(Boolean) : [];
+      const approvalMode = item.approval_mode || 'manual_approval';
       return {
         name: item.name,
         description: item.description || '',
@@ -9098,8 +9187,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         active: activate ? true : Boolean(item.enabled ?? item.active),
         response_type: item.response_type || item.type || 'flowspec',
         type: item.response_type || item.type || 'flowspec',
-        connector_id: connectorId ? Number(connectorId) : null,
-        approval_mode: item.approval_mode || 'manual_approval',
+        connector_id: targetMode === 'fixed_connector' && connectorId ? Number(connectorId) : null,
+        mitigation_target_mode: targetMode,
+        selected_connector_ids: targetMode === 'selected_connectors' ? selectedConnectorIds : [],
+        approval_mode: approvalMode,
+        allow_automatic: ['auto', 'automatic'].includes(approvalMode),
         action: item.default_action || item.action || 'discard',
         default_action: item.default_action || item.action || 'discard',
         default_rate_limit_raw: item.default_rate_limit_raw || item.rate_limit_value_raw || '',
@@ -9840,7 +9932,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       clearBgpProfileForm();
       setValue('bgpProfileId', '');
       setValue('bgpProfileName', draft.name || '');
-      setValue('bgpProfileConnector', draft.connector_id || firstActiveBgpConnectorId());
+      setValue('bgpProfileTargetMode', draft.mitigation_target_mode || 'sensor_origin');
+      setValue('bgpProfileConnector', draft.mitigation_target_mode === 'fixed_connector' ? (draft.connector_id || firstActiveBgpConnectorId()) : '');
       setValue('bgpProfileType', draft.response_type || 'flowspec');
       setValue('bgpProfileApproval', draft.approval_mode || 'manual_approval');
       setValue('bgpProfileAction', draft.action || 'discard');
@@ -9855,7 +9948,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileMaxDuration', draft.max_duration_seconds || 3600);
       setBoolSelect('bgpProfileEnabled', Boolean(draft.enabled));
       renderBgpSelects();
-      setValue('bgpProfileConnector', draft.connector_id || firstActiveBgpConnectorId());
+      document.getElementById('bgpProfileSelectedConnectors').innerHTML = bgpConnectorMultiOptions(draft.selected_connector_ids || []);
+      setValue('bgpProfileConnector', draft.mitigation_target_mode === 'fixed_connector' ? (draft.connector_id || firstActiveBgpConnectorId()) : '');
+      updateBgpProfileTargetModeUi();
       setText('bgpStatus', `Draft do Peak Hunter #${draft.source_peak_analysis_id || '-'} carregado para revisao.`);
     }
 
@@ -14937,6 +15032,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
     document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
     document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
+    document.getElementById('bgpProfileTargetMode').addEventListener('change', updateBgpProfileTargetModeUi);
     document.getElementById('attachLegacyBgpProfilesButton').addEventListener('click', () => attachLegacyBgpProfiles().catch(error => setText('bgpStatus', `Falha ao associar profiles legados: ${error.message}`)));
     document.getElementById('bgpProfileFilters').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
