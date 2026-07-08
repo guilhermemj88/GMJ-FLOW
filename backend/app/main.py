@@ -1378,6 +1378,21 @@ def ensure_sqlite_column(conn: sqlite3.Connection, table: str, column: str, ddl:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def sqlite_insert_dict(conn: sqlite3.Connection, table: str, values: dict[str, Any]) -> sqlite3.Cursor:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+        raise ValueError("invalid sqlite table name")
+    columns = list(values.keys())
+    for column in columns:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", column):
+            raise ValueError("invalid sqlite column name")
+    column_sql = ", ".join(columns)
+    placeholder_sql = ", ".join("?" for _ in columns)
+    return conn.execute(
+        f"INSERT INTO {table} ({column_sql}) VALUES ({placeholder_sql})",
+        tuple(values[column] for column in columns),
+    )
+
+
 def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -6404,8 +6419,6 @@ def clickhouse_cidr_string_param(value: str, field_name: str = "target_cidr") ->
         network = ip_network(value, strict=False)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
-    if network.version == 4:
-        return f"::ffff:{network.network_address}/{network.prefixlen + 96}"
     return str(network)
 
 
@@ -16586,54 +16599,52 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         json.dumps(source_details, sort_keys=True, default=str),
     )
     if existing is None:
-        conn.execute(
-            """
-            INSERT INTO security_anomalies (
-                vector,
-                severity,
-                zone_id,
-                zone_name,
-                template_id,
-                template_name,
-                rule_id,
-                prefix_id,
-                prefix_cidr,
-                domain,
-                direction,
-                src_ip,
-                dst_ip,
-                target_ip,
-                target_cidr,
-                target_role,
-                scope_type,
-                invalid_scope,
-                protocol,
-                packets_s,
-                bits_s,
-                flows,
-                flows_s,
-                packets,
-                bytes,
-                unique_dst_ips,
-                unique_dst_ports,
-                unique_src_ports,
-                first_seen,
-                last_seen,
-                message,
-                recommended_action,
-                response,
-                dedupe_key,
-                anomaly_source,
-                source_engine,
-                source_id,
-                source_name,
-                source_details_json,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (*values, now, now),
+        sqlite_insert_dict(
+            conn,
+            "security_anomalies",
+            {
+                "vector": values[0],
+                "severity": values[1],
+                "zone_id": values[2],
+                "zone_name": values[3],
+                "template_id": values[4],
+                "template_name": values[5],
+                "rule_id": values[6],
+                "prefix_id": values[7],
+                "prefix_cidr": values[8],
+                "domain": values[9],
+                "direction": values[10],
+                "src_ip": values[11],
+                "dst_ip": values[12],
+                "target_ip": values[13],
+                "target_cidr": values[14],
+                "target_role": values[15],
+                "scope_type": values[16],
+                "invalid_scope": values[17],
+                "protocol": values[18],
+                "packets_s": values[19],
+                "bits_s": values[20],
+                "flows": values[21],
+                "flows_s": values[22],
+                "packets": values[23],
+                "bytes": values[24],
+                "unique_dst_ips": values[25],
+                "unique_dst_ports": values[26],
+                "unique_src_ports": values[27],
+                "first_seen": values[28],
+                "last_seen": values[29],
+                "message": values[30],
+                "recommended_action": values[31],
+                "response": values[32],
+                "dedupe_key": values[33],
+                "anomaly_source": values[34],
+                "source_engine": values[35],
+                "source_id": values[36],
+                "source_name": values[37],
+                "source_details_json": values[38],
+                "created_at": now,
+                "updated_at": now,
+            },
         )
         return "created"
     conn.execute(
@@ -19905,109 +19916,59 @@ def upsert_anomaly_event(
     if row is None:
         started_at = now
         summary = anomaly_summary(vector, target_ip, observed, threshold, started_at)
-        cursor = conn.execute(
-            """
-            INSERT INTO anomaly_events (
-                attack_vector_id,
-                sensor_id,
-                interface_if_index,
-                target_ip,
-                target_cidr,
-                target_role,
-                target_port,
-                protocol,
-                input_if,
-                output_if,
-                unique_src_ips,
-                unique_dst_ips,
-                unique_dst_ports,
-                mitigation_basis,
-                mitigation_reason,
-                top_src_ip,
-                top_dst_ip,
-                top_src_port,
-                top_dst_port,
-                top_packets,
-                top_bytes,
-                zone_id,
-                zone_name,
-                vector_name,
-                scope_type,
-                invalid_scope,
-                direction,
-                decoder,
-                severity,
-                metric_unit,
-                threshold_value,
-                observed_value,
-                peak_value,
-                started_at,
-                last_seen_at,
-                status,
-                estimated_bytes,
-                estimated_packets,
-                flow_count,
-                summary,
-                dedupe_key,
-                anomaly_source,
-                source_engine,
-                source_id,
-                source_name,
-                source_details_json,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                vector["id"],
-                vector.get("sensor_id"),
-                vector.get("interface_if_index"),
-                scope["target_ip"],
-                scope["target_cidr"] or vector.get("target_cidr"),
-                scope["target_role"],
-                target_port,
-                event_protocol,
-                input_if,
-                output_if,
-                unique_src_ips,
-                unique_dst_ips,
-                unique_dst_ports,
-                mitigation_basis,
-                mitigation_reason,
-                top_src_ip,
-                top_dst_ip,
-                top_src_port,
-                top_dst_port,
-                top_packets,
-                top_bytes,
-                traffic.get("zone_id"),
-                clean_text(traffic.get("zone_name")),
-                vector.get("name") or vector.get("detection_key") or "",
-                scope["scope_type"],
-                1 if scope["invalid_scope"] else 0,
-                vector["direction"],
-                vector["decoder"],
-                severity,
-                vector["threshold_unit"],
-                threshold,
-                observed,
-                observed,
-                started_at,
-                now,
-                estimated_bytes,
-                estimated_packets,
-                flow_count,
-                summary,
-                dedupe_key,
-                source_info["anomaly_source"],
-                source_info["source_engine"],
-                source_info["source_id"],
-                source_info["source_name"],
-                json.dumps(source_info["source_details_json"], sort_keys=True, default=str),
-                now,
-                now,
-            ),
+        cursor = sqlite_insert_dict(
+            conn,
+            "anomaly_events",
+            {
+                "attack_vector_id": vector["id"],
+                "sensor_id": vector.get("sensor_id"),
+                "interface_if_index": vector.get("interface_if_index"),
+                "target_ip": scope["target_ip"],
+                "target_cidr": scope["target_cidr"] or vector.get("target_cidr"),
+                "target_role": scope["target_role"],
+                "target_port": target_port,
+                "protocol": event_protocol,
+                "input_if": input_if,
+                "output_if": output_if,
+                "unique_src_ips": unique_src_ips,
+                "unique_dst_ips": unique_dst_ips,
+                "unique_dst_ports": unique_dst_ports,
+                "mitigation_basis": mitigation_basis,
+                "mitigation_reason": mitigation_reason,
+                "top_src_ip": top_src_ip,
+                "top_dst_ip": top_dst_ip,
+                "top_src_port": top_src_port,
+                "top_dst_port": top_dst_port,
+                "top_packets": top_packets,
+                "top_bytes": top_bytes,
+                "zone_id": traffic.get("zone_id"),
+                "zone_name": clean_text(traffic.get("zone_name")),
+                "vector_name": vector.get("name") or vector.get("detection_key") or "",
+                "scope_type": scope["scope_type"],
+                "invalid_scope": 1 if scope["invalid_scope"] else 0,
+                "direction": vector["direction"],
+                "decoder": vector["decoder"],
+                "severity": severity,
+                "metric_unit": vector["threshold_unit"],
+                "threshold_value": threshold,
+                "observed_value": observed,
+                "peak_value": observed,
+                "started_at": started_at,
+                "last_seen_at": now,
+                "status": "active",
+                "estimated_bytes": estimated_bytes,
+                "estimated_packets": estimated_packets,
+                "flow_count": flow_count,
+                "summary": summary,
+                "dedupe_key": dedupe_key,
+                "anomaly_source": source_info["anomaly_source"],
+                "source_engine": source_info["source_engine"],
+                "source_id": source_info["source_id"],
+                "source_name": source_info["source_name"],
+                "source_details_json": json.dumps(source_info["source_details_json"], sort_keys=True, default=str),
+                "created_at": now,
+                "updated_at": now,
+            },
         )
         event_id = int(cursor.lastrowid)
         action = "created"

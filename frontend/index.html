@@ -7867,9 +7867,9 @@
       renderDetectionRuleTestSensorSelect();
       setValue('detectionRuleTestRange', 120);
       const template = selectedDetectionTemplate();
-      setText('detectionRuleTestSummary', `${template?.name || 'Grupo'} - ${rule.vector}`);
+      setText('detectionRuleTestSummary', `${template?.name || 'Grupo'} - ${vectorDisplayName(rule, rule.vector)}`);
       setText('detectionRuleTestGroup', template?.name || '-');
-      setText('detectionRuleTestRule', rule.vector || '-');
+      setText('detectionRuleTestRule', vectorDisplayName(rule, rule.vector));
       setText('detectionRuleTestZoneName', '-');
       setText('detectionRuleTestPrefixes', '-');
       setText('detectionRuleTestSensorName', '-');
@@ -7912,7 +7912,7 @@
         : '';
       setText('detectionRuleTestSummary', `${formatNumber(items.length)} candidatos encontrados.${anomalyText}${warnings.length ? ` Avisos: ${warnings.join(' | ')}` : ''}`);
       setText('detectionRuleTestGroup', template.name || '-');
-      setText('detectionRuleTestRule', rule?.vector || items[0]?.vector || '-');
+      setText('detectionRuleTestRule', vectorDisplayName(rule || items[0] || {}, rule?.vector || items[0]?.vector || ''));
       setText('detectionRuleTestZoneName', zone.name || '-');
       setText('detectionRuleTestPrefixes', prefixes.map(prefix => prefix.cidr).join(', ') || '-');
       setText('detectionRuleTestSensorName', sensor?.name || (sensorId ? `Sensor #${sensorId}` : 'Todos'));

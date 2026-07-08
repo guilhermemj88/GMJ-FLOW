@@ -120,6 +120,146 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         for raw, expected in cases.items():
             self.assertEqual(backend_main.normalize_detection_port_text(raw, "dst_port"), expected)
 
+    def test_clickhouse_ipv4_cidr_filter_does_not_emit_ipv4_mapped_prefix(self):
+        self.assertEqual(backend_main.clickhouse_cidr_string_param("45.5.248.0/23"), "45.5.248.0/23")
+        self.assertNotIn("::ffff", backend_main.normalize_ip_filter_for_clickhouse("45.5.248.195", "src_cidr"))
+        params = {}
+        condition = backend_main.build_ip_condition("src_ip", "45.5.248.0/23", params, "src_cidr", "src_cidr")
+        self.assertIn("isIPAddressInRange(toString(src_ip), {src_cidr:String})", condition)
+        self.assertEqual(params["src_cidr"], "45.5.248.0/23")
+
+    def test_sqlite_connection_uses_wal_and_busy_timeout(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    self.assertEqual(int(conn.execute("PRAGMA busy_timeout").fetchone()[0]), 30000)
+                    self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_automatic_worker_creates_security_anomaly_with_display_name_without_dedupe_pollution(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+            now = "2026-07-07T12:00:00Z"
+            columns = [
+                "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "bytes", "packets", "flows",
+                "bits_s", "packets_s", "flows_s", "unique_dst_ips", "unique_dst_ports", "unique_src_ports",
+                "first_seen", "last_seen", "metric_value",
+            ]
+            row = ("45.5.248.195", "", "45.5.248.195", "UDP", 0, 90_000_000, 22_080_000, 300, 12_000_000, 368_000, 5, 12, 8, 5, flow_time, flow_time, 368_000)
+
+            def fake_query_clickhouse(query, params=None):
+                self.assertEqual((params or {}).get("prefix_cidr"), "45.5.248.0/23")
+                self.assertNotIn("::ffff", str(params))
+                return FakeClickHouseResult(columns, [row])
+
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
+                 mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+                 mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="greatest(sample_rate, 1)"):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    cursor = conn.execute(
+                        "INSERT INTO detection_templates (name, description, active, created_at, updated_at) VALUES (?, '', 1, ?, ?)",
+                        ("Fibinet", now, now),
+                    )
+                    template_id = int(cursor.lastrowid)
+                    zone_id = int(conn.execute(
+                        "INSERT INTO ip_zones (name, description, active, detection_template_id, created_at, updated_at) VALUES (?, '', 1, ?, ?, ?)",
+                        ("Cliente", template_id, now, now),
+                    ).lastrowid)
+                    conn.execute(
+                        "INSERT INTO ip_zone_prefixes (zone_id, cidr, name, description, prefix_type, active, created_at, updated_at) VALUES (?, ?, '', '', 'client', 1, ?, ?)",
+                        (zone_id, "45.5.248.0/23", now, now),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO detection_template_rules (
+                            template_id, vector, display_name, domain, direction, protocol, metric, comparison,
+                            warning_value, critical_value, window_seconds, consecutive_windows, cooldown_minutes,
+                            cooldown_seconds, enabled, response, src_cidr, dst_cidr, src_port, dst_port,
+                            detection_key, group_by, mitigation_mode, mitigation_enabled, use_global_whitelist,
+                            extra_whitelist_ids, bypass_whitelist, notes, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, 'internal_ip', 'transmits', 'UDP', 'packets_s', 'over',
+                            45000, 60000, 60, 1, 0, 0, 1, 'DETECTION_ONLY', '', '', 'any', 'any',
+                            '', '', 'detection_only', 0, 0, '[]', 1, '', ?, ?)
+                        """,
+                        (template_id, "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK", "UDP flood por IP", now, now),
+                    )
+                    conn.commit()
+
+                result = backend_main.run_detection_template_rules_once(create_anomalies=True)
+                self.assertEqual(result["anomalies_created"], 1)
+                with backend_main.sqlite_connection() as conn:
+                    anomaly = conn.execute("SELECT * FROM security_anomalies WHERE vector = ?", ("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",)).fetchone()
+                    self.assertIsNotNone(anomaly)
+                    self.assertEqual(anomaly["source_name"], "UDP flood por IP")
+                    self.assertNotIn("UDP flood por IP", anomaly["dedupe_key"])
+                    item = backend_main.security_anomaly_row_to_dict(anomaly)
+                    self.assertEqual(item["type_label"], "UDP flood por IP")
+                    self.assertEqual(item["technical_vector"], "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_legacy_anomaly_event_insert_and_update_use_matching_columns(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            start = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+            vector = {
+                "id": None,
+                "name": "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",
+                "display_name": "UDP flood por IP",
+                "domain_type": "internal_ip",
+                "target_cidr": "",
+                "sensor_id": None,
+                "interface_if_index": None,
+                "direction": "transmits",
+                "decoder": "UDP",
+                "threshold_unit": "packets_s",
+                "threshold_value": 45000,
+                "severity": "critical",
+                "response_action": "alert_only",
+            }
+            traffic = {
+                "target_ip": "45.5.248.195",
+                "target_cidr": "45.5.248.195/32",
+                "target_role": "source",
+                "scope_type": "internal_ip_32",
+                "packets_s": 368000,
+                "bits_s": 12000000,
+                "total_bytes": 90000000,
+                "total_packets": 22080000,
+                "flow_count": 300,
+                "protocol": "udp",
+                "zone_id": 1,
+                "zone_name": "Cliente",
+            }
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
+                 mock.patch.object(backend_main, "save_anomaly_flow_samples", return_value=None):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    self.assertEqual(backend_main.upsert_anomaly_event(conn, vector, traffic, start, start + timedelta(minutes=1)), "created")
+                    self.assertEqual(backend_main.upsert_anomaly_event(conn, vector, traffic, start, start + timedelta(minutes=2)), "updated")
+                    row = conn.execute("SELECT * FROM anomaly_events WHERE vector_name = ?", ("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK",)).fetchone()
+                    self.assertIsNotNone(row)
+                    self.assertEqual(row["source_name"], "UDP flood por IP")
+                    self.assertNotIn("UDP flood por IP", row["dedupe_key"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_outbound_dst_port_exclusion_filters_dns_and_allows_other_udp(self):
         calls = []
         flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
@@ -497,6 +637,8 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("syncFriendlyNameFromTechnical('modalVectorName', 'modalVectorDisplayName')", FRONTEND)
         self.assertIn('${escapeHtml(vectorDisplayName(rule, rule.vector))}<div class="subtle">${escapeHtml(rule.vector)}</div>', FRONTEND)
         self.assertIn('${escapeHtml(vectorDisplayName(vector, vector.name))}<div class="subtle">${escapeHtml(vector.name)}</div>', FRONTEND)
+        self.assertIn("setText('detectionRuleTestRule', vectorDisplayName(rule, rule.vector))", FRONTEND)
+        self.assertIn("setText('detectionRuleTestRule', vectorDisplayName(rule || items[0] || {}", FRONTEND)
 
     def test_anomaly_timeseries_window_expands_zero_duration(self):
         first = datetime(2026, 7, 7, 14, 12, 49, tzinfo=timezone.utc)
