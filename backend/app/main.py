@@ -8563,6 +8563,9 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
     matched: list[dict[str, Any]] = []
     decision = "allow_auto" if requested_mode == "automatic" else "require_manual_approval"
     severity = "safe"
+    raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+    dns_destination_only = is_dns_outbound_destination_only_candidate(candidate)
+    dns_client_cidr = dns_outbound_client_cidr_for_candidate(candidate, raw_anomaly) if dns_destination_only else ""
 
     if requested_mode == "disabled":
         return {
@@ -8578,6 +8581,7 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
     with sqlite_connection() as conn:
         dst_protected = protected_prefix_match(conn, dst_cidr)
         src_protected = protected_prefix_match(conn, src_cidr)
+        dns_client_protected = protected_prefix_match(conn, dns_client_cidr) if dns_client_cidr else None
         rows = conn.execute(
             """
             SELECT *
@@ -8596,7 +8600,6 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                 matched.append(policy)
 
     has_scope = bool(src_cidr or dst_cidr)
-    raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
     known_dns_dst = clean_ip(candidate.get("dominant_dst_ip") or raw_anomaly.get("dominant_dst_ip"))
     raw_top_flow = raw_anomaly.get("top_flow") if isinstance(raw_anomaly.get("top_flow"), dict) else {}
     known_dns_dst = known_dns_dst or clean_ip(raw_top_flow.get("dst_ip"))
@@ -8687,7 +8690,16 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     pass
     require_protected = bool(candidate.get("require_protected_prefix"))
-    if require_protected and dst_cidr and not dst_protected:
+    if require_protected and dns_destination_only:
+        if dst_protected:
+            decision = "require_manual_approval" if decision != "deny" else decision
+            severity = "caution" if severity != "danger" else severity
+            reasons.append("Destino DNS outbound esta dentro de prefixo protegido; bloqueio automatico exige destino externo.")
+        if not dns_client_cidr or not dns_client_protected:
+            decision = "require_manual_approval" if decision != "deny" else decision
+            severity = "caution" if severity != "danger" else severity
+            reasons.append("Origem/internal_ip nao confirmada dentro de prefixo protegido.")
+    elif require_protected and dst_cidr and not dst_protected:
         decision = "require_manual_approval" if decision != "deny" else decision
         severity = "caution" if severity != "danger" else severity
         reasons.append("Destino nao confirmado dentro de prefixo protegido.")
@@ -8718,7 +8730,7 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         "warnings": sorted(set(warnings)),
         "required_scope": sorted(set(required_scope)),
         "matched_port_policies": matched,
-        "protected_prefix_match": dst_protected or src_protected,
+        "protected_prefix_match": dns_client_protected or dst_protected or src_protected,
     }
 
 
@@ -9471,10 +9483,24 @@ def detection_rule_mitigation_config(conn: sqlite3.Connection, attack_vector_nam
 
 
 def anomaly_mitigation_config(conn: sqlite3.Connection, event: dict[str, Any], attack_vector_name: str) -> dict[str, Any] | None:
-    return (
-        mitigation_vector_config(conn, attack_vector_name, event.get("attack_vector_id"))
-        or detection_rule_mitigation_config(conn, attack_vector_name)
-    )
+    names = [attack_vector_name]
+    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"}:
+        names.extend(["DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"])
+    seen: set[str] = set()
+    for name in names:
+        name = clean_text(name)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        vector_config = mitigation_vector_config(conn, name, event.get("attack_vector_id"))
+        rule_config = detection_rule_mitigation_config(conn, name)
+        if vector_config is not None and vector_config.get("response_profile_id"):
+            return vector_config
+        if rule_config is not None:
+            return rule_config
+        if vector_config is not None:
+            return vector_config
+    return None
 
 
 def anomaly_confidence(event: dict[str, Any]) -> float:
@@ -9507,7 +9533,7 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
         return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
         return ["FLOWSPEC_BLOCK_DST_UDP_SRC_PORT"]
-    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS"}:
+    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"}:
         return ["FLOWSPEC_AUTO_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == "DNS_REFLECTION_INBOUND":
         return ["FLOWSPEC_BLOCK_SRC_DNS_RESPONSE", "FLOWSPEC_BLOCK_DST_DNS"]
@@ -9532,6 +9558,9 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
         candidate["response_profile_name"] = profile.get("name") or candidate.get("response_profile_name") or candidate.get("profile") or ""
     candidate["connector_id"] = connector["id"] if connector else None
     mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
+    if mode == "response_profile" and profile:
+        profile_mode = clean_text(profile.get("approval_mode")).lower()
+        mode = "automatic" if profile_mode in {"auto", "automatic"} else "manual_approval"
     enabled = bool(vector.get("mitigation_enabled")) if vector else True
     candidate["mitigation_mode"] = mode if enabled else "disabled"
     if not explicit_profile:
@@ -9734,9 +9763,11 @@ def dns_outbound_attack_vector_name(event: dict[str, Any]) -> str:
     event_vector = clean_text(event.get("attack_vector_name") or event.get("vector") or event.get("vector_name"))
     if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT"}:
         return event_vector
+    if event_vector == "dns_abuse_outbound":
+        return "DNS_QUERY_OUTBOUND_CLIENT"
     classification = clean_text(event.get("classification") or event.get("ai_classification")).lower()
     if classification == "dns_abuse_outbound":
-        return event_vector or "DNS_QUERY_OUTBOUND_CLIENT"
+        return event_vector if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT"} else "DNS_QUERY_OUTBOUND_CLIENT"
     return "DNS_QUERY_OUTBOUND_CLIENT"
 
 
@@ -9972,6 +10003,7 @@ def dns_outbound_candidates(
             "candidate_role": "recommended",
             "mitigation_basis": "dns_outbound_destination",
             "mitigation_reason": dns_outbound_reason(),
+            "sensor_id": event.get("sensor_id"),
             "top_flow": top_flow_payload,
         }
     )
@@ -10104,7 +10136,7 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
             if dns_candidates:
                 deduped: dict[str, dict[str, Any]] = {}
                 for candidate in dns_candidates:
-                    deduped[candidate["mitigation_key"]] = candidate
+                    deduped.setdefault(candidate["mitigation_key"], candidate)
                 return list(deduped.values())
 
         if event_vector in UDP_UPLOAD_MANY_CLIENTS_ALIASES or event.get("scope_type") == "external_dst_ip_port":
@@ -10353,6 +10385,7 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
             policy["decision"] = "deny"
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
+        policy_allows_auto = policy.get("decision") == "allow_auto"
         evaluated.append(
             {
                 **candidate,
@@ -10361,8 +10394,10 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
                 "announce_command": rendered,
                 "withdraw_command": render_exabgp_flowspec_command("withdraw", candidate) if not rendered.startswith("INVALID:") else "",
                 "apply_enabled": False,
-                "manual_approval_required": True,
-                "allow_auto": False,
+                "manual_approval_required": not policy_allows_auto,
+                "allow_auto": policy_allows_auto,
+                "dry_run": True,
+                "dry_run_message": "Seria aplicado automaticamente; nao aplicado porque e dry-run." if policy_allows_auto else "Nao seria aplicado automaticamente pela politica atual.",
             }
         )
     return {"anomaly": context["event"], "candidates": evaluated}
@@ -12412,7 +12447,6 @@ DNS_OUTBOUND_POLICY_TOKENS = {
     "dns_query_outbound_client",
 }
 
-
 def mitigation_candidate_text(*items: dict[str, Any]) -> str:
     fields = (
         "classification",
@@ -12466,6 +12500,54 @@ def is_flowspec_block_dst_dns_candidate(candidate: dict[str, Any], profile: dict
     return bool(profile_names_for_candidate(candidate, profile) & FLOWSPEC_DST_DNS_PROFILE_NAMES)
 
 
+def dns_outbound_client_cidr_for_candidate(candidate: dict[str, Any], anomaly: dict[str, Any] | None = None) -> str:
+    anomaly = anomaly or {}
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    raw_top_flow = anomaly.get("top_flow") if isinstance(anomaly.get("top_flow"), dict) else {}
+    source_details = anomaly.get("source_details") or anomaly.get("source_details_json") or {}
+    source_details = source_details if isinstance(source_details, dict) else {}
+    candidates = [
+        candidate.get("internal_ip"),
+        candidate.get("src_ip"),
+        top_flow.get("src_ip"),
+        anomaly.get("internal_ip"),
+        anomaly.get("src_ip"),
+        anomaly.get("dominant_src_ip"),
+        anomaly.get("top_src_ip"),
+        source_details.get("top_src_ip"),
+        raw_top_flow.get("src_ip"),
+    ]
+    if clean_text(anomaly.get("target_role")) == "src_ip":
+        candidates.append(anomaly.get("target_ip"))
+        candidates.append(anomaly.get("target_cidr"))
+    for value in candidates:
+        cidr = cidr_from_ip_or_cidr(value)
+        if cidr:
+            return cidr
+    return ""
+
+
+def is_dns_outbound_destination_only_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
+    if not is_dns_outbound_mitigation_context(candidate, None, None):
+        return False
+    if not is_flowspec_block_dst_dns_candidate(candidate, profile):
+        return False
+    if clean_text(candidate.get("protocol")).lower() != "udp" or clean_text(candidate.get("dst_port")) != "53":
+        return False
+    if clean_text(candidate.get("src_prefix") or candidate.get("src_cidr") or candidate.get("src_port")):
+        return False
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    if not dst_prefix and clean_text(candidate.get("target_role")) != "src_ip":
+        dst_prefix = clean_text(candidate.get("target_prefix") or candidate.get("target_scope"))
+    if not dst_prefix:
+        return False
+    try:
+        network = ip_network(dst_prefix, strict=False)
+    except ValueError:
+        return False
+    return network.prefixlen == network.max_prefixlen and not is_internal_ip_text(str(network.network_address))
+
+
 def is_destination_port_flowspec_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
     return bool(profile_names_for_candidate(candidate, profile) & (FLOWSPEC_DST_DNS_PROFILE_NAMES | {"FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"}))
 
@@ -12477,7 +12559,11 @@ def sanitize_flowspec_block_dst_dns_candidate(
     profile_names = profile_names_for_candidate(candidate, profile)
     if not profile_names & (FLOWSPEC_DST_DNS_PROFILE_NAMES | {"FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"}):
         return candidate
-    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr") or candidate.get("target_prefix") or candidate.get("target_scope"))
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    if not dst_prefix and clean_text(candidate.get("target_role")) != "src_ip":
+        dst_prefix = clean_text(candidate.get("target_prefix") or candidate.get("target_scope"))
+    if not dst_prefix and clean_text(candidate.get("target_role")) == "src_ip":
+        return candidate
     if dst_prefix:
         candidate["dst_prefix"] = dst_prefix
         candidate["dst_cidr"] = dst_prefix
@@ -13913,8 +13999,8 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
     if event_id < 0:
         return missing_draft_payload_response()
     with sqlite_connection() as conn:
-        security_item = resolve_security_anomaly_identifier(conn, event_id)
-        anomaly_id = int(security_item["id"])
+        context = fetch_anomaly_mitigation_context(conn, event_id)
+        anomaly_id = int((context.get("event") or {}).get("id") or event_id)
         analysis = latest_ai_analysis(conn, anomaly_id)
     if analysis is None:
         return {
@@ -13945,8 +14031,8 @@ def create_anomaly_ai_analysis(request: Request, event_id: int):
     if event_id < 0:
         return missing_draft_payload_response()
     with sqlite_connection() as conn:
-        security_item = resolve_security_anomaly_identifier(conn, event_id)
-        anomaly_id = int(security_item["id"])
+        context = fetch_anomaly_mitigation_context(conn, event_id)
+        anomaly_id = int((context.get("event") or {}).get("id") or event_id)
         config = ai_effective_config(conn)
     if not config["enabled"]:
         raise HTTPException(status_code=409, detail="IA de mitigacao esta desativada.")
@@ -14371,7 +14457,9 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 if mode in {"disabled", "analysis_only"} or candidate.get("never_announce"):
                     stats["skipped"] += 1
                     continue
-                if mode in {"automatic", "manual_approval", "suggest_only", "manual_review", "response_profile"}:
+                if mode in {"automatic", "auto"}:
+                    item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
+                elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
                     item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
                 else:
                     stats["skipped"] += 1
@@ -23050,13 +23138,16 @@ def evaluate_anomaly_mitigation(request: Request, event_id: int):
     require_admin(request)
     payload = evaluated_mitigation_candidates(event_id)
     evidence_status = "complete" if payload["candidates"] else "insufficient"
+    automatic_candidates = [candidate for candidate in payload["candidates"] if candidate.get("allow_auto")]
     return {
         "anomaly": payload["anomaly"],
         "evidence_status": evidence_status,
         "mitigation_allowed": bool(payload["candidates"]),
-        "recommended_action": "manual_review" if payload["candidates"] else "alert_only",
-        "manual_approval_required": True,
+        "recommended_action": "automatic_dry_run" if automatic_candidates else "manual_review" if payload["candidates"] else "alert_only",
+        "manual_approval_required": not bool(automatic_candidates),
         "apply_enabled": False,
+        "dry_run": True,
+        "dry_run_message": "Seria aplicado automaticamente; nao aplicado porque e dry-run." if automatic_candidates else "Dry-run: nenhuma acao de mitigacao foi enviada.",
         "candidates": payload["candidates"],
     }
 

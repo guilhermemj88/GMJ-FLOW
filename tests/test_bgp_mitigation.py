@@ -186,6 +186,13 @@ class BgpMitigationTest(unittest.TestCase):
         ).lastrowid
         conn.execute(
             """
+            INSERT OR IGNORE INTO sensors (id, name, exporter_ip, created_at, updated_at)
+            VALUES (9, 'sensor-origin', '192.0.2.9', ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
             INSERT INTO bgp_protected_prefixes (cidr, name, enabled, block_rtbh, block_flowspec, created_at, updated_at)
             VALUES ('45.5.248.0/24', 'Fibinet clientes', 1, 1, 1, ?, ?)
             """,
@@ -223,6 +230,20 @@ class BgpMitigationTest(unittest.TestCase):
                 created_at, updated_at
             )
             VALUES (?, 'DNS_INTERNAL_IP_TO_DST_HIGH_PPS', 'DNS alto por destino', 'internal_ip',
+                    'transmits', 'DNS', 'packets_s', 'over', 5000, 15000, 60, 1, 5,
+                    1, 'DETECTION_ONLY', ?, 'response_profile', 1, ?, ?)
+            """,
+            (template_id, int(profile["id"]), now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO detection_template_rules (
+                template_id, vector, display_name, domain, direction, protocol, metric, comparison,
+                warning_value, critical_value, window_seconds, consecutive_windows, cooldown_minutes,
+                enabled, response, critical_response_profile_id, mitigation_mode, mitigation_enabled,
+                created_at, updated_at
+            )
+            VALUES (?, 'DNS_QUERY_OUTBOUND_CLIENT', 'DNS outbound por cliente', 'internal_ip',
                     'transmits', 'DNS', 'packets_s', 'over', 5000, 15000, 60, 1, 5,
                     1, 'DETECTION_ONLY', ?, 'response_profile', 1, ?, ?)
             """,
@@ -284,6 +305,38 @@ class BgpMitigationTest(unittest.TestCase):
             "bits_s": 100,
         })
         return event, flows
+
+    def _insert_dns_query_anomaly_event(self, conn, event_id=140, src_ip="45.5.248.205", dst_ip="103.100.169.200"):
+        now = main.utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO anomaly_events (
+                id, sensor_id, target_ip, target_cidr, target_role, zone_id, zone_name,
+                vector_name, scope_type, direction, decoder, severity, metric_unit,
+                threshold_value, observed_value, peak_value, started_at, last_seen_at,
+                estimated_bytes, estimated_packets, flow_count, summary, dedupe_key,
+                created_at, updated_at, top_src_ip, top_dst_ip, top_src_port, top_dst_port,
+                top_packets, top_bytes, protocol
+            )
+            VALUES (?, 9, ?, ?, 'src_ip', 1, 'Clientes', 'DNS_QUERY_OUTBOUND_CLIENT',
+                    'internal_ip_32', 'transmits', 'DNS', 'critical', 'packets_s',
+                    10000, 13000, 13000, ?, ?, 1000000, 13000, 1,
+                    'DNS outbound alto', ?, ?, ?, ?, ?, 62129, 53, 13000, 1000000, 'udp')
+            """,
+            (event_id, src_ip, f"{src_ip}/32", now, now, f"dns-query-{event_id}", now, now, src_ip, dst_ip),
+        )
+        conn.execute(
+            """
+            INSERT INTO anomaly_event_flows (
+                anomaly_event_id, flow_time, sensor, exporter_ip, src_ip, dst_ip,
+                src_port, dst_port, proto, bytes, packets, flow_count
+            )
+            VALUES (?, ?, 'sensor-9', '192.0.2.9', ?, ?, 62129, 53, 17, 1000000, 13000, 1)
+            """,
+            (event_id, now, src_ip, dst_ip),
+        )
+        conn.commit()
+        return event_id
 
     def test_announce_command_has_no_ttl_and_expires_at_is_internal(self):
         with temporary_main_db():
@@ -573,12 +626,11 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(data["fallback_response_profile_id"], profile["id"])
             self.assertEqual(data["mitigation_mode"], "response_profile")
 
-    def test_automatic_runner_does_not_call_automatic_announce(self):
+    def test_automatic_runner_uses_automatic_for_auto_profiles(self):
         source = Path(ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
         start = source.find("def process_anomaly_mitigation")
         end = source.find("def anomaly_detection_enabled")
-        self.assertNotIn('"automatic", "worker"', source[start:end])
-        self.assertNotIn("'automatic', 'worker'", source[start:end])
+        self.assertIn('"automatic", "worker"', source[start:end])
 
     def test_dns_outbound_related_flow_recommends_destination_candidate_first(self):
         with temporary_main_db():
@@ -626,6 +678,163 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(config["response_profile_id"], profile["id"])
             self.assertEqual(config["mitigation_mode"], "response_profile")
             self.assertTrue(config["mitigation_enabled"])
+
+    def test_ai_analysis_accepts_anomaly_events_id(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.close()
+
+            get_response = main.get_anomaly_ai_analysis(self._admin_request(), event_id)
+            self.assertEqual(get_response["anomaly_id"], event_id)
+            self.assertFalse(get_response["available"])
+
+            config = {
+                "enabled": True,
+                "provider": "ollama",
+                "base_url": "http://ollama.invalid",
+                "selected_model": "test",
+                "selected_profile": "economical",
+                "timeout_seconds": 1,
+                "max_context_chars": 10000,
+                "max_top_flows": 10,
+                "num_predict": 64,
+                "keep_alive": "30m",
+                "allow_auto": False,
+                "require_policy_validation": True,
+            }
+            with patch.object(main, "ai_effective_config", return_value=config), \
+                 patch.object(main, "call_ollama_mitigation_ai", side_effect=RuntimeError("offline")), \
+                 patch.object(main, "persist_ai_pending_bgp_approval", return_value=None):
+                post_response = main.create_anomaly_ai_analysis(self._admin_request(), event_id)
+            self.assertEqual(post_response["anomaly_id"], event_id)
+            self.assertTrue(post_response["error_message"])
+
+    def test_dns_query_outbound_auto_policy_uses_source_protected_not_destination(self):
+        with temporary_main_db():
+            conn, _connector, profile = self._dns_multi_target_context(add_whitelist=False)
+            conn.close()
+            event = {
+                "id": 140,
+                "attack_vector_name": "DNS_QUERY_OUTBOUND_CLIENT",
+                "classification": "dns_abuse_outbound",
+                "direction": "transmits",
+                "decoder": "DNS",
+                "protocol": "udp",
+                "target_ip": "45.5.248.205",
+                "target_cidr": "45.5.248.205/32",
+                "target_role": "src_ip",
+                "target_port": 53,
+                "sensor_id": 9,
+                "severity": "critical",
+            }
+            flows = [{
+                "src_ip": "45.5.248.205",
+                "src_port": 62129,
+                "dst_ip": "103.100.169.200",
+                "dst_port": 53,
+                "proto": 17,
+                "packets": 13000,
+                "bytes": 1000000,
+                "packets_s": 13000,
+                "bits_s": 8000000,
+            }]
+            candidates = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})
+            recommended = candidates[0]
+            policy = main.policy_for_candidate(recommended)
+            command = main.render_exabgp_flowspec_command("announce", recommended)
+            self.assertEqual(recommended["response_profile_id"], profile["id"])
+            self.assertEqual(recommended["response_profile_name"], "FLOWSPEC_AUTO_BLOCK_DST_DNS")
+            self.assertEqual(recommended["mitigation_mode"], "automatic")
+            self.assertEqual(policy["decision"], "allow_auto")
+            self.assertFalse(recommended.get("src_prefix"))
+            self.assertFalse(recommended.get("src_port"))
+            self.assertIn("destination 103.100.169.200/32; protocol =udp; destination-port =53", command)
+            self.assertNotIn("source ", command)
+            self.assertNotIn("source-port", command)
+
+    def test_dns_query_outbound_requires_source_protected_and_respects_destination_whitelist(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            protected_event, protected_flows = self._dns_event_and_flows()
+            protected_event["attack_vector_name"] = "DNS_QUERY_OUTBOUND_CLIENT"
+            protected_flows = [protected_flows[10]]
+            protected_flows[0]["dst_ip"] = "103.192.159.11"
+            whitelist_candidate = main.build_mitigation_candidates_from_anomaly({"event": protected_event, "flows": protected_flows})[0]
+            whitelist_policy = main.policy_for_candidate(whitelist_candidate)
+            self.assertNotEqual(whitelist_policy["decision"], "allow_auto")
+            self.assertIn("whitelist", " ".join(whitelist_policy["warnings"] + whitelist_policy["reasons"]).lower())
+
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            event["attack_vector_name"] = "DNS_QUERY_OUTBOUND_CLIENT"
+            event["target_ip"] = "198.51.100.10"
+            event["target_cidr"] = "198.51.100.10/32"
+            flows = [flows[0]]
+            flows[0]["src_ip"] = "198.51.100.10"
+            candidate = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            policy = main.policy_for_candidate(candidate)
+            self.assertEqual(policy["decision"], "require_manual_approval")
+            self.assertIn("Origem/internal_ip nao confirmada dentro de prefixo protegido.", policy["reasons"])
+
+    def test_dns_query_outbound_dry_run_reports_auto_without_pipe_write(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                evaluated = main.evaluated_mitigation_candidates(event_id)
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertTrue(evaluated["candidates"][0]["allow_auto"])
+            self.assertFalse(evaluated["candidates"][0]["manual_approval_required"])
+            self.assertEqual(evaluated["candidates"][0]["policy_decision"]["decision"], "allow_auto")
+            self.assertIn("dry-run", evaluated["candidates"][0]["dry_run_message"].lower())
+
+    def test_dns_query_outbound_worker_auto_applies_to_sensor_origin_connector(self):
+        with temporary_main_db():
+            conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
+            self._insert_dns_query_anomaly_event(conn)
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append((_connector["id"], command))
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(stats["active"], 1)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], connector["id"])
+            self.assertNotIn("source ", calls[0][1])
+            self.assertNotIn("source-port", calls[0][1])
+            with main.sqlite_connection() as check:
+                row = check.execute(
+                    """
+                    SELECT status, connector_id, response_profile_id, sensor_id, dst_ip, protocol, dst_port,
+                           policy_decision, pipe_path, announce_command, withdraw_command
+                    FROM bgp_announcements
+                    WHERE anomaly_id = 140
+                    """
+                ).fetchone()
+            self.assertEqual(row["status"], "active")
+            self.assertEqual(row["connector_id"], connector["id"])
+            self.assertEqual(row["response_profile_id"], profile["id"])
+            self.assertEqual(row["sensor_id"], 9)
+            self.assertEqual(row["dst_ip"], "103.100.169.200")
+            self.assertEqual(row["protocol"], "udp")
+            self.assertEqual(row["dst_port"], "53")
+            self.assertEqual(row["policy_decision"], "allow_auto")
+            self.assertEqual(row["pipe_path"], "/run/exabgp/exabgp.in")
+            self.assertIn("announce flow route", row["announce_command"])
+            self.assertIn("withdraw flow route", row["withdraw_command"])
 
     def test_dns_outbound_multi_target_candidate_filters_and_renders_dst_only(self):
         with temporary_main_db():
