@@ -9945,6 +9945,153 @@ def dns_flow_metric(flow: dict[str, Any], key: str) -> float:
         return 0.0
 
 
+def dns_candidate_top_src_ip(candidate: dict[str, Any]) -> str:
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+    return clean_ip(
+        candidate.get("top_src_ip")
+        or candidate.get("src_ip")
+        or candidate.get("internal_ip")
+        or top_flow.get("src_ip")
+        or raw_anomaly.get("top_src_ip")
+        or raw_anomaly.get("src_ip")
+        or raw_anomaly.get("internal_ip")
+        or (raw_anomaly.get("target_ip") if clean_text(raw_anomaly.get("target_role")) == "src_ip" else "")
+    )
+
+
+def dns_candidate_top_dst_ip(candidate: dict[str, Any]) -> str:
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    return clean_ip(
+        candidate.get("top_dst_ip")
+        or candidate.get("dst_ip")
+        or top_flow.get("dst_ip")
+        or raw_anomaly.get("top_dst_ip")
+        or raw_anomaly.get("dst_ip")
+        or (dst_prefix.split("/", 1)[0] if dst_prefix else "")
+    )
+
+
+def dns_candidate_dst_port(candidate: dict[str, Any]) -> int:
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    try:
+        return int(candidate.get("top_dst_port") or candidate.get("dst_port") or top_flow.get("dst_port") or candidate.get("target_port") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def dns_auto_candidate_loggable(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
+    return (
+        is_dns_outbound_mitigation_context(candidate, None, None)
+        or is_flowspec_block_dst_dns_candidate(candidate, profile)
+        or clean_text(candidate.get("attack_vector_name")).upper() in DNS_OUTBOUND_TEMPLATE_VECTORS
+    )
+
+
+def dns_operational_log_fields(
+    candidate: dict[str, Any],
+    connector: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+    command: str = "",
+) -> dict[str, Any]:
+    return {
+        "anomaly_id": candidate.get("anomaly_id"),
+        "vector": candidate.get("attack_vector_name") or candidate.get("vector_name") or "",
+        "sensor_id": candidate.get("sensor_id"),
+        "connector_id": connector.get("id") if connector else candidate.get("connector_id"),
+        "pipe_path": connector.get("exabgp_pipe_in") if connector else candidate.get("pipe_path") or "",
+        "top_src_ip": dns_candidate_top_src_ip(candidate),
+        "top_dst_ip": dns_candidate_top_dst_ip(candidate),
+        "dst_port": dns_candidate_dst_port(candidate),
+        "response_profile_id": profile.get("id") if profile else candidate.get("response_profile_id"),
+        "announce_command": command,
+    }
+
+
+def dns_policy_skip_reason(
+    candidate: dict[str, Any],
+    policy: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+    fallback: str = "",
+) -> str:
+    if not dns_candidate_top_dst_ip(candidate):
+        return "sem top_dst_ip"
+    if not dns_candidate_top_src_ip(candidate):
+        return "sem top_src_ip"
+    text = " | ".join(
+        [
+            *((policy or {}).get("reasons") or []),
+            *((policy or {}).get("warnings") or []),
+            *((validation or {}).get("errors") or []),
+            *((validation or {}).get("warnings") or []),
+            fallback,
+        ]
+    ).lower()
+    if "origem/internal_ip" in text or "src_not_protected" in text:
+        return "src fora de prefixo protegido"
+    if "whitelist" in text:
+        return "destino em whitelist"
+    if profile and clean_text(profile.get("approval_mode")).lower() not in {"auto", "automatic"}:
+        return "profile nao auto"
+    return fallback or "politica nao permitiu automatico"
+
+
+def log_dns_auto_mitigation_skipped(
+    candidate: dict[str, Any],
+    reason: str,
+    connector: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    command: str = "",
+) -> None:
+    if not dns_auto_candidate_loggable(candidate, profile):
+        return
+    fields = dns_operational_log_fields(candidate, connector, profile, command)
+    logger.info(
+        "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s vector=%s sensor_id=%s connector_id=%s pipe_path=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s policy_decision=%s validation_errors=%s",
+        reason,
+        fields["anomaly_id"],
+        fields["vector"],
+        fields["sensor_id"],
+        fields["connector_id"],
+        fields["pipe_path"],
+        fields["top_src_ip"],
+        fields["top_dst_ip"],
+        fields["dst_port"],
+        fields["response_profile_id"],
+        (policy or {}).get("decision") or "",
+        (validation or {}).get("errors") or [],
+    )
+
+
+def log_dns_auto_mitigation_applied(
+    candidate: dict[str, Any],
+    connector: dict[str, Any],
+    profile: dict[str, Any] | None,
+    command: str,
+) -> None:
+    if not dns_auto_candidate_loggable(candidate, profile):
+        return
+    fields = dns_operational_log_fields(candidate, connector, profile, command)
+    logger.info(
+        "dns_auto_mitigation_applied anomaly_id=%s vector=%s sensor_id=%s connector_id=%s pipe_path=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s announce_command=%s",
+        fields["anomaly_id"],
+        fields["vector"],
+        fields["sensor_id"],
+        fields["connector_id"],
+        fields["pipe_path"],
+        fields["top_src_ip"],
+        fields["top_dst_ip"],
+        fields["dst_port"],
+        fields["response_profile_id"],
+        fields["announce_command"],
+    )
+
+
 def dns_target_candidate_from_flow(
     event: dict[str, Any],
     attack_vector_name: str,
@@ -10019,11 +10166,32 @@ def dns_outbound_target_flows(
         src_ip = clean_ip(flow.get("src_ip")) or event_src
         dst_ip = clean_ip(flow.get("dst_ip"))
         if not src_ip or not dst_ip:
+            logger.info(
+                "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s vector=%s sensor_id=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s",
+                "sem top_src_ip" if not src_ip else "sem top_dst_ip",
+                event.get("id"),
+                dns_outbound_attack_vector_name(event),
+                event.get("sensor_id"),
+                src_ip,
+                dst_ip,
+                dst_port,
+                (profile or {}).get("id"),
+            )
             continue
         src_cidr = cidr_from_ip_or_cidr(src_ip)
         dst_cidr = cidr_from_ip_or_cidr(dst_ip)
         if protected_configured and not protected_prefix_match(conn, src_cidr):
             ignored.append({"dst_ip": dst_ip, "reason": "src_not_protected"})
+            logger.info(
+                "dns_auto_mitigation_not_applied reason=src fora de prefixo protegido anomaly_id=%s vector=%s sensor_id=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s",
+                event.get("id"),
+                dns_outbound_attack_vector_name(event),
+                event.get("sensor_id"),
+                src_ip,
+                dst_ip,
+                dst_port,
+                (profile or {}).get("id"),
+            )
             continue
         if protected_prefix_match(conn, dst_cidr):
             ignored.append({"dst_ip": dst_ip, "reason": "dst_is_protected"})
@@ -10041,6 +10209,16 @@ def dns_outbound_target_flows(
         whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
         if whitelist_hits:
             ignored.append({"dst_ip": dst_ip, "reason": "whitelist", "whitelist_hits": whitelist_hits})
+            logger.info(
+                "dns_auto_mitigation_not_applied reason=destino em whitelist anomaly_id=%s vector=%s sensor_id=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s",
+                event.get("id"),
+                dns_outbound_attack_vector_name(event),
+                event.get("sensor_id"),
+                src_ip,
+                dst_ip,
+                dst_port,
+                (profile or {}).get("id"),
+            )
             continue
         packets_s = dns_flow_metric(flow, "packets_s")
         bits_s = dns_flow_metric(flow, "bits_s")
@@ -10136,6 +10314,28 @@ def dns_outbound_candidates(
         dst_port = int(top_flow.get("dst_port") or event.get("target_port") or 53)
     except (TypeError, ValueError):
         dst_port = 0
+    if not src_ip:
+        logger.info(
+            "dns_auto_mitigation_not_applied reason=sem top_src_ip anomaly_id=%s vector=%s sensor_id=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s",
+            event.get("id"),
+            attack_vector_name,
+            event.get("sensor_id"),
+            src_ip,
+            dst_ip,
+            dst_port,
+            (profile or {}).get("id"),
+        )
+    if not dst_ip:
+        logger.info(
+            "dns_auto_mitigation_not_applied reason=sem top_dst_ip anomaly_id=%s vector=%s sensor_id=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s",
+            event.get("id"),
+            attack_vector_name,
+            event.get("sensor_id"),
+            src_ip,
+            dst_ip,
+            dst_port,
+            (profile or {}).get("id"),
+        )
     if not dst_ip or dst_port != 53:
         return []
     top_flow_payload = {
@@ -10546,6 +10746,12 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
     candidates = build_mitigation_candidates_from_anomaly(context)
     evaluated = []
     for candidate in candidates:
+        preview_connector = None
+        preview_profile = None
+        with sqlite_connection() as conn:
+            preview_profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+            connectors = resolve_mitigation_target_connectors(conn, candidate, preview_profile)
+            preview_connector = connectors[0] if connectors else None
         policy = policy_for_candidate(candidate)
         try:
             rendered = render_exabgp_flowspec_command("announce", candidate)
@@ -10562,6 +10768,10 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
                 "rendered_command": rendered,
                 "announce_command": rendered,
                 "withdraw_command": render_exabgp_flowspec_command("withdraw", candidate) if not rendered.startswith("INVALID:") else "",
+                "connector_id": preview_connector.get("id") if preview_connector else candidate.get("connector_id"),
+                "connector_name": preview_connector.get("name") if preview_connector else candidate.get("connector_name") or "",
+                "pipe_path": preview_connector.get("exabgp_pipe_in") if preview_connector else candidate.get("pipe_path") or "",
+                "mitigation_target_mode": (preview_profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "",
                 "apply_enabled": False,
                 "manual_approval_required": not policy_allows_auto,
                 "allow_auto": policy_allows_auto,
@@ -14487,6 +14697,8 @@ def apply_mitigation_candidate(
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
     if not connectors:
+        reason = "conector sensor_origin nao encontrado" if clean_text((profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode")) == "sensor_origin" else "nenhum conector BGP ativo"
+        log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
         raise HTTPException(status_code=400, detail="Nenhum conector BGP ativo resolvido para esta mitigacao.")
     requested_mode = "automatic" if mode == "automatic" else "manual_approval"
     results: list[dict[str, Any]] = []
@@ -14498,6 +14710,7 @@ def apply_mitigation_candidate(
         }
         connector_candidate["mitigation_key"] = mitigation_key_for_candidate(connector_candidate)
         if active_mitigation_exists(conn, connector_candidate["mitigation_key"]):
+            log_dns_auto_mitigation_skipped(connector_candidate, "mitigacao ativa duplicada", connector, profile)
             raise HTTPException(status_code=409, detail=f"Ja existe mitigacao ativa para esta chave no conector {connector.get('name') or connector['id']}.")
         policy = policy_for_candidate(connector_candidate, requested_mode)
         command = render_exabgp_flowspec_command("announce", connector_candidate)
@@ -14511,23 +14724,31 @@ def apply_mitigation_candidate(
             "approval_mode": "manual_approval",
         })
         if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
+            log_dns_auto_mitigation_skipped(connector_candidate, "duracao excede maximo", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
         if policy["decision"] == "deny":
+            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny"), connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by))
             continue
         if validation["errors"]:
+            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error"), connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
         if mode == "automatic" and policy["decision"] != "allow_auto":
+            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "politica nao permitiu automatico"), connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Politica nao permite automatico; aprovacao manual exigida.")
         if mode == "manual_approval" or policy["decision"] == "require_manual_approval" and mode != "announce_now":
+            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "profile nao auto"), connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "pending_approval", command, created_by))
             continue
         if connector.get("backend_type") != "exabgp":
+            log_dns_auto_mitigation_skipped(connector_candidate, "conector nao exabgp", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp para anunciar.")
         try:
             exabgp_write_pipe(connector, command)
+            log_dns_auto_mitigation_applied(connector_candidate, connector, profile, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "announced", command, created_by))
         except HTTPException as exc:
+            log_dns_auto_mitigation_skipped(connector_candidate, clean_text(exc.detail) or "falha ao escrever pipe", connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "failed", command, created_by, clean_text(exc.detail)))
     if len(results) == 1:
         return results[0]
@@ -14630,9 +14851,19 @@ def process_anomaly_mitigation() -> dict[str, int]:
                     stats["skipped"] += 1
                     continue
                 if mode in {"automatic", "auto"}:
-                    item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
+                    try:
+                        item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
+                    except HTTPException as exc:
+                        stats["failed"] += 1
+                        log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "automatico nao aplicado")
+                        continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
-                    item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
+                    try:
+                        item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
+                    except HTTPException as exc:
+                        stats["failed"] += 1
+                        log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "manual nao aplicado")
+                        continue
                 else:
                     stats["skipped"] += 1
                     continue

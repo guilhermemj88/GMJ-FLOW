@@ -9521,6 +9521,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const topFlowText = topFlow.src_ip && topFlow.dst_ip
           ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
           : '';
+        const connectorText = [candidate.mitigation_target_mode || '', candidate.connector_name || (candidate.connector_id ? `#${candidate.connector_id}` : ''), candidate.pipe_path || '']
+          .filter(Boolean)
+          .join(' / ');
         const candidateRole = candidate.candidate_role === 'recommended'
           ? 'Recomendado: destination /32 + udp/53'
           : candidate.candidate_role === 'conservative'
@@ -9549,6 +9552,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
             ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
             ${renderDnsMultiTargetBlock(candidate, index, canApply)}
+            ${connectorText ? `<div class="metric-readout mb-2">Conector: ${escapeHtml(connectorText)}</div>` : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>

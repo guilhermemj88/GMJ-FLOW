@@ -779,6 +779,12 @@ class BgpMitigationTest(unittest.TestCase):
                 count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(count, 0)
 
+    def test_legacy_dns_ui_hides_mitigation_action_and_shows_warning(self):
+        source = Path(ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Detector legacy: mitigação automática desativada. Use templates de detecção.", source)
+        self.assertIn("function isLegacyDnsAnomaly", source)
+        self.assertIn("${legacyDns ? '' : `<button", source)
+
     def test_official_dns_template_event_persists_top_flow_and_auto_applies(self):
         with temporary_main_db():
             conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
@@ -1028,6 +1034,9 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertFalse(evaluated["candidates"][0]["manual_approval_required"])
             self.assertEqual(evaluated["candidates"][0]["policy_decision"]["decision"], "allow_auto")
             self.assertIn("dry-run", evaluated["candidates"][0]["dry_run_message"].lower())
+            self.assertEqual(evaluated["candidates"][0]["connector_name"], "BGP-SENSOR-ORIGIN")
+            self.assertEqual(evaluated["candidates"][0]["mitigation_target_mode"], "sensor_origin")
+            self.assertEqual(evaluated["candidates"][0]["pipe_path"], "/run/exabgp/exabgp.in")
 
     def test_dns_query_outbound_worker_auto_applies_to_sensor_origin_connector(self):
         with temporary_main_db():
@@ -1038,7 +1047,8 @@ class BgpMitigationTest(unittest.TestCase):
             original = main.exabgp_write_pipe
             main.exabgp_write_pipe = lambda _connector, command: calls.append((_connector["id"], command))
             try:
-                stats = main.process_anomaly_mitigation()
+                with self.assertLogs("gmj-flow", level="INFO") as logs:
+                    stats = main.process_anomaly_mitigation()
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(stats["active"], 1)
@@ -1066,6 +1076,54 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(row["pipe_path"], "/run/exabgp/exabgp.in")
             self.assertIn("announce flow route", row["announce_command"])
             self.assertIn("withdraw flow route", row["withdraw_command"])
+            log_text = "\n".join(logs.output)
+            self.assertIn("dns_auto_mitigation_applied", log_text)
+            self.assertIn("anomaly_id=140", log_text)
+            self.assertIn("connector_id=", log_text)
+            self.assertIn("pipe_path=/run/exabgp/exabgp.in", log_text)
+            self.assertIn("top_src_ip=45.5.248.205", log_text)
+            self.assertIn("top_dst_ip=103.100.169.200", log_text)
+            self.assertIn("destination 103.100.169.200/32", log_text)
+
+    def test_template_dns_destination_whitelist_does_not_apply(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=141, dst_ip="103.192.159.11")
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with self.assertLogs("gmj-flow", level="INFO") as logs:
+                    stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["active"], 0)
+            with main.sqlite_connection() as check:
+                count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
+            self.assertEqual(count, 0)
+            self.assertIn("destino em whitelist", "\n".join(logs.output))
+
+    def test_template_dns_source_outside_protected_prefix_does_not_apply(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=142, src_ip="198.51.100.10")
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with self.assertLogs("gmj-flow", level="INFO") as logs:
+                    stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["active"], 0)
+            with main.sqlite_connection() as check:
+                count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
+            self.assertEqual(count, 0)
+            self.assertIn("src fora de prefixo protegido", "\n".join(logs.output))
 
     def test_dns_outbound_multi_target_candidate_filters_and_renders_dst_only(self):
         with temporary_main_db():
