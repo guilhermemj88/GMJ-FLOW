@@ -1115,6 +1115,10 @@ class BgpResponseProfilePayload(BaseModel):
     max_duration_seconds: int = Field(BGP_DEFAULT_MAX_DURATION_SECONDS, ge=60, le=604800)
     default_duration_seconds: int = Field(1800, ge=60, le=604800)
     duration_default: int | None = Field(None, ge=60, le=604800)
+    enable_multi_target_dns: bool = False
+    max_targets_per_anomaly: int = Field(10, ge=1, le=100)
+    min_target_packets_s: float | None = Field(None, ge=0)
+    min_target_bits_s: float | None = Field(None, ge=0)
     max_prefixlen_v4: int = Field(32, ge=0, le=32)
     max_prefixlen_v6: int = Field(128, ge=0, le=128)
     notes: str = ""
@@ -1164,7 +1168,13 @@ class BgpFlowspecTestPayload(BaseModel):
 
 class BgpAnomalyMitigationApplyPayload(BaseModel):
     candidate_index: int = Field(0, ge=0)
+    candidate_indexes: list[int] = Field(default_factory=list)
+    selected_dns_target_ips: list[str] = Field(default_factory=list)
     mode: str = "manual_approval"
+
+
+class BgpAnomalyMitigationWithdrawPayload(BaseModel):
+    announcement_ids: list[int] = Field(default_factory=list)
 
 
 class BgpMitigationPortPolicyPayload(BaseModel):
@@ -2692,6 +2702,8 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "require_protocol_or_port": 1,
             "default_duration_seconds": 600,
             "max_duration_seconds": 1800,
+            "enable_multi_target_dns": 1,
+            "max_targets_per_anomaly": 10,
         },
         {
             "name": "FLOWSPEC_BLOCK_SRC_TO_DST_UDP",
@@ -2790,11 +2802,13 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 target_selector, protocol_selector, src_port_selector, src_port_value,
                 dst_port_selector, dst_port_value, tcp_flags_selector, rate_limit_bps,
                 redirect_target, next_hop, community, large_community, require_protocol_or_port,
-                allow_wide_prefix, max_duration_seconds, default_duration_seconds, created_at, updated_at
+                allow_wide_prefix, max_duration_seconds, default_duration_seconds,
+                enable_multi_target_dns, max_targets_per_anomaly, min_target_packets_s, min_target_bits_s,
+                created_at, updated_at
             )
             VALUES (
                 ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
-                '', '', '', '', ?, 0, ?, ?, ?, ?
+                '', '', '', '', ?, 0, ?, ?, ?, ?, NULL, NULL, ?, ?
             )
             """,
             (
@@ -2814,6 +2828,8 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 int(item.get("require_protocol_or_port", 1)),
                 int(item.get("max_duration_seconds", BGP_DEFAULT_MAX_DURATION_SECONDS)),
                 int(item.get("default_duration_seconds", 1800)),
+                int(item.get("enable_multi_target_dns", 0)),
+                int(item.get("max_targets_per_anomaly", 10)),
                 now,
                 now,
             ),
@@ -2968,6 +2984,10 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             allow_wide_prefix INTEGER NOT NULL DEFAULT 0,
             max_duration_seconds INTEGER NOT NULL DEFAULT 3600,
             default_duration_seconds INTEGER NOT NULL DEFAULT 1800,
+            enable_multi_target_dns INTEGER NOT NULL DEFAULT 0,
+            max_targets_per_anomaly INTEGER NOT NULL DEFAULT 10,
+            min_target_packets_s REAL,
+            min_target_bits_s REAL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(connector_id) REFERENCES bgp_connectors(id) ON DELETE SET NULL
@@ -2982,6 +3002,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             connector_name TEXT NOT NULL DEFAULT '',
             response_profile_id INTEGER,
             anomaly_id INTEGER,
+            sensor_id INTEGER,
             status TEXT NOT NULL DEFAULT 'dry_run',
             route_type TEXT NOT NULL DEFAULT '',
             response_type TEXT NOT NULL DEFAULT '',
@@ -2992,6 +3013,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             target_prefix TEXT NOT NULL DEFAULT '',
             src_prefix TEXT NOT NULL DEFAULT '',
             dst_prefix TEXT NOT NULL DEFAULT '',
+            dst_ip TEXT NOT NULL DEFAULT '',
             protocol TEXT NOT NULL DEFAULT '',
             src_port TEXT NOT NULL DEFAULT '',
             dst_port TEXT NOT NULL DEFAULT '',
@@ -3001,6 +3023,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             announced_at TEXT,
             announce_command TEXT NOT NULL DEFAULT '',
             withdraw_command TEXT NOT NULL DEFAULT '',
+            pipe_path TEXT NOT NULL DEFAULT '',
             rendered_command TEXT NOT NULL DEFAULT '',
             match_json TEXT NOT NULL DEFAULT '{}',
             then_json TEXT NOT NULL DEFAULT '{}',
@@ -3031,10 +3054,13 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_sqlite_column(conn, "bgp_announcements", "connector_name", "connector_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "sensor_id", "sensor_id INTEGER")
     ensure_sqlite_column(conn, "bgp_announcements", "route_type", "route_type TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "announced_at", "announced_at TEXT")
     ensure_sqlite_column(conn, "bgp_announcements", "announce_command", "announce_command TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "withdraw_command", "withdraw_command TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "dst_ip", "dst_ip TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "pipe_path", "pipe_path TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "match_json", "match_json TEXT NOT NULL DEFAULT '{}'")
     ensure_sqlite_column(conn, "bgp_announcements", "then_json", "then_json TEXT NOT NULL DEFAULT '{}'")
     ensure_sqlite_column(conn, "bgp_announcements", "source", "source TEXT NOT NULL DEFAULT 'manual'")
@@ -3071,6 +3097,10 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_response_profiles", "max_prefixlen_v4", "max_prefixlen_v4 INTEGER NOT NULL DEFAULT 32")
     ensure_sqlite_column(conn, "bgp_response_profiles", "max_prefixlen_v6", "max_prefixlen_v6 INTEGER NOT NULL DEFAULT 128")
     ensure_sqlite_column(conn, "bgp_response_profiles", "require_protected_prefix", "require_protected_prefix INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "enable_multi_target_dns", "enable_multi_target_dns INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "max_targets_per_anomaly", "max_targets_per_anomaly INTEGER NOT NULL DEFAULT 10")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "min_target_packets_s", "min_target_packets_s REAL")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "min_target_bits_s", "min_target_bits_s REAL")
     ensure_sqlite_column(conn, "bgp_response_profiles", "notes", "notes TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
@@ -3117,6 +3147,17 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
     seed_default_bgp_response_profiles(conn)
+    conn.execute(
+        """
+        UPDATE bgp_response_profiles
+        SET enable_multi_target_dns = 1,
+            max_targets_per_anomaly = CASE WHEN COALESCE(max_targets_per_anomaly, 0) <= 0 THEN 10 ELSE max_targets_per_anomaly END,
+            mitigation_target_mode = CASE WHEN COALESCE(mitigation_target_mode, '') = '' THEN 'sensor_origin' ELSE mitigation_target_mode END,
+            default_duration_seconds = CASE WHEN COALESCE(default_duration_seconds, 0) <= 0 OR default_duration_seconds = 1800 THEN 600 ELSE default_duration_seconds END,
+            max_duration_seconds = CASE WHEN COALESCE(max_duration_seconds, 0) <= 0 THEN 1800 ELSE max_duration_seconds END
+        WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
+        """
+    )
     seed_default_bgp_port_policies(conn)
 
 
@@ -7265,6 +7306,10 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "max_duration_seconds": int(item.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
         "default_duration_seconds": int(item.get("default_duration_seconds") or 1800),
         "duration_seconds": int(item.get("default_duration_seconds") or 1800),
+        "enable_multi_target_dns": sqlite_bool(item.get("enable_multi_target_dns", 0)),
+        "max_targets_per_anomaly": int(item.get("max_targets_per_anomaly") or 10),
+        "min_target_packets_s": item.get("min_target_packets_s"),
+        "min_target_bits_s": item.get("min_target_bits_s"),
         "notes": item.get("notes") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -7516,6 +7561,7 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "connector_id": item.get("connector_id"),
         "response_profile_id": item.get("response_profile_id"),
         "anomaly_id": item.get("anomaly_id"),
+        "sensor_id": item.get("sensor_id"),
         "status": item.get("status") or "dry_run",
         "route_type": item.get("route_type") or bgp_route_type_for_response(item.get("response_type")),
         "response_type": item.get("response_type") or "",
@@ -7527,6 +7573,7 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "target_prefix": item.get("target_prefix") or "",
         "src_prefix": item.get("src_prefix") or "",
         "dst_prefix": item.get("dst_prefix") or "",
+        "dst_ip": item.get("dst_ip") or clean_ip(clean_text(item.get("dst_prefix")).split("/", 1)[0]),
         "protocol": item.get("protocol") or "",
         "src_port": item.get("src_port") or "",
         "dst_port": item.get("dst_port") or "",
@@ -7536,6 +7583,7 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "announced_at": item.get("announced_at"),
         "announce_command": announce_command,
         "withdraw_command": withdraw_command,
+        "pipe_path": item.get("pipe_path") or "",
         "rendered_command": item.get("rendered_command") or "",
         "match_json": bgp_json_loads(item.get("match_json"), {}),
         "then_json": bgp_json_loads(item.get("then_json"), {}),
@@ -7734,6 +7782,10 @@ def bgp_profile_payload_to_values(payload: BgpResponseProfilePayload) -> dict[st
         "max_prefixlen_v6": int(payload.max_prefixlen_v6),
         "max_duration_seconds": max_duration,
         "default_duration_seconds": default_duration,
+        "enable_multi_target_dns": 1 if payload.enable_multi_target_dns else 0,
+        "max_targets_per_anomaly": int(payload.max_targets_per_anomaly or 10),
+        "min_target_packets_s": payload.min_target_packets_s,
+        "min_target_bits_s": payload.min_target_bits_s,
         "notes": clean_text(payload.notes),
     }
 
@@ -9377,6 +9429,53 @@ def mitigation_vector_config(conn: sqlite3.Connection, attack_vector_name: str, 
     return attack_vector_row_to_dict(row) if row is not None else None
 
 
+def detection_rule_mitigation_config(conn: sqlite3.Connection, attack_vector_name: str) -> dict[str, Any] | None:
+    name = clean_text(attack_vector_name)
+    if not name or not sqlite_table_exists(conn, "detection_template_rules"):
+        return None
+    row = conn.execute(
+        """
+        SELECT *
+        FROM detection_template_rules
+        WHERE vector = ?
+          AND enabled = 1
+        ORDER BY mitigation_enabled DESC, id
+        LIMIT 1
+        """,
+        (name,),
+    ).fetchone()
+    if row is None:
+        return None
+    item = detection_template_rule_row_to_dict(row)
+    profile_id = item.get("critical_response_profile_id") or item.get("warning_response_profile_id") or item.get("fallback_response_profile_id")
+    return {
+        "id": item.get("id"),
+        "name": item.get("vector") or name,
+        "detection_key": item.get("vector") or name,
+        "response_profile_id": profile_id,
+        "connector_id": None,
+        "mitigation_mode": item.get("mitigation_mode") or "response_profile",
+        "mitigation_enabled": item.get("mitigation_enabled", True),
+        "duration_seconds": None,
+        "require_protected_prefix": item.get("require_protected_prefix", True),
+        "max_auto_prefixlen_v4": item.get("max_auto_prefixlen_v4"),
+        "max_auto_prefixlen_v6": item.get("max_auto_prefixlen_v6"),
+        "cooldown_seconds": item.get("cooldown_seconds") or 300,
+        "max_active_announcements": item.get("max_active_announcements") or 10,
+        "min_confidence_for_auto": item.get("min_confidence_for_auto"),
+        "use_global_whitelist": item.get("use_global_whitelist", True),
+        "extra_whitelist_ids": item.get("extra_whitelist_ids") or [],
+        "bypass_whitelist": item.get("bypass_whitelist", False),
+    }
+
+
+def anomaly_mitigation_config(conn: sqlite3.Connection, event: dict[str, Any], attack_vector_name: str) -> dict[str, Any] | None:
+    return (
+        mitigation_vector_config(conn, attack_vector_name, event.get("attack_vector_id"))
+        or detection_rule_mitigation_config(conn, attack_vector_name)
+    )
+
+
 def anomaly_confidence(event: dict[str, Any]) -> float:
     severity = clean_text(event.get("severity")).lower()
     if severity == "critical":
@@ -9407,7 +9506,7 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
         return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
         return ["FLOWSPEC_BLOCK_DST_UDP_SRC_PORT"]
-    if attack_vector_name == "DNS_QUERY_OUTBOUND_CLIENT":
+    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS"}:
         return ["FLOWSPEC_AUTO_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == "DNS_REFLECTION_INBOUND":
         return ["FLOWSPEC_BLOCK_SRC_DNS_RESPONSE", "FLOWSPEC_BLOCK_DST_DNS"]
@@ -9440,7 +9539,8 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     if candidate.get("mitigation_basis") == "top_conversation" or candidate.get("attack_vector_name") in UDP_SPECIAL_VECTORS:
         candidate["mitigation_mode"] = "manual_approval"
     candidate["requested_mode"] = candidate["mitigation_mode"]
-    candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or 900) if vector else int(candidate.get("duration_seconds") or 900)
+    default_profile_duration = int(profile.get("default_duration_seconds") or 0) if profile else 0
+    candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or default_profile_duration or 900) if vector else int(candidate.get("duration_seconds") or default_profile_duration or 900)
     candidate["require_protected_prefix"] = bool(vector.get("require_protected_prefix", True)) if vector else bool(candidate.get("require_protected_prefix", True))
     candidate["max_auto_prefixlen_v4"] = vector.get("max_auto_prefixlen_v4") if vector else candidate.get("max_auto_prefixlen_v4")
     candidate["max_auto_prefixlen_v6"] = vector.get("max_auto_prefixlen_v6") if vector else candidate.get("max_auto_prefixlen_v6")
@@ -9621,12 +9721,221 @@ def outbound_dst_port_candidate(event: dict[str, Any], confidence: float) -> dic
     return candidate
 
 
+def bgp_has_enabled_protected_prefixes(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("SELECT id FROM bgp_protected_prefixes WHERE enabled = 1 LIMIT 1").fetchone()
+    return row is not None
+
+
+def dns_outbound_attack_vector_name(event: dict[str, Any]) -> str:
+    event_vector = clean_text(event.get("attack_vector_name") or event.get("vector") or event.get("vector_name"))
+    if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT"}:
+        return event_vector
+    classification = clean_text(event.get("classification") or event.get("ai_classification")).lower()
+    if classification == "dns_abuse_outbound":
+        return event_vector or "DNS_QUERY_OUTBOUND_CLIENT"
+    return "DNS_QUERY_OUTBOUND_CLIENT"
+
+
+def dns_profile_settings(profile: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "enable_multi_target_dns": bool((profile or {}).get("enable_multi_target_dns", True)),
+        "max_targets_per_anomaly": max(1, int((profile or {}).get("max_targets_per_anomaly") or 10)),
+        "min_target_packets_s": float((profile or {}).get("min_target_packets_s") or 0),
+        "min_target_bits_s": float((profile or {}).get("min_target_bits_s") or 0),
+    }
+
+
+def dns_flow_metric(flow: dict[str, Any], key: str) -> float:
+    try:
+        return float(flow.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def dns_target_candidate_from_flow(
+    event: dict[str, Any],
+    attack_vector_name: str,
+    flow: dict[str, Any],
+    confidence: float,
+    role: str = "recommended",
+) -> dict[str, Any]:
+    src_ip = clean_ip(flow.get("src_ip")) or clean_ip(event.get("target_ip")) or clean_ip(event.get("src_ip"))
+    dst_ip = clean_ip(flow.get("dst_ip"))
+    dst_cidr = cidr_from_ip_or_cidr(dst_ip)
+    packets = int(dns_flow_metric(flow, "packets"))
+    bytes_value = int(dns_flow_metric(flow, "bytes"))
+    packets_s = dns_flow_metric(flow, "packets_s")
+    bits_s = dns_flow_metric(flow, "bits_s")
+    candidate = base_mitigation_candidate(event, attack_vector_name, dns_outbound_reason(), confidence)
+    candidate.update(
+        {
+            "source": "detection_template_rule",
+            "profile": "FLOWSPEC_AUTO_BLOCK_DST_DNS",
+            "response_profile_name": "FLOWSPEC_AUTO_BLOCK_DST_DNS",
+            "dst_cidr": dst_cidr,
+            "protocol": "udp",
+            "dst_port": "53",
+            "target_scope": dst_cidr,
+            "target_ip": dst_ip,
+            "target_cidr": dst_cidr,
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "candidate_role": role,
+            "mitigation_basis": "dns_outbound_destination",
+            "mitigation_reason": dns_outbound_reason(),
+            "dst_ip": dst_ip,
+            "sensor_id": event.get("sensor_id"),
+            "top_flow": {
+                "src_ip": src_ip,
+                "src_port": int(flow.get("src_port") or 0),
+                "dst_ip": dst_ip,
+                "dst_port": 53,
+                "packets": packets,
+                "bytes": bytes_value,
+                "packets_s": packets_s,
+                "bits_s": bits_s,
+                "protocol": "udp",
+            },
+            "reason": f"Destino DNS externo {dst_ip}:53 elegivel para bloqueio destination /32 + udp/53.",
+        }
+    )
+    return candidate
+
+
+def dns_outbound_target_flows(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    profile: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    settings = dns_profile_settings(profile)
+    protected_configured = bgp_has_enabled_protected_prefixes(conn)
+    event_src = clean_ip(event.get("target_ip") or event.get("src_ip") or event.get("internal_ip"))
+    aggregated: dict[str, dict[str, Any]] = {}
+    ignored: list[dict[str, Any]] = []
+    for raw_flow in flows:
+        flow = dict(raw_flow)
+        if protocol_from_flow_or_event(flow, event) != "udp":
+            continue
+        try:
+            dst_port = int(flow.get("dst_port") or event.get("target_port") or 0)
+        except (TypeError, ValueError):
+            dst_port = 0
+        if dst_port != 53:
+            continue
+        src_ip = clean_ip(flow.get("src_ip")) or event_src
+        dst_ip = clean_ip(flow.get("dst_ip"))
+        if not src_ip or not dst_ip:
+            continue
+        src_cidr = cidr_from_ip_or_cidr(src_ip)
+        dst_cidr = cidr_from_ip_or_cidr(dst_ip)
+        if protected_configured and not protected_prefix_match(conn, src_cidr):
+            ignored.append({"dst_ip": dst_ip, "reason": "src_not_protected"})
+            continue
+        if protected_prefix_match(conn, dst_cidr):
+            ignored.append({"dst_ip": dst_ip, "reason": "dst_is_protected"})
+            continue
+        candidate = {
+            "src_cidr": "",
+            "dst_cidr": dst_cidr,
+            "dst_prefix": dst_cidr,
+            "protocol": "udp",
+            "dst_port": "53",
+            "use_global_whitelist": True,
+            "extra_whitelist_ids": [],
+            "bypass_whitelist": False,
+        }
+        whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
+        if whitelist_hits:
+            ignored.append({"dst_ip": dst_ip, "reason": "whitelist", "whitelist_hits": whitelist_hits})
+            continue
+        packets_s = dns_flow_metric(flow, "packets_s")
+        bits_s = dns_flow_metric(flow, "bits_s")
+        min_packets_s = settings["min_target_packets_s"]
+        min_bits_s = settings["min_target_bits_s"]
+        if (min_packets_s or min_bits_s) and not ((min_packets_s and packets_s >= min_packets_s) or (min_bits_s and bits_s >= min_bits_s)):
+            ignored.append({"dst_ip": dst_ip, "reason": "below_threshold", "packets_s": packets_s, "bits_s": bits_s})
+            continue
+        current = aggregated.setdefault(
+            dst_ip,
+            {
+                "src_ip": src_ip,
+                "src_port": int(flow.get("src_port") or 0),
+                "dst_ip": dst_ip,
+                "dst_port": 53,
+                "proto": 17,
+                "protocol": "udp",
+                "packets": 0,
+                "bytes": 0,
+                "packets_s": 0.0,
+                "bits_s": 0.0,
+            },
+        )
+        current["packets"] += int(dns_flow_metric(flow, "packets"))
+        current["bytes"] += int(dns_flow_metric(flow, "bytes"))
+        current["packets_s"] += packets_s
+        current["bits_s"] += bits_s
+        if int(flow.get("packets") or 0) > int(current.get("top_packets") or 0):
+            current["src_port"] = int(flow.get("src_port") or 0)
+            current["top_packets"] = int(flow.get("packets") or 0)
+    selected = sorted(
+        aggregated.values(),
+        key=lambda item: (float(item.get("packets_s") or 0), int(item.get("bytes") or 0)),
+        reverse=True,
+    )[: settings["max_targets_per_anomaly"]]
+    return selected, ignored
+
+
 def dns_outbound_candidates(
     conn: sqlite3.Connection,
     event: dict[str, Any],
     flows: list[dict[str, Any]],
     confidence: float,
 ) -> list[dict[str, Any]]:
+    attack_vector_name = dns_outbound_attack_vector_name(event)
+    vector = anomaly_mitigation_config(conn, event, attack_vector_name)
+    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if vector and vector.get("response_profile_id") else None
+    selected_flows, ignored_targets = dns_outbound_target_flows(conn, event, flows, profile)
+    result: list[dict[str, Any]] = []
+    if selected_flows:
+        per_target_candidates = [
+            attach_mitigation_config(
+                conn,
+                dns_target_candidate_from_flow(event, attack_vector_name, flow, confidence, "dns_multi_target"),
+                vector,
+            )
+            for flow in selected_flows
+        ]
+        settings = dns_profile_settings(profile)
+        group = dict(per_target_candidates[0])
+        group.update(
+            {
+                "mitigation_key": f"{group.get('mitigation_key')}:dns_multi",
+                "candidate_role": "recommended",
+                "multi_target_dns": settings["enable_multi_target_dns"],
+                "apply_batch_supported": settings["enable_multi_target_dns"],
+                "eligible_dns_targets_count": len(per_target_candidates),
+                "dns_targets": [
+                    {
+                        "dst_ip": item.get("dst_ip") or clean_ip((item.get("top_flow") or {}).get("dst_ip")),
+                        "dst_cidr": item.get("dst_prefix") or item.get("dst_cidr"),
+                        "packets": (item.get("top_flow") or {}).get("packets"),
+                        "bytes": (item.get("top_flow") or {}).get("bytes"),
+                        "packets_s": (item.get("top_flow") or {}).get("packets_s"),
+                        "bits_s": (item.get("top_flow") or {}).get("bits_s"),
+                        "candidate": {key: value for key, value in item.items() if key not in {"policy_decision", "rendered_command"}},
+                    }
+                    for item in per_target_candidates
+                ],
+                "ignored_dns_targets": ignored_targets,
+                "max_dns_targets_per_anomaly": settings["max_targets_per_anomaly"],
+                "reason": f"Mitigacao multi-destino recomendada: {len(per_target_candidates)} destino(s) DNS elegivel(is).",
+                "mitigation_reason": "Mitigacao multi-destino recomendada para DNS outbound: gera um FlowSpec destination /32 + udp/53 por destino externo.",
+            }
+        )
+        result.append(group)
+        result.extend(per_target_candidates)
+        return result
     top_flow = top_udp_flow_for_mitigation(event, flows)
     src_ip = clean_ip(top_flow.get("src_ip")) or clean_ip(event.get("target_ip"))
     dst_ip = clean_ip(top_flow.get("dst_ip")) or clean_ip(event.get("dominant_dst_ip")) or clean_ip(event.get("top_flow", {}).get("dst_ip") if isinstance(event.get("top_flow"), dict) else "")
@@ -9645,8 +9954,7 @@ def dns_outbound_candidates(
         "bytes": int(top_flow.get("bytes") or 0),
         "protocol": "udp",
     }
-    result: list[dict[str, Any]] = []
-    recommended = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", dns_outbound_reason(), confidence)
+    recommended = base_mitigation_candidate(event, attack_vector_name, dns_outbound_reason(), confidence)
     recommended.update(
         {
             "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
@@ -9663,9 +9971,9 @@ def dns_outbound_candidates(
             "top_flow": top_flow_payload,
         }
     )
-    result.append(attach_mitigation_config(conn, recommended, mitigation_vector_config(conn, recommended["attack_vector_name"], event.get("attack_vector_id"))))
+    result.append(attach_mitigation_config(conn, recommended, vector))
     if src_ip:
-        conservative = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Conservador: limita DNS outbound ao par origem+destino observado em udp/53.", confidence)
+        conservative = base_mitigation_candidate(event, attack_vector_name, "Conservador: limita DNS outbound ao par origem+destino observado em udp/53.", confidence)
         conservative.update(
             {
                 "src_cidr": cidr_from_ip_or_cidr(src_ip),
@@ -9683,8 +9991,8 @@ def dns_outbound_candidates(
                 "top_flow": top_flow_payload,
             }
         )
-        result.append(attach_mitigation_config(conn, conservative, mitigation_vector_config(conn, conservative["attack_vector_name"], event.get("attack_vector_id"))))
-        source_only = base_mitigation_candidate(event, "DNS_QUERY_OUTBOUND_CLIENT", "Nao recomendado: source-only DNS outbound pode bloquear DNS legitimo do cliente.", confidence)
+        result.append(attach_mitigation_config(conn, conservative, vector))
+        source_only = base_mitigation_candidate(event, attack_vector_name, "Nao recomendado: source-only DNS outbound pode bloquear DNS legitimo do cliente.", confidence)
         source_only.update(
             {
                 "src_cidr": cidr_from_ip_or_cidr(src_ip),
@@ -9705,7 +10013,7 @@ def dns_outbound_candidates(
                 "top_flow": top_flow_payload,
             }
         )
-        source_only = attach_mitigation_config(conn, source_only, mitigation_vector_config(conn, source_only["attack_vector_name"], event.get("attack_vector_id")))
+        source_only = attach_mitigation_config(conn, source_only, vector)
         source_only.update(
             {
                 "not_recommended": True,
@@ -9787,7 +10095,7 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
             candidate = outbound_dst_port_candidate(event, confidence)
             return [candidate] if candidate else []
 
-        if protocol == "udp" and (dst_port == 53 or event_target_port == 53 or decoder == "DNS" or event_vector in {"DNS_QUERY_OUTBOUND_CLIENT", "dns_udp_abuse_outbound", "DNS upload", "dns"}):
+        if protocol == "udp" and (dst_port == 53 or event_target_port == 53 or decoder == "DNS" or event_vector in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_udp_abuse_outbound", "DNS upload", "dns"}):
             dns_candidates = dns_outbound_candidates(conn, event, flows, confidence)
             if dns_candidates:
                 deduped: dict[str, dict[str, Any]] = {}
@@ -12147,12 +12455,15 @@ def profile_names_for_candidate(candidate: dict[str, Any], profile: dict[str, An
     return {name.upper() for name in names if name}
 
 
+FLOWSPEC_DST_DNS_PROFILE_NAMES = {"FLOWSPEC_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_AUTO_BLOCK_DST_DNS"}
+
+
 def is_flowspec_block_dst_dns_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
-    return "FLOWSPEC_BLOCK_DST_DNS" in profile_names_for_candidate(candidate, profile)
+    return bool(profile_names_for_candidate(candidate, profile) & FLOWSPEC_DST_DNS_PROFILE_NAMES)
 
 
 def is_destination_port_flowspec_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
-    return bool(profile_names_for_candidate(candidate, profile) & {"FLOWSPEC_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"})
+    return bool(profile_names_for_candidate(candidate, profile) & (FLOWSPEC_DST_DNS_PROFILE_NAMES | {"FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"}))
 
 
 def sanitize_flowspec_block_dst_dns_candidate(
@@ -12160,7 +12471,7 @@ def sanitize_flowspec_block_dst_dns_candidate(
     profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile_names = profile_names_for_candidate(candidate, profile)
-    if not profile_names & {"FLOWSPEC_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"}:
+    if not profile_names & (FLOWSPEC_DST_DNS_PROFILE_NAMES | {"FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_DST_TCP_PORT"}):
         return candidate
     dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr") or candidate.get("target_prefix") or candidate.get("target_scope"))
     if dst_prefix:
@@ -12173,8 +12484,8 @@ def sanitize_flowspec_block_dst_dns_candidate(
         candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or clean_text((profile or {}).get("name")) or "FLOWSPEC_BLOCK_DST_TCP_PORT"
     else:
         candidate["protocol"] = "udp"
-        candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or clean_text((profile or {}).get("name")) or ("FLOWSPEC_BLOCK_DST_DNS" if "FLOWSPEC_BLOCK_DST_DNS" in profile_names else "FLOWSPEC_BLOCK_DST_UDP_PORT")
-    if "FLOWSPEC_BLOCK_DST_DNS" in profile_names:
+        candidate["response_profile_name"] = candidate.get("response_profile_name") or candidate.get("profile") or clean_text((profile or {}).get("name")) or ("FLOWSPEC_BLOCK_DST_DNS" if profile_names & FLOWSPEC_DST_DNS_PROFILE_NAMES else "FLOWSPEC_BLOCK_DST_UDP_PORT")
+    if profile_names & FLOWSPEC_DST_DNS_PROFILE_NAMES:
         candidate["dst_port"] = "53"
     candidate["src_prefix"] = ""
     candidate["src_cidr"] = ""
@@ -12196,7 +12507,7 @@ def validate_dns_outbound_pending_candidate(
     profile_names = profile_names_for_candidate(candidate, profile)
     if "FLOWSPEC_BLOCK_SRC_DNS" in profile_names:
         return False, "dns_outbound_cannot_use_flowspec_block_src_dns"
-    if "FLOWSPEC_BLOCK_DST_DNS" not in profile_names:
+    if not profile_names & FLOWSPEC_DST_DNS_PROFILE_NAMES:
         return False, "dns_outbound_requires_flowspec_block_dst_dns"
     candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
     dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
@@ -13695,10 +14006,10 @@ def insert_bgp_mitigation_announcement(
         }
     )
     columns = [
-        "connector_id", "connector_name", "response_profile_id", "anomaly_id", "status", "route_type", "response_type", "action",
+        "connector_id", "connector_name", "response_profile_id", "anomaly_id", "sensor_id", "status", "route_type", "response_type", "action",
         "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
-        "target_prefix", "src_prefix", "dst_prefix", "protocol", "src_port", "dst_port", "tcp_flags",
-        "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "rendered_command", "match_json", "then_json",
+        "target_prefix", "src_prefix", "dst_prefix", "dst_ip", "protocol", "src_port", "dst_port", "tcp_flags",
+        "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
         "validation_errors", "validation_warnings",
         "raw_payload", "source", "source_id", "mitigation_key", "attack_vector_name", "anomaly_source", "last_error",
         "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
@@ -13709,6 +14020,7 @@ def insert_bgp_mitigation_announcement(
         connector.get("name") if connector else candidate.get("connector_name") or "",
         profile["id"] if profile else candidate.get("response_profile_id"),
         candidate.get("anomaly_id"),
+        candidate.get("sensor_id"),
         active_status,
         bgp_route_type_for_response(candidate.get("response_type") or "flowspec"),
         candidate.get("response_type") or "flowspec",
@@ -13719,6 +14031,7 @@ def insert_bgp_mitigation_announcement(
         candidate.get("target_prefix") or "",
         candidate.get("src_prefix") or "",
         candidate.get("dst_prefix") or "",
+        clean_ip(candidate.get("dst_ip")) or clean_ip(clean_text(candidate.get("dst_prefix")).split("/", 1)[0]),
         candidate.get("protocol") or "",
         candidate.get("src_port") or "",
         candidate.get("dst_port") or "",
@@ -13728,6 +14041,7 @@ def insert_bgp_mitigation_announcement(
         now if active_status == "active" else None,
         command,
         withdraw_command,
+        connector.get("exabgp_pipe_in") if connector else candidate.get("pipe_path") or "",
         command,
         bgp_match_json(candidate),
         bgp_then_json(candidate),
@@ -13820,6 +14134,83 @@ def cooldown_allows_mitigation(conn: sqlite3.Connection, mitigation_key: str, co
         return True
     updated = parse_datetime_text(row["updated_at"])
     return updated is None or updated <= datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+
+
+def dns_multi_target_child_candidates(candidate: dict[str, Any], selected_dns_target_ips: set[str] | None = None) -> list[dict[str, Any]]:
+    if not candidate.get("multi_target_dns"):
+        return [candidate]
+    children: list[dict[str, Any]] = []
+    selected_dns_target_ips = selected_dns_target_ips or set()
+    for target in candidate.get("dns_targets") or []:
+        target_candidate = target.get("candidate") if isinstance(target, dict) else None
+        if not isinstance(target_candidate, dict):
+            continue
+        child = {
+            **candidate,
+            **target_candidate,
+            "multi_target_dns": False,
+            "apply_batch_supported": False,
+            "dns_targets": [],
+            "ignored_dns_targets": [],
+            "candidate_role": "dns_multi_target_child",
+        }
+        dst_ip = clean_ip(child.get("dst_ip") or target.get("dst_ip"))
+        if selected_dns_target_ips and dst_ip not in selected_dns_target_ips:
+            continue
+        dst_cidr = cidr_from_ip_or_cidr(target.get("dst_cidr") or dst_ip)
+        child.update(
+            {
+                "dst_ip": dst_ip,
+                "dst_cidr": dst_cidr,
+                "dst_prefix": dst_cidr,
+                "target_prefix": dst_cidr,
+                "target_scope": dst_cidr,
+                "target_ip": dst_ip,
+                "target_cidr": dst_cidr,
+                "target_port": 53,
+                "target_role": "dst_ip",
+                "protocol": "udp",
+                "dst_port": "53",
+                "src_cidr": "",
+                "src_prefix": "",
+                "src_port": "",
+                "tcp_flags": "",
+            }
+        )
+        child["mitigation_key"] = mitigation_key_for_candidate(child)
+        children.append(child)
+    return children or [candidate]
+
+
+def apply_mitigation_candidates(
+    conn: sqlite3.Connection,
+    candidates: list[dict[str, Any]],
+    mode: str,
+    created_by: str,
+    selected_dns_target_ips: set[str] | None = None,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        for child in dns_multi_target_child_candidates(candidate, selected_dns_target_ips):
+            try:
+                result = apply_mitigation_candidate(conn, child, mode, created_by)
+                if isinstance(result, dict) and result.get("multi_connector"):
+                    items.extend(result.get("items") or [])
+                else:
+                    items.append(result)
+                conn.commit()
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    skipped.append({"dst_ip": child.get("dst_ip"), "reason": clean_text(exc.detail)})
+                    continue
+                if exc.status_code == 400 and "Limite de regras ativas" in clean_text(exc.detail):
+                    skipped.append({"dst_ip": child.get("dst_ip"), "reason": clean_text(exc.detail)})
+                    break
+                raise
+    if len(items) == 1 and not skipped:
+        return items[0]
+    return {"multi_target_dns": True, "count": len(items), "items": items, "skipped": skipped}
 
 
 def apply_mitigation_candidate(
@@ -14476,7 +14867,7 @@ def create_bgp_response_profile(request: Request, payload: BgpResponseProfilePay
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
     now = utc_now_iso()
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "mitigation_target_mode", "selected_connector_ids", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "mitigation_target_mode", "selected_connector_ids", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "enable_multi_target_dns", "max_targets_per_anomaly", "min_target_packets_s", "min_target_bits_s", "notes")
     with sqlite_connection() as conn:
         validate_profile_connector_for_save(conn, values)
         cursor = conn.execute(
@@ -14564,7 +14955,7 @@ def update_bgp_response_profile(request: Request, profile_id: int, payload: BgpR
     require_admin(request)
     ensure_sensor_db()
     values = bgp_profile_payload_to_values(payload)
-    columns = ("name", "description", "enabled", "response_type", "connector_id", "mitigation_target_mode", "selected_connector_ids", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "notes")
+    columns = ("name", "description", "enabled", "response_type", "connector_id", "mitigation_target_mode", "selected_connector_ids", "approval_mode", "action", "default_action", "target_selector", "protocol_selector", "fixed_protocol", "src_port_selector", "src_port_value", "dst_port_selector", "dst_port_value", "tcp_flags_selector", "tcp_flags_value", "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit", "default_rate_limit_bps", "default_rate_limit_raw", "max_rate_limit_bps", "min_rate_limit_bps", "bgp_community", "action_metadata", "use_global_whitelist", "extra_whitelist_ids", "bypass_whitelist", "redirect_target", "next_hop", "community", "large_community", "require_protocol_or_port", "require_protected_prefix", "allow_wide_prefix", "max_prefixlen_v4", "max_prefixlen_v6", "max_duration_seconds", "default_duration_seconds", "enable_multi_target_dns", "max_targets_per_anomaly", "min_target_packets_s", "min_target_bits_s", "notes")
     with sqlite_connection() as conn:
         fetch_bgp_profile(conn, profile_id)
         validate_profile_connector_for_save(conn, values)
@@ -22671,17 +23062,44 @@ def apply_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomal
     require_admin(request)
     evaluated = evaluated_mitigation_candidates(event_id)
     candidates = evaluated["candidates"]
-    if payload.candidate_index >= len(candidates):
-        raise HTTPException(status_code=400, detail="candidate_index invalido")
-    candidate = dict(candidates[payload.candidate_index])
-    if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
-        raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
-    candidate.pop("policy_decision", None)
-    candidate.pop("rendered_command", None)
+    indexes = payload.candidate_indexes or [payload.candidate_index]
+    selected: list[dict[str, Any]] = []
+    for index in indexes:
+        if index >= len(candidates):
+            raise HTTPException(status_code=400, detail="candidate_index invalido")
+        candidate = dict(candidates[index])
+        if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
+            raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
+        candidate.pop("policy_decision", None)
+        candidate.pop("rendered_command", None)
+        selected.append(candidate)
     with sqlite_connection() as conn:
-        item = apply_mitigation_candidate(conn, candidate, payload.mode, bgp_current_user(request))
+        selected_dns_target_ips = {clean_ip(item) for item in payload.selected_dns_target_ips or [] if clean_ip(item)}
+        item = apply_mitigation_candidates(conn, selected, payload.mode, bgp_current_user(request), selected_dns_target_ips)
         conn.commit()
         return {"anomaly": evaluated["anomaly"], "announcement": item}
+
+
+@app.post("/api/anomalies/{event_id}/mitigation/withdraw")
+def withdraw_anomaly_mitigations(request: Request, event_id: int, payload: BgpAnomalyMitigationWithdrawPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    ids = sorted({int(item) for item in payload.announcement_ids or [] if int(item) > 0})
+    with sqlite_connection() as conn:
+        filters = ["anomaly_id = ?", "status IN ('active', 'announced', 'pending_approval')"]
+        values: list[Any] = [event_id]
+        if ids:
+            filters.append(f"id IN ({','.join('?' for _ in ids)})")
+            values.extend(ids)
+        rows = conn.execute(
+            f"SELECT id FROM bgp_announcements WHERE {' AND '.join(filters)} ORDER BY id",
+            values,
+        ).fetchall()
+    items = [
+        update_bgp_announcement_status(request, int(row["id"]), "withdrawn", "withdrawn", "Withdraw solicitado pela anomalia.")
+        for row in rows
+    ]
+    return {"count": len(items), "items": items}
 
 
 @app.post("/api/anomalies/{event_id}/ack")

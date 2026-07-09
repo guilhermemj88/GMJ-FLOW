@@ -158,6 +158,121 @@ class BgpMitigationTest(unittest.TestCase):
         profile = main.fetch_bgp_profile(conn, profile_id)
         return conn, connector, profile
 
+    def _dns_multi_target_context(self, max_active_rules=50, min_packets_s=1000, add_whitelist=True):
+        conn = main.sqlite_connection()
+        now = main.utc_now_iso()
+        connector_id = conn.execute(
+            """
+            INSERT INTO bgp_connectors (
+                name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+                enabled, is_active, exabgp_pipe_in, created_at, updated_at
+            )
+            VALUES ('BGP-SENSOR-ORIGIN', 'flowspec_mitigation', 'exabgp', 'manual_approval', ?, 1800,
+                    1, 1, '/run/exabgp/exabgp.in', ?, ?)
+            """,
+            (max_active_rules, now, now),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO bgp_protected_prefixes (cidr, name, enabled, block_rtbh, block_flowspec, created_at, updated_at)
+            VALUES ('45.5.248.0/24', 'Fibinet clientes', 1, 1, 1, ?, ?)
+            """,
+            (now, now),
+        )
+        profile = conn.execute("SELECT * FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'").fetchone()
+        conn.execute(
+            """
+            UPDATE bgp_response_profiles
+            SET enable_multi_target_dns = 1,
+                max_targets_per_anomaly = 10,
+                min_target_packets_s = ?,
+                min_target_bits_s = NULL,
+                mitigation_target_mode = 'sensor_origin',
+                approval_mode = 'auto',
+                target_selector = 'dst_ip',
+                protocol_selector = 'udp',
+                dst_port_selector = 'fixed',
+                dst_port_value = '53',
+                default_duration_seconds = 600
+            WHERE id = ?
+            """,
+            (min_packets_s, int(profile["id"])),
+        )
+        template_id = conn.execute(
+            "INSERT INTO detection_templates (name, description, active, created_at, updated_at) VALUES ('DNS', '', 1, ?, ?)",
+            (now, now),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO detection_template_rules (
+                template_id, vector, display_name, domain, direction, protocol, metric, comparison,
+                warning_value, critical_value, window_seconds, consecutive_windows, cooldown_minutes,
+                enabled, response, critical_response_profile_id, mitigation_mode, mitigation_enabled,
+                created_at, updated_at
+            )
+            VALUES (?, 'DNS_INTERNAL_IP_TO_DST_HIGH_PPS', 'DNS alto por destino', 'internal_ip',
+                    'transmits', 'DNS', 'packets_s', 'over', 5000, 15000, 60, 1, 5,
+                    1, 'DETECTION_ONLY', ?, 'response_profile', 1, ?, ?)
+            """,
+            (template_id, int(profile["id"]), now, now),
+        )
+        if add_whitelist:
+            conn.execute(
+                """
+                INSERT INTO detection_whitelist (
+                    name, type, dst_cidr, protocol, active, created_at, updated_at
+                )
+                VALUES ('dns-ok', 'destination', '198.18.0.11/32', 'udp', 1, ?, ?)
+                """,
+                (now, now),
+            )
+        conn.commit()
+        profile = main.fetch_bgp_profile(conn, int(profile["id"]))
+        connector = main.fetch_bgp_connector(conn, int(connector_id))
+        return conn, connector, profile
+
+    def _dns_event_and_flows(self):
+        event = {
+            "id": 77,
+            "attack_vector_name": "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
+            "classification": "dns_abuse_outbound",
+            "direction": "transmits",
+            "decoder": "DNS",
+            "protocol": "udp",
+            "target_ip": "45.5.248.205",
+            "target_cidr": "45.5.248.205/32",
+            "target_role": "src_ip",
+            "target_port": 53,
+            "sensor_id": 9,
+            "severity": "critical",
+        }
+        flows = [
+            {
+                "src_ip": "45.5.248.205",
+                "src_port": 1100 + index,
+                "dst_ip": f"198.18.0.{index}",
+                "dst_port": 53,
+                "proto": 17,
+                "packets": 100000 + index,
+                "bytes": 1000000 + index,
+                "packets_s": 2000 + index,
+                "bits_s": 500000 + index,
+            }
+            for index in range(1, 12)
+        ]
+        flows.append({
+            "src_ip": "45.5.248.205",
+            "src_port": 2200,
+            "dst_ip": "198.18.0.12",
+            "dst_port": 53,
+            "proto": 17,
+            "packets": 10,
+            "bytes": 1000,
+            "packets_s": 10,
+            "bits_s": 100,
+        })
+        return event, flows
+
     def test_announce_command_has_no_ttl_and_expires_at_is_internal(self):
         with temporary_main_db():
             conn, connector, profile = self._connector_and_profile()
@@ -480,6 +595,155 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(candidates[0]["dst_port"], "53")
             self.assertIn("destination 75.131.245.200/32; protocol udp; destination-port =53", main.render_exabgp_flowspec_command("announce", candidates[0]))
             self.assertNotEqual(candidates[0].get("candidate_role"), "not_recommended")
+
+    def test_dns_outbound_multi_target_candidate_filters_and_renders_dst_only(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            candidates = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})
+            group = candidates[0]
+            self.assertTrue(group["multi_target_dns"])
+            self.assertEqual(group["attack_vector_name"], "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+            self.assertEqual(group["eligible_dns_targets_count"], 10)
+            ignored = {item["reason"] for item in group["ignored_dns_targets"]}
+            self.assertIn("whitelist", ignored)
+            self.assertIn("below_threshold", ignored)
+            self.assertEqual(len(group["dns_targets"]), 10)
+            for target in group["dns_targets"]:
+                command = main.render_exabgp_flowspec_command("announce", target["candidate"])
+                self.assertIn("destination ", command)
+                self.assertIn("protocol =udp", command)
+                self.assertIn("destination-port =53", command)
+                self.assertNotIn("source ", command)
+                self.assertNotIn("source-port", command)
+
+    def test_dns_outbound_multi_target_apply_creates_one_announcement_per_destination(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append((_connector["id"], command))
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    result = main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(result["count"], 10)
+            self.assertEqual(len(calls), 10)
+            self.assertTrue(all(call[0] == connector["id"] for call in calls))
+            self.assertTrue(all("source " not in command and "source-port" not in command for _cid, command in calls))
+            with main.sqlite_connection() as check:
+                rows = check.execute(
+                    "SELECT status, connector_id, sensor_id, dst_ip, protocol, dst_port, announce_command, withdraw_command, pipe_path FROM bgp_announcements ORDER BY dst_ip"
+                ).fetchall()
+            self.assertEqual(len(rows), 10)
+            self.assertTrue(all(row["status"] == "active" for row in rows))
+            self.assertTrue(all(row["connector_id"] == connector["id"] for row in rows))
+            self.assertTrue(all(row["sensor_id"] == 9 for row in rows))
+            self.assertTrue(all(row["protocol"] == "udp" and row["dst_port"] == "53" for row in rows))
+            self.assertTrue(all(row["pipe_path"] == "/run/exabgp/exabgp.in" for row in rows))
+            self.assertTrue(all("withdraw flow route" in row["withdraw_command"] for row in rows))
+
+    def test_dns_outbound_multi_target_does_not_duplicate_active_destination(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    first = main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+                    second = main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(first["count"], 10)
+            self.assertEqual(second["count"], 0)
+            self.assertEqual(len(second["skipped"]), 10)
+            with main.sqlite_connection() as check:
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'active'").fetchone()["total"]
+            self.assertEqual(total, 10)
+
+    def test_dns_outbound_multi_target_respects_max_active_rules_and_pipe_failure(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(max_active_rules=3)
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    result = main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(result["count"], 3)
+            with main.sqlite_connection() as check:
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'active'").fetchone()["total"]
+            self.assertEqual(total, 3)
+
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: (_ for _ in ()).throw(HTTPException(status_code=400, detail="pipe down"))
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    result = main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(result["count"], 10)
+            with main.sqlite_connection() as check:
+                statuses = [row["status"] for row in check.execute("SELECT status FROM bgp_announcements").fetchall()]
+            self.assertEqual(set(statuses), {"failed"})
+
+    def test_dns_outbound_multi_target_expiration_and_anomaly_withdraw_cover_all(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+                    past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+                    apply_conn.execute("UPDATE bgp_announcements SET expires_at = ? WHERE anomaly_id = 77", (past,))
+                    apply_conn.commit()
+                    stats = main.process_expired_bgp_announcements(apply_conn)
+                    apply_conn.commit()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(stats["withdrawn"], 10)
+            self.assertEqual(len([command for command in calls if command.startswith("withdraw flow route")]), 10)
+
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context()
+            conn.close()
+            event, flows = self._dns_event_and_flows()
+            group = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with main.sqlite_connection() as apply_conn:
+                    main.apply_mitigation_candidates(apply_conn, [group], "announce_now", "test")
+                result = main.withdraw_anomaly_mitigations(self._admin_request(), 77, main.BgpAnomalyMitigationWithdrawPayload())
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(result["count"], 10)
+            self.assertEqual(len([command for command in calls if command.startswith("withdraw flow route")]), 10)
 
     def test_dns_outbound_source_only_gets_warning_and_is_not_recommended(self):
         with temporary_main_db():

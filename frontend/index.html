@@ -4477,6 +4477,10 @@
               <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileDuration">Duração padrão (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
               <div class="field"><label for="bgpProfileMaxDuration">Duração máxima (s)</label><input id="bgpProfileMaxDuration" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
+              <div class="field"><label for="bgpProfileMultiTargetDns">DNS multi-destino</label><select id="bgpProfileMultiTargetDns" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+              <div class="field"><label for="bgpProfileMaxDnsTargets">Máx. destinos DNS</label><input id="bgpProfileMaxDnsTargets" type="number" min="1" max="100" class="form-control form-control-sm" value="10"></div>
+              <div class="field"><label for="bgpProfileMinDnsPps">Min. packets/s DNS</label><input id="bgpProfileMinDnsPps" type="number" min="0" step="1" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProfileMinDnsBps">Min. bits/s DNS</label><input id="bgpProfileMinDnsBps" type="number" min="0" step="1" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpProfileEnabled">Ativo</label><select id="bgpProfileEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
@@ -9057,6 +9061,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', 'any');
       setValue('bgpProfileDuration', 1800);
       setValue('bgpProfileMaxDuration', 3600);
+      setBoolSelect('bgpProfileMultiTargetDns', true);
+      setValue('bgpProfileMaxDnsTargets', 10);
+      setValue('bgpProfileMinDnsPps', '');
+      setValue('bgpProfileMinDnsBps', '');
       setBoolSelect('bgpProfileEnabled', true);
       renderBgpSelects();
       updateBgpProfileTargetModeUi();
@@ -9084,6 +9092,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', item.tcp_flags_selector);
       setValue('bgpProfileDuration', item.default_duration_seconds || 1800);
       setValue('bgpProfileMaxDuration', item.max_duration_seconds || 3600);
+      setBoolSelect('bgpProfileMultiTargetDns', item.enable_multi_target_dns);
+      setValue('bgpProfileMaxDnsTargets', item.max_targets_per_anomaly || 10);
+      setValue('bgpProfileMinDnsPps', item.min_target_packets_s ?? '');
+      setValue('bgpProfileMinDnsBps', item.min_target_bits_s ?? '');
       setBoolSelect('bgpProfileEnabled', item.enabled ?? item.active);
       renderBgpSelects();
       document.getElementById('bgpProfileSelectedConnectors').innerHTML = bgpConnectorMultiOptions(item.selected_connector_ids || []);
@@ -9137,7 +9149,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         tcp_flags_selector: selectValue('bgpProfileTcpFlags', 'any'),
         default_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800)),
         duration_default: Math.max(60, numberValue('bgpProfileDuration', 1800)),
-        max_duration_seconds: Math.max(60, numberValue('bgpProfileMaxDuration', 3600))
+        max_duration_seconds: Math.max(60, numberValue('bgpProfileMaxDuration', 3600)),
+        enable_multi_target_dns: boolSelectValue('bgpProfileMultiTargetDns'),
+        max_targets_per_anomaly: Math.max(1, numberValue('bgpProfileMaxDnsTargets', 10)),
+        min_target_packets_s: selectValue('bgpProfileMinDnsPps') ? Number(selectValue('bgpProfileMinDnsPps')) : null,
+        min_target_bits_s: selectValue('bgpProfileMinDnsBps') ? Number(selectValue('bgpProfileMinDnsBps')) : null
       };
     }
 
@@ -9450,6 +9466,44 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `<span class="badge-soft ${klass}">${escapeHtml(decision || '-')}</span>`;
     }
 
+    function renderDnsMultiTargetBlock(candidate, index, canApply) {
+      if (!candidate.multi_target_dns) return '';
+      const targets = Array.isArray(candidate.dns_targets) ? candidate.dns_targets : [];
+      const ignored = Array.isArray(candidate.ignored_dns_targets) ? candidate.ignored_dns_targets : [];
+      const rows = targets.slice(0, 20).map((target, targetIndex) => `
+        <tr>
+          <td><input class="form-check-input bgp-dns-target-select" type="checkbox" data-parent-index="${index}" data-child-index="${targetIndex}" checked></td>
+          <td>${escapeHtml(target.dst_ip || '-')}</td>
+          <td class="text-end">${formatPps(Number(target.packets_s || 0))}</td>
+          <td class="text-end">${formatBps(Number(target.bits_s || 0))}</td>
+          <td class="text-end">${formatNumber(target.bytes || 0)}</td>
+        </tr>
+      `).join('');
+      const ignoredText = ignored.length
+        ? ignored.slice(0, 6).map(item => `${item.dst_ip || '-'} (${item.reason || '-'})`).join(', ')
+        : '-';
+      return `
+        <div class="panel p-2 mb-2">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div>
+              <div class="panel-title">Mitigação multi-destino recomendada</div>
+              <div class="subtle">${targets.length} destino(s) elegível(is). Ignorados por whitelist/regras: ${escapeHtml(ignoredText)}</div>
+            </div>
+            <div class="toolbar">
+              ${canApply ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply-all" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aplicar todos</span></button>` : ''}
+              ${canApply ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply-selected" data-index="${index}" data-mode="announce_now"><i data-lucide="list-checks"></i><span>Aplicar selecionados</span></button>` : ''}
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th></th><th>Destino</th><th class="text-end">Packets/s</th><th class="text-end">Bits/s</th><th class="text-end">Bytes</th></tr></thead>
+              <tbody>${rows || '<tr><td colspan="5" class="subtle">Nenhum destino elegível.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
     function renderBgpMitigationCandidates(candidates) {
       const container = document.getElementById('bgpMitigationCandidates');
       container.innerHTML = candidates.map((candidate, index) => {
@@ -9494,6 +9548,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <div class="metric-readout mb-2">${escapeHtml(candidateRole || basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
             ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
+            ${renderDnsMultiTargetBlock(candidate, index, canApply)}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
@@ -9608,6 +9663,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!currentBgpMitigationAnomalyId) return;
       document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigação...' : 'Criando sugestao...';
       const payload = { candidate_index: Number(index), mode };
+      const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
+      await loadBgpView();
+    }
+
+    async function applyBgpMitigationDnsTargets(index, mode, selectedOnly = false) {
+      if (!currentBgpMitigationAnomalyId) return;
+      const candidate = currentBgpMitigationCandidates[Number(index)] || {};
+      const targets = Array.isArray(candidate.dns_targets) ? candidate.dns_targets : [];
+      let selectedIps = targets.map(target => target.dst_ip).filter(Boolean);
+      if (selectedOnly) {
+        selectedIps = Array.from(document.querySelectorAll(`.bgp-dns-target-select[data-parent-index="${Number(index)}"]:checked`))
+          .map(input => targets[Number(input.dataset.childIndex)]?.dst_ip)
+          .filter(Boolean);
+      }
+      if (!selectedIps.length) {
+        document.getElementById('bgpMitigationOutput').textContent = 'Nenhum destino DNS selecionado.';
+        return;
+      }
+      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigações DNS...' : 'Criando sugestões DNS...';
+      const payload = { candidate_index: Number(index), mode, selected_dns_target_ips: selectedIps };
       const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
       await loadBgpView();
@@ -9946,6 +10022,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', draft.tcp_flags_selector || 'any');
       setValue('bgpProfileDuration', draft.default_duration_seconds || 1800);
       setValue('bgpProfileMaxDuration', draft.max_duration_seconds || 3600);
+      setBoolSelect('bgpProfileMultiTargetDns', draft.enable_multi_target_dns ?? true);
+      setValue('bgpProfileMaxDnsTargets', draft.max_targets_per_anomaly || 10);
+      setValue('bgpProfileMinDnsPps', draft.min_target_packets_s ?? '');
+      setValue('bgpProfileMinDnsBps', draft.min_target_bits_s ?? '');
       setBoolSelect('bgpProfileEnabled', Boolean(draft.enabled));
       renderBgpSelects();
       document.getElementById('bgpProfileSelectedConnectors').innerHTML = bgpConnectorMultiOptions(draft.selected_connector_ids || []);
@@ -15055,8 +15135,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('bgpMitigationCandidates').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const apply = target?.closest('.bgp-mitigation-apply');
+      const applyAll = target?.closest('.bgp-mitigation-apply-all');
+      const applySelected = target?.closest('.bgp-mitigation-apply-selected');
       const reject = target?.closest('.bgp-mitigation-reject');
-      if (apply) {
+      if (applyAll) {
+        applyBgpMitigationDnsTargets(Number(applyAll.dataset.index), applyAll.dataset.mode, false).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
+      } else if (applySelected) {
+        applyBgpMitigationDnsTargets(Number(applySelected.dataset.index), applySelected.dataset.mode, true).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
+      } else if (apply) {
         applyBgpMitigationCandidate(Number(apply.dataset.index), apply.dataset.mode).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
       } else if (reject) {
         document.getElementById('bgpMitigationOutput').textContent = `Candidato ${Number(reject.dataset.index) + 1} rejeitado nesta revisao.`;
