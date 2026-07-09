@@ -581,6 +581,8 @@ BGP_DEFAULT_MAX_ACTIVE_RULES = 50
 BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
 BGP_POLICY_DECISIONS = {"allow_auto", "require_manual_approval", "deny"}
 BGP_POLICY_SEVERITIES = {"safe", "caution", "danger"}
+LEGACY_DNS_MITIGATION_DISABLED_MESSAGE = "legacy DNS detection: mitigation disabled; use detection template"
+DNS_OUTBOUND_TEMPLATE_VECTORS = {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT", "DNS_ABUSE_OUTBOUND"}
 UDP_UPLOAD_SINGLE_CLIENT_VECTOR = "UDP_UPLOAD_SINGLE_CLIENT_HIGH_PPS"
 UDP_UPLOAD_MANY_CLIENTS_VECTOR = "UDP_UPLOAD_MANY_CLIENTS_SAME_DST_PORT"
 UDP_DOWNLOAD_REFLECTION_VECTOR = "UDP_DOWNLOAD_REFLECTION_TO_CLIENT"
@@ -2562,6 +2564,7 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
         (template_id,),
     ).fetchone()["count"]
     ensure_outbound_dst_port_rules_exclude_dns(conn)
+    ensure_official_dns_detection_rules(conn, template_id)
     if int(count or 0) > 0:
         return
 
@@ -2601,6 +2604,141 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
             """,
             (template_id, vector, automatic_vector_display_name(vector), domain, direction, protocol, metric, warning, critical, now, now),
         )
+
+
+def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: int | None = None) -> None:
+    if not sqlite_table_exists(conn, "bgp_response_profiles"):
+        return
+    profile = conn.execute(
+        "SELECT id FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS' ORDER BY id LIMIT 1"
+    ).fetchone()
+    if profile is None:
+        return
+    now = utc_now_iso()
+    profile_id = int(profile["id"])
+    if template_id is None:
+        row = conn.execute(
+            "SELECT id FROM detection_templates WHERE name = ? ORDER BY id LIMIT 1",
+            ("CLIENTES-PUBLICOS-DEFAULT",),
+        ).fetchone()
+        if row is None:
+            cursor = conn.execute(
+                "INSERT INTO detection_templates (name, description, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+                (
+                    "CLIENTES-PUBLICOS-DEFAULT",
+                    "Template default para deteccao informativa de IPs /32 dentro de prefixos publicos monitorados.",
+                    now,
+                    now,
+                ),
+            )
+            template_id = int(cursor.lastrowid)
+        else:
+            template_id = int(row["id"])
+    defaults = [
+        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS alto por destino", 5_000, 15_000),
+        ("DNS_QUERY_OUTBOUND_CLIENT", "DNS outbound por cliente", 5_000, 15_000),
+        ("dns_abuse_outbound", "Abuso DNS outbound", 5_000, 15_000),
+    ]
+    for vector, display_name, warning, critical in defaults:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM detection_template_rules
+            WHERE template_id = ?
+              AND lower(vector) = lower(?)
+            ORDER BY id
+            LIMIT 1
+            """,
+            (template_id, vector),
+        ).fetchone()
+        values = (
+            display_name,
+            "internal_ip",
+            "transmits",
+            "DNS",
+            "packets_s",
+            "over",
+            warning,
+            critical,
+            60,
+            1,
+            5,
+            1,
+            "DETECTION_ONLY",
+            "53",
+            vector,
+            "src_ip,dst_ip,dst_port,proto",
+            profile_id,
+            profile_id,
+            profile_id,
+            "response_profile",
+            1,
+            1,
+            32,
+            128,
+            300,
+            600,
+            10,
+            0.75,
+            1,
+            "Regra oficial DNS outbound: somente destination /32 udp/53 via FLOWSPEC_AUTO_BLOCK_DST_DNS.",
+            now,
+        )
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO detection_template_rules (
+                    template_id, vector, display_name, domain, direction, protocol, metric, comparison,
+                    warning_value, critical_value, window_seconds, consecutive_windows, cooldown_minutes,
+                    enabled, response, dst_port, detection_key, group_by,
+                    warning_response_profile_id, critical_response_profile_id, fallback_response_profile_id,
+                    mitigation_mode, mitigation_enabled, require_protected_prefix, max_auto_prefixlen_v4,
+                    max_auto_prefixlen_v6, cooldown_seconds, duration_seconds, max_active_announcements,
+                    min_confidence_for_auto, use_global_whitelist, notes, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (template_id, vector, *values, now),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE detection_template_rules
+                SET display_name = ?,
+                    domain = ?,
+                    direction = ?,
+                    protocol = ?,
+                    metric = ?,
+                    comparison = ?,
+                    warning_value = ?,
+                    critical_value = ?,
+                    window_seconds = ?,
+                    consecutive_windows = ?,
+                    cooldown_minutes = ?,
+                    enabled = ?,
+                    response = ?,
+                    dst_port = ?,
+                    detection_key = ?,
+                    group_by = ?,
+                    warning_response_profile_id = ?,
+                    critical_response_profile_id = ?,
+                    fallback_response_profile_id = ?,
+                    mitigation_mode = ?,
+                    mitigation_enabled = ?,
+                    require_protected_prefix = ?,
+                    max_auto_prefixlen_v4 = ?,
+                    max_auto_prefixlen_v6 = ?,
+                    cooldown_seconds = ?,
+                    duration_seconds = ?,
+                    max_active_announcements = ?,
+                    min_confidence_for_auto = ?,
+                    use_global_whitelist = ?,
+                    notes = CASE WHEN notes = '' THEN ? ELSE notes END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (*values, int(row["id"])),
+            )
 
 
 def ensure_outbound_dst_port_rules_exclude_dns(conn: sqlite3.Connection) -> None:
@@ -3151,13 +3289,20 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         """
         UPDATE bgp_response_profiles
         SET enable_multi_target_dns = 1,
+            approval_mode = 'auto',
+            mitigation_target_mode = 'sensor_origin',
+            target_selector = 'dst_ip',
+            protocol_selector = 'udp',
+            dst_port_selector = 'fixed',
+            dst_port_value = '53',
             max_targets_per_anomaly = CASE WHEN COALESCE(max_targets_per_anomaly, 0) <= 0 THEN 10 ELSE max_targets_per_anomaly END,
-            mitigation_target_mode = CASE WHEN COALESCE(mitigation_target_mode, '') = '' THEN 'sensor_origin' ELSE mitigation_target_mode END,
             default_duration_seconds = CASE WHEN COALESCE(default_duration_seconds, 0) <= 0 OR default_duration_seconds = 1800 THEN 600 ELSE default_duration_seconds END,
             max_duration_seconds = CASE WHEN COALESCE(max_duration_seconds, 0) <= 0 THEN 1800 ELSE max_duration_seconds END
         WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
         """
     )
+    if sqlite_table_exists(conn, "detection_template_rules"):
+        ensure_official_dns_detection_rules(conn)
     seed_default_bgp_port_policies(conn)
 
 
@@ -9759,6 +9904,19 @@ def bgp_has_enabled_protected_prefixes(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def is_dns_outbound_template_vector(value: Any) -> bool:
+    return clean_text(value).upper() in DNS_OUTBOUND_TEMPLATE_VECTORS
+
+
+def is_legacy_dns_event(event: dict[str, Any] | None) -> bool:
+    if not isinstance(event, dict):
+        return False
+    detection_engine = clean_text(event.get("detection_engine")).lower()
+    vector = clean_text(event.get("vector_name") or event.get("attack_vector_name") or event.get("vector") or event.get("decoder")).lower()
+    source = clean_text(event.get("anomaly_source") or event.get("source")).lower()
+    return detection_engine == "legacy" and vector == "dns" and source != "detection_template_rule"
+
+
 def dns_outbound_attack_vector_name(event: dict[str, Any]) -> str:
     event_vector = clean_text(event.get("attack_vector_name") or event.get("vector") or event.get("vector_name"))
     if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT"}:
@@ -10109,6 +10267,9 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
 
 def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[dict[str, Any]]:
     event = anomaly.get("event") or anomaly
+    if is_legacy_dns_event(event):
+        logger.info(LEGACY_DNS_MITIGATION_DISABLED_MESSAGE)
+        return []
     flows = anomaly.get("flows") or []
     flow = dict(flows[0]) if flows else {}
     confidence = anomaly_confidence(event)
@@ -10374,6 +10535,14 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
     ensure_sensor_db()
     with sqlite_connection() as conn:
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+    if is_legacy_dns_event(context.get("event")):
+        logger.info(LEGACY_DNS_MITIGATION_DISABLED_MESSAGE)
+        return {
+            "anomaly": context["event"],
+            "candidates": [],
+            "legacy_dns_mitigation_disabled": True,
+            "message": LEGACY_DNS_MITIGATION_DISABLED_MESSAGE,
+        }
     candidates = build_mitigation_candidates_from_anomaly(context)
     evaluated = []
     for candidate in candidates:
@@ -13121,6 +13290,10 @@ def persist_ai_pending_bgp_approval(
     response_json: dict[str, Any],
     created_by: str = "ai",
 ) -> dict[str, Any] | None:
+    anomaly = dict(request_payload.get("anomaly") or {})
+    if is_legacy_dns_event(anomaly):
+        logger.info(LEGACY_DNS_MITIGATION_DISABLED_MESSAGE)
+        return None
     candidate = ai_recommended_candidate(request_payload, response_json)
     if candidate is None:
         return None
@@ -13143,7 +13316,6 @@ def persist_ai_pending_bgp_approval(
     candidate["anomaly_id"] = anomaly_id
     candidate["source"] = "ai_mitigation"
     candidate["source_id"] = str(anomaly_id)
-    anomaly = dict(request_payload.get("anomaly") or {})
     candidate["attack_vector_name"] = candidate.get("attack_vector_name") or anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or ""
     candidate["anomaly_source"] = anomaly.get("anomaly_source") or anomaly.get("source") or ""
 
@@ -15314,6 +15486,10 @@ def create_bgp_dry_run_from_anomaly(request: Request, anomaly_id: int, payload: 
     require_admin(request)
     ensure_sensor_db()
     with sqlite_connection() as conn:
+        context = fetch_anomaly_mitigation_context(conn, anomaly_id)
+        if is_legacy_dns_event(context.get("event")):
+            logger.info(LEGACY_DNS_MITIGATION_DISABLED_MESSAGE)
+            raise HTTPException(status_code=409, detail=LEGACY_DNS_MITIGATION_DISABLED_MESSAGE)
         profile = fetch_bgp_profile(conn, payload.response_profile_id)
         connector_id = payload.connector_id or profile.get("connector_id")
         if not connector_id:
@@ -16604,7 +16780,7 @@ def detection_protocol_label_expr(protocol: str) -> str:
 
 def detection_rule_grouping(rule: dict[str, Any]) -> str:
     vector = clean_text(rule.get("vector")).upper()
-    if rule.get("domain") == "internal_ip" and "_TO_DST_" in vector:
+    if rule.get("domain") == "internal_ip" and ("_TO_DST_" in vector or is_dns_outbound_template_vector(vector)):
         return "internal_ip_to_dst"
     return clean_text(rule.get("domain")) or "internal_ip"
 
@@ -16986,16 +17162,19 @@ def query_detection_rule_candidates(
     membership_filter, src_expr, dst_expr, internal_expr = detection_direction_sql(rule["direction"], prefix_param)
     grouping = detection_rule_grouping(rule)
     outbound_dst_port = detection_rule_is_outbound_dst_port(rule)
+    dns_outbound_rule = is_dns_outbound_template_vector(rule.get("vector"))
     dst_port_expr = "toUInt16(0)"
+    top_src_port_expr = "toUInt16(0)"
     if grouping == "subnet":
         src_expr = "CAST(NULL, 'Nullable(String)')"
         dst_expr = "CAST(NULL, 'Nullable(String)')"
         internal_expr = "CAST(NULL, 'Nullable(String)')"
     elif grouping == "internal_ip_to_dst" and rule["direction"] == "transmits":
         dst_expr = "toString(flow_raw.dst_ip)"
-    if outbound_dst_port:
+    if outbound_dst_port or dns_outbound_rule:
         dst_expr = "toString(flow_raw.dst_ip)"
         dst_port_expr = "dst_port"
+        top_src_port_expr = "argMax(src_port, packets)"
 
     window_seconds = max(1, int(rule.get("window_seconds") or 60))
     protocol_expr = detection_protocol_label_expr(rule.get("protocol") or "ALL")
@@ -17012,6 +17191,8 @@ def query_detection_rule_candidates(
         membership_filter,
         protocol_filter,
     ]
+    if dns_outbound_rule:
+        filters.append("proto = 17")
     src_port_filter = detection_port_filter_condition("src_port", rule.get("src_port"), "src_port")
     dst_port_filter = detection_port_filter_condition("dst_port", rule.get("dst_port"), "dst_port")
     filters.extend(filter(None, [src_port_filter, dst_port_filter]))
@@ -17021,7 +17202,7 @@ def query_detection_rule_candidates(
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto")
     metric_alias = metric_expression_for_detection(rule["metric"])
-    group_columns = "bucket, src_ip, dst_ip, internal_ip, protocol" + (", dst_port" if outbound_dst_port else "")
+    group_columns = "bucket, src_ip, dst_ip, internal_ip, protocol" + (", dst_port" if outbound_dst_port or dns_outbound_rule else "")
     result = query_clickhouse(
         f"""
         WITH grouped AS (
@@ -17032,6 +17213,7 @@ def query_detection_rule_candidates(
                 {internal_expr} AS internal_ip,
                 {protocol_expr} AS protocol,
                 {dst_port_expr} AS dst_port,
+                {top_src_port_expr} AS top_src_port,
                 {corrected_sum_expr("bytes", factor_expr)} AS bytes,
                 {corrected_sum_expr("packets", factor_expr)} AS packets,
                 sum(flow_count) AS flows,
@@ -17050,6 +17232,7 @@ def query_detection_rule_candidates(
             internal_ip,
             protocol,
             dst_port,
+            top_src_port,
             bytes,
             packets,
             flows,
@@ -17081,6 +17264,7 @@ def query_detection_rule_candidates(
         dst_ip = clean_ip(row.get("dst_ip"))
         internal_ip = clean_ip(row.get("internal_ip"))
         dst_port = int(row.get("dst_port") or 0)
+        top_src_port = int(row.get("top_src_port") or 0)
         if grouping == "subnet":
             scope = {
                 "target_ip": "",
@@ -17096,6 +17280,7 @@ def query_detection_rule_candidates(
             "zone_name": zone["name"],
             "template_id": int(template["id"]),
             "template_name": template["name"],
+            "sensor_id": sensor_id,
             "rule_id": int(rule["id"]),
             "rule_name": rule["vector"],
             "display_name": rule.get("display_name") or automatic_vector_display_name(rule["vector"]),
@@ -17132,13 +17317,16 @@ def query_detection_rule_candidates(
             "target_role": scope["target_role"],
             "scope_type": scope["scope_type"],
             "invalid_scope": scope["invalid_scope"],
-            "protocol": clean_text(row.get("protocol")) or normalize_detection_protocol(rule.get("protocol")),
-            "target_port": dst_port if outbound_dst_port else None,
-            "top_src_ip": src_ip if outbound_dst_port else "",
-            "top_dst_ip": dst_ip if outbound_dst_port else "",
-            "top_dst_port": dst_port if outbound_dst_port else None,
-            "mitigation_basis": "dst_ip,dst_port,protocol" if outbound_dst_port else "",
-            "mitigation_reason": "Alto PPS para destino/porta/protocolo especifico." if outbound_dst_port else "",
+            "protocol": "udp" if dns_outbound_rule else clean_text(row.get("protocol")) or normalize_detection_protocol(rule.get("protocol")),
+            "target_port": dst_port if outbound_dst_port or dns_outbound_rule else None,
+            "top_src_ip": src_ip if outbound_dst_port or dns_outbound_rule else "",
+            "top_dst_ip": dst_ip if outbound_dst_port or dns_outbound_rule else "",
+            "top_src_port": top_src_port if outbound_dst_port or dns_outbound_rule else None,
+            "top_dst_port": dst_port if outbound_dst_port or dns_outbound_rule else None,
+            "top_packets": int(float(row.get("packets") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
+            "top_bytes": int(float(row.get("bytes") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
+            "mitigation_basis": "dns_outbound_destination" if dns_outbound_rule else "dst_ip,dst_port,protocol" if outbound_dst_port else "",
+            "mitigation_reason": dns_outbound_reason() if dns_outbound_rule else "Alto PPS para destino/porta/protocolo especifico." if outbound_dst_port else "",
             "packets_s": round(float(row.get("packets_s") or 0), 2),
             "bits_s": round(float(row.get("bits_s") or 0), 2),
             "flows": int(row.get("flows") or 0),
@@ -17152,6 +17340,11 @@ def query_detection_rule_candidates(
             "last_seen": iso(last_seen) if isinstance(last_seen, datetime) else clean_text(last_seen),
             "threshold_warning": float(warning_threshold),
             "threshold_critical": float(critical) if critical is not None else None,
+            "warning_response_profile_id": rule.get("warning_response_profile_id"),
+            "critical_response_profile_id": rule.get("critical_response_profile_id"),
+            "fallback_response_profile_id": rule.get("fallback_response_profile_id"),
+            "mitigation_mode": rule.get("mitigation_mode"),
+            "mitigation_enabled": rule.get("mitigation_enabled"),
             "metric": rule["metric"],
             "comparison": rule.get("comparison") or "over",
             "metric_value": round(metric_value, 2),
@@ -18294,6 +18487,13 @@ def anomaly_source_fields_from_row(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def int_or_none(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def backfill_anomaly_source_fields(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """
@@ -18415,6 +18615,10 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "id": int(item["id"]),
         "attack_vector_id": int(item["attack_vector_id"]) if item.get("attack_vector_id") is not None else None,
         "attack_vector_name": item.get("attack_vector_name") or item.get("vector_name") or "",
+        "detection_engine": item.get("detection_engine") or "legacy",
+        "detection_template_id": int_or_none(item.get("detection_template_id")),
+        "detection_template_rule_id": int_or_none(item.get("detection_template_rule_id")),
+        "response_profile_id": int_or_none(item.get("response_profile_id")),
         "attack_domain_type": domain_type,
         "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
         "sensor_name": item.get("sensor_name") or "",
@@ -21002,6 +21206,187 @@ def find_security_anomaly_id_for_candidate(conn: sqlite3.Connection, candidate: 
     return int(row["id"]) if row else None
 
 
+def detection_template_dns_anomaly_dedupe_key(candidate: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            clean_text(candidate.get("vector")),
+            str(candidate.get("zone_id") or ""),
+            clean_ip(candidate.get("top_src_ip") or candidate.get("src_ip") or candidate.get("internal_ip")),
+            clean_ip(candidate.get("top_dst_ip") or candidate.get("dst_ip")),
+            str(int(candidate.get("top_dst_port") or candidate.get("target_port") or 53)),
+            "udp",
+        ]
+    )
+
+
+def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candidate: dict[str, Any]) -> str:
+    now = clean_text(candidate.get("last_seen")) or utc_now_iso()
+    first_seen = clean_text(candidate.get("first_seen")) or now
+    vector_name = clean_text(candidate.get("vector") or candidate.get("rule_name"))
+    response_profile_id = (
+        candidate.get("critical_response_profile_id")
+        or candidate.get("warning_response_profile_id")
+        or candidate.get("fallback_response_profile_id")
+    )
+    src_ip = clean_ip(candidate.get("top_src_ip") or candidate.get("src_ip") or candidate.get("internal_ip") or candidate.get("target_ip"))
+    dst_ip = clean_ip(candidate.get("top_dst_ip") or candidate.get("dst_ip"))
+    src_port = int(candidate.get("top_src_port") or 0)
+    dst_port = int(candidate.get("top_dst_port") or candidate.get("target_port") or 53)
+    top_packets = int(candidate.get("top_packets") or candidate.get("packets") or 0)
+    top_bytes = int(candidate.get("top_bytes") or candidate.get("bytes") or 0)
+    target_cidr = host_cidr_for_ip(src_ip)
+    dedupe_key = detection_template_dns_anomaly_dedupe_key(candidate)
+    source_details = {
+        "template_id": candidate.get("template_id"),
+        "template_name": candidate.get("template_name") or "",
+        "rule_id": candidate.get("rule_id"),
+        "rule_name": vector_name,
+        "display_name": candidate.get("display_name") or automatic_vector_display_name(vector_name),
+        "rule_config": candidate.get("rule_config") or {},
+        "top_src_ip": src_ip,
+        "top_dst_ip": dst_ip,
+        "top_dst_port": dst_port,
+        "target_port": dst_port,
+        "mitigation_basis": "dns_outbound_destination",
+        "mitigation_reason": dns_outbound_reason(),
+    }
+    common = {
+        "attack_vector_id": None,
+        "sensor_id": candidate.get("sensor_id"),
+        "interface_if_index": candidate.get("output_if") or candidate.get("input_if"),
+        "target_ip": src_ip,
+        "target_cidr": target_cidr,
+        "target_role": "src_ip",
+        "zone_id": candidate.get("zone_id"),
+        "zone_name": clean_text(candidate.get("zone_name")),
+        "vector_name": vector_name,
+        "scope_type": "internal_ip_32",
+        "invalid_scope": 0 if is_ipv4_32_cidr(target_cidr) else 1,
+        "target_port": 53,
+        "protocol": "udp",
+        "unique_src_ips": 1,
+        "unique_dst_ips": int(candidate.get("unique_dst_ips") or 1),
+        "unique_dst_ports": int(candidate.get("unique_dst_ports") or 1),
+        "mitigation_basis": "dns_outbound_destination",
+        "mitigation_reason": dns_outbound_reason(),
+        "top_src_ip": src_ip,
+        "top_dst_ip": dst_ip,
+        "top_src_port": src_port,
+        "top_dst_port": dst_port,
+        "top_packets": top_packets,
+        "top_bytes": top_bytes,
+        "direction": "transmits",
+        "decoder": "DNS",
+        "severity": clean_text(candidate.get("severity")) or "warning",
+        "metric_unit": clean_text(candidate.get("metric")) or "packets_s",
+        "threshold_value": float(candidate.get("threshold_critical") or candidate.get("threshold_warning") or 0),
+        "observed_value": float(candidate.get("metric_value") or candidate.get("packets_s") or 0),
+        "estimated_bytes": int(candidate.get("bytes") or 0),
+        "estimated_packets": int(candidate.get("packets") or 0),
+        "flow_count": int(candidate.get("flows") or 0),
+        "summary": security_anomaly_message(candidate),
+        "detection_engine": "detection_template",
+        "detection_template_id": candidate.get("template_id"),
+        "detection_template_rule_id": candidate.get("rule_id"),
+        "response_profile_id": response_profile_id,
+        "rule_snapshot_json": json.dumps(candidate.get("rule_config") or {}, sort_keys=True, default=str),
+        "anomaly_source": "detection_template_rule",
+        "source_engine": "detection_templates",
+        "source_id": clean_text(candidate.get("rule_id")),
+        "source_name": candidate.get("display_name") or vector_name,
+        "source_details_json": json.dumps(source_details, sort_keys=True, default=str),
+        "updated_at": now,
+    }
+    row = conn.execute(
+        """
+        SELECT *
+        FROM anomaly_events
+        WHERE dedupe_key = ?
+          AND status = 'active'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    if row is None:
+        cursor = sqlite_insert_dict(
+            conn,
+            "anomaly_events",
+            {
+                **common,
+                "peak_value": common["observed_value"],
+                "started_at": first_seen,
+                "last_seen_at": now,
+                "status": "active",
+                "dedupe_key": dedupe_key,
+                "created_at": now,
+            },
+        )
+        event_id = int(cursor.lastrowid)
+        action = "created"
+    else:
+        event_id = int(row["id"])
+        peak = max(float(row["peak_value"] or 0), float(common["observed_value"] or 0))
+        conn.execute(
+            """
+            UPDATE anomaly_events
+            SET target_ip = ?, target_cidr = ?, target_role = ?, zone_id = ?, zone_name = ?,
+                vector_name = ?, scope_type = ?, invalid_scope = ?, target_port = ?, protocol = ?,
+                unique_src_ips = ?, unique_dst_ips = ?, unique_dst_ports = ?, mitigation_basis = ?,
+                mitigation_reason = ?, top_src_ip = ?, top_dst_ip = ?, top_src_port = ?,
+                top_dst_port = ?, top_packets = ?, top_bytes = ?, direction = ?, decoder = ?,
+                severity = ?, metric_unit = ?, threshold_value = ?, observed_value = ?,
+                peak_value = ?, last_seen_at = ?, estimated_bytes = estimated_bytes + ?,
+                estimated_packets = estimated_packets + ?, flow_count = flow_count + ?,
+                summary = ?, detection_engine = ?, detection_template_id = ?,
+                detection_template_rule_id = ?, response_profile_id = ?, rule_snapshot_json = ?,
+                anomaly_source = ?, source_engine = ?, source_id = ?, source_name = ?,
+                source_details_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                common["target_ip"], common["target_cidr"], common["target_role"], common["zone_id"], common["zone_name"],
+                common["vector_name"], common["scope_type"], common["invalid_scope"], common["target_port"], common["protocol"],
+                common["unique_src_ips"], common["unique_dst_ips"], common["unique_dst_ports"], common["mitigation_basis"],
+                common["mitigation_reason"], common["top_src_ip"], common["top_dst_ip"], common["top_src_port"],
+                common["top_dst_port"], common["top_packets"], common["top_bytes"], common["direction"], common["decoder"],
+                common["severity"], common["metric_unit"], common["threshold_value"], common["observed_value"],
+                peak, now, common["estimated_bytes"], common["estimated_packets"], common["flow_count"],
+                common["summary"], common["detection_engine"], common["detection_template_id"],
+                common["detection_template_rule_id"], common["response_profile_id"], common["rule_snapshot_json"],
+                common["anomaly_source"], common["source_engine"], common["source_id"], common["source_name"],
+                common["source_details_json"], now, event_id,
+            ),
+        )
+        action = "updated"
+    if src_ip and dst_ip and dst_port == 53:
+        conn.execute(
+            """
+            INSERT INTO anomaly_event_flows (
+                anomaly_event_id, flow_time, sensor, exporter_ip, src_ip, dst_ip,
+                src_port, dst_port, proto, tcp_flags, input_if, output_if, bytes, packets, flow_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 17, 0, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                now,
+                clean_text(candidate.get("sensor")),
+                clean_ip(candidate.get("exporter_ip")),
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port,
+                int(candidate.get("input_if") or 0),
+                int(candidate.get("output_if") or 0),
+                top_bytes,
+                top_packets,
+                int(candidate.get("flows") or 1),
+            ),
+        )
+    return action
+
+
 def record_detection_rule_runtime(
     conn: sqlite3.Connection,
     rule_id: int,
@@ -21112,11 +21497,28 @@ def evaluate_detection_template_rule(
                 logger.info("rule skipped: cooldown")
                 continue
             if create_anomalies:
-                action = upsert_security_anomaly(conn, item)
+                if is_dns_outbound_template_vector(rule.get("vector")):
+                    action = upsert_detection_template_dns_anomaly_event(conn, item)
+                else:
+                    action = upsert_security_anomaly(conn, item)
                 if action == "created":
                     result["anomaly_created"] = True
                     result["anomalies_created"] += 1
-                    result["anomaly_id"] = find_security_anomaly_id_for_candidate(conn, item)
+                    if is_dns_outbound_template_vector(rule.get("vector")):
+                        row = conn.execute(
+                            """
+                            SELECT id
+                            FROM anomaly_events
+                            WHERE dedupe_key = ?
+                              AND status = 'active'
+                            ORDER BY id DESC
+                            LIMIT 1
+                            """,
+                            (detection_template_dns_anomaly_dedupe_key(item),),
+                        ).fetchone()
+                        result["anomaly_id"] = int(row["id"]) if row else None
+                    else:
+                        result["anomaly_id"] = find_security_anomaly_id_for_candidate(conn, item)
                     logger.info("anomaly created")
 
     if result["rows"] == 0 and not result["matched"]:
@@ -23148,6 +23550,8 @@ def evaluate_anomaly_mitigation(request: Request, event_id: int):
         "apply_enabled": False,
         "dry_run": True,
         "dry_run_message": "Seria aplicado automaticamente; nao aplicado porque e dry-run." if automatic_candidates else "Dry-run: nenhuma acao de mitigacao foi enviada.",
+        "legacy_dns_mitigation_disabled": bool(payload.get("legacy_dns_mitigation_disabled")),
+        "message": payload.get("message") or "",
         "candidates": payload["candidates"],
     }
 

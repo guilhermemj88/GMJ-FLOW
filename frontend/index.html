@@ -9653,6 +9653,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, { method: 'POST' });
       currentBgpMitigationEvaluation = payload || {};
       currentBgpMitigationCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+      if (payload.legacy_dns_mitigation_disabled) {
+        document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="text-warning">Detector legacy: mitigação automática desativada. Use templates de detecção.</div>';
+        document.getElementById('bgpMitigationOutput').textContent = 'Mitigação automática desativada para DNS legacy.';
+        return;
+      }
       await loadBgpAiRecommendation();
       renderBgpMitigationCandidates(currentBgpMitigationCandidates);
       document.getElementById('bgpMitigationOutput').textContent = `${currentBgpMitigationCandidates.length} candidato(s) avaliados.`;
@@ -11433,6 +11438,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return Number(event?.action_id || event?.security_anomaly_id || event?.id || 0);
     }
 
+    function isLegacyDnsAnomaly(event = {}) {
+      const engine = String(event.detection_engine || '').toLowerCase();
+      const vector = String(event.vector_name || event.attack_vector_name || event.vector || event.decoder || '').toLowerCase();
+      const source = String(event.anomaly_source || event.source || '').toLowerCase();
+      const hasTopFlow = Boolean(event.top_src_ip && event.top_dst_ip && Number(event.top_dst_port || event.target_port || 0));
+      return engine === 'legacy' && vector === 'dns' && source !== 'detection_template_rule' && !hasTopFlow;
+    }
+
     function anomalyOperationalStatus(event) {
       return String(event?.operational_status || event?.status || '').toLowerCase();
     }
@@ -11462,6 +11475,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const visibleItems = idSearch ? tabItems.filter(event => String(anomalyActionId(event) || event.id || '') === idSearch) : tabItems;
       tbody.innerHTML = visibleItems.map(event => {
         const actionId = anomalyActionId(event);
+        const legacyDns = isLegacyDnsAnomaly(event);
         return `
         <tr>
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
@@ -11480,9 +11494,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}" title="Ver detalhes" aria-label="Ver detalhes">
                 <i data-lucide="eye"></i>
               </button>
-              <button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}" title="Mitigar" aria-label="Mitigar">
+              ${legacyDns ? '' : `<button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}" title="Mitigar" aria-label="Mitigar">
                 <i data-lucide="shield-check"></i>
-              </button>
+              </button>`}
               <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" title="Reconhecer" aria-label="Reconhecer"><i data-lucide="check"></i></button>
               <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" title="Encerrar" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
             </div>
@@ -11599,7 +11613,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Motivo', event.mitigation_reason || '-']
       ];
       if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
-      return `<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
+      const legacyDnsWarning = isLegacyDnsAnomaly(event)
+        ? '<div class="text-warning mb-2">Detector legacy: mitigação automática desativada. Use templates de detecção.</div>'
+        : '';
+      return `${legacyDnsWarning}<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
         <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
       `).join('')}</div>`;
     }
