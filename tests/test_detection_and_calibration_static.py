@@ -729,6 +729,11 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_dns_template_rule_mitigation_config_uses_existing_serializer(self):
+        self.assertIn("def detection_rule_mitigation_config", SOURCE)
+        self.assertIn("item = detection_rule_row_to_dict(row)", SOURCE)
+        self.assertNotIn("detection_template_rule_row_to_dict", SOURCE)
+
     def test_anomaly_human_labels_and_fallbacks(self):
         self.assertEqual(backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK"), "UDP flood por IP")
         self.assertEqual(backend_main.anomaly_type_label("DNS_INTERNAL_IP_TO_DST_HIGH_PPS"), "DNS alto por destino")

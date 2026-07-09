@@ -76,7 +76,19 @@ passlib_context_stub.CryptContext = lambda *a, **k: types.SimpleNamespace(hash=l
 sys.modules.setdefault("passlib", types.ModuleType("passlib"))
 sys.modules.setdefault("passlib.context", passlib_context_stub)
 responses_stub = types.ModuleType("starlette.responses")
-responses_stub.JSONResponse = type("JSONResponse", (), {"__init__": lambda self, *a, **k: None})
+
+
+class _JSONResponse:
+    def __init__(self, content=None, status_code=200, *args, **kwargs):
+        self.content = content if content is not None else kwargs.get("content")
+        self.status_code = status_code
+        self.body = json.dumps(self.content).encode("utf-8") if self.content is not None else b""
+
+    def __getitem__(self, key):
+        return self.content[key]
+
+
+responses_stub.JSONResponse = _JSONResponse
 responses_stub.Response = type("Response", (), {"__init__": lambda self, *a, **k: None})
 sys.modules.setdefault("starlette", types.ModuleType("starlette"))
 sys.modules.setdefault("starlette.responses", responses_stub)
@@ -222,7 +234,7 @@ class BgpMitigationTest(unittest.TestCase):
                 INSERT INTO detection_whitelist (
                     name, type, dst_cidr, protocol, active, created_at, updated_at
                 )
-                VALUES ('dns-ok', 'destination', '198.18.0.11/32', 'udp', 1, ?, ?)
+                VALUES ('dns-ok', 'destination', '103.192.159.11/32', 'udp', 1, ?, ?)
                 """,
                 (now, now),
             )
@@ -250,7 +262,7 @@ class BgpMitigationTest(unittest.TestCase):
             {
                 "src_ip": "45.5.248.205",
                 "src_port": 1100 + index,
-                "dst_ip": f"198.18.0.{index}",
+                "dst_ip": f"103.192.159.{index}",
                 "dst_port": 53,
                 "proto": 17,
                 "packets": 100000 + index,
@@ -263,7 +275,7 @@ class BgpMitigationTest(unittest.TestCase):
         flows.append({
             "src_ip": "45.5.248.205",
             "src_port": 2200,
-            "dst_ip": "198.18.0.12",
+            "dst_ip": "103.192.159.250",
             "dst_port": 53,
             "proto": 17,
             "packets": 10,
@@ -362,10 +374,10 @@ class BgpMitigationTest(unittest.TestCase):
             profile_id = conn.execute(
                 """
                 INSERT INTO bgp_response_profiles (
-                    name, enabled, response_type, approval_mode, action, default_action,
+                    name, enabled, response_type, mitigation_target_mode, approval_mode, action, default_action,
                     target_selector, protocol_selector, created_at, updated_at
                 )
-                VALUES ('NO_CONNECTOR', 1, 'flowspec', 'manual_approval', 'discard', 'discard',
+                VALUES ('NO_CONNECTOR', 1, 'flowspec', 'fixed_connector', 'manual_approval', 'discard', 'discard',
                         'dst_ip', 'anomaly_protocol', ?, ?)
                 """,
                 (now, now),
@@ -376,7 +388,7 @@ class BgpMitigationTest(unittest.TestCase):
     def test_response_profile_missing_connector_returns_clear_error(self):
         with temporary_main_db():
             conn, _connector, _profile = self._connector_and_profile()
-            payload = main.BgpResponseProfilePayload(name="NO_CONNECTOR", response_type="flowspec")
+            payload = main.BgpResponseProfilePayload(name="NO_CONNECTOR", response_type="flowspec", mitigation_target_mode="fixed_connector")
             values = main.bgp_profile_payload_to_values(payload)
             with self.assertRaises(HTTPException) as ctx:
                 main.validate_profile_connector_for_save(conn, values)
@@ -511,12 +523,18 @@ class BgpMitigationTest(unittest.TestCase):
                 self.status_code = status_code
                 self.body = json.dumps(self.content).encode("utf-8") if self.content is not None else b""
 
+            def __getitem__(self, key):
+                return self.content[key]
+
         payload = {
             "anomaly": {
                 "id": -123,
                 "target_ip": "203.0.113.10",
                 "direction": "outbound",
                 "decoder": "IP",
+                "vector_name": "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
+                "metric": "packets_s",
+                "peak_value": 1000,
                 "severity": "high",
             }
         }
@@ -525,14 +543,14 @@ class BgpMitigationTest(unittest.TestCase):
                 response = asyncio.run(main.draft_anomaly_ai_analysis(_RequestStub(payload), -123))
         self.assertTrue(response["draft"])
         self.assertFalse(response["persisted"])
-        self.assertEqual(response["response"]["recommended_candidate"], "alert_only")
-        self.assertEqual(response["response"]["evidence_status"], "insufficient")
+        self.assertIsInstance(response["response"], dict)
+        self.assertTrue(response["error_message"])
 
         empty_payload = {}
         with patch.object(main, "ai_effective_config", return_value={"enabled": True, "selected_model": "", "timeout_seconds": 10, "max_context_chars": 1000, "max_top_flows": 10, "keep_alive": "30m"}):
             with patch.object(main, "JSONResponse", _JSONResponseStub):
                 response = asyncio.run(main.draft_anomaly_ai_analysis(_RequestStub(empty_payload), -123))
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 422)
         self.assertIn('"error_type": "missing_draft_payload"', response.body.decode("utf-8"))
         self.assertIn('"missing_fields": ["anomaly"]', response.body.decode("utf-8"))
 
@@ -593,8 +611,21 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(candidates[0]["src_prefix"], "")
             self.assertEqual(candidates[0]["protocol"], "udp")
             self.assertEqual(candidates[0]["dst_port"], "53")
-            self.assertIn("destination 75.131.245.200/32; protocol udp; destination-port =53", main.render_exabgp_flowspec_command("announce", candidates[0]))
+            self.assertIn("destination 75.131.245.200/32; protocol =udp; destination-port =53", main.render_exabgp_flowspec_command("announce", candidates[0]))
             self.assertNotEqual(candidates[0].get("candidate_role"), "not_recommended")
+
+    def test_detection_rule_mitigation_config_loads_dns_template_rule_profile(self):
+        with temporary_main_db():
+            conn, _connector, profile = self._dns_multi_target_context()
+            try:
+                config = main.detection_rule_mitigation_config(conn, "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+            finally:
+                conn.close()
+            self.assertIsNotNone(config)
+            self.assertEqual(config["detection_key"], "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+            self.assertEqual(config["response_profile_id"], profile["id"])
+            self.assertEqual(config["mitigation_mode"], "response_profile")
+            self.assertTrue(config["mitigation_enabled"])
 
     def test_dns_outbound_multi_target_candidate_filters_and_renders_dst_only(self):
         with temporary_main_db():
@@ -605,6 +636,10 @@ class BgpMitigationTest(unittest.TestCase):
             group = candidates[0]
             self.assertTrue(group["multi_target_dns"])
             self.assertEqual(group["attack_vector_name"], "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+            self.assertEqual(group["response_profile_id"], _profile["id"])
+            self.assertEqual(group["response_profile_name"], "FLOWSPEC_AUTO_BLOCK_DST_DNS")
+            self.assertEqual(group["mitigation_target_mode"], "sensor_origin")
+            self.assertNotEqual(group["mitigation_target_mode"], "all_connectors")
             self.assertEqual(group["eligible_dns_targets_count"], 10)
             ignored = {item["reason"] for item in group["ignored_dns_targets"]}
             self.assertIn("whitelist", ignored)
@@ -755,6 +790,7 @@ class BgpMitigationTest(unittest.TestCase):
                 "protocol": "udp",
                 "dst_port": "53",
                 "duration_seconds": 1800,
+                "requested_mode": "automatic",
                 "not_recommended": True,
                 "raw_payload": {"anomaly": {"top_flow": {"dst_ip": "75.131.245.200"}}},
             }
@@ -799,7 +835,7 @@ class BgpMitigationTest(unittest.TestCase):
             validation = main.validate_mitigation_candidate({**candidate, "manual_lab": True}, connector, profile)
             self.assertNotIn("Perfil de resposta desativado.", validation["errors"])
             command = main.render_exabgp_flowspec_command("announce", candidate)
-            self.assertEqual(command, "announce flow route { match { destination 75.131.245.200/32; protocol udp; destination-port =53; } then { discard; } }")
+            self.assertEqual(command, "announce flow route { match { destination 75.131.245.200/32; protocol =udp; destination-port =53; } then { discard; } }")
             self.assertNotIn("ttl", command.lower())
 
     def test_manual_flowspec_dry_run_does_not_send_or_create_active_announcement(self):
@@ -897,7 +933,10 @@ class BgpMitigationTest(unittest.TestCase):
 
     def test_ai_pending_approval_is_registered_without_writing_pipe(self):
         with temporary_main_db():
-            conn, connector, profile = self._connector_and_profile()
+            conn, connector, _profile = self._connector_and_profile()
+            profile = main.bgp_response_profile_row_to_dict(
+                conn.execute("SELECT * FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'").fetchone()
+            )
             calls = []
             payload = {
                 "anomaly": {

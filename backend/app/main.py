@@ -8671,8 +8671,8 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                     dst_network = ip_network(dst_cidr, strict=False)
                     min_dst = policy.get("min_dst_prefixlen_auto")
                     if min_dst is not None and dst_network.prefixlen < int(min_dst):
-                        decision = "require_manual_approval"
-                        severity = "caution"
+                        decision = "require_manual_approval" if decision != "deny" else decision
+                        severity = "caution" if severity != "danger" else severity
                         reasons.append(f"{policy['name']}: dst_cidr {dst_cidr} mais amplo que /{min_dst} para automatico.")
                 except ValueError:
                     pass
@@ -8681,8 +8681,8 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                     src_network = ip_network(src_cidr, strict=False)
                     min_src = policy.get("min_src_prefixlen_auto")
                     if min_src is not None and src_network.prefixlen < int(min_src):
-                        decision = "require_manual_approval"
-                        severity = "caution"
+                        decision = "require_manual_approval" if decision != "deny" else decision
+                        severity = "caution" if severity != "danger" else severity
                         reasons.append(f"{policy['name']}: src_cidr {src_cidr} mais amplo que /{min_src} para automatico.")
                 except ValueError:
                     pass
@@ -9161,42 +9161,43 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
             "require_protected_prefix": False,
         }
     )
+    columns = [
+        "connector_id", "connector_name", "response_profile_id", "anomaly_id", "sensor_id", "status", "route_type", "response_type", "action",
+        "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
+        "target_prefix", "src_prefix", "dst_prefix", "dst_ip", "protocol", "src_port", "dst_port", "tcp_flags",
+        "duration_seconds", "expires_at", "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
+        "validation_errors", "validation_warnings",
+        "raw_payload", "source", "source_id", "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
+        "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
+    ]
+    values = [
+        connector["id"], connector.get("name") or "", profile["id"], anomaly_id, candidate.get("sensor_id"), "dry_run",
+        bgp_route_type_for_response(candidate.get("response_type") or profile.get("response_type")),
+        candidate.get("response_type") or "", candidate.get("action") or "",
+        candidate.get("rate_limit_bps"), candidate.get("rate_limit_value_raw") or "", candidate.get("rate_limit_unit") or "",
+        candidate.get("target_prefix") or "", candidate.get("src_prefix") or "", candidate.get("dst_prefix") or "",
+        clean_ip(candidate.get("dst_ip")) or clean_ip(clean_text(candidate.get("dst_prefix")).split("/", 1)[0]),
+        candidate.get("protocol") or "", candidate.get("src_port") or "", candidate.get("dst_port") or "",
+        candidate.get("tcp_flags") or "", duration, expires_at, announce_command, withdraw_command,
+        connector.get("exabgp_pipe_in") or "", rendered,
+        bgp_match_json(candidate), bgp_then_json(candidate),
+        json.dumps(validation["errors"], sort_keys=True), json.dumps(validation["warnings"], sort_keys=True),
+        json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
+        clean_text(candidate.get("source") or "manual"),
+        clean_text(candidate.get("source_id") or anomaly_id or ""),
+        policy.get("decision") or "",
+        policy.get("severity") or "",
+        json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
+        json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
+        created_by,
+        now,
+        now,
+    ]
     cursor = conn.execute(
-        """
-        INSERT INTO bgp_announcements (
-            connector_id, connector_name, response_profile_id, anomaly_id, status, route_type, response_type, action,
-            rate_limit_bps, rate_limit_value_raw, rate_limit_unit,
-            target_prefix, src_prefix, dst_prefix, protocol, src_port, dst_port, tcp_flags,
-            duration_seconds, expires_at, announce_command, withdraw_command, rendered_command, match_json, then_json,
-            validation_errors, validation_warnings,
-            raw_payload, source, source_id, policy_decision, policy_severity, policy_reasons, policy_warnings,
-            policy_required_scope, policy_matched_port_policies, created_by, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, 'dry_run', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            connector["id"], connector.get("name") or "", profile["id"], anomaly_id,
-            bgp_route_type_for_response(candidate.get("response_type") or profile.get("response_type")),
-            candidate.get("response_type") or "", candidate.get("action") or "",
-            candidate.get("rate_limit_bps"), candidate.get("rate_limit_value_raw") or "", candidate.get("rate_limit_unit") or "",
-            candidate.get("target_prefix") or "", candidate.get("src_prefix") or "", candidate.get("dst_prefix") or "",
-            candidate.get("protocol") or "", candidate.get("src_port") or "", candidate.get("dst_port") or "",
-            candidate.get("tcp_flags") or "", duration, expires_at, announce_command, withdraw_command, rendered,
-            bgp_match_json(candidate), bgp_then_json(candidate),
-            json.dumps(validation["errors"], sort_keys=True), json.dumps(validation["warnings"], sort_keys=True),
-            json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
-            clean_text(candidate.get("source") or "manual"),
-            clean_text(candidate.get("source_id") or anomaly_id or ""),
-            policy.get("decision") or "",
-            policy.get("severity") or "",
-            json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("warnings") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("required_scope") or [], sort_keys=True, default=str),
-            json.dumps(policy.get("matched_port_policies") or [], sort_keys=True, default=str),
-            created_by,
-            now,
-            now,
-        ),
+        f"INSERT INTO bgp_announcements ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+        tuple(values),
     )
     announcement_id = int(cursor.lastrowid)
     bgp_event(conn, announcement_id, "dry_run_created", "Dry-run BGP gerado. Nenhum anuncio real foi enviado.", validation, created_by)
@@ -9446,7 +9447,7 @@ def detection_rule_mitigation_config(conn: sqlite3.Connection, attack_vector_nam
     ).fetchone()
     if row is None:
         return None
-    item = detection_template_rule_row_to_dict(row)
+    item = detection_rule_row_to_dict(row)
     profile_id = item.get("critical_response_profile_id") or item.get("warning_response_profile_id") or item.get("fallback_response_profile_id")
     return {
         "id": item.get("id"),
@@ -9526,6 +9527,9 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     else:
         connector = default_bgp_connector(conn)
     candidate["response_profile_id"] = profile["id"] if profile else None
+    if profile:
+        candidate["mitigation_target_mode"] = profile.get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "sensor_origin"
+        candidate["response_profile_name"] = profile.get("name") or candidate.get("response_profile_name") or candidate.get("profile") or ""
     candidate["connector_id"] = connector["id"] if connector else None
     mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
     enabled = bool(vector.get("mitigation_enabled")) if vector else True
