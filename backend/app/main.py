@@ -17395,7 +17395,6 @@ def query_detection_rule_candidates(
     outbound_dst_port = detection_rule_is_outbound_dst_port(rule)
     dns_outbound_rule = is_dns_outbound_template_vector(rule.get("vector"))
     dst_port_expr = "toUInt16(0)"
-    top_src_port_expr = "toUInt16(0)"
     if grouping == "subnet":
         src_expr = "CAST(NULL, 'Nullable(String)')"
         dst_expr = "CAST(NULL, 'Nullable(String)')"
@@ -17405,7 +17404,6 @@ def query_detection_rule_candidates(
     if outbound_dst_port or dns_outbound_rule:
         dst_expr = "toString(flow_raw.dst_ip)"
         dst_port_expr = "dst_port"
-        top_src_port_expr = "argMax(src_port, packets)"
 
     window_seconds = max(1, int(rule.get("window_seconds") or 60))
     protocol_expr = detection_protocol_label_expr(rule.get("protocol") or "ALL")
@@ -17436,7 +17434,7 @@ def query_detection_rule_candidates(
     group_columns = "bucket, src_ip, dst_ip, internal_ip, protocol" + (", dst_port" if outbound_dst_port or dns_outbound_rule else "")
     result = query_clickhouse(
         f"""
-        WITH grouped AS (
+        WITH base AS (
             SELECT
                 toStartOfInterval(flow_time, INTERVAL {window_seconds} SECOND) AS bucket,
                 {src_expr} AS src_ip,
@@ -17444,17 +17442,36 @@ def query_detection_rule_candidates(
                 {internal_expr} AS internal_ip,
                 {protocol_expr} AS protocol,
                 {dst_port_expr} AS dst_port,
-                {top_src_port_expr} AS top_src_port,
-                {corrected_sum_expr("bytes", factor_expr)} AS bytes,
-                {corrected_sum_expr("packets", factor_expr)} AS packets,
-                sum(flow_count) AS flows,
-                uniqExact(toString(flow_raw.dst_ip)) AS unique_dst_ips,
-                uniqExact(dst_port) AS unique_dst_ports,
-                uniqExact(src_port) AS unique_src_ports,
-                min(flow_time) AS first_seen,
-                max(flow_time) AS last_seen
+                toUInt16(src_port) AS src_port_value,
+                toFloat64(bytes) AS byte_value,
+                toFloat64(packets) AS packet_value,
+                toFloat64(flow_count) AS flow_value,
+                toString(flow_raw.dst_ip) AS unique_dst_ip_value,
+                toUInt16(dst_port) AS unique_dst_port_value,
+                toUInt16(src_port) AS unique_src_port_value,
+                ({factor_expr}) AS multiplier,
+                flow_time
             FROM flow_raw
             WHERE {where}
+        ),
+        grouped AS (
+            SELECT
+                bucket,
+                src_ip,
+                dst_ip,
+                internal_ip,
+                protocol,
+                dst_port,
+                argMax(src_port_value, packet_value * multiplier) AS top_src_port,
+                sum(byte_value * multiplier) AS bytes,
+                sum(packet_value * multiplier) AS packets,
+                sum(flow_value) AS flows,
+                uniqExact(unique_dst_ip_value) AS unique_dst_ips,
+                uniqExact(unique_dst_port_value) AS unique_dst_ports,
+                uniqExact(unique_src_port_value) AS unique_src_ports,
+                min(flow_time) AS first_seen,
+                max(flow_time) AS last_seen
+            FROM base
             GROUP BY {group_columns}
         )
         SELECT

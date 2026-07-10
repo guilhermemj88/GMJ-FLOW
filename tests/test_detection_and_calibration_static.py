@@ -478,6 +478,55 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("src_port = 53 OR dst_port = 53", calls[0][0])
         self.assertNotIn("dst_port NOT IN (53)", calls[0][0])
 
+    def test_dns_template_query_aggregates_sample_rate_without_nested_aggregates(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "bytes", "packets", "flows",
+            "bits_s", "packets_s", "flows_s", "unique_dst_ips", "unique_dst_ports", "unique_src_ports",
+            "first_seen", "last_seen", "metric_value",
+        ]
+        row = ("186.232.171.235", "8.8.8.8", "186.232.171.235", "udp", 53, 460_800_000, 7_680_000, 20, 61_440_000, 128_000, 0.33, 1, 1, 2, flow_time, flow_time, 128_000)
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            self.assertIn("WITH base AS", query)
+            self.assertIn("toFloat64(packets) AS packet_value", query)
+            self.assertIn("toFloat64(bytes) AS byte_value", query)
+            self.assertIn("(multiIf(input_if > 0, 512.0, greatest(toFloat64(sample_rate), 1.0))) AS multiplier", query)
+            self.assertIn("sum(packet_value * multiplier) AS packets", query)
+            self.assertIn("sum(byte_value * multiplier) AS bytes", query)
+            self.assertIn("packets / 60.0 AS packets_s", query)
+            self.assertIn("bytes * 8 / 60.0 AS bits_s", query)
+            self.assertIn("GROUP BY bucket, src_ip, dst_ip, internal_ip, protocol, dst_port", query)
+            self.assertIn("proto = 17", query)
+            self.assertIn("dst_port IN (53)", query)
+            self.assertNotIn("sum(toFloat64(packets)", query)
+            self.assertNotIn("sum(toFloat64(bytes)", query)
+            self.assertNotIn("sum(packets", query)
+            self.assertNotIn("sum(bytes", query)
+            self.assertNotIn("source-port", query)
+            return FakeClickHouseResult(columns, [row])
+
+        rule = outbound_dst_port_rule(vector="DNS_INTERNAL_IP_TO_DST_HIGH_PPS", protocol="DNS", dst_port="53")
+        zone = {"id": 1, "name": "CGN"}
+        template = {"id": 10, "name": "DNS", "active": True}
+        prefix = {"id": 7, "cidr": "186.232.171.0/24"}
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+             mock.patch.object(
+                 backend_main,
+                 "clickhouse_sample_rate_expr",
+                 return_value="multiIf(input_if > 0, 512.0, greatest(toFloat64(sample_rate), 1.0))",
+             ):
+            items = backend_main.query_detection_rule_candidates(zone, template, rule, prefix, flow_time, flow_time, None)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["top_dst_ip"], "8.8.8.8")
+        self.assertEqual(items[0]["top_dst_port"], 53)
+        self.assertEqual(items[0]["protocol"], "udp")
+        self.assertEqual(items[0]["mitigation_basis"], "dns_outbound_destination")
+        self.assertEqual(calls[0][1]["prefix_cidr"], "186.232.171.0/24")
+
     def test_outbound_dst_port_rule_creates_one_candidate_per_destination_port(self):
         calls = []
         flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
