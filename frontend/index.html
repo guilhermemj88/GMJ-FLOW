@@ -3036,10 +3036,11 @@
                       <option value="false">Desativada</option>
                     </select>
                   </div>
-                  <div class="field">
+                  <div id="detectionRuleResponseField" class="field">
                     <label for="detectionRuleResponse">Response</label>
                     <select id="detectionRuleResponse" class="form-select form-select-sm">
                       <option value="DETECTION_ONLY">DETECTION_ONLY</option>
+                      <option value="RESPONSE_PROFILE">RESPONSE_PROFILE</option>
                       <option value="MANUAL_REVIEW">MANUAL_REVIEW</option>
                       <option value="ALERT_ONLY">ALERT_ONLY</option>
                     </select>
@@ -6933,7 +6934,56 @@
     }
 
     function detectionResponseLabel(value) {
-      return String(value || 'DETECTION_ONLY') === 'DETECTION_ONLY' ? 'Detecção apenas informativa' : String(value || '-');
+      const response = String(value || 'DETECTION_ONLY');
+      if (response === 'DETECTION_ONLY') return 'Detecção apenas informativa';
+      if (response === 'RESPONSE_PROFILE') return 'Response Profile';
+      return response || '-';
+    }
+
+    function syncDetectionRuleMitigationUi() {
+      const mitigationEnabled = boolSelectValue('detectionRuleMitigationEnabled');
+      const mitigationMode = selectValue('detectionRuleMitigationMode', 'detection_only');
+      const responseSelect = document.getElementById('detectionRuleResponse');
+      const responseField = document.getElementById('detectionRuleResponseField');
+      const profileSelectIds = [
+        'detectionRuleWarningProfile',
+        'detectionRuleCriticalProfile',
+        'detectionRuleFallbackProfile'
+      ];
+      const detectionOnly = !mitigationEnabled || mitigationMode === 'detection_only';
+      const profileMode = mitigationEnabled && mitigationMode === 'response_profile';
+
+      if (detectionOnly) {
+        if (!mitigationEnabled) setValue('detectionRuleMitigationMode', 'detection_only');
+        setValue('detectionRuleResponse', 'DETECTION_ONLY');
+        if (responseSelect) responseSelect.disabled = false;
+        if (responseField) responseField.classList.remove('d-none');
+        profileSelectIds.forEach(id => {
+          setValue(id, '');
+          const select = document.getElementById(id);
+          if (select) select.disabled = true;
+        });
+        return;
+      }
+
+      if (profileMode) {
+        setValue('detectionRuleResponse', 'RESPONSE_PROFILE');
+        if (responseSelect) responseSelect.disabled = true;
+        if (responseField) responseField.classList.add('d-none');
+        profileSelectIds.forEach(id => {
+          const select = document.getElementById(id);
+          if (select) select.disabled = false;
+        });
+        return;
+      }
+
+      if (responseSelect) responseSelect.disabled = false;
+      if (responseField) responseField.classList.remove('d-none');
+      profileSelectIds.forEach(id => {
+        setValue(id, '');
+        const select = document.getElementById(id);
+        if (select) select.disabled = true;
+      });
     }
 
     function detectionDomainLabel(value) {
@@ -7628,6 +7678,7 @@
       setValue('detectionRuleDstPort', suggested.dst_port || selectValue('detectionRuleDstPort', 'any'));
       setValue('detectionRuleMitigationMode', 'manual_review');
       setBoolSelect('detectionRuleMitigationEnabled', false);
+      syncDetectionRuleMitigationUi();
       if (draftOnly) setBoolSelect('detectionRuleEnabled', false);
       highlightTrafficLearnedFields();
       closeModal('trafficLearningModal');
@@ -7740,11 +7791,22 @@
       setBoolSelect('detectionRuleWhitelist', rule?.use_global_whitelist ?? true);
       setValue('detectionRuleNotes', rule?.notes || '');
       renderBgpSelects();
+      syncDetectionRuleMitigationUi();
     }
 
     function collectDetectionRuleForm() {
       const warningText = selectValue('detectionRuleWarning').trim();
       const criticalText = selectValue('detectionRuleCritical').trim();
+      const mitigationEnabledRaw = boolSelectValue('detectionRuleMitigationEnabled');
+      const mitigationModeRaw = selectValue('detectionRuleMitigationMode', 'detection_only');
+      const responseProfileMode = mitigationEnabledRaw && mitigationModeRaw === 'response_profile';
+      const detectionOnlyMode = !mitigationEnabledRaw || mitigationModeRaw === 'detection_only';
+      const mitigationEnabled = detectionOnlyMode ? false : mitigationEnabledRaw;
+      const mitigationMode = detectionOnlyMode ? 'detection_only' : mitigationModeRaw;
+      const response = responseProfileMode ? 'RESPONSE_PROFILE' : detectionOnlyMode ? 'DETECTION_ONLY' : selectValue('detectionRuleResponse', 'DETECTION_ONLY');
+      const warningProfileId = responseProfileMode && selectValue('detectionRuleWarningProfile') ? Number(selectValue('detectionRuleWarningProfile')) : null;
+      const criticalProfileId = responseProfileMode && selectValue('detectionRuleCriticalProfile') ? Number(selectValue('detectionRuleCriticalProfile')) : null;
+      const fallbackProfileId = responseProfileMode && selectValue('detectionRuleFallbackProfile') ? Number(selectValue('detectionRuleFallbackProfile')) : null;
       return {
         vector: selectValue('detectionRuleVector').trim(),
         display_name: selectValue('detectionRuleDisplayName').trim() || automaticVectorDisplayName(selectValue('detectionRuleVector').trim()),
@@ -7759,7 +7821,7 @@
         consecutive_windows: numberValue('detectionRuleConsecutive', 1),
         cooldown_minutes: numberValue('detectionRuleCooldown', 5),
         enabled: boolSelectValue('detectionRuleEnabled'),
-        response: selectValue('detectionRuleResponse', 'DETECTION_ONLY'),
+        response: response,
         src_cidr: selectValue('detectionRuleSrcCidr').trim(),
         dst_cidr: selectValue('detectionRuleDstCidr').trim(),
         src_port: selectValue('detectionRuleSrcPort', 'any').trim() || 'any',
@@ -7771,11 +7833,11 @@
         detection_key: selectValue('detectionRuleGroupBy'),
         input_if: selectValue('detectionRuleInputIf').trim(),
         output_if: selectValue('detectionRuleOutputIf').trim(),
-        warning_response_profile_id: selectValue('detectionRuleWarningProfile') ? Number(selectValue('detectionRuleWarningProfile')) : null,
-        critical_response_profile_id: selectValue('detectionRuleCriticalProfile') ? Number(selectValue('detectionRuleCriticalProfile')) : null,
-        fallback_response_profile_id: selectValue('detectionRuleFallbackProfile') ? Number(selectValue('detectionRuleFallbackProfile')) : null,
-        mitigation_enabled: boolSelectValue('detectionRuleMitigationEnabled'),
-        mitigation_mode: selectValue('detectionRuleMitigationMode', 'detection_only'),
+        warning_response_profile_id: warningProfileId,
+        critical_response_profile_id: criticalProfileId,
+        fallback_response_profile_id: fallbackProfileId,
+        mitigation_enabled: mitigationEnabled,
+        mitigation_mode: mitigationMode,
         duration_seconds: Math.max(60, numberValue('detectionRuleDuration', 7200)),
         use_global_whitelist: boolSelectValue('detectionRuleWhitelist'),
         notes: selectValue('detectionRuleNotes').trim()
@@ -14857,6 +14919,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
     document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
     document.getElementById('detectionRuleVector').addEventListener('input', () => syncFriendlyNameFromTechnical('detectionRuleVector', 'detectionRuleDisplayName'));
+    document.getElementById('detectionRuleMitigationEnabled').addEventListener('change', syncDetectionRuleMitigationUi);
+    document.getElementById('detectionRuleMitigationMode').addEventListener('change', syncDetectionRuleMitigationUi);
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
     document.getElementById('runDetectionNowButton').addEventListener('click', () => runDetectionNow().catch(console.error));
     document.getElementById('learnDetectionRuleButton').addEventListener('click', () => openTrafficLearningModal().catch(error => setText('detectionRuleStatus', `Falha ao abrir aprendizado: ${error.message}`)));

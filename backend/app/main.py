@@ -543,7 +543,7 @@ DETECTION_METRICS = {
     "unique_src_ports",
 }
 DETECTION_COMPARISONS = {"over", "under"}
-DETECTION_RESPONSES = {"DETECTION_ONLY", "ALERT_ONLY", "MANUAL_REVIEW"}
+DETECTION_RESPONSES = {"DETECTION_ONLY", "ALERT_ONLY", "MANUAL_REVIEW", "RESPONSE_PROFILE"}
 DETECTION_WHITELIST_TYPES = {"source", "destination", "source_destination"}
 DETECTION_PROTOCOLS = {item["id"] for item in DECODER_REGISTRY} | {"ALL", "IP/ALL", "FRAGMENTS"}
 DETECTION_GROUP_BY_OPTIONS = {
@@ -6956,15 +6956,27 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
     display_name = effective_vector_display_name(item.get("display_name"), vector)
     cooldown_seconds = int(item.get("cooldown_seconds") or int(item.get("cooldown_minutes") or 5) * 60)
     mitigation_mode = normalize_detection_mitigation_mode(item.get("mitigation_mode"))
+    mitigation_enabled = sqlite_bool(item.get("mitigation_enabled"))
+    if not mitigation_enabled:
+        mitigation_mode = "detection_only"
     warning_profile_id = int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None
     critical_profile_id = int(item["critical_response_profile_id"]) if item.get("critical_response_profile_id") is not None else None
     fallback_profile_id = int(item["fallback_response_profile_id"]) if item.get("fallback_response_profile_id") is not None else None
+    if mitigation_mode == "detection_only":
+        warning_profile_id = None
+        critical_profile_id = None
+        fallback_profile_id = None
     selected_profile_id = critical_profile_id or warning_profile_id or fallback_profile_id
     profile_status = "valid"
     profile_status_reason = ""
-    if mitigation_mode != "detection_only" and selected_profile_id is None:
+    if mitigation_mode == "response_profile" and selected_profile_id is None:
         profile_status = "invalid_connector"
         profile_status_reason = "Nenhum Response Profile valido foi selecionado."
+    response = item.get("response") or "DETECTION_ONLY"
+    if mitigation_mode == "response_profile":
+        response = "RESPONSE_PROFILE"
+    elif mitigation_mode == "detection_only":
+        response = "DETECTION_ONLY"
     return {
         "id": int(item["id"]),
         "template_id": int(item["template_id"]),
@@ -6984,7 +6996,7 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "cooldown_minutes": int(item.get("cooldown_minutes") or 5),
         "cooldown_seconds": cooldown_seconds,
         "enabled": sqlite_bool(item.get("enabled")),
-        "response": item.get("response") or "DETECTION_ONLY",
+        "response": response,
         "src_cidr": item.get("src_cidr") or "",
         "dst_cidr": item.get("dst_cidr") or "",
         "src_port": item.get("src_port") or "any",
@@ -7001,11 +7013,11 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "warning_response_profile_id": warning_profile_id,
         "critical_response_profile_id": critical_profile_id,
         "fallback_response_profile_id": fallback_profile_id,
-        "warning_response_profile_name": item.get("warning_response_profile_name") or "",
-        "critical_response_profile_name": item.get("critical_response_profile_name") or "",
-        "fallback_response_profile_name": item.get("fallback_response_profile_name") or "",
+        "warning_response_profile_name": item.get("warning_response_profile_name") if warning_profile_id else "",
+        "critical_response_profile_name": item.get("critical_response_profile_name") if critical_profile_id else "",
+        "fallback_response_profile_name": item.get("fallback_response_profile_name") if fallback_profile_id else "",
         "mitigation_mode": mitigation_mode,
-        "mitigation_enabled": sqlite_bool(item.get("mitigation_enabled")),
+        "mitigation_enabled": mitigation_enabled and mitigation_mode != "detection_only",
         "profile_status": profile_status,
         "profile_status_reason": profile_status_reason,
         "selected_response_profile_id": selected_profile_id,
@@ -7135,6 +7147,20 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
     metric = normalize_choice(clean_text(data.get("metric")).lower() or "packets_s", DETECTION_METRICS, "metric")
     comparison = normalize_choice(clean_text(data.get("comparison")).lower() or "over", DETECTION_COMPARISONS, "comparison")
     response = normalize_choice(clean_text(data.get("response")).upper() or "DETECTION_ONLY", DETECTION_RESPONSES, "response")
+    mitigation_mode = normalize_detection_mitigation_mode(data.get("mitigation_mode"))
+    mitigation_enabled = 1 if data.get("mitigation_enabled") else 0
+    warning_response_profile_id = data.get("warning_response_profile_id")
+    critical_response_profile_id = data.get("critical_response_profile_id")
+    fallback_response_profile_id = data.get("fallback_response_profile_id")
+    if not mitigation_enabled or mitigation_mode == "detection_only":
+        mitigation_mode = "detection_only"
+        mitigation_enabled = 0
+        response = "DETECTION_ONLY"
+        warning_response_profile_id = None
+        critical_response_profile_id = None
+        fallback_response_profile_id = None
+    elif mitigation_mode == "response_profile":
+        response = "RESPONSE_PROFILE"
     group_by = clean_text(data.get("group_by") or data.get("detection_key"))
     if group_by not in DETECTION_GROUP_BY_OPTIONS:
         raise HTTPException(status_code=400, detail="group_by invalido")
@@ -7178,11 +7204,11 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
         "input_if": clean_text(data.get("input_if")),
         "output_if": clean_text(data.get("output_if")),
         "sensor_id": data.get("sensor_id"),
-        "warning_response_profile_id": data.get("warning_response_profile_id"),
-        "critical_response_profile_id": data.get("critical_response_profile_id"),
-        "fallback_response_profile_id": data.get("fallback_response_profile_id"),
-        "mitigation_mode": normalize_detection_mitigation_mode(data.get("mitigation_mode")),
-        "mitigation_enabled": 1 if data.get("mitigation_enabled") or normalize_detection_mitigation_mode(data.get("mitigation_mode")) != "detection_only" else 0,
+        "warning_response_profile_id": warning_response_profile_id,
+        "critical_response_profile_id": critical_response_profile_id,
+        "fallback_response_profile_id": fallback_response_profile_id,
+        "mitigation_mode": mitigation_mode,
+        "mitigation_enabled": mitigation_enabled,
         "max_auto_prefixlen_v4": int(data.get("max_auto_prefixlen_v4") or 32),
         "max_auto_prefixlen_v6": int(data.get("max_auto_prefixlen_v6") or 128),
         "require_protected_prefix": 1 if data.get("require_protected_prefix") else 0,
@@ -9622,6 +9648,8 @@ def detection_rule_mitigation_config(conn: sqlite3.Connection, attack_vector_nam
         return None
     item = detection_rule_row_to_dict(row)
     profile_id = item.get("critical_response_profile_id") or item.get("warning_response_profile_id") or item.get("fallback_response_profile_id")
+    if not item.get("mitigation_enabled") or item.get("mitigation_mode") != "response_profile" or profile_id is None:
+        return None
     return {
         "id": item.get("id"),
         "name": item.get("vector") or name,
@@ -17451,6 +17479,9 @@ def query_detection_rule_candidates(
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto")
     metric_alias = metric_expression_for_detection(rule["metric"])
+    rule_mitigation_mode = normalize_detection_mitigation_mode(rule.get("mitigation_mode"))
+    rule_mitigation_enabled = sqlite_bool(rule.get("mitigation_enabled"))
+    rule_response = "RESPONSE_PROFILE" if rule_mitigation_enabled and rule_mitigation_mode == "response_profile" else (rule.get("response") or "DETECTION_ONLY")
     group_column_names = ["bucket", "src_ip", "dst_ip", "internal_ip", "protocol"]
     if group_by_dst_port:
         group_column_names.append("dst_port")
@@ -17625,7 +17656,7 @@ def query_detection_rule_candidates(
             "comparison": rule.get("comparison") or "over",
             "metric_value": round(metric_value, 2),
             "matched": matched,
-            "response": rule.get("response") or "DETECTION_ONLY",
+            "response": rule_response,
         }
         items.append(item)
     return items

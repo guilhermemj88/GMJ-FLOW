@@ -937,6 +937,103 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("item = detection_rule_row_to_dict(row)", SOURCE)
         self.assertNotIn("detection_template_rule_row_to_dict", SOURCE)
 
+    def test_detection_only_payload_clears_response_profiles(self):
+        payload = backend_main.DetectionRulePayload(
+            vector="UDP_INTERNAL_IP_DST_HIGH_PPS",
+            warning_value=1000,
+            response="MANUAL_REVIEW",
+            warning_response_profile_id=10,
+            critical_response_profile_id=11,
+            fallback_response_profile_id=12,
+            mitigation_mode="detection_only",
+            mitigation_enabled=False,
+        )
+        normalized = backend_main.normalize_detection_rule_payload(payload)
+
+        self.assertEqual(normalized["response"], "DETECTION_ONLY")
+        self.assertEqual(normalized["mitigation_mode"], "detection_only")
+        self.assertEqual(normalized["mitigation_enabled"], 0)
+        self.assertIsNone(normalized["warning_response_profile_id"])
+        self.assertIsNone(normalized["critical_response_profile_id"])
+        self.assertIsNone(normalized["fallback_response_profile_id"])
+
+    def test_response_profile_payload_is_source_of_truth(self):
+        payload = backend_main.DetectionRulePayload(
+            vector="UDP_INTERNAL_IP_DST_HIGH_PPS",
+            warning_value=1000,
+            response="DETECTION_ONLY",
+            warning_response_profile_id=10,
+            critical_response_profile_id=11,
+            fallback_response_profile_id=12,
+            mitigation_mode="response_profile",
+            mitigation_enabled=True,
+        )
+        normalized = backend_main.normalize_detection_rule_payload(payload)
+
+        self.assertEqual(normalized["response"], "RESPONSE_PROFILE")
+        self.assertEqual(normalized["mitigation_mode"], "response_profile")
+        self.assertEqual(normalized["mitigation_enabled"], 1)
+        self.assertEqual(normalized["warning_response_profile_id"], 10)
+        self.assertEqual(normalized["critical_response_profile_id"], 11)
+        self.assertEqual(normalized["fallback_response_profile_id"], 12)
+
+    def test_response_profile_runtime_does_not_depend_on_detection_only_response(self):
+        with sqlite3.connect(":memory:") as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """
+                CREATE TABLE detection_template_rules (
+                    id INTEGER PRIMARY KEY,
+                    template_id INTEGER NOT NULL DEFAULT 1,
+                    vector TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    domain TEXT NOT NULL DEFAULT 'internal_ip',
+                    direction TEXT NOT NULL DEFAULT 'transmits',
+                    protocol TEXT DEFAULT 'UDP',
+                    metric TEXT NOT NULL DEFAULT 'packets_s',
+                    comparison TEXT NOT NULL DEFAULT 'over',
+                    warning_value REAL,
+                    critical_value REAL,
+                    window_seconds INTEGER NOT NULL DEFAULT 60,
+                    consecutive_windows INTEGER NOT NULL DEFAULT 1,
+                    cooldown_minutes INTEGER NOT NULL DEFAULT 5,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    response TEXT NOT NULL DEFAULT 'DETECTION_ONLY',
+                    src_cidr TEXT NOT NULL DEFAULT '',
+                    dst_cidr TEXT NOT NULL DEFAULT '',
+                    src_port TEXT NOT NULL DEFAULT 'any',
+                    dst_port TEXT NOT NULL DEFAULT 'any',
+                    detection_key TEXT NOT NULL DEFAULT '',
+                    group_by TEXT NOT NULL DEFAULT '',
+                    warning_response_profile_id INTEGER,
+                    critical_response_profile_id INTEGER,
+                    fallback_response_profile_id INTEGER,
+                    mitigation_mode TEXT NOT NULL DEFAULT 'detection_only',
+                    mitigation_enabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO detection_template_rules (
+                    id, vector, warning_value, critical_value, response,
+                    critical_response_profile_id, mitigation_mode, mitigation_enabled,
+                    created_at, updated_at
+                )
+                VALUES (1, 'UDP_INTERNAL_IP_DST_HIGH_PPS', 1000, 2000, 'DETECTION_ONLY',
+                    42, 'response_profile', 1, '2026-07-10T12:00:00Z', '2026-07-10T12:00:00Z')
+                """
+            )
+
+            config = backend_main.detection_rule_mitigation_config(conn, "UDP_INTERNAL_IP_DST_HIGH_PPS")
+
+        self.assertIsNotNone(config)
+        self.assertEqual(config["response_profile_id"], 42)
+        self.assertEqual(config["mitigation_mode"], "response_profile")
+        self.assertTrue(config["mitigation_enabled"])
+
     def test_anomaly_human_labels_and_fallbacks(self):
         self.assertEqual(backend_main.anomaly_type_label("PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK"), "UDP flood por IP")
         self.assertEqual(backend_main.anomaly_type_label("DNS_INTERNAL_IP_TO_DST_HIGH_PPS"), "DNS alto por destino")
@@ -1207,6 +1304,20 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn('${escapeHtml(vectorDisplayName(vector, vector.name))}<div class="subtle">${escapeHtml(vector.name)}</div>', FRONTEND)
         self.assertIn("setText('detectionRuleTestRule', vectorDisplayName(rule, rule.vector))", FRONTEND)
         self.assertIn("setText('detectionRuleTestRule', vectorDisplayName(rule || items[0] || {}", FRONTEND)
+
+    def test_detection_rule_response_profile_ui_avoids_contradictory_state(self):
+        self.assertIn('id="detectionRuleResponseField"', FRONTEND)
+        self.assertIn('<option value="RESPONSE_PROFILE">RESPONSE_PROFILE</option>', FRONTEND)
+        self.assertIn("function syncDetectionRuleMitigationUi()", FRONTEND)
+        self.assertIn("if (response === 'RESPONSE_PROFILE') return 'Response Profile'", FRONTEND)
+        self.assertIn("setValue('detectionRuleResponse', 'RESPONSE_PROFILE')", FRONTEND)
+        self.assertIn("responseField.classList.add('d-none')", FRONTEND)
+        self.assertIn("setValue('detectionRuleResponse', 'DETECTION_ONLY')", FRONTEND)
+        self.assertIn("setValue(id, '')", FRONTEND)
+        self.assertIn("response: response", FRONTEND)
+        self.assertIn("warning_response_profile_id: warningProfileId", FRONTEND)
+        self.assertIn("critical_response_profile_id: criticalProfileId", FRONTEND)
+        self.assertIn("fallback_response_profile_id: fallbackProfileId", FRONTEND)
 
     def test_anomaly_timeseries_window_expands_zero_duration(self):
         first = datetime(2026, 7, 7, 14, 12, 49, tzinfo=timezone.utc)
