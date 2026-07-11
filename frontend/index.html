@@ -5472,6 +5472,7 @@
     let aiProfiles = [];
     let bgpConnectors = [];
     let bgpProfiles = [];
+    let bgpResponseProfilesLoadingPromise = null;
     let bgpProfileFilter = 'all';
     let bgpProtectedPrefixes = [];
     let bgpAnnouncements = [];
@@ -7782,16 +7783,16 @@
       setValue('detectionRuleGroupBy', rule?.group_by || rule?.detection_key || '');
       setValue('detectionRuleInputIf', rule?.input_if || '');
       setValue('detectionRuleOutputIf', rule?.output_if || '');
-      setValue('detectionRuleWarningProfile', rule?.warning_response_profile_id || '');
-      setValue('detectionRuleCriticalProfile', rule?.critical_response_profile_id || '');
-      setValue('detectionRuleFallbackProfile', rule?.fallback_response_profile_id || '');
+      const profileSelections = detectionRuleProfileSelections(rule);
       setBoolSelect('detectionRuleMitigationEnabled', rule?.mitigation_enabled ?? false);
       setValue('detectionRuleMitigationMode', rule?.mitigation_mode || 'detection_only');
       setValue('detectionRuleDuration', rule?.duration_seconds || 7200);
       setBoolSelect('detectionRuleWhitelist', rule?.use_global_whitelist ?? true);
       setValue('detectionRuleNotes', rule?.notes || '');
-      renderBgpSelects();
+      renderBgpSelects(profileSelections);
+      applyDetectionRuleProfileSelections(profileSelections);
       syncDetectionRuleMitigationUi();
+      ensureDetectionRuleProfileOptions(profileSelections).catch(() => {});
     }
 
     function collectDetectionRuleForm() {
@@ -8452,11 +8453,87 @@
       return connector?.id || '';
     }
 
+    function bgpResponseProfilesFromPayload(payload) {
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload?.items)) return payload.items;
+      if (Array.isArray(payload?.profiles)) return payload.profiles;
+      return [];
+    }
+
+    async function loadBgpResponseProfiles() {
+      if (bgpResponseProfilesLoadingPromise) return bgpResponseProfilesLoadingPromise;
+      bgpResponseProfilesLoadingPromise = apiRequest('/api/bgp/response-profiles')
+        .then(payload => {
+          bgpProfiles = bgpResponseProfilesFromPayload(payload);
+          if (!Array.isArray(bgpProfiles)) bgpProfiles = [];
+          return bgpProfiles;
+        })
+        .catch(error => {
+          setText('detectionRuleStatus', `Falha ao carregar Response Profiles: ${error.message}`);
+          throw error;
+        })
+        .finally(() => {
+          bgpResponseProfilesLoadingPromise = null;
+        });
+      return bgpResponseProfilesLoadingPromise;
+    }
+
+    function bgpProfileEnabled(item = {}) {
+      return item.enabled !== false && item.enabled !== 0 && String(item.enabled).toLowerCase() !== 'false';
+    }
+
+    function detectionRuleProfileSelections(rule = null) {
+      return {
+        detectionRuleWarningProfile: rule?.warning_response_profile_id || selectValue('detectionRuleWarningProfile'),
+        detectionRuleCriticalProfile: rule?.critical_response_profile_id || selectValue('detectionRuleCriticalProfile'),
+        detectionRuleFallbackProfile: rule?.fallback_response_profile_id || selectValue('detectionRuleFallbackProfile')
+      };
+    }
+
+    function applyDetectionRuleProfileSelections(selections = {}) {
+      Object.entries(selections).forEach(([id, value]) => {
+        if (value !== undefined && value !== null) setValue(id, value || '');
+      });
+    }
+
+    function detectionRuleProfileLoadNeeded(selections = {}) {
+      const selectedIds = Object.values(selections).filter(Boolean).map(value => String(value));
+      if (!bgpProfiles.length) return true;
+      return selectedIds.some(id => !bgpProfiles.some(profile => String(profile.id) === id));
+    }
+
+    function refreshDetectionRuleProfileSelects(selections = detectionRuleProfileSelections()) {
+      renderBgpSelects(selections);
+      applyDetectionRuleProfileSelections(selections);
+      syncDetectionRuleMitigationUi();
+    }
+
+    async function ensureDetectionRuleProfileOptions(selections = detectionRuleProfileSelections()) {
+      if (!detectionRuleProfileLoadNeeded(selections)) {
+        refreshDetectionRuleProfileSelects(selections);
+        return bgpProfiles;
+      }
+      await loadBgpResponseProfiles();
+      refreshDetectionRuleProfileSelects(selections);
+      return bgpProfiles;
+    }
+
+    function handleDetectionRuleMitigationChange() {
+      const selections = detectionRuleProfileSelections();
+      const profileMode = boolSelectValue('detectionRuleMitigationEnabled')
+        && selectValue('detectionRuleMitigationMode', 'detection_only') === 'response_profile';
+      if (!profileMode) {
+        syncDetectionRuleMitigationUi();
+        return;
+      }
+      ensureDetectionRuleProfileOptions(selections).catch(() => syncDetectionRuleMitigationUi());
+    }
+
     function bgpProfileOptions(selected = '') {
       return optionList([['', 'Selecionar']], selected) + optionList(
         bgpProfiles
-          .filter(item => item.enabled && (item.profile_status === 'valid' || String(item.id) === String(selected)))
-          .map(item => [item.id, `${item.name}${item.profile_status && item.profile_status !== 'valid' ? ` (${item.profile_status})` : ''}`]),
+          .filter(item => bgpProfileEnabled(item) || String(item.id) === String(selected))
+          .map(item => [item.id, item.name]),
         selected
       );
     }
@@ -8502,7 +8579,7 @@
       if (selected) selected.disabled = mode !== 'selected_connectors';
     }
 
-    function renderBgpSelects() {
+    function renderBgpSelects(detectionProfileSelections = {}) {
       document.getElementById('bgpConnectorRole').innerHTML = optionList(BGP_ROLE_OPTIONS, selectValue('bgpConnectorRole') || 'generic_bgp');
       document.getElementById('bgpConnectorBackend').innerHTML = optionList(BGP_BACKEND_OPTIONS, selectValue('bgpConnectorBackend') || 'dry_run');
       document.getElementById('bgpConnectorMode').innerHTML = optionList(BGP_MODE_OPTIONS, selectValue('bgpConnectorMode') || 'dry_run');
@@ -8523,7 +8600,13 @@
       }
       ['detectionRuleWarningProfile', 'detectionRuleCriticalProfile', 'detectionRuleFallbackProfile'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.innerHTML = bgpProfileOptions(selectValue(id));
+        if (el) {
+          const selected = Object.prototype.hasOwnProperty.call(detectionProfileSelections, id)
+            ? detectionProfileSelections[id]
+            : selectValue(id);
+          el.innerHTML = bgpProfileOptions(selected);
+          if (selected !== undefined && selected !== null) el.value = String(selected || '');
+        }
       });
       if (document.getElementById('bgpMitigationConnector')) {
         document.getElementById('bgpMitigationConnector').innerHTML = bgpConnectorOptions(selectValue('bgpMitigationConnector'));
@@ -8905,13 +8988,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('bgpStatus', 'Carregando BGP / Mitigação...');
       const [connectors, profiles, protectedPrefixes, policies, announcements] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
-        apiRequest('/api/bgp/response-profiles?include_disabled=true'),
+        apiRequest('/api/bgp/response-profiles'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
         apiRequest('/api/bgp/port-policies?include_disabled=true'),
         apiRequest('/api/bgp/announcements?limit=200')
       ]);
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
-      bgpProfiles = Array.isArray(profiles.items) ? profiles.items : [];
+      bgpProfiles = bgpResponseProfilesFromPayload(profiles);
       bgpProtectedPrefixes = Array.isArray(protectedPrefixes.items) ? protectedPrefixes.items : [];
       bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
@@ -14919,8 +15002,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('disableDetectionTemplateButton').addEventListener('click', () => disableDetectionTemplate().catch(console.error));
     document.getElementById('newDetectionRuleButton').addEventListener('click', () => resetDetectionRuleForm());
     document.getElementById('detectionRuleVector').addEventListener('input', () => syncFriendlyNameFromTechnical('detectionRuleVector', 'detectionRuleDisplayName'));
-    document.getElementById('detectionRuleMitigationEnabled').addEventListener('change', syncDetectionRuleMitigationUi);
-    document.getElementById('detectionRuleMitigationMode').addEventListener('change', syncDetectionRuleMitigationUi);
+    document.getElementById('detectionRuleMitigationEnabled').addEventListener('change', handleDetectionRuleMitigationChange);
+    document.getElementById('detectionRuleMitigationMode').addEventListener('change', handleDetectionRuleMitigationChange);
     document.getElementById('saveDetectionRuleButton').addEventListener('click', () => saveDetectionRule().catch(console.error));
     document.getElementById('runDetectionNowButton').addEventListener('click', () => runDetectionNow().catch(console.error));
     document.getElementById('learnDetectionRuleButton').addEventListener('click', () => openTrafficLearningModal().catch(error => setText('detectionRuleStatus', `Falha ao abrir aprendizado: ${error.message}`)));

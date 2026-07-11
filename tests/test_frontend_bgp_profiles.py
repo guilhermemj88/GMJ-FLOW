@@ -11,7 +11,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("apiRequest('/api/bgp/connectors')", HTML)
 
     def test_profile_payload_uses_numeric_connector_id(self):
-        self.assertIn("connector_id: selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null", HTML)
+        self.assertIn("connector_id: targetMode === 'fixed_connector' && selectValue('bgpProfileConnector') ? Number(selectValue('bgpProfileConnector')) : null", HTML)
         self.assertNotIn("connector_id: selectValue('bgpProfileConnector', item.connector_name", HTML)
 
     def test_edit_profile_selects_connector_id(self):
@@ -80,6 +80,33 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("trafficLearnSaveButton", HTML)
         self.assertIn("setValue('detectionRuleMitigationMode', 'manual_review')", HTML)
         self.assertIn("setBoolSelect('detectionRuleMitigationEnabled', false)", HTML)
+
+    def test_detection_rule_profile_selects_load_response_profiles_endpoint(self):
+        self.assertIn("apiRequest('/api/bgp/response-profiles')", HTML)
+        self.assertIn("function bgpResponseProfilesFromPayload(payload)", HTML)
+        self.assertIn("if (Array.isArray(payload)) return payload", HTML)
+        self.assertIn("if (Array.isArray(payload?.items)) return payload.items", HTML)
+        self.assertIn("if (Array.isArray(payload?.profiles)) return payload.profiles", HTML)
+        self.assertIn("Falha ao carregar Response Profiles", HTML)
+
+    def test_detection_rule_profile_selects_preserve_existing_rule_ids(self):
+        self.assertIn("detectionRuleWarningProfile: rule?.warning_response_profile_id", HTML)
+        self.assertIn("detectionRuleCriticalProfile: rule?.critical_response_profile_id", HTML)
+        self.assertIn("detectionRuleFallbackProfile: rule?.fallback_response_profile_id", HTML)
+        self.assertIn("renderBgpSelects(profileSelections)", HTML)
+        self.assertIn("applyDetectionRuleProfileSelections(profileSelections)", HTML)
+        self.assertIn("ensureDetectionRuleProfileOptions(profileSelections)", HTML)
+        self.assertIn("function bgpProfileEnabled(item = {})", HTML)
+        self.assertIn(".filter(item => bgpProfileEnabled(item) || String(item.id) === String(selected))", HTML)
+        self.assertIn(".map(item => [item.id, item.name])", HTML)
+
+    def test_detection_rule_profile_save_preserves_selected_ids(self):
+        self.assertIn("const warningProfileId = responseProfileMode && selectValue('detectionRuleWarningProfile')", HTML)
+        self.assertIn("const criticalProfileId = responseProfileMode && selectValue('detectionRuleCriticalProfile')", HTML)
+        self.assertIn("const fallbackProfileId = responseProfileMode && selectValue('detectionRuleFallbackProfile')", HTML)
+        self.assertIn("warning_response_profile_id: warningProfileId", HTML)
+        self.assertIn("critical_response_profile_id: criticalProfileId", HTML)
+        self.assertIn("fallback_response_profile_id: fallbackProfileId", HTML)
 
 
 if __name__ == "__main__":
