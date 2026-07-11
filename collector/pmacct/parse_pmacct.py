@@ -31,6 +31,9 @@ COLUMN_NAMES = [
     "flow_count",
     "flow_type",
     "sample_rate",
+    "flow_start",
+    "flow_end",
+    "duration_ms",
     "src_asn",
     "dst_asn",
     "src_as_name",
@@ -67,6 +70,9 @@ ALIASES = {
     "bytes": ("bytes", "octets", "in_bytes", "byte_count"),
     "flows": ("flows", "flow_count", "records"),
     "timestamp": ("timestamp", "timestamp_start", "stamp_inserted", "stamp_updated", "first_switched", "flow_start"),
+    "flow_start": ("flow_start", "timestamp_start", "flow_begin", "start_time"),
+    "flow_end": ("flow_end", "timestamp_end", "flow_finish", "end_time"),
+    "duration_ms": ("duration_ms", "flow_duration_ms", "duration_msec", "duration_milliseconds"),
     "sample_rate": ("sample_rate", "sampling_rate", "samplinginterval"),
     "src_as": ("src_as", "src_asn", "src_as_number", "src_asnum", "peer_src_as"),
     "dst_as": ("dst_as", "dst_asn", "dst_as_number", "dst_asnum", "peer_dst_as"),
@@ -221,12 +227,30 @@ def parse_timestamp(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def parse_optional_timestamp(value: Any) -> datetime | None:
+    if value in (None, "", "null", "NULL"):
+        return None
+    return parse_timestamp(value)
+
+
+def parse_duration_ms(value: Any, start: datetime | None = None, end: datetime | None = None) -> int:
+    duration = safe_int(value, default=0, minimum=0)
+    if duration > 0:
+        return duration
+    if start and end and end > start:
+        return max(0, int((end - start).total_seconds() * 1000))
+    return 0
+
+
 def normalize_flow(record: dict[str, Any], sensor: str, exporter_ip: str, sample_rate_default: int) -> tuple:
     normalized = normalize_record_keys(record)
     proto = parse_proto(pick(normalized, "proto", 0))
     tcp_flags = parse_tcp_flags(pick(normalized, "tcpflags", 0))
     sample_rate = safe_int(pick(normalized, "sample_rate", sample_rate_default), default=sample_rate_default, minimum=1)
     flow_count = safe_int(pick(normalized, "flows", 1), default=1, minimum=1)
+    flow_start = parse_optional_timestamp(pick(normalized, "flow_start"))
+    flow_end = parse_optional_timestamp(pick(normalized, "flow_end"))
+    duration_ms = parse_duration_ms(pick(normalized, "duration_ms"), flow_start, flow_end)
 
     # Names are kept here for debugging/future enrichment; flow_raw stores compact numeric values.
     _ = (proto_name(proto), tcp_flags_name(tcp_flags))
@@ -248,6 +272,9 @@ def normalize_flow(record: dict[str, Any], sensor: str, exporter_ip: str, sample
         flow_count,
         "netflow-v9",
         sample_rate,
+        flow_start,
+        flow_end,
+        duration_ms,
         safe_int(pick(normalized, "src_as", 0), minimum=0),
         safe_int(pick(normalized, "dst_as", 0), minimum=0),
         str(pick(normalized, "src_as_name", "") or "")[:255],

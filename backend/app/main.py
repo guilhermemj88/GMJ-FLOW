@@ -96,8 +96,6 @@ FLOW_SEARCH_SORT_COLUMNS = {
     "bytes": "bytes",
     "packets": "packets",
     "flows": "flow_count",
-    "bits_s": "bits_s",
-    "packets_s": "packets_s",
     "sample_rate": "sample_rate_applied",
     "flow_type": "flow_type",
 }
@@ -1259,6 +1257,9 @@ def ensure_clickhouse_schema() -> None:
         "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0",
         "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_as_name String DEFAULT ''",
         "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_as_name String DEFAULT ''",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_start Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_end Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
+        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS duration_ms UInt64 DEFAULT 0",
     )
     for command in commands:
         command_clickhouse(command)
@@ -29167,9 +29168,23 @@ def search_flows_payload(
     )
     start_dt = context["start"]
     end_dt = context["end"]
-    seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
-    params.update({"limit": limit, "seconds": seconds})
+    params.update({"limit": limit})
+    schema = clickhouse_flow_raw_schema()
+    duration_expr = "toFloat64(0)"
+    flow_start_select = "CAST(NULL, 'Nullable(DateTime64(3, \\'UTC\\'))') AS flow_start"
+    flow_end_select = "CAST(NULL, 'Nullable(DateTime64(3, \\'UTC\\'))') AS flow_end"
+    duration_ms_select = "toUInt64(0) AS duration_ms"
+    if "flow_start" in schema:
+        flow_start_select = "flow_start"
+    if "flow_end" in schema:
+        flow_end_select = "flow_end"
+    if "duration_ms" in schema:
+        duration_ms_select = "duration_ms"
+        duration_expr = "if(duration_ms > 0, toFloat64(duration_ms) / 1000.0, toFloat64(0))"
+    if "flow_start" in schema and "flow_end" in schema:
+        calculated_duration = "greatest(toFloat64(dateDiff('millisecond', flow_start, flow_end)) / 1000.0, toFloat64(0))"
+        duration_expr = f"multiIf(duration_ms > 0, toFloat64(duration_ms) / 1000.0, isNotNull(flow_start) AND isNotNull(flow_end), {calculated_duration}, toFloat64(0))" if "duration_ms" in schema else f"if(isNotNull(flow_start) AND isNotNull(flow_end), {calculated_duration}, toFloat64(0))"
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", context["resolved_if_index"])
     bytes_value = corrected_value_expr("bytes", factor_expr)
     packets_value = corrected_value_expr("packets", factor_expr)
@@ -29195,8 +29210,10 @@ def search_flows_payload(
             round({bytes_value}) AS bytes,
             round({packets_value}) AS packets,
             flow_count,
-            {bytes_value} * 8 / {{seconds:Float64}} AS bits_s,
-            {packets_value} / {{seconds:Float64}} AS packets_s,
+            {flow_start_select},
+            {flow_end_select},
+            {duration_ms_select},
+            {duration_expr} AS duration_seconds,
             flow_type,
             sample_rate,
             {factor_expr} AS sample_rate_applied,
@@ -29227,8 +29244,21 @@ def search_flows_payload(
         row["raw_bytes"] = int(row.get("raw_bytes") or 0)
         row["raw_packets"] = int(row.get("raw_packets") or 0)
         row["flow_count"] = int(row.get("flow_count") or 0)
-        row["bits_s"] = round(float(row.get("bits_s") or 0), 2)
-        row["packets_s"] = round(float(row.get("packets_s") or 0), 2)
+        duration_seconds = float(row.get("duration_seconds") or 0)
+        row["duration_seconds"] = round(duration_seconds, 3) if duration_seconds > 0 else None
+        row["duration_ms"] = int(row.get("duration_ms") or 0)
+        row["flow_start"] = iso(row.get("flow_start")) if row.get("flow_start") else ""
+        row["flow_end"] = iso(row.get("flow_end")) if row.get("flow_end") else ""
+        if duration_seconds >= 1.0:
+            row["bits_s"] = round((float(row.get("bytes") or 0) * 8) / duration_seconds, 2)
+            row["packets_s"] = round(float(row.get("packets") or 0) / duration_seconds, 2)
+            row["rate_status"] = "estimated_from_flow_duration"
+            row["rate_note"] = "Taxa estimada a partir da duracao exportada no flow."
+        else:
+            row["bits_s"] = None
+            row["packets_s"] = None
+            row["rate_status"] = "unavailable_no_flow_duration"
+            row["rate_note"] = "Taxa indisponivel: flow_raw nao possui duracao real para este registro."
         row["sample_rate_applied"] = round(float(row.get("sample_rate_applied") or 1), 2)
         items.append(row)
 
@@ -29259,8 +29289,9 @@ def flows_csv_response(payload: dict[str, Any]) -> Response:
         "bytes",
         "packets",
         "flow_count",
-        "bits_s",
-        "packets_s",
+        "duration_seconds",
+        "rate_status",
+        "rate_note",
         "sample_rate_applied",
         "flow_type",
     ]
@@ -29426,10 +29457,8 @@ def anomaly_timeseries_chart_flowable(points: list[dict[str, Any]], event: dict[
 
 
 def flow_pdf_summary_rows(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[list[str]]:
-    top_bits = max(items, key=lambda item: float(item.get("bits_s") or 0), default={})
-    top_pps = max(items, key=lambda item: float(item.get("packets_s") or 0), default={})
     top_src = max(items, key=lambda item: float(item.get("bytes") or 0), default={})
-    top_dst = top_bits or top_src
+    top_dst = top_src
     top_dst_text = "-"
     if top_dst:
         parts = [clean_ip(top_dst.get("dst_ip")) or clean_text(top_dst.get("dst_ip"))]
@@ -29439,7 +29468,8 @@ def flow_pdf_summary_rows(items: list[dict[str, Any]], payload: dict[str, Any]) 
         top_dst_text = ":".join([part for part in parts if part]) + (f" {proto}" if proto else "")
     return key_value_rows(
         [
-            ("Maior trafego", f"{format_bits_per_second(top_bits.get('bits_s'))} / {format_packets_per_second(top_pps.get('packets_s'))}"),
+            ("Maior trafego", format_bytes(top_src.get("bytes"))),
+            ("Taxa por registro", "Indisponivel sem duracao real exportada pelo flow"),
             ("Top origem", clean_ip(top_src.get("src_ip")) or top_src.get("src_ip") or "-"),
             ("Top destino", top_dst_text or "-"),
             ("Sensor", payload.get("sensor") or "todos"),
@@ -29460,8 +29490,9 @@ def flow_pdf_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "dst_ip": clean_ip(item.get("dst_ip")) or clean_text(item.get("dst_ip")),
                 "dst_port": item.get("dst_port"),
                 "proto_name": clean_text(item.get("proto_name") or item.get("protocol") or item.get("proto")),
-                "bits_s": item.get("bits_s"),
-                "packets_s": item.get("packets_s"),
+                "duration_seconds": item.get("duration_seconds"),
+                "rate_status": clean_text(item.get("rate_status")),
+                "rate_note": clean_text(item.get("rate_note")),
             }
         )
     return rows
@@ -29477,8 +29508,8 @@ def flows_pdf_response(payload: dict[str, Any], row_limit: int = 500) -> Respons
         {"key": "dst_ip", "label": "Destino"},
         {"key": "dst_port", "label": "DPort"},
         {"key": "proto_name", "label": "Proto"},
-        {"key": "bits_s", "label": "Bits/s"},
-        {"key": "packets_s", "label": "Pacotes/s"},
+        {"key": "duration_seconds", "label": "Duracao"},
+        {"key": "rate_note", "label": "Taxa"},
     ]
     sections = [
         {

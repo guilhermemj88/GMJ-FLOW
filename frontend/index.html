@@ -1795,7 +1795,7 @@
                 <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
                   <div>
                     <div class="panel-title">Registros de Flow</div>
-                    <div id="flowSearchStatus" class="metric-readout">Flows corrigidos por sample-rate</div>
+                    <div id="flowSearchStatus" class="metric-readout">Contadores corrigidos por sample-rate</div>
                   </div>
                   <div class="flow-search-grid">
                     <div class="field">
@@ -1930,8 +1930,7 @@
                         <th class="sortable-header" data-flow-sort="bytes">Bytes <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="packets">Pacotes <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="flows">Flows <span class="sort-indicator"></span></th>
-                        <th class="sortable-header" data-flow-sort="bits_s">Bits/s <span class="sort-indicator"></span></th>
-                        <th class="sortable-header" data-flow-sort="packets_s">Packets/s <span class="sort-indicator"></span></th>
+                        <th>Taxa</th>
                         <th class="sortable-header" data-flow-sort="sample_rate">Sample rate <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="flow_type">Flow type <span class="sort-indicator"></span></th>
                       </tr>
@@ -12554,15 +12553,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td class="numeric">${formatBytes(flow.bytes)}</td>
             <td class="numeric">${formatNumber(flow.packets)}</td>
             <td class="numeric">${formatNumber(flow.flow_count)}</td>
-            <td class="numeric">${formatBps(flow.bits_s)}</td>
-            <td class="numeric">${formatPps(flow.packets_s)}</td>
+            <td>${escapeHtml(flow.rate_status === 'estimated_from_flow_duration' ? `${formatBps(flow.bits_s)} / ${formatPps(flow.packets_s)}` : (flow.rate_note || 'Taxa indisponivel sem duracao real'))}</td>
             <td class="numeric">${formatNumber(flow.sample_rate_applied)}x</td>
             <td>${escapeHtml(flow.flow_type || '-')}</td>
           </tr>
-        `).join('') || `<tr><td colspan="18" class="text-muted">Sem flows no intervalo</td></tr>`;
-        status.textContent = `${formatNumber(items.length)} flows corrigidos`;
+        `).join('') || `<tr><td colspan="17" class="text-muted">Sem flows no intervalo</td></tr>`;
+        status.textContent = `${formatNumber(items.length)} flows com contadores corrigidos`;
       } catch (error) {
-        tbody.innerHTML = `<tr><td colspan="18" class="text-danger">${escapeHtml(error.message || 'Falha ao buscar flows')}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="17" class="text-danger">${escapeHtml(error.message || 'Falha ao buscar flows')}</td></tr>`;
         status.textContent = error.message || 'Falha na busca';
         console.error('Falha na chamada da API', endpoint, error);
       }
