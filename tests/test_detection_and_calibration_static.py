@@ -116,8 +116,10 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("flow_raw.src_ip", SOURCE)
         self.assertIn("flow_raw.dst_ip", SOURCE)
         self.assertNotIn("isIPAddressInRange(toString(src_ip), {prefix_cidr:String})", query_builder)
-        for cidr in ("45.5.248.0/23", "168.232.197.0/24", "179.189.80.0/22", "2804:7540::/32"):
-            self.assertEqual(backend_main.clickhouse_cidr_string_param(cidr), cidr)
+        self.assertEqual(backend_main.clickhouse_cidr_string_param("45.5.248.0/23"), "::ffff:45.5.248.0/119")
+        self.assertEqual(backend_main.clickhouse_cidr_string_param("168.232.197.0/24"), "::ffff:168.232.197.0/120")
+        self.assertEqual(backend_main.clickhouse_cidr_string_param("179.189.80.0/22"), "::ffff:179.189.80.0/118")
+        self.assertEqual(backend_main.clickhouse_cidr_string_param("2804:7540::/32"), "2804:7540::/32")
         membership_filter, *_ = backend_main.detection_direction_sql("transmits", "prefix_cidr")
         self.assertIn("isIPAddressInRange(CAST(toString(flow_raw.src_ip) AS String), {prefix_cidr:String})", membership_filter)
 
@@ -153,13 +155,90 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         for raw, expected in cases.items():
             self.assertEqual(backend_main.normalize_detection_port_text(raw, "dst_port"), expected)
 
-    def test_clickhouse_ipv4_cidr_filter_does_not_emit_ipv4_mapped_prefix(self):
-        self.assertEqual(backend_main.clickhouse_cidr_string_param("45.5.248.0/23"), "45.5.248.0/23")
-        self.assertNotIn("::ffff", backend_main.normalize_ip_filter_for_clickhouse("45.5.248.195", "src_cidr"))
-        params = {}
-        condition = backend_main.build_ip_condition("src_ip", "45.5.248.0/23", params, "src_cidr", "src_cidr")
-        self.assertIn("isIPAddressInRange(toString(src_ip), {src_cidr:String})", condition)
-        self.assertEqual(params["src_cidr"], "45.5.248.0/23")
+    def test_clickhouse_ip_filters_match_ipv4_mapped_ipv6_storage(self):
+        cases = [
+            ("src_ip", "45.163.144.1", "ip", "toString(src_ip) = {src_ip:String}", "::ffff:45.163.144.1"),
+            ("dst_ip", "45.163.144.0/24", "cidr", "isIPAddressInRange(toString(dst_ip), {dst_ip:String})", "::ffff:45.163.144.0/120"),
+            ("src_ip", "2804:7540::1", "ip", "toString(src_ip) = {src_ip:String}", "2804:7540::1"),
+            ("dst_ip", "2804:7540::/32", "cidr", "isIPAddressInRange(toString(dst_ip), {dst_ip:String})", "2804:7540::/32"),
+        ]
+        for column, value, expected_kind, expected_condition, expected_param in cases:
+            params = {}
+            kind, normalized = backend_main.normalize_ip_match_for_clickhouse(value, column)
+            condition = backend_main.build_ip_condition(column, value, params, column, column)
+            self.assertEqual(kind, expected_kind)
+            self.assertEqual(normalized, expected_param)
+            self.assertEqual(condition, expected_condition)
+            self.assertEqual(params[column], expected_param)
+
+    def test_flow_search_uses_ipv4_mapped_sql_params_for_src_dst_filters(self):
+        calls = []
+
+        def fake_query_clickhouse(query, params=None):
+            calls.append((query, dict(params or {})))
+            self.assertIn("toString(src_ip) = {src_ip:String}", query)
+            self.assertIn("isIPAddressInRange(toString(dst_ip), {dst_ip:String})", query)
+            self.assertNotIn("45.163.144.1", query)
+            return FakeClickHouseResult([], [])
+
+        with mock.patch.object(backend_main, "ensure_clickhouse_schema", return_value=None), \
+             mock.patch.object(backend_main, "clickhouse_flow_raw_schema", return_value={}), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="1"), \
+             mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            payload = backend_main.search_flows_payload(
+                range_minutes=60,
+                start=None,
+                end=None,
+                start_time=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+                end_time=datetime(2026, 7, 10, 13, 0, tzinfo=timezone.utc),
+                sensor=None,
+                sensor_id=None,
+                interface_id=None,
+                if_index=None,
+                ip=None,
+                src_ip="45.163.144.1",
+                dst_ip="45.163.144.0/24",
+                port=None,
+                src_port=None,
+                dst_port=None,
+                proto=None,
+                tcp_flags=None,
+                decoder=None,
+                limit=10,
+                order_by="flow_time",
+                order_dir="desc",
+            )
+
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(calls[0][1]["src_ip"], "::ffff:45.163.144.1")
+        self.assertEqual(calls[0][1]["dst_ip"], "::ffff:45.163.144.0/120")
+
+    def test_top_flow_uses_same_ipv4_and_ipv6_filter_normalization(self):
+        calls = []
+
+        def fake_query_clickhouse(query, params=None):
+            calls.append((query, dict(params or {})))
+            return FakeClickHouseResult([], [])
+
+        with mock.patch.object(backend_main, "ensure_clickhouse_schema", return_value=None), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="1"), \
+             mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse):
+            backend_main.top_flows(
+                top_type="src_ip",
+                direction="both",
+                range_minutes=60,
+                start_time=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+                end_time=datetime(2026, 7, 10, 13, 0, tzinfo=timezone.utc),
+                sensor_id=None,
+                interface_id=None,
+                if_index=None,
+                src_ip="45.163.144.1",
+                dst_ip="2804:7540::/32",
+                limit=10,
+            )
+
+        self.assertEqual(calls[0][1]["src_ip"], "::ffff:45.163.144.1")
+        self.assertEqual(calls[0][1]["dst_ip"], "2804:7540::/32")
 
     def test_sqlite_connection_uses_wal_and_busy_timeout(self):
         tmpdir = tempfile.mkdtemp()
@@ -331,8 +410,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
             row = ("45.5.248.195", "", "45.5.248.195", "UDP", 0, 90_000_000, 22_080_000, 300, 12_000_000, 368_000, 5, 12, 8, 5, flow_time, flow_time, 368_000)
 
             def fake_query_clickhouse(query, params=None):
-                self.assertEqual((params or {}).get("prefix_cidr"), "45.5.248.0/23")
-                self.assertNotIn("::ffff", str(params))
+                self.assertEqual((params or {}).get("prefix_cidr"), "::ffff:45.5.248.0/119")
                 return FakeClickHouseResult(columns, [row])
 
             with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
@@ -548,7 +626,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(items[0]["top_dst_port"], 53)
         self.assertEqual(items[0]["protocol"], "udp")
         self.assertEqual(items[0]["mitigation_basis"], "dns_outbound_destination")
-        self.assertEqual(calls[0][1]["prefix_cidr"], "186.232.171.0/24")
+        self.assertEqual(calls[0][1]["prefix_cidr"], "::ffff:186.232.171.0/120")
 
     def test_detection_template_grouped_select_keeps_plain_columns_in_group_by_or_aggregated(self):
         calls = []

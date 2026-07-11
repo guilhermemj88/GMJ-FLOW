@@ -6672,30 +6672,45 @@ def clickhouse_cidr_string_param(value: str, field_name: str = "target_cidr") ->
         network = ip_network(value, strict=False)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+    if network.version == 4:
+        mapped_prefix = 96 + int(network.prefixlen)
+        return f"::ffff:{network.network_address}/{mapped_prefix}"
     return str(network)
 
 
-def normalize_ip_filter_for_clickhouse(value: Any, field_name: str) -> str | None:
+def normalize_ip_match_for_clickhouse(value: Any, field_name: str) -> tuple[str, str] | None:
     text = clean_text(value)
     if not text:
         return None
     try:
         if "/" in text:
-            network = ip_network(text, strict=False)
-        else:
-            parsed_ip = ip_address(text)
-            suffix = 32 if isinstance(parsed_ip, IPv4Address) else 128
-            network = ip_network(f"{parsed_ip}/{suffix}", strict=False)
+            return "cidr", clickhouse_cidr_string_param(text, field_name)
+        return "ip", clickhouse_ip_string_param(text, field_name)
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido. Use IP ou CIDR valido.") from None
-    return clickhouse_cidr_string_param(str(network), field_name)
+
+
+def normalize_ip_filter_for_clickhouse(value: Any, field_name: str) -> str | None:
+    match = normalize_ip_match_for_clickhouse(value, field_name)
+    if match is None:
+        return None
+    kind, normalized = match
+    if kind == "cidr":
+        return normalized
+    suffix = 128 if ":" in normalized else 32
+    return str(ip_network(f"{normalized}/{suffix}", strict=False))
 
 
 def build_ip_condition(column: str, value: Any, params: dict[str, Any], key: str, field_name: str) -> str:
-    cidr = normalize_ip_filter_for_clickhouse(value, field_name)
-    if not cidr:
+    match = normalize_ip_match_for_clickhouse(value, field_name)
+    if match is None:
         return ""
-    params[key] = cidr
+    kind, normalized = match
+    params[key] = normalized
+    if kind == "ip":
+        return f"toString({column}) = {{{key}:String}}"
     return f"isIPAddressInRange(toString({column}), {{{key}:String}})"
 
 
