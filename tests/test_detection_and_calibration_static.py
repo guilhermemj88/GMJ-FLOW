@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -51,6 +52,27 @@ def outbound_dst_port_rule(vector="UDP_INTERNAL_IP_DST_HIGH_PPS", protocol="UDP"
 
 
 class DetectionAndCalibrationStaticTest(unittest.TestCase):
+    def assert_grouped_select_is_clickhouse_aggregate_safe(self, query):
+        match = re.search(r"grouped AS \(\s*SELECT(?P<select>.*?)\s*FROM base\s*GROUP BY (?P<group_by>.*?)\s*\)", query, re.S)
+        self.assertIsNotNone(match, query)
+        select_lines = [
+            line.strip().rstrip(",")
+            for line in match.group("select").splitlines()
+            if line.strip()
+        ]
+        group_keys = {item.strip() for item in match.group("group_by").split(",") if item.strip()}
+        aggregate_prefixes = ("argMax(", "sum(", "uniqExact(", "min(", "max(")
+        for expression in select_lines:
+            if expression in group_keys:
+                continue
+            if " AS " in expression and expression.split(" AS ", 1)[0].strip() in group_keys:
+                continue
+            if expression.startswith(aggregate_prefixes):
+                continue
+            if " AS " in expression and expression.split(" AS ", 1)[0].strip().startswith(aggregate_prefixes):
+                continue
+            self.fail(f"Grouped SELECT expression is neither grouped nor aggregated: {expression}\nGROUP BY {group_keys}\n{query}")
+
     def test_worker_evaluates_detection_template_rules_before_legacy_vectors(self):
         worker = SOURCE[SOURCE.find("def detect_anomalies_once"):SOURCE.find("def anomaly_detection_enabled")]
         self.assertIn("run_detection_template_rules_once(create_anomalies=True)", worker)
@@ -490,6 +512,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
         def fake_query_clickhouse(query, params):
             calls.append((query, dict(params)))
+            self.assert_grouped_select_is_clickhouse_aggregate_safe(query)
             self.assertIn("WITH base AS", query)
             self.assertIn("toFloat64(packets) AS packet_value", query)
             self.assertIn("toFloat64(bytes) AS byte_value", query)
@@ -527,6 +550,58 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertEqual(items[0]["mitigation_basis"], "dns_outbound_destination")
         self.assertEqual(calls[0][1]["prefix_cidr"], "186.232.171.0/24")
 
+    def test_detection_template_grouped_select_keeps_plain_columns_in_group_by_or_aggregated(self):
+        calls = []
+        flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+        columns = [
+            "src_ip", "dst_ip", "internal_ip", "protocol", "dst_port", "top_dst_port", "top_src_port",
+            "bytes", "packets", "flows", "bits_s", "packets_s", "flows_s", "unique_dst_ips",
+            "unique_dst_ports", "unique_src_ports", "first_seen", "last_seen", "metric_value",
+        ]
+        row = ("186.232.171.235", "8.8.8.8", "186.232.171.235", "UDP", 53, 53, 53000, 9_000_000, 900_000, 20, 1_200_000, 15_000, 0.33, 1, 1, 2, flow_time, flow_time, 15_000)
+
+        def fake_query_clickhouse(query, params):
+            calls.append((query, dict(params)))
+            self.assert_grouped_select_is_clickhouse_aggregate_safe(query)
+            grouped = re.search(r"grouped AS \(\s*SELECT(?P<select>.*?)\s*FROM base\s*GROUP BY (?P<group_by>.*?)\s*\)", query, re.S)
+            self.assertIsNotNone(grouped)
+            select_sql = grouped.group("select")
+            group_by_sql = grouped.group("group_by")
+            if "dst_port" not in {part.strip() for part in group_by_sql.split(",")}:
+                self.assertIn("argMax(unique_dst_port_value, packet_value * multiplier) AS dst_port", select_sql)
+                self.assertNotIn("\n                dst_port,\n", select_sql)
+            return FakeClickHouseResult(columns, [row])
+
+        dns_vectors = ["DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT", "dns_abuse_outbound"]
+        rules = []
+        for rule_id in range(1, 13):
+            rule = outbound_dst_port_rule(
+                vector=dns_vectors[rule_id - 1] if rule_id <= 3 else f"CUSTOM_INTERNAL_IP_RULE_{rule_id}",
+                protocol="DNS" if rule_id <= 3 else "UDP",
+                dst_port="53" if rule_id <= 3 else "any",
+            )
+            rule["id"] = rule_id
+            if rule_id <= 3:
+                rule["group_by"] = "src_ip,dst_ip,dst_port,proto"
+            elif rule_id % 3 == 0:
+                rule["vector"] = f"UDP_INTERNAL_IP_TO_DST_RULE_{rule_id}"
+                rule["group_by"] = "src_ip,dst_ip,proto"
+            else:
+                rule["group_by"] = "src_ip"
+            rules.append(rule)
+
+        zone = {"id": 1, "name": "CGN"}
+        template = {"id": 10, "name": "Detection", "active": True}
+        with mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse), \
+             mock.patch.object(backend_main, "clickhouse_sample_rate_expr", return_value="greatest(sample_rate, 1)"):
+            for index, rule in enumerate(rules, start=1):
+                prefix = {"id": index, "cidr": "186.232.171.0/24" if index % 2 else "2804:7540::/32"}
+                backend_main.query_detection_rule_candidates(zone, template, rule, prefix, flow_time, flow_time, None)
+
+        self.assertEqual(len(calls), 12)
+        self.assertTrue(any("GROUP BY bucket, src_ip, dst_ip, internal_ip, protocol, dst_port" in query for query, _ in calls))
+        self.assertTrue(any("GROUP BY bucket, src_ip, dst_ip, internal_ip, protocol" in query and "protocol, dst_port" not in query for query, _ in calls))
+
     def test_outbound_dst_port_rule_creates_one_candidate_per_destination_port(self):
         calls = []
         flow_time = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
@@ -542,6 +617,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
         def fake_query_clickhouse(query, params):
             calls.append((query, dict(params)))
+            self.assert_grouped_select_is_clickhouse_aggregate_safe(query)
             return FakeClickHouseResult(columns, rows)
 
         zone = {"id": 1, "name": "CGN"}

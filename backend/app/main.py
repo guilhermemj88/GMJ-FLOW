@@ -17395,6 +17395,9 @@ def query_detection_rule_candidates(
     grouping = detection_rule_grouping(rule)
     outbound_dst_port = detection_rule_is_outbound_dst_port(rule)
     dns_outbound_rule = is_dns_outbound_template_vector(rule.get("vector"))
+    group_by_text = clean_text(rule.get("group_by") or rule.get("detection_key")).lower()
+    group_by_fields = {field.strip() for field in group_by_text.split(",") if field.strip()}
+    group_by_dst_port = "dst_port" in group_by_fields or outbound_dst_port or dns_outbound_rule
     dst_port_expr = "toUInt16(0)"
     if grouping == "subnet":
         src_expr = "CAST(NULL, 'Nullable(String)')"
@@ -17404,6 +17407,7 @@ def query_detection_rule_candidates(
         dst_expr = "toString(flow_raw.dst_ip)"
     if outbound_dst_port or dns_outbound_rule:
         dst_expr = "toString(flow_raw.dst_ip)"
+    if group_by_dst_port:
         dst_port_expr = "dst_port"
 
     window_seconds = max(1, int(rule.get("window_seconds") or 60))
@@ -17432,7 +17436,12 @@ def query_detection_rule_candidates(
     where = " AND ".join(f"({item})" for item in filters if item)
     factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto")
     metric_alias = metric_expression_for_detection(rule["metric"])
-    group_columns = "bucket, src_ip, dst_ip, internal_ip, protocol" + (", dst_port" if outbound_dst_port or dns_outbound_rule else "")
+    group_column_names = ["bucket", "src_ip", "dst_ip", "internal_ip", "protocol"]
+    if group_by_dst_port:
+        group_column_names.append("dst_port")
+    group_columns = ", ".join(group_column_names)
+    grouped_dst_port_expr = "dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS dst_port"
+    grouped_top_dst_port_expr = "dst_port AS top_dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS top_dst_port"
     result = query_clickhouse(
         f"""
         WITH base AS (
@@ -17462,7 +17471,8 @@ def query_detection_rule_candidates(
                 dst_ip,
                 internal_ip,
                 protocol,
-                dst_port,
+                {grouped_dst_port_expr},
+                {grouped_top_dst_port_expr},
                 argMax(src_port_value, packet_value * multiplier) AS top_src_port,
                 sum(byte_value * multiplier) AS bytes,
                 sum(packet_value * multiplier) AS packets,
@@ -17481,6 +17491,7 @@ def query_detection_rule_candidates(
             internal_ip,
             protocol,
             dst_port,
+            top_dst_port,
             top_src_port,
             bytes,
             packets,
@@ -17513,6 +17524,7 @@ def query_detection_rule_candidates(
         dst_ip = clean_ip(row.get("dst_ip"))
         internal_ip = clean_ip(row.get("internal_ip"))
         dst_port = int(row.get("dst_port") or 0)
+        top_dst_port = int(row.get("top_dst_port") or dst_port or 0)
         top_src_port = int(row.get("top_src_port") or 0)
         if grouping == "subnet":
             scope = {
@@ -17567,11 +17579,11 @@ def query_detection_rule_candidates(
             "scope_type": scope["scope_type"],
             "invalid_scope": scope["invalid_scope"],
             "protocol": "udp" if dns_outbound_rule else clean_text(row.get("protocol")) or normalize_detection_protocol(rule.get("protocol")),
-            "target_port": dst_port if outbound_dst_port or dns_outbound_rule else None,
+            "target_port": top_dst_port if outbound_dst_port or dns_outbound_rule else None,
             "top_src_ip": src_ip if outbound_dst_port or dns_outbound_rule else "",
             "top_dst_ip": dst_ip if outbound_dst_port or dns_outbound_rule else "",
             "top_src_port": top_src_port if outbound_dst_port or dns_outbound_rule else None,
-            "top_dst_port": dst_port if outbound_dst_port or dns_outbound_rule else None,
+            "top_dst_port": top_dst_port if outbound_dst_port or dns_outbound_rule else None,
             "top_packets": int(float(row.get("packets") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
             "top_bytes": int(float(row.get("bytes") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
             "mitigation_basis": "dns_outbound_destination" if dns_outbound_rule else "dst_ip,dst_port,protocol" if outbound_dst_port else "",
