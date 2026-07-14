@@ -25847,6 +25847,7 @@ def clickhouse_sample_rate_expr(
     sensor_id: int | None,
     direction: str = "auto",
     if_index: int | None = None,
+    exporter_ip_column: str = "exporter_ip",
 ) -> str:
     fallback = "greatest(toFloat64(sample_rate), 1.0)"
     config = sensor_sample_rate_config(sensor_id)
@@ -25855,7 +25856,7 @@ def clickhouse_sample_rate_expr(
         conditions: list[str] = []
         for sensor_config in sensor_configs:
             try:
-                exporter_condition = f"exporter_ip = {clickhouse_ipv6_literal(sensor_config['exporter_ip'])}"
+                exporter_condition = f"{exporter_ip_column} = {clickhouse_ipv6_literal(sensor_config['exporter_ip'])}"
             except ValueError:
                 continue
             interfaces = sensor_config.get("interfaces") if isinstance(sensor_config.get("interfaces"), dict) else {}
@@ -29243,7 +29244,12 @@ def search_flows_payload(
     if "flow_start" in schema and "flow_end" in schema:
         calculated_duration = "greatest(toFloat64(dateDiff('millisecond', flow_start, flow_end)) / 1000.0, toFloat64(0))"
         duration_expr = f"multiIf(duration_ms > 0, toFloat64(duration_ms) / 1000.0, isNotNull(flow_start) AND isNotNull(flow_end), {calculated_duration}, toFloat64(0))" if "duration_ms" in schema else f"if(isNotNull(flow_start) AND isNotNull(flow_end), {calculated_duration}, toFloat64(0))"
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", context["resolved_if_index"])
+    factor_expr = clickhouse_sample_rate_expr(
+        sensor_id,
+        "auto",
+        context["resolved_if_index"],
+        exporter_ip_column="flow_raw.exporter_ip",
+    )
     bytes_value = corrected_value_expr("bytes", factor_expr)
     packets_value = corrected_value_expr("packets", factor_expr)
     sort_column = FLOW_SEARCH_SORT_COLUMNS.get(order_by, "flow_time")

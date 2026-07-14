@@ -71,6 +71,105 @@ class FlowRecordsRatesTest(unittest.TestCase):
         self.assertIn('"flow_end"', PARSER)
         self.assertIn('"duration_ms"', PARSER)
 
+    def test_flow_search_without_sensor_uses_typed_sample_rates_for_two_exporters(self):
+        calls = []
+        sensor_configs = [
+            {
+                "sensor_id": 1,
+                "exporter_ip": "::ffff:192.0.2.10",
+                "default_in": 100,
+                "default_out": 200,
+                "mode": "sensor_default",
+                "interfaces": {},
+            },
+            {
+                "sensor_id": 2,
+                "exporter_ip": "2001:db8::20",
+                "default_in": 300,
+                "default_out": 400,
+                "mode": "sensor_default",
+                "interfaces": {},
+            },
+        ]
+
+        def fake_query_clickhouse(query, params=None):
+            calls.append((query, dict(params or {})))
+            return FakeClickHouseResult(FLOW_COLUMNS, [])
+
+        with (
+            mock.patch.object(backend_main, "ensure_clickhouse_schema", return_value=None),
+            mock.patch.object(backend_main, "clickhouse_flow_raw_schema", return_value={}),
+            mock.patch.object(backend_main, "sensor_sample_rate_config", return_value=None),
+            mock.patch.object(backend_main, "sensor_sample_rate_configs", return_value=sensor_configs),
+            mock.patch.object(backend_main, "query_clickhouse", side_effect=fake_query_clickhouse),
+        ):
+            payload = backend_main.search_flows_payload(
+                range_minutes=60,
+                start=None,
+                end=None,
+                start_time=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+                end_time=datetime(2026, 7, 10, 13, 0, tzinfo=timezone.utc),
+                sensor=None,
+                sensor_id=None,
+                interface_id=None,
+                if_index=None,
+                ip=None,
+                src_ip=None,
+                dst_ip=None,
+                port=None,
+                src_port=None,
+                dst_port=None,
+                proto=None,
+                tcp_flags=None,
+                decoder=None,
+                limit=10,
+                order_by="flow_time",
+                order_dir="desc",
+            )
+
+        self.assertEqual(payload["items"], [])
+        query = calls[0][0]
+        self.assertIn("toString(exporter_ip) AS exporter_ip", query)
+        self.assertIn("flow_raw.exporter_ip = toIPv6('::ffff:192.0.2.10')", query)
+        self.assertIn("flow_raw.exporter_ip = toIPv6('2001:db8::20')", query)
+        self.assertNotIn("toString(exporter_ip) = toIPv6", query)
+        for rate in (100, 200, 300, 400):
+            self.assertIn(f"toFloat64({rate})", query)
+        self.assertIn("greatest(toFloat64(sample_rate), 1.0)", query)
+
+    def test_sample_rate_expression_with_sensor_id_keeps_existing_behavior(self):
+        config = {
+            "default_in": 100,
+            "default_out": 200,
+            "mode": "per_interface",
+            "interfaces": {
+                10: {"in": 150, "out": 250, "override": True},
+            },
+        }
+
+        with (
+            mock.patch.object(backend_main, "sensor_sample_rate_config", return_value=config),
+            mock.patch.object(
+                backend_main,
+                "sensor_sample_rate_configs",
+                side_effect=AssertionError("multi-exporter config must not be loaded"),
+            ),
+        ):
+            expression = backend_main.clickhouse_sample_rate_expr(
+                1,
+                "auto",
+                10,
+                exporter_ip_column="flow_raw.exporter_ip",
+            )
+
+        self.assertNotIn("exporter_ip", expression)
+        self.assertEqual(
+            expression,
+            "multiIf(input_if = 10, toFloat64(150), output_if = 10, toFloat64(250), "
+            "multiIf(input_if > 0, toFloat64(100), output_if > 0, toFloat64(200), "
+            "greatest(toFloat64(sample_rate), 1.0)))",
+        )
+
     def _payload(self, row, schema=None):
         calls = []
 
