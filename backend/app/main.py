@@ -361,6 +361,10 @@ DETECTION_SCHEDULER_STATUS: dict[str, Any] = {
 }
 BGP_EXPIRATION_STOP = threading.Event()
 BGP_EXPIRATION_THREAD: threading.Thread | None = None
+BGP_STATUS_CHECK_STOP = threading.Event()
+BGP_STATUS_CHECK_THREAD: threading.Thread | None = None
+BGP_STATUS_CHECK_CYCLE_LOCK = threading.Lock()
+BGP_STATUS_CHECK_LOCK = threading.Lock()
 SYSTEM_SETTING_DEFAULTS = {
     "database_retention_enabled": "1",
     "flow_retention_days": "7",
@@ -3043,6 +3047,13 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             router_username TEXT NOT NULL DEFAULT '',
             router_auth_secret_ref TEXT NOT NULL DEFAULT '',
             router_password TEXT NOT NULL DEFAULT '',
+            bgp_state TEXT NOT NULL DEFAULT 'not_checked',
+            flowspec_state TEXT NOT NULL DEFAULT 'not_checked',
+            pipe_state TEXT NOT NULL DEFAULT 'not_checked',
+            status_message TEXT NOT NULL DEFAULT '',
+            status_errors_json TEXT NOT NULL DEFAULT '[]',
+            status_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            last_checked_at TEXT NOT NULL DEFAULT '',
             max_active_rules INTEGER NOT NULL DEFAULT 50,
             max_duration_seconds INTEGER NOT NULL DEFAULT 3600,
             enabled INTEGER NOT NULL DEFAULT 1,
@@ -3066,6 +3077,13 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_connectors", "router_username", "router_username TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_connectors", "router_auth_secret_ref", "router_auth_secret_ref TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_connectors", "router_password", "router_password TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "bgp_state", "bgp_state TEXT NOT NULL DEFAULT 'not_checked'")
+    ensure_sqlite_column(conn, "bgp_connectors", "flowspec_state", "flowspec_state TEXT NOT NULL DEFAULT 'not_checked'")
+    ensure_sqlite_column(conn, "bgp_connectors", "pipe_state", "pipe_state TEXT NOT NULL DEFAULT 'not_checked'")
+    ensure_sqlite_column(conn, "bgp_connectors", "status_message", "status_message TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_connectors", "status_errors_json", "status_errors_json TEXT NOT NULL DEFAULT '[]'")
+    ensure_sqlite_column(conn, "bgp_connectors", "status_snapshot_json", "status_snapshot_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "bgp_connectors", "last_checked_at", "last_checked_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_connectors", "is_active", "is_active INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         """
@@ -3485,6 +3503,7 @@ def startup() -> None:
     start_snmp_polling_thread()
     start_database_retention_thread()
     start_bgp_expiration_thread()
+    start_bgp_status_check_thread()
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
     start_peak_hunter_runner_thread()
@@ -3495,6 +3514,7 @@ def shutdown() -> None:
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
     BGP_EXPIRATION_STOP.set()
+    stop_bgp_status_check_thread()
     ANOMALY_DETECTION_STOP.set()
     ASN_RESOLVER_STOP.set()
     PEAK_HUNTER_RUNNER_STOP.set()
@@ -7420,6 +7440,13 @@ def bgp_connector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "router_mgmt_ip": item.get("router_mgmt_ip") or "",
         "router_username": item.get("router_username") or "",
         "router_auth_secret_ref": item.get("router_auth_secret_ref") or "",
+        "bgp_state": item.get("bgp_state") or "not_checked",
+        "flowspec_state": item.get("flowspec_state") or "not_checked",
+        "pipe_state": item.get("pipe_state") or "not_checked",
+        "status_message": item.get("status_message") or "",
+        "status_errors": bgp_json_loads(item.get("status_errors_json"), []),
+        "status_snapshot": bgp_json_loads(item.get("status_snapshot_json"), {}),
+        "last_checked_at": item.get("last_checked_at") or "",
         "max_active_rules": int(item.get("max_active_rules") or BGP_DEFAULT_MAX_ACTIVE_RULES),
         "max_duration_seconds": int(item.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
         "enabled": sqlite_bool(item.get("enabled")),
@@ -8228,9 +8255,9 @@ def router_ssh_status(connector: dict[str, Any]) -> dict[str, Any]:
         return {
             "enabled": False,
             "method": "router_ssh",
-            "bgp_state": "not_verified",
-            "flowspec_state": "not_verified",
-            "message": "Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.",
+            "bgp_state": "verification_disabled",
+            "flowspec_state": "verification_disabled",
+            "message": "Verificacao BGP/FlowSpec desabilitada para este conector.",
         }
     if clean_text(connector.get("router_vendor")).lower() not in {"huawei_vrp", "huawei", "vrp"}:
         return {
@@ -8240,8 +8267,13 @@ def router_ssh_status(connector: dict[str, Any]) -> dict[str, Any]:
             "flowspec_state": "unknown",
             "message": "Vendor de Router SSH ainda nao suportado; use huawei_vrp.",
         }
-    bgp_code, bgp_output = router_ssh_command(connector, "display bgp peer")
-    flow_code, flow_output = router_ssh_command(connector, "display bgp flow peer")
+    try:
+        total_timeout = float(os.getenv("GMJFLOW_BGP_CHECK_TIMEOUT_SECONDS", "8"))
+    except ValueError:
+        total_timeout = 8.0
+    command_timeout = max(1.0, min(total_timeout, 30.0) / 2.0)
+    bgp_code, bgp_output = router_ssh_command(connector, "display bgp peer", timeout=command_timeout)
+    flow_code, flow_output = router_ssh_command(connector, "display bgp flow peer", timeout=command_timeout)
     bgp = parse_huawei_vrp_peer_state(bgp_output, peer_ip) if bgp_code == 0 else {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": bgp_output[-4000:]}
     flow = parse_huawei_vrp_peer_state(flow_output, peer_ip) if flow_code == 0 else {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": flow_output[-4000:]}
     return {
@@ -8326,6 +8358,28 @@ def exabgp_pipe_mount_error(pipe_path: str) -> str:
     return ""
 
 
+def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
+    pipe_in = clean_text(connector.get("exabgp_pipe_in"))
+    pipe_out = clean_text(connector.get("exabgp_pipe_out"))
+    mount_error = exabgp_pipe_mount_error(pipe_in) or exabgp_pipe_mount_error(pipe_out)
+    input_exists = bool(pipe_in and Path(pipe_in).exists())
+    output_exists = bool(pipe_out and Path(pipe_out).exists())
+    input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
+    pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
+    message = "" if pipes_ok else mount_error or "Pipe ExaBGP indisponivel ou sem permissao de escrita."
+    return {
+        "input_path": pipe_in,
+        "input_exists": input_exists,
+        "input_writable": input_writable,
+        "output_path": pipe_out,
+        "output_exists": output_exists,
+        "ok": pipes_ok,
+        "status": "ok" if pipes_ok else "down",
+        "severity": "ok" if pipes_ok else "down",
+        "message": message,
+    }
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -8389,32 +8443,45 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             session_status = "unknown_ss_error"
             errors.append(f"ss -antp: {tcp_output}")
 
-    pipe_in = clean_text(connector.get("exabgp_pipe_in"))
-    pipe_out = clean_text(connector.get("exabgp_pipe_out"))
-    pipe_mount_error = exabgp_pipe_mount_error(pipe_in) or exabgp_pipe_mount_error(pipe_out)
-    input_exists = bool(pipe_in and Path(pipe_in).exists())
-    output_exists = bool(pipe_out and Path(pipe_out).exists())
-    input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
-    pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
-    if pipe_mount_error:
-        messages.append(pipe_mount_error)
-        errors.append(pipe_mount_error)
+    pipes = exabgp_pipe_status(connector)
+    pipes_ok = bool(pipes["ok"])
+    if not pipes_ok:
+        messages.append(pipes["message"])
+        errors.append(pipes["message"])
     exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
     if exabgp_peer.get("state") == "unknown":
         heuristic_peer = exabgp_peer_from_log_heuristic(connector)
         if heuristic_peer.get("state") == "established":
             exabgp_peer = heuristic_peer
-    router_status = router_ssh_status(connector)
+    try:
+        router_status = router_ssh_status(connector)
+    except Exception as exc:
+        router_status = {
+            "enabled": bool(connector.get("router_check_enabled")),
+            "method": "router_ssh",
+            "bgp_state": "unknown",
+            "flowspec_state": "unknown",
+            "message": f"Falha na verificacao Router SSH: {exc}",
+        }
     agent_status = host_agent_status(connector)
-    bgp_state = prefer_verified_state(
-        router_status.get("bgp_state"),
-        agent_status.get("bgp_state"),
-        exabgp_peer.get("state"),
-    )
-    flowspec_state = prefer_verified_state(
-        router_status.get("flowspec_state"),
-        agent_status.get("flowspec_state"),
-    )
+    if connector.get("router_check_enabled"):
+        bgp_state = prefer_verified_state(
+            router_status.get("bgp_state"),
+            agent_status.get("bgp_state"),
+            exabgp_peer.get("state"),
+        )
+        flowspec_state = prefer_verified_state(
+            router_status.get("flowspec_state"),
+            agent_status.get("flowspec_state"),
+        )
+    else:
+        bgp_state = "verification_disabled"
+        flowspec_state = "verification_disabled"
+    for check_name, return_code in (router_status.get("returncodes") or {}).items():
+        if int(return_code or 0) != 0:
+            errors.append(f"Router SSH {check_name}: {router_status.get('message') or f'return code {return_code}'}")
+    if connector.get("router_check_enabled") and router_status.get("message") and not router_status.get("returncodes"):
+        errors.append(f"Router SSH: {router_status['message']}")
     active_flowspec_count = active_flowspec_announcement_count(connector)
     if (
         flowspec_state == "not_verified"
@@ -8430,7 +8497,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         messages.append("FlowSpec nao verificado. Configure Router SSH ou Host Agent.")
     if agent_status.get("enabled") and agent_status.get("message"):
         messages.append(f"Host Agent: {agent_status['message']}")
-    if router_status.get("enabled") and router_status.get("message"):
+    if router_status.get("message"):
         messages.append(f"Router SSH: {router_status['message']}")
     return {
         "connector_id": connector["id"],
@@ -8440,17 +8507,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
         "service": {"name": service_name, "active": service_active, "raw": service_raw, "severity": service_severity},
         "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
-        "pipes": {
-            "input_path": pipe_in,
-            "input_exists": input_exists,
-            "input_writable": input_writable,
-            "output_path": pipe_out,
-            "output_exists": output_exists,
-            "ok": pipes_ok,
-            "status": "ok" if pipes_ok else "down",
-            "severity": "ok" if pipes_ok else "down",
-            "message": "" if pipes_ok else pipe_mount_error,
-        },
+        "pipes": pipes,
         "exabgp_peer": exabgp_peer,
         "router_check": router_status,
         "host_agent": agent_status,
@@ -8469,6 +8526,193 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "messages": sorted(set(messages)),
     }
+
+
+class BgpStatusCheckInProgress(RuntimeError):
+    pass
+
+
+def persisted_bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
+    snapshot = connector.get("status_snapshot")
+    if not isinstance(snapshot, dict) or not snapshot:
+        snapshot = {
+            "connector_id": connector["id"],
+            "name": connector["name"],
+            "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
+            "role": connector.get("role") or "",
+            "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
+            "pipes": {"ok": False, "status": connector.get("pipe_state") or "not_checked", "severity": "unknown"},
+            "router_check": {"enabled": bool(connector.get("router_check_enabled"))},
+            "verification": {
+                "router_check_enabled": bool(connector.get("router_check_enabled")),
+                "bgp_verified": False,
+                "flowspec_verified": False,
+                "pipe_verified": False,
+            },
+            "bgp_state": connector.get("bgp_state") or "not_checked",
+            "flowspec_state": connector.get("flowspec_state") or "not_checked",
+            "pipe_state": connector.get("pipe_state") or "not_checked",
+            "last_checked_at": connector.get("last_checked_at") or "",
+            "message": connector.get("status_message") or "",
+            "messages": [connector["status_message"]] if connector.get("status_message") else [],
+            "errors": connector.get("status_errors") or [],
+        }
+    result = dict(snapshot)
+    result.update({
+        "connector_id": connector["id"],
+        "name": connector["name"],
+        "bgp_state": connector.get("bgp_state") or result.get("bgp_state") or "not_checked",
+        "flowspec_state": connector.get("flowspec_state") or result.get("flowspec_state") or "not_checked",
+        "pipe_state": connector.get("pipe_state") or result.get("pipe_state") or "not_checked",
+        "last_checked_at": connector.get("last_checked_at") or result.get("last_checked_at") or "",
+        "message": connector.get("status_message") or result.get("message") or "",
+        "errors": connector.get("status_errors") or result.get("errors") or [],
+    })
+    return result
+
+
+def bgp_connector_for_status_check(connector_id_or_connector: int | dict[str, Any]) -> dict[str, Any]:
+    connector_id = connector_id_or_connector.get("id") if isinstance(connector_id_or_connector, dict) else connector_id_or_connector
+    if connector_id is None:
+        return dict(connector_id_or_connector)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT * FROM bgp_connectors WHERE id = ?", (int(connector_id),)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Conector BGP nao encontrado")
+    connector = bgp_connector_row_to_dict(row)
+    connector["router_password"] = row["router_password"] if "router_password" in row.keys() else ""
+    return connector
+
+
+def check_and_persist_bgp_connector_status(connector_id_or_connector: int | dict[str, Any]) -> dict[str, Any]:
+    if not BGP_STATUS_CHECK_LOCK.acquire(blocking=False):
+        raise BgpStatusCheckInProgress("Ja existe uma checagem BGP/FlowSpec em andamento.")
+    try:
+        connector = bgp_connector_for_status_check(connector_id_or_connector)
+        try:
+            status = bgp_connector_status(connector)
+        except Exception as exc:
+            disabled = not connector.get("router_check_enabled")
+            error = f"Falha ao verificar conector BGP: {exc}"
+            status = {
+                "connector_id": connector["id"],
+                "name": connector["name"],
+                "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
+                "role": connector.get("role") or "",
+                "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
+                "pipes": {"ok": False, "status": "unknown", "severity": "unknown", "message": error},
+                "router_check": {"enabled": bool(connector.get("router_check_enabled"))},
+                "verification": {"router_check_enabled": bool(connector.get("router_check_enabled")), "bgp_verified": False, "flowspec_verified": False, "pipe_verified": False},
+                "bgp_state": "verification_disabled" if disabled else "unknown",
+                "flowspec_state": "verification_disabled" if disabled else "unknown",
+                "errors": [error],
+                "messages": [error],
+            }
+        checked_at = utc_now_iso()
+        status["last_checked_at"] = checked_at
+        status["pipe_state"] = clean_text((status.get("pipes") or {}).get("status")) or "unknown"
+        status["errors"] = [clean_text(error) for error in status.get("errors") or [] if clean_text(error)]
+        status["messages"] = sorted({clean_text(message) for message in status.get("messages") or [] if clean_text(message)})
+        status["message"] = " | ".join(status["messages"])
+        with sqlite_connection() as conn:
+            conn.execute(
+                """
+                UPDATE bgp_connectors
+                SET bgp_state = ?, flowspec_state = ?, pipe_state = ?, status_message = ?,
+                    status_errors_json = ?, status_snapshot_json = ?, last_checked_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status.get("bgp_state") or "unknown",
+                    status.get("flowspec_state") or "unknown",
+                    status["pipe_state"],
+                    status["message"],
+                    json.dumps(status["errors"], ensure_ascii=True),
+                    json.dumps(status, ensure_ascii=True, default=str),
+                    checked_at,
+                    int(connector["id"]),
+                ),
+            )
+            conn.commit()
+        return status
+    finally:
+        BGP_STATUS_CHECK_LOCK.release()
+
+
+def bgp_auto_check_enabled() -> bool:
+    return clean_text(os.getenv("GMJFLOW_BGP_AUTO_CHECK_ENABLED", "true")).lower() not in {"0", "false", "no", "off"}
+
+
+def bgp_check_interval_seconds() -> int:
+    try:
+        return max(1, int(os.getenv("GMJFLOW_BGP_CHECK_INTERVAL_SECONDS", "30")))
+    except ValueError:
+        return 30
+
+
+def run_bgp_connector_status_checks_once() -> dict[str, int | bool]:
+    if not BGP_STATUS_CHECK_CYCLE_LOCK.acquire(blocking=False):
+        return {"checked": 0, "failed": 0, "skipped": 1, "concurrent": True}
+    stats: dict[str, int | bool] = {"checked": 0, "failed": 0, "skipped": 0, "concurrent": False}
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            connector_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM bgp_connectors WHERE enabled = 1 AND is_active = 1 ORDER BY id"
+                ).fetchall()
+            ]
+        for connector_id in connector_ids:
+            try:
+                check_and_persist_bgp_connector_status(connector_id)
+                stats["checked"] = int(stats["checked"]) + 1
+            except BgpStatusCheckInProgress:
+                stats["skipped"] = int(stats["skipped"]) + 1
+            except Exception as exc:
+                stats["failed"] = int(stats["failed"]) + 1
+                logger.warning("Falha na checagem BGP connector_id=%s: %s", connector_id, exc)
+        return stats
+    finally:
+        BGP_STATUS_CHECK_CYCLE_LOCK.release()
+
+
+def bgp_status_check_loop() -> None:
+    interval = bgp_check_interval_seconds()
+    logger.info("BGP status checker started interval_seconds=%s", interval)
+    while not BGP_STATUS_CHECK_STOP.is_set():
+        try:
+            run_bgp_connector_status_checks_once()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no worker de status BGP: %s", exc)
+        if BGP_STATUS_CHECK_STOP.wait(interval):
+            break
+
+
+def start_bgp_status_check_thread() -> None:
+    global BGP_STATUS_CHECK_THREAD
+    if not bgp_auto_check_enabled():
+        return
+    if BGP_STATUS_CHECK_THREAD is not None and BGP_STATUS_CHECK_THREAD.is_alive():
+        return
+    BGP_STATUS_CHECK_STOP.clear()
+    BGP_STATUS_CHECK_THREAD = threading.Thread(
+        target=bgp_status_check_loop,
+        name="gmj-flow-bgp-status-checker",
+        daemon=True,
+    )
+    BGP_STATUS_CHECK_THREAD.start()
+
+
+def stop_bgp_status_check_thread(timeout: float = 15.0) -> None:
+    global BGP_STATUS_CHECK_THREAD
+    BGP_STATUS_CHECK_STOP.set()
+    thread = BGP_STATUS_CHECK_THREAD
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=max(0.1, timeout))
+    if thread is None or not thread.is_alive():
+        BGP_STATUS_CHECK_THREAD = None
 
 
 def normalize_flowspec_port(value: Any, field_name: str) -> str:
@@ -15194,30 +15438,30 @@ def get_bgp_connector_status(request: Request, connector_id: int):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         connector = fetch_bgp_connector(conn, connector_id)
-    return bgp_connector_status(connector)
+    return persisted_bgp_connector_status(connector)
 
 
 @app.post("/api/bgp/connectors/{connector_id}/check-router")
 def check_bgp_connector_router(request: Request, connector_id: int):
     require_admin(request)
     ensure_sensor_db()
-    with sqlite_connection() as conn:
-        connector = fetch_bgp_connector(conn, connector_id)
-    status = router_ssh_status(connector)
+    try:
+        status = check_and_persist_bgp_connector_status(connector_id)
+    except BgpStatusCheckInProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    router_status = status.get("router_check") or {}
     return {
+        **status,
         "connector_id": connector_id,
-        "router_check_enabled": bool(connector.get("router_check_enabled")),
-        "router_vendor": connector.get("router_vendor") or "huawei_vrp",
-        "bgp_state": status.get("bgp_state", "not_verified"),
-        "flowspec_state": status.get("flowspec_state", "not_verified"),
+        "router_check_enabled": bool((status.get("verification") or {}).get("router_check_enabled")),
+        "router_vendor": router_status.get("vendor") or "huawei_vrp",
         "planned_commands": [
             "display bgp peer",
             "display bgp flow peer",
         ],
-        "message": status.get("message") or "",
         "raw": {
-            "bgp": status.get("bgp_raw", ""),
-            "flowspec": status.get("flowspec_raw", ""),
+            "bgp": router_status.get("bgp_raw", ""),
+            "flowspec": router_status.get("flowspec_raw", ""),
         },
     }
 

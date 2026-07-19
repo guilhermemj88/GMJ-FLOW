@@ -140,6 +140,22 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("item.mode === 'dry_run' ? 'off' : 'ok'", HTML)
         self.assertIn("item.status !== 'dry_run' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado'", HTML)
 
+    def test_bgp_status_uses_existing_global_polling_without_another_interval(self):
+        refresh_start = HTML.index("async function refreshOpsSummary()")
+        refresh_end = HTML.index("function startOpsSummaryPolling()", refresh_start)
+        refresh_source = HTML[refresh_start:refresh_end]
+        self.assertIn("await refreshBgpConnectorStatuses()", refresh_source)
+        self.assertIn("document.getElementById('view-bgp')?.classList.contains('active')", refresh_source)
+        self.assertIn("if (bgpStatusesRefreshInFlight) return", HTML)
+        self.assertEqual(HTML.count("opsSummaryRefreshTimer = setInterval"), 1)
+
+    def test_bgp_manual_check_and_disabled_labels_use_persisted_status(self):
+        self.assertIn("function checkBgpConnectorStatusesNow()", HTML)
+        self.assertIn("/check-router`, { method: 'POST' }", HTML)
+        self.assertIn("/status`).catch", HTML)
+        self.assertIn("VERIFICACAO DESABILITADA", HTML)
+        self.assertIn("checkBgpConnectorStatusesNow().catch", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,8 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -1586,6 +1588,7 @@ class BgpMitigationTest(unittest.TestCase):
     def test_flowspec_peer_is_verified_when_active_flowspec_exists_and_bgp_is_up(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()
+            connector["router_check_enabled"] = True
             now = main.utc_now_iso()
             conn.execute(
                 """
@@ -1609,6 +1612,182 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(status["flowspec_state"], "established")
             self.assertTrue(status["verification"]["flowspec_verified"])
             self.assertEqual(status["verification"]["flowspec_active_announcements"], 1)
+
+    def test_bgp_status_worker_checks_periodically(self):
+        calls = []
+        called_twice = threading.Event()
+
+        def run_once():
+            calls.append(time.monotonic())
+            if len(calls) >= 2:
+                called_twice.set()
+            return {"checked": 0, "failed": 0, "skipped": 0, "concurrent": False}
+
+        main.BGP_STATUS_CHECK_STOP.clear()
+        with patch.object(main, "bgp_check_interval_seconds", return_value=0.01), \
+             patch.object(main, "run_bgp_connector_status_checks_once", side_effect=run_once):
+            thread = threading.Thread(target=main.bgp_status_check_loop)
+            thread.start()
+            try:
+                self.assertTrue(called_twice.wait(1))
+            finally:
+                main.BGP_STATUS_CHECK_STOP.set()
+                thread.join(1)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertFalse(thread.is_alive())
+
+    def test_manual_bgp_check_endpoint_uses_central_check(self):
+        with temporary_main_db():
+            status = {
+                "connector_id": 2,
+                "bgp_state": "established",
+                "flowspec_state": "established",
+                "pipe_state": "ok",
+                "verification": {"router_check_enabled": True},
+                "router_check": {"vendor": "huawei_vrp"},
+            }
+            with patch.object(main, "check_and_persist_bgp_connector_status", return_value=status) as central:
+                result = main.check_bgp_connector_router(self._admin_request(), 2)
+        central.assert_called_once_with(2)
+        self.assertEqual(result["bgp_state"], "established")
+        self.assertEqual(result["flowspec_state"], "established")
+
+    def test_bgp_status_endpoint_only_reads_persisted_snapshot(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.execute(
+                """
+                UPDATE bgp_connectors
+                SET bgp_state = 'established', flowspec_state = 'established', pipe_state = 'ok',
+                    status_message = 'persisted', last_checked_at = '2026-07-19T12:00:00Z'
+                WHERE id = ?
+                """,
+                (connector["id"],),
+            )
+            conn.commit()
+            conn.close()
+            with patch.object(main, "bgp_connector_status") as live_check:
+                result = main.get_bgp_connector_status(self._admin_request(), connector["id"])
+            live_check.assert_not_called()
+            self.assertEqual(result["bgp_state"], "established")
+            self.assertEqual(result["flowspec_state"], "established")
+            self.assertEqual(result["pipe_state"], "ok")
+            self.assertEqual(result["message"], "persisted")
+
+    def test_router_check_disabled_keeps_pipe_check_and_persists_disabled_states(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            with tempfile.NamedTemporaryFile() as pipe_in, tempfile.NamedTemporaryFile() as pipe_out:
+                conn.execute(
+                    """
+                    UPDATE bgp_connectors
+                    SET router_check_enabled = 0, exabgp_pipe_in = ?, exabgp_pipe_out = ?
+                    WHERE id = ?
+                    """,
+                    (pipe_in.name, pipe_out.name, connector["id"]),
+                )
+                conn.commit()
+                conn.close()
+                with patch.object(main, "router_ssh_command") as ssh_command, \
+                     patch.object(main, "exabgp_peer_from_pipe", return_value={"state": "unknown"}), \
+                     patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}):
+                    status = main.check_and_persist_bgp_connector_status(connector["id"])
+            self.assertEqual(status["pipe_state"], "ok")
+            self.assertEqual(status["bgp_state"], "verification_disabled")
+            self.assertEqual(status["flowspec_state"], "verification_disabled")
+            self.assertIn("desabilitada", status["message"].lower())
+            ssh_command.assert_not_called()
+            with main.sqlite_connection() as check:
+                persisted = check.execute(
+                    "SELECT bgp_state, flowspec_state, pipe_state, last_checked_at FROM bgp_connectors WHERE id = ?",
+                    (connector["id"],),
+                ).fetchone()
+            self.assertEqual(persisted["bgp_state"], "verification_disabled")
+            self.assertEqual(persisted["flowspec_state"], "verification_disabled")
+            self.assertEqual(persisted["pipe_state"], "ok")
+            self.assertTrue(persisted["last_checked_at"])
+
+    def test_router_ssh_status_parses_bgp_and_flowspec_established(self):
+        connector = {
+            "router_check_enabled": True,
+            "router_vendor": "huawei_vrp",
+            "peer_ip": "192.0.2.2",
+        }
+        bgp_output = "192.0.2.2 4 65002 10 10 0 0 00:10:00 Established"
+        flow_output = "BGP current state: Established\nPeer: 192.0.2.2"
+        with patch.object(main, "router_ssh_command", side_effect=[(0, bgp_output), (0, flow_output)]) as command:
+            status = main.router_ssh_status(connector)
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
+        self.assertEqual(command.call_args_list[0].args[1], "display bgp peer")
+        self.assertEqual(command.call_args_list[1].args[1], "display bgp flow peer")
+
+    def test_router_ssh_timeout_is_reported_and_persisted(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.execute("UPDATE bgp_connectors SET router_check_enabled = 1 WHERE id = ?", (connector["id"],))
+            conn.commit()
+            conn.close()
+            with patch.object(main, "router_ssh_command", return_value=(124, "ssh timeout")), \
+                 patch.object(main, "host_agent_status", return_value={"enabled": False}), \
+                 patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}):
+                status = main.check_and_persist_bgp_connector_status(connector["id"])
+            self.assertEqual(status["bgp_state"], "not_verified")
+            self.assertEqual(status["flowspec_state"], "not_verified")
+            self.assertTrue(any("timeout" in error.lower() for error in status["errors"]))
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT status_errors_json FROM bgp_connectors WHERE id = ?", (connector["id"],)).fetchone()
+            self.assertTrue(any("timeout" in error.lower() for error in json.loads(row["status_errors_json"])))
+
+    def test_bgp_worker_continues_after_connector_failure(self):
+        with temporary_main_db():
+            conn, first, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            second_id = conn.execute(
+                """
+                INSERT INTO bgp_connectors (name, enabled, is_active, created_at, updated_at)
+                VALUES ('SECOND', 1, 1, ?, ?)
+                """,
+                (now, now),
+            ).lastrowid
+            conn.commit()
+            conn.close()
+            checked = []
+
+            def check_connector(connector_id):
+                if connector_id == first["id"]:
+                    raise RuntimeError("first failed")
+                checked.append(connector_id)
+                return {"connector_id": connector_id}
+
+            with patch.object(main, "check_and_persist_bgp_connector_status", side_effect=check_connector):
+                result = main.run_bgp_connector_status_checks_once()
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(checked, [second_id])
+
+    def test_bgp_worker_rejects_concurrent_cycle(self):
+        self.assertTrue(main.BGP_STATUS_CHECK_CYCLE_LOCK.acquire(blocking=False))
+        try:
+            result = main.run_bgp_connector_status_checks_once()
+        finally:
+            main.BGP_STATUS_CHECK_CYCLE_LOCK.release()
+        self.assertTrue(result["concurrent"])
+        self.assertEqual(result["skipped"], 1)
+
+    def test_bgp_worker_shutdown_cancels_thread(self):
+        main.stop_bgp_status_check_thread(timeout=0.1)
+        with patch.dict(os.environ, {"GMJFLOW_BGP_AUTO_CHECK_ENABLED": "true"}), \
+             patch.object(main, "bgp_check_interval_seconds", return_value=30), \
+             patch.object(main, "run_bgp_connector_status_checks_once", return_value={"checked": 0}):
+            main.start_bgp_status_check_thread()
+            thread = main.BGP_STATUS_CHECK_THREAD
+            self.assertIsNotNone(thread)
+            self.assertTrue(thread.is_alive())
+            main.stop_bgp_status_check_thread(timeout=1)
+        self.assertTrue(main.BGP_STATUS_CHECK_STOP.is_set())
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(main.BGP_STATUS_CHECK_THREAD)
 
     def test_ai_pending_approval_is_registered_without_writing_pipe(self):
         with temporary_main_db():
