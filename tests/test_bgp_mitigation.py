@@ -648,6 +648,32 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(data["critical_response_profile_id"], profile["id"])
             self.assertEqual(data["fallback_response_profile_id"], profile["id"])
             self.assertEqual(data["mitigation_mode"], "response_profile")
+            self.assertEqual(data["mitigation_enabled"], 1)
+
+    def test_detection_rule_serializer_preserves_legacy_response_profile_ids(self):
+        item = main.detection_rule_row_to_dict({
+            "id": 1,
+            "template_id": 1,
+            "vector": "UDP_TEST",
+            "domain": "internal_ip",
+            "direction": "transmits",
+            "metric": "packets_s",
+            "comparison": "over",
+            "warning_response_profile_id": 16,
+            "critical_response_profile_id": 16,
+            "fallback_response_profile_id": 16,
+            "mitigation_mode": "response_profile",
+            "mitigation_enabled": 0,
+            "created_at": "2026-07-19T00:00:00Z",
+            "updated_at": "2026-07-19T00:00:00Z",
+        })
+
+        self.assertEqual(item["warning_response_profile_id"], 16)
+        self.assertEqual(item["critical_response_profile_id"], 16)
+        self.assertEqual(item["fallback_response_profile_id"], 16)
+        self.assertEqual(item["mitigation_mode"], "response_profile")
+        self.assertTrue(item["mitigation_enabled"])
+        self.assertEqual(item["response"], "RESPONSE_PROFILE")
 
     def test_automatic_runner_uses_automatic_for_auto_profiles(self):
         source = Path(ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")

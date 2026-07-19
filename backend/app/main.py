@@ -6957,7 +6957,7 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
     display_name = effective_vector_display_name(item.get("display_name"), vector)
     cooldown_seconds = int(item.get("cooldown_seconds") or int(item.get("cooldown_minutes") or 5) * 60)
     mitigation_mode = normalize_detection_mitigation_mode(item.get("mitigation_mode"))
-    mitigation_enabled = sqlite_bool(item.get("mitigation_enabled"))
+    mitigation_enabled = sqlite_bool(item.get("mitigation_enabled")) or mitigation_mode == "response_profile"
     if not mitigation_enabled:
         mitigation_mode = "detection_only"
     warning_profile_id = int(item["warning_response_profile_id"]) if item.get("warning_response_profile_id") is not None else None
@@ -7149,7 +7149,7 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
     comparison = normalize_choice(clean_text(data.get("comparison")).lower() or "over", DETECTION_COMPARISONS, "comparison")
     response = normalize_choice(clean_text(data.get("response")).upper() or "DETECTION_ONLY", DETECTION_RESPONSES, "response")
     mitigation_mode = normalize_detection_mitigation_mode(data.get("mitigation_mode"))
-    mitigation_enabled = 1 if data.get("mitigation_enabled") else 0
+    mitigation_enabled = 1 if data.get("mitigation_enabled") or mitigation_mode == "response_profile" else 0
     warning_response_profile_id = data.get("warning_response_profile_id")
     critical_response_profile_id = data.get("critical_response_profile_id")
     fallback_response_profile_id = data.get("fallback_response_profile_id")
