@@ -1196,7 +1196,7 @@
           <i data-lucide="activity"></i><span>Peak Hunter</span>
         </button>
         <button id="bgpNavButton" type="button" data-nav-view="bgp">
-          <i data-lucide="shield-check"></i><span>BGP / Mitigação</span>
+          <i data-lucide="shield-check"></i><span>BGP / Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
         </button>
         <button id="systemNavButton" type="button" data-nav-view="system">
           <i data-lucide="activity"></i><span>Sistema</span>
@@ -4359,6 +4359,15 @@
           </div>
 
           <section class="panel p-3 mb-3">
+            <div class="database-metrics-grid mb-0">
+              <div class="metric-card"><div class="metric-label">Ativas</div><div id="bgpSummaryActive" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Pendentes</div><div id="bgpSummaryPending" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Falhas</div><div id="bgpSummaryFailed" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Expiradas hoje</div><div id="bgpSummaryExpiredToday" class="metric-value">0</div></div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
                 <div class="panel-title">IA para mitigação</div>
@@ -5478,6 +5487,8 @@
     let bgpAnnouncements = [];
     let bgpPortPolicies = [];
     let bgpConnectorStatuses = [];
+    let opsSummaryRefreshTimer = null;
+    let opsSummaryRefreshInFlight = false;
     let activeCustomRangeTarget = null;
     let flowSort = { column: 'flow_time', direction: 'desc' };
     let topFlowSort = { column: 'bits_s', direction: 'desc' };
@@ -8403,6 +8414,7 @@
         } else {
           await loadSecurityAnomalies();
         }
+        await refreshOpsSummary();
       } catch (error) {
         document.getElementById('securityCandidateStatus').textContent = `Falha ao atualizar anomalia: ${error.message}`;
       }
@@ -8619,8 +8631,8 @@
         <tr>
           <td>${escapeHtml(item.name)}</td>
           <td>${escapeHtml(item.role)}</td>
-          <td>${escapeHtml(item.backend || item.backend_type)}</td>
-          <td>${escapeHtml(item.mode)}</td>
+          <td><span class="badge-soft ${(item.backend || item.backend_type) === 'dry_run' ? 'off' : 'ok'}">${escapeHtml(item.backend || item.backend_type)}</span></td>
+          <td><span class="badge-soft ${item.mode === 'dry_run' ? 'off' : 'ok'}">${escapeHtml(item.mode)}</span></td>
           <td>${escapeHtml(item.peer_ip || '-')} ${item.peer_asn ? `(AS${escapeHtml(item.peer_asn)})` : ''}<br><span class="subtle">${escapeHtml(item.local_address || '-')} : ${escapeHtml(item.listen_port || 179)}</span></td>
           <td><span class="badge-soft ${item.enabled ? 'ok' : 'off'}">${item.enabled ? 'Ativo' : 'Off'}</span></td>
           <td>
@@ -8919,10 +8931,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return 'Esta regra vai descartar o tráfego correspondente.';
     }
 
+    function bgpAnnouncementIsOperationalActive(item) {
+      if (!['active', 'announced'].includes(item?.status)) return false;
+      if (!item.expires_at) return true;
+      const expires = new Date(item.expires_at);
+      return Number.isFinite(expires.getTime()) && expires > new Date();
+    }
+
     function renderBgpAnnouncements() {
       const pending = bgpAnnouncements.filter(item => item.status === 'pending_approval');
-      const active = bgpAnnouncements.filter(item => ['active', 'announced'].includes(item.status));
-      const history = bgpAnnouncements.filter(item => !['active', 'announced', 'pending_approval'].includes(item.status));
+      const active = bgpAnnouncements.filter(item => bgpAnnouncementIsOperationalActive(item));
+      const history = bgpAnnouncements.filter(item => !bgpAnnouncementIsOperationalActive(item) && item.status !== 'pending_approval');
       document.getElementById('bgpPendingSuggestionsTable').innerHTML = pending.map(item => `
         <tr>
           <td>#${item.id}</td>
@@ -8986,18 +9005,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadBgpView() {
       setText('bgpStatus', 'Carregando BGP / Mitigação...');
-      const [connectors, profiles, protectedPrefixes, policies, announcements] = await Promise.all([
+      const [connectors, profiles, protectedPrefixes, policies, announcements, summary] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
         apiRequest('/api/bgp/port-policies?include_disabled=true'),
-        apiRequest('/api/bgp/announcements?limit=200')
+        apiRequest('/api/bgp/announcements?limit=200'),
+        apiRequest('/api/bgp/summary')
       ]);
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
       bgpProfiles = bgpResponseProfilesFromPayload(profiles);
       bgpProtectedPrefixes = Array.isArray(protectedPrefixes.items) ? protectedPrefixes.items : [];
       bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
+      renderOpsSummary(summary);
       bgpConnectorStatuses = await Promise.all(bgpConnectors.map(connector =>
         apiRequest(`/api/bgp/connectors/${connector.id}/status`).catch(error => ({
           connector_id: connector.id,
@@ -9582,8 +9603,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       try {
         const item = await apiRequest(`/api/bgp/connectors/${connectorId}/manual-flowspec/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
-        setText('bgpStatus', action === 'announce' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado');
+        setText('bgpStatus', action === 'announce' && item.status !== 'dry_run' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado');
         await loadBgpView();
+        await refreshOpsSummary();
       } catch (error) {
         const text = `Falha no laboratorio FlowSpec: ${error.message}`;
         setText('bgpStatus', text);
@@ -9819,6 +9841,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
       await loadBgpView();
+      await refreshOpsSummary();
     }
 
     async function applyBgpMitigationDnsTargets(index, mode, selectedOnly = false) {
@@ -9840,11 +9863,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
       await loadBgpView();
+      await refreshOpsSummary();
     }
 
     async function updateBgpAnnouncement(id, action) {
       await apiRequest(`/api/bgp/announcements/${id}/${action}`, { method: 'POST' });
       await loadBgpView();
+      await refreshOpsSummary();
     }
 
     function unitLabel(unit) {
@@ -11441,6 +11466,56 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('anomalyWarningCount', formatNumber(summary.warning_count || 0));
     }
 
+    function renderMitigationBadge(summary) {
+      const count = Number(summary.active_bgp_announcements || 0);
+      const badge = document.getElementById('bgpNavBadge');
+      const button = document.getElementById('bgpNavButton');
+      if (!badge || !button) return;
+      badge.textContent = formatNumber(count);
+      badge.classList.toggle('active', count > 0);
+      button.classList.toggle('has-anomalies', count > 0);
+      setText('bgpSummaryActive', formatNumber(count));
+      setText('bgpSummaryPending', formatNumber(summary.pending_bgp_announcements || 0));
+      setText('bgpSummaryFailed', formatNumber(summary.failed_bgp_announcements || 0));
+      setText('bgpSummaryExpiredToday', formatNumber(summary.expired_bgp_announcements_today || 0));
+    }
+
+    function renderOpsSummary(summary) {
+      renderAnomalyBadge({
+        active_count: summary.active_anomalies ?? summary.active_count ?? 0,
+        critical_count: summary.critical_count || 0,
+        warning_count: summary.warning_count || 0
+      });
+      renderMitigationBadge(summary);
+    }
+
+    async function refreshOpsSummary() {
+      if (currentAuthUser?.role !== 'admin' || opsSummaryRefreshInFlight) return;
+      opsSummaryRefreshInFlight = true;
+      try {
+        const summary = await apiRequest('/api/ops/summary');
+        renderOpsSummary(summary);
+      } finally {
+        opsSummaryRefreshInFlight = false;
+      }
+    }
+
+    function startOpsSummaryPolling() {
+      if (opsSummaryRefreshTimer) return;
+      refreshOpsSummary().catch(console.error);
+      opsSummaryRefreshTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+          refreshOpsSummary().catch(console.error);
+        }
+      }, 5000);
+    }
+
+    function stopOpsSummaryPolling() {
+      if (!opsSummaryRefreshTimer) return;
+      clearInterval(opsSummaryRefreshTimer);
+      opsSummaryRefreshTimer = null;
+    }
+
     async function updateAnomalySummary() {
       if (currentAuthUser?.role !== 'admin') return;
       const summary = await apiRequest('/api/anomalies/summary');
@@ -11969,7 +12044,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!anomalyId) return;
       await apiRequest(`/api/anomalies/${anomalyId}/ack`, { method: 'POST' });
       await loadAnomalies();
-      await updateAnomalySummary();
+      await refreshOpsSummary();
       if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
     }
 
@@ -11977,7 +12052,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!anomalyId) return;
       await apiRequest(`/api/anomalies/${anomalyId}/close`, { method: 'POST' });
       await loadAnomalies();
-      await updateAnomalySummary();
+      await refreshOpsSummary();
       if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
     }
 
@@ -15450,12 +15525,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     resetPeakHunterForm();
     installHelpTooltips();
     createIcons();
-    initAuth().then(scheduleDashboardRefresh).catch(console.error);
-    setInterval(() => {
-      if (activeView === 'anomalies') {
-        updateAnomalySummary().catch(console.error);
-      }
-    }, 30000);
+    initAuth().then(() => {
+      scheduleDashboardRefresh();
+      startOpsSummaryPolling();
+    }).catch(console.error);
+    window.addEventListener('beforeunload', stopOpsSummaryPolling);
   </script>
 </body>
 </html>

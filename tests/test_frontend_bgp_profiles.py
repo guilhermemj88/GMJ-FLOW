@@ -108,6 +108,38 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("critical_response_profile_id: criticalProfileId", HTML)
         self.assertIn("fallback_response_profile_id: fallbackProfileId", HTML)
 
+    def test_ops_summary_polling_updates_anomaly_badge_every_five_seconds(self):
+        self.assertIn("function refreshOpsSummary()", HTML)
+        self.assertIn("apiRequest('/api/ops/summary')", HTML)
+        self.assertIn("renderAnomalyBadge({", HTML)
+        self.assertIn("active_count: summary.active_anomalies", HTML)
+        self.assertIn("setInterval(() =>", HTML)
+        self.assertIn("}, 5000)", HTML)
+        self.assertIn("if (opsSummaryRefreshTimer) return;", HTML)
+        self.assertIn("clearInterval(opsSummaryRefreshTimer)", HTML)
+
+    def test_mitigation_nav_badge_and_summary_cards_use_active_announcements(self):
+        self.assertIn('id="bgpNavBadge"', HTML)
+        self.assertIn("function renderMitigationBadge(summary)", HTML)
+        self.assertIn("summary.active_bgp_announcements", HTML)
+        self.assertIn('id="bgpSummaryActive"', HTML)
+        self.assertIn('id="bgpSummaryPending"', HTML)
+        self.assertIn('id="bgpSummaryFailed"', HTML)
+        self.assertIn('id="bgpSummaryExpiredToday"', HTML)
+        self.assertIn("function bgpAnnouncementIsOperationalActive(item)", HTML)
+        self.assertIn("['active', 'announced'].includes(item?.status)", HTML)
+
+    def test_bgp_actions_refresh_summary_immediately(self):
+        self.assertIn("await refreshOpsSummary();", HTML)
+        self.assertIn("async function updateBgpAnnouncement(id, action)", HTML)
+        self.assertIn("async function applyBgpMitigationCandidate(index, mode)", HTML)
+        self.assertIn("async function applyBgpMitigationDnsTargets(index, mode, selectedOnly = false)", HTML)
+
+    def test_dry_run_connector_is_visually_clear(self):
+        self.assertIn("(item.backend || item.backend_type) === 'dry_run' ? 'off' : 'ok'", HTML)
+        self.assertIn("item.mode === 'dry_run' ? 'off' : 'ok'", HTML)
+        self.assertIn("item.status !== 'dry_run' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado'", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

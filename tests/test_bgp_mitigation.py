@@ -1085,6 +1085,161 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertIn("top_dst_ip=103.100.169.200", log_text)
             self.assertIn("destination 103.100.169.200/32", log_text)
 
+    def test_dns_query_outbound_sensor_null_uses_single_active_flowspec_connector(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append((_connector["id"], command))
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(stats["active"], 1)
+            self.assertEqual(calls[0][0], connector["id"])
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT connector_id, sensor_id, status FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()
+            self.assertEqual(row["connector_id"], connector["id"])
+            self.assertIsNone(row["sensor_id"])
+            self.assertEqual(row["status"], "active")
+
+    def test_dns_query_outbound_sensor_null_uses_selected_connector_ids(self):
+        with temporary_main_db():
+            conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_connectors (
+                    name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+                    enabled, is_active, exabgp_pipe_in, created_at, updated_at
+                )
+                VALUES ('BGP-OTHER', 'flowspec_mitigation', 'exabgp', 'manual_approval', 50, 1800,
+                        1, 1, '/run/exabgp/other.in', ?, ?)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                "UPDATE bgp_response_profiles SET selected_connector_ids = ?, connector_id = NULL WHERE id = ?",
+                (json.dumps([connector["id"]]), profile["id"]),
+            )
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append((_connector["id"], command))
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(stats["active"], 1)
+            self.assertEqual([call[0] for call in calls], [connector["id"]])
+
+    def test_dns_query_outbound_multiple_active_connectors_without_selection_does_not_announce(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_connectors (
+                    name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+                    enabled, is_active, exabgp_pipe_in, created_at, updated_at
+                )
+                VALUES ('BGP-SECOND', 'flowspec_mitigation', 'exabgp', 'manual_approval', 50, 1800,
+                        1, 1, '/run/exabgp/second.in', ?, ?)
+                """,
+                (now, now),
+            )
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                with self.assertLogs("gmj-flow", level="INFO") as logs:
+                    stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["active"], 0)
+            with main.sqlite_connection() as check:
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
+            self.assertEqual(total, 0)
+            log_text = "\n".join(logs.output)
+            self.assertIn("reason=no_connector_resolved", log_text)
+            self.assertIn("connector_resolution_error=ambiguous_connectors", log_text)
+
+    def test_dns_query_outbound_no_active_connector_does_not_announce(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.execute("UPDATE bgp_connectors SET enabled = 0, is_active = 0 WHERE id = ?", (connector["id"],))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["active"], 0)
+            with main.sqlite_connection() as check:
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
+            self.assertEqual(total, 0)
+
+    def test_dns_query_outbound_dry_run_connector_is_not_operational_active(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.execute("UPDATE bgp_connectors SET backend_type = 'dry_run', mode = 'dry_run' WHERE id = ?", (connector["id"],))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            with main.sqlite_connection() as check:
+                row = check.execute("SELECT status FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()
+                summary = main.bgp_summary_payload(check)
+            self.assertEqual(row["status"], "dry_run")
+            self.assertEqual(summary["active_bgp_announcements"], 0)
+
+    def test_bgp_summary_counts_active_and_excludes_expired_announcements(self):
+        with temporary_main_db():
+            conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
+            now = main.utc_now_iso()
+            future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+            past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+            for status, expires_at in (("active", future), ("announced", None), ("active", past), ("pending_approval", None), ("failed", None)):
+                conn.execute(
+                    """
+                    INSERT INTO bgp_announcements (
+                        connector_id, response_profile_id, status, route_type, response_type, action,
+                        target_prefix, duration_seconds, expires_at, created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 'flowspec', 'flowspec', 'discard', '203.0.113.10/32', 600, ?, 'test', ?, ?)
+                    """,
+                    (connector["id"], profile["id"], status, expires_at, now, now),
+                )
+            conn.commit()
+            summary = main.bgp_summary_payload(conn)
+            self.assertEqual(summary["active_bgp_announcements"], 2)
+            self.assertEqual(summary["pending_bgp_announcements"], 1)
+            self.assertEqual(summary["failed_bgp_announcements"], 1)
+
     def test_template_dns_destination_whitelist_does_not_apply(self):
         with temporary_main_db():
             conn, _connector, _profile = self._dns_multi_target_context()

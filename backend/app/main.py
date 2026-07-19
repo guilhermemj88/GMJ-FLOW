@@ -573,7 +573,8 @@ BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "
 BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "anomaly_tcp_flags", "fixed", "syn", "syn_ack"}
 BGP_MITIGATION_TARGET_MODES = {"fixed_connector", "sensor_origin", "all_connectors", "selected_connectors"}
 BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "prepared", "pending_approval", "active", "announced", "rejected", "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw"}
-BGP_ACTIVE_STATUSES = {"dry_run", "pending_approval", "active", "announced"}
+BGP_ACTIVE_STATUSES = {"pending_approval", "active", "announced"}
+BGP_OPERATIONAL_ACTIVE_STATUSES = {"active", "announced"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
 BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
@@ -8309,8 +8310,9 @@ def active_flowspec_announcement_count(connector: dict[str, Any]) -> int:
                 WHERE connector_id = ?
                   AND response_type = 'flowspec'
                   AND status IN ('active', 'announced')
+                  AND (expires_at IS NULL OR expires_at > ?)
                 """,
-                (int(connector_id),),
+                (int(connector_id), utc_now_iso()),
             ).fetchone()
         return int(row["count"] or 0) if row is not None else 0
     except Exception:
@@ -9512,6 +9514,20 @@ def default_bgp_connector(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return bgp_connector_row_to_dict(row) if row is not None else None
 
 
+def connector_is_operationally_active(connector: dict[str, Any] | None) -> bool:
+    return bool(connector and connector.get("enabled") and connector.get("is_active"))
+
+
+def connector_is_flowspec_mitigation(connector: dict[str, Any] | None) -> bool:
+    return connector_is_operationally_active(connector) and clean_text((connector or {}).get("role")) == "flowspec_mitigation"
+
+
+def connector_is_dry_run(connector: dict[str, Any] | None) -> bool:
+    if not connector:
+        return True
+    return clean_text(connector.get("backend_type") or connector.get("backend")).lower() == "dry_run" or clean_text(connector.get("mode")).lower() == "dry_run"
+
+
 def active_flowspec_connectors(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -9526,41 +9542,104 @@ def active_flowspec_connectors(conn: sqlite3.Connection) -> list[dict[str, Any]]
     return [bgp_connector_row_to_dict(row) for row in rows]
 
 
+def active_connector_by_id(conn: sqlite3.Connection, connector_id: Any) -> dict[str, Any] | None:
+    try:
+        value = int(connector_id)
+    except (TypeError, ValueError):
+        return None
+    row = conn.execute(
+        """
+        SELECT *
+        FROM bgp_connectors
+        WHERE id = ?
+          AND enabled = 1
+          AND is_active = 1
+        """,
+        (value,),
+    ).fetchone()
+    if row is None:
+        return None
+    connector = bgp_connector_row_to_dict(row)
+    return connector if connector_is_flowspec_mitigation(connector) else None
+
+
+def active_connectors_by_ids(conn: sqlite3.Connection, connector_ids: Any) -> list[dict[str, Any]]:
+    if not isinstance(connector_ids, list):
+        return []
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_id in connector_ids:
+        try:
+            connector_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if connector_id > 0 and connector_id not in seen:
+            seen.add(connector_id)
+            unique_ids.append(connector_id)
+    return [connector for connector in (active_connector_by_id(conn, connector_id) for connector_id in unique_ids) if connector]
+
+
+def sensor_origin_bgp_connector(conn: sqlite3.Connection, sensor_id: Any) -> dict[str, Any] | None:
+    try:
+        value = int(sensor_id)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(bgp_connectors)").fetchall()}
+    if "sensor_id" not in columns:
+        return None
+    row = conn.execute(
+        """
+        SELECT *
+        FROM bgp_connectors
+        WHERE sensor_id = ?
+          AND enabled = 1
+          AND is_active = 1
+          AND role = 'flowspec_mitigation'
+        ORDER BY id
+        LIMIT 1
+        """,
+        (value,),
+    ).fetchone()
+    return bgp_connector_row_to_dict(row) if row is not None else None
+
+
 def resolve_mitigation_target_connectors(
     conn: sqlite3.Connection,
     candidate: dict[str, Any],
     profile: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     profile = profile or {}
-    target_mode = normalize_choice(
-        profile.get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "sensor_origin",
-        BGP_MITIGATION_TARGET_MODES,
-        "mitigation_target_mode",
-    )
-    connectors: list[dict[str, Any]] = []
-    if target_mode == "fixed_connector":
-        connector_id = profile.get("connector_id") or candidate.get("connector_id")
-        if connector_id:
-            connectors.append(fetch_bgp_connector(conn, int(connector_id)))
-    elif target_mode == "selected_connectors":
-        selected_ids = profile.get("selected_connector_ids") if isinstance(profile.get("selected_connector_ids"), list) else []
-        for connector_id in selected_ids:
-            connectors.append(fetch_bgp_connector(conn, int(connector_id)))
-    elif target_mode == "all_connectors":
-        connectors = active_flowspec_connectors(conn)
+    resolution_error = ""
+    selected = active_connectors_by_ids(conn, profile.get("selected_connector_ids") or candidate.get("selected_connector_ids"))
+    if selected:
+        connectors = selected
     else:
-        connector_id = candidate.get("connector_id") or profile.get("connector_id")
-        if connector_id:
-            connectors.append(fetch_bgp_connector(conn, int(connector_id)))
+        connector = active_connector_by_id(conn, profile.get("connector_id") or candidate.get("connector_id"))
+        if connector:
+            connectors = [connector]
         else:
-            fallback = default_bgp_connector(conn)
-            if fallback:
-                connectors.append(fallback)
+            sensor_connector = sensor_origin_bgp_connector(conn, candidate.get("sensor_id") or profile.get("sensor_id"))
+            if sensor_connector:
+                connectors = [sensor_connector]
+            else:
+                fallback_connectors = active_flowspec_connectors(conn)
+                if len(fallback_connectors) == 1:
+                    connectors = fallback_connectors
+                elif len(fallback_connectors) > 1:
+                    connectors = []
+                    resolution_error = "ambiguous_connectors"
+                else:
+                    connectors = []
+                    resolution_error = "no_active_flowspec_connectors"
     unique: dict[int, dict[str, Any]] = {}
     for connector in connectors:
         connector_id = connector.get("id")
         if connector_id is not None:
             unique[int(connector_id)] = connector
+    if not unique and resolution_error:
+        candidate["connector_resolution_error"] = resolution_error
     return list(unique.values())
 
 
@@ -9736,11 +9815,9 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if explicit_profile else None
     connector = None
     if vector and vector.get("connector_id"):
-        connector = fetch_bgp_connector(conn, int(vector["connector_id"]))
+        connector = active_connector_by_id(conn, int(vector["connector_id"]))
     elif profile and profile.get("connector_id"):
-        connector = fetch_bgp_connector(conn, int(profile["connector_id"]))
-    else:
-        connector = default_bgp_connector(conn)
+        connector = active_connector_by_id(conn, int(profile["connector_id"]))
     candidate["response_profile_id"] = profile["id"] if profile else None
     if profile:
         candidate["mitigation_target_mode"] = profile.get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "sensor_origin"
@@ -10050,6 +10127,9 @@ def dns_operational_log_fields(
         "top_dst_ip": dns_candidate_top_dst_ip(candidate),
         "dst_port": dns_candidate_dst_port(candidate),
         "response_profile_id": profile.get("id") if profile else candidate.get("response_profile_id"),
+        "selected_connector_ids": profile.get("selected_connector_ids") if profile else candidate.get("selected_connector_ids") or [],
+        "profile_connector_id": profile.get("connector_id") if profile else candidate.get("connector_id"),
+        "connector_resolution_error": candidate.get("connector_resolution_error") or "",
         "announce_command": command,
     }
 
@@ -10095,8 +10175,20 @@ def log_dns_auto_mitigation_skipped(
     if not dns_auto_candidate_loggable(candidate, profile):
         return
     fields = dns_operational_log_fields(candidate, connector, profile, command)
+    if reason == "no_connector_resolved":
+        logger.info(
+            "dns_auto_mitigation_not_applied reason=no_connector_resolved anomaly_id=%s vector=%s sensor_id=%s response_profile_id=%s selected_connector_ids=%s connector_id=%s connector_resolution_error=%s",
+            fields["anomaly_id"],
+            fields["vector"],
+            fields["sensor_id"],
+            fields["response_profile_id"],
+            fields["selected_connector_ids"],
+            fields["profile_connector_id"],
+            fields["connector_resolution_error"],
+        )
+        return
     logger.info(
-        "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s vector=%s sensor_id=%s connector_id=%s pipe_path=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s policy_decision=%s validation_errors=%s",
+        "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s vector=%s sensor_id=%s connector_id=%s pipe_path=%s top_src_ip=%s top_dst_ip=%s dst_port=%s response_profile_id=%s selected_connector_ids=%s profile_connector_id=%s connector_resolution_error=%s policy_decision=%s validation_errors=%s",
         reason,
         fields["anomaly_id"],
         fields["vector"],
@@ -10107,6 +10199,9 @@ def log_dns_auto_mitigation_skipped(
         fields["top_dst_ip"],
         fields["dst_port"],
         fields["response_profile_id"],
+        fields["selected_connector_ids"],
+        fields["profile_connector_id"],
+        fields["connector_resolution_error"],
         (policy or {}).get("decision") or "",
         (validation or {}).get("errors") or [],
     )
@@ -13573,7 +13668,6 @@ def persist_ai_pending_bgp_approval(
     candidate["attack_vector_name"] = candidate.get("attack_vector_name") or anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or ""
     candidate["anomaly_source"] = anomaly.get("anomaly_source") or anomaly.get("source") or ""
 
-    connector = fetch_bgp_connector(conn, int(candidate["connector_id"])) if candidate.get("connector_id") else default_bgp_connector(conn)
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     if profile is None:
         requested_profile_name = clean_text(candidate.get("response_profile_name") or candidate.get("profile"))
@@ -13593,7 +13687,10 @@ def persist_ai_pending_bgp_approval(
                 profile = bgp_response_profile_row_to_dict(profile_row)
     if profile is None:
         profile = default_bgp_profile(conn)
+    connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
+    connector = connectors[0] if connectors else None
     if connector is None:
+        log_dns_auto_mitigation_skipped(candidate, "no_connector_resolved", profile=profile)
         return None
     if connector:
         candidate["connector_id"] = connector["id"]
@@ -14741,8 +14838,7 @@ def apply_mitigation_candidate(
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
     if not connectors:
-        reason = "conector sensor_origin nao encontrado" if clean_text((profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode")) == "sensor_origin" else "nenhum conector BGP ativo"
-        log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
+        log_dns_auto_mitigation_skipped(candidate, "no_connector_resolved", profile=profile)
         raise HTTPException(status_code=400, detail="Nenhum conector BGP ativo resolvido para esta mitigacao.")
     requested_mode = "automatic" if mode == "automatic" else "manual_approval"
     results: list[dict[str, Any]] = []
@@ -14783,6 +14879,10 @@ def apply_mitigation_candidate(
         if mode == "manual_approval" or policy["decision"] == "require_manual_approval" and mode != "announce_now":
             log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "profile nao auto"), connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "pending_approval", command, created_by))
+            continue
+        if connector_is_dry_run(connector):
+            log_dns_auto_mitigation_skipped(connector_candidate, "connector_dry_run", connector, profile, policy, validation, command)
+            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "dry_run", command, created_by))
             continue
         if connector.get("backend_type") != "exabgp":
             log_dns_auto_mitigation_skipped(connector_candidate, "conector nao exabgp", connector, profile, policy, validation, command)
@@ -15166,6 +15266,12 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
         if action == "dry_run":
             return manual_flowspec_preview_response(connector, candidate, payload, policy, validation, announce_command, withdraw_command, expires_at)
+        if connector_is_dry_run(connector):
+            response = manual_flowspec_preview_response(connector, candidate, payload, policy, validation, announce_command, withdraw_command, expires_at)
+            response["dry_run"] = True
+            response["status"] = "dry_run"
+            response["message"] = "Conector em dry_run; nenhum comando foi enviado ao ExaBGP."
+            return response
         if validation["errors"]:
             if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
                 raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
@@ -15671,6 +15777,68 @@ def list_bgp_announcements(request: Request, status: str | None = None, limit: i
     return {"items": [bgp_announcement_row_to_dict(row) for row in rows]}
 
 
+def active_anomalies_summary(conn: sqlite3.Connection) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS active_count,
+            SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical_count,
+            SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS warning_count
+        FROM anomaly_events
+        WHERE status = 'active'
+        """
+    ).fetchone()
+    consolidated = [group["event"] for group in consolidated_security_anomaly_groups("active")]
+    return {
+        "active_count": int(row["active_count"] or 0) + len(consolidated),
+        "critical_count": int(row["critical_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "critical"),
+        "warning_count": int(row["warning_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "warning"),
+        "security_consolidated_count": len(consolidated),
+    }
+
+
+def bgp_summary_payload(conn: sqlite3.Connection) -> dict[str, int]:
+    now = utc_now_iso()
+    today = datetime.now(timezone.utc).date().isoformat()
+    row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status IN ('active', 'announced') AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS active_bgp_announcements,
+            SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END) AS pending_bgp_announcements,
+            SUM(CASE WHEN status IN ('failed', 'failed_withdraw') THEN 1 ELSE 0 END) AS failed_bgp_announcements,
+            SUM(CASE WHEN status = 'expired' AND substr(COALESCE(withdrawn_at, updated_at, created_at), 1, 10) = ? THEN 1 ELSE 0 END) AS expired_bgp_announcements_today
+        FROM bgp_announcements
+        """,
+        (now, today),
+    ).fetchone()
+    anomaly_summary = active_anomalies_summary(conn)
+    return {
+        "active_anomalies": anomaly_summary["active_count"],
+        "critical_count": anomaly_summary["critical_count"],
+        "warning_count": anomaly_summary["warning_count"],
+        "active_bgp_announcements": int(row["active_bgp_announcements"] or 0) if row else 0,
+        "pending_bgp_announcements": int(row["pending_bgp_announcements"] or 0) if row else 0,
+        "failed_bgp_announcements": int(row["failed_bgp_announcements"] or 0) if row else 0,
+        "expired_bgp_announcements_today": int(row["expired_bgp_announcements_today"] or 0) if row else 0,
+    }
+
+
+@app.get("/api/bgp/summary")
+def bgp_summary(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return bgp_summary_payload(conn)
+
+
+@app.get("/api/ops/summary")
+def ops_summary(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return bgp_summary_payload(conn)
+
+
 @app.get("/api/bgp/report.pdf")
 def bgp_report_pdf(request: Request):
     require_admin(request)
@@ -15791,7 +15959,11 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
         final_status = status
         last_error = ""
         command = clean_text(row["rendered_command"])
-        if status == "pending_approval" and connector and connector.get("backend_type") == "exabgp":
+        if status == "pending_approval" and connector and connector_is_dry_run(connector):
+            final_status = "dry_run"
+            event_type = "dry_run_created"
+            message = "Conector em dry_run; nenhum anuncio real foi enviado."
+        elif status == "pending_approval" and connector and connector.get("backend_type") == "exabgp":
             errors = bgp_json_loads(row["validation_errors"], [])
             if errors:
                 raise HTTPException(status_code=400, detail="Nao e possivel aprovar anuncio com erros de validacao")
@@ -15805,6 +15977,8 @@ def update_bgp_announcement_status(request: Request, announcement_id: int, statu
                 last_error = clean_text(exc.detail)
                 event_type = "announce_failed"
                 message = last_error
+        elif status == "withdrawn" and connector and connector_is_dry_run(connector):
+            message = "Conector em dry_run; withdraw real nao foi enviado."
         elif status == "withdrawn" and connector and connector.get("backend_type") == "exabgp":
             withdraw_command = render_bgp_withdraw_command(row)
             try:
@@ -23360,22 +23534,10 @@ def anomaly_summary_endpoint(request: Request):
     require_admin(request)
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS active_count,
-                SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical_count,
-                SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS warning_count
-            FROM anomaly_events
-            WHERE status = 'active'
-            """
-        ).fetchone()
-    consolidated = [group["event"] for group in consolidated_security_anomaly_groups("active")]
+        summary = active_anomalies_summary(conn)
     return {
-        "active_count": int(row["active_count"] or 0) + len(consolidated),
-        "critical_count": int(row["critical_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "critical"),
-        "warning_count": int(row["warning_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "warning"),
-        "security_consolidated_count": len(consolidated),
+        **summary,
+        "security_consolidated_count": summary["security_consolidated_count"],
     }
 
 
