@@ -156,6 +156,12 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("VERIFICACAO DESABILITADA", HTML)
         self.assertIn("checkBgpConnectorStatusesNow().catch", HTML)
 
+    def test_zone_connector_mapping_and_not_applied_reason_are_visible(self):
+        self.assertIn('id="ipZoneConnector"', HTML)
+        self.assertIn("connector_id: connectorId ? Number(connectorId) : null", HTML)
+        self.assertIn("candidate.automatic_not_applied_reason || candidate.connector_resolution_error", HTML)
+        self.assertIn("event.auto_mitigation_reason || '-'", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

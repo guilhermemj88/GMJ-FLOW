@@ -2665,6 +2665,13 @@
                     </select>
                     <div class="subtle">Conjunto de regras/thresholds aplicado a esta zona.</div>
                   </div>
+                  <div class="field">
+                    <label for="ipZoneConnector">Conector FlowSpec da zona</label>
+                    <select id="ipZoneConnector" class="form-select form-select-sm">
+                      <option value="">Sem conector associado</option>
+                    </select>
+                    <div class="subtle">Associacao persistida usada para anomalias sem sensor_id.</div>
+                  </div>
                   <div class="field grid-span-3">
                     <label for="ipZoneDescription">Descricao</label>
                     <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observações da zona">
@@ -7057,6 +7064,7 @@
       setValue('ipZoneDescription', zone?.description || '');
       setBoolSelect('ipZoneActive', zone?.active ?? true);
       setValue('ipZoneTemplate', zone?.detection_template_id || '');
+      renderIpZoneConnectorSelect(zone?.connector_id || '');
       renderIpZoneTemplateSummary();
       renderIpZoneList();
       renderIpZonePrefixTable(zone?.prefixes || []);
@@ -7067,12 +7075,25 @@
 
     function collectIpZoneForm() {
       const templateId = selectValue('ipZoneTemplate');
+      const connectorId = selectValue('ipZoneConnector');
       return {
         name: selectValue('ipZoneName').trim(),
         description: selectValue('ipZoneDescription').trim(),
         active: boolSelectValue('ipZoneActive'),
-        detection_template_id: templateId ? Number(templateId) : null
+        detection_template_id: templateId ? Number(templateId) : null,
+        connector_id: connectorId ? Number(connectorId) : null
       };
+    }
+
+    function renderIpZoneConnectorSelect(selected = '') {
+      const select = document.getElementById('ipZoneConnector');
+      if (!select) return;
+      const connectors = bgpConnectors.filter(item => item.role === 'flowspec_mitigation' && item.enabled !== false && item.is_active !== false);
+      select.innerHTML = [
+        '<option value="">Sem conector associado</option>',
+        ...connectors.map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`)
+      ].join('');
+      select.value = selected ? String(selected) : '';
     }
 
     function renderIpZoneList() {
@@ -7085,7 +7106,7 @@
         <tr data-zone-id="${zone.id}" class="${Number(zone.id) === Number(currentIpZoneId) ? 'active' : ''}">
           <td>
             <div class="fw-semibold">${escapeHtml(zone.name)}</div>
-            <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')}</div>
+            <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')} / ${escapeHtml(zone.connector_name || 'Sem conector FlowSpec')}</div>
           </td>
           <td class="text-end">${formatNumber(zone.active_prefix_count ?? zone.prefix_count ?? 0)} / ${formatNumber(zone.total_prefix_count ?? zone.prefix_count ?? (zone.prefixes || []).length)}</td>
           <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Desativada'}</span></td>
@@ -8421,17 +8442,24 @@
       }
     }
 
+    async function loadIpZoneConnectors() {
+      const payload = await apiRequest('/api/bgp/connectors');
+      bgpConnectors = Array.isArray(payload.items) ? payload.items : [];
+    }
+
     async function loadIpZoneWorkspace() {
       setIpZoneStatus('Carregando IP Zones...');
       await Promise.all([
         loadDashboardSensors(),
         loadDetectionTemplates(),
+        loadIpZoneConnectors(),
         loadIpZones(),
         loadDetectionWhitelist()
       ]);
       renderDashboardZoneSelects();
       renderDetectionTemplateSelect();
       renderIpZoneTemplateSummary();
+      renderIpZoneConnectorSelect(selectedIpZone()?.connector_id || '');
       renderCandidateSensorSelect();
       renderIpZoneCoverageSensorSelect();
       await loadSecurityAnomalies();
@@ -9716,6 +9744,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const connectorText = [candidate.mitigation_target_mode || '', candidate.connector_name || (candidate.connector_id ? `#${candidate.connector_id}` : ''), candidate.pipe_path || '']
           .filter(Boolean)
           .join(' / ');
+        const connectorResolutionReason = candidate.automatic_not_applied_reason || candidate.connector_resolution_error || '';
         const candidateRole = candidate.candidate_role === 'recommended'
           ? 'Recomendado: destination /32 + udp/53'
           : candidate.candidate_role === 'conservative'
@@ -9745,6 +9774,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
             ${renderDnsMultiTargetBlock(candidate, index, canApply)}
             ${connectorText ? `<div class="metric-readout mb-2">Conector: ${escapeHtml(connectorText)}</div>` : ''}
+            ${connectorResolutionReason ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
@@ -11831,6 +11861,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? 'Mitigação por destino/porta agregados'
           : event.mitigation_basis || '-';
       const sourceDetails = event.source_details_json || event.source_details || {};
+      const autoMitigationDetails = event.auto_mitigation_details || {};
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
         ['Origem', anomalySourceLabel(event.anomaly_source)],
@@ -11862,7 +11893,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Base mitigação', mitigationBasis],
         ['Top flow', topFlowText],
         ['Resumo completo', event.summary || '-'],
-        ['Motivo', event.mitigation_reason || '-']
+        ['Motivo', event.mitigation_reason || '-'],
+        ['Mitigacao automatica', event.auto_mitigation_status || '-'],
+        ['Motivo nao aplicada', event.auto_mitigation_reason || '-'],
+        ['Resolucao conector', autoMitigationDetails.connector_resolution_method || '-']
       ];
       if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
       const legacyDnsWarning = isLegacyDnsAnomaly(event)

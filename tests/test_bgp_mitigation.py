@@ -340,6 +340,38 @@ class BgpMitigationTest(unittest.TestCase):
         conn.commit()
         return event_id
 
+    def _insert_zone_connector_mapping(self, conn, name, cidr, connector_id, zone_id=None):
+        now = main.utc_now_iso()
+        if zone_id is None:
+            zone_id = conn.execute(
+                "INSERT INTO ip_zones (name, connector_id, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+                (name, connector_id, now, now),
+            ).lastrowid
+        else:
+            conn.execute(
+                "INSERT INTO ip_zones (id, name, connector_id, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)",
+                (zone_id, name, connector_id, now, now),
+            )
+        conn.execute(
+            "INSERT INTO ip_zone_prefixes (zone_id, cidr, active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+            (zone_id, cidr, now, now),
+        )
+        return int(zone_id)
+
+    def _insert_flowspec_connector(self, conn, name, pipe_path):
+        now = main.utc_now_iso()
+        return int(conn.execute(
+            """
+            INSERT INTO bgp_connectors (
+                name, role, backend_type, mode, max_active_rules, max_duration_seconds,
+                enabled, is_active, exabgp_pipe_in, created_at, updated_at
+            )
+            VALUES (?, 'flowspec_mitigation', 'exabgp', 'manual_approval', 50, 1800,
+                    1, 1, ?, ?, ?)
+            """,
+            (name, pipe_path, now, now),
+        ).lastrowid)
+
     def _insert_legacy_dns_anomaly_event(self, conn, event_id=143):
         now = main.utc_now_iso()
         conn.execute(
@@ -1168,6 +1200,179 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(stats["active"], 1)
             self.assertEqual([call[0] for call in calls], [connector["id"]])
 
+    def test_sensor_null_resolves_fibinet_and_gm_connectors_from_origin_prefix(self):
+        with temporary_main_db():
+            conn, fibinet, profile = self._dns_multi_target_context(add_whitelist=False)
+            gm_id = self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            fib_zone = self._insert_zone_connector_mapping(conn, "Clientes FIBINET", "179.189.83.0/24", fibinet["id"])
+            gm_zone = self._insert_zone_connector_mapping(conn, "Clientes GM", "45.5.249.0/24", gm_id)
+            conn.commit()
+
+            def candidate(source_ip):
+                return {
+                    "sensor_id": None,
+                    "raw_payload": {
+                        "anomaly": {
+                            "top_src_ip": source_ip,
+                            "target_ip": source_ip,
+                            "target_role": "src_ip",
+                            "zone_name": "nome-nao-usado",
+                        }
+                    },
+                }
+
+            fib_candidate = candidate("179.189.83.212")
+            gm_candidate = candidate("45.5.249.10")
+            fib_resolved = main.resolve_mitigation_target_connectors(conn, fib_candidate, profile)
+            gm_resolved = main.resolve_mitigation_target_connectors(conn, gm_candidate, profile)
+            target_fallback_candidate = {
+                "sensor_id": None,
+                "raw_payload": {"anomaly": {"top_src_ip": "", "target_ip": "179.189.83.212", "target_role": "src_ip"}},
+            }
+            target_fallback_resolved = main.resolve_mitigation_target_connectors(conn, target_fallback_candidate, profile)
+            self.assertEqual([item["id"] for item in fib_resolved], [fibinet["id"]])
+            self.assertEqual([item["id"] for item in gm_resolved], [gm_id])
+            self.assertEqual([item["id"] for item in target_fallback_resolved], [fibinet["id"]])
+            self.assertEqual(fib_candidate["connector_resolution_zone_id"], fib_zone)
+            self.assertEqual(gm_candidate["connector_resolution_zone_id"], gm_zone)
+            self.assertEqual(fib_candidate["connector_resolution_method"], "zone_prefix")
+
+    def test_ambiguous_zone_connector_resolution_persists_reason_and_does_not_announce(self):
+        with temporary_main_db():
+            conn, fibinet, profile = self._dns_multi_target_context(add_whitelist=False)
+            gm_id = self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            self._insert_zone_connector_mapping(conn, "FIBINET", "179.189.83.0/24", fibinet["id"])
+            self._insert_zone_connector_mapping(conn, "GM overlap", "179.189.83.0/24", gm_id)
+            conn.execute(
+                "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('179.189.83.0/24', 1, ?, ?)",
+                (main.utc_now_iso(), main.utc_now_iso()),
+            )
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1727, src_ip="179.189.83.212", dst_ip="174.55.141.233")
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL, zone_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda connector, command: calls.append((connector["id"], command))
+            try:
+                with self.assertLogs("gmj-flow", level="INFO") as logs:
+                    main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            with main.sqlite_connection() as check:
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements").fetchone()["total"]
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason, auto_mitigation_details_json FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(total, 0)
+            self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+            self.assertEqual(outcome["auto_mitigation_reason"], "ambiguous_connector_resolution")
+            details = json.loads(outcome["auto_mitigation_details_json"])
+            self.assertEqual(details["source_ip"], "179.189.83.212")
+            self.assertEqual(details["candidate_connector_ids"], sorted([fibinet["id"], gm_id]))
+            log_text = "\n".join(logs.output)
+            self.assertIn("reason=ambiguous_connector_resolution", log_text)
+            self.assertIn("source_ip=179.189.83.212", log_text)
+            self.assertIn("candidate_connector_ids=", log_text)
+
+    def test_no_zone_mapping_with_multiple_connectors_does_not_announce(self):
+        with temporary_main_db():
+            conn, _fibinet, _profile = self._dns_multi_target_context(add_whitelist=False)
+            self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1727)
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL, zone_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda connector, command: calls.append(command)
+            try:
+                main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            with main.sqlite_connection() as check:
+                self.assertEqual(check.execute("SELECT COUNT(*) AS total FROM bgp_announcements").fetchone()["total"], 0)
+
+    def test_three_equivalent_anomalies_create_one_flowspec_announcement(self):
+        with temporary_main_db():
+            conn, fibinet, _profile = self._dns_multi_target_context(add_whitelist=False)
+            self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            self._insert_zone_connector_mapping(conn, "Clientes FIBINET", "179.189.83.0/24", fibinet["id"], zone_id=1)
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('179.189.83.0/24', 1, ?, ?)",
+                (now, now),
+            )
+            for event_id in (1727, 1728, 1729):
+                self._insert_dns_query_anomaly_event(conn, event_id=event_id, src_ip="179.189.83.212", dst_ip="174.55.141.233")
+                conn.execute("UPDATE anomaly_events SET sensor_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda connector, command: calls.append((connector["id"], command))
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(stats["active"], 1)
+            self.assertGreaterEqual(stats["skipped"], 2)
+            with main.sqlite_connection() as check:
+                rows = check.execute(
+                    "SELECT connector_id, dst_prefix, protocol, dst_port, action FROM bgp_announcements"
+                ).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(tuple(rows[0]), (fibinet["id"], "174.55.141.233/32", "udp", "53", "discard"))
+
+    def test_same_destination_on_different_connectors_is_not_deduplicated(self):
+        with temporary_main_db():
+            conn, fibinet, _profile = self._dns_multi_target_context(add_whitelist=False)
+            gm_id = self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            self._insert_zone_connector_mapping(conn, "FIBINET", "179.189.83.0/24", fibinet["id"])
+            self._insert_zone_connector_mapping(conn, "GM", "45.5.249.0/24", gm_id)
+            now = main.utc_now_iso()
+            for cidr in ("179.189.83.0/24", "45.5.249.0/24"):
+                conn.execute(
+                    "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES (?, 1, ?, ?)",
+                    (cidr, now, now),
+                )
+            for event_id, source_ip in ((1801, "179.189.83.212"), (1802, "45.5.249.10")):
+                self._insert_dns_query_anomaly_event(conn, event_id=event_id, src_ip=source_ip, dst_ip="174.55.141.233")
+                conn.execute("UPDATE anomaly_events SET sensor_id = NULL, zone_id = NULL WHERE id = ?", (event_id,))
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda connector, command: calls.append((connector["id"], command))
+            try:
+                main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(sorted(connector_id for connector_id, _command in calls), sorted([fibinet["id"], gm_id]))
+            with main.sqlite_connection() as check:
+                connector_ids = [row["connector_id"] for row in check.execute("SELECT connector_id FROM bgp_announcements").fetchall()]
+            self.assertEqual(sorted(connector_ids), sorted([fibinet["id"], gm_id]))
+
+    def test_selected_and_explicit_profile_connectors_keep_priority(self):
+        with temporary_main_db():
+            conn, fibinet, profile = self._dns_multi_target_context(add_whitelist=False)
+            gm_id = self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
+            self._insert_zone_connector_mapping(conn, "FIBINET", "179.189.83.0/24", fibinet["id"])
+            candidate = {
+                "sensor_id": None,
+                "raw_payload": {"anomaly": {"top_src_ip": "179.189.83.212", "target_role": "src_ip"}},
+            }
+            selected_profile = {**profile, "selected_connector_ids": [gm_id], "connector_id": fibinet["id"]}
+            selected = main.resolve_mitigation_target_connectors(conn, dict(candidate), selected_profile)
+            self.assertEqual([item["id"] for item in selected], [gm_id])
+            explicit_profile = {**profile, "selected_connector_ids": [], "connector_id": gm_id}
+            explicit = main.resolve_mitigation_target_connectors(conn, dict(candidate), explicit_profile)
+            self.assertEqual([item["id"] for item in explicit], [gm_id])
+
     def test_dns_query_outbound_multiple_active_connectors_without_selection_does_not_announce(self):
         with temporary_main_db():
             conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
@@ -1201,8 +1406,8 @@ class BgpMitigationTest(unittest.TestCase):
                 total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(total, 0)
             log_text = "\n".join(logs.output)
-            self.assertIn("reason=no_connector_resolved", log_text)
-            self.assertIn("connector_resolution_error=ambiguous_connectors", log_text)
+            self.assertIn("reason=ambiguous_connector_resolution", log_text)
+            self.assertIn("connector_resolution_error=ambiguous_connector_resolution", log_text)
 
     def test_dns_query_outbound_no_active_connector_does_not_announce(self):
         with temporary_main_db():

@@ -945,6 +945,7 @@ class IpZonePayload(BaseModel):
     description: str = ""
     active: bool = True
     detection_template_id: int | None = Field(None, ge=1)
+    connector_id: int | None = Field(None, ge=1)
 
 
 class IpZonePrefixPayload(BaseModel):
@@ -1775,6 +1776,10 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "anomaly_events", "peak_analysis_id", "peak_analysis_id INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "peak_hunter_job_id", "peak_hunter_job_id INTEGER")
     ensure_sqlite_column(conn, "anomaly_events", "peak_hunter_run_id", "peak_hunter_run_id INTEGER")
+    ensure_sqlite_column(conn, "anomaly_events", "auto_mitigation_status", "auto_mitigation_status TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "auto_mitigation_reason", "auto_mitigation_reason TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "anomaly_events", "auto_mitigation_details_json", "auto_mitigation_details_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "anomaly_events", "auto_mitigation_updated_at", "auto_mitigation_updated_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "interface_if_index", "interface_if_index INTEGER")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "attack_vector_suggestions", "reason", "reason TEXT NOT NULL DEFAULT ''")
@@ -2375,6 +2380,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             description TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1,
             detection_template_id INTEGER,
+            connector_id INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(detection_template_id) REFERENCES detection_templates(id) ON DELETE SET NULL
@@ -3085,6 +3091,8 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_connectors", "status_snapshot_json", "status_snapshot_json TEXT NOT NULL DEFAULT '{}'")
     ensure_sqlite_column(conn, "bgp_connectors", "last_checked_at", "last_checked_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_connectors", "is_active", "is_active INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_connectors", "sensor_id", "sensor_id INTEGER")
+    ensure_sqlite_column(conn, "ip_zones", "connector_id", "connector_id INTEGER")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_protected_prefixes (
@@ -3302,6 +3310,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_protected_enabled ON bgp_protected_prefixes(enabled)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_status ON bgp_announcements(status, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_mitigation_key ON bgp_announcements(mitigation_key, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zones_connector ON ip_zones(connector_id, active)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
     seed_default_bgp_response_profiles(conn)
@@ -7072,6 +7081,8 @@ def ip_zone_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "active": sqlite_bool(item.get("active")),
         "detection_template_id": int(item["detection_template_id"]) if item.get("detection_template_id") is not None else None,
         "detection_template_name": item.get("detection_template_name") or item.get("template_name") or "",
+        "connector_id": int(item["connector_id"]) if item.get("connector_id") is not None else None,
+        "connector_name": item.get("connector_name") or "",
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
         "prefix_count": prefix_count,
@@ -7125,11 +7136,17 @@ def normalize_ip_zone_payload(conn: sqlite3.Connection, payload: IpZonePayload) 
     template_id = data.get("detection_template_id")
     if template_id is not None:
         _ = fetch_detection_template_row(conn, int(template_id))
+    connector_id = data.get("connector_id")
+    if connector_id is not None:
+        connector = active_connector_by_id(conn, int(connector_id))
+        if connector is None:
+            raise HTTPException(status_code=400, detail="connector_id deve apontar para um conector FlowSpec ativo")
     return {
         "name": name,
         "description": clean_text(data.get("description")),
         "active": 1 if data.get("active") else 0,
         "detection_template_id": int(template_id) if template_id is not None else None,
+        "connector_id": int(connector_id) if connector_id is not None else None,
     }
 
 
@@ -7329,11 +7346,13 @@ def fetch_ip_zone(
         SELECT
             z.*,
             t.name AS detection_template_name,
+            c.name AS connector_name,
             COUNT(CASE WHEN p.active = 1 THEN p.id END) AS prefix_count,
             COUNT(CASE WHEN p.active = 1 THEN p.id END) AS active_prefix_count,
             COUNT(p.id) AS total_prefix_count
         FROM ip_zones z
         LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+        LEFT JOIN bgp_connectors c ON c.id = z.connector_id
         LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
         WHERE z.id = ?
         GROUP BY z.id
@@ -7418,6 +7437,7 @@ def bgp_connector_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "id": int(item["id"]),
         "name": item["name"],
         "role": item.get("role") or "generic_bgp",
+        "sensor_id": int(item["sensor_id"]) if item.get("sensor_id") is not None else None,
         "backend": backend_type,
         "backend_type": backend_type,
         "mode": item.get("mode") or "dry_run",
@@ -9730,16 +9750,18 @@ def cidr_from_ip_or_cidr(value: Any) -> str:
 
 
 def mitigation_key_for_candidate(candidate: dict[str, Any]) -> str:
+    """Stable FlowSpec identity shared by equivalent anomaly events.
+
+    Anomaly id, vector name, source prefix and profile are intentionally not
+    part of this key. The same rule observed by multiple detectors must result
+    in one announcement, while the connector remains part of the identity.
+    """
     parts = [
         str(candidate.get("connector_id") or ""),
-        clean_text(candidate.get("attack_vector_name")),
-        clean_text(candidate.get("src_cidr") or candidate.get("src_prefix")),
         clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix")),
-        clean_text(candidate.get("protocol")),
-        clean_text(candidate.get("src_port")),
+        clean_text(candidate.get("protocol")).lower(),
         clean_text(candidate.get("dst_port")),
-        clean_text(candidate.get("action") or candidate.get("then_action")),
-        str(candidate.get("rate_limit_bps") or 0),
+        clean_text(candidate.get("action") or candidate.get("then_action")).lower(),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:24]
 
@@ -9849,6 +9871,106 @@ def sensor_origin_bgp_connector(conn: sqlite3.Connection, sensor_id: Any) -> dic
     return bgp_connector_row_to_dict(row) if row is not None else None
 
 
+def mitigation_origin_ip(candidate: dict[str, Any]) -> str:
+    """Return the internal/origin IP without relying on customer or zone names."""
+    raw_payload = candidate.get("raw_payload") if isinstance(candidate.get("raw_payload"), dict) else {}
+    anomaly = raw_payload.get("anomaly") if isinstance(raw_payload.get("anomaly"), dict) else {}
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    # For outbound anomalies, the persisted top source is authoritative. A
+    # normalized src_ip target is the second choice, as requested by the rule.
+    values = [candidate.get("top_src_ip"), anomaly.get("top_src_ip")]
+    if clean_text(candidate.get("target_role")).lower() == "src_ip":
+        values.append(candidate.get("target_ip"))
+    if clean_text(anomaly.get("target_role")).lower() == "src_ip":
+        values.append(anomaly.get("target_ip"))
+    values.extend(
+        [
+            top_flow.get("src_ip"),
+            candidate.get("src_ip"),
+            candidate.get("internal_ip"),
+            anomaly.get("src_ip"),
+            anomaly.get("internal_ip"),
+        ]
+    )
+    for value in values:
+        parsed = clean_ip(value)
+        if parsed:
+            return parsed
+    return ""
+
+
+def zone_prefix_bgp_connectors(
+    conn: sqlite3.Connection,
+    candidate: dict[str, Any],
+) -> list[dict[str, Any]]:
+    source_ip = mitigation_origin_ip(candidate)
+    raw_payload = candidate.get("raw_payload") if isinstance(candidate.get("raw_payload"), dict) else {}
+    anomaly = raw_payload.get("anomaly") if isinstance(raw_payload.get("anomaly"), dict) else {}
+    candidate["connector_resolution_source_ip"] = source_ip
+
+    explicit_zone_id = int_or_none(candidate.get("zone_id") or anomaly.get("zone_id"))
+    if explicit_zone_id is not None:
+        row = conn.execute(
+            "SELECT connector_id FROM ip_zones WHERE id = ? AND active = 1",
+            (explicit_zone_id,),
+        ).fetchone()
+        connector = active_connector_by_id(conn, row["connector_id"] if row else None)
+        if connector:
+            candidate["connector_resolution_zone_id"] = explicit_zone_id
+            candidate["connector_resolution_zone_ids"] = [explicit_zone_id]
+            candidate["candidate_connector_ids"] = [int(connector["id"])]
+            candidate["connector_resolution_method"] = "zone_id"
+            return [connector]
+
+    try:
+        parsed_source = ip_address(source_ip) if source_ip else None
+    except ValueError:
+        parsed_source = None
+    if parsed_source is None:
+        return []
+
+    rows = conn.execute(
+        """
+        SELECT z.id AS zone_id, z.connector_id, p.id AS prefix_id, p.cidr
+        FROM ip_zone_prefixes p
+        JOIN ip_zones z ON z.id = p.zone_id
+        WHERE p.active = 1
+          AND z.active = 1
+          AND z.connector_id IS NOT NULL
+        ORDER BY z.id, p.id
+        """
+    ).fetchall()
+    matched_zone_ids: set[int] = set()
+    connector_by_id: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            matches = parsed_source in ip_network(clean_text(row["cidr"]), strict=False)
+        except ValueError:
+            matches = False
+        if not matches:
+            continue
+        connector = active_connector_by_id(conn, row["connector_id"])
+        if not connector:
+            continue
+        zone_id = int(row["zone_id"])
+        connector_id = int(connector["id"])
+        matched_zone_ids.add(zone_id)
+        connector_by_id[connector_id] = connector
+
+    zone_ids = sorted(matched_zone_ids)
+    connector_ids = sorted(connector_by_id)
+    candidate["connector_resolution_zone_ids"] = zone_ids
+    candidate["candidate_connector_ids"] = connector_ids
+    if len(zone_ids) == 1:
+        candidate["connector_resolution_zone_id"] = zone_ids[0]
+    if len(connector_ids) == 1:
+        candidate["connector_resolution_method"] = "zone_prefix"
+        return [connector_by_id[connector_ids[0]]]
+    if len(connector_ids) > 1:
+        candidate["connector_resolution_error"] = "ambiguous_connector_resolution"
+    return []
+
+
 def resolve_mitigation_target_connectors(
     conn: sqlite3.Connection,
     candidate: dict[str, Any],
@@ -9856,27 +9978,42 @@ def resolve_mitigation_target_connectors(
 ) -> list[dict[str, Any]]:
     profile = profile or {}
     resolution_error = ""
+    candidate.pop("connector_resolution_error", None)
     selected = active_connectors_by_ids(conn, profile.get("selected_connector_ids") or candidate.get("selected_connector_ids"))
     if selected:
         connectors = selected
+        candidate["connector_resolution_method"] = "selected_connector_ids"
+        candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in selected)
     else:
         connector = active_connector_by_id(conn, profile.get("connector_id") or candidate.get("connector_id"))
         if connector:
             connectors = [connector]
+            candidate["connector_resolution_method"] = "connector_id"
+            candidate["candidate_connector_ids"] = [int(connector["id"])]
         else:
             sensor_connector = sensor_origin_bgp_connector(conn, candidate.get("sensor_id") or profile.get("sensor_id"))
             if sensor_connector:
                 connectors = [sensor_connector]
+                candidate["connector_resolution_method"] = "sensor"
             else:
-                fallback_connectors = active_flowspec_connectors(conn)
-                if len(fallback_connectors) == 1:
-                    connectors = fallback_connectors
-                elif len(fallback_connectors) > 1:
+                zone_connectors = zone_prefix_bgp_connectors(conn, candidate)
+                if zone_connectors:
+                    connectors = zone_connectors
+                elif candidate.get("connector_resolution_error") == "ambiguous_connector_resolution":
                     connectors = []
-                    resolution_error = "ambiguous_connectors"
+                    resolution_error = "ambiguous_connector_resolution"
                 else:
-                    connectors = []
-                    resolution_error = "no_active_flowspec_connectors"
+                    fallback_connectors = active_flowspec_connectors(conn)
+                    if len(fallback_connectors) == 1:
+                        connectors = fallback_connectors
+                        candidate["connector_resolution_method"] = "single_active_connector"
+                    elif len(fallback_connectors) > 1:
+                        connectors = []
+                        resolution_error = "ambiguous_connector_resolution"
+                        candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in fallback_connectors)
+                    else:
+                        connectors = []
+                        resolution_error = "no_active_flowspec_connectors"
     unique: dict[int, dict[str, Any]] = {}
     for connector in connectors:
         connector_id = connector.get("id")
@@ -10313,15 +10450,18 @@ def dns_flow_metric(flow: dict[str, Any], key: str) -> float:
 def dns_candidate_top_src_ip(candidate: dict[str, Any]) -> str:
     top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
     raw_anomaly = candidate.get("raw_payload", {}).get("anomaly", {}) if isinstance(candidate.get("raw_payload"), dict) else {}
+    candidate_target_role = clean_text(candidate.get("target_role")).lower()
+    anomaly_target_role = clean_text(raw_anomaly.get("target_role")).lower()
     return clean_ip(
         candidate.get("top_src_ip")
+        or raw_anomaly.get("top_src_ip")
+        or (candidate.get("target_ip") if candidate_target_role == "src_ip" else "")
+        or (raw_anomaly.get("target_ip") if anomaly_target_role == "src_ip" else "")
         or candidate.get("src_ip")
         or candidate.get("internal_ip")
         or top_flow.get("src_ip")
-        or raw_anomaly.get("top_src_ip")
         or raw_anomaly.get("src_ip")
         or raw_anomaly.get("internal_ip")
-        or (raw_anomaly.get("target_ip") if clean_text(raw_anomaly.get("target_role")) == "src_ip" else "")
     )
 
 
@@ -10374,8 +10514,46 @@ def dns_operational_log_fields(
         "selected_connector_ids": profile.get("selected_connector_ids") if profile else candidate.get("selected_connector_ids") or [],
         "profile_connector_id": profile.get("connector_id") if profile else candidate.get("connector_id"),
         "connector_resolution_error": candidate.get("connector_resolution_error") or "",
+        "source_ip": mitigation_origin_ip(candidate),
+        "zone_id": candidate.get("connector_resolution_zone_id") or candidate.get("zone_id"),
+        "candidate_connector_ids": candidate.get("candidate_connector_ids") or [],
         "announce_command": command,
     }
+
+
+def record_auto_mitigation_outcome(
+    conn: sqlite3.Connection,
+    candidate: dict[str, Any],
+    status: str,
+    reason: str = "",
+    profile: dict[str, Any] | None = None,
+) -> None:
+    anomaly_id = int_or_none(candidate.get("anomaly_id"))
+    if anomaly_id is None or anomaly_id <= 0:
+        return
+    details = {
+        "anomaly_id": anomaly_id,
+        "profile_id": (profile or {}).get("id") or candidate.get("response_profile_id"),
+        "source_ip": mitigation_origin_ip(candidate),
+        "zone_id": candidate.get("connector_resolution_zone_id") or candidate.get("zone_id"),
+        "zone_ids": candidate.get("connector_resolution_zone_ids") or [],
+        "candidate_connector_ids": candidate.get("candidate_connector_ids") or [],
+        "connector_resolution_method": candidate.get("connector_resolution_method") or "",
+    }
+    candidate["auto_mitigation_status"] = clean_text(status)
+    candidate["auto_mitigation_reason"] = clean_text(reason)
+    candidate["auto_mitigation_details"] = details
+    conn.execute(
+        """
+        UPDATE anomaly_events
+        SET auto_mitigation_status = ?,
+            auto_mitigation_reason = ?,
+            auto_mitigation_details_json = ?,
+            auto_mitigation_updated_at = ?
+        WHERE id = ?
+        """,
+        (clean_text(status), clean_text(reason), json.dumps(details, sort_keys=True), utc_now_iso(), anomaly_id),
+    )
 
 
 def dns_policy_skip_reason(
@@ -10419,13 +10597,17 @@ def log_dns_auto_mitigation_skipped(
     if not dns_auto_candidate_loggable(candidate, profile):
         return
     fields = dns_operational_log_fields(candidate, connector, profile, command)
-    if reason == "no_connector_resolved":
+    if reason in {"no_connector_resolved", "ambiguous_connector_resolution", "no_active_flowspec_connectors"}:
         logger.info(
-            "dns_auto_mitigation_not_applied reason=no_connector_resolved anomaly_id=%s vector=%s sensor_id=%s response_profile_id=%s selected_connector_ids=%s connector_id=%s connector_resolution_error=%s",
+            "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s profile_id=%s source_ip=%s zone_id=%s candidate_connector_ids=%s vector=%s sensor_id=%s selected_connector_ids=%s connector_id=%s connector_resolution_error=%s",
+            reason,
             fields["anomaly_id"],
+            fields["response_profile_id"],
+            fields["source_ip"],
+            fields["zone_id"],
+            fields["candidate_connector_ids"],
             fields["vector"],
             fields["sensor_id"],
-            fields["response_profile_id"],
             fields["selected_connector_ids"],
             fields["profile_connector_id"],
             fields["connector_resolution_error"],
@@ -11136,6 +11318,11 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
             connectors = resolve_mitigation_target_connectors(conn, candidate, preview_profile)
             preview_connector = connectors[0] if connectors else None
         policy = policy_for_candidate(candidate)
+        connector_resolution_reason = clean_text(candidate.get("connector_resolution_error")) if not preview_connector else ""
+        if connector_resolution_reason:
+            policy["decision"] = "deny"
+            policy["severity"] = "danger"
+            policy["reasons"] = sorted(set([*(policy.get("reasons") or []), connector_resolution_reason]))
         try:
             rendered = render_exabgp_flowspec_command("announce", candidate)
         except HTTPException as exc:
@@ -11155,11 +11342,12 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
                 "connector_name": preview_connector.get("name") if preview_connector else candidate.get("connector_name") or "",
                 "pipe_path": preview_connector.get("exabgp_pipe_in") if preview_connector else candidate.get("pipe_path") or "",
                 "mitigation_target_mode": (preview_profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "",
+                "automatic_not_applied_reason": connector_resolution_reason,
                 "apply_enabled": False,
                 "manual_approval_required": not policy_allows_auto,
                 "allow_auto": policy_allows_auto,
                 "dry_run": True,
-                "dry_run_message": "Seria aplicado automaticamente; nao aplicado porque e dry-run." if policy_allows_auto else "Nao seria aplicado automaticamente pela politica atual.",
+                "dry_run_message": f"Mitigacao automatica nao aplicada: {connector_resolution_reason}." if connector_resolution_reason else "Seria aplicado automaticamente; nao aplicado porque e dry-run." if policy_allows_auto else "Nao seria aplicado automaticamente pela politica atual.",
             }
         )
     return {"anomaly": context["event"], "candidates": evaluated}
@@ -15082,8 +15270,10 @@ def apply_mitigation_candidate(
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
     if not connectors:
-        log_dns_auto_mitigation_skipped(candidate, "no_connector_resolved", profile=profile)
-        raise HTTPException(status_code=400, detail="Nenhum conector BGP ativo resolvido para esta mitigacao.")
+        reason = clean_text(candidate.get("connector_resolution_error")) or "no_connector_resolved"
+        record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, profile)
+        log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
+        raise HTTPException(status_code=400, detail=f"Nenhum conector BGP ativo resolvido para esta mitigacao: {reason}.")
     requested_mode = "automatic" if mode == "automatic" else "manual_approval"
     results: list[dict[str, Any]] = []
     for connector in connectors:
@@ -15094,6 +15284,7 @@ def apply_mitigation_candidate(
         }
         connector_candidate["mitigation_key"] = mitigation_key_for_candidate(connector_candidate)
         if active_mitigation_exists(conn, connector_candidate["mitigation_key"]):
+            record_auto_mitigation_outcome(conn, connector_candidate, "deduplicated", "equivalent_active_announcement", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, "mitigacao ativa duplicada", connector, profile)
             raise HTTPException(status_code=409, detail=f"Ja existe mitigacao ativa para esta chave no conector {connector.get('name') or connector['id']}.")
         policy = policy_for_candidate(connector_candidate, requested_mode)
@@ -15135,6 +15326,7 @@ def apply_mitigation_candidate(
             exabgp_write_pipe(connector, command)
             log_dns_auto_mitigation_applied(connector_candidate, connector, profile, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "announced", command, created_by))
+            record_auto_mitigation_outcome(conn, connector_candidate, "applied", "", profile)
         except HTTPException as exc:
             log_dns_auto_mitigation_skipped(connector_candidate, clean_text(exc.detail) or "falha ao escrever pipe", connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "failed", command, created_by, clean_text(exc.detail)))
@@ -15242,7 +15434,10 @@ def process_anomaly_mitigation() -> dict[str, int]:
                     try:
                         item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
                     except HTTPException as exc:
-                        stats["failed"] += 1
+                        if exc.status_code == 409:
+                            stats["skipped"] += 1
+                        else:
+                            stats["failed"] += 1
                         log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "automatico nao aplicado")
                         continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
@@ -16290,11 +16485,13 @@ def list_ip_zones():
             SELECT
                 z.*,
                 t.name AS detection_template_name,
+                c.name AS connector_name,
                 COUNT(CASE WHEN p.active = 1 THEN p.id END) AS prefix_count,
                 COUNT(CASE WHEN p.active = 1 THEN p.id END) AS active_prefix_count,
                 COUNT(p.id) AS total_prefix_count
             FROM ip_zones z
             LEFT JOIN detection_templates t ON t.id = z.detection_template_id
+            LEFT JOIN bgp_connectors c ON c.id = z.connector_id
             LEFT JOIN ip_zone_prefixes p ON p.zone_id = z.id
             GROUP BY z.id
             ORDER BY z.active DESC, z.name, z.id
@@ -16311,10 +16508,10 @@ def create_ip_zone(payload: IpZonePayload):
         now = utc_now_iso()
         cursor = conn.execute(
             """
-            INSERT INTO ip_zones (name, description, active, detection_template_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO ip_zones (name, description, active, detection_template_id, connector_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (data["name"], data["description"], data["active"], data["detection_template_id"], now, now),
+            (data["name"], data["description"], data["active"], data["detection_template_id"], data["connector_id"], now, now),
         )
         conn.commit()
         return fetch_ip_zone(conn, int(cursor.lastrowid), include_prefixes=True)
@@ -16341,10 +16538,11 @@ def update_ip_zone(zone_id: int, payload: IpZonePayload):
                 description = ?,
                 active = ?,
                 detection_template_id = ?,
+                connector_id = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (data["name"], data["description"], data["active"], data["detection_template_id"], now, zone_id),
+            (data["name"], data["description"], data["active"], data["detection_template_id"], data["connector_id"], now, zone_id),
         )
         conn.commit()
         return fetch_ip_zone(conn, zone_id, include_prefixes=True)
@@ -19360,6 +19558,14 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "unique_dst_ports": int(item.get("unique_dst_ports") or 0),
         "mitigation_basis": item.get("mitigation_basis") or "",
         "mitigation_reason": item.get("mitigation_reason") or "",
+        "auto_mitigation_status": item.get("auto_mitigation_status") or "",
+        "auto_mitigation_reason": item.get("auto_mitigation_reason") or "",
+        "auto_mitigation_details": bgp_json_loads(item.get("auto_mitigation_details_json"), {}),
+        "auto_mitigation_updated_at": item.get("auto_mitigation_updated_at") or "",
+        "top_src_ip": clean_ip(item.get("top_src_ip")),
+        "top_dst_ip": clean_ip(item.get("top_dst_ip")),
+        "top_src_port": int(item["top_src_port"]) if item.get("top_src_port") is not None else None,
+        "top_dst_port": int(item["top_dst_port"]) if item.get("top_dst_port") is not None else None,
         "top_flow": {
             "src_ip": clean_ip(item.get("top_src_ip")),
             "src_port": int(item["top_src_port"]) if item.get("top_src_port") is not None else None,
