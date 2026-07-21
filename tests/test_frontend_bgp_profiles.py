@@ -22,7 +22,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("editBgpProfile(saved.id)", HTML)
 
     def test_save_error_shows_backend_message_and_payload(self):
-        self.assertIn("Erro ao salvar Response Profile", HTML)
+        self.assertIn("Erro ao salvar perfil de resposta", HTML)
         self.assertIn("Payload enviado:", HTML)
         self.assertIn("showBgpProfileSaveError(error, payload)", HTML)
 
@@ -87,7 +87,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("if (Array.isArray(payload)) return payload", HTML)
         self.assertIn("if (Array.isArray(payload?.items)) return payload.items", HTML)
         self.assertIn("if (Array.isArray(payload?.profiles)) return payload.profiles", HTML)
-        self.assertIn("Falha ao carregar Response Profiles", HTML)
+        self.assertIn("Falha ao carregar perfis de resposta", HTML)
 
     def test_detection_rule_profile_selects_preserve_existing_rule_ids(self):
         self.assertIn("detectionRuleWarningProfile: rule?.warning_response_profile_id", HTML)
@@ -399,8 +399,9 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         refresh_start = HTML.index("async function refreshOpsSummary()")
         refresh_end = HTML.index("function startOpsSummaryPolling()", refresh_start)
         refresh_source = HTML[refresh_start:refresh_end]
-        self.assertIn("await refreshBgpConnectorStatuses()", refresh_source)
-        self.assertIn("document.getElementById('view-bgp')?.classList.contains('active')", refresh_source)
+        self.assertNotIn("refreshBgpConnectorStatuses", refresh_source)
+        self.assertNotIn("checkBgpConnectorStatusesNow", refresh_source)
+        self.assertEqual(HTML.count("setInterval(() =>"), 1)
         self.assertIn("if (bgpStatusesRefreshInFlight) return", HTML)
         self.assertEqual(HTML.count("opsSummaryRefreshTimer = setInterval"), 1)
 
@@ -485,6 +486,146 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("/mitigation/reject", HTML)
         self.assertIn("rejection_persisted: true", HTML)
         self.assertIn("rejectBgpMitigationCandidate(Number(reject.dataset.index))", HTML)
+
+
+    def test_peer_status_badges_distinguish_established_unverified_and_down(self):
+        for label in (
+            "BGP estabelecido",
+            "BGP não verificado",
+            "BGP indisponível",
+            "FlowSpec estabelecido",
+            "FlowSpec não verificado",
+            "FlowSpec indisponível",
+            "Pipe OK",
+            "Pipe indisponível",
+        ):
+            self.assertIn(label, HTML)
+        self.assertIn("conector(es) checado(s)", HTML)
+        self.assertNotIn("conector(es) verificado(s)` : '-'", HTML)
+
+    def test_unverified_and_down_response_labels_follow_technical_reason(self):
+        presentation_start = HTML.index("function bgpTechnicalFailurePresentation")
+        presentation_end = HTML.index("function bgpAnnouncementStatusInfo", presentation_start)
+        source = HTML[presentation_start:presentation_end]
+        self.assertIn("reason === 'peer_bgp_not_verified'", source)
+        self.assertIn("label: 'Peer BGP não verificado'", source)
+        self.assertIn("reason === 'peer_bgp_down'", source)
+        self.assertIn("label: 'Peer BGP indisponível'", source)
+        self.assertIn("Estado do peer BGP não confirmado; anúncio não enviado.", source)
+        self.assertIn("Peer BGP indisponível; anúncio não enviado.", source)
+
+    def test_anomaly_response_modal_shows_technical_reason_and_host_agent_evidence(self):
+        self.assertIn("anomalyResponseDetailField('Motivo técnico'", HTML)
+        self.assertIn("anomalyResponseDetailField('Evidência Host Agent'", HTML)
+        self.assertIn("statusDetails.host_agent_evidence", HTML)
+        self.assertIn("outcomeDetails.host_agent_evidence", HTML)
+
+    def test_navigation_splits_mitigation_and_bgp_connectors(self):
+        self.assertIn('id="mitigationNavButton" type="button" data-nav-view="mitigation"', HTML)
+        self.assertIn('<span>Mitigação</span>', HTML)
+        self.assertIn('id="bgpNavButton" type="button" data-nav-view="bgp-connectors"', HTML)
+        self.assertIn('<span>BGP / Conectores</span>', HTML)
+        self.assertIn('id="view-mitigation" class="app-view"', HTML)
+        self.assertIn('id="view-bgp-connectors" class="app-view"', HTML)
+        self.assertIn("loadMitigationView().catch", HTML)
+        self.assertIn("loadBgpConnectorsView().catch", HTML)
+
+    def test_legacy_bgp_route_resolves_to_mitigation(self):
+        start = HTML.index("function canonicalNavigationView(view)")
+        end = HTML.index("function viewFromLocationHash()", start)
+        source = HTML[start:end]
+        self.assertIn("value === 'bgp'", source)
+        self.assertIn("value === 'bgp-mitigation'", source)
+        self.assertIn("return 'mitigation'", source)
+        self.assertIn("window.addEventListener('hashchange'", HTML)
+
+    def test_bgp_connectors_page_is_read_only_until_explicit_check_or_edit(self):
+        load_start = HTML.index("async function loadBgpConnectorsView()")
+        load_end = HTML.index("async function loadMitigationView()", load_start)
+        load_source = HTML[load_start:load_end]
+        refresh_start = HTML.index("async function refreshBgpConnectorStatuses()")
+        refresh_end = HTML.index("async function checkBgpConnectorStatusesNow()", refresh_start)
+        refresh_source = HTML[refresh_start:refresh_end]
+        self.assertIn("apiRequest('/api/bgp/connectors')", load_source)
+        self.assertIn("refreshBgpConnectorStatuses()", load_source)
+        self.assertIn("/status`).catch", refresh_source)
+        for forbidden in ("method: 'POST'", "/announcements", "runBgpDryRun", "updateBgpAnnouncement", "pipe"):
+            self.assertNotIn(forbidden, load_source)
+        self.assertNotIn("method: 'POST'", refresh_source)
+        self.assertNotIn("/announcements", refresh_source)
+
+    def test_manual_connector_check_never_sends_an_announcement(self):
+        check_start = HTML.index("async function checkBgpConnectorStatusNow(connectorId)")
+        check_end = HTML.index("async function loadBgpConnectorsView()", check_start)
+        source = HTML[check_start:check_end]
+        self.assertIn("/check-router`, { method: 'POST' }", source)
+        self.assertIn("refreshBgpConnectorStatuses()", source)
+        self.assertNotIn("/announcements", source)
+        self.assertNotIn("runBgpDryRun", source)
+        self.assertNotIn("updateBgpAnnouncement", source)
+
+    def test_bgp_connector_workspace_has_summary_table_actions_and_details(self):
+        for element_id in (
+            "bgpInfraTotal", "bgpInfraBgpEstablished", "bgpInfraBgpUnverified",
+            "bgpInfraBgpDown", "bgpInfraFlowspecEstablished",
+            "bgpInfraFlowspecUnverified", "bgpInfraPipesOk", "bgpInfraReady",
+            "bgpInfraLastChecked", "bgpPeerStatusRows", "bgpConnectorDetailsModal",
+        ):
+            self.assertIn(f'id="{element_id}"', HTML)
+        for action_class in ("bgp-status-check", "bgp-status-details", "bgp-connector-edit", "bgp-status-history"):
+            self.assertIn(action_class, HTML)
+        for section in ("Identificação", "Estado calculado", "Evidência", "Recomendação"):
+            self.assertIn(section, HTML)
+
+    def test_mitigation_workspace_keeps_operational_sections_and_actions(self):
+        for element_id in (
+            "bgpPendingSuggestionsTable", "bgpInFlightAnnouncementsTable",
+            "bgpActiveAnnouncementsTable", "bgpFailedAnnouncementsTable",
+            "bgpHistoryAnnouncementsTable",
+        ):
+            self.assertIn(f'id="{element_id}"', HTML)
+        for action_class in ("bgp-ann-approve", "bgp-ann-reject", "bgp-ann-withdraw"):
+            self.assertIn(action_class, HTML)
+        self.assertIn("retry_of_announcement_id", HTML)
+        self.assertIn("async function updateBgpAnnouncement(id, action)", HTML)
+
+    def test_mitigation_connector_link_opens_bgp_details(self):
+        self.assertIn("function mitigationConnectorLink(item = {})", HTML)
+        self.assertIn("mitigation-connector-link", HTML)
+        self.assertIn("pendingBgpConnectorDetailsId = Number(connectorLink.dataset.connectorId)", HTML)
+        self.assertIn("showView('bgp-connectors')", HTML)
+        self.assertIn("openBgpConnectorDetails(connectorId)", HTML)
+
+    def test_bgp_and_mitigation_badges_are_rendered_separately(self):
+        self.assertIn("function bgpStatusBadge(label, kind)", HTML)
+        self.assertIn("function bgpAnnouncementStatusBadge(item)", HTML)
+        self.assertIn("bgpReadinessBadge(readiness)", HTML)
+        announcement_start = HTML.index("function bgpAnnouncementStatusBadge(item)")
+        announcement_end = HTML.index("function bgpCommandDetails", announcement_start)
+        self.assertNotIn("bgpReadinessBadge", HTML[announcement_start:announcement_end])
+
+    def test_new_pages_have_required_empty_states_and_portuguese_text(self):
+        for text in (
+            "Nenhum conector configurado.",
+            "Nenhum conector foi checado ainda.",
+            "Nenhuma sugestão aguardando aprovação.",
+            "Nenhuma mitigação em processamento.",
+            "Nenhum FlowSpec ativo.",
+            "Nenhum registro no histórico.",
+        ):
+            self.assertIn(text, HTML)
+        self.assertNotRegex(HTML, r"(?i)>\s*response(?:\s+profiles?)?\s*<")
+        self.assertNotRegex(HTML, r"(?i)horario")
+        self.assertIn("Horário", HTML)
+
+    def test_mitigation_summary_includes_all_operational_counts(self):
+        for element_id in (
+            "bgpSummaryPending", "bgpSummaryProcessing", "bgpSummaryActive",
+            "bgpSummaryFailed", "bgpSummaryWithdrawPending", "bgpSummaryExpiredToday",
+            "bgpSummaryDryRun", "bgpSummaryPeerBlocked",
+        ):
+            self.assertIn(f'id="{element_id}"', HTML)
+            self.assertIn(f"setText('{element_id}'", HTML)
 
 
 if __name__ == "__main__":

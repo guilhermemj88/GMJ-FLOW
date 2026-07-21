@@ -834,18 +834,18 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
     def test_response_profiles_ui_is_compact_and_uses_details_for_preview(self):
         response_profiles_section = FRONTEND[
-            FRONTEND.find('<div class="panel-title mb-2">Response Profiles</div>'):
+            FRONTEND.find('<div class="panel-title mb-2">Perfis de resposta</div>'):
             FRONTEND.find('<div class="panel-title mb-2">Politica de seguranca</div>')
         ]
         self.assertIn('id="bgpProfileFilters"', response_profiles_section)
         self.assertIn('data-filter="valid"', response_profiles_section)
         self.assertIn('data-filter="unsafe"', response_profiles_section)
-        self.assertIn("<th>Match</th>", response_profiles_section)
-        self.assertIn("<th>Aprovacao</th>", response_profiles_section)
+        self.assertIn("<th>Correspondência</th>", response_profiles_section)
+        self.assertIn("<th>Aprovação</th>", response_profiles_section)
         self.assertNotIn("<th>Preview</th>", response_profiles_section)
         self.assertIn('id="bgpProfileTargetMode"', response_profiles_section)
         self.assertIn('id="bgpProfileSelectedConnectors"', response_profiles_section)
-        self.assertIn("Destino da mitigacao", response_profiles_section)
+        self.assertIn("Destino da mitigação", FRONTEND)
         self.assertIn("Sensor de origem", FRONTEND)
         self.assertIn("Resolvido pelo sensor", FRONTEND)
         self.assertIn("Todos os conectores", FRONTEND)
@@ -1307,9 +1307,9 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
     def test_detection_rule_response_profile_ui_avoids_contradictory_state(self):
         self.assertIn('id="detectionRuleResponseField"', FRONTEND)
-        self.assertIn('<option value="RESPONSE_PROFILE">RESPONSE_PROFILE</option>', FRONTEND)
+        self.assertIn('<option value="RESPONSE_PROFILE">Perfil de resposta</option>', FRONTEND)
         self.assertIn("function syncDetectionRuleMitigationUi()", FRONTEND)
-        self.assertIn("if (response === 'RESPONSE_PROFILE') return 'Response Profile'", FRONTEND)
+        self.assertIn("if (response === 'RESPONSE_PROFILE') return 'Perfil de resposta'", FRONTEND)
         self.assertIn("setValue('detectionRuleResponse', 'RESPONSE_PROFILE')", FRONTEND)
         self.assertIn("responseField.classList.add('d-none')", FRONTEND)
         self.assertIn("setValue('detectionRuleResponse', 'DETECTION_ONLY')", FRONTEND)
