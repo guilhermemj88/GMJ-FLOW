@@ -4625,6 +4625,41 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(down["confirmation_level"], "peer_down")
         self.assertIn("indisponivel", down["reason_message"])
 
+    def test_host_agent_request_includes_configured_exabgp_log_path(self):
+        connector = {
+            "peer_ip": "45.5.249.0",
+            "listen_port": 179,
+            "systemd_service_name": "exabgp-gmj-flow.service",
+            "exabgp_pipe_in": "/run/exabgp/gm-teste.in",
+        }
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def read(self):
+                return b'{"available": true}'
+
+        def fake_urlopen(request, timeout=0):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.object(main, "GMJFLOW_HOST_AGENT_URL", "http://127.0.0.1:18080"), \
+             patch.object(main, "GMJFLOW_EXABGP_LOG_PATH", "/var/log/exabgp-gmj-flow.log"), \
+             patch.object(main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = main.host_agent_status(connector)
+
+        params = main.urllib.parse.parse_qs(main.urllib.parse.urlparse(captured["url"]).query)
+        self.assertTrue(result["available"])
+        self.assertEqual(params["log_path"], ["/var/log/exabgp-gmj-flow.log"])
+        self.assertEqual(params["pipe_path"], ["/run/exabgp/gm-teste.in"])
+        self.assertEqual(captured["timeout"], 5)
+
     def test_host_agent_confirmation_does_not_require_huawei_query(self):
         connector = {
             "id": 901,

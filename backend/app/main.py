@@ -566,6 +566,10 @@ DETECTION_MITIGATION_MODES = {"detection_only", "manual_review", "response_profi
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 GMJFLOW_HOST_AGENT_URL = os.getenv("GMJFLOW_HOST_AGENT_URL", "").strip().rstrip("/")
+GMJFLOW_EXABGP_LOG_PATH = (
+    os.getenv("GMJFLOW_EXABGP_LOG_PATH", "/var/log/exabgp-gmj-flow.log").strip()
+    or "/var/log/exabgp-gmj-flow.log"
+)
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
 BGP_MODES = {"detection_only", "dry_run", "manual_approval", "semi_auto", "auto", "automatic"}
 BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion", "blackhole", "rate_limit", "alert_only", "webhook"}
@@ -8388,6 +8392,7 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
             "peer_ip": clean_text(connector.get("peer_ip")),
             "listen_port": int(connector.get("listen_port") or 179),
             "pipe_path": clean_text(connector.get("exabgp_pipe_in")),
+            "log_path": GMJFLOW_EXABGP_LOG_PATH,
         }
     )
     try:
@@ -8566,6 +8571,9 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
                 "input_exists": bool(agent_pipe.get("exists")),
                 "is_fifo": bool(agent_pipe.get("is_fifo")),
                 "reader_active": bool(agent_pipe.get("reader_active")),
+                "reader_process_pid": agent_pipe.get("reader_process_pid"),
+                "reader_process_cmdline": clean_text(agent_pipe.get("reader_process_cmdline")),
+                "reader_detection_method": clean_text(agent_pipe.get("reader_detection_method")),
                 "ok": pipe_ok,
                 "status": "ok" if pipe_ok else "down",
                 "severity": "ok" if pipe_ok else "down",
