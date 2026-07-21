@@ -89,6 +89,7 @@ GMJFLOW_ANOMALY_INTERVAL_SECONDS=30
 GMJFLOW_ANOMALY_LOOKBACK_SECONDS=60
 GMJFLOW_ANOMALY_MIN_DURATION_SECONDS=30
 GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS=120
+GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS=900
 ```
 
 A cada intervalo, o worker:
@@ -100,6 +101,7 @@ A cada intervalo, o worker:
 5. Cria ou atualiza uma anomalia ativa usando chave de deduplicacao.
 6. Salva uma amostra de flows relacionados.
 7. Encerra eventos ativos que nao aparecem novamente dentro de `GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS`.
+8. Reavalia mitigacao apenas para eventos sem resultado que estejam ativos ou tenham terminado dentro de `GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS`.
 
 As metricas sao calculadas na janela avaliada com:
 
