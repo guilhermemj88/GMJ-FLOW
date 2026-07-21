@@ -4569,5 +4569,103 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(source["source_name"], "DNS_QUERY_OUTBOUND_CLIENT")
 
 
+    def test_readiness_requires_service_bgp_flowspec_and_pipe(self):
+        status = {
+            "service": {"active": True},
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "pipes": {"ok": True, "status": "ok", "is_fifo": True, "reader_active": True},
+            "session": {"tcp_established": True},
+            "host_agent": {
+                "evidence": {"source": "exabgp_journal", "last_connected_at": "2026-07-21T10:00:00Z"},
+                "pipe": {"reader_active": True},
+            },
+        }
+        readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["confirmation_level"], "peer_established")
+        self.assertEqual(readiness["details"]["host_agent_evidence"]["source"], "exabgp_journal")
+
+    def test_established_bgp_without_flowspec_evidence_is_not_ready(self):
+        status = {
+            "service": {"active": True},
+            "bgp_state": "established",
+            "flowspec_state": "not_verified",
+            "pipes": {"ok": True, "status": "ok", "is_fifo": True, "reader_active": True},
+        }
+        readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["reason"], "flowspec_not_verified")
+        self.assertEqual(readiness["confirmation_level"], "peer_established")
+        self.assertIn("Familia FlowSpec nao confirmada", readiness["reason_message"])
+
+    def test_established_peer_with_unavailable_pipe_is_not_ready(self):
+        status = {
+            "service": {"active": True},
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "pipes": {"ok": False, "status": "down", "is_fifo": True, "reader_active": False},
+        }
+        readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["reason"], "exabgp_pipe_unavailable")
+
+    def test_unverified_and_down_have_distinct_confirmation_levels_and_messages(self):
+        base = {
+            "service": {"active": True},
+            "flowspec_state": "not_verified",
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
+        }
+        unverified = main.evaluate_bgp_connector_readiness({**base, "bgp_state": "not_verified"})
+        down = main.evaluate_bgp_connector_readiness({**base, "bgp_state": "down"})
+        self.assertEqual(unverified["reason"], "peer_bgp_not_verified")
+        self.assertEqual(unverified["confirmation_level"], "peer_not_verified")
+        self.assertIn("nao confirmado", unverified["reason_message"])
+        self.assertEqual(down["reason"], "peer_bgp_down")
+        self.assertEqual(down["confirmation_level"], "peer_down")
+        self.assertIn("indisponivel", down["reason_message"])
+
+    def test_host_agent_confirmation_does_not_require_huawei_query(self):
+        connector = {
+            "id": 901,
+            "name": "FIBINET",
+            "role": "flowspec_mitigation",
+            "backend_type": "exabgp",
+            "peer_ip": "179.189.80.0",
+            "listen_port": 179,
+            "systemd_service_name": "exabgp-gmj-flow.service",
+            "exabgp_pipe_in": "/run/exabgp/exabgp.in",
+            "router_check_enabled": True,
+        }
+        agent = {
+            "enabled": True,
+            "available": True,
+            "service": {"active": True, "raw": "active"},
+            "listener": {"listening": True},
+            "session": {"tcp_established": True},
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "pipe": {
+                "path": "/run/exabgp/exabgp.in",
+                "exists": True,
+                "is_fifo": True,
+                "reader_active": True,
+            },
+            "evidence": {"source": "exabgp_journal"},
+        }
+        with patch.object(main, "host_agent_status", return_value=agent), \
+             patch.object(main, "router_ssh_status") as router_status, \
+             patch.object(main, "exabgp_pipe_status", return_value={"ok": False, "status": "down", "message": "local mount unavailable"}), \
+             patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}), \
+             patch.object(main, "active_flowspec_announcement_count", return_value=0), \
+             patch.object(main.shutil, "which", return_value=None):
+            status = main.bgp_connector_status(connector)
+        router_status.assert_not_called()
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
+        self.assertTrue(status["pipes"]["ok"])
+        self.assertTrue(main.evaluate_bgp_connector_readiness(status)["ready"])
+
+
 if __name__ == "__main__":
     unittest.main()

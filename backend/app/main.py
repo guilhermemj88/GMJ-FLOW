@@ -8387,6 +8387,7 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
             "service": clean_text(connector.get("systemd_service_name")),
             "peer_ip": clean_text(connector.get("peer_ip")),
             "listen_port": int(connector.get("listen_port") or 179),
+            "pipe_path": clean_text(connector.get("exabgp_pipe_in")),
         }
     )
     try:
@@ -8529,9 +8530,6 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
 
     pipes = exabgp_pipe_status(connector)
     pipes_ok = bool(pipes["ok"])
-    if not pipes_ok:
-        messages.append(pipes["message"])
-        errors.append(pipes["message"])
     exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
     heuristic_peer = exabgp_peer_from_log_heuristic(connector) if exabgp_peer.get("state") == "unknown" else {
         "state": "not_checked",
@@ -8540,39 +8538,104 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     }
     if heuristic_peer.get("state") == "established":
         messages.append("Log recente sugere peer conectado, mas essa heuristica nao autoriza anuncio.")
-    try:
-        router_status = router_ssh_status(connector)
-    except Exception as exc:
+    agent_status = host_agent_status(connector)
+    agent_available = bool(agent_status.get("enabled") and agent_status.get("available"))
+    if agent_available:
+        agent_service = agent_status.get("service") or {}
+        agent_listener = agent_status.get("listener") or {}
+        agent_session = agent_status.get("session") or {}
+        agent_pipe = agent_status.get("pipe") or {}
+        service_active = bool(agent_service.get("active"))
+        service_raw = clean_text(agent_service.get("raw")) or ("active" if service_active else "inactive")
+        service_severity = "ok" if service_active else "down"
+        listening = bool(agent_listener.get("listening"))
+        listener_status = "listening" if listening else "down"
+        listener_severity = "ok" if listening else "down"
+        tcp_established = bool(agent_session.get("tcp_established"))
+        session_status = "established" if tcp_established else "not_established"
+        session_severity = "ok" if tcp_established else "down"
+        if agent_pipe:
+            pipe_ok = bool(
+                agent_pipe.get("exists")
+                and agent_pipe.get("is_fifo")
+                and agent_pipe.get("reader_active")
+            )
+            pipes = {
+                **pipes,
+                "input_path": clean_text(agent_pipe.get("path")) or pipes.get("input_path") or "",
+                "input_exists": bool(agent_pipe.get("exists")),
+                "is_fifo": bool(agent_pipe.get("is_fifo")),
+                "reader_active": bool(agent_pipe.get("reader_active")),
+                "ok": pipe_ok,
+                "status": "ok" if pipe_ok else "down",
+                "severity": "ok" if pipe_ok else "down",
+                "message": "" if pipe_ok else clean_text(agent_pipe.get("error")) or "Pipe ExaBGP indisponivel ou sem leitor ativo.",
+                "source": "host_agent",
+            }
+            pipes_ok = pipe_ok
+
+    agent_bgp_state = clean_text(agent_status.get("bgp_state")).lower()
+    agent_flowspec_state = clean_text(agent_status.get("flowspec_state")).lower()
+    agent_confirms_exabgp = bool(
+        agent_available
+        and agent_bgp_state == "established"
+        and agent_flowspec_state == "established"
+    )
+    if connector.get("router_check_enabled") and not agent_confirms_exabgp:
+        try:
+            router_status = router_ssh_status(connector)
+        except Exception as exc:
+            router_status = {
+                "enabled": True,
+                "method": "router_ssh",
+                "bgp_state": "unknown",
+                "flowspec_state": "unknown",
+                "message": f"Falha na verificacao Router SSH: {exc}",
+            }
+    else:
         router_status = {
             "enabled": bool(connector.get("router_check_enabled")),
             "method": "router_ssh",
-            "bgp_state": "unknown",
-            "flowspec_state": "unknown",
-            "message": f"Falha na verificacao Router SSH: {exc}",
+            "skipped": bool(connector.get("router_check_enabled") and agent_confirms_exabgp),
+            "bgp_state": "verification_not_required" if agent_confirms_exabgp else "verification_disabled",
+            "flowspec_state": "verification_not_required" if agent_confirms_exabgp else "verification_disabled",
+            "message": "Verificacao Router SSH nao exigida; lado ExaBGP confirmado pelo Host Agent." if agent_confirms_exabgp else "Verificacao BGP/FlowSpec desabilitada para este conector.",
         }
-    agent_status = host_agent_status(connector)
-    bgp_state = prefer_verified_state(
-        router_status.get("bgp_state") if connector.get("router_check_enabled") else None,
-        exabgp_peer.get("state"),
-        agent_status.get("bgp_state"),
-    )
-    flowspec_state = prefer_verified_state(
-        router_status.get("flowspec_state") if connector.get("router_check_enabled") else None,
-        agent_status.get("flowspec_state"),
-    )
+
+    if agent_available and agent_bgp_state in {"established", "down", "not_verified"}:
+        bgp_state = agent_bgp_state
+    else:
+        bgp_state = prefer_verified_state(
+            exabgp_peer.get("state"),
+            router_status.get("bgp_state") if connector.get("router_check_enabled") else None,
+        )
+    if agent_available and agent_flowspec_state in {"established", "down", "not_verified"}:
+        flowspec_state = agent_flowspec_state
+    else:
+        flowspec_state = prefer_verified_state(
+            router_status.get("flowspec_state") if connector.get("router_check_enabled") else None
+        )
     for check_name, return_code in (router_status.get("returncodes") or {}).items():
         if int(return_code or 0) != 0:
             errors.append(f"Router SSH {check_name}: {router_status.get('message') or f'return code {return_code}'}")
-    if connector.get("router_check_enabled") and router_status.get("message") and not router_status.get("returncodes"):
+    if (
+        connector.get("router_check_enabled")
+        and router_status.get("message")
+        and not router_status.get("returncodes")
+        and not router_status.get("skipped")
+    ):
         errors.append(f"Router SSH: {router_status['message']}")
+    if not pipes_ok:
+        messages.append(pipes["message"])
+        errors.append(pipes["message"])
     active_flowspec_count = active_flowspec_announcement_count(connector)
     # Local rows and a writable FIFO are metrics, never evidence of a BGP or
     # FlowSpec session.  In particular, do not infer an established peer from
     # an announcement that this application itself previously marked active.
     if bgp_state == "not_verified":
-        messages.append("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.")
+        messages.append("Estado do peer BGP nao confirmado pelo ExaBGP.")
     if flowspec_state == "not_verified":
-        messages.append("FlowSpec nao verificado. Configure Router SSH ou Host Agent.")
+        messages.append("Familia FlowSpec nao confirmada pelo ExaBGP.")
     if agent_status.get("enabled") and agent_status.get("message"):
         messages.append(f"Host Agent: {agent_status['message']}")
     if router_status.get("message"):
@@ -8597,6 +8660,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "flowspec_verified": flowspec_state in {"established", "down"},
             "flowspec_active_announcements": active_flowspec_count,
             "pipe_verified": pipes_ok,
+            "source": "host_agent" if agent_available else "fallback",
         },
         "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
         "bgp_state": bgp_state,
@@ -8646,33 +8710,102 @@ def persist_bgp_connector_status_snapshot(
 
 
 def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
-    flowspec_state = clean_text(status.get("flowspec_state")).lower()
     bgp_state = clean_text(status.get("bgp_state")).lower()
     exabgp_state = clean_text((status.get("exabgp_peer") or {}).get("state")).lower()
-    if flowspec_state in {"established", "up"}:
+    if bgp_state in {"established", "up"}:
         return "established"
-    if flowspec_state in {"idle", "active", "connect", "down", "not_established"}:
+    if bgp_state in {"idle", "active", "connect", "down", "not_established"}:
         return "down"
-    if bgp_state in {"established", "up"} or exabgp_state in {"established", "up"}:
+    if bgp_state in {"not_verified", "unknown"}:
+        return "not_verified"
+    if exabgp_state in {"established", "up"}:
         return "established"
-    if bgp_state in {"idle", "active", "connect", "down", "not_established"} or exabgp_state in {
-        "idle", "active", "connect", "down", "not_established",
-    }:
+    if exabgp_state in {"idle", "active", "connect", "down", "not_established"}:
         return "down"
     return "not_verified"
 
 
 def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
+    host_agent = status.get("host_agent") or {}
+    pipes = status.get("pipes") or {}
+    pipe_ok = bool(pipes.get("ok") and pipes.get("is_fifo") and pipes.get("reader_active"))
     return {
         "checked_at": status.get("last_checked_at") or "",
         "bgp_state": status.get("bgp_state") or "unknown",
         "flowspec_state": status.get("flowspec_state") or "unknown",
         "pipe_state": status.get("pipe_state") or clean_text((status.get("pipes") or {}).get("status")) or "unknown",
-        "pipe_ok": bool((status.get("pipes") or {}).get("ok")),
+        "pipe_ok": pipe_ok,
         "tcp_established": bool((status.get("session") or {}).get("tcp_established")),
         "service_active": bool((status.get("service") or {}).get("active")),
+        "host_agent_evidence": host_agent.get("evidence") or {},
+        "host_agent_pipe": host_agent.get("pipe") or {},
         "messages": status.get("messages") or [],
         "errors": status.get("errors") or [],
+    }
+
+
+def bgp_readiness_reason_message(reason: str) -> str:
+    return {
+        "peer_bgp_not_verified": "Estado do peer BGP nao confirmado; anuncio nao enviado.",
+        "peer_bgp_down": "Peer BGP indisponivel; anuncio nao enviado.",
+        "flowspec_not_verified": "Familia FlowSpec nao confirmada; anuncio nao enviado.",
+        "flowspec_down": "Familia FlowSpec indisponivel; anuncio nao enviado.",
+        "exabgp_service_inactive": "Servico ExaBGP indisponivel; anuncio nao enviado.",
+        "exabgp_pipe_unavailable": "Pipe ExaBGP indisponivel ou sem leitor ativo; anuncio nao enviado.",
+    }.get(clean_text(reason), clean_text(reason))
+
+
+def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
+    peer_state = bgp_peer_state_from_status(status)
+    service_active = bool((status.get("service") or {}).get("active"))
+    flowspec_state = clean_text(status.get("flowspec_state")).lower()
+    pipes = status.get("pipes") or {}
+    pipe_ok = bool(pipes.get("ok") and pipes.get("is_fifo") and pipes.get("reader_active"))
+    if not service_active:
+        reason = "exabgp_service_inactive"
+        failure_status = "peer_down"
+        confirmation_level = "peer_down"
+    elif peer_state == "down":
+        reason = "peer_bgp_down"
+        failure_status = "peer_down"
+        confirmation_level = "peer_down"
+    elif peer_state != "established":
+        reason = "peer_bgp_not_verified"
+        failure_status = "failed"
+        confirmation_level = "peer_not_verified"
+    elif flowspec_state in {"idle", "active", "connect", "down", "not_established"}:
+        reason = "flowspec_down"
+        failure_status = "failed"
+        confirmation_level = "peer_established"
+    elif flowspec_state != "established":
+        reason = "flowspec_not_verified"
+        failure_status = "failed"
+        confirmation_level = "peer_established"
+    elif not pipe_ok:
+        reason = "exabgp_pipe_unavailable"
+        failure_status = "failed"
+        confirmation_level = "peer_established"
+    else:
+        reason = ""
+        failure_status = ""
+        confirmation_level = "peer_established"
+    ready = bool(
+        service_active
+        and peer_state == "established"
+        and flowspec_state == "established"
+        and pipe_ok
+    )
+    details = compact_bgp_status_details(status)
+    details["technical_reason"] = reason
+    details["reason_message"] = bgp_readiness_reason_message(reason)
+    return {
+        "ready": ready,
+        "peer_state": peer_state,
+        "reason": reason,
+        "reason_message": bgp_readiness_reason_message(reason),
+        "failure_status": failure_status,
+        "confirmation_level": confirmation_level,
+        "details": details,
     }
 
 
@@ -8699,26 +8832,8 @@ def check_bgp_connector_readiness(conn: sqlite3.Connection, connector: dict[str,
             BGP_STATUS_CHECK_LOCK.release()
     status = normalize_bgp_connector_status_snapshot(connector, raw_status)
     persist_bgp_connector_status_snapshot(conn, connector, status)
-    peer_state = bgp_peer_state_from_status(status)
-    pipe_ok = bool((status.get("pipes") or {}).get("ok"))
-    if peer_state != "established":
-        reason = "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
-        failure_status = "peer_down"
-    elif not pipe_ok:
-        reason = clean_text((status.get("pipes") or {}).get("message")) or "exabgp_pipe_unavailable"
-        failure_status = "failed"
-    else:
-        reason = ""
-        failure_status = ""
-    return {
-        "ready": peer_state == "established" and pipe_ok,
-        "peer_state": peer_state,
-        "reason": reason,
-        "failure_status": failure_status,
-        "confirmation_level": "peer_established" if peer_state == "established" else "peer_unavailable",
-        "status": status,
-        "details": compact_bgp_status_details(status),
-    }
+    readiness = evaluate_bgp_connector_readiness(status)
+    return {**readiness, "status": status}
 
 
 def mark_connector_advertisements_peer_down(
@@ -16018,6 +16133,7 @@ def attempt_bgp_announcement(
     if not readiness.get("ready"):
         failure_status = clean_text(readiness.get("failure_status")) or "peer_down"
         reason = clean_text(readiness.get("reason")) or "peer_bgp_not_verified"
+        reason_message = clean_text(readiness.get("reason_message")) or bgp_readiness_reason_message(reason)
         # The durable claim protected a possible crash before readiness was
         # known. Once readiness explicitly fails, no pipe write occurred and
         # the claim must stop looking like an uncertain delivery.
@@ -16026,18 +16142,20 @@ def attempt_bgp_announcement(
             "send_claim_token": "",
             "send_claim_cancelled_at": utc_now_iso(),
             "send_claim_cancelled_reason": reason,
+            "technical_reason": reason,
+            "reason_message": reason_message,
         }
         item = transition_bgp_announcement(
             conn,
             announcement_id,
             failure_status,
             failure_status,
-            reason,
+            reason_message,
             created_by,
             peer_state=peer_state,
             confirmation_level=clean_text(readiness.get("confirmation_level")) or "peer_unavailable",
             details=details,
-            last_error=reason,
+            last_error=f"{reason}: {reason_message}" if reason_message != reason else reason,
             command=command,
             expected_statuses={"queued"},
             expected_confirmation_level="delivery_attempted",

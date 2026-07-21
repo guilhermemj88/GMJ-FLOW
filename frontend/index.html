@@ -1237,8 +1237,11 @@
         <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter">
           <i data-lucide="activity"></i><span>Peak Hunter</span>
         </button>
-        <button id="bgpNavButton" type="button" data-nav-view="bgp">
-          <i data-lucide="shield-check"></i><span>BGP / Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
+        <button id="mitigationNavButton" type="button" data-nav-view="mitigation">
+          <i data-lucide="shield-check"></i><span>Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
+        </button>
+        <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors">
+          <i data-lucide="network"></i><span>BGP / Conectores</span>
         </button>
         <button id="systemNavButton" type="button" data-nav-view="system">
           <i data-lucide="activity"></i><span>Sistema</span>
@@ -1501,7 +1504,7 @@
               <table class="table table-sm align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>Horario BRT</th>
+                    <th>Horário BRT</th>
                     <th>Interface</th>
                     <th>Direção</th>
                     <th>Protocolo</th>
@@ -1739,7 +1742,7 @@
             </div>
           </div>
 
-          <section class="panel p-3">
+          <section id="bgpInfrastructurePanel" class="panel p-3 mb-3">
             <div class="sensor-form-grid mb-3">
               <div class="field">
                 <label for="mapSrcAsn">ASN origem</label>
@@ -1958,7 +1961,7 @@
                   <table class="table table-sm table-hover align-middle mb-0 flow-table">
                     <thead>
                       <tr>
-                        <th class="sortable-header" data-flow-sort="flow_time">Horario <span class="sort-indicator"></span></th>
+                        <th class="sortable-header" data-flow-sort="flow_time">Horário <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="sensor">Sensor <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="exporter_ip">Exporter <span class="sort-indicator"></span></th>
                         <th class="sortable-header" data-flow-sort="src_ip">IP origem <span class="sort-indicator"></span></th>
@@ -3086,10 +3089,10 @@
                     </select>
                   </div>
                   <div id="detectionRuleResponseField" class="field">
-                    <label for="detectionRuleResponse">Response</label>
+                    <label for="detectionRuleResponse">Resposta</label>
                     <select id="detectionRuleResponse" class="form-select form-select-sm">
                       <option value="DETECTION_ONLY">DETECTION_ONLY</option>
-                      <option value="RESPONSE_PROFILE">RESPONSE_PROFILE</option>
+                      <option value="RESPONSE_PROFILE">Perfil de resposta</option>
                       <option value="MANUAL_REVIEW">MANUAL_REVIEW</option>
                       <option value="ALERT_ONLY">ALERT_ONLY</option>
                     </select>
@@ -3146,15 +3149,15 @@
                     <input id="detectionRuleOutputIf" class="form-control form-control-sm">
                   </div>
                   <div class="field">
-                    <label for="detectionRuleWarningProfile">Warning Response Profile</label>
+                    <label for="detectionRuleWarningProfile">Perfil de resposta para warning</label>
                     <select id="detectionRuleWarningProfile" class="form-select form-select-sm"></select>
                   </div>
                   <div class="field">
-                    <label for="detectionRuleCriticalProfile">Critical Response Profile</label>
+                    <label for="detectionRuleCriticalProfile">Perfil de resposta para critical</label>
                     <select id="detectionRuleCriticalProfile" class="form-select form-select-sm"></select>
                   </div>
                   <div class="field">
-                    <label for="detectionRuleFallbackProfile">Fallback Response Profile</label>
+                    <label for="detectionRuleFallbackProfile">Perfil de resposta alternativo</label>
                     <select id="detectionRuleFallbackProfile" class="form-select form-select-sm"></select>
                   </div>
                   <div class="field">
@@ -3169,7 +3172,7 @@
                     <select id="detectionRuleMitigationMode" class="form-select form-select-sm">
                       <option value="detection_only">detection_only</option>
                       <option value="manual_review">manual_review</option>
-                      <option value="response_profile">response_profile</option>
+                      <option value="response_profile">Perfil de resposta</option>
                     </select>
                   </div>
                   <div class="field">
@@ -3190,7 +3193,7 @@
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                    <thead><tr><th>Vector</th><th>Domain</th><th>Direction</th><th>Protocol</th><th>Metric</th><th>Warning response</th><th>Critical response</th><th>Mitigation</th><th>Whitelist</th><th>Ultimo check</th><th>Safe</th><th>Ações</th></tr></thead>
+                    <thead><tr><th>Vetor</th><th>Domínio</th><th>Direção</th><th>Protocolo</th><th>Métrica</th><th>Resposta de alerta</th><th>Resposta crítica</th><th>Mitigação</th><th>Lista permitida</th><th>Última checagem</th><th>Seguro</th><th>Ações</th></tr></thead>
                     <tbody id="detectionRuleTable"></tbody>
                   </table>
                 </div>
@@ -3308,7 +3311,7 @@
                   <tr>
                     <th>Vetor</th><th>Severidade</th><th>Prefixo</th><th>Origem /32</th><th>Destino</th><th>Protocolo</th>
                     <th class="text-end">packets/s</th><th class="text-end">bits/s</th><th class="text-end">flows/s</th><th class="text-end">flows</th>
-                    <th>Response</th>
+                    <th>Resposta</th>
                   </tr>
                 </thead>
                 <tbody id="securityCandidateTable"></tbody>
@@ -3597,7 +3600,7 @@
               <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
                 <thead>
                   <tr>
-                    <th>Horario</th>
+                    <th>Horário</th>
                     <th>Zona/Cliente</th>
                     <th>Prefixo</th>
                     <th>Domain</th>
@@ -3612,7 +3615,7 @@
                     <th class="text-end">flows</th>
                     <th>Severidade</th>
                     <th>Status</th>
-                    <th>Response</th>
+                    <th>Resposta</th>
                     <th>Mensagem</th>
                     <th>Ação recomendada</th>
                     <th>Ações</th>
@@ -3695,11 +3698,11 @@
                 </select>
               </div>
               <div class="field">
-                <label for="peakHunterStartTime">Inicio (horario local America/Sao_Paulo)</label>
+                <label for="peakHunterStartTime">Início (horário local America/Sao_Paulo)</label>
                 <input id="peakHunterStartTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
-                <label for="peakHunterEndTime">Fim (horario local America/Sao_Paulo)</label>
+                <label for="peakHunterEndTime">Fim (horário local America/Sao_Paulo)</label>
                 <input id="peakHunterEndTime" type="datetime-local" class="form-control form-control-sm" required>
               </div>
               <div class="field">
@@ -3790,7 +3793,7 @@
                 <i data-lucide="list-plus"></i><span>Criar regra</span>
               </button>
               <button id="peakHunterCreateResponseProfileButton" type="button" class="btn btn-sm btn-outline-success" data-peak-action="response-profile" data-source="result">
-                <i data-lucide="shield-plus"></i><span>Criar Response Profile</span>
+                <i data-lucide="shield-plus"></i><span>Criar perfil de resposta</span>
               </button>
               <button id="peakHunterCreatePlaybookButton" type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="playbook" data-source="result">
                 <i data-lucide="book-open-check"></i><span>Criar playbook</span>
@@ -3833,8 +3836,8 @@
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Horario BRT</th>
-                    <th>Horario UTC</th>
+                    <th>Horário BRT</th>
+                    <th>Horário UTC</th>
                     <th class="text-end">Valor</th>
                     <th class="text-end">Score</th>
                     <th>Evidência</th>
@@ -4030,7 +4033,7 @@
               <table class="table table-sm table-hover align-middle mb-0">
                 <thead>
                   <tr>
-                    <th>Horario do pico</th>
+                    <th>Horário do pico</th>
                     <th>Sensor</th>
                     <th>Interface</th>
                     <th>Direção</th>
@@ -4063,7 +4066,7 @@
                 <i data-lucide="list-plus"></i><span>Criar regra</span>
               </button>
               <button type="button" class="btn btn-sm btn-outline-success" data-peak-action="response-profile" data-source="history">
-                <i data-lucide="shield-plus"></i><span>Criar Response Profile</span>
+                <i data-lucide="shield-plus"></i><span>Criar perfil de resposta</span>
               </button>
               <button type="button" class="btn btn-sm btn-outline-secondary" data-peak-action="playbook" data-source="history">
                 <i data-lucide="book-open-check"></i><span>Criar playbook</span>
@@ -4393,11 +4396,45 @@
           </section>
         </section>
 
-        <section id="view-bgp" class="app-view">
+        <section id="view-bgp-connectors" class="app-view">
           <div class="view-header">
             <div>
-              <h1 class="view-title">BGP / Mitigação</h1>
-              <div id="bgpStatus" class="subtle">Estados de aprovação, envio e confirmação operacional do FlowSpec</div>
+              <h1 class="view-title">BGP / Conectores</h1>
+              <div id="bgpConnectorsStatus" class="subtle">Os conectores estão prontos para anunciar?</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshBgpConnectorsButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar dados</span>
+              </button>
+              <button id="checkAllBgpConnectorsButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="activity"></i><span>Verificar agora</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3 mb-3">
+            <div class="database-metrics-grid mb-0">
+              <div class="metric-card"><div class="metric-label">Total de conectores</div><div id="bgpInfraTotal" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">BGP estabelecidos</div><div id="bgpInfraBgpEstablished" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">BGP não verificados</div><div id="bgpInfraBgpUnverified" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">BGP indisponíveis</div><div id="bgpInfraBgpDown" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">FlowSpec estabelecidos</div><div id="bgpInfraFlowspecEstablished" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">FlowSpec não verificados</div><div id="bgpInfraFlowspecUnverified" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Pipes OK</div><div id="bgpInfraPipesOk" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Conectores prontos</div><div id="bgpInfraReady" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Última checagem</div><div id="bgpInfraLastChecked" class="metric-value">-</div></div>
+            </div>
+          </section>
+
+          <div id="bgpInfrastructureMount"></div>
+          <div id="bgpConnectorEditorMount"></div>
+        </section>
+
+        <section id="view-mitigation" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Mitigação</h1>
+              <div id="bgpStatus" class="subtle">O que foi sugerido, aprovado, enviado, anunciado, falhou ou foi retirado?</div>
             </div>
             <div class="toolbar">
               <button id="bgpPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -4411,10 +4448,14 @@
 
           <section class="panel p-3 mb-3">
             <div class="database-metrics-grid mb-0">
-              <div class="metric-card"><div class="metric-label">FlowSpec ativos</div><div id="bgpSummaryActive" class="metric-value">0</div></div>
-              <div class="metric-card"><div class="metric-label">Pendentes</div><div id="bgpSummaryPending" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Aguardando aprovação</div><div id="bgpSummaryPending" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Em processamento</div><div id="bgpSummaryProcessing" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Ativos</div><div id="bgpSummaryActive" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Falhas</div><div id="bgpSummaryFailed" class="metric-value">0</div></div>
-              <div class="metric-card"><div class="metric-label">Expiradas hoje</div><div id="bgpSummaryExpiredToday" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Retiradas pendentes</div><div id="bgpSummaryWithdrawPending" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Expirados hoje</div><div id="bgpSummaryExpiredToday" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Dry-run</div><div id="bgpSummaryDryRun" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Bloqueados por peer não pronto</div><div id="bgpSummaryPeerBlocked" class="metric-value">0</div></div>
             </div>
           </section>
 
@@ -4457,8 +4498,8 @@
           <section class="panel p-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
-                <div class="panel-title">Estado dos peers</div>
-                <div id="bgpPeerStatusText" class="metric-readout">-</div>
+                <div class="panel-title">Prontidão dos conectores</div>
+                <div id="bgpPeerStatusText" class="metric-readout">Nenhum conector foi checado ainda.</div>
               </div>
               <button id="checkBgpStatusButton" type="button" class="btn btn-sm btn-outline-success">
                 <i data-lucide="activity"></i><span>Verificar agora</span>
@@ -4468,11 +4509,17 @@
               <table class="table table-sm bgp-peer-table mb-0">
                 <thead>
                   <tr>
-                    <th>Conector</th>
-                    <th>BGP Peer</th>
-                    <th>FlowSpec Peer</th>
-                    <th>Pipe ExaBGP</th>
+                    <th>Nome</th>
+                    <th>Peer</th>
+                    <th>AS local</th>
+                    <th>AS remoto</th>
+                    <th>BGP</th>
+                    <th>FlowSpec</th>
+                    <th>Pipe</th>
+                    <th>Serviço ExaBGP</th>
+                    <th>Prontidão</th>
                     <th>Última checagem</th>
+                    <th>Ações</th>
                   </tr>
                 </thead>
                 <tbody id="bgpPeerStatusRows"></tbody>
@@ -4480,8 +4527,8 @@
             </div>
           </section>
 
-          <section class="panel p-3">
-            <div class="panel-title mb-2">Conectores</div>
+          <section id="bgpConnectorEditorPanel" class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Configuração dos conectores</div>
             <div class="flow-search-grid mb-2">
               <input id="bgpConnectorId" type="hidden">
               <div class="field"><label for="bgpConnectorName">Nome</label><input id="bgpConnectorName" class="form-control form-control-sm" placeholder="EDGE-RTBH-DRYRUN"></div>
@@ -4515,11 +4562,11 @@
           </section>
 
           <section class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Response Profiles</div>
+            <div class="panel-title mb-2">Perfis de resposta</div>
             <div class="flow-search-grid mb-2">
               <input id="bgpProfileId" type="hidden">
               <div class="field"><label for="bgpProfileName">Nome</label><input id="bgpProfileName" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpProfileTargetMode">Destino da mitigacao</label><select id="bgpProfileTargetMode" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpProfileTargetMode">Destino da mitigação</label><select id="bgpProfileTargetMode" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileConnector">Conector</label><select id="bgpProfileConnector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileSelectedConnectors">Conectores selecionados</label><select id="bgpProfileSelectedConnectors" class="form-select form-select-sm" multiple size="3"></select></div>
               <div class="field"><label for="bgpProfileType">Tipo</label><select id="bgpProfileType" class="form-select form-select-sm"></select></div>
@@ -4558,7 +4605,7 @@
               <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="used">Usados por regras</button>
               <button type="button" class="btn btn-sm btn-outline-secondary" data-filter="unused">Nao usados</button>
             </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Connector</th><th>Acao</th><th>Match</th><th>Aprovacao</th><th>Status</th><th>Usado por</th><th>Acoes</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Conector</th><th>Ação</th><th>Correspondência</th><th>Aprovação</th><th>Status</th><th>Usado por</th><th>Ações</th></tr></thead><tbody id="bgpProfilesTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -4624,13 +4671,15 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Sugestões aguardando aprovação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Conector</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Em processamento / sem confirmação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Ação</th><th>Alvo</th><th>Confirmação</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpInFlightAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Ação</th><th>Alvo</th><th>Confirmação</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpInFlightAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">FlowSpec ativos confirmados pela aplicação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Retirada automatica</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Retirada automática</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Falhas</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Erro</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpFailedAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">Histórico</div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Retirado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
           </section>
         </section>
 
@@ -5011,7 +5060,7 @@
             <input id="detectionRuleTestRange" type="number" min="1" max="259200" step="1" class="form-control form-control-sm" value="120">
           </div>
           <div class="field">
-            <label>Response</label>
+            <label>Resposta</label>
             <input class="form-control form-control-sm" value="DETECTION_ONLY" disabled>
           </div>
         </div>
@@ -5035,7 +5084,7 @@
           <div class="metric-card"><div class="metric-label">Flows/s</div><div id="detectionRuleTestFlowsS" class="metric-value">-</div></div>
           <div class="metric-card"><div class="metric-label">Flows</div><div id="detectionRuleTestFlows" class="metric-value">-</div></div>
           <div class="metric-card"><div class="metric-label">Motivo</div><div id="detectionRuleTestReason" class="metric-value">-</div></div>
-          <div class="metric-card"><div class="metric-label">Response</div><div id="detectionRuleTestResponse" class="metric-value">DETECTION_ONLY</div></div>
+          <div class="metric-card"><div class="metric-label">Resposta</div><div id="detectionRuleTestResponse" class="metric-value">DETECTION_ONLY</div></div>
         </div>
         <div class="table-wrap">
           <table class="table table-sm table-hover align-middle mb-0 detection-candidate-table">
@@ -5189,6 +5238,25 @@
       </div>
       <div class="gmj-dialog-footer">
         <button type="button" class="btn btn-sm btn-success" data-close-modal="anomalyResponseModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="bgpConnectorDetailsModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="bgpConnectorDetailsModalTitle">
+    <div class="gmj-dialog wide">
+      <div class="gmj-dialog-header">
+        <h2 id="bgpConnectorDetailsModalTitle" class="view-title">Detalhes do conector BGP</h2>
+        <button type="button" class="icon-button" data-close-modal="bgpConnectorDetailsModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="bgpConnectorDetailsSummary" class="subtle mb-3"></div>
+        <div id="bgpConnectorDetailsBody"></div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="bgpConnectorDetailsEditButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="pencil"></i><span>Editar conector</span></button>
+        <button type="button" class="btn btn-sm btn-success" data-close-modal="bgpConnectorDetailsModal">Fechar</button>
       </div>
     </div>
   </div>
@@ -5555,6 +5623,7 @@
     let aiProfiles = [];
     let bgpConnectors = [];
     let bgpProfiles = [];
+    let pendingBgpConnectorDetailsId = null;
     let bgpResponseProfilesLoadingPromise = null;
     let bgpProfileFilter = 'all';
     let bgpProtectedPrefixes = [];
@@ -5810,11 +5879,17 @@
       document.getElementById('attackVectorsNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('bgpNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('mitigationNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       setLoginStatus('');
-      Object.values(charts).forEach(chart => chart.resize());
-      Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
-        .then(() => refresh())
-        .catch(console.error);
+      const requestedView = viewFromLocationHash();
+      if (requestedView !== 'dashboard') {
+        showView(requestedView);
+      } else {
+        Object.values(charts).forEach(chart => chart.resize());
+        Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
+          .then(() => refresh())
+          .catch(console.error);
+      }
       createIcons();
     }
 
@@ -7023,7 +7098,7 @@
     function detectionResponseLabel(value) {
       const response = String(value || 'DETECTION_ONLY');
       if (response === 'DETECTION_ONLY') return 'Detecção apenas informativa';
-      if (response === 'RESPONSE_PROFILE') return 'Response Profile';
+      if (response === 'RESPONSE_PROFILE') return 'Perfil de resposta';
       return response || '-';
     }
 
@@ -7823,11 +7898,11 @@
         detectionRuleGroupBy: 'Define como o tráfego será agrupado antes de aplicar a regra. Exemplo: src_ip,dst_ip,dst_port,protocol detecta uma conversa específica.',
         detectionRuleInputIf: 'Interface de entrada usada como filtro adicional.',
         detectionRuleOutputIf: 'Interface de saída usada como filtro adicional.',
-        detectionRuleWarningProfile: 'Response Profile usado ao atingir warning. Deve ser válido e normalmente exige aprovação manual.',
-        detectionRuleCriticalProfile: 'Response Profile usado ao atingir critical. Deve ser válido e normalmente exige aprovação manual.',
-        detectionRuleFallbackProfile: 'Response Profile alternativo usado quando não há profile específico por severidade.',
+        detectionRuleWarningProfile: 'Perfil de resposta usado ao atingir warning. Deve ser válido e normalmente exige aprovação manual.',
+        detectionRuleCriticalProfile: 'Perfil de resposta usado ao atingir critical. Deve ser válido e normalmente exige aprovação manual.',
+        detectionRuleFallbackProfile: 'Perfil de resposta alternativo usado quando não há perfil específico por severidade.',
         detectionRuleMitigationEnabled: 'Indica se a regra pode gerar candidate de mitigação. Não significa aplicação automática.',
-        detectionRuleMitigationMode: 'Define se a regra apenas detecta, gera candidate para revisão manual ou usa Response Profile. Não significa aplicação automática.',
+        detectionRuleMitigationMode: 'Define se a regra apenas detecta, gera candidato para revisão manual ou usa perfil de resposta. Não significa aplicação automática.',
         detectionRuleDuration: 'Duração interna no GMJ-FLOW para retirada automática. O TTL não é enviado ao BGP.',
         detectionRuleWhitelist: 'Controla se a whitelist global é aplicada antes de abrir anomalia ou candidate.',
         bgpProfileTargetMode: 'Define para onde a mitigacao sera enviada: sensor de origem, conector fixo, todos ou uma lista selecionada.',
@@ -8577,7 +8652,7 @@
           return bgpProfiles;
         })
         .catch(error => {
-          setText('detectionRuleStatus', `Falha ao carregar Response Profiles: ${error.message}`);
+          setText('detectionRuleStatus', `Falha ao carregar perfis de resposta: ${error.message}`);
           throw error;
         })
         .finally(() => {
@@ -8800,69 +8875,196 @@
     }
 
     function bgpPeerOperationalState(status) {
-      const rawState = String(status.exabgp_peer?.state || status.bgp_state || 'unknown').toLowerCase();
-      const aggregate = String(status.bgp_state || rawState).toLowerCase();
+      const aggregate = String(status?.bgp_state || 'unknown').toLowerCase();
       if (aggregate === 'verification_disabled') return 'VERIFICACAO DESABILITADA';
-      if (['established', 'up'].includes(aggregate) || rawState === 'established') return 'UP';
+      if (['established', 'up'].includes(aggregate)) return 'UP';
       if (['idle', 'active', 'connect', 'down', 'not_established'].includes(aggregate)) return 'DOWN';
       return 'NAO VERIFICADO';
     }
 
     function bgpPipeOperationalState(status) {
       const pipes = status.pipes || {};
-      return pipes.ok || (pipes.input_exists && pipes.input_writable) ? 'OK' : 'DOWN';
+      return pipes.ok && pipes.is_fifo && pipes.reader_active ? 'OK' : 'DOWN';
     }
 
     function bgpFlowspecOperationalState(status, connector) {
-      const raw = String(status.flowspec_state || 'not_verified').toLowerCase();
+      const raw = String(status?.flowspec_state || 'not_verified').toLowerCase();
       if (raw === 'verification_disabled') return 'VERIFICACAO DESABILITADA';
       if (['established', 'up'].includes(raw)) return 'UP';
       if (['idle', 'active', 'connect', 'down', 'not_established'].includes(raw)) return 'DOWN';
       return 'NAO VERIFICADO';
     }
 
-    function bgpPeerDetails(status) {
-      const details = {
-        service: {
-          raw: status.service?.raw,
-          name: status.service?.name,
-          severity: status.service?.severity
-        },
-        listener: status.listener || {},
-        session: status.session || {},
-        pipes: status.pipes || {},
-        exabgp_peer: status.exabgp_peer || {},
-        router_check: status.router_check || {},
-        host_agent: status.host_agent || {},
-        verification: status.verification || {},
-        messages: status.messages || [],
-        errors: status.errors || []
-      };
-      return `<details class="bgp-peer-details"><summary>Detalhes</summary><pre class="bg-light border rounded p-2 mt-2 mb-0">${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
+    function bgpStatusForConnector(connector) {
+      return bgpConnectorStatuses.find(status => Number(status.connector_id) === Number(connector?.id)) || null;
+    }
+
+    function bgpPipeDetailedState(status, connector = null) {
+      if (!status) return 'NOT_VERIFIED';
+      const pipes = status.pipes || {};
+      const configuredPath = pipes.input_path || status.host_agent?.pipe?.path || connector?.exabgp_pipe_in || '';
+      const exists = pipes.input_exists ?? status.host_agent?.pipe?.exists;
+      const isFifo = pipes.is_fifo ?? status.host_agent?.pipe?.is_fifo;
+      const readerActive = pipes.reader_active ?? status.host_agent?.pipe?.reader_active;
+      if (exists === false || (!configuredPath && !exists)) return 'ABSENT';
+      if (exists && isFifo && readerActive === false) return 'NO_READER';
+      if (pipes.ok && isFifo && readerActive) return 'OK';
+      return 'UNAVAILABLE';
+    }
+
+    function bgpConnectorReadinessState(status, connector = null) {
+      if (!status || !status.last_checked_at) return 'NOT_VERIFIED';
+      const bgpState = bgpPeerOperationalState(status);
+      const flowspecState = bgpFlowspecOperationalState(status, connector);
+      const pipeState = bgpPipeDetailedState(status, connector);
+      if (status.service?.active && bgpState === 'UP' && flowspecState === 'UP' && pipeState === 'OK') return 'READY';
+      if (!status.service?.active || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
+      return 'NOT_VERIFIED';
+    }
+
+    function bgpPipeDetailedBadge(state) {
+      const presentation = {
+        OK: ['Pipe OK', 'ok'],
+        ABSENT: ['Pipe ausente', 'down'],
+        NO_READER: ['Sem leitor do FIFO', 'down'],
+        UNAVAILABLE: ['Pipe indisponível', 'down'],
+        NOT_VERIFIED: ['Pipe não verificado', 'not_verified']
+      }[state] || ['Pipe indisponível', 'down'];
+      return bgpStatusBadge(presentation[0], presentation[1]);
+    }
+
+    function bgpReadinessBadge(state) {
+      const presentation = {
+        READY: ['Pronto', 'ok'],
+        NOT_READY: ['Não pronto', 'down'],
+        NOT_VERIFIED: ['Não verificado', 'not_verified']
+      }[state] || ['Não verificado', 'not_verified'];
+      return bgpStatusBadge(presentation[0], presentation[1]);
+    }
+
+    function renderBgpInfrastructureSummary() {
+      const states = bgpConnectors.map(connector => {
+        const status = bgpStatusForConnector(connector);
+        return {
+          status,
+          bgp: status ? bgpPeerOperationalState(status) : 'NAO VERIFICADO',
+          flowspec: status ? bgpFlowspecOperationalState(status, connector) : 'NAO VERIFICADO',
+          pipe: bgpPipeDetailedState(status, connector),
+          readiness: bgpConnectorReadinessState(status, connector)
+        };
+      });
+      setText('bgpInfraTotal', formatNumber(bgpConnectors.length));
+      setText('bgpInfraBgpEstablished', formatNumber(states.filter(item => item.bgp === 'UP').length));
+      setText('bgpInfraBgpUnverified', formatNumber(states.filter(item => item.bgp === 'NAO VERIFICADO').length));
+      setText('bgpInfraBgpDown', formatNumber(states.filter(item => item.bgp === 'DOWN').length));
+      setText('bgpInfraFlowspecEstablished', formatNumber(states.filter(item => item.flowspec === 'UP').length));
+      setText('bgpInfraFlowspecUnverified', formatNumber(states.filter(item => item.flowspec === 'NAO VERIFICADO').length));
+      setText('bgpInfraPipesOk', formatNumber(states.filter(item => item.pipe === 'OK').length));
+      setText('bgpInfraReady', formatNumber(states.filter(item => item.readiness === 'READY').length));
+      const checked = states.map(item => item.status?.last_checked_at).filter(Boolean).sort();
+      setText('bgpInfraLastChecked', checked.length ? formatDateTime(checked[checked.length - 1]) : '-');
+    }
+
+    function bgpConnectorDetailField(label, value) {
+      if (value === null || value === undefined || value === '') return '';
+      return `<div class="anomaly-response-detail-item"><div class="anomaly-response-detail-label">${escapeHtml(label)}</div><div>${escapeHtml(value)}</div></div>`;
+    }
+
+    function bgpConnectorRecommendation(status, connector) {
+      const readiness = bgpConnectorReadinessState(status, connector);
+      if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP.';
+      if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
+      if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
+      if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
+      if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
+      if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise a negociação IPv4 FlowSpec.';
+      if (bgpPipeDetailedState(status, connector) === 'NO_READER') return 'Inicie ou recupere o leitor persistente do FIFO deste conector.';
+      return 'Verifique o FIFO configurado e as mensagens técnicas do Host Agent.';
+    }
+
+    function openBgpConnectorDetails(connectorId, section = 'evidence') {
+      const connector = bgpConnectors.find(item => Number(item.id) === Number(connectorId));
+      if (!connector) return;
+      const status = bgpStatusForConnector(connector);
+      const evidence = status?.host_agent?.evidence || {};
+      const pipe = status?.host_agent?.pipe || status?.pipes || {};
+      const pipeExists = pipe.exists ?? pipe.input_exists;
+      const readerActive = pipe.reader_active;
+      const calculated = [
+        bgpConnectorDetailField('BGP', status ? (bgpPeerOperationalState(status) === 'UP' ? 'Estabelecido' : bgpPeerOperationalState(status) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
+        bgpConnectorDetailField('FlowSpec', status ? (bgpFlowspecOperationalState(status, connector) === 'UP' ? 'Estabelecido' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
+        bgpConnectorDetailField('Pipe', bgpPipeDetailedState(status, connector).replace('NO_READER', 'Sem leitor do FIFO').replace('NOT_VERIFIED', 'Não verificado').replace('UNAVAILABLE', 'Indisponível').replace('ABSENT', 'Ausente').replace('OK', 'OK')),
+        bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto'))
+      ].join('');
+      const identity = [
+        bgpConnectorDetailField('Nome', connector.name),
+        bgpConnectorDetailField('Peer IP', connector.peer_ip),
+        bgpConnectorDetailField('Endereço local', connector.local_address),
+        bgpConnectorDetailField('AS local', connector.local_asn),
+        bgpConnectorDetailField('AS remoto', connector.peer_asn),
+        bgpConnectorDetailField('Serviço systemd', connector.systemd_service_name),
+        bgpConnectorDetailField('Status do serviço', status?.service?.active ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('Listener', status?.listener?.listening ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('Sessão TCP', status?.session?.tcp_established ? 'Estabelecida' : status ? 'Não estabelecida' : 'Não verificada'),
+        bgpConnectorDetailField('Pipe configurado', pipe.path || pipe.input_path || connector.exabgp_pipe_in),
+        bgpConnectorDetailField('FIFO existente', pipeExists === undefined ? 'Não verificado' : pipeExists ? 'Sim' : 'Não'),
+        bgpConnectorDetailField('Leitor ativo', readerActive === undefined ? 'Não verificado' : readerActive ? 'Sim' : 'Não')
+      ].join('');
+      const evidenceFields = [
+        bgpConnectorDetailField('Fonte da evidência', evidence.source || status?.verification?.source),
+        bgpConnectorDetailField('Última conexão', formatDateTime(evidence.last_connected_at) || evidence.last_connected_at),
+        bgpConnectorDetailField('Último shutdown', formatDateTime(evidence.last_shutdown_at) || evidence.last_shutdown_at),
+        bgpConnectorDetailField('Última desconexão', formatDateTime(evidence.last_disconnect_at) || evidence.last_disconnect_at),
+        bgpConnectorDetailField('Última evidência de FlowSpec', formatDateTime(evidence.last_family_evidence_at) || evidence.last_family_evidence_at)
+      ].join('');
+      const payload = status?.host_agent || {};
+      const evidenceTitle = section === 'history' ? 'Evidência e histórico técnico' : 'Evidência';
+      setText('bgpConnectorDetailsModalTitle', `Conector BGP · ${connector.name || `#${connector.id}`}`);
+      setText('bgpConnectorDetailsSummary', `${connector.peer_ip || '-'} · ${bgpConnectorReadinessState(status, connector) === 'READY' ? 'Pronto' : 'Atenção operacional'}`);
+      document.getElementById('bgpConnectorDetailsBody').innerHTML = `
+        <section class="panel p-3 mb-3"><div class="panel-title mb-2">Identificação</div><div class="anomaly-response-detail-grid">${identity}</div></section>
+        <section class="panel p-3 mb-3"><div class="panel-title mb-2">Estado calculado</div><div class="anomaly-response-detail-grid">${calculated}</div></section>
+        <section class="panel p-3 mb-3" data-technical-section="${escapeHtml(section)}"><div class="panel-title mb-2">${evidenceTitle}</div><div class="anomaly-response-detail-grid">${evidenceFields}</div><pre class="bg-light border rounded p-2 mt-2 mb-0">${escapeHtml(JSON.stringify(payload, null, 2))}</pre></section>
+        <section class="panel p-3"><div class="panel-title mb-2">Recomendação</div><div>${escapeHtml(bgpConnectorRecommendation(status, connector))}</div>${(status?.messages || []).length ? `<div class="subtle mt-2">${escapeHtml(status.messages.join(' | '))}</div>` : ''}</section>
+      `;
+      document.getElementById('bgpConnectorDetailsEditButton').dataset.connectorId = connector.id;
+      openModal('bgpConnectorDetailsModal');
     }
 
     function renderBgpPeerStatus() {
-      document.getElementById('bgpPeerStatusRows').innerHTML = bgpConnectorStatuses.map(status => {
-        const connector = bgpConnectorForStatus(status);
+      const rows = bgpConnectors.map(connector => {
+        const status = bgpStatusForConnector(connector);
         const bgpState = bgpPeerOperationalState(status);
         const flowspecState = bgpFlowspecOperationalState(status, connector);
-        const pipeState = bgpPipeOperationalState(status);
+        const pipeState = bgpPipeDetailedState(status, connector);
+        const readiness = bgpConnectorReadinessState(status, connector);
         const bgpKind = bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : bgpState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
         const flowKind = flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : flowspecState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
         return `
           <tr>
-            <td>${escapeHtml(status.name || connector?.name || `#${status.connector_id}`)}</td>
-            <td>${bgpStatusBadge(bgpState === 'NAO VERIFICADO' ? 'Sessao BGP nao verificada' : bgpState, bgpKind)}</td>
-            <td>${bgpStatusBadge(flowspecState === 'NAO VERIFICADO' ? 'FlowSpec nao verificado' : flowspecState, flowKind)}</td>
-            <td>${bgpStatusBadge(pipeState, pipeState === 'OK' ? 'ok' : 'down')}</td>
-            <td>${escapeHtml(formatDateTime(status.last_checked_at) || '-')}</td>
-          </tr>
-          <tr>
-            <td colspan="5">${bgpPeerDetails(status)}</td>
+            <td>${escapeHtml(connector.name || `#${connector.id}`)}</td>
+            <td>${escapeHtml(connector.peer_ip || '-')}</td>
+            <td>${escapeHtml(connector.local_asn || '-')}</td>
+            <td>${escapeHtml(connector.peer_asn || '-')}</td>
+            <td>${bgpStatusBadge(bgpState === 'UP' ? 'BGP estabelecido' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'NAO VERIFICADO' ? 'BGP não verificado' : bgpState, bgpKind)}</td>
+            <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec estabelecido' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
+            <td>${bgpPipeDetailedBadge(pipeState)}</td>
+            <td>${bgpStatusBadge(status?.service?.active ? 'Serviço ativo' : status ? 'Serviço indisponível' : 'Serviço não verificado', status?.service?.active ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpReadinessBadge(readiness)}</td>
+            <td>${escapeHtml(formatDateTime(status?.last_checked_at) || '-')}</td>
+            <td><div class="d-flex flex-wrap gap-1">
+              <button type="button" class="btn btn-sm btn-outline-success bgp-status-check" data-id="${connector.id}" title="Verificar agora"><i data-lucide="activity"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-status-details" data-id="${connector.id}" title="Ver detalhes"><i data-lucide="eye"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-connector-edit" data-id="${connector.id}" title="Editar conector"><i data-lucide="pencil"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary bgp-status-history" data-id="${connector.id}" title="Abrir histórico técnico"><i data-lucide="history"></i></button>
+            </div></td>
           </tr>
         `;
-      }).join('') || '<tr><td colspan="5" class="text-muted">Sem conectores para verificar.</td></tr>';
-      setText('bgpPeerStatusText', bgpConnectorStatuses.length ? `${bgpConnectorStatuses.length} conector(es) verificado(s)` : '-');
+      }).join('');
+      document.getElementById('bgpPeerStatusRows').innerHTML = rows || '<tr><td colspan="11" class="text-muted">Nenhum conector configurado.</td></tr>';
+      const checked = bgpConnectorStatuses.filter(status => status.last_checked_at).length;
+      setText('bgpPeerStatusText', !bgpConnectors.length ? 'Nenhum conector configurado.' : checked ? `${checked} conector(es) checado(s)` : 'Nenhum conector foi checado ainda.');
+      renderBgpInfrastructureSummary();
     }
 
     function bgpProfileStatusClass(status) {
@@ -8897,7 +9099,7 @@
           <td colspan="9">
             <div class="bgp-profile-details">
               <div class="bgp-profile-detail-grid">
-                ${bgpProfileDetailCell('Destino da mitigacao', bgpProfileConnectorLabel(item, connector))}
+                ${bgpProfileDetailCell('Destino da mitigação', bgpProfileConnectorLabel(item, connector))}
                 ${bgpProfileDetailCell('Conector fixo', item.connector_name || connector?.name || '-')}
                 ${bgpProfileDetailCell('Tipo', item.response_type)}
                 ${bgpProfileDetailCell('Alvo', item.target_selector)}
@@ -9085,6 +9287,50 @@
       return String(item.status || '').trim().toLowerCase();
     }
 
+    function bgpTechnicalReason(item = {}) {
+      const details = item.status_details && typeof item.status_details === 'object' ? item.status_details : {};
+      const candidates = [
+        details.technical_reason,
+        item.technical_reason,
+        item.response_reason,
+        item.reason,
+        item.status_reason,
+        item.last_error
+      ].map(value => String(value || '').trim().toLowerCase());
+      return ['peer_bgp_not_verified', 'peer_bgp_down', 'flowspec_not_verified', 'flowspec_down', 'exabgp_pipe_unavailable']
+        .find(reason => candidates.some(value => value === reason || value.startsWith(`${reason}:`))) || '';
+    }
+
+    function bgpTechnicalFailurePresentation(item = {}) {
+      const reason = bgpTechnicalReason(item);
+      if (reason === 'peer_bgp_not_verified') return {
+        label: 'Peer BGP não verificado', badge: 'warn',
+        confirmation: 'Estado do peer BGP não confirmado; anúncio não enviado.',
+        note: 'Não anunciado: faltou evidência operacional atual do ExaBGP.'
+      };
+      if (reason === 'peer_bgp_down') return {
+        label: 'Peer BGP indisponível', badge: 'down',
+        confirmation: 'Peer BGP indisponível; anúncio não enviado.',
+        note: 'Não anunciado: há evidência operacional de sessão indisponível.'
+      };
+      if (reason === 'flowspec_not_verified') return {
+        label: 'FlowSpec não verificado', badge: 'warn',
+        confirmation: 'Família FlowSpec não confirmada; anúncio não enviado.',
+        note: 'Não anunciado: a família IPv4 FlowSpec não foi confirmada pelo ExaBGP.'
+      };
+      if (reason === 'flowspec_down') return {
+        label: 'FlowSpec indisponível', badge: 'down',
+        confirmation: 'Família FlowSpec indisponível; anúncio não enviado.',
+        note: 'Não anunciado: a família IPv4 FlowSpec está indisponível.'
+      };
+      if (reason === 'exabgp_pipe_unavailable') return {
+        label: 'Pipe indisponível', badge: 'down',
+        confirmation: 'Pipe ExaBGP indisponível ou sem leitor ativo; anúncio não enviado.',
+        note: 'Não anunciado: o FIFO específico do conector não está pronto.'
+      };
+      return {};
+    }
+
     function bgpAnnouncementStatusInfo(item = {}) {
       const code = bgpAnnouncementStatusCode(item);
       const presentation = BGP_ANNOUNCEMENT_STATUS_PRESENTATION[code] || {
@@ -9125,7 +9371,8 @@
           confirmation: 'O peer caiu após o envio/anúncio; o histórico de entrega foi preservado.',
           note: 'Estado operacional perdido após a entrega. Retire a regra para impedir reanúncio ao reconectar.'
         } : {}),
-        ...intentPresentation
+        ...intentPresentation,
+        ...bgpTechnicalFailurePresentation(item)
       };
     }
 
@@ -9222,17 +9469,47 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `;
     }
 
+    function mitigationConnectorLink(item = {}) {
+      const connectorId = Number(item.connector_id || 0);
+      const label = item.connector_name || (connectorId ? `#${connectorId}` : '-');
+      if (!connectorId) return escapeHtml(label);
+      return `<button type="button" class="btn btn-link btn-sm p-0 mitigation-connector-link" data-connector-id="${connectorId}" title="Abrir em BGP / Conectores">${escapeHtml(label)}</button>`;
+    }
+
     function renderBgpAnnouncements() {
+      const failureCodes = new Set(['failed', 'failed_withdraw', 'peer_down']);
       const pending = bgpAnnouncements.filter(item => bgpAnnouncementStatusCode(item) === 'pending_approval');
       const active = bgpAnnouncements.filter(item => bgpAnnouncementIsOperationalActive(item));
-      const inFlight = bgpAnnouncements.filter(item => bgpAnnouncementIsInFlight(item));
-      const history = bgpAnnouncements.filter(item => !bgpAnnouncementIsOperationalActive(item) && !bgpAnnouncementIsInFlight(item) && bgpAnnouncementStatusCode(item) !== 'pending_approval');
+      const failures = bgpAnnouncements.filter(item => failureCodes.has(bgpAnnouncementStatusCode(item)));
+      const inFlight = bgpAnnouncements.filter(item => bgpAnnouncementIsInFlight(item) && !failureCodes.has(bgpAnnouncementStatusCode(item)));
+      const failureIds = new Set(failures.map(item => String(item.id)));
+      const history = bgpAnnouncements.filter(item => !bgpAnnouncementIsOperationalActive(item) && !bgpAnnouncementIsInFlight(item) && bgpAnnouncementStatusCode(item) !== 'pending_approval' && !failureIds.has(String(item.id)));
+      const withdrawPending = bgpAnnouncements.filter(item => String(item.confirmation_level || '').toLowerCase() === 'withdraw_requested');
+      const dryRuns = bgpAnnouncements.filter(item => bgpAnnouncementStatusCode(item) === 'dry_run');
+      const peerBlocked = bgpAnnouncements.filter(item => ['peer_bgp_not_verified', 'peer_bgp_down', 'flowspec_not_verified', 'flowspec_down', 'exabgp_service_inactive', 'exabgp_pipe_unavailable'].includes(bgpTechnicalReason(item)));
+      const today = new Date();
+      const expiredToday = bgpAnnouncements.filter(item => {
+        if (bgpAnnouncementStatusCode(item) !== 'expired') return false;
+        const timestamp = new Date(item.withdrawn_at || item.expires_at || item.updated_at || '');
+        return !Number.isNaN(timestamp.getTime())
+          && timestamp.getFullYear() === today.getFullYear()
+          && timestamp.getMonth() === today.getMonth()
+          && timestamp.getDate() === today.getDate();
+      });
+      setText('bgpSummaryPending', formatNumber(pending.length));
+      setText('bgpSummaryProcessing', formatNumber(inFlight.length));
+      setText('bgpSummaryActive', formatNumber(active.length));
+      setText('bgpSummaryFailed', formatNumber(failures.length));
+      setText('bgpSummaryWithdrawPending', formatNumber(withdrawPending.length));
+      setText('bgpSummaryExpiredToday', formatNumber(expiredToday.length));
+      setText('bgpSummaryDryRun', formatNumber(dryRuns.length));
+      setText('bgpSummaryPeerBlocked', formatNumber(peerBlocked.length));
       document.getElementById('bgpPendingSuggestionsTable').innerHTML = pending.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td>${item.anomaly_id ? `#${escapeHtml(item.anomaly_id)}` : '-'}</td>
           <td>${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}</td>
-          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${mitigationConnectorLink(item)}</td>
           <td>${bgpAnnouncementStatusBadge(item)}<br>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
@@ -9242,14 +9519,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestões aguardando aprovação</td></tr>';
+      `).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma sugestão aguardando aprovação.</td></tr>';
       document.getElementById('bgpInFlightAnnouncementsTable').innerHTML = inFlight.map(item => {
         const info = bgpAnnouncementStatusInfo(item);
         return `
         <tr>
           <td>#${item.id}</td>
           <td>${bgpAnnouncementStatusBadge(item)}</td>
-          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
@@ -9258,12 +9535,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${bgpInFlightActions(item)}</td>
         </tr>
       `;
-      }).join('') || '<tr><td colspan="9" class="text-muted">Nenhum envio aguardando confirmação</td></tr>';
+      }).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma mitigação em processamento.</td></tr>';
       document.getElementById('bgpActiveAnnouncementsTable').innerHTML = active.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td>${bgpAnnouncementStatusBadge(item)}</td>
-          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
           <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
@@ -9274,27 +9551,71 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="10" class="text-muted">Sem FlowSpec com status advertised ativo</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Nenhum FlowSpec ativo.</td></tr>';
+      document.getElementById('bgpFailedAnnouncementsTable').innerHTML = failures.map(item => `
+        <tr>
+          <td>#${item.id}</td>
+          <td>${formatDateTime(item.created_at)}</td>
+          <td>${bgpAnnouncementStatusBadge(item)}</td>
+          <td>${mitigationConnectorLink(item)}</td>
+          <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}</td>
+          <td>${escapeHtml(bgpActionLabel(item))}</td>
+          <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
+          <td>${escapeHtml(item.last_error || '-')}</td>
+          <td>${bgpCommandDetails(item)}</td>
+          <td>${bgpInFlightActions(item)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="11" class="text-muted">Nenhuma falha registrada.</td></tr>';
       document.getElementById('bgpHistoryAnnouncementsTable').innerHTML = history.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td>${formatDateTime(item.created_at)}</td>
           <td>${formatDateTime(item.withdrawn_at)}</td>
           <td>${bgpAnnouncementStatusBadge(item)}</td>
-          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
           <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}</td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.last_error || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
         </tr>
-      `).join('') || '<tr><td colspan="10" class="text-muted">Sem histórico</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Nenhum registro no histórico.</td></tr>';
+    }
+
+    function organizeBgpPageSections() {
+      const infrastructureMount = document.getElementById('bgpInfrastructureMount');
+      const editorMount = document.getElementById('bgpConnectorEditorMount');
+      const infrastructure = document.getElementById('bgpInfrastructurePanel');
+      const editor = document.getElementById('bgpConnectorEditorPanel');
+      if (infrastructureMount && infrastructure && infrastructure.parentElement !== infrastructureMount) infrastructureMount.appendChild(infrastructure);
+      if (editorMount && editor && editor.parentElement !== editorMount) editorMount.appendChild(editor);
     }
 
     function renderBgpWorkspace() {
+      organizeBgpPageSections();
       renderBgpSelects();
       renderBgpPeerStatus();
       renderBgpConnectors();
+      renderBgpProfiles();
+      renderBgpProtected();
+      renderBgpPolicies();
+      renderBgpAnnouncements();
+      updateBgpDryRateLimitUi();
+      createIcons();
+    }
+
+    function renderBgpConnectorsWorkspace() {
+      organizeBgpPageSections();
+      renderBgpSelects();
+      renderBgpConnectors();
+      renderBgpPeerStatus();
+      createIcons();
+    }
+
+    function renderMitigationWorkspace() {
+      organizeBgpPageSections();
+      renderBgpSelects();
       renderBgpProfiles();
       renderBgpProtected();
       renderBgpPolicies();
@@ -9335,12 +9656,36 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await refreshBgpConnectorStatuses();
       const failed = results.filter(result => result.status === 'rejected').length;
       setText('bgpPeerStatusText', failed
-        ? `${connectors.length - failed} verificado(s), ${failed} falha(s)`
-        : `${connectors.length} conector(es) verificado(s)`);
+        ? `${connectors.length - failed} checado(s), ${failed} falha(s)`
+        : `${connectors.length} conector(es) checado(s)`);
     }
 
-    async function loadBgpView() {
-      setText('bgpStatus', 'Carregando BGP / Mitigação...');
+    async function checkBgpConnectorStatusNow(connectorId) {
+      const connector = bgpConnectors.find(item => Number(item.id) === Number(connectorId));
+      if (!connector) return;
+      setText('bgpPeerStatusText', `Checando ${connector.name || `#${connector.id}`}...`);
+      await apiRequest(`/api/bgp/connectors/${connector.id}/check-router`, { method: 'POST' });
+      await refreshBgpConnectorStatuses();
+    }
+
+    async function loadBgpConnectorsView() {
+      organizeBgpPageSections();
+      setText('bgpConnectorsStatus', 'Carregando conectores e últimos estados persistidos...');
+      const connectors = await apiRequest('/api/bgp/connectors');
+      bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
+      await refreshBgpConnectorStatuses();
+      renderBgpConnectorsWorkspace();
+      setText('bgpConnectorsStatus', !bgpConnectors.length ? 'Nenhum conector configurado.' : `${bgpConnectors.length} conector(es) carregado(s); a página não envia anúncios.`);
+      if (pendingBgpConnectorDetailsId) {
+        const connectorId = pendingBgpConnectorDetailsId;
+        pendingBgpConnectorDetailsId = null;
+        openBgpConnectorDetails(connectorId);
+      }
+    }
+
+    async function loadMitigationView() {
+      organizeBgpPageSections();
+      setText('bgpStatus', 'Carregando Mitigação...');
       const [connectors, profiles, protectedPrefixes, policies, announcements, summary] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles'),
@@ -9355,10 +9700,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
       renderOpsSummary(summary);
-      await refreshBgpConnectorStatuses();
-      renderBgpWorkspace();
+      renderMitigationWorkspace();
       await loadAiMitigationStatus().catch(error => setText('aiMitigationStatusText', `Falha IA: ${error.message}`));
-      setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Registros BGP: ${bgpAnnouncements.length}`);
+      setText('bgpStatus', `Perfis: ${bgpProfiles.length} / Registros de mitigação: ${bgpAnnouncements.length}`);
+    }
+
+    async function loadBgpView() {
+      return loadMitigationView();
     }
 
     function aiProfileText(profileId) {
@@ -9433,10 +9781,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function exportBgpPdf() {
-      setText('bgpStatus', 'Exportando PDF BGP / Mitigação...');
+      setText('bgpStatus', 'Exportando PDF de mitigação...');
       try {
         await downloadAuthFile(`${API_BASE}/api/bgp/report.pdf`, 'gmj-bgp-mitigation.pdf');
-        setText('bgpStatus', 'PDF BGP / Mitigação exportado');
+        setText('bgpStatus', 'PDF de mitigação exportado');
       } catch (error) {
         setText('bgpStatus', `Falha ao exportar PDF: ${error.message}`);
       }
@@ -9525,7 +9873,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       };
       await apiRequest(id ? `/api/bgp/connectors/${id}` : '/api/bgp/connectors', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       clearBgpConnectorForm();
-      await loadBgpView();
+      await loadBgpConnectorsView();
     }
 
     function clearBgpProfileForm() {
@@ -9646,7 +9994,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function showBgpProfileSaveError(error, payload) {
-      const text = `Erro ao salvar Response Profile: ${error.message}`;
+      const text = `Erro ao salvar perfil de resposta: ${error.message}`;
       setText('bgpStatus', text);
       const output = document.getElementById('bgpDryRunOutput');
       if (output) {
@@ -10632,8 +10980,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const command = peakHunterFlowspecCommand(candidate, result?.mitigation_allowed);
       return [
         'Peak Hunter - relatorio operacional',
-        `Horario BRT: ${best.peak_time_local ? formatPeakHunterLocalIso(best.peak_time_local) : formatPeakHunterLocal(best.peak_time_utc || best.peak_time || best.time)}`,
-        `Horario UTC: ${best.peak_time_utc || formatPeakHunterUtc(best.peak_time || best.time)}`,
+        `Horário BRT: ${best.peak_time_local ? formatPeakHunterLocalIso(best.peak_time_local) : formatPeakHunterLocal(best.peak_time_utc || best.peak_time || best.time)}`,
+        `Horário UTC: ${best.peak_time_utc || formatPeakHunterUtc(best.peak_time || best.time)}`,
         `Picos detectados: ${result?.peaks_detected ?? 0}`,
         `Picos analisados: ${result?.peaks_analyzed ?? 0}`,
         `Evidência: ${best.evidence_status || result?.evidence_status || '-'}`,
@@ -10703,7 +11051,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const payload = await apiRequest(`/api/peak-hunter/history/${context.id}/${endpoint}`, { method: 'POST' });
       peakHunterCurrentDraft = { action, source, draft: payload.draft || payload };
       document.getElementById('peakHunterDraftModalTitle').textContent = action === 'response-profile'
-        ? 'Draft de Response Profile'
+        ? 'Rascunho de perfil de resposta'
         : action === 'detection-rule'
           ? 'Draft de regra'
           : 'Draft de playbook';
@@ -12015,7 +12363,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function renderMitigationBadge(summary) {
       const count = Number(summary.active_bgp_announcements || 0);
       const badge = document.getElementById('bgpNavBadge');
-      const button = document.getElementById('bgpNavButton');
+      const button = document.getElementById('mitigationNavButton');
       if (!badge || !button) return;
       badge.textContent = formatNumber(count);
       badge.classList.toggle('active', count > 0);
@@ -12041,9 +12389,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       try {
         const summary = await apiRequest('/api/ops/summary');
         renderOpsSummary(summary);
-        if (document.getElementById('view-bgp')?.classList.contains('active')) {
-          await refreshBgpConnectorStatuses();
-        }
         if (document.getElementById('view-anomalies')?.classList.contains('active')) {
           await refreshAnomalyResponseRows();
         }
@@ -12321,6 +12666,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       delivered_to_exabgp: 'Enviado ao ExaBGP',
       peer_established: 'Peer estabelecido',
       peer_established_announce_requested: 'Anúncio solicitado com peer estabelecido (confirmação local)',
+      peer_not_verified: 'Peer BGP não verificado; não enviado',
+      peer_down: 'Peer BGP indisponível; não enviado',
       peer_unavailable: 'Peer indisponível; não enviado',
       peer_not_ready: 'Peer ainda não estabelecido; não enviado',
       simulation_only: 'Somente simulação',
@@ -12443,7 +12790,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         code,
         ...presentation,
         ...(peerDownAfterDelivery ? { confirmation: 'O peer caiu após o envio/anúncio; o histórico foi preservado.' } : {}),
-        ...anomalyResponseIntentPresentation(primary, code)
+        ...anomalyResponseIntentPresentation(primary, code),
+        ...bgpTechnicalFailurePresentation({ ...primary, response_reason: event.response_reason || event.auto_mitigation_reason })
       };
     }
 
@@ -12459,7 +12807,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         code,
         ...presentation,
         ...(peerDownAfterDelivery ? { confirmation: 'O peer caiu após o envio/anúncio; o histórico foi preservado.' } : {}),
-        ...anomalyResponseIntentPresentation(announcement, code)
+        ...anomalyResponseIntentPresentation(announcement, code),
+        ...bgpTechnicalFailurePresentation(announcement)
       };
     }
 
@@ -12572,6 +12921,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         || announcement.confirmation
         || announcement.confirmation_status
         || info.confirmation;
+      const statusDetails = announcement.status_details && typeof announcement.status_details === 'object'
+        ? announcement.status_details
+        : {};
+      const hostAgentEvidence = statusDetails.host_agent_evidence && typeof statusDetails.host_agent_evidence === 'object'
+        ? statusDetails.host_agent_evidence
+        : {};
       const announcementId = announcement.announcement_id || announcement.id;
       const advertisedAt = rawStatus === 'advertised'
         ? announcement.advertised_at || announcement.announced_at
@@ -12581,6 +12936,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         anomalyResponseDetailField('Tipo da resposta', anomalyResponseTypeLabel(announcement.response_type || announcement.mitigation_type)),
         anomalyResponseDetailField('Estado atual', info.label),
         anomalyResponseDetailField('Motivo', announcement.reason || announcement.status_reason),
+        anomalyResponseDetailField('Motivo técnico', bgpTechnicalReason(announcement)),
+        anomalyResponseDetailField('Evidência Host Agent', Object.keys(hostAgentEvidence).length ? JSON.stringify(hostAgentEvidence, null, 2) : ''),
         anomalyResponseDetailField('Conector', connector),
         anomalyResponseDetailField('Estado do peer', anomalyResponsePeerStatusLabel(announcement.peer_status || announcement.bgp_state || announcement.connector_bgp_state)),
         anomalyResponseDetailField('Zona', zone),
@@ -12635,6 +12992,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const overviewFields = [
         anomalyResponseDetailField('Estado atual', info.label),
         anomalyResponseDetailField('Motivo', reason),
+        anomalyResponseDetailField('Motivo técnico', outcomeDetails.technical_reason || bgpTechnicalReason({ response_reason: reason })),
+        anomalyResponseDetailField('Evidência Host Agent', outcomeDetails.host_agent_evidence ? JSON.stringify(outcomeDetails.host_agent_evidence, null, 2) : ''),
         anomalyResponseDetailField('Atualizado em', anomalyResponseDateText(updatedAt)),
         anomalyResponseDetailField('Tentativa prioritária', primary?.announcement_id || primary?.id ? `#${primary.announcement_id || primary.id}` : ''),
         anomalyResponseDetailField('Conector', primary ? '' : outcomeConnector),
@@ -15887,7 +16246,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('systemAiOutput', JSON.stringify(result, null, 2));
     }
 
+    function canonicalNavigationView(view) {
+      const value = String(view || '').replace(/^#/, '').trim();
+      if (value === 'bgp' || value === 'bgp-mitigation') return 'mitigation';
+      return value || 'dashboard';
+    }
+
+    function viewFromLocationHash() {
+      return canonicalNavigationView(window.location.hash);
+    }
+
     function showView(view, placeholderTitle = '') {
+      view = canonicalNavigationView(view);
       if (view !== 'dashboard') {
         if (dashboardRefreshTimer) {
           clearTimeout(dashboardRefreshTimer);
@@ -15900,6 +16270,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         abortMapRequest();
       }
       activeView = view === 'placeholder' ? 'placeholder' : view;
+      if (view !== 'placeholder' && window.location.hash !== `#${view}`) {
+        window.history.replaceState(null, '', `#${view}`);
+      }
       document.querySelectorAll('.app-view').forEach(section => section.classList.remove('active'));
       document.querySelectorAll('.side-nav button').forEach(button => button.classList.remove('active'));
 
@@ -15962,10 +16335,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           return null;
         }).catch(console.error);
         setTimeout(() => charts.peakHunterSeries.resize(), 50);
-      } else if (view === 'bgp') {
-        document.getElementById('view-bgp').classList.add('active');
-        document.querySelector('[data-nav-view="bgp"]').classList.add('active');
-        loadBgpView().catch(console.error);
+      } else if (view === 'mitigation') {
+        document.getElementById('view-mitigation').classList.add('active');
+        document.querySelector('[data-nav-view="mitigation"]').classList.add('active');
+        loadMitigationView().catch(console.error);
+      } else if (view === 'bgp-connectors') {
+        document.getElementById('view-bgp-connectors').classList.add('active');
+        document.querySelector('[data-nav-view="bgp-connectors"]').classList.add('active');
+        loadBgpConnectorsView().catch(error => setText('bgpConnectorsStatus', `Falha: ${error.message}`));
       } else if (view === 'system') {
         document.getElementById('view-system').classList.add('active');
         document.querySelector('[data-nav-view="system"]').classList.add('active');
@@ -15981,6 +16358,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     document.querySelectorAll('.side-nav button[data-nav-view]').forEach(button => {
       button.addEventListener('click', () => showView(button.dataset.navView, button.dataset.placeholderTitle || ''));
+    });
+
+    window.addEventListener('hashchange', () => {
+      if (currentAuthUser) showView(viewFromLocationHash());
     });
 
     document.addEventListener('click', event => {
@@ -16443,9 +16824,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
 
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
+    document.getElementById('refreshBgpConnectorsButton').addEventListener('click', () => loadBgpConnectorsView().catch(error => setText('bgpConnectorsStatus', `Falha: ${error.message}`)));
+    document.getElementById('checkAllBgpConnectorsButton').addEventListener('click', () => checkBgpConnectorStatusesNow().catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`)));
     document.getElementById('bgpPdfButton').addEventListener('click', () => exportBgpPdf().catch(console.error));
     document.getElementById('checkBgpStatusButton').addEventListener('click', () => checkBgpConnectorStatusesNow().catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`)));
-    document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpStatus', `Falha ao salvar conector: ${error.message}`)));
+    document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpConnectorsStatus', `Falha ao salvar conector: ${error.message}`)));
     document.getElementById('clearBgpConnectorButton').addEventListener('click', clearBgpConnectorForm);
     document.getElementById('saveBgpProfileButton').addEventListener('click', () => saveBgpProfile().catch(error => setText('bgpStatus', `Falha ao salvar profile: ${error.message}`)));
     document.getElementById('clearBgpProfileButton').addEventListener('click', clearBgpProfileForm);
@@ -16503,7 +16886,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const edit = target?.closest('.bgp-connector-edit');
       const remove = target?.closest('.bgp-connector-delete');
       if (edit) editBgpConnector(Number(edit.dataset.id));
-      if (remove) apiRequest(`/api/bgp/connectors/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpView).catch(error => setText('bgpStatus', `Falha ao remover conector: ${error.message}`));
+      if (remove) apiRequest(`/api/bgp/connectors/${remove.dataset.id}`, { method: 'DELETE' }).then(loadBgpConnectorsView).catch(error => setText('bgpConnectorsStatus', `Falha ao remover conector: ${error.message}`));
+    });
+    document.getElementById('bgpPeerStatusRows').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const check = target?.closest('.bgp-status-check');
+      const details = target?.closest('.bgp-status-details');
+      const edit = target?.closest('.bgp-connector-edit');
+      const history = target?.closest('.bgp-status-history');
+      if (check) checkBgpConnectorStatusNow(Number(check.dataset.id)).catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`));
+      if (details) openBgpConnectorDetails(Number(details.dataset.id));
+      if (history) openBgpConnectorDetails(Number(history.dataset.id), 'history');
+      if (edit) editBgpConnector(Number(edit.dataset.id));
+    });
+    document.getElementById('bgpConnectorDetailsEditButton').addEventListener('click', event => {
+      closeModal('bgpConnectorDetailsModal');
+      editBgpConnector(Number(event.currentTarget.dataset.connectorId));
+      document.getElementById('bgpConnectorEditorPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    document.addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const connectorLink = target?.closest('.mitigation-connector-link');
+      if (!connectorLink) return;
+      pendingBgpConnectorDetailsId = Number(connectorLink.dataset.connectorId);
+      showView('bgp-connectors');
     });
     document.getElementById('bgpProfilesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
@@ -16544,6 +16950,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
     });
     document.getElementById('bgpInFlightAnnouncementsTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const reject = target?.closest('.bgp-ann-reject');
+      const withdraw = target?.closest('.bgp-ann-withdraw');
+      if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
+      if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
+    });
+    document.getElementById('bgpFailedAnnouncementsTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const reject = target?.closest('.bgp-ann-reject');
       const withdraw = target?.closest('.bgp-ann-withdraw');
