@@ -4599,6 +4599,19 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(readiness["confirmation_level"], "peer_established")
         self.assertIn("Familia FlowSpec nao confirmada", readiness["reason_message"])
 
+    def test_readiness_never_uses_tcp_or_auxiliary_peer_without_established_bgp_state(self):
+        status = {
+            "service": {"active": True},
+            "bgp_state": "not_verified",
+            "flowspec_state": "established",
+            "session": {"tcp_established": True},
+            "exabgp_peer": {"state": "established"},
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
+        }
+        readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["reason"], "peer_bgp_not_verified")
+
     def test_established_peer_with_unavailable_pipe_is_not_ready(self):
         status = {
             "service": {"active": True},
@@ -4625,7 +4638,7 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(down["confirmation_level"], "peer_down")
         self.assertIn("indisponivel", down["reason_message"])
 
-    def test_host_agent_request_includes_configured_exabgp_log_path(self):
+    def test_host_agent_request_includes_configured_exabgp_log_and_config_paths(self):
         connector = {
             "peer_ip": "45.5.249.0",
             "listen_port": 179,
@@ -4651,12 +4664,14 @@ class BgpMitigationTest(unittest.TestCase):
 
         with patch.object(main, "GMJFLOW_HOST_AGENT_URL", "http://127.0.0.1:18080"), \
              patch.object(main, "GMJFLOW_EXABGP_LOG_PATH", "/var/log/exabgp-gmj-flow.log"), \
+             patch.object(main, "GMJFLOW_EXABGP_CONFIG_PATH", "/etc/exabgp/gmj-flow-ne8000.conf"), \
              patch.object(main.urllib.request, "urlopen", side_effect=fake_urlopen):
             result = main.host_agent_status(connector)
 
         params = main.urllib.parse.parse_qs(main.urllib.parse.urlparse(captured["url"]).query)
         self.assertTrue(result["available"])
         self.assertEqual(params["log_path"], ["/var/log/exabgp-gmj-flow.log"])
+        self.assertEqual(params["config_path"], ["/etc/exabgp/gmj-flow-ne8000.conf"])
         self.assertEqual(params["pipe_path"], ["/run/exabgp/gm-teste.in"])
         self.assertEqual(captured["timeout"], 5)
 
@@ -4686,7 +4701,13 @@ class BgpMitigationTest(unittest.TestCase):
                 "is_fifo": True,
                 "reader_active": True,
             },
-            "evidence": {"source": "exabgp_journal"},
+            "evidence": {
+                "source": "exabgp_journal + exabgp_config",
+                "flowspec_evidence_source": "exabgp_config",
+                "neighbor_found": True,
+                "family_block_found": True,
+                "ipv4_flow_configured": True,
+            },
         }
         with patch.object(main, "host_agent_status", return_value=agent), \
              patch.object(main, "router_ssh_status") as router_status, \

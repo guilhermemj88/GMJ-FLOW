@@ -43,7 +43,9 @@ TIME_ONLY_LOG_TIMESTAMP_RE = re.compile(
     r"^\s*[\[(]?(?P<timestamp>\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)(?:\s|\||[])]|$)"
 )
 DEFAULT_EXABGP_LOG_PATH = "/var/log/exabgp-gmj-flow.log"
+DEFAULT_EXABGP_CONFIG_PATH = "/etc/exabgp/gmj-flow-ne8000.conf"
 MAX_LOG_READ_BYTES = 4 * 1024 * 1024
+MAX_CONFIG_READ_BYTES = 1024 * 1024
 PERSISTENT_FIFO_WRAPPER_PATHS = {"/usr/local/sbin/exabgp-fifo-reader.sh"}
 SHELL_EXECUTABLES = {"/bin/sh", "/bin/bash", "/bin/dash", "sh", "bash", "dash"}
 
@@ -348,6 +350,230 @@ def read_log_file(requested_path: str, configured_path: str) -> tuple[str, datet
         return "", None, str(exc)
 
 
+def validated_config_path(requested_path: str, configured_path: str) -> str:
+    """Allow only the exact absolute config file selected by the agent operator."""
+    requested = str(requested_path or configured_path or "").strip()
+    configured = str(configured_path or "").strip()
+    if not configured or not posixpath.isabs(configured):
+        raise ValueError("configured config_path must be absolute")
+    if not requested or not posixpath.isabs(requested):
+        raise ValueError("config_path must be absolute")
+    if "\x00" in requested or "\x00" in configured:
+        raise ValueError("invalid config_path")
+    normalized_requested = posixpath.normpath(requested)
+    normalized_configured = posixpath.normpath(configured)
+    if requested != normalized_requested or configured != normalized_configured:
+        raise ValueError("config_path must be normalized")
+    if normalized_requested != normalized_configured:
+        raise ValueError("config_path is not configured for this Host Agent")
+    return normalized_requested
+
+
+def read_config_file(requested_path: str, configured_path: str) -> tuple[str, str, str]:
+    """Read at most 1 MiB from the configured regular file without following links."""
+    try:
+        path = validated_config_path(requested_path, configured_path)
+    except ValueError as exc:
+        return "", str(exc), ""
+    try:
+        path_stat = os.lstat(path)
+        if stat.S_ISLNK(path_stat.st_mode):
+            return "", "configured config_path must not be a symlink", path
+        if not stat.S_ISREG(path_stat.st_mode):
+            return "", "configured config_path is not a regular file", path
+        if path_stat.st_size > MAX_CONFIG_READ_BYTES:
+            return "", "configured config_path exceeds the read limit", path
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            descriptor_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(descriptor_stat.st_mode):
+                return "", "configured config_path is not a regular file", path
+            if (
+                descriptor_stat.st_dev != path_stat.st_dev
+                or descriptor_stat.st_ino != path_stat.st_ino
+            ):
+                return "", "configured config_path changed while opening", path
+            if descriptor_stat.st_size > MAX_CONFIG_READ_BYTES:
+                return "", "configured config_path exceeds the read limit", path
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_CONFIG_READ_BYTES:
+                chunk = os.read(descriptor, MAX_CONFIG_READ_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            content = b"".join(chunks)
+            if len(content) > MAX_CONFIG_READ_BYTES:
+                return "", "configured config_path exceeds the read limit", path
+            return content.decode("utf-8", errors="replace"), "", path
+        finally:
+            os.close(descriptor)
+    except FileNotFoundError:
+        return "", "configured config_path does not exist", path
+    except PermissionError:
+        return "", "configured config_path is not readable", path
+    except OSError:
+        return "", "unable to read configured config_path", path
+
+
+def exabgp_config_tokens(content: str) -> list[str]:
+    """Tokenize syntax while removing comments and quoted values such as secrets."""
+    sanitized: list[str] = []
+    index = 0
+    quote = ""
+    line_comment = False
+    block_comment = False
+    escaped = False
+    while index < len(content):
+        char = content[index]
+        following = content[index + 1] if index + 1 < len(content) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+                sanitized.append("\n")
+            else:
+                sanitized.append(" ")
+        elif block_comment:
+            if char == "*" and following == "/":
+                sanitized.extend((" ", " "))
+                block_comment = False
+                index += 1
+            else:
+                sanitized.append("\n" if char == "\n" else " ")
+        elif quote:
+            sanitized.append("\n" if char == "\n" else " ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in {'"', "'"}:
+            quote = char
+            sanitized.append(" ")
+        elif char == "#" or (char == "/" and following == "/"):
+            line_comment = True
+            sanitized.append(" ")
+            if following == "/":
+                sanitized.append(" ")
+                index += 1
+        elif char == "/" and following == "*":
+            block_comment = True
+            sanitized.extend((" ", " "))
+            index += 1
+        else:
+            sanitized.append(char)
+        index += 1
+    return re.findall(r"[{};]|[^\s{};]+", "".join(sanitized))
+
+
+def matching_brace(tokens: list[str], opening: int, limit: int | None = None) -> int | None:
+    if opening >= len(tokens) or tokens[opening] != "{":
+        return None
+    depth = 0
+    upper = len(tokens) if limit is None else min(limit, len(tokens))
+    for index in range(opening, upper):
+        if tokens[index] == "{":
+            depth += 1
+        elif tokens[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def family_config_evidence(tokens: list[str], start: int, end: int) -> tuple[bool, bool, bool]:
+    family_found = False
+    ipv4_flow_configured = False
+    parse_valid = True
+    depth = 0
+    index = start
+    while index < end:
+        token = tokens[index]
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and token.lower() == "family" and index + 1 < end and tokens[index + 1] == "{":
+            family_found = True
+            family_end = matching_brace(tokens, index + 1, end + 1)
+            if family_end is None:
+                return family_found, ipv4_flow_configured, False
+            family_depth = 0
+            cursor = index + 2
+            while cursor < family_end:
+                family_token = tokens[cursor]
+                if family_token == "{":
+                    family_depth += 1
+                elif family_token == "}":
+                    family_depth = max(0, family_depth - 1)
+                elif (
+                    family_depth == 0
+                    and family_token.lower() == "ipv4"
+                    and cursor + 2 < family_end
+                    and tokens[cursor + 1].lower() == "flow"
+                    and tokens[cursor + 2] == ";"
+                ):
+                    ipv4_flow_configured = True
+                cursor += 1
+            index = family_end
+        index += 1
+    return family_found, ipv4_flow_configured, parse_valid
+
+
+def exabgp_config_evidence(content: str, peer_ip: str, config_path: str) -> dict[str, Any]:
+    tokens = exabgp_config_tokens(content)
+    neighbor_found = False
+    family_found = False
+    ipv4_flow_configured = False
+    parse_valid = True
+    index = 0
+    while index + 2 < len(tokens):
+        if (
+            tokens[index].lower() == "neighbor"
+            and tokens[index + 1] == peer_ip
+            and tokens[index + 2] == "{"
+        ):
+            neighbor_found = True
+            neighbor_end = matching_brace(tokens, index + 2)
+            if neighbor_end is None:
+                parse_valid = False
+                break
+            found, configured, valid = family_config_evidence(
+                tokens, index + 3, neighbor_end
+            )
+            family_found = family_found or found
+            ipv4_flow_configured = ipv4_flow_configured or configured
+            parse_valid = parse_valid and valid
+            index = neighbor_end
+        index += 1
+    return {
+        "flowspec_evidence_source": "exabgp_config",
+        "config_path": config_path,
+        "config_readable": True,
+        "config_parse_valid": parse_valid,
+        "neighbor_found": neighbor_found,
+        "family_block_found": family_found,
+        "ipv4_flow_configured": ipv4_flow_configured,
+        "config_error": "" if parse_valid else "configured neighbor block is malformed",
+    }
+
+
+def unavailable_config_evidence(config_path: str, error: str) -> dict[str, Any]:
+    return {
+        "flowspec_evidence_source": "exabgp_config",
+        "config_path": config_path,
+        "config_readable": False,
+        "config_parse_valid": False,
+        "neighbor_found": False,
+        "family_block_found": False,
+        "ipv4_flow_configured": False,
+        "config_error": error,
+    }
+
+
 def empty_reader_evidence() -> dict[str, Any]:
     return {
         "reader_active": False,
@@ -472,6 +698,8 @@ def bgp_status(
     pipe_path: str = "",
     log_path: str = "",
     configured_log_path: str = DEFAULT_EXABGP_LOG_PATH,
+    config_path: str = "",
+    configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
 ) -> dict[str, object]:
     service_code, service_output = run(["systemctl", "is-active", service]) if service else (1, "service not configured")
     invocation_code, invocation_output = (
@@ -524,6 +752,20 @@ def bgp_status(
         evidence["log_path"] = (
             configured_log_path if not log_error else ""
         )
+    log_evidence_source = str(evidence.get("source") or "exabgp_journal")
+    config_content, config_error, accepted_config_path = read_config_file(
+        config_path, configured_config_path
+    )
+    if config_error:
+        config_evidence = unavailable_config_evidence(accepted_config_path, config_error)
+    else:
+        config_evidence = exabgp_config_evidence(
+            config_content, peer_ip, accepted_config_path
+        )
+    evidence.update(config_evidence)
+    evidence["source"] = f"{log_evidence_source} + exabgp_config"
+
+    pipe = fifo_status(pipe_path)
     explicit_down = bool(evidence["explicit_disconnect"] or evidence["explicit_shutdown"])
     if not service_active or explicit_down or (evidence["connected_current"] and not tcp_established):
         bgp_state = "down"
@@ -531,9 +773,20 @@ def bgp_status(
         bgp_state = "established"
     else:
         bgp_state = "not_verified"
+    config_verified = bool(
+        evidence["config_readable"]
+        and evidence["config_parse_valid"]
+        and evidence["neighbor_found"]
+    )
     if bgp_state == "down":
         flowspec_state = "down"
-    elif bgp_state == "established" and evidence["family_current"]:
+    elif bgp_state != "established":
+        flowspec_state = "not_verified"
+    elif not config_verified:
+        flowspec_state = "not_verified"
+    elif not evidence["family_block_found"] or not evidence["ipv4_flow_configured"]:
+        flowspec_state = "down"
+    elif pipe["ok"]:
         flowspec_state = "established"
     else:
         flowspec_state = "not_verified"
@@ -545,13 +798,14 @@ def bgp_status(
         "session": {"tcp_established": tcp_established, "peer_ip": peer_ip},
         "bgp_state": bgp_state,
         "flowspec_state": flowspec_state,
-        "pipe": fifo_status(pipe_path),
+        "pipe": pipe,
         "evidence": evidence,
     }
 
 
 class Handler(BaseHTTPRequestHandler):
     configured_log_path = DEFAULT_EXABGP_LOG_PATH
+    configured_config_path = DEFAULT_EXABGP_CONFIG_PATH
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -564,6 +818,7 @@ class Handler(BaseHTTPRequestHandler):
         peer_ip = params.get("peer_ip", [""])[0]
         pipe_path = params.get("pipe_path", [""])[0]
         log_path = params.get("log_path", [self.configured_log_path])[0]
+        config_path = params.get("config_path", [self.configured_config_path])[0]
         try:
             listen_port = int(params.get("listen_port", ["179"])[0])
         except ValueError:
@@ -575,6 +830,8 @@ class Handler(BaseHTTPRequestHandler):
             pipe_path,
             log_path,
             self.configured_log_path,
+            config_path,
+            self.configured_config_path,
         )
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -596,9 +853,17 @@ def main() -> None:
         default=os.getenv("GMJFLOW_EXABGP_LOG_PATH", DEFAULT_EXABGP_LOG_PATH),
         help="absolute ExaBGP log path accepted by /bgp/status",
     )
+    parser.add_argument(
+        "--config-path",
+        default=os.getenv("GMJFLOW_EXABGP_CONFIG_PATH", DEFAULT_EXABGP_CONFIG_PATH),
+        help="absolute ExaBGP config path accepted by /bgp/status",
+    )
     args = parser.parse_args()
     try:
         Handler.configured_log_path = validated_log_path(args.log_path, args.log_path)
+        Handler.configured_config_path = validated_config_path(
+            args.config_path, args.config_path
+        )
     except ValueError as exc:
         parser.error(str(exc))
     server = ThreadingHTTPServer((args.host, args.port), Handler)

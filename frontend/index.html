@@ -4418,7 +4418,7 @@
               <div class="metric-card"><div class="metric-label">BGP estabelecidos</div><div id="bgpInfraBgpEstablished" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">BGP não verificados</div><div id="bgpInfraBgpUnverified" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">BGP indisponíveis</div><div id="bgpInfraBgpDown" class="metric-value">0</div></div>
-              <div class="metric-card"><div class="metric-label">FlowSpec estabelecidos</div><div id="bgpInfraFlowspecEstablished" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">FlowSpec habilitados no ExaBGP</div><div id="bgpInfraFlowspecEstablished" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">FlowSpec não verificados</div><div id="bgpInfraFlowspecUnverified" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Pipes OK</div><div id="bgpInfraPipesOk" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Conectores prontos</div><div id="bgpInfraReady" class="metric-value">0</div></div>
@@ -8926,7 +8926,7 @@
       const presentation = {
         OK: ['Pipe OK', 'ok'],
         ABSENT: ['Pipe ausente', 'down'],
-        NO_READER: ['Sem leitor do FIFO', 'down'],
+        NO_READER: ['Pipe sem leitor', 'down'],
         UNAVAILABLE: ['Pipe indisponível', 'down'],
         NOT_VERIFIED: ['Pipe não verificado', 'not_verified']
       }[state] || ['Pipe indisponível', 'down'];
@@ -8972,12 +8972,12 @@
 
     function bgpConnectorRecommendation(status, connector) {
       const readiness = bgpConnectorReadinessState(status, connector);
-      if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP.';
+      if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP. A instalação da rota no Huawei não foi verificada.';
       if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
       if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
       if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
       if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
-      if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise a negociação IPv4 FlowSpec.';
+      if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise o bloco family e a diretiva ipv4 flow do neighbor na configuração ExaBGP.';
       if (bgpPipeDetailedState(status, connector) === 'NO_READER') return 'Inicie ou recupere o leitor persistente do FIFO deste conector.';
       return 'Verifique o FIFO configurado e as mensagens técnicas do Host Agent.';
     }
@@ -8990,10 +8990,11 @@
       const pipe = status?.host_agent?.pipe || status?.pipes || {};
       const pipeExists = pipe.exists ?? pipe.input_exists;
       const readerActive = pipe.reader_active;
+      const flowspecEnabled = status && bgpFlowspecOperationalState(status, connector) === 'UP';
       const calculated = [
         bgpConnectorDetailField('BGP', status ? (bgpPeerOperationalState(status) === 'UP' ? 'Estabelecido' : bgpPeerOperationalState(status) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
-        bgpConnectorDetailField('FlowSpec', status ? (bgpFlowspecOperationalState(status, connector) === 'UP' ? 'Estabelecido' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
-        bgpConnectorDetailField('Pipe', bgpPipeDetailedState(status, connector).replace('NO_READER', 'Sem leitor do FIFO').replace('NOT_VERIFIED', 'Não verificado').replace('UNAVAILABLE', 'Indisponível').replace('ABSENT', 'Ausente').replace('OK', 'OK')),
+        bgpConnectorDetailField('FlowSpec', status ? (flowspecEnabled ? 'Habilitado no ExaBGP' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
+        bgpConnectorDetailField('Pipe', bgpPipeDetailedState(status, connector).replace('NO_READER', 'Pipe sem leitor').replace('NOT_VERIFIED', 'Não verificado').replace('UNAVAILABLE', 'Indisponível').replace('ABSENT', 'Ausente').replace('OK', 'OK')),
         bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto'))
       ].join('');
       const identity = [
@@ -9015,15 +9016,21 @@
         bgpConnectorDetailField('Última conexão', formatDateTime(evidence.last_connected_at) || evidence.last_connected_at),
         bgpConnectorDetailField('Último shutdown', formatDateTime(evidence.last_shutdown_at) || evidence.last_shutdown_at),
         bgpConnectorDetailField('Última desconexão', formatDateTime(evidence.last_disconnect_at) || evidence.last_disconnect_at),
-        bgpConnectorDetailField('Última evidência de FlowSpec', formatDateTime(evidence.last_family_evidence_at) || evidence.last_family_evidence_at)
+        bgpConnectorDetailField('Configuração ExaBGP', evidence.config_path),
+        bgpConnectorDetailField('Neighbor encontrado', evidence.neighbor_found === undefined ? '' : evidence.neighbor_found ? 'Sim' : 'Não'),
+        bgpConnectorDetailField('Bloco family encontrado', evidence.family_block_found === undefined ? '' : evidence.family_block_found ? 'Sim' : 'Não'),
+        bgpConnectorDetailField('IPv4 FlowSpec configurado', evidence.ipv4_flow_configured === undefined ? '' : evidence.ipv4_flow_configured ? 'Sim' : 'Não')
       ].join('');
+      const flowspecNotice = flowspecEnabled
+        ? '<div class="alert alert-info mt-3 mb-0">FlowSpec habilitado no ExaBGP. Isso não confirma instalação da rota no Huawei.</div>'
+        : '';
       const payload = status?.host_agent || {};
       const evidenceTitle = section === 'history' ? 'Evidência e histórico técnico' : 'Evidência';
       setText('bgpConnectorDetailsModalTitle', `Conector BGP · ${connector.name || `#${connector.id}`}`);
       setText('bgpConnectorDetailsSummary', `${connector.peer_ip || '-'} · ${bgpConnectorReadinessState(status, connector) === 'READY' ? 'Pronto' : 'Atenção operacional'}`);
       document.getElementById('bgpConnectorDetailsBody').innerHTML = `
         <section class="panel p-3 mb-3"><div class="panel-title mb-2">Identificação</div><div class="anomaly-response-detail-grid">${identity}</div></section>
-        <section class="panel p-3 mb-3"><div class="panel-title mb-2">Estado calculado</div><div class="anomaly-response-detail-grid">${calculated}</div></section>
+        <section class="panel p-3 mb-3"><div class="panel-title mb-2">Estado calculado</div><div class="anomaly-response-detail-grid">${calculated}</div>${flowspecNotice}</section>
         <section class="panel p-3 mb-3" data-technical-section="${escapeHtml(section)}"><div class="panel-title mb-2">${evidenceTitle}</div><div class="anomaly-response-detail-grid">${evidenceFields}</div><pre class="bg-light border rounded p-2 mt-2 mb-0">${escapeHtml(JSON.stringify(payload, null, 2))}</pre></section>
         <section class="panel p-3"><div class="panel-title mb-2">Recomendação</div><div>${escapeHtml(bgpConnectorRecommendation(status, connector))}</div>${(status?.messages || []).length ? `<div class="subtle mt-2">${escapeHtml(status.messages.join(' | '))}</div>` : ''}</section>
       `;
@@ -9047,7 +9054,7 @@
             <td>${escapeHtml(connector.local_asn || '-')}</td>
             <td>${escapeHtml(connector.peer_asn || '-')}</td>
             <td>${bgpStatusBadge(bgpState === 'UP' ? 'BGP estabelecido' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'NAO VERIFICADO' ? 'BGP não verificado' : bgpState, bgpKind)}</td>
-            <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec estabelecido' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
+            <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec habilitado no ExaBGP' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
             <td>${bgpPipeDetailedBadge(pipeState)}</td>
             <td>${bgpStatusBadge(status?.service?.active ? 'Serviço ativo' : status ? 'Serviço indisponível' : 'Serviço não verificado', status?.service?.active ? 'ok' : status ? 'down' : 'not_verified')}</td>
             <td>${bgpReadinessBadge(readiness)}</td>

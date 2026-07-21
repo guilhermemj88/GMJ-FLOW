@@ -44,6 +44,8 @@ class HostAgentStatusTest(unittest.TestCase):
         file_logs=None,
         file_mtime=None,
         started_at="2026-07-21T09:59:00Z",
+        config_text=None,
+        config_error="",
     ):
         def fake_run(args, timeout=2.0):
             if args[:2] == ["systemctl", "is-active"]:
@@ -72,11 +74,24 @@ class HostAgentStatusTest(unittest.TestCase):
             file_mtime or datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc),
             "" if file_logs is not None else "configured log_path does not exist",
         )
+        if config_text is None:
+            config_text = (
+                f"neighbor {self.peer_ip} {{\n"
+                "  family { ipv4 unicast; ipv4 flow; }\n"
+                "  authentication { md5 \"never-expose-this\"; }\n"
+                "}\n"
+            )
+        config_result = (
+            "" if config_error else config_text,
+            config_error,
+            host_agent.DEFAULT_EXABGP_CONFIG_PATH,
+        )
         with patch.object(host_agent, "run", side_effect=fake_run), \
              patch.object(host_agent.os.path, "exists", return_value=pipe_exists), \
              patch.object(host_agent.os, "stat", return_value=fifo_stat), \
              patch.object(host_agent, "fifo_reader_evidence", return_value=reader_evidence), \
-             patch.object(host_agent, "read_log_file", return_value=file_result):
+             patch.object(host_agent, "read_log_file", return_value=file_result), \
+             patch.object(host_agent, "read_config_file", return_value=config_result):
             return host_agent.bgp_status(
                 "exabgp-gmj-flow.service",
                 self.peer_ip,
@@ -84,6 +99,8 @@ class HostAgentStatusTest(unittest.TestCase):
                 self.pipe_path,
                 host_agent.DEFAULT_EXABGP_LOG_PATH,
                 host_agent.DEFAULT_EXABGP_LOG_PATH,
+                host_agent.DEFAULT_EXABGP_CONFIG_PATH,
+                host_agent.DEFAULT_EXABGP_CONFIG_PATH,
             )
 
     def current_established_logs(self):
@@ -93,13 +110,20 @@ class HostAgentStatusTest(unittest.TestCase):
         ]
 
     def test_current_bgp_and_flowspec_evidence_with_fifo_reader_are_established(self):
-        status = self.run_status(self.current_established_logs())
+        logs = [journal_record("2026-07-21T10:00:00Z", f"connected to peer-1 with {self.peer_ip}")]
+        status = self.run_status(logs)
         self.assertEqual(status["bgp_state"], "established")
         self.assertEqual(status["flowspec_state"], "established")
         self.assertTrue(status["pipe"]["ok"])
         self.assertTrue(status["pipe"]["reader_active"])
         self.assertEqual(status["evidence"]["last_connected_at"], "2026-07-21T10:00:00Z")
-        self.assertEqual(status["evidence"]["last_family_evidence_at"], "2026-07-21T10:00:01Z")
+        self.assertEqual(status["evidence"]["last_family_evidence_at"], "")
+        self.assertTrue(status["evidence"]["neighbor_found"])
+        self.assertTrue(status["evidence"]["family_block_found"])
+        self.assertTrue(status["evidence"]["ipv4_flow_configured"])
+        self.assertEqual(status["evidence"]["flowspec_evidence_source"], "exabgp_config")
+        self.assertEqual(status["evidence"]["source"], "exabgp_journal + exabgp_config")
+        self.assertNotIn("never-expose-this", json.dumps(status))
 
     def test_tcp_without_exabgp_evidence_is_not_verified(self):
         status = self.run_status([])
@@ -117,7 +141,7 @@ class HostAgentStatusTest(unittest.TestCase):
         )
         self.assertEqual(status["bgp_state"], "established")
         self.assertEqual(status["flowspec_state"], "established")
-        self.assertEqual(status["evidence"]["source"], "exabgp_log_file")
+        self.assertEqual(status["evidence"]["source"], "exabgp_log_file + exabgp_config")
 
     def test_log_file_connected_only_before_restart_is_not_verified(self):
         status = self.run_status(
@@ -186,6 +210,88 @@ class HostAgentStatusTest(unittest.TestCase):
         self.assertTrue(status["pipe"]["is_fifo"])
         self.assertFalse(status["pipe"]["reader_active"])
         self.assertFalse(status["pipe"]["ok"])
+        self.assertEqual(status["flowspec_state"], "not_verified")
+
+    def test_ipv4_flow_only_in_another_neighbor_is_not_established(self):
+        config = """
+        neighbor 45.5.249.0 { family { ipv4 flow; } }
+        neighbor 179.189.80.1 { family { ipv4 flow; } }
+        """
+        status = self.run_status(self.current_established_logs(), config_text=config)
+        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertFalse(status["evidence"]["neighbor_found"])
+
+    def test_commented_ipv4_flow_does_not_count(self):
+        config = f"""
+        neighbor {self.peer_ip} {{
+          family {{
+            ipv4 unicast;
+            # ipv4 flow;
+            // ipv4 flow;
+            /* ipv4 flow; */
+          }}
+        }}
+        """
+        status = self.run_status(self.current_established_logs(), config_text=config)
+        self.assertEqual(status["flowspec_state"], "down")
+        self.assertTrue(status["evidence"]["family_block_found"])
+        self.assertFalse(status["evidence"]["ipv4_flow_configured"])
+
+    def test_correct_neighbor_without_family_is_unavailable(self):
+        status = self.run_status(
+            self.current_established_logs(),
+            config_text=f"neighbor {self.peer_ip} {{ description test; }}",
+        )
+        self.assertEqual(status["flowspec_state"], "down")
+        self.assertTrue(status["evidence"]["neighbor_found"])
+        self.assertFalse(status["evidence"]["family_block_found"])
+
+    def test_correct_neighbor_family_without_ipv4_flow_is_unavailable(self):
+        status = self.run_status(
+            self.current_established_logs(),
+            config_text=f"neighbor {self.peer_ip} {{ family {{ ipv4 unicast; }} }}",
+        )
+        self.assertEqual(status["flowspec_state"], "down")
+        self.assertFalse(status["evidence"]["ipv4_flow_configured"])
+
+    def test_ipv4_flow_outside_family_does_not_count(self):
+        status = self.run_status(
+            self.current_established_logs(),
+            config_text=f"neighbor {self.peer_ip} {{ ipv4 flow; family {{ ipv4 unicast; }} }}",
+        )
+        self.assertEqual(status["flowspec_state"], "down")
+        self.assertTrue(status["evidence"]["family_block_found"])
+        self.assertFalse(status["evidence"]["ipv4_flow_configured"])
+
+    def test_missing_neighbor_is_not_verified(self):
+        status = self.run_status(
+            self.current_established_logs(),
+            config_text="neighbor 192.0.2.1 { family { ipv4 flow; } }",
+        )
+        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertFalse(status["evidence"]["neighbor_found"])
+
+    def test_unreadable_config_is_not_verified(self):
+        status = self.run_status(
+            self.current_established_logs(), config_error="configured config_path is not readable"
+        )
+        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertFalse(status["evidence"]["config_readable"])
+
+    def test_multiple_neighbors_are_parsed_independently(self):
+        config = f"""
+        group edge {{
+          neighbor 45.5.249.0 {{ family {{ ipv4 unicast; }} }}
+          neighbor {self.peer_ip} {{
+            description \"braces {{ and ipv4 flow; in a secret-like string }}\";
+            family {{ ipv4 unicast; ipv4 flow; }}
+          }}
+        }}
+        """
+        status = self.run_status(self.current_established_logs(), config_text=config)
+        self.assertEqual(status["flowspec_state"], "established")
+        self.assertTrue(status["evidence"]["neighbor_found"])
+        self.assertTrue(status["evidence"]["ipv4_flow_configured"])
 
 
 class HostAgentFifoReaderTest(unittest.TestCase):
@@ -262,6 +368,76 @@ class HostAgentLogSafetyTest(unittest.TestCase):
     def test_systemd_start_timestamp_with_numeric_timezone_is_parsed(self):
         parsed = host_agent.parse_timestamp("Tue 2026-07-21 09:59:00 -03")
         self.assertEqual(parsed, datetime(2026, 7, 21, 12, 59, tzinfo=timezone.utc))
+
+
+class HostAgentConfigSafetyTest(unittest.TestCase):
+    config_path = host_agent.DEFAULT_EXABGP_CONFIG_PATH
+
+    def test_request_cannot_select_an_unconfigured_config_file(self):
+        with patch.object(host_agent.os, "lstat") as lstat_call, \
+             patch.object(host_agent.os, "open") as open_call:
+            content, error, accepted = host_agent.read_config_file(
+                "/etc/shadow", self.config_path
+            )
+        self.assertEqual(content, "")
+        self.assertEqual(accepted, "")
+        self.assertIn("not configured", error)
+        lstat_call.assert_not_called()
+        open_call.assert_not_called()
+
+    def test_config_symlink_is_rejected_without_opening_it(self):
+        link_stat = types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_size=10)
+        with patch.object(host_agent.os, "lstat", return_value=link_stat), \
+             patch.object(host_agent.os, "open") as open_call:
+            content, error, accepted = host_agent.read_config_file(
+                self.config_path, self.config_path
+            )
+        self.assertEqual(content, "")
+        self.assertEqual(accepted, self.config_path)
+        self.assertIn("symlink", error)
+        open_call.assert_not_called()
+
+    def test_oversized_config_is_rejected_without_opening_it(self):
+        file_stat = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_size=host_agent.MAX_CONFIG_READ_BYTES + 1,
+        )
+        with patch.object(host_agent.os, "lstat", return_value=file_stat), \
+             patch.object(host_agent.os, "open") as open_call:
+            content, error, accepted = host_agent.read_config_file(
+                self.config_path, self.config_path
+            )
+        self.assertEqual(content, "")
+        self.assertEqual(accepted, self.config_path)
+        self.assertIn("read limit", error)
+        open_call.assert_not_called()
+
+    def test_config_read_is_bounded_read_only_and_never_writes(self):
+        config = b"neighbor 179.189.80.0 { family { ipv4 flow; } }"
+        file_stat = types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_size=len(config),
+            st_dev=10,
+            st_ino=20,
+        )
+        with patch.object(host_agent.os, "lstat", return_value=file_stat), \
+             patch.object(host_agent.os, "open", return_value=99) as open_call, \
+             patch.object(host_agent.os, "fstat", return_value=file_stat), \
+             patch.object(host_agent.os, "read", side_effect=[config, b""]) as read_call, \
+             patch.object(host_agent.os, "close"), \
+             patch.object(host_agent.os, "write") as write_call:
+            content, error, accepted = host_agent.read_config_file(
+                self.config_path, self.config_path
+            )
+        self.assertEqual(content, config.decode())
+        self.assertEqual(error, "")
+        self.assertEqual(accepted, self.config_path)
+        self.assertEqual(
+            open_call.call_args.args[1] & getattr(host_agent.os, "O_ACCMODE", 3),
+            host_agent.os.O_RDONLY,
+        )
+        self.assertEqual(read_call.call_args_list[0].args, (99, host_agent.MAX_CONFIG_READ_BYTES + 1))
+        write_call.assert_not_called()
 
 
 if __name__ == "__main__":
