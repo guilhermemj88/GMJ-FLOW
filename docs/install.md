@@ -69,11 +69,12 @@ display bgp flow peer
 Host Agent opcional:
 
 ```sh
-sudo python3 scripts/host-agent.py --host 127.0.0.1 --port 18080
+sudo python3 scripts/host-agent.py --host 127.0.0.1 --port 18080 --log-path /var/log/exabgp-gmj-flow.log
 GMJFLOW_HOST_AGENT_URL=http://127.0.0.1:18080
+GMJFLOW_EXABGP_LOG_PATH=/var/log/exabgp-gmj-flow.log
 ```
 
-O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179` retornando JSON com `bgp_state` e `flowspec_state`.
+O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&log_path=/var/log/exabgp-gmj-flow.log` retornando JSON com `bgp_state` e `flowspec_state`. O `log_path` aceito deve coincidir exatamente com o caminho configurado na inicializacao do agente.
 
 ### Estados e nivel de confirmacao dos anuncios
 
