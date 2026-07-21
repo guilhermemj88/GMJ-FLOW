@@ -75,6 +75,24 @@ GMJFLOW_HOST_AGENT_URL=http://127.0.0.1:18080
 
 O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179` retornando JSON com `bgp_state` e `flowspec_state`.
 
+### Estados e nivel de confirmacao dos anuncios
+
+O registro local e o estado operacional sao informacoes diferentes:
+
+- `pending_approval`: sugestao aguardando o operador; nada foi escrito no pipe.
+- `queued`: aprovada e registrada antes da tentativa de envio. Quando `confirmation_level=delivery_attempted`, a intencao de escrita ja foi persistida e o resultado pode estar temporariamente incerto.
+- `sent`: o comando foi entregue ao pipe ExaBGP, ainda sem confirmacao operacional.
+- `advertised`: o comando foi entregue enquanto a fonte de status configurada informava o peer BGP estabelecido. Este e o unico estado contado como FlowSpec ativo pelo GMJ-FLOW.
+- `peer_down`: a tentativa nao foi enviada por indisponibilidade do peer, ou um anuncio antes operacional perdeu explicitamente o peer; os timestamps anteriores sao preservados.
+- `failed`, `withdrawn`, `expired` e `dry_run`: respectivamente falha, retirada confirmada pela aplicacao, TTL encerrado com retirada concluida e simulacao.
+- `failed_withdraw`: a retirada falhou ou ficou incerta; a regra continua reservada, pode permanecer ativa e sera reconciliada novamente.
+
+O nivel `peer_established_announce_requested` confirma somente que o GMJ-FLOW entregou o comando ao ExaBGP com o peer estabelecido e solicitou o anuncio. Ele nao confirma, sozinho, a presenca da rota na RIB FlowSpec do Huawei. Sem consulta direta e conclusiva ao roteador, a interface deve tratar a confirmacao como local. Uma porta TCP/179 acessivel indica apenas transporte disponivel e nao prova sessao BGP estabelecida.
+
+O prazo de seguranca e armado na intencao duravel imediatamente anterior a escrita no pipe e e preservado em `sent`/`advertised`. Se o processo cair depois da escrita e antes de salvar `sent`, o reconciliador envia um withdraw conservador ao fim do prazo; um withdraw redundante e seguro. `pending_approval`, `dry_run` e `queued` sem tentativa nao expiram operacionalmente.
+
+O relogio vencido, sozinho, nao comprova que o withdraw foi entregue. Um registro `advertised` continua contado e exibido como potencialmente ativo ate mudar para `expired` ou `withdrawn`; durante essa janela a interface informa retirada atrasada/pendente. Isso tambem impede que uma nova regra equivalente seja anunciada e depois removida por um withdraw antigo. Registros legados `active`/`announced` permanecem visiveis como enviados sem confirmacao e nao entram na contagem operacional.
+
 ## Autostart
 
 ```sh

@@ -576,9 +576,15 @@ BGP_PROTOCOL_SELECTORS = {"any", "manual", "anomaly_protocol", "fixed", "tcp", "
 BGP_PORT_SELECTORS = {"any", "manual", "anomaly_src_port", "anomaly_dst_port", "fixed"}
 BGP_TCP_FLAGS_SELECTORS = {"any", "manual", "anomaly_tcp_flags", "fixed", "syn", "syn_ack"}
 BGP_MITIGATION_TARGET_MODES = {"fixed_connector", "sensor_origin", "all_connectors", "selected_connectors"}
-BGP_ANNOUNCEMENT_STATUSES = {"dry_run", "prepared", "pending_approval", "active", "announced", "rejected", "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw"}
-BGP_ACTIVE_STATUSES = {"pending_approval", "active", "announced"}
-BGP_OPERATIONAL_ACTIVE_STATUSES = {"active", "announced"}
+BGP_ANNOUNCEMENT_STATUSES = {
+    "dry_run", "prepared", "pending_approval", "queued", "sent", "advertised",
+    "peer_down", "deduplicated", "active", "announced", "rejected",
+    "rejected_by_policy", "withdrawn", "expired", "failed", "failed_withdraw",
+}
+# These statuses reserve an equivalent rule and therefore participate in
+# capacity and duplicate checks.  Only ``advertised`` is operationally active.
+BGP_ACTIVE_STATUSES = {"pending_approval", "queued", "sent", "advertised"}
+BGP_OPERATIONAL_ACTIVE_STATUSES = {"advertised"}
 BGP_DEFAULT_MAX_DURATION_SECONDS = 3600
 BGP_DEFAULT_MAX_ACTIVE_RULES = 50
 BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automatic"}
@@ -1176,7 +1182,18 @@ class BgpAnomalyMitigationApplyPayload(BaseModel):
     candidate_index: int = Field(0, ge=0)
     candidate_indexes: list[int] = Field(default_factory=list)
     selected_dns_target_ips: list[str] = Field(default_factory=list)
+    connector_id: int | None = Field(None, ge=1)
     mode: str = "manual_approval"
+
+
+class BgpAnomalyMitigationEvaluatePayload(BaseModel):
+    connector_id: int | None = Field(None, ge=1)
+
+
+class BgpAnomalyMitigationRejectPayload(BaseModel):
+    candidate_index: int = Field(0, ge=0)
+    connector_id: int | None = Field(None, ge=1)
+    reason: str = "manual_rejection"
 
 
 class BgpAnomalyMitigationWithdrawPayload(BaseModel):
@@ -2477,6 +2494,10 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "source_id", "source_id TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "source_name", "source_name TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "source_details_json", "source_details_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_status", "auto_mitigation_status TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_reason", "auto_mitigation_reason TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_details_json", "auto_mitigation_details_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_updated_at", "auto_mitigation_updated_at TEXT NOT NULL DEFAULT ''")
     detection_rule_columns = {
         "display_name": "display_name TEXT NOT NULL DEFAULT ''",
         "src_cidr": "src_cidr TEXT NOT NULL DEFAULT ''",
@@ -3186,7 +3207,16 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             tcp_flags TEXT NOT NULL DEFAULT '',
             duration_seconds INTEGER NOT NULL DEFAULT 0,
             expires_at TEXT,
+            queued_at TEXT,
+            sent_at TEXT,
+            advertised_at TEXT,
             announced_at TEXT,
+            last_attempt_at TEXT,
+            peer_state TEXT NOT NULL DEFAULT '',
+            confirmation_level TEXT NOT NULL DEFAULT 'registered',
+            status_details_json TEXT NOT NULL DEFAULT '{}',
+            requested_mode TEXT NOT NULL DEFAULT '',
+            retry_of_announcement_id INTEGER,
             announce_command TEXT NOT NULL DEFAULT '',
             withdraw_command TEXT NOT NULL DEFAULT '',
             pipe_path TEXT NOT NULL DEFAULT '',
@@ -3222,7 +3252,16 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_announcements", "connector_name", "connector_name TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "sensor_id", "sensor_id INTEGER")
     ensure_sqlite_column(conn, "bgp_announcements", "route_type", "route_type TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "queued_at", "queued_at TEXT")
+    ensure_sqlite_column(conn, "bgp_announcements", "sent_at", "sent_at TEXT")
+    ensure_sqlite_column(conn, "bgp_announcements", "advertised_at", "advertised_at TEXT")
     ensure_sqlite_column(conn, "bgp_announcements", "announced_at", "announced_at TEXT")
+    ensure_sqlite_column(conn, "bgp_announcements", "last_attempt_at", "last_attempt_at TEXT")
+    ensure_sqlite_column(conn, "bgp_announcements", "peer_state", "peer_state TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "confirmation_level", "confirmation_level TEXT NOT NULL DEFAULT 'registered'")
+    ensure_sqlite_column(conn, "bgp_announcements", "status_details_json", "status_details_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_sqlite_column(conn, "bgp_announcements", "requested_mode", "requested_mode TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "retry_of_announcement_id", "retry_of_announcement_id INTEGER")
     ensure_sqlite_column(conn, "bgp_announcements", "announce_command", "announce_command TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "withdraw_command", "withdraw_command TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "dst_ip", "dst_ip TEXT NOT NULL DEFAULT ''")
@@ -3310,6 +3349,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_protected_enabled ON bgp_protected_prefixes(enabled)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_status ON bgp_announcements(status, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_mitigation_key ON bgp_announcements(mitigation_key, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_anomaly ON bgp_announcements(anomaly_source, anomaly_id, updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ip_zones_connector ON ip_zones(connector_id, active)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
@@ -7815,7 +7855,16 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "tcp_flags": item.get("tcp_flags") or "",
         "duration_seconds": int(item.get("duration_seconds") or 0),
         "expires_at": item.get("expires_at"),
+        "queued_at": item.get("queued_at"),
+        "sent_at": item.get("sent_at"),
+        "advertised_at": item.get("advertised_at"),
         "announced_at": item.get("announced_at"),
+        "last_attempt_at": item.get("last_attempt_at"),
+        "peer_state": item.get("peer_state") or "",
+        "confirmation_level": item.get("confirmation_level") or "registered",
+        "status_details": bgp_json_loads(item.get("status_details_json"), {}),
+        "requested_mode": item.get("requested_mode") or "",
+        "retry_of_announcement_id": item.get("retry_of_announcement_id"),
         "announce_command": announce_command,
         "withdraw_command": withdraw_command,
         "pipe_path": item.get("pipe_path") or "",
@@ -7846,6 +7895,15 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "connector_name": item.get("connector_name") or "",
         "response_profile_name": item.get("response_profile_name") or "",
     }
+    expires_at = parse_datetime_text(result.get("expires_at"))
+    expiry_valid = not result.get("expires_at") or expires_at is not None
+    result["expiry_valid"] = expiry_valid
+    result["ttl_elapsed"] = bool(expires_at is not None and expires_at <= datetime.now(timezone.utc))
+    # The clock alone cannot prove that a withdrawal reached ExaBGP. An
+    # advertised row stays operationally active until the withdrawal worker
+    # records a terminal state (withdrawn/expired).
+    result["operationally_active"] = result["status"] in BGP_OPERATIONAL_ACTIVE_STATUSES
+    result["legacy_unconfirmed"] = result["status"] in {"active", "announced"}
     if include_events and conn is not None:
         event_rows = conn.execute(
             "SELECT * FROM bgp_announcement_events WHERE announcement_id = ? ORDER BY id",
@@ -8138,12 +8196,15 @@ def parse_exabgp_peer_state(text: str, peer_ip: str = "") -> dict[str, Any]:
     raw = clean_text(text)
     if not raw:
         return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-    lowered = raw.lower()
-    peer_matches = not peer_ip or peer_ip in raw
+    peer_lines = [line for line in raw.splitlines() if not peer_ip or peer_ip in line]
+    if peer_ip and not peer_lines:
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe", "raw": raw[-2000:]}
+    target = "\n".join(peer_lines) if peer_lines else raw
+    lowered = target.lower()
     state = "unknown"
-    if peer_matches and "established" in lowered and "not established" not in lowered:
+    if "established" in lowered and "not established" not in lowered:
         state = "established"
-    elif peer_matches:
+    else:
         for candidate in ("idle", "active", "connect", "down"):
             if re.search(rf"\b{candidate}\b", lowered):
                 state = candidate
@@ -8227,12 +8288,16 @@ def parse_huawei_vrp_peer_state(text: str, peer_ip: str = "") -> dict[str, Any]:
         return {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": ""}
     lowered = raw.lower()
     peer_lines = [line for line in raw.splitlines() if not peer_ip or peer_ip in line]
+    # If a peer was requested, never fall back to the whole command output:
+    # Huawei headers such as "Up/Down" are not evidence about that peer.
+    if peer_ip and not peer_lines and not re.search(r"\bbgp\s+current\s+state\s*:", raw, re.IGNORECASE):
+        return {"state": "unknown", "peer_ip": peer_ip, "source": "router_ssh", "raw": raw[-4000:]}
     target_text = "\n".join(peer_lines) if peer_lines else raw
     target_lowered = target_text.lower()
     state = "unknown"
     if re.search(r"\bbgp\s+current\s+state\s*:\s*established\b", lowered):
         state = "established"
-    elif re.search(r"\b(established|establ|up)\b", target_lowered):
+    elif re.search(r"\b(established|establ)\b", target_lowered):
         state = "established"
     elif re.search(r"\b(idle|active|connect|down)\b", target_lowered):
         state = "down"
@@ -8361,10 +8426,9 @@ def active_flowspec_announcement_count(connector: dict[str, Any]) -> int:
                 FROM bgp_announcements
                 WHERE connector_id = ?
                   AND response_type = 'flowspec'
-                  AND status IN ('active', 'announced')
-                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND status = 'advertised'
                 """,
-                (int(connector_id), utc_now_iso()),
+                (int(connector_id),),
             ).fetchone()
         return int(row["count"] or 0) if row is not None else 0
     except Exception:
@@ -8469,10 +8533,13 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         messages.append(pipes["message"])
         errors.append(pipes["message"])
     exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-    if exabgp_peer.get("state") == "unknown":
-        heuristic_peer = exabgp_peer_from_log_heuristic(connector)
-        if heuristic_peer.get("state") == "established":
-            exabgp_peer = heuristic_peer
+    heuristic_peer = exabgp_peer_from_log_heuristic(connector) if exabgp_peer.get("state") == "unknown" else {
+        "state": "not_checked",
+        "peer_ip": peer_ip,
+        "source": "exabgp_log_heuristic",
+    }
+    if heuristic_peer.get("state") == "established":
+        messages.append("Log recente sugere peer conectado, mas essa heuristica nao autoriza anuncio.")
     try:
         router_status = router_ssh_status(connector)
     except Exception as exc:
@@ -8484,33 +8551,24 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "message": f"Falha na verificacao Router SSH: {exc}",
         }
     agent_status = host_agent_status(connector)
-    if connector.get("router_check_enabled"):
-        bgp_state = prefer_verified_state(
-            router_status.get("bgp_state"),
-            agent_status.get("bgp_state"),
-            exabgp_peer.get("state"),
-        )
-        flowspec_state = prefer_verified_state(
-            router_status.get("flowspec_state"),
-            agent_status.get("flowspec_state"),
-        )
-    else:
-        bgp_state = "verification_disabled"
-        flowspec_state = "verification_disabled"
+    bgp_state = prefer_verified_state(
+        router_status.get("bgp_state") if connector.get("router_check_enabled") else None,
+        exabgp_peer.get("state"),
+        agent_status.get("bgp_state"),
+    )
+    flowspec_state = prefer_verified_state(
+        router_status.get("flowspec_state") if connector.get("router_check_enabled") else None,
+        agent_status.get("flowspec_state"),
+    )
     for check_name, return_code in (router_status.get("returncodes") or {}).items():
         if int(return_code or 0) != 0:
             errors.append(f"Router SSH {check_name}: {router_status.get('message') or f'return code {return_code}'}")
     if connector.get("router_check_enabled") and router_status.get("message") and not router_status.get("returncodes"):
         errors.append(f"Router SSH: {router_status['message']}")
     active_flowspec_count = active_flowspec_announcement_count(connector)
-    if (
-        flowspec_state == "not_verified"
-        and active_flowspec_count > 0
-        and connector.get("role") == "flowspec_mitigation"
-        and (bgp_state == "established" or exabgp_peer.get("state") == "established" or pipes_ok)
-    ):
-        flowspec_state = "established"
-        messages.append("FlowSpec inferido por anuncio ativo registrado no GMJ-FLOW.")
+    # Local rows and a writable FIFO are metrics, never evidence of a BGP or
+    # FlowSpec session.  In particular, do not infer an established peer from
+    # an announcement that this application itself previously marked active.
     if bgp_state == "not_verified":
         messages.append("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.")
     if flowspec_state == "not_verified":
@@ -8529,6 +8587,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
         "pipes": pipes,
         "exabgp_peer": exabgp_peer,
+        "exabgp_log_peer": heuristic_peer,
         "router_check": router_status,
         "host_agent": agent_status,
         "verification": {
@@ -8546,6 +8605,192 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "messages": sorted(set(messages)),
     }
+
+
+def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    checked_at = clean_text(status.get("last_checked_at")) or utc_now_iso()
+    result = dict(status)
+    result["connector_id"] = int(connector["id"])
+    result["name"] = connector.get("name") or ""
+    result["last_checked_at"] = checked_at
+    result["pipe_state"] = clean_text((result.get("pipes") or {}).get("status")) or "unknown"
+    result["errors"] = [clean_text(error) for error in result.get("errors") or [] if clean_text(error)]
+    result["messages"] = sorted({clean_text(message) for message in result.get("messages") or [] if clean_text(message)})
+    result["message"] = " | ".join(result["messages"])
+    return result
+
+
+def persist_bgp_connector_status_snapshot(
+    conn: sqlite3.Connection,
+    connector: dict[str, Any],
+    status: dict[str, Any],
+) -> None:
+    conn.execute(
+        """
+        UPDATE bgp_connectors
+        SET bgp_state = ?, flowspec_state = ?, pipe_state = ?, status_message = ?,
+            status_errors_json = ?, status_snapshot_json = ?, last_checked_at = ?
+        WHERE id = ?
+        """,
+        (
+            status.get("bgp_state") or "unknown",
+            status.get("flowspec_state") or "unknown",
+            status.get("pipe_state") or "unknown",
+            status.get("message") or "",
+            json.dumps(status.get("errors") or [], ensure_ascii=True),
+            json.dumps(status, ensure_ascii=True, default=str),
+            status.get("last_checked_at") or utc_now_iso(),
+            int(connector["id"]),
+        ),
+    )
+
+
+def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
+    flowspec_state = clean_text(status.get("flowspec_state")).lower()
+    bgp_state = clean_text(status.get("bgp_state")).lower()
+    exabgp_state = clean_text((status.get("exabgp_peer") or {}).get("state")).lower()
+    if flowspec_state in {"established", "up"}:
+        return "established"
+    if flowspec_state in {"idle", "active", "connect", "down", "not_established"}:
+        return "down"
+    if bgp_state in {"established", "up"} or exabgp_state in {"established", "up"}:
+        return "established"
+    if bgp_state in {"idle", "active", "connect", "down", "not_established"} or exabgp_state in {
+        "idle", "active", "connect", "down", "not_established",
+    }:
+        return "down"
+    return "not_verified"
+
+
+def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "checked_at": status.get("last_checked_at") or "",
+        "bgp_state": status.get("bgp_state") or "unknown",
+        "flowspec_state": status.get("flowspec_state") or "unknown",
+        "pipe_state": status.get("pipe_state") or clean_text((status.get("pipes") or {}).get("status")) or "unknown",
+        "pipe_ok": bool((status.get("pipes") or {}).get("ok")),
+        "tcp_established": bool((status.get("session") or {}).get("tcp_established")),
+        "service_active": bool((status.get("service") or {}).get("active")),
+        "messages": status.get("messages") or [],
+        "errors": status.get("errors") or [],
+    }
+
+
+def check_bgp_connector_readiness(conn: sqlite3.Connection, connector: dict[str, Any]) -> dict[str, Any]:
+    """Run a fresh check and persist it through the caller's SQLite connection."""
+    acquired = BGP_STATUS_CHECK_LOCK.acquire(blocking=False)
+    try:
+        if not acquired:
+            raise BgpStatusCheckInProgress("Ja existe uma checagem BGP/FlowSpec em andamento.")
+        raw_status = bgp_connector_status(connector)
+    except Exception as exc:
+        error = f"Falha ao verificar conector BGP: {exc}"
+        raw_status = {
+            "connector_id": connector["id"],
+            "name": connector.get("name") or "",
+            "pipes": {"ok": False, "status": "unknown"},
+            "bgp_state": "unknown",
+            "flowspec_state": "unknown",
+            "errors": [error],
+            "messages": [error],
+        }
+    finally:
+        if acquired:
+            BGP_STATUS_CHECK_LOCK.release()
+    status = normalize_bgp_connector_status_snapshot(connector, raw_status)
+    persist_bgp_connector_status_snapshot(conn, connector, status)
+    peer_state = bgp_peer_state_from_status(status)
+    pipe_ok = bool((status.get("pipes") or {}).get("ok"))
+    if peer_state != "established":
+        reason = "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
+        failure_status = "peer_down"
+    elif not pipe_ok:
+        reason = clean_text((status.get("pipes") or {}).get("message")) or "exabgp_pipe_unavailable"
+        failure_status = "failed"
+    else:
+        reason = ""
+        failure_status = ""
+    return {
+        "ready": peer_state == "established" and pipe_ok,
+        "peer_state": peer_state,
+        "reason": reason,
+        "failure_status": failure_status,
+        "confirmation_level": "peer_established" if peer_state == "established" else "peer_unavailable",
+        "status": status,
+        "details": compact_bgp_status_details(status),
+    }
+
+
+def mark_connector_advertisements_peer_down(
+    conn: sqlite3.Connection,
+    connector: dict[str, Any],
+    status: dict[str, Any],
+) -> int:
+    if bgp_peer_state_from_status(status) != "down":
+        return 0
+    now = status.get("last_checked_at") or utc_now_iso()
+    details = compact_bgp_status_details(status)
+    rows = conn.execute(
+        """
+        SELECT id, status_details_json
+        FROM bgp_announcements
+        WHERE connector_id = ?
+          AND status = 'advertised'
+          AND confirmation_level <> 'withdraw_requested'
+        """,
+        (int(connector["id"]),),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        announcement_id = int(row["id"])
+        merged_details = {
+            **bgp_json_loads(row["status_details_json"], {}),
+            **details,
+            "peer_down_detected_at": now,
+        }
+        cursor = conn.execute(
+            """
+            UPDATE bgp_announcements
+            SET status = 'peer_down', peer_state = 'down', last_error = ?,
+                status_details_json = ?, updated_at = ?
+            WHERE id = ? AND status = 'advertised'
+              AND confirmation_level <> 'withdraw_requested'
+            """,
+            (
+                "Sessao BGP/FlowSpec indisponivel apos o anuncio.",
+                json.dumps(merged_details, sort_keys=True, default=str),
+                now,
+                announcement_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            continue
+        changed += 1
+        bgp_event(
+            conn,
+            announcement_id,
+            "peer_down",
+            "Peer BGP ficou indisponivel apos o anuncio; historico de envio preservado.",
+            details,
+            "bgp-status-checker",
+        )
+        announcement = fetch_bgp_announcement(conn, announcement_id, include_events=False)
+        profile = fetch_bgp_profile(conn, int(announcement["response_profile_id"])) if announcement.get("response_profile_id") else None
+        record_auto_mitigation_outcome(
+            conn,
+            announcement,
+            "peer_down",
+            "peer_bgp_down_after_advertisement",
+            profile,
+            announcement,
+            "bgp-status-checker",
+            announcement.get("requested_mode") or "automatic",
+            {
+                "peer_state": "down",
+                "confirmation_level": announcement.get("confirmation_level") or "peer_established_announce_requested",
+            },
+        )
+    return changed
 
 
 class BgpStatusCheckInProgress(RuntimeError):
@@ -8629,31 +8874,10 @@ def check_and_persist_bgp_connector_status(connector_id_or_connector: int | dict
                 "errors": [error],
                 "messages": [error],
             }
-        checked_at = utc_now_iso()
-        status["last_checked_at"] = checked_at
-        status["pipe_state"] = clean_text((status.get("pipes") or {}).get("status")) or "unknown"
-        status["errors"] = [clean_text(error) for error in status.get("errors") or [] if clean_text(error)]
-        status["messages"] = sorted({clean_text(message) for message in status.get("messages") or [] if clean_text(message)})
-        status["message"] = " | ".join(status["messages"])
+        status = normalize_bgp_connector_status_snapshot(connector, status)
         with sqlite_connection() as conn:
-            conn.execute(
-                """
-                UPDATE bgp_connectors
-                SET bgp_state = ?, flowspec_state = ?, pipe_state = ?, status_message = ?,
-                    status_errors_json = ?, status_snapshot_json = ?, last_checked_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status.get("bgp_state") or "unknown",
-                    status.get("flowspec_state") or "unknown",
-                    status["pipe_state"],
-                    status["message"],
-                    json.dumps(status["errors"], ensure_ascii=True),
-                    json.dumps(status, ensure_ascii=True, default=str),
-                    checked_at,
-                    int(connector["id"]),
-                ),
-            )
+            persist_bgp_connector_status_snapshot(conn, connector, status)
+            mark_connector_advertisements_peer_down(conn, connector, status)
             conn.commit()
         return status
     finally:
@@ -9001,6 +9225,95 @@ def protected_prefix_match(conn: sqlite3.Connection, prefix: str) -> dict[str, A
     return None
 
 
+def mitigation_raw_anomaly(candidate: dict[str, Any]) -> dict[str, Any]:
+    raw_payload = candidate.get("raw_payload") if isinstance(candidate.get("raw_payload"), dict) else {}
+    anomaly = raw_payload.get("anomaly") if isinstance(raw_payload.get("anomaly"), dict) else {}
+    return anomaly
+
+
+def is_outbound_destination_mitigation(candidate: dict[str, Any]) -> bool:
+    """True only when an external destination rule is tied to an outbound anomaly."""
+    anomaly = mitigation_raw_anomaly(candidate)
+    direction = clean_text(candidate.get("direction") or anomaly.get("direction")).lower()
+    scope_type = clean_text(candidate.get("scope_type") or anomaly.get("scope_type")).lower()
+    target_role = clean_text(candidate.get("target_role") or anomaly.get("target_role")).lower()
+    vector = clean_text(candidate.get("attack_vector_name") or anomaly.get("attack_vector_name") or anomaly.get("vector_name")).upper()
+    dst_cidr = clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix"))
+    if not dst_cidr or not mitigation_origin_ip(candidate):
+        return False
+    explicitly_outbound = (
+        direction in {"sends", "transmits", "outbound"}
+        or scope_type.startswith("external_dst")
+        or vector in {value.upper() for value in (*OUTBOUND_DST_PORT_VECTORS, *UDP_UPLOAD_MANY_CLIENTS_ALIASES, *DNS_OUTBOUND_TEMPLATE_VECTORS)}
+    )
+    return bool(explicitly_outbound and (target_role in {"", "dst_ip"} or scope_type.startswith("external_dst")))
+
+
+def mitigation_origin_authorization(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Authorize the internal origin without consulting the external destination."""
+    source_ip = mitigation_origin_ip(candidate)
+    anomaly = mitigation_raw_anomaly(candidate)
+    explicit_zone_id = int_or_none(candidate.get("zone_id") or anomaly.get("zone_id"))
+    matched_zone_ids: set[int] = set()
+    matched_connector_ids: set[int] = set()
+    matched_prefixes: list[str] = []
+    try:
+        parsed_source = ip_address(source_ip) if source_ip else None
+    except ValueError:
+        parsed_source = None
+    if parsed_source is not None:
+        rows = conn.execute(
+            """
+            SELECT z.id AS zone_id, z.connector_id, p.cidr
+            FROM ip_zone_prefixes p
+            JOIN ip_zones z ON z.id = p.zone_id
+            WHERE p.active = 1 AND z.active = 1
+            ORDER BY z.id, p.id
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                matches = parsed_source in ip_network(clean_text(row["cidr"]), strict=False)
+            except ValueError:
+                matches = False
+            if not matches:
+                continue
+            matched_zone_ids.add(int(row["zone_id"]))
+            matched_prefixes.append(clean_text(row["cidr"]))
+            if row["connector_id"] is not None and active_connector_by_id(conn, row["connector_id"]):
+                matched_connector_ids.add(int(row["connector_id"]))
+    source_cidr = host_cidr_for_ip(source_ip) if source_ip else ""
+    protected = protected_prefix_match(conn, source_cidr) if source_cidr else None
+    explicit_zone_matches = explicit_zone_id is None or explicit_zone_id in matched_zone_ids
+    authorized = bool(parsed_source and (matched_zone_ids or protected))
+    result = {
+        "authorized": authorized,
+        "source_ip": source_ip,
+        "source_cidr": source_cidr,
+        "zone_id": explicit_zone_id,
+        "zone_ids": sorted(matched_zone_ids),
+        "connector_ids": sorted(matched_connector_ids),
+        "matched_prefixes": sorted(set(matched_prefixes)),
+        "protected_prefix": protected,
+        "explicit_zone_matches": explicit_zone_matches,
+        "reason": "" if authorized else "origin_not_in_authorized_zone_or_prefix",
+    }
+    candidate["origin_authorization"] = result
+    candidate["connector_resolution_source_ip"] = source_ip
+    if matched_zone_ids:
+        candidate["connector_resolution_zone_ids"] = sorted(matched_zone_ids)
+    return result
+
+
+def outbound_destination_is_host_prefix(candidate: dict[str, Any]) -> bool:
+    prefix = clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix"))
+    try:
+        network = ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    return network.prefixlen == network.max_prefixlen
+
+
 def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
     src_cidr = clean_text(candidate.get("src_cidr") or candidate.get("src_prefix"))
     dst_cidr = clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix"))
@@ -9031,10 +9344,14 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
             "protected_prefix_match": None,
         }
 
+    outbound_destination = is_outbound_destination_mitigation(candidate)
+    origin_authorization: dict[str, Any] = {}
     with sqlite_connection() as conn:
         dst_protected = protected_prefix_match(conn, dst_cidr)
         src_protected = protected_prefix_match(conn, src_cidr)
         dns_client_protected = protected_prefix_match(conn, dns_client_cidr) if dns_client_cidr else None
+        if outbound_destination:
+            origin_authorization = mitigation_origin_authorization(conn, candidate)
         rows = conn.execute(
             """
             SELECT *
@@ -9143,7 +9460,16 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     pass
     require_protected = bool(candidate.get("require_protected_prefix"))
-    if require_protected and dns_destination_only:
+    if require_protected and outbound_destination:
+        if not origin_authorization.get("authorized"):
+            decision = "deny"
+            severity = "danger"
+            reasons.append("Origem interna nao confirmada em zona ou prefixo autorizado.")
+        elif not outbound_destination_is_host_prefix(candidate):
+            decision = "deny"
+            severity = "danger"
+            reasons.append("Destino externo outbound precisa ser um host /32 ou /128.")
+    elif require_protected and dns_destination_only:
         if dst_protected:
             decision = "require_manual_approval" if decision != "deny" else decision
             severity = "caution" if severity != "danger" else severity
@@ -9183,7 +9509,9 @@ def evaluate_mitigation_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         "warnings": sorted(set(warnings)),
         "required_scope": sorted(set(required_scope)),
         "matched_port_policies": matched,
-        "protected_prefix_match": dns_client_protected or dst_protected or src_protected,
+        "protected_prefix_match": origin_authorization.get("protected_prefix") or dns_client_protected or dst_protected or src_protected,
+        "origin_authorization": origin_authorization,
+        "outbound_destination": outbound_destination,
     }
 
 
@@ -9384,26 +9712,42 @@ def validate_response_profile_for_anomaly(
 
     require_protected = bool(profile.get("require_protected_prefix", True)) or bool(candidate.get("require_protected_prefix", True))
     if require_protected:
-        prefix_candidates = [clean_text(candidate.get("target_prefix") or candidate.get("dst_prefix") or candidate.get("src_prefix"))]
-        prefix_candidates = [prefix for prefix in prefix_candidates if prefix]
-        if prefix_candidates:
-            target_prefix = prefix_candidates[0]
+        outbound_candidate = {
+            **candidate,
+            "direction": direction,
+            "top_src_ip": candidate.get("top_src_ip") or anomaly.get("top_src_ip") or anomaly.get("src_ip"),
+            "zone_id": candidate.get("zone_id") or anomaly.get("zone_id"),
+            "raw_payload": {**(candidate.get("raw_payload") or {}), "anomaly": anomaly},
+        }
+        if outbound and is_outbound_destination_mitigation(outbound_candidate):
             with sqlite_connection() as conn:
-                protected = protected_prefix_match(conn, target_prefix)
-            if not protected:
-                errors.append("target_not_in_protected_prefixes")
-                warnings.append(f"Destino {target_prefix} nao pertence a nenhum prefixo protegido habilitado.")
-            else:
-                response_type = clean_text(profile.get("response_type") or profile.get("type") or candidate.get("response_type") or "flowspec").lower()
-                if response_type == "flowspec" and not protected.get("block_flowspec"):
-                    errors.append("protected_prefix_action_not_allowed")
-                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action flowspec para este profile.")
-                elif response_type == "rtbh" and not protected.get("block_rtbh"):
-                    errors.append("protected_prefix_action_not_allowed")
-                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action rtbh para este profile.")
-                elif response_type == "diversion" and not protected.get("block_diversion"):
-                    errors.append("protected_prefix_action_not_allowed")
-                    warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action diversion para este profile.")
+                authorization = mitigation_origin_authorization(conn, outbound_candidate)
+            if not authorization.get("authorized"):
+                errors.append("origin_not_in_authorized_zone_or_prefix")
+                warnings.append("Origem interna nao pertence a uma zona ou prefixo autorizado.")
+            if not outbound_destination_is_host_prefix(outbound_candidate):
+                errors.append("external_destination_must_be_host_prefix")
+        else:
+            prefix_candidates = [clean_text(candidate.get("target_prefix") or candidate.get("dst_prefix") or candidate.get("src_prefix"))]
+            prefix_candidates = [prefix for prefix in prefix_candidates if prefix]
+            if prefix_candidates:
+                target_prefix = prefix_candidates[0]
+                with sqlite_connection() as conn:
+                    protected = protected_prefix_match(conn, target_prefix)
+                if not protected:
+                    errors.append("target_not_in_protected_prefixes")
+                    warnings.append(f"Destino {target_prefix} nao pertence a nenhum prefixo protegido habilitado.")
+                else:
+                    response_type = clean_text(profile.get("response_type") or profile.get("type") or candidate.get("response_type") or "flowspec").lower()
+                    if response_type == "flowspec" and not protected.get("block_flowspec"):
+                        errors.append("protected_prefix_action_not_allowed")
+                        warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action flowspec para este profile.")
+                    elif response_type == "rtbh" and not protected.get("block_rtbh"):
+                        errors.append("protected_prefix_action_not_allowed")
+                        warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action rtbh para este profile.")
+                    elif response_type == "diversion" and not protected.get("block_diversion"):
+                        errors.append("protected_prefix_action_not_allowed")
+                        warnings.append(f"Prefixo protegido {protected.get('cidr')} nao permite action diversion para este profile.")
 
     whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
     if whitelist_hits:
@@ -9510,6 +9854,13 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
         dns_ok, dns_error = validate_dns_outbound_pending_candidate(candidate, raw_anomaly, {}, response_profile)
         if not dns_ok:
             errors.append(f"DNS outbound invalido: {dns_error}.")
+        if bool(response_profile.get("require_protected_prefix", True)) and is_outbound_destination_mitigation(candidate):
+            with sqlite_connection() as authorization_conn:
+                authorization = mitigation_origin_authorization(authorization_conn, candidate)
+            if not authorization.get("authorized"):
+                errors.append("Origem interna nao pertence a uma zona ou prefixo autorizado.")
+            if not outbound_destination_is_host_prefix(candidate):
+                errors.append("Destino externo outbound precisa ser /32 ou /128.")
 
     duration = int(candidate.get("duration_seconds") or 0)
     max_duration = min(
@@ -9535,19 +9886,22 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
             for prefix in prefixes:
                 if bgp_prefix_overlaps(prefix, protected["cidr"]):
                     warnings.append(f"Escopo cruza prefixo protegido: {protected['cidr']}")
-        active_statuses = sorted(BGP_ACTIVE_STATUSES)
-        placeholders = ",".join("?" for _ in active_statuses)
+        reserving_clause = bgp_reserving_announcement_clause()
         if connector:
             active_count = conn.execute(
-                f"SELECT COUNT(*) AS count FROM bgp_announcements WHERE connector_id = ? AND status IN ({placeholders})",
-                (connector["id"], *active_statuses),
+                f"""
+                SELECT COUNT(*) AS count
+                FROM bgp_announcements
+                WHERE connector_id = ? AND {reserving_clause}
+                """,
+                (connector["id"],),
             ).fetchone()["count"]
             if int(active_count or 0) >= int(connector.get("max_active_rules") or BGP_DEFAULT_MAX_ACTIVE_RULES):
                 errors.append("Limite de regras ativas do conector excedido.")
         duplicate = conn.execute(
             f"""
             SELECT id FROM bgp_announcements
-            WHERE status IN ({placeholders})
+            WHERE {reserving_clause}
               AND COALESCE(connector_id, 0) = ?
               AND response_type = ?
               AND action = ?
@@ -9562,7 +9916,6 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
             LIMIT 1
             """,
             (
-                *active_statuses,
                 int(connector["id"]) if connector else 0,
                 response_type,
                 clean_text(candidate.get("action")),
@@ -9616,7 +9969,9 @@ def bgp_current_user(request: Request) -> str:
 def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any], connector: dict[str, Any], profile: dict[str, Any], validation: dict[str, list[str]], created_by: str, anomaly_id: int | None = None) -> dict[str, Any]:
     now = utc_now_iso()
     duration = int(candidate.get("duration_seconds") or 0)
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration else None
+    # A dry-run has no operational lifetime. TTL starts only when a real
+    # announcement reaches the advertised state.
+    expires_at = None
     announce_command, withdraw_command = bgp_command_pair(candidate, connector, profile)
     rendered = announce_command
     policy = candidate.get("policy") or evaluate_mitigation_policy(
@@ -9630,9 +9985,11 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
         "connector_id", "connector_name", "response_profile_id", "anomaly_id", "sensor_id", "status", "route_type", "response_type", "action",
         "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
         "target_prefix", "src_prefix", "dst_prefix", "dst_ip", "protocol", "src_port", "dst_port", "tcp_flags",
-        "duration_seconds", "expires_at", "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
+        "duration_seconds", "expires_at", "confirmation_level", "requested_mode",
+        "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
         "validation_errors", "validation_warnings",
-        "raw_payload", "source", "source_id", "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
+        "raw_payload", "source", "source_id", "mitigation_key", "attack_vector_name", "anomaly_source",
+        "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
         "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
     ]
     values = [
@@ -9643,13 +10000,16 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
         candidate.get("target_prefix") or "", candidate.get("src_prefix") or "", candidate.get("dst_prefix") or "",
         clean_ip(candidate.get("dst_ip")) or clean_ip(clean_text(candidate.get("dst_prefix")).split("/", 1)[0]),
         candidate.get("protocol") or "", candidate.get("src_port") or "", candidate.get("dst_port") or "",
-        candidate.get("tcp_flags") or "", duration, expires_at, announce_command, withdraw_command,
+        candidate.get("tcp_flags") or "", duration, expires_at, "simulation_only", "dry_run", announce_command, withdraw_command,
         connector.get("exabgp_pipe_in") or "", rendered,
         bgp_match_json(candidate), bgp_then_json(candidate),
         json.dumps(validation["errors"], sort_keys=True), json.dumps(validation["warnings"], sort_keys=True),
         json.dumps(candidate.get("raw_payload") or {}, sort_keys=True, default=str),
         clean_text(candidate.get("source") or "manual"),
         clean_text(candidate.get("source_id") or anomaly_id or ""),
+        candidate.get("mitigation_key") or mitigation_key_for_candidate({**candidate, "connector_id": connector["id"]}),
+        clean_text(candidate.get("attack_vector_name")),
+        clean_text(candidate.get("anomaly_source")),
         policy.get("decision") or "",
         policy.get("severity") or "",
         json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
@@ -9681,19 +10041,15 @@ def create_bgp_announcement(conn: sqlite3.Connection, candidate: dict[str, Any],
 
 def candidate_from_anomaly(conn: sqlite3.Connection, anomaly_id: int, payload: BgpAnnouncementDryRunPayload, profile: dict[str, Any]) -> dict[str, Any]:
     base = dump_model(payload)
+    persisted_anomaly_id = anomaly_id
+    anomaly_source = "anomaly_events"
     if anomaly_id < 0:
-        group = next(
-            (
-                item
-                for status_filter in ("active", "history")
-                for item in consolidated_security_anomaly_groups(status_filter)
-                if int(item["event"]["id"]) == anomaly_id
-            ),
-            None,
-        )
+        group = find_consolidated_security_anomaly_group(anomaly_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         event = group["event"]
+        persisted_anomaly_id = int(event.get("security_anomaly_id") or event["id"])
+        anomaly_source = "security_anomalies"
         details = sorted(
             [item for item in group["items"] if security_item_matches_event_target(item, event)],
             key=lambda item: float(item.get("bits_s") or item.get("packets_s") or 0),
@@ -9711,26 +10067,53 @@ def candidate_from_anomaly(conn: sqlite3.Connection, anomaly_id: int, payload: B
     else:
         row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (anomaly_id,)).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-        event = anomaly_event_row_to_dict(row)
-        flow = conn.execute(
-            "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 1",
-            (anomaly_id,),
-        ).fetchone()
-        if flow is not None:
-            flow_dict = dict(flow)
+            security_item = resolve_security_anomaly_identifier(conn, anomaly_id, raise_not_found=False)
+            if security_item is None:
+                raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+            event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+            persisted_anomaly_id = int(security_item["id"])
+            anomaly_source = "security_anomalies"
             base.update({
-                "src_ip": clean_ip(flow_dict.get("src_ip")) or event.get("target_ip"),
-                "dst_ip": clean_ip(flow_dict.get("dst_ip")) or event.get("target_ip"),
-                "src_port": flow_dict.get("src_port") or None,
-                "dst_port": flow_dict.get("dst_port") or None,
-                "protocol": proto_name(flow_dict.get("proto")),
+                "src_ip": security_item.get("src_ip") or event.get("target_ip"),
+                "dst_ip": security_item.get("dst_ip") or event.get("target_ip"),
+                "target_ip": event.get("target_ip"),
+                "target_cidr": event.get("target_cidr"),
+                "protocol": security_item.get("protocol") or event.get("decoder"),
+                "dst_port": 53 if clean_text(security_item.get("protocol")).upper() == "DNS" else None,
             })
-        base["target_ip"] = base.get("target_ip") or event.get("target_ip")
-        base["target_cidr"] = base.get("target_cidr") or event.get("target_cidr")
+        else:
+            event = anomaly_event_row_to_dict(row)
+            flow = conn.execute(
+                "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 1",
+                (anomaly_id,),
+            ).fetchone()
+            if flow is not None:
+                flow_dict = dict(flow)
+                base.update({
+                    "src_ip": clean_ip(flow_dict.get("src_ip")) or event.get("target_ip"),
+                    "dst_ip": clean_ip(flow_dict.get("dst_ip")) or event.get("target_ip"),
+                    "src_port": flow_dict.get("src_port") or None,
+                    "dst_port": flow_dict.get("dst_port") or None,
+                    "protocol": proto_name(flow_dict.get("proto")),
+                })
+            base["target_ip"] = base.get("target_ip") or event.get("target_ip")
+            base["target_cidr"] = base.get("target_cidr") or event.get("target_cidr")
     merged = BgpAnnouncementDryRunPayload(**base)
     candidate = candidate_from_bgp_payload(merged, profile)
-    candidate["raw_payload"] = {**candidate["raw_payload"], "anomaly_id": anomaly_id}
+    candidate.update(
+        {
+            "anomaly_id": persisted_anomaly_id,
+            "anomaly_source": anomaly_source,
+            "source_id": str(persisted_anomaly_id),
+            "attack_vector_name": clean_text(event.get("attack_vector_name") or event.get("vector")),
+        }
+    )
+    candidate["raw_payload"] = {
+        **candidate["raw_payload"],
+        "anomaly_id": persisted_anomaly_id,
+        "anomaly_action_id": anomaly_id,
+        "anomaly": event,
+    }
     return candidate
 
 
@@ -9752,18 +10135,46 @@ def cidr_from_ip_or_cidr(value: Any) -> str:
 def mitigation_key_for_candidate(candidate: dict[str, Any]) -> str:
     """Stable FlowSpec identity shared by equivalent anomaly events.
 
-    Anomaly id, vector name, source prefix and profile are intentionally not
-    part of this key. The same rule observed by multiple detectors must result
-    in one announcement, while the connector remains part of the identity.
+    Anomaly id, vector name and profile are intentionally not part of this key.
+    Every field that changes the route/NLRI or action is included so distinct
+    rules can never suppress one another merely because their destination is
+    equal. The connector remains part of the identity.
     """
+    response_type = clean_text(candidate.get("response_type") or "flowspec").lower()
+    target_identity = clean_text(candidate.get("target_prefix") or candidate.get("target_scope")) if response_type != "flowspec" else ""
     parts = [
         str(candidate.get("connector_id") or ""),
+        response_type,
+        target_identity,
+        clean_text(candidate.get("src_cidr") or candidate.get("src_prefix")),
         clean_text(candidate.get("dst_cidr") or candidate.get("dst_prefix")),
         clean_text(candidate.get("protocol")).lower(),
+        clean_text(candidate.get("src_port")),
         clean_text(candidate.get("dst_port")),
+        clean_text(candidate.get("tcp_flags")).lower(),
         clean_text(candidate.get("action") or candidate.get("then_action")).lower(),
+        str(int(candidate.get("rate_limit_bps") or 0)),
+        clean_text(candidate.get("redirect_target") or candidate.get("next_hop")),
+        clean_text(candidate.get("community") or candidate.get("bgp_community")),
+        clean_text(candidate.get("large_community")),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def bgp_reserving_announcement_clause(alias: str = "") -> str:
+    """SQL predicate for a rule that must keep ownership of its NLRI.
+
+    A delivered rule remains reserved until withdrawal is confirmed.  In
+    particular, an elapsed TTL or a failed withdrawal cannot release the key:
+    a late withdrawal of the old row would also remove a newer equivalent
+    route from the peer.
+    """
+    prefix = f"{alias}." if alias else ""
+    return f"""(
+        {prefix}status IN ('pending_approval', 'queued', 'sent', 'advertised', 'active', 'announced', 'failed_withdraw')
+        OR ({prefix}status = 'peer_down' AND ({prefix}sent_at IS NOT NULL OR {prefix}advertised_at IS NOT NULL OR {prefix}announced_at IS NOT NULL))
+        OR {prefix}confirmation_level = 'withdraw_requested'
+    )"""
 
 
 def default_bgp_connector(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -9901,74 +10312,59 @@ def mitigation_origin_ip(candidate: dict[str, Any]) -> str:
     return ""
 
 
+def persisted_zone_bgp_connectors(
+    conn: sqlite3.Connection,
+    candidate: dict[str, Any],
+    authorization: dict[str, Any],
+) -> list[dict[str, Any]]:
+    anomaly = mitigation_raw_anomaly(candidate)
+    explicit_zone_id = int_or_none(candidate.get("zone_id") or anomaly.get("zone_id"))
+    if explicit_zone_id is None:
+        return []
+    row = conn.execute(
+        "SELECT connector_id FROM ip_zones WHERE id = ? AND active = 1",
+        (explicit_zone_id,),
+    ).fetchone()
+    if row is None:
+        # A stale zone hint must not suppress the documented sensor/origin
+        # fallbacks.  Only a live zone that contradicts the source is fatal.
+        return []
+    if is_outbound_destination_mitigation(candidate) and explicit_zone_id not in set(authorization.get("zone_ids") or []):
+        candidate["connector_resolution_error"] = "origin_not_in_persisted_zone"
+        return []
+    connector = active_connector_by_id(conn, row["connector_id"])
+    if connector:
+        candidate["connector_resolution_zone_id"] = explicit_zone_id
+        candidate["candidate_connector_ids"] = [int(connector["id"])]
+        candidate["connector_resolution_method"] = "zone_id"
+        return [connector]
+    return []
+
+
 def zone_prefix_bgp_connectors(
     conn: sqlite3.Connection,
     candidate: dict[str, Any],
+    authorization: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    source_ip = mitigation_origin_ip(candidate)
-    raw_payload = candidate.get("raw_payload") if isinstance(candidate.get("raw_payload"), dict) else {}
-    anomaly = raw_payload.get("anomaly") if isinstance(raw_payload.get("anomaly"), dict) else {}
-    candidate["connector_resolution_source_ip"] = source_ip
-
-    explicit_zone_id = int_or_none(candidate.get("zone_id") or anomaly.get("zone_id"))
-    if explicit_zone_id is not None:
-        row = conn.execute(
-            "SELECT connector_id FROM ip_zones WHERE id = ? AND active = 1",
-            (explicit_zone_id,),
-        ).fetchone()
-        connector = active_connector_by_id(conn, row["connector_id"] if row else None)
-        if connector:
-            candidate["connector_resolution_zone_id"] = explicit_zone_id
-            candidate["connector_resolution_zone_ids"] = [explicit_zone_id]
-            candidate["candidate_connector_ids"] = [int(connector["id"])]
-            candidate["connector_resolution_method"] = "zone_id"
-            return [connector]
-
-    try:
-        parsed_source = ip_address(source_ip) if source_ip else None
-    except ValueError:
-        parsed_source = None
-    if parsed_source is None:
-        return []
-
-    rows = conn.execute(
-        """
-        SELECT z.id AS zone_id, z.connector_id, p.id AS prefix_id, p.cidr
-        FROM ip_zone_prefixes p
-        JOIN ip_zones z ON z.id = p.zone_id
-        WHERE p.active = 1
-          AND z.active = 1
-          AND z.connector_id IS NOT NULL
-        ORDER BY z.id, p.id
-        """
-    ).fetchall()
-    matched_zone_ids: set[int] = set()
-    connector_by_id: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        try:
-            matches = parsed_source in ip_network(clean_text(row["cidr"]), strict=False)
-        except ValueError:
-            matches = False
-        if not matches:
-            continue
-        connector = active_connector_by_id(conn, row["connector_id"])
-        if not connector:
-            continue
-        zone_id = int(row["zone_id"])
-        connector_id = int(connector["id"])
-        matched_zone_ids.add(zone_id)
-        connector_by_id[connector_id] = connector
-
-    zone_ids = sorted(matched_zone_ids)
-    connector_ids = sorted(connector_by_id)
+    zone_ids = authorization.get("zone_ids") or []
+    connector_ids = authorization.get("connector_ids") or []
     candidate["connector_resolution_zone_ids"] = zone_ids
     candidate["candidate_connector_ids"] = connector_ids
+    if not authorization.get("authorized"):
+        if is_outbound_destination_mitigation(candidate):
+            candidate["connector_resolution_error"] = authorization.get("reason") or "origin_not_in_authorized_zone_or_prefix"
+        return []
+    connectors = [
+        connector
+        for connector in (active_connector_by_id(conn, connector_id) for connector_id in connector_ids)
+        if connector
+    ]
     if len(zone_ids) == 1:
         candidate["connector_resolution_zone_id"] = zone_ids[0]
-    if len(connector_ids) == 1:
+    if len(connectors) == 1:
         candidate["connector_resolution_method"] = "zone_prefix"
-        return [connector_by_id[connector_ids[0]]]
-    if len(connector_ids) > 1:
+        return connectors
+    if len(connectors) > 1:
         candidate["connector_resolution_error"] = "ambiguous_connector_resolution"
     return []
 
@@ -9981,41 +10377,88 @@ def resolve_mitigation_target_connectors(
     profile = profile or {}
     resolution_error = ""
     candidate.pop("connector_resolution_error", None)
-    selected = active_connectors_by_ids(conn, profile.get("selected_connector_ids") or candidate.get("selected_connector_ids"))
-    if selected:
-        connectors = selected
-        candidate["connector_resolution_method"] = "selected_connector_ids"
-        candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in selected)
+    operator_connector = active_connector_by_id(conn, candidate.get("operator_connector_id"))
+    operator_resolution_error = ""
+    if operator_connector and is_outbound_destination_mitigation(candidate):
+        authorization = mitigation_origin_authorization(conn, candidate)
+        explicit_zone_id = int_or_none(candidate.get("zone_id") or mitigation_raw_anomaly(candidate).get("zone_id"))
+        allowed_connector_ids = {int(value) for value in authorization.get("connector_ids") or []}
+        if not authorization.get("authorized"):
+            operator_resolution_error = authorization.get("reason") or "origin_not_in_authorized_zone_or_prefix"
+        elif explicit_zone_id is not None:
+            zone_row = conn.execute(
+                "SELECT connector_id FROM ip_zones WHERE id = ? AND active = 1",
+                (explicit_zone_id,),
+            ).fetchone()
+            if zone_row is not None and explicit_zone_id not in set(authorization.get("zone_ids") or []):
+                operator_resolution_error = "origin_not_in_persisted_zone"
+            elif zone_row is not None and zone_row["connector_id"] is not None:
+                allowed_connector_ids = {int(zone_row["connector_id"])}
+        if allowed_connector_ids and int(operator_connector["id"]) not in allowed_connector_ids:
+            operator_resolution_error = "operator_connector_not_eligible_for_origin"
+    if candidate.get("operator_connector_id") and (not operator_connector or operator_resolution_error):
+        connectors = []
+        resolution_error = operator_resolution_error or "operator_connector_not_eligible"
+    elif operator_connector:
+        connectors = [operator_connector]
+        candidate["connector_resolution_method"] = "operator_connector_id"
+        candidate["candidate_connector_ids"] = [int(operator_connector["id"])]
     else:
-        connector = active_connector_by_id(conn, profile.get("connector_id") or candidate.get("connector_id"))
-        if connector:
-            connectors = [connector]
-            candidate["connector_resolution_method"] = "connector_id"
-            candidate["candidate_connector_ids"] = [int(connector["id"])]
+        explicit_connector = active_connector_by_id(conn, candidate.get("connector_id"))
+        selected = active_connectors_by_ids(conn, candidate.get("selected_connector_ids") or profile.get("selected_connector_ids"))
+        profile_connector = active_connector_by_id(conn, profile.get("connector_id"))
+        if explicit_connector:
+            connectors = [explicit_connector]
+            candidate["connector_resolution_method"] = "candidate_connector_id"
+            candidate["candidate_connector_ids"] = [int(explicit_connector["id"])]
+        elif selected:
+            connectors = selected
+            candidate["connector_resolution_method"] = "selected_connector_ids"
+            candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in selected)
+        elif profile_connector:
+            connectors = [profile_connector]
+            candidate["connector_resolution_method"] = "profile_connector_id"
+            candidate["candidate_connector_ids"] = [int(profile_connector["id"])]
         else:
-            sensor_connector = sensor_origin_bgp_connector(conn, candidate.get("sensor_id") or profile.get("sensor_id"))
-            if sensor_connector:
-                connectors = [sensor_connector]
-                candidate["connector_resolution_method"] = "sensor"
+            authorization = mitigation_origin_authorization(conn, candidate)
+            if is_outbound_destination_mitigation(candidate) and not authorization.get("authorized"):
+                connectors = []
+                resolution_error = authorization.get("reason") or "origin_not_in_authorized_zone_or_prefix"
+                candidate["connector_resolution_error"] = resolution_error
+                zone_connectors = []
             else:
-                zone_connectors = zone_prefix_bgp_connectors(conn, candidate)
-                if zone_connectors:
-                    connectors = zone_connectors
-                elif candidate.get("connector_resolution_error") == "ambiguous_connector_resolution":
-                    connectors = []
-                    resolution_error = "ambiguous_connector_resolution"
+                zone_connectors = persisted_zone_bgp_connectors(conn, candidate, authorization)
+            if zone_connectors:
+                connectors = zone_connectors
+            elif candidate.get("connector_resolution_error"):
+                connectors = []
+                resolution_error = clean_text(candidate.get("connector_resolution_error"))
+            else:
+                sensor_connector = sensor_origin_bgp_connector(conn, candidate.get("sensor_id") or profile.get("sensor_id"))
+                if sensor_connector:
+                    connectors = [sensor_connector]
+                    candidate["connector_resolution_method"] = "sensor"
+                    candidate["candidate_connector_ids"] = [int(sensor_connector["id"])]
                 else:
-                    fallback_connectors = active_flowspec_connectors(conn)
-                    if len(fallback_connectors) == 1:
-                        connectors = fallback_connectors
-                        candidate["connector_resolution_method"] = "single_active_connector"
-                    elif len(fallback_connectors) > 1:
+                    prefix_connectors = zone_prefix_bgp_connectors(conn, candidate, authorization)
+                    if prefix_connectors:
+                        connectors = prefix_connectors
+                    elif candidate.get("connector_resolution_error"):
                         connectors = []
-                        resolution_error = "ambiguous_connector_resolution"
-                        candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in fallback_connectors)
+                        resolution_error = clean_text(candidate.get("connector_resolution_error"))
                     else:
-                        connectors = []
-                        resolution_error = "no_active_flowspec_connectors"
+                        fallback_connectors = active_flowspec_connectors(conn)
+                        if len(fallback_connectors) == 1:
+                            connectors = fallback_connectors
+                            candidate["connector_resolution_method"] = "single_active_connector"
+                            candidate["candidate_connector_ids"] = [int(fallback_connectors[0]["id"])]
+                        elif len(fallback_connectors) > 1:
+                            connectors = []
+                            resolution_error = "ambiguous_connector_resolution"
+                            candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in fallback_connectors)
+                        else:
+                            connectors = []
+                            resolution_error = "no_active_flowspec_connectors"
     unique: dict[int, dict[str, Any]] = {}
     for connector in connectors:
         connector_id = connector.get("id")
@@ -10026,7 +10469,11 @@ def resolve_mitigation_target_connectors(
     return list(unique.values())
 
 
-def default_bgp_profile(conn: sqlite3.Connection, preferred_names: list[str] | None = None) -> dict[str, Any] | None:
+def default_bgp_profile(
+    conn: sqlite3.Connection,
+    preferred_names: list[str] | None = None,
+    allow_generic_fallback: bool = True,
+) -> dict[str, Any] | None:
     names = preferred_names or []
     if names:
         placeholders = ",".join("?" for _ in names)
@@ -10044,6 +10491,8 @@ def default_bgp_profile(conn: sqlite3.Connection, preferred_names: list[str] | N
         ).fetchone()
         if row is not None:
             return bgp_response_profile_row_to_dict(row)
+        if not allow_generic_fallback:
+            return None
     row = conn.execute(
         """
         SELECT *
@@ -10195,7 +10644,11 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
 
 def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any], vector: dict[str, Any] | None) -> dict[str, Any]:
     explicit_profile = bool(vector and vector.get("response_profile_id"))
-    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if explicit_profile else None
+    profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if explicit_profile else default_bgp_profile(
+        conn,
+        preferred_profile_names(clean_text(candidate.get("attack_vector_name"))),
+        allow_generic_fallback=False,
+    )
     connector = None
     if vector and vector.get("connector_id"):
         connector = active_connector_by_id(conn, int(vector["connector_id"]))
@@ -10216,8 +10669,8 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
         candidate["mitigation_mode"] = "manual_approval"
         candidate["manual_approval_required"] = True
         candidate["allow_auto"] = False
-        candidate["never_announce"] = True
-        candidate["response_profile_fallback"] = "alert_only_manual_approval"
+        candidate["never_announce"] = not bool(profile)
+        candidate["response_profile_fallback"] = "safe_manual_profile" if profile else "alert_only_manual_approval"
     if candidate.get("mitigation_basis") == "top_conversation" or candidate.get("attack_vector_name") in UDP_SPECIAL_VECTORS:
         candidate["mitigation_mode"] = "manual_approval"
     candidate["requested_mode"] = candidate["mitigation_mode"]
@@ -10536,10 +10989,25 @@ def record_auto_mitigation_outcome(
     status: str,
     reason: str = "",
     profile: dict[str, Any] | None = None,
+    announcement: dict[str, Any] | None = None,
+    created_by: str = "",
+    requested_mode: str = "",
+    extra_details: dict[str, Any] | None = None,
 ) -> None:
+    if (
+        candidate.get("never_announce")
+        or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
+        or clean_text(candidate.get("candidate_role")) == "analysis_only"
+    ):
+        return
     anomaly_id = int_or_none(candidate.get("anomaly_id"))
     if anomaly_id is None or anomaly_id <= 0:
         return
+    selected_connector_id = (
+        (announcement or {}).get("connector_id")
+        or candidate.get("operator_connector_id")
+        or candidate.get("connector_id")
+    )
     details = {
         "anomaly_id": anomaly_id,
         "profile_id": (profile or {}).get("id") or candidate.get("response_profile_id"),
@@ -10548,20 +11016,52 @@ def record_auto_mitigation_outcome(
         "zone_ids": candidate.get("connector_resolution_zone_ids") or [],
         "candidate_connector_ids": candidate.get("candidate_connector_ids") or [],
         "connector_resolution_method": candidate.get("connector_resolution_method") or "",
+        "connector_id": int_or_none(selected_connector_id),
+        "connector_name": (announcement or {}).get("connector_name") or candidate.get("connector_name") or "",
+        "announcement_id": int_or_none((announcement or {}).get("id")),
+        "created_by": clean_text(created_by),
+        "origin": "automatic" if (
+            clean_text(requested_mode or candidate.get("requested_mode")) in {"auto", "automatic"}
+            or clean_text(created_by).lower() in {"worker", "system", "ai", "bgp-status-checker"}
+        ) else "manual",
+        "requested_mode": clean_text(requested_mode or candidate.get("requested_mode")),
+        "mitigation_key": (announcement or {}).get("mitigation_key") or candidate.get("mitigation_key") or "",
     }
+    details.update(extra_details or {})
     candidate["auto_mitigation_status"] = clean_text(status)
     candidate["auto_mitigation_reason"] = clean_text(reason)
     candidate["auto_mitigation_details"] = details
+    now = utc_now_iso()
+    values = (clean_text(status), clean_text(reason), json.dumps(details, sort_keys=True), now)
+    anomaly = mitigation_raw_anomaly(candidate)
+    source_table = clean_text(candidate.get("anomaly_source") or candidate.get("source") or anomaly.get("source")).lower()
+    if source_table == "security_anomalies" or anomaly.get("security_anomaly_id") is not None:
+        security_ids = {
+            int(item)
+            for item in (anomaly.get("security_anomaly_ids") or [anomaly.get("security_anomaly_id") or anomaly_id])
+            if int_or_none(item) and int(item) > 0
+        }
+        if not security_ids:
+            security_ids = {anomaly_id}
+        placeholders = ",".join("?" for _ in security_ids)
+        conn.execute(
+            f"""
+            UPDATE security_anomalies
+            SET auto_mitigation_status = ?, auto_mitigation_reason = ?,
+                auto_mitigation_details_json = ?, auto_mitigation_updated_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            (*values, *sorted(security_ids)),
+        )
+        return
     conn.execute(
         """
         UPDATE anomaly_events
-        SET auto_mitigation_status = ?,
-            auto_mitigation_reason = ?,
-            auto_mitigation_details_json = ?,
-            auto_mitigation_updated_at = ?
+        SET auto_mitigation_status = ?, auto_mitigation_reason = ?,
+            auto_mitigation_details_json = ?, auto_mitigation_updated_at = ?
         WHERE id = ?
         """,
-        (clean_text(status), clean_text(reason), json.dumps(details, sort_keys=True), utc_now_iso(), anomaly_id),
+        (*values, anomaly_id),
     )
 
 
@@ -11005,12 +11505,8 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
         event = group["event"]
         details = [item for item in group["items"] if security_item_matches_event_target(item, event)]
         return {"event": event, "flows": details, "security_anomalies": details}
-    security_item = resolve_security_anomaly_identifier(conn, anomaly_id, raise_not_found=False)
-    if security_item is not None:
-        event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
-        return {"event": event, "flows": [security_item], "security_anomalies": [security_item]}
     row = conn.execute(
-        """
+        f"""
         SELECT e.*, v.name AS attack_vector_name, v.display_name AS attack_vector_display_name, v.domain_type AS attack_domain_type, s.name AS sensor_name
         FROM anomaly_events e
         LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
@@ -11019,24 +11515,28 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
         """,
         (anomaly_id,),
     ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-    event = anomaly_event_row_to_dict(row)
-    flows = []
-    for flow in conn.execute(
-        "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 20",
-        (anomaly_id,),
-    ).fetchall():
-        item = {
-            **dict(flow),
-            "src_ip": clean_ip(flow["src_ip"]),
-            "dst_ip": clean_ip(flow["dst_ip"]),
-            "proto_name": proto_name(flow["proto"]),
-            "decoder": classify_flow_decoder(dict(flow)),
-        }
-        if flow_matches_anomaly_target(item, event):
-            flows.append(item)
-    return {"event": enrich_anomaly_event_from_flows(event, flows), "flows": flows}
+    if row is not None:
+        event = anomaly_event_row_to_dict(row)
+        flows = []
+        for flow in conn.execute(
+            "SELECT * FROM anomaly_event_flows WHERE anomaly_event_id = ? ORDER BY packets DESC, bytes DESC LIMIT 20",
+            (anomaly_id,),
+        ).fetchall():
+            item = {
+                **dict(flow),
+                "src_ip": clean_ip(flow["src_ip"]),
+                "dst_ip": clean_ip(flow["dst_ip"]),
+                "proto_name": proto_name(flow["proto"]),
+                "decoder": classify_flow_decoder(dict(flow)),
+            }
+            if flow_matches_anomaly_target(item, event):
+                flows.append(item)
+        return {"event": enrich_anomaly_event_from_flows(event, flows), "flows": flows}
+    security_item = resolve_security_anomaly_identifier(conn, anomaly_id, raise_not_found=False)
+    if security_item is not None:
+        event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+        return {"event": event, "flows": [security_item], "security_anomalies": [security_item]}
+    raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
 
 
 def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[dict[str, Any]]:
@@ -11064,7 +11564,10 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
             event_target_port = 0
         if event_vector in OUTBOUND_DST_PORT_VECTORS:
             candidate = outbound_dst_port_candidate(event, confidence)
-            return [candidate] if candidate else []
+            if not candidate:
+                return []
+            vector = mitigation_vector_config(conn, candidate["attack_vector_name"], event.get("attack_vector_id"))
+            return [attach_mitigation_config(conn, candidate, vector)]
 
         if protocol == "udp" and (dst_port == 53 or event_target_port == 53 or decoder == "DNS" or event_vector in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_udp_abuse_outbound", "DNS upload", "dns"}):
             dns_candidates = dns_outbound_candidates(conn, event, flows, confidence)
@@ -11305,7 +11808,43 @@ def mitigation_candidate_whitelist_hits(candidate: dict[str, Any]) -> list[dict[
     return hits[:10]
 
 
-def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
+def mitigation_connector_choice(connector: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(connector["id"]),
+        "name": connector.get("name") or f"Conector #{connector['id']}",
+        "backend_type": connector.get("backend_type") or connector.get("backend") or "",
+        "mode": connector.get("mode") or "",
+        "dry_run": connector_is_dry_run(connector),
+    }
+
+
+def equivalent_mitigation_announcement(
+    conn: sqlite3.Connection,
+    mitigation_key: str,
+) -> dict[str, Any] | None:
+    if not clean_text(mitigation_key):
+        return None
+    row = conn.execute(
+        f"""
+        SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+        FROM bgp_announcements a
+        LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+        LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+        WHERE a.mitigation_key = ?
+          AND {bgp_reserving_announcement_clause('a')}
+        ORDER BY CASE a.status WHEN 'advertised' THEN 0 WHEN 'sent' THEN 1 WHEN 'queued' THEN 2 WHEN 'pending_approval' THEN 3 ELSE 4 END,
+                 a.updated_at DESC, a.id DESC
+        LIMIT 1
+        """,
+        (mitigation_key,),
+    ).fetchone()
+    return bgp_announcement_row_to_dict(row) if row is not None else None
+
+
+def evaluated_mitigation_candidates(
+    anomaly_id: int,
+    operator_connector_id: int | None = None,
+) -> dict[str, Any]:
     ensure_sensor_db()
     with sqlite_connection() as conn:
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
@@ -11322,16 +11861,54 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
     for candidate in candidates:
         preview_connector = None
         preview_profile = None
+        eligible_connectors: list[dict[str, Any]] = []
+        equivalent_announcement = None
+        cooldown_allowed = True
+        validation: dict[str, list[str]] = {"errors": [], "warnings": []}
+        if operator_connector_id is not None:
+            candidate["operator_connector_id"] = int(operator_connector_id)
         with sqlite_connection() as conn:
             preview_profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
             connectors = resolve_mitigation_target_connectors(conn, candidate, preview_profile)
-            preview_connector = connectors[0] if connectors else None
+            connector_ids = sorted({
+                *[int(item["id"]) for item in connectors],
+                *[int(item) for item in candidate.get("candidate_connector_ids") or [] if int_or_none(item)],
+            })
+            eligible_connectors = [
+                mitigation_connector_choice(connector)
+                for connector in (active_connector_by_id(conn, connector_id) for connector_id in connector_ids)
+                if connector
+            ]
+            preview_connector = connectors[0] if len(connectors) == 1 else None
+            if preview_connector:
+                candidate["connector_id"] = int(preview_connector["id"])
+                candidate["connector_name"] = preview_connector.get("name") or ""
+                candidate["pipe_path"] = preview_connector.get("exabgp_pipe_in") or ""
+                candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
         policy = policy_for_candidate(candidate)
+        requires_connector_selection = bool(not operator_connector_id and len(eligible_connectors) > 1)
         connector_resolution_reason = clean_text(candidate.get("connector_resolution_error")) if not preview_connector else ""
-        if connector_resolution_reason:
+        if requires_connector_selection:
+            connector_resolution_reason = "ambiguous_connector_resolution"
+        elif connector_resolution_reason:
             policy["decision"] = "deny"
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), connector_resolution_reason]))
+        with sqlite_connection() as conn:
+            validation_profile = preview_profile or {}
+            validation = validate_mitigation_candidate(candidate, preview_connector, validation_profile)
+            if requires_connector_selection:
+                validation["errors"] = [
+                    error for error in validation.get("errors") or []
+                    if error != "Conector BGP ausente ou nao selecionado."
+                ]
+            if preview_connector:
+                equivalent_announcement = equivalent_mitigation_announcement(conn, candidate.get("mitigation_key") or "")
+                cooldown_allowed = cooldown_allows_mitigation(
+                    conn,
+                    candidate.get("mitigation_key") or "",
+                    int(candidate.get("cooldown_seconds") or 0),
+                )
         try:
             rendered = render_exabgp_flowspec_command("announce", candidate)
         except HTTPException as exc:
@@ -11340,10 +11917,22 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
         policy_allows_auto = policy.get("decision") == "allow_auto"
+        analysis_only = bool(candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only")
+        actionable = bool(
+            preview_connector
+            and not requires_connector_selection
+            and policy.get("decision") != "deny"
+            and not validation.get("errors")
+            and not analysis_only
+            and not equivalent_announcement
+        )
         evaluated.append(
             {
                 **candidate,
                 "policy_decision": policy,
+                "validation": validation,
+                "validation_errors": validation.get("errors") or [],
+                "validation_warnings": validation.get("warnings") or [],
                 "rendered_command": rendered,
                 "announce_command": rendered,
                 "withdraw_command": render_exabgp_flowspec_command("withdraw", candidate) if not rendered.startswith("INVALID:") else "",
@@ -11352,11 +11941,21 @@ def evaluated_mitigation_candidates(anomaly_id: int) -> dict[str, Any]:
                 "pipe_path": preview_connector.get("exabgp_pipe_in") if preview_connector else candidate.get("pipe_path") or "",
                 "mitigation_target_mode": (preview_profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "",
                 "automatic_not_applied_reason": connector_resolution_reason,
-                "apply_enabled": False,
+                "eligible_connectors": eligible_connectors,
+                "requires_connector_selection": requires_connector_selection,
+                "selected_connector_id": int(preview_connector["id"]) if preview_connector else None,
+                "equivalent_announcement": equivalent_announcement,
+                "cooldown_allowed": cooldown_allowed,
+                "actionable": actionable,
+                "can_submit_approval": actionable,
+                "can_announce_now": actionable and not connector_is_dry_run(preview_connector),
+                "connector_dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
+                "apply_enabled": actionable,
                 "manual_approval_required": not policy_allows_auto,
                 "allow_auto": policy_allows_auto,
-                "dry_run": True,
-                "dry_run_message": f"Mitigacao automatica nao aplicada: {connector_resolution_reason}." if connector_resolution_reason else "Seria aplicado automaticamente; nao aplicado porque e dry-run." if policy_allows_auto else "Nao seria aplicado automaticamente pela politica atual.",
+                "evaluation_only": True,
+                "dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
+                "dry_run_message": "Selecione um conector para recalcular a proposta." if requires_connector_selection else f"Nao elegivel para mitigacao: {connector_resolution_reason}." if connector_resolution_reason else "Avaliacao concluida; nenhum comando foi enviado.",
             }
         )
     return {"anomaly": context["event"], "candidates": evaluated}
@@ -14158,6 +14757,7 @@ def persist_ai_pending_bgp_approval(
             },
         )
         raise ValueError(f"pending approval DNS outbound bloqueado: {dns_error}")
+    begin_immediate_if_idle(conn)
     if active_mitigation_exists(conn, candidate["mitigation_key"]):
         return None
     raw_candidate = {key: value for key, value in candidate.items() if key != "raw_payload"}
@@ -14979,11 +15579,6 @@ def get_anomaly_ai_analysis(request: Request, event_id: int):
 def get_anomaly_flow_context(request: Request, event_id: int):
     require_admin(request)
     ensure_sensor_db()
-    if event_id >= 0:
-        with sqlite_connection() as conn:
-            security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
-            if security_item is not None:
-                event_id = int(security_item["id"])
     analysis = deterministic_anomaly_analysis(event_id)
     return flow_context_from_analysis(analysis)
 
@@ -15050,8 +15645,20 @@ def insert_bgp_mitigation_announcement(
 ) -> dict[str, Any]:
     now = utc_now_iso()
     duration = int(candidate.get("duration_seconds") or 0)
-    active_status = "active" if status == "announced" else status
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration and active_status == "active" else None
+    final_status = clean_text(status) or "dry_run"
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration and final_status == "advertised" else None
+    queued_at = now if final_status in {"queued", "sent", "advertised"} else None
+    sent_at = now if final_status in {"sent", "advertised"} else None
+    advertised_at = now if final_status == "advertised" else None
+    last_attempt_at = now if final_status in {"queued", "sent", "advertised", "peer_down", "failed"} else None
+    confirmation_level = clean_text(candidate.get("confirmation_level")) or {
+        "pending_approval": "registered",
+        "queued": "approved",
+        "sent": "delivered_to_exabgp",
+        "advertised": "peer_established_announce_requested",
+        "peer_down": "peer_unavailable",
+        "dry_run": "simulation_only",
+    }.get(final_status, "registered")
     withdraw_command = render_bgp_withdraw_command(
         {
             **candidate,
@@ -15063,11 +15670,14 @@ def insert_bgp_mitigation_announcement(
         "connector_id", "connector_name", "response_profile_id", "anomaly_id", "sensor_id", "status", "route_type", "response_type", "action",
         "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
         "target_prefix", "src_prefix", "dst_prefix", "dst_ip", "protocol", "src_port", "dst_port", "tcp_flags",
-        "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
+        "duration_seconds", "expires_at", "queued_at", "sent_at", "advertised_at", "announced_at", "last_attempt_at",
+        "peer_state", "confirmation_level", "status_details_json", "requested_mode", "retry_of_announcement_id",
+        "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
         "validation_errors", "validation_warnings",
         "raw_payload", "source", "source_id", "mitigation_key", "attack_vector_name", "anomaly_source", "last_error",
         "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
         "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
+        "approved_at", "rejected_at", "withdrawn_at",
     ]
     values = [
         connector["id"] if connector else candidate.get("connector_id"),
@@ -15075,7 +15685,7 @@ def insert_bgp_mitigation_announcement(
         profile["id"] if profile else candidate.get("response_profile_id"),
         candidate.get("anomaly_id"),
         candidate.get("sensor_id"),
-        active_status,
+        final_status,
         bgp_route_type_for_response(candidate.get("response_type") or "flowspec"),
         candidate.get("response_type") or "flowspec",
         candidate.get("action") or candidate.get("then_action") or "discard",
@@ -15092,7 +15702,16 @@ def insert_bgp_mitigation_announcement(
         candidate.get("tcp_flags") or "",
         duration,
         expires_at,
-        now if active_status == "active" else None,
+        queued_at,
+        sent_at,
+        advertised_at,
+        advertised_at,
+        last_attempt_at,
+        clean_text(candidate.get("peer_state")),
+        confirmation_level,
+        json.dumps(candidate.get("status_details") or {}, sort_keys=True, default=str),
+        clean_text(candidate.get("requested_mode")),
+        int_or_none(candidate.get("retry_of_announcement_id")),
         command,
         withdraw_command,
         connector.get("exabgp_pipe_in") if connector else candidate.get("pipe_path") or "",
@@ -15117,6 +15736,9 @@ def insert_bgp_mitigation_announcement(
         created_by,
         now,
         now,
+        now if final_status in {"queued", "sent", "advertised"} else None,
+        now if final_status in {"rejected", "rejected_by_policy"} else None,
+        now if final_status in {"withdrawn", "expired"} else None,
     ]
     if len(columns) != len(values):
         raise RuntimeError(f"bgp_announcements insert mismatch: {len(columns)} columns, {len(values)} values")
@@ -15137,13 +15759,15 @@ def insert_bgp_mitigation_announcement(
     else:
         bgp_event(conn, announcement_id, "policy_denied", "Politica negou mitigacao.", policy, created_by)
     event_type = {
-        "active": "announced",
-        "announced": "announced",
+        "queued": "queued",
+        "sent": "sent",
+        "advertised": "advertised",
+        "peer_down": "peer_down",
         "pending_approval": "pending_approval",
         "rejected_by_policy": "rejected_by_policy",
         "failed": "failed",
-    }.get(status, status)
-    bgp_event(conn, announcement_id, event_type, last_error or f"Mitigacao registrada com status {status}.", {"command": command}, created_by)
+    }.get(final_status, final_status)
+    bgp_event(conn, announcement_id, event_type, last_error or f"Mitigacao registrada com status {final_status}.", {"command": command}, created_by)
     row = conn.execute(
         """
         SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
@@ -15157,13 +15781,400 @@ def insert_bgp_mitigation_announcement(
     return bgp_announcement_row_to_dict(row, include_events=True, conn=conn)
 
 
-def active_mitigation_exists(conn: sqlite3.Connection, mitigation_key: str) -> bool:
+def fetch_bgp_announcement(
+    conn: sqlite3.Connection,
+    announcement_id: int,
+    include_events: bool = True,
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+        FROM bgp_announcements a
+        LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+        LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+        WHERE a.id = ?
+        """,
+        (int(announcement_id),),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Anuncio BGP nao encontrado")
+    return bgp_announcement_row_to_dict(row, include_events=include_events, conn=conn)
+
+
+def transition_bgp_announcement(
+    conn: sqlite3.Connection,
+    announcement_id: int,
+    status: str,
+    event_type: str,
+    message: str,
+    created_by: str,
+    *,
+    peer_state: str = "",
+    confirmation_level: str = "",
+    details: dict[str, Any] | None = None,
+    last_error: str = "",
+    command: str = "",
+    expected_statuses: set[str] | None = None,
+    expected_confirmation_level: str = "",
+) -> dict[str, Any]:
+    status = normalize_choice(status, BGP_ANNOUNCEMENT_STATUSES, "status")
+    current = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (int(announcement_id),)).fetchone()
+    if current is None:
+        raise HTTPException(status_code=404, detail="Anuncio BGP nao encontrado")
+    current_status = clean_text(current["status"])
+    if expected_statuses is not None and current_status not in expected_statuses:
+        raise HTTPException(status_code=409, detail=f"Transicao concorrente detectada: status atual {current_status}.")
+    if expected_confirmation_level and clean_text(current["confirmation_level"]) != clean_text(expected_confirmation_level):
+        raise HTTPException(status_code=409, detail="Transicao concorrente detectada: a intencao operacional mudou.")
+    now = utc_now_iso()
+    persisted_details = bgp_json_loads(current["status_details_json"], {})
+    merged_details = {**persisted_details, **(details or {})}
+    updates: dict[str, Any] = {
+        "status": status,
+        "updated_at": now,
+        "last_error": clean_text(last_error),
+        "peer_state": clean_text(peer_state) or clean_text(current["peer_state"]),
+        "confirmation_level": clean_text(confirmation_level) or clean_text(current["confirmation_level"]) or "registered",
+        "status_details_json": json.dumps(merged_details, sort_keys=True, default=str),
+    }
+    if status == "queued":
+        updates["queued_at"] = current["queued_at"] or now
+        updates["approved_at"] = current["approved_at"] or now
+        updates["last_attempt_at"] = now
+        updates["expires_at"] = None
+    elif status == "sent":
+        duration = int(current["duration_seconds"] or 0)
+        updates["sent_at"] = current["sent_at"] or now
+        updates["last_attempt_at"] = now
+        updates["expires_at"] = current["expires_at"] or (
+            (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z")
+            if duration else None
+        )
+    elif status == "advertised":
+        duration = int(current["duration_seconds"] or 0)
+        updates["advertised_at"] = now
+        updates["announced_at"] = now
+        updates["last_attempt_at"] = now
+        updates["expires_at"] = current["expires_at"] or (
+            (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z")
+            if duration else None
+        )
+    elif status in {"peer_down", "failed", "failed_withdraw"}:
+        updates["last_attempt_at"] = now
+        if status != "failed_withdraw" and not current["advertised_at"]:
+            updates["expires_at"] = None
+    elif status in {"rejected", "rejected_by_policy"}:
+        updates["rejected_at"] = now
+    elif status in {"withdrawn", "expired"}:
+        updates["withdrawn_at"] = now
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    filters = ["id = ?"]
+    filter_values: list[Any] = [int(announcement_id)]
+    if expected_statuses is not None:
+        placeholders = ",".join("?" for _ in expected_statuses)
+        filters.append(f"status IN ({placeholders})")
+        filter_values.extend(sorted(expected_statuses))
+    if expected_confirmation_level:
+        filters.append("confirmation_level = ?")
+        filter_values.append(clean_text(expected_confirmation_level))
+    cursor = conn.execute(
+        f"UPDATE bgp_announcements SET {assignments} WHERE {' AND '.join(filters)}",
+        (*updates.values(), *filter_values),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Transicao concorrente detectada; nenhuma alteracao aplicada.")
+    bgp_event(
+        conn,
+        int(announcement_id),
+        event_type,
+        message,
+        {"command": command, "peer_state": peer_state, "confirmation_level": confirmation_level, "details": details or {}},
+        created_by,
+    )
+    return fetch_bgp_announcement(conn, int(announcement_id), include_events=True)
+
+
+def latest_retryable_bgp_announcement_id(
+    conn: sqlite3.Connection,
+    mitigation_key: str,
+) -> int | None:
+    if not clean_text(mitigation_key):
+        return None
     row = conn.execute(
         """
         SELECT id
         FROM bgp_announcements
         WHERE mitigation_key = ?
-          AND status IN ('dry_run', 'pending_approval', 'active', 'announced')
+          AND status IN ('peer_down', 'failed', 'failed_withdraw', 'withdrawn', 'expired')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (mitigation_key,),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def begin_immediate_if_idle(conn: sqlite3.Connection) -> None:
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+
+
+def bgp_operation_claim_token(announcement_id: int, operation: str) -> str:
+    seed = f"{operation}|{announcement_id}|{time.time_ns()}|{threading.get_ident()}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def persist_bgp_send_intent(
+    conn: sqlite3.Connection,
+    announcement_id: int,
+    created_by: str,
+    command: str,
+) -> str:
+    """Durably claim a queued delivery before touching the external pipe.
+
+    The safety expiry deliberately starts at this intent. If the process dies
+    after the pipe write but before ``sent`` is committed, the expiration
+    worker can conservatively withdraw the possibly-delivered rule.
+    """
+    begin_immediate_if_idle(conn)
+    row = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (int(announcement_id),)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Anuncio BGP nao encontrado")
+    if clean_text(row["status"]) != "queued":
+        raise HTTPException(status_code=409, detail=f"Anuncio nao esta mais na fila: {clean_text(row['status'])}.")
+    details = bgp_json_loads(row["status_details_json"], {})
+    if clean_text(row["confirmation_level"]) == "delivery_attempted" or details.get("send_claim_token"):
+        raise HTTPException(
+            status_code=409,
+            detail="Este anuncio ja possui uma tentativa de entrega; aguarde a reconciliacao operacional.",
+        )
+    now = utc_now_iso()
+    duration = int(row["duration_seconds"] or 0)
+    safety_seconds = duration if duration > 0 else BGP_DEFAULT_MAX_DURATION_SECONDS
+    expires_at = row["expires_at"] or (
+        datetime.now(timezone.utc) + timedelta(seconds=safety_seconds)
+    ).isoformat().replace("+00:00", "Z")
+    claim_token = bgp_operation_claim_token(announcement_id, "announce")
+    details.update(
+        {
+            "send_claim_token": claim_token,
+            "send_claimed_at": now,
+            "send_claimed_by": clean_text(created_by),
+        }
+    )
+    cursor = conn.execute(
+        """
+        UPDATE bgp_announcements
+        SET confirmation_level = 'delivery_attempted', status_details_json = ?,
+            last_attempt_at = ?, expires_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'queued'
+          AND confirmation_level <> 'withdraw_requested'
+        """,
+        (json.dumps(details, sort_keys=True, default=str), now, expires_at, now, int(announcement_id)),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(status_code=409, detail="A fila mudou antes da tentativa de entrega.")
+    bgp_event(
+        conn,
+        int(announcement_id),
+        "delivery_attempted",
+        "Intencao de entrega persistida antes da escrita no pipe ExaBGP.",
+        {"claim_token": claim_token, "command": command, "safety_expires_at": expires_at},
+        created_by,
+    )
+    conn.commit()
+    return claim_token
+
+
+def attempt_bgp_announcement(
+    conn: sqlite3.Connection,
+    announcement_id: int,
+    connector: dict[str, Any],
+    command: str,
+    created_by: str,
+) -> dict[str, Any]:
+    current = fetch_bgp_announcement(conn, announcement_id, include_events=False)
+    if current["status"] not in {"queued", "pending_approval"}:
+        raise HTTPException(status_code=409, detail=f"Anuncio nao pode ser enviado no estado {current['status']}.")
+    if current["status"] == "pending_approval":
+        transition_bgp_announcement(
+            conn,
+            announcement_id,
+            "queued",
+            "queued",
+            "Anuncio aprovado e colocado na fila de envio.",
+            created_by,
+            confirmation_level="approved",
+            command=command,
+            expected_statuses={"pending_approval"},
+        )
+    # Make the queued state durable before any external status query or pipe
+    # write.  A crash can therefore never leave an untracked announcement.
+    conn.commit()
+    claim_token = persist_bgp_send_intent(conn, announcement_id, created_by, command)
+    readiness = check_bgp_connector_readiness(conn, connector)
+    details = readiness.get("details") if isinstance(readiness.get("details"), dict) else {}
+    peer_state = clean_text(readiness.get("peer_state")) or "not_verified"
+    if not readiness.get("ready"):
+        failure_status = clean_text(readiness.get("failure_status")) or "peer_down"
+        reason = clean_text(readiness.get("reason")) or "peer_bgp_not_verified"
+        # The durable claim protected a possible crash before readiness was
+        # known. Once readiness explicitly fails, no pipe write occurred and
+        # the claim must stop looking like an uncertain delivery.
+        details = {
+            **details,
+            "send_claim_token": "",
+            "send_claim_cancelled_at": utc_now_iso(),
+            "send_claim_cancelled_reason": reason,
+        }
+        item = transition_bgp_announcement(
+            conn,
+            announcement_id,
+            failure_status,
+            failure_status,
+            reason,
+            created_by,
+            peer_state=peer_state,
+            confirmation_level=clean_text(readiness.get("confirmation_level")) or "peer_unavailable",
+            details=details,
+            last_error=reason,
+            command=command,
+            expected_statuses={"queued"},
+            expected_confirmation_level="delivery_attempted",
+        )
+        conn.commit()
+        return item
+    # Keep SQLite's writer lock from the final claim verification through the
+    # pipe write and the sent transition. Competing reject/withdraw requests
+    # therefore cannot overtake this attempt and later be overwritten.
+    begin_immediate_if_idle(conn)
+    claimed = conn.execute(
+        "SELECT status, confirmation_level, status_details_json FROM bgp_announcements WHERE id = ?",
+        (int(announcement_id),),
+    ).fetchone()
+    claimed_details = bgp_json_loads(claimed["status_details_json"], {}) if claimed is not None else {}
+    if (
+        claimed is None
+        or clean_text(claimed["status"]) != "queued"
+        or clean_text(claimed["confirmation_level"]) != "delivery_attempted"
+        or clean_text(claimed_details.get("send_claim_token")) != claim_token
+    ):
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="A tentativa perdeu a posse da fila antes da escrita externa.")
+    try:
+        exabgp_write_pipe(connector, command)
+    except HTTPException as exc:
+        reason = clean_text(exc.detail) or "exabgp_pipe_write_failed"
+        failure_details = {
+            **details,
+            "send_claim_token": "",
+            "send_claim_cancelled_at": utc_now_iso(),
+            "send_claim_cancelled_reason": reason,
+        }
+        item = transition_bgp_announcement(
+            conn,
+            announcement_id,
+            "failed",
+            "announce_failed",
+            reason,
+            created_by,
+            peer_state=peer_state,
+            confirmation_level="peer_established",
+            details=failure_details,
+            last_error=reason,
+            command=command,
+            expected_statuses={"queued"},
+            expected_confirmation_level="delivery_attempted",
+        )
+        conn.commit()
+        return item
+    try:
+        transition_bgp_announcement(
+            conn,
+            announcement_id,
+            "sent",
+            "sent",
+            "Comando entregue ao pipe ExaBGP; confirmacao operacional ainda pendente.",
+            created_by,
+            peer_state=peer_state,
+            confirmation_level="delivered_to_exabgp",
+            details=details,
+            command=command,
+            expected_statuses={"queued"},
+            expected_confirmation_level="delivery_attempted",
+        )
+        conn.commit()
+        begin_immediate_if_idle(conn)
+        item = transition_bgp_announcement(
+            conn,
+            announcement_id,
+            "advertised",
+            "advertised",
+            "Anuncio solicitado ao ExaBGP com o peer estabelecido.",
+            created_by,
+            peer_state="established",
+            confirmation_level="peer_established_announce_requested",
+            details=details,
+            command=command,
+            expected_statuses={"sent"},
+        )
+        conn.commit()
+        return item
+    except sqlite3.Error as exc:
+        conn.rollback()
+        withdraw_command = render_bgp_withdraw_command(current)
+        rollback_success = False
+        rollback_error = ""
+        try:
+            persist_bgp_withdraw_intent(
+                conn,
+                announcement_id,
+                created_by,
+                "Falha ao persistir a entrega; withdraw compensatorio registrado antes da escrita externa.",
+                {"database_error": clean_text(exc), "send_claim_token": claim_token},
+                allow_retry=True,
+                expected_statuses={"queued", "sent"},
+            )
+            begin_immediate_if_idle(conn)
+            exabgp_write_pipe(connector, withdraw_command)
+            rollback_success = True
+        except HTTPException as rollback_exc:
+            rollback_error = clean_text(rollback_exc.detail)
+        reason = (
+            "Falha ao persistir transicao apos envio; withdraw compensatorio executado."
+            if rollback_success
+            else f"Falha ao persistir transicao apos envio; withdraw compensatorio falhou: {rollback_error}"
+        )
+        try:
+            item = transition_bgp_announcement(
+                conn,
+                announcement_id,
+                "failed" if rollback_success else "failed_withdraw",
+                "announce_db_failure",
+                reason,
+                created_by,
+                peer_state=peer_state,
+                confirmation_level="compensating_withdraw_delivered" if rollback_success else "withdraw_failed",
+                details={**details, "database_error": clean_text(exc), "rollback_success": rollback_success},
+                last_error=reason,
+                command=command,
+                expected_statuses={"queued", "sent"},
+                expected_confirmation_level="withdraw_requested",
+            )
+            conn.commit()
+            return item
+        except sqlite3.Error:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=reason) from None
+
+
+def active_mitigation_exists(conn: sqlite3.Connection, mitigation_key: str) -> bool:
+    row = conn.execute(
+        f"""
+        SELECT id
+        FROM bgp_announcements
+        WHERE mitigation_key = ?
+          AND {bgp_reserving_announcement_clause()}
         LIMIT 1
         """,
         (mitigation_key,),
@@ -15280,30 +16291,40 @@ def apply_mitigation_candidate(
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
     if not connectors:
         reason = clean_text(candidate.get("connector_resolution_error")) or "no_connector_resolved"
-        record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, profile)
+        record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, profile, created_by=created_by, requested_mode=mode)
         log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
         raise HTTPException(status_code=400, detail=f"Nenhum conector BGP ativo resolvido para esta mitigacao: {reason}.")
     requested_mode = "automatic" if mode == "automatic" else "manual_approval"
     results: list[dict[str, Any]] = []
     for connector in connectors:
+        # Serialize check-then-insert across API/worker processes. SQLite's
+        # writer lock prevents two equivalent candidates from both passing the
+        # dedup/capacity checks before either row exists.
+        begin_immediate_if_idle(conn)
         connector_candidate = {
             **candidate,
             "connector_id": connector["id"],
             "connector_name": connector.get("name") or "",
+            "requested_mode": mode,
         }
         connector_candidate["mitigation_key"] = mitigation_key_for_candidate(connector_candidate)
-        if active_mitigation_exists(conn, connector_candidate["mitigation_key"]):
-            record_auto_mitigation_outcome(conn, connector_candidate, "deduplicated", "equivalent_active_announcement", profile)
+        equivalent = equivalent_mitigation_announcement(conn, connector_candidate["mitigation_key"])
+        if equivalent:
+            record_auto_mitigation_outcome(conn, connector_candidate, "deduplicated", "equivalent_active_announcement", profile, equivalent, created_by, mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "mitigacao ativa duplicada", connector, profile)
-            raise HTTPException(status_code=409, detail=f"Ja existe mitigacao ativa para esta chave no conector {connector.get('name') or connector['id']}.")
+            raise HTTPException(status_code=409, detail=f"Resposta equivalente ja ativa: anuncio #{equivalent['id']}.")
         if mode == "automatic" and not cooldown_allows_mitigation(
             conn,
             connector_candidate["mitigation_key"],
             int(connector_candidate.get("cooldown_seconds") or 0),
         ):
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "mitigation_cooldown", profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "mitigation_cooldown", profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "mitigation_cooldown", connector, profile)
             raise HTTPException(status_code=409, detail="Mitigacao equivalente ainda esta em cooldown.")
+        connector_candidate["retry_of_announcement_id"] = latest_retryable_bgp_announcement_id(
+            conn,
+            connector_candidate["mitigation_key"],
+        )
         policy = policy_for_candidate(connector_candidate, requested_mode)
         command = render_exabgp_flowspec_command("announce", connector_candidate)
         validation = validate_mitigation_candidate(connector_candidate, connector, profile or {
@@ -15316,98 +16337,376 @@ def apply_mitigation_candidate(
             "approval_mode": "manual_approval",
         })
         if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "duration_exceeds_maximum", profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "duration_exceeds_maximum", profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "duracao excede maximo", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
         if policy["decision"] == "deny":
             outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny")
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            announcement = insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, announcement, created_by, mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
-            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by))
+            results.append(announcement)
             continue
         if validation["errors"]:
             outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error")
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
         if mode == "automatic" and policy["decision"] != "allow_auto":
             outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "politica nao permitiu automatico")
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Politica nao permite automatico; aprovacao manual exigida.")
         if mode == "manual_approval" or policy["decision"] == "require_manual_approval" and mode != "announce_now":
             outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "profile nao auto")
-            record_auto_mitigation_outcome(conn, connector_candidate, "pending_approval", outcome_reason, profile)
+            announcement = insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "pending_approval", command, created_by)
+            record_auto_mitigation_outcome(conn, connector_candidate, "pending_approval", outcome_reason, profile, announcement, created_by, mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
-            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "pending_approval", command, created_by))
+            results.append(announcement)
             continue
         if connector_is_dry_run(connector):
-            record_auto_mitigation_outcome(conn, connector_candidate, "dry_run", "connector_dry_run", profile)
+            announcement = insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "dry_run", command, created_by)
+            record_auto_mitigation_outcome(conn, connector_candidate, "dry_run", "connector_dry_run", profile, announcement, created_by, mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "connector_dry_run", connector, profile, policy, validation, command)
-            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "dry_run", command, created_by))
+            results.append(announcement)
             continue
         if connector.get("backend_type") != "exabgp":
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "connector_backend_not_exabgp", profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "connector_backend_not_exabgp", profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "conector nao exabgp", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp para anunciar.")
-        try:
-            exabgp_write_pipe(connector, command)
+        announcement = insert_bgp_mitigation_announcement(
+            conn,
+            connector_candidate,
+            connector,
+            profile,
+            policy,
+            validation,
+            "queued",
+            command,
+            created_by,
+        )
+        record_auto_mitigation_outcome(
+            conn,
+            connector_candidate,
+            "queued",
+            "approved_for_delivery",
+            profile,
+            announcement,
+            created_by,
+            mode,
+        )
+        conn.commit()
+        announcement = attempt_bgp_announcement(conn, int(announcement["id"]), connector, command, created_by)
+        final_status = clean_text(announcement.get("status"))
+        final_reason = clean_text(announcement.get("last_error"))
+        if final_status == "advertised":
             log_dns_auto_mitigation_applied(connector_candidate, connector, profile, command)
-            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "announced", command, created_by))
-            record_auto_mitigation_outcome(conn, connector_candidate, "applied", "", profile)
-        except HTTPException as exc:
-            record_auto_mitigation_outcome(conn, connector_candidate, "failed", clean_text(exc.detail) or "exabgp_pipe_write_failed", profile)
-            log_dns_auto_mitigation_skipped(connector_candidate, clean_text(exc.detail) or "falha ao escrever pipe", connector, profile, policy, validation, command)
-            results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "failed", command, created_by, clean_text(exc.detail)))
+            outcome_status = "applied"
+        else:
+            outcome_status = final_status or "failed"
+            log_dns_auto_mitigation_skipped(connector_candidate, final_reason or outcome_status, connector, profile, policy, validation, command)
+        record_auto_mitigation_outcome(
+            conn,
+            connector_candidate,
+            outcome_status,
+            final_reason,
+            profile,
+            announcement,
+            created_by,
+            mode,
+            {
+                "peer_state": announcement.get("peer_state") or "",
+                "confirmation_level": announcement.get("confirmation_level") or "registered",
+            },
+        )
+        results.append(announcement)
     if len(results) == 1:
         return results[0]
     return {"multi_connector": True, "count": len(results), "items": results}
 
 
-def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int]:
+def persist_bgp_withdraw_intent(
+    conn: sqlite3.Connection,
+    announcement_id: int,
+    created_by: str,
+    message: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    allow_retry: bool = False,
+    expected_statuses: set[str] | None = None,
+) -> str | None:
+    begin_immediate_if_idle(conn)
+    row = conn.execute(
+        "SELECT status, confirmation_level, status_details_json FROM bgp_announcements WHERE id = ?",
+        (int(announcement_id),),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Anuncio BGP nao encontrado")
+    current_status = clean_text(row["status"])
+    if expected_statuses is not None and current_status not in expected_statuses:
+        if allow_retry:
+            conn.rollback()
+            return None
+        raise HTTPException(status_code=409, detail=f"O anuncio mudou para {current_status} antes da retirada.")
+    details = bgp_json_loads(row["status_details_json"], {})
+    previous_request = parse_datetime_text(details.get("withdraw_requested_at"))
+    if clean_text(row["confirmation_level"]) == "withdraw_requested" and previous_request is not None:
+        if datetime.now(timezone.utc) - previous_request < timedelta(seconds=30):
+            if allow_retry:
+                conn.rollback()
+                return None
+            raise HTTPException(status_code=409, detail="Retirada ja solicitada para este anuncio.")
     now = utc_now_iso()
+    claim_token = bgp_operation_claim_token(announcement_id, "withdraw")
+    details["withdraw_requested_at"] = now
+    details["withdraw_requested_by"] = clean_text(created_by)
+    details["withdraw_claim_token"] = claim_token
+    if payload:
+        details["withdraw_request"] = payload
+    cursor = conn.execute(
+        """
+        UPDATE bgp_announcements
+        SET confirmation_level = 'withdraw_requested', status_details_json = ?,
+            last_attempt_at = ?, updated_at = ?
+        WHERE id = ? AND status = ?
+        """,
+        (json.dumps(details, sort_keys=True, default=str), now, now, int(announcement_id), current_status),
+    )
+    if cursor.rowcount != 1:
+        if allow_retry:
+            conn.rollback()
+            return None
+        raise HTTPException(status_code=409, detail="O anuncio mudou antes do pedido de retirada.")
+    bgp_event(
+        conn,
+        int(announcement_id),
+        "withdraw_requested",
+        message,
+        {**(payload or {}), "claim_token": claim_token},
+        created_by,
+    )
+    # The intent must survive a process crash before or during the external
+    # write. A retry is idempotent and remains traceable in the event timeline.
+    conn.commit()
+    return claim_token
+
+
+def newer_equivalent_bgp_delivery(
+    conn: sqlite3.Connection,
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    connector_id = int_or_none(item.get("connector_id"))
+    if connector_id is None:
+        return None
     rows = conn.execute(
         """
         SELECT *
         FROM bgp_announcements
-        WHERE status IN ('active', 'announced')
-          AND expires_at IS NOT NULL
-          AND expires_at <= ?
-        ORDER BY expires_at, id
+        WHERE connector_id = ? AND id > ?
+          AND (
+                status IN ('sent', 'advertised', 'active', 'announced', 'failed_withdraw')
+                OR (status = 'peer_down' AND (sent_at IS NOT NULL OR advertised_at IS NOT NULL OR announced_at IS NOT NULL))
+                OR (status = 'queued' AND confirmation_level = 'delivery_attempted')
+                OR confirmation_level = 'withdraw_requested'
+          )
+        ORDER BY id DESC
+        """,
+        (connector_id, int(item["id"])),
+    ).fetchall()
+    current_command = clean_text(item.get("withdraw_command") or render_bgp_withdraw_command(item))
+    for row in rows:
+        candidate = dict(row)
+        candidate_command = clean_text(candidate.get("withdraw_command") or render_bgp_withdraw_command(candidate))
+        if current_command and candidate_command == current_command:
+            return candidate
+    return None
+
+
+def latest_bgp_delivery_for_withdraw_command(
+    conn: sqlite3.Connection,
+    connector_id: int,
+    withdraw_command: str,
+) -> dict[str, Any] | None:
+    """Find the tracked delivery affected by an operator-entered withdraw.
+
+    A FlowSpec withdraw identifies the NLRI, not the audit row. Matching the
+    rendered command keeps the original delivered row truthful instead of
+    creating a detached terminal record while the original stays advertised.
+    """
+    expected_command = clean_text(withdraw_command)
+    if not expected_command:
+        return None
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM bgp_announcements
+        WHERE connector_id = ?
+          AND (
+                status IN ('sent', 'advertised', 'active', 'announced', 'failed_withdraw')
+                OR (status = 'peer_down' AND (sent_at IS NOT NULL OR advertised_at IS NOT NULL OR announced_at IS NOT NULL))
+                OR (status = 'queued' AND confirmation_level IN ('delivery_attempted', 'withdraw_requested'))
+          )
+        ORDER BY id DESC
+        """,
+        (int(connector_id),),
+    ).fetchall()
+    for row in rows:
+        item = dict(row)
+        saved_command = clean_text(item.get("withdraw_command") or render_bgp_withdraw_command(item))
+        if saved_command == expected_command:
+            return item
+    return None
+
+
+def process_expired_bgp_announcements(conn: sqlite3.Connection) -> dict[str, int]:
+    now = utc_now_iso()
+    retry_before = iso(datetime.now(timezone.utc) - timedelta(seconds=30))
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM bgp_announcements
+        WHERE (
+              expires_at IS NOT NULL
+              AND expires_at <= ?
+              AND (
+                    status IN ('sent', 'advertised')
+                    OR (status = 'queued' AND confirmation_level = 'delivery_attempted')
+                    OR (status = 'peer_down' AND (sent_at IS NOT NULL OR advertised_at IS NOT NULL OR announced_at IS NOT NULL))
+                    OR (status IN ('active', 'announced') AND (sent_at IS NOT NULL OR announced_at IS NOT NULL))
+              )
+          )
+          OR (
+              status = 'failed_withdraw'
+              AND updated_at <= ?
+          )
+          OR (
+              confirmation_level = 'withdraw_requested'
+              AND updated_at <= ?
+              AND (
+                    sent_at IS NOT NULL OR advertised_at IS NOT NULL OR announced_at IS NOT NULL
+                    OR status IN ('queued', 'sent', 'advertised', 'active', 'announced', 'peer_down', 'failed_withdraw')
+              )
+          )
+        ORDER BY COALESCE(expires_at, updated_at), id
         LIMIT 100
         """,
-        (now,),
+        (now, retry_before, retry_before),
     ).fetchall()
     withdrawn = 0
     failed = 0
     for row in rows:
         item = dict(row)
-        connector = fetch_bgp_connector(conn, int(item["connector_id"])) if item.get("connector_id") is not None else None
-        command = render_bgp_withdraw_command(item)
-        status = "expired"
+        claim_token = persist_bgp_withdraw_intent(
+            conn,
+            int(item["id"]),
+            "worker",
+            "Retirada automatica/reconciliacao registrada antes da escrita externa.",
+            {"expires_at": item.get("expires_at"), "status": item.get("status"), "scheduler": True},
+            allow_retry=True,
+            expected_statuses={clean_text(item.get("status"))},
+        )
+        if not claim_token:
+            continue
+        begin_immediate_if_idle(conn)
+        claimed_row = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (int(item["id"]),)).fetchone()
+        claimed = dict(claimed_row) if claimed_row is not None else {}
+        claimed_details = bgp_json_loads(claimed.get("status_details_json"), {})
+        if (
+            not claimed
+            or clean_text(claimed.get("confirmation_level")) != "withdraw_requested"
+            or clean_text(claimed_details.get("withdraw_claim_token")) != claim_token
+        ):
+            conn.rollback()
+            continue
+        command = render_bgp_withdraw_command(claimed)
+        expiry = parse_datetime_text(claimed.get("expires_at"))
+        target_status = "expired" if expiry is not None and expiry <= datetime.now(timezone.utc) else "withdrawn"
+        superseding = newer_equivalent_bgp_delivery(conn, claimed)
+        if superseding is not None:
+            result = transition_bgp_announcement(
+                conn,
+                int(claimed["id"]),
+                target_status,
+                "withdraw_superseded",
+                "Withdraw antigo omitido: uma tentativa equivalente mais nova possui a mesma rota.",
+                "worker",
+                peer_state=clean_text(claimed.get("peer_state")),
+                confirmation_level="superseded_by_newer_delivery",
+                details={"superseded_by_announcement_id": int(superseding["id"])},
+                command=command,
+                expected_statuses={clean_text(claimed.get("status"))},
+                expected_confirmation_level="withdraw_requested",
+            )
+            if result.get("anomaly_id"):
+                profile = fetch_bgp_profile(conn, int(result["response_profile_id"])) if result.get("response_profile_id") else None
+                record_auto_mitigation_outcome(
+                    conn,
+                    result,
+                    target_status,
+                    "superseded_by_newer_delivery",
+                    profile,
+                    result,
+                    "worker",
+                    result.get("requested_mode") or "automatic",
+                )
+            withdrawn += 1
+            conn.commit()
+            continue
+        connector = fetch_bgp_connector(conn, int(claimed["connector_id"])) if claimed.get("connector_id") is not None else None
+        status = target_status
         last_error = ""
-        if connector and connector.get("backend_type") == "exabgp":
+        if connector and connector.get("backend_type") == "exabgp" and not connector_is_dry_run(connector):
             try:
                 exabgp_write_pipe(connector, command)
             except HTTPException as exc:
                 status = "failed_withdraw"
                 last_error = clean_text(exc.detail)
-        conn.execute(
-            """
-            UPDATE bgp_announcements
-            SET status = ?, withdrawn_at = CASE WHEN ? = 'expired' THEN ? ELSE withdrawn_at END,
-                updated_at = ?, last_error = ?
-            WHERE id = ?
-            """,
-            (status, status, now, now, last_error, int(item["id"])),
+        else:
+            status = "failed_withdraw"
+            last_error = "Conector ExaBGP indisponivel para retirada automatica."
+        result = transition_bgp_announcement(
+            conn,
+            int(item["id"]),
+            status,
+            "auto_withdraw" if status in {"expired", "withdrawn"} else "withdraw_failed",
+            "Withdraw entregue automaticamente ao pipe ExaBGP." if status in {"expired", "withdrawn"} else last_error,
+            "worker",
+            peer_state=clean_text(item.get("peer_state")),
+            confirmation_level="withdrawn" if status in {"expired", "withdrawn"} else "withdraw_failed",
+            last_error=last_error,
+            command=command,
+            expected_statuses={clean_text(claimed.get("status"))},
+            expected_confirmation_level="withdraw_requested",
         )
-        if status == "expired":
+        if result.get("anomaly_id"):
+            profile = fetch_bgp_profile(conn, int(result["response_profile_id"])) if result.get("response_profile_id") else None
+            record_auto_mitigation_outcome(
+                conn,
+                result,
+                status if status in {"expired", "withdrawn"} else "failed",
+                last_error,
+                profile,
+                result,
+                "worker",
+                result.get("requested_mode") or "automatic",
+                {
+                    "peer_state": result.get("peer_state") or "",
+                    "confirmation_level": result.get("confirmation_level") or "registered",
+                },
+            )
+        if status in {"expired", "withdrawn"}:
             withdrawn += 1
-            bgp_event(conn, int(item["id"]), "auto_withdraw", "Duracao expirada; withdraw enviado automaticamente.", {"command": command}, "worker")
-            bgp_event(conn, int(item["id"]), "expired", "Mitigacao expirada e retirada automaticamente.", {"command": command}, "worker")
+            bgp_event(
+                conn,
+                int(item["id"]),
+                status,
+                "Mitigacao retirada automaticamente apos o TTL." if status == "expired" else "Retirada pendente reconciliada automaticamente.",
+                {"command": command},
+                "worker",
+            )
         else:
             failed += 1
-            bgp_event(conn, int(item["id"]), "failed", last_error or "Falha no withdraw automatico.", {"command": command}, "worker")
+        conn.commit()
     return {"withdrawn": withdrawn, "failed": failed}
 
 
@@ -15506,6 +16805,10 @@ def process_anomaly_mitigation() -> dict[str, int]:
         "retried_ended": 0,
         "active": 0,
         "announced": 0,
+        "advertised": 0,
+        "sent": 0,
+        "peer_down": 0,
+        "dry_run": 0,
         "pending_approval": 0,
         "rejected_by_policy": 0,
         "expired": 0,
@@ -15545,6 +16848,8 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 "raw_payload": {"anomaly": event},
             }
             for candidate in candidates:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
                 stats["checked"] += 1
                 mode = clean_text(candidate.get("mitigation_mode")) or "disabled"
                 if mode in {"disabled", "analysis_only"} or candidate.get("never_announce"):
@@ -15599,9 +16904,11 @@ MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS = (
     "connector_id", "connector_name", "response_profile_id", "anomaly_id", "status", "route_type", "response_type", "action",
     "rate_limit_bps", "rate_limit_value_raw", "rate_limit_unit",
     "target_prefix", "src_prefix", "dst_prefix", "protocol", "src_port", "dst_port", "tcp_flags",
-    "duration_seconds", "expires_at", "announced_at", "announce_command", "withdraw_command", "rendered_command", "match_json", "then_json",
+    "duration_seconds", "expires_at", "queued_at", "sent_at", "advertised_at", "announced_at", "last_attempt_at",
+    "peer_state", "confirmation_level", "status_details_json", "requested_mode", "retry_of_announcement_id",
+    "announce_command", "withdraw_command", "rendered_command", "match_json", "then_json",
     "validation_errors", "validation_warnings",
-    "raw_payload", "source", "source_id", "last_error",
+    "raw_payload", "source", "source_id", "mitigation_key", "last_error",
     "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
     "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
 )
@@ -15644,7 +16951,16 @@ def manual_flowspec_announcement_values(
         "tcp_flags": candidate.get("tcp_flags") or "",
         "duration_seconds": candidate.get("duration_seconds") or 0,
         "expires_at": expires_at,
+        "queued_at": now if status == "queued" else None,
+        "sent_at": now if status == "sent" else None,
+        "advertised_at": now if status == "advertised" else None,
         "announced_at": announced_at,
+        "last_attempt_at": now if status in {"queued", "sent", "advertised", "peer_down", "failed"} else None,
+        "peer_state": "",
+        "confirmation_level": "approved" if status == "queued" else "registered",
+        "status_details_json": "{}",
+        "requested_mode": clean_text(candidate.get("requested_mode")),
+        "retry_of_announcement_id": None,
         "announce_command": announce_command,
         "withdraw_command": withdraw_command,
         "rendered_command": rendered_command,
@@ -15655,6 +16971,7 @@ def manual_flowspec_announcement_values(
         "raw_payload": json.dumps(dump_model(payload), sort_keys=True, default=str),
         "source": "manual_lab",
         "source_id": "",
+        "mitigation_key": candidate.get("mitigation_key") or mitigation_key_for_candidate(candidate),
         "last_error": last_error,
         "policy_decision": policy.get("decision") or "",
         "policy_severity": policy.get("severity") or "",
@@ -15832,15 +17149,38 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
         }
         candidate = flowspec_candidate_from_payload(payload)
         candidate["connector_id"] = connector_id
+        candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
         candidate["manual_lab"] = True
-        candidate["requested_mode"] = "manual_approval" if payload_action in {"announce", "withdraw"} else "dry_run"
+        candidate["requested_mode"] = {
+            "announce": "announce_now",
+            "withdraw": "withdraw",
+        }.get(payload_action, "dry_run")
         policy = evaluate_mitigation_policy(candidate)
         candidate["policy"] = policy
         validation = validate_mitigation_candidate(candidate, connector, profile)
         action = payload_action
-        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
+        # A preview/dry-run has no operational TTL. The expiry clock starts only
+        # after the queued command is delivered with an established peer.
+        expires_at = None
         announce_command = render_exabgp_flowspec_command("announce", candidate)
         withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
+        tracked_withdraw = (
+            latest_bgp_delivery_for_withdraw_command(conn, connector_id, withdraw_command)
+            if action == "withdraw"
+            else None
+        )
+        if tracked_withdraw is not None:
+            # Capacity and exact-duplicate errors describe creation of a new
+            # rule. They must not prevent removal of the tracked rule itself.
+            validation = {
+                **validation,
+                "errors": [
+                    error
+                    for error in validation.get("errors") or []
+                    if not clean_text(error).startswith("Ja existe mitigacao equivalente ativa:")
+                    and clean_text(error) != "Limite de regras ativas do conector excedido."
+                ],
+            }
         if action == "dry_run":
             return manual_flowspec_preview_response(connector, candidate, payload, policy, validation, announce_command, withdraw_command, expires_at)
         if connector_is_dry_run(connector):
@@ -15859,46 +17199,91 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
             raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp")
         created_by = bgp_current_user(request)
         command = announce_command if action == "announce" else withdraw_command
+        if action == "withdraw" and tracked_withdraw is not None:
+            item = update_bgp_announcement_status(
+                request,
+                int(tracked_withdraw["id"]),
+                "withdrawn",
+                "flowspec_withdraw",
+                "Withdraw manual solicitado para o anuncio rastreado.",
+            )
+            return {
+                **item,
+                "ok": item.get("status") == "withdrawn",
+                "command": withdraw_command,
+                "policy": policy,
+                "matched_announcement_id": int(tracked_withdraw["id"]),
+            }
+        if action == "announce":
+            begin_immediate_if_idle(conn)
+            equivalent = equivalent_mitigation_announcement(conn, candidate["mitigation_key"])
+            if equivalent:
+                raise HTTPException(status_code=409, detail=f"Resposta equivalente ja ativa: anuncio #{equivalent['id']}.")
         if action == "withdraw":
-            last_error = ""
-            try:
-                exabgp_write_pipe(connector, withdraw_command)
-                status = "withdrawn"
-            except HTTPException as exc:
-                last_error = clean_text(exc.detail)
-                status = "failed_withdraw"
             try:
                 values = manual_flowspec_announcement_values(
-                    connector, candidate, payload, policy, validation, status,
+                    connector, candidate, payload, policy, validation, "queued",
                     announce_command, withdraw_command, withdraw_command, created_by,
-                    expires_at=None, announced_at=None, last_error=last_error,
+                    expires_at=None, announced_at=None,
                 )
                 announcement_id = insert_manual_flowspec_announcement(conn, values)
-                bgp_event(conn, announcement_id, f"flowspec_{action}", last_error or "Withdraw FlowSpec processado.", {"command": withdraw_command, "policy": policy}, created_by)
+                bgp_event(conn, announcement_id, "withdraw_queued", "Retirada manual registrada antes da escrita externa.", {"command": withdraw_command, "policy": policy}, created_by)
                 conn.commit()
             except sqlite3.Error as exc:
                 logger.error("Erro ao salvar withdraw manual FlowSpec: %s", exc)
                 return JSONResponse({"ok": False, "detail": "Erro ao salvar anúncio FlowSpec", "rollback_attempted": False, "rollback_success": False}, status_code=500)
-            row = conn.execute(
-                """
-                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
-                FROM bgp_announcements a
-                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
-                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
-                WHERE a.id = ?
-                """,
+            withdraw_claim_token = persist_bgp_withdraw_intent(
+                conn,
+                announcement_id,
+                created_by,
+                "Retirada manual pronta para entrega ao ExaBGP.",
+                {"command": withdraw_command},
+                expected_statuses={"queued"},
+            )
+            begin_immediate_if_idle(conn)
+            claimed_row = conn.execute(
+                "SELECT confirmation_level, status_details_json FROM bgp_announcements WHERE id = ? AND status = 'queued'",
                 (announcement_id,),
             ).fetchone()
-            return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": not last_error, "command": command, "policy": policy}
+            claimed_details = bgp_json_loads(claimed_row["status_details_json"], {}) if claimed_row is not None else {}
+            if (
+                claimed_row is None
+                or clean_text(claimed_row["confirmation_level"]) != "withdraw_requested"
+                or clean_text(claimed_details.get("withdraw_claim_token")) != clean_text(withdraw_claim_token)
+            ):
+                conn.rollback()
+                raise HTTPException(status_code=409, detail="A retirada perdeu a posse antes da escrita externa.")
+            last_error = ""
+            try:
+                exabgp_write_pipe(connector, withdraw_command)
+                final_status = "withdrawn"
+            except HTTPException as exc:
+                last_error = clean_text(exc.detail)
+                final_status = "failed_withdraw"
+            item = transition_bgp_announcement(
+                conn,
+                announcement_id,
+                final_status,
+                "flowspec_withdraw" if final_status == "withdrawn" else "withdraw_failed",
+                "Withdraw FlowSpec entregue ao ExaBGP." if final_status == "withdrawn" else last_error,
+                created_by,
+                confirmation_level="withdrawn" if final_status == "withdrawn" else "withdraw_failed",
+                last_error=last_error,
+                command=withdraw_command,
+                expected_statuses={"queued"},
+                expected_confirmation_level="withdraw_requested",
+            )
+            conn.commit()
+            return {**item, "ok": not last_error, "command": command, "policy": policy}
 
         try:
             values = manual_flowspec_announcement_values(
-                connector, candidate, payload, policy, validation, "prepared",
+                connector, candidate, payload, policy, validation, "queued",
                 announce_command, withdraw_command, announce_command, created_by,
-                expires_at=expires_at, announced_at=None,
+                expires_at=None, announced_at=None,
             )
             announcement_id = insert_manual_flowspec_announcement(conn, values)
-            bgp_event(conn, announcement_id, "flowspec_prepared", "Anuncio FlowSpec preparado antes do envio ao ExaBGP.", {"command": announce_command, "policy": policy}, created_by)
+            bgp_event(conn, announcement_id, "queued", "Anuncio FlowSpec aprovado e colocado na fila de envio.", {"command": announce_command, "policy": policy}, created_by)
             conn.commit()
         except sqlite3.Error as exc:
             try:
@@ -15909,94 +17294,18 @@ def test_bgp_connector_flowspec(request: Request, connector_id: int, payload: Bg
             return JSONResponse({"ok": False, "detail": "Erro ao salvar anúncio FlowSpec", "rollback_attempted": False, "rollback_success": False}, status_code=500)
 
         try:
-            exabgp_write_pipe(connector, announce_command)
+            item = attempt_bgp_announcement(conn, announcement_id, connector, announce_command, created_by)
         except HTTPException as exc:
-            last_error = clean_text(exc.detail)
-            now = utc_now_iso()
-            conn.execute(
-                """
-                UPDATE bgp_announcements
-                SET status = 'failed', last_error = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (last_error, now, announcement_id),
-            )
-            bgp_event(conn, announcement_id, "announce_failed", last_error or "Falha ao enviar announce FlowSpec.", {"command": announce_command, "policy": policy}, created_by)
-            conn.commit()
-            row = conn.execute(
-                """
-                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
-                FROM bgp_announcements a
-                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
-                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
-                WHERE a.id = ?
-                """,
-                (announcement_id,),
-            ).fetchone()
-            return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": False, "command": announce_command, "policy": policy}
-
-        announced_at = utc_now_iso()
-        active_expires_at = (datetime.now(timezone.utc) + timedelta(seconds=int(candidate.get("duration_seconds") or 0))).isoformat().replace("+00:00", "Z") if candidate.get("duration_seconds") else None
-        try:
-            conn.execute(
-                """
-                UPDATE bgp_announcements
-                SET status = 'active', announced_at = ?, expires_at = ?, updated_at = ?, last_error = ''
-                WHERE id = ?
-                """,
-                (announced_at, active_expires_at, announced_at, announcement_id),
-            )
-            bgp_event(conn, announcement_id, "flowspec_announce", "Comando FlowSpec anunciado ao ExaBGP.", {"command": announce_command, "policy": policy}, created_by)
-            conn.commit()
-        except sqlite3.Error as exc:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            rollback_success = False
-            rollback_error = ""
-            try:
-                exabgp_write_pipe(connector, withdraw_command)
-                rollback_success = True
-            except HTTPException as rollback_exc:
-                rollback_error = clean_text(rollback_exc.detail)
-            try:
-                recovery_status = "failed" if rollback_success else "failed_withdraw"
-                recovery_error = "Erro ao salvar anuncio ativo apos envio; rollback withdraw executado." if rollback_success else f"Erro ao salvar anuncio ativo apos envio; rollback withdraw falhou: {rollback_error}"
-                recovery_now = utc_now_iso()
-                conn.execute(
-                    """
-                    UPDATE bgp_announcements
-                    SET status = ?, last_error = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (recovery_status, recovery_error, recovery_now, announcement_id),
-                )
-                bgp_event(conn, announcement_id, "announce_db_failure", recovery_error, {"announce_command": announce_command, "withdraw_command": withdraw_command, "rollback_success": rollback_success}, created_by)
-                conn.commit()
-            except sqlite3.Error as recovery_exc:
-                logger.critical("Falha adicional ao registrar rollback FlowSpec %s: %s", announcement_id, recovery_exc)
-            logger.critical("Erro critico ao ativar anuncio FlowSpec %s apos envio; rollback withdraw tentado=%s sucesso=%s erro_db=%s erro_rollback=%s", announcement_id, True, rollback_success, exc, rollback_error)
             return JSONResponse(
-                {
-                    "ok": False,
-                    "detail": "Erro ao salvar anúncio FlowSpec",
-                    "rollback_attempted": True,
-                    "rollback_success": rollback_success,
-                },
-                status_code=500,
+                {"ok": False, "detail": clean_text(exc.detail) or "Erro ao processar anuncio FlowSpec"},
+                status_code=exc.status_code,
             )
-        row = conn.execute(
-            """
-            SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
-            FROM bgp_announcements a
-            LEFT JOIN bgp_connectors c ON c.id = a.connector_id
-            LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
-            WHERE a.id = ?
-            """,
-            (announcement_id,),
-        ).fetchone()
-        return {**bgp_announcement_row_to_dict(row, include_events=True, conn=conn), "ok": True, "command": announce_command, "policy": policy}
+        return {
+            **item,
+            "ok": item.get("status") == "advertised",
+            "command": announce_command,
+            "policy": policy,
+        }
 
 
 @app.put("/api/bgp/connectors/{connector_id}")
@@ -16375,18 +17684,18 @@ def active_anomalies_summary(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def bgp_summary_payload(conn: sqlite3.Connection) -> dict[str, int]:
-    now = utc_now_iso()
     today = datetime.now(timezone.utc).date().isoformat()
     row = conn.execute(
         """
         SELECT
-            SUM(CASE WHEN status IN ('active', 'announced') AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS active_bgp_announcements,
+            SUM(CASE WHEN status = 'advertised' THEN 1 ELSE 0 END) AS active_bgp_announcements,
             SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END) AS pending_bgp_announcements,
             SUM(CASE WHEN status IN ('failed', 'failed_withdraw') THEN 1 ELSE 0 END) AS failed_bgp_announcements,
+            SUM(CASE WHEN status = 'peer_down' THEN 1 ELSE 0 END) AS peer_down_bgp_announcements,
             SUM(CASE WHEN status = 'expired' AND substr(COALESCE(withdrawn_at, updated_at, created_at), 1, 10) = ? THEN 1 ELSE 0 END) AS expired_bgp_announcements_today
         FROM bgp_announcements
         """,
-        (now, today),
+        (today,),
     ).fetchone()
     anomaly_summary = active_anomalies_summary(conn)
     return {
@@ -16396,6 +17705,7 @@ def bgp_summary_payload(conn: sqlite3.Connection) -> dict[str, int]:
         "active_bgp_announcements": int(row["active_bgp_announcements"] or 0) if row else 0,
         "pending_bgp_announcements": int(row["pending_bgp_announcements"] or 0) if row else 0,
         "failed_bgp_announcements": int(row["failed_bgp_announcements"] or 0) if row else 0,
+        "peer_down_bgp_announcements": int(row["peer_down_bgp_announcements"] or 0) if row else 0,
         "expired_bgp_announcements_today": int(row["expired_bgp_announcements_today"] or 0) if row else 0,
     }
 
@@ -16517,8 +17827,17 @@ def create_bgp_dry_run_from_anomaly(request: Request, anomaly_id: int, payload: 
         connector = fetch_bgp_connector(conn, int(connector_id))
         candidate = candidate_from_anomaly(conn, anomaly_id, payload, profile)
         candidate["connector_id"] = connector["id"]
+        candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
         validation = validate_mitigation_candidate(candidate, connector, profile)
-        item = create_bgp_announcement(conn, candidate, connector, profile, validation, bgp_current_user(request), anomaly_id=anomaly_id)
+        item = create_bgp_announcement(
+            conn,
+            candidate,
+            connector,
+            profile,
+            validation,
+            bgp_current_user(request),
+            anomaly_id=int(candidate.get("anomaly_id") or anomaly_id),
+        )
         conn.commit()
         return item
 
@@ -16526,92 +17845,197 @@ def create_bgp_dry_run_from_anomaly(request: Request, anomaly_id: int, payload: 
 def update_bgp_announcement_status(request: Request, announcement_id: int, status: str, event_type: str, message: str) -> dict[str, Any]:
     require_admin(request)
     ensure_sensor_db()
-    now = utc_now_iso()
-    column = {"pending_approval": "approved_at", "announced": "approved_at", "rejected": "rejected_at", "withdrawn": "withdrawn_at"}[status]
+    created_by = bgp_current_user(request)
     with sqlite_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (announcement_id,)).fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Dry-run BGP nao encontrado")
+            raise HTTPException(status_code=404, detail="Anuncio BGP nao encontrado")
+        item = dict(row)
         connector = fetch_bgp_connector(conn, int(row["connector_id"])) if row["connector_id"] is not None else None
-        final_status = status
-        last_error = ""
-        command = clean_text(row["rendered_command"])
-        if status == "pending_approval" and connector and connector_is_dry_run(connector):
-            final_status = "dry_run"
-            event_type = "dry_run_created"
-            message = "Conector em dry_run; nenhum anuncio real foi enviado."
-        elif status == "pending_approval" and connector and connector.get("backend_type") == "exabgp":
+        command = clean_text(row["announce_command"] or row["rendered_command"])
+        if status == "pending_approval":
+            if clean_text(row["status"]) != "pending_approval":
+                raise HTTPException(status_code=409, detail="Somente anuncio pendente pode ser aprovado.")
             errors = bgp_json_loads(row["validation_errors"], [])
             if errors:
                 raise HTTPException(status_code=400, detail="Nao e possivel aprovar anuncio com erros de validacao")
-            try:
-                exabgp_write_pipe(connector, command)
-                final_status = "active"
-                event_type = "announced"
-                message = "Comando announce enviado ao pipe ExaBGP."
-            except HTTPException as exc:
-                final_status = "failed"
-                last_error = clean_text(exc.detail)
-                event_type = "announce_failed"
-                message = last_error
-        elif status == "withdrawn" and connector and connector_is_dry_run(connector):
-            message = "Conector em dry_run; withdraw real nao foi enviado."
-        elif status == "withdrawn" and connector and connector.get("backend_type") == "exabgp":
-            withdraw_command = render_bgp_withdraw_command(row)
-            try:
-                exabgp_write_pipe(connector, withdraw_command)
-                command = withdraw_command
-                message = "Comando withdraw enviado ao pipe ExaBGP."
-            except HTTPException as exc:
+            if connector is None:
+                raise HTTPException(status_code=400, detail="Conector BGP indisponivel.")
+            if connector_is_dry_run(connector):
+                result = transition_bgp_announcement(
+                    conn,
+                    announcement_id,
+                    "dry_run",
+                    "dry_run_created",
+                    "Conector em dry_run; nenhum anuncio real foi enviado.",
+                    created_by,
+                    confirmation_level="simulation_only",
+                    command=command,
+                )
+                conn.commit()
+            elif connector.get("backend_type") != "exabgp":
+                raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp para anunciar.")
+            else:
+                result = attempt_bgp_announcement(conn, announcement_id, connector, command, created_by)
+        elif status == "rejected":
+            current_status = clean_text(row["status"])
+            current_details = bgp_json_loads(row["status_details_json"], {})
+            delivery_in_progress = bool(
+                clean_text(row["confirmation_level"]) == "delivery_attempted"
+                or current_details.get("send_claim_token")
+            )
+            rejectable = current_status in {"pending_approval", "prepared", "dry_run"} or (
+                current_status in {"queued", "peer_down", "failed"} and row["sent_at"] is None and not delivery_in_progress
+            )
+            if not rejectable:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Anuncio ja entregue ao ExaBGP nao pode ser rejeitado; use withdraw.",
+                )
+            result = transition_bgp_announcement(
+                conn,
+                announcement_id,
+                "rejected",
+                event_type,
+                message,
+                created_by,
+                confirmation_level="operator_rejected",
+                command=command,
+            )
+            conn.commit()
+        elif status == "withdrawn":
+            if clean_text(row["status"]) in {"withdrawn", "expired"}:
+                raise HTTPException(status_code=409, detail="Anuncio ja retirado ou expirado.")
+            final_status = "withdrawn"
+            withdraw_result: dict[str, Any] | None = None
+            last_error = ""
+            withdraw_command = render_bgp_withdraw_command(item)
+            current_details = bgp_json_loads(row["status_details_json"], {})
+            was_delivered = bool(
+                row["sent_at"]
+                or row["advertised_at"]
+                or row["announced_at"]
+                or clean_text(row["status"]) in {"active", "announced", "failed_withdraw"}
+                or clean_text(row["confirmation_level"]) in {
+                    "delivery_attempted",
+                    "delivery_persistence_failed",
+                    "withdraw_failed",
+                    "withdraw_requested",
+                }
+                or current_details.get("send_claim_token")
+            )
+            withdraw_claim_token = ""
+            if was_delivered:
+                withdraw_claim_token = clean_text(persist_bgp_withdraw_intent(
+                    conn,
+                    announcement_id,
+                    created_by,
+                    "Retirada solicitada pelo operador e persistida antes da escrita externa.",
+                    {"status": clean_text(row["status"]), "command": withdraw_command},
+                    expected_statuses={clean_text(row["status"])},
+                ))
+                begin_immediate_if_idle(conn)
+                claimed_row = conn.execute("SELECT * FROM bgp_announcements WHERE id = ?", (announcement_id,)).fetchone()
+                item = dict(claimed_row) if claimed_row is not None else {}
+                claimed_details = bgp_json_loads(item.get("status_details_json"), {})
+                if (
+                    not item
+                    or clean_text(item.get("confirmation_level")) != "withdraw_requested"
+                    or clean_text(claimed_details.get("withdraw_claim_token")) != withdraw_claim_token
+                ):
+                    conn.rollback()
+                    raise HTTPException(status_code=409, detail="A retirada perdeu a posse antes da escrita externa.")
+                superseding = newer_equivalent_bgp_delivery(conn, item)
+                if superseding is not None:
+                    message = "Withdraw antigo omitido: tentativa equivalente mais nova preservada."
+                    withdraw_result = transition_bgp_announcement(
+                        conn,
+                        announcement_id,
+                        "withdrawn",
+                        "withdraw_superseded",
+                        message,
+                        created_by,
+                        peer_state=clean_text(item.get("peer_state")),
+                        confirmation_level="superseded_by_newer_delivery",
+                        details={"superseded_by_announcement_id": int(superseding["id"])},
+                        command=withdraw_command,
+                        expected_statuses={clean_text(item.get("status"))},
+                        expected_confirmation_level="withdraw_requested",
+                    )
+                    conn.commit()
+                else:
+                    connector = fetch_bgp_connector(conn, int(item["connector_id"])) if item.get("connector_id") is not None else None
+            if was_delivered and withdraw_result is None and connector and connector.get("backend_type") == "exabgp" and not connector_is_dry_run(connector):
+                try:
+                    exabgp_write_pipe(connector, withdraw_command)
+                    message = "Comando withdraw entregue ao pipe ExaBGP."
+                except HTTPException as exc:
+                    final_status = "failed_withdraw"
+                    last_error = clean_text(exc.detail)
+                    event_type = "withdraw_failed"
+                    message = last_error
+            elif not was_delivered:
+                message = "Registro retirado sem write: o anuncio nunca havia sido entregue ao ExaBGP."
+            elif withdraw_result is None:
                 final_status = "failed_withdraw"
-                last_error = clean_text(exc.detail)
+                last_error = "Withdraw real nao enviado: conector ExaBGP indisponivel ou em dry_run."
                 event_type = "withdraw_failed"
                 message = last_error
-        expires_at = row["expires_at"]
-        if final_status == "active":
-            duration = int(row["duration_seconds"] or 0)
-            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat().replace("+00:00", "Z") if duration else None
-        conn.execute(
-            f"""
-            UPDATE bgp_announcements
-            SET status = ?,
-                updated_at = ?,
-                {column} = ?,
-                announced_at = CASE WHEN ? = 'active' THEN ? ELSE announced_at END,
-                expires_at = ?,
-                last_error = ?
-            WHERE id = ?
-            """,
-            (final_status, now, now, final_status, now, expires_at, last_error, announcement_id),
-        )
-        bgp_event(conn, announcement_id, event_type, message, {"command": command}, bgp_current_user(request))
-        conn.commit()
-        row = conn.execute(
-            """
-            SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
-            FROM bgp_announcements a
-            LEFT JOIN bgp_connectors c ON c.id = a.connector_id
-            LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
-            WHERE a.id = ?
-            """,
-            (announcement_id,),
-        ).fetchone()
-        return bgp_announcement_row_to_dict(row, include_events=True, conn=conn)
+            if withdraw_result is None:
+                withdraw_result = transition_bgp_announcement(
+                    conn,
+                    announcement_id,
+                    final_status,
+                    event_type,
+                    message,
+                    created_by,
+                    peer_state=clean_text(row["peer_state"]),
+                    confirmation_level="withdrawn" if final_status == "withdrawn" else "withdraw_failed",
+                    last_error=last_error,
+                    command=withdraw_command,
+                    expected_statuses={clean_text(item.get("status") or row["status"])} if was_delivered else {clean_text(row["status"])},
+                    expected_confirmation_level="withdraw_requested" if was_delivered else "",
+                )
+                conn.commit()
+            result = withdraw_result
+        else:
+            raise HTTPException(status_code=400, detail="Transicao de anuncio invalida.")
+
+        if result.get("anomaly_id"):
+            profile = fetch_bgp_profile(conn, int(result["response_profile_id"])) if result.get("response_profile_id") else None
+            outcome_status = "applied" if result.get("status") == "advertised" else clean_text(result.get("status"))
+            record_auto_mitigation_outcome(
+                conn,
+                result,
+                outcome_status,
+                clean_text(result.get("last_error")),
+                profile,
+                result,
+                created_by,
+                result.get("requested_mode") or "manual_approval",
+                {
+                    "peer_state": result.get("peer_state") or "",
+                    "confirmation_level": result.get("confirmation_level") or "registered",
+                },
+            )
+            conn.commit()
+        return fetch_bgp_announcement(conn, announcement_id, include_events=True)
 
 
 @app.post("/api/bgp/announcements/{announcement_id}/approve")
 def approve_bgp_announcement(request: Request, announcement_id: int):
-    return update_bgp_announcement_status(request, announcement_id, "pending_approval", "approved_for_manual_review", "Dry-run aprovado para revisao manual. Nenhum anuncio real foi enviado.")
+    return update_bgp_announcement_status(request, announcement_id, "pending_approval", "approved_for_manual_review", "Proposta BGP aprovada pelo operador.")
 
 
 @app.post("/api/bgp/announcements/{announcement_id}/reject")
 def reject_bgp_announcement(request: Request, announcement_id: int):
-    return update_bgp_announcement_status(request, announcement_id, "rejected", "rejected", "Dry-run BGP rejeitado.")
+    return update_bgp_announcement_status(request, announcement_id, "rejected", "rejected", "Proposta BGP rejeitada pelo operador.")
 
 
 @app.post("/api/bgp/announcements/{announcement_id}/withdraw")
 def withdraw_bgp_announcement(request: Request, announcement_id: int):
-    return update_bgp_announcement_status(request, announcement_id, "withdrawn", "withdrawn", "Dry-run marcado como withdrawn. Nenhum withdraw real foi enviado.")
+    return update_bgp_announcement_status(request, announcement_id, "withdrawn", "withdrawn", "Retirada solicitada pelo operador.")
 
 
 @app.get("/api/ip-zones")
@@ -18745,6 +20169,10 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "message": item.get("message") or "",
         "recommended_action": item.get("recommended_action") or "",
         "response": item.get("response") or "DETECTION_ONLY",
+        "auto_mitigation_status": item.get("auto_mitigation_status") or "",
+        "auto_mitigation_reason": item.get("auto_mitigation_reason") or "",
+        "auto_mitigation_details": bgp_json_loads(item.get("auto_mitigation_details_json"), {}),
+        "auto_mitigation_updated_at": item.get("auto_mitigation_updated_at") or "",
         "anomaly_source": item.get("anomaly_source") or "detection_template_rule",
         "source_engine": item.get("source_engine") or "detection_templates",
         "source_id": item.get("source_id") or (str(item.get("rule_id")) if item.get("rule_id") is not None else ""),
@@ -18767,6 +20195,9 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
     result["type_label"] = result["display_name"] or anomaly_type_label(result.get("vector") or result.get("source_name") or result.get("protocol"))
     result["technical_vector"] = result.get("vector") or ""
     result["technical_rule"] = result.get("source_name") or result.get("vector") or ""
+    result["action_id"] = legacy_consolidated_security_anomaly_id(
+        security_consolidation_key(result, include_status=clean_text(result.get("status")).lower() != "active")
+    )
     result["compact_summary"] = anomaly_short_summary({
         **result,
         "peak_value": result.get("packets_s") if result.get("packets_s") else result.get("bits_s"),
@@ -18818,11 +20249,35 @@ def resolve_security_anomaly_identifier(
     return None
 
 
+def latest_security_anomaly_mitigation(items: list[dict[str, Any]], fallback: dict[str, Any]) -> dict[str, Any]:
+    candidates = [
+        item
+        for item in items
+        if clean_text(item.get("auto_mitigation_status"))
+        or clean_text(item.get("auto_mitigation_reason"))
+        or item.get("auto_mitigation_details")
+        or clean_text(item.get("auto_mitigation_updated_at"))
+    ]
+    if not candidates:
+        return fallback
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    return max(
+        candidates,
+        key=lambda item: (
+            parse_datetime_text(item.get("auto_mitigation_updated_at")) or minimum,
+            int(item.get("id") or 0),
+        ),
+    )
+
+
 def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id: int | None = None) -> dict[str, Any]:
     if not items:
         raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
     representative = max(items, key=lambda item: (severity_rank(item.get("severity")), float(item.get("packets_s") or 0), float(item.get("bits_s") or 0)))
     real_id = int(preferred_id or representative["id"])
+    mitigation = latest_security_anomaly_mitigation(items, representative)
+    consolidation_key = security_consolidation_key(representative)
+    action_id = legacy_consolidated_security_anomaly_id(consolidation_key)
     first_seen_values = [parse_datetime_text(item.get("first_seen")) for item in items]
     last_seen_values = [parse_datetime_text(item.get("last_seen")) for item in items]
     first_seen_values = [value for value in first_seen_values if value is not None]
@@ -18885,10 +20340,10 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
     source_details.setdefault("security_anomaly_ids", [int(item["id"]) for item in items])
     return {
         "id": real_id,
-        "action_id": real_id,
+        "action_id": action_id,
         "security_anomaly_id": real_id,
         "security_anomaly_ids": [int(item["id"]) for item in items],
-        "legacy_event_id": consolidated_security_anomaly_id(security_consolidation_key(representative)),
+        "legacy_event_id": consolidated_security_anomaly_id(consolidation_key),
         "source": "security_anomalies",
         "anomaly_source": clean_text(representative.get("anomaly_source")) or "detection_template_rule",
         "source_engine": clean_text(representative.get("source_engine")) or "detection_templates",
@@ -18916,6 +20371,10 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         "top_dst_port": top_dst_port or None,
         "mitigation_basis": clean_text(representative.get("mitigation_basis") or source_details.get("mitigation_basis")),
         "mitigation_reason": clean_text(representative.get("mitigation_reason") or source_details.get("mitigation_reason")),
+        "auto_mitigation_status": clean_text(mitigation.get("auto_mitigation_status")),
+        "auto_mitigation_reason": clean_text(mitigation.get("auto_mitigation_reason")),
+        "auto_mitigation_details": dict(mitigation.get("auto_mitigation_details") or {}),
+        "auto_mitigation_updated_at": clean_text(mitigation.get("auto_mitigation_updated_at")),
         "zone_id": representative.get("zone_id"),
         "zone_name": zone_name,
         "vector_name": vector,
@@ -23614,6 +25073,7 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         if not items:
             continue
         representative = max(items, key=lambda item: (severity_rank(item.get("severity")), float(item.get("packets_s") or 0), float(item.get("bits_s") or 0)))
+        mitigation = latest_security_anomaly_mitigation(items, representative)
         first_seen_values = [parse_datetime_text(item.get("first_seen")) for item in items]
         last_seen_values = [parse_datetime_text(item.get("last_seen")) for item in items]
         first_seen_values = [value for value in first_seen_values if value is not None]
@@ -23661,9 +25121,10 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         )
         representative_id = int(representative["id"])
         legacy_event_id = consolidated_security_anomaly_id(group["key"])
+        action_id = legacy_consolidated_security_anomaly_id(group["key"])
         event = {
             "id": representative_id,
-            "action_id": representative_id,
+            "action_id": action_id,
             "security_anomaly_id": representative_id,
             "legacy_event_id": legacy_event_id,
             "source": "security_anomalies",
@@ -23703,6 +25164,10 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
             "vector_name": vector,
             "scope_type": scope_type,
             "invalid_scope": invalid_scope,
+            "auto_mitigation_status": clean_text(mitigation.get("auto_mitigation_status")),
+            "auto_mitigation_reason": clean_text(mitigation.get("auto_mitigation_reason")),
+            "auto_mitigation_details": dict(mitigation.get("auto_mitigation_details") or {}),
+            "auto_mitigation_updated_at": clean_text(mitigation.get("auto_mitigation_updated_at")),
             "direction": clean_text(representative.get("direction")) or "-",
             "decoder": decoder,
             "severity": max((clean_text(item.get("severity")) or "info" for item in items), key=severity_rank),
@@ -23726,6 +25191,195 @@ def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, A
         }
         consolidated.append({"event": event, "items": items, "key": group["key"]})
     return consolidated
+
+
+def bgp_response_announcement_rank(announcement: dict[str, Any]) -> int:
+    status = clean_text(announcement.get("status")).lower()
+    if status == "advertised" and bool(announcement.get("operationally_active")):
+        return 4
+    if status in {"sent", "queued"}:
+        return 3
+    if status == "pending_approval":
+        return 2
+    return 1
+
+
+def bgp_response_announcement_sort_key(announcement: dict[str, Any]) -> tuple[Any, ...]:
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    updated = (
+        parse_datetime_text(announcement.get("updated_at"))
+        or parse_datetime_text(announcement.get("last_attempt_at"))
+        or parse_datetime_text(announcement.get("created_at"))
+        or minimum
+    )
+    return (bgp_response_announcement_rank(announcement), updated, int(announcement.get("id") or 0))
+
+
+def anomaly_linked_announcement_ids(item: dict[str, Any]) -> set[int]:
+    details = item.get("auto_mitigation_details")
+    if not isinstance(details, dict):
+        details = {}
+    values: list[Any] = [details.get("announcement_id"), details.get("bgp_announcement_id")]
+    values.extend(details.get("announcement_ids") if isinstance(details.get("announcement_ids"), list) else [])
+    return {int(value) for value in values if int_or_none(value) is not None and int(value) > 0}
+
+
+def anomaly_security_ids(item: dict[str, Any]) -> set[int]:
+    values = item.get("security_anomaly_ids") if isinstance(item.get("security_anomaly_ids"), list) else []
+    values = [*values, item.get("security_anomaly_id"), item.get("id")]
+    return {int(value) for value in values if int_or_none(value) is not None and int(value) > 0}
+
+
+def response_announcement_summary(announcement: dict[str, Any], anomaly: dict[str, Any]) -> dict[str, Any]:
+    summary = dict(announcement)
+    details = anomaly.get("auto_mitigation_details")
+    if not isinstance(details, dict):
+        details = {}
+    raw_payload = announcement.get("raw_payload")
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+    raw_anomaly = raw_payload.get("anomaly")
+    if not isinstance(raw_anomaly, dict):
+        raw_anomaly = {}
+    linked_announcement_id = int_or_none(details.get("announcement_id") or details.get("bgp_announcement_id"))
+    linked_details = details if linked_announcement_id == int(announcement["id"]) else {}
+    origin_ip = (
+        clean_ip(raw_anomaly.get("top_src_ip"))
+        or (clean_ip(raw_anomaly.get("target_ip")) if clean_text(raw_anomaly.get("target_role")).lower() == "src_ip" else "")
+        or clean_ip(raw_anomaly.get("src_ip"))
+        or clean_ip(linked_details.get("source_ip"))
+        or clean_ip(anomaly.get("top_src_ip"))
+        or (clean_ip(anomaly.get("target_ip")) if clean_text(anomaly.get("target_role")).lower() == "src_ip" else "")
+    )
+    requested_mode = clean_text(announcement.get("requested_mode") or linked_details.get("requested_mode")).lower()
+    response_origin = ""
+    if requested_mode in {"auto", "automatic"}:
+        response_origin = "automatic"
+    elif requested_mode:
+        response_origin = "manual"
+    if not response_origin:
+        source = clean_text(announcement.get("source")).lower()
+        created_by = clean_text(announcement.get("created_by")).lower()
+        if source in {"automatic", "automation", "ai_mitigation"} or created_by in {"worker", "scheduler", "bgp-status-checker"}:
+            response_origin = "automatic"
+        else:
+            response_origin = clean_text(linked_details.get("origin")).lower()
+    if response_origin not in {"manual", "automatic"}:
+        response_origin = "manual"
+    announcement_reason = clean_text(announcement.get("last_error"))
+    if linked_announcement_id == int(announcement["id"]):
+        announcement_reason = clean_text(anomaly.get("auto_mitigation_reason")) or announcement_reason
+    effective_status = clean_text(announcement.get("status")).lower()
+    summary.update(
+        {
+            "announcement_id": int(announcement["id"]),
+            "effective_status": effective_status,
+            "peer_status": clean_text(announcement.get("peer_state")),
+            "zone_id": int_or_none(raw_anomaly.get("zone_id") or linked_details.get("zone_id") or anomaly.get("zone_id")),
+            "zone_name": clean_text(raw_anomaly.get("zone_name") or anomaly.get("zone_name")),
+            "origin_ip": origin_ip,
+            "response_origin": response_origin,
+            "mode": response_origin,
+            "requested_mode": requested_mode,
+            "reason": announcement_reason,
+        }
+    )
+    return summary
+
+
+def enrich_anomalies_with_responses(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not items:
+        return items
+    anomaly_ids: set[int] = set()
+    linked_owners: dict[int, set[int]] = {}
+    security_ids_by_index: dict[int, set[int]] = {}
+    regular_id_by_index: dict[int, int] = {}
+    for index, item in enumerate(items):
+        linked_ids = anomaly_linked_announcement_ids(item)
+        for announcement_id in linked_ids:
+            linked_owners.setdefault(announcement_id, set()).add(index)
+        if clean_text(item.get("source")).lower() == "security_anomalies":
+            security_ids = anomaly_security_ids(item)
+            security_ids_by_index[index] = security_ids
+            anomaly_ids.update(security_ids)
+        else:
+            anomaly_id = int_or_none(item.get("id"))
+            if anomaly_id is not None and anomaly_id > 0:
+                regular_id_by_index[index] = anomaly_id
+                anomaly_ids.add(anomaly_id)
+    query_ids = sorted(anomaly_ids | set(linked_owners))
+    announcements_by_index: dict[int, dict[int, dict[str, Any]]] = {index: {} for index in range(len(items))}
+    if query_ids:
+        id_list = ",".join(str(value) for value in query_ids)
+        with sqlite_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT a.*, c.name AS connector_name, p.name AS response_profile_name
+                FROM bgp_announcements a
+                LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+                LEFT JOIN bgp_response_profiles p ON p.id = a.response_profile_id
+                WHERE a.anomaly_id IN ({id_list}) OR a.id IN ({id_list})
+                ORDER BY a.updated_at DESC, a.id DESC
+                """
+            ).fetchall()
+        for row in rows:
+            announcement = bgp_announcement_row_to_dict(row)
+            announcement_id = int(announcement["id"])
+            explicit_owners = linked_owners.get(announcement_id)
+            if explicit_owners:
+                for index in explicit_owners:
+                    announcements_by_index[index][announcement_id] = announcement
+            anomaly_id = int_or_none(announcement.get("anomaly_id"))
+            if anomaly_id is None:
+                continue
+            announcement_source = clean_text(announcement.get("anomaly_source")).lower()
+            if announcement_source in {"security_anomaly", "security_anomalies"}:
+                for index, security_ids in security_ids_by_index.items():
+                    if anomaly_id in security_ids:
+                        announcements_by_index[index][announcement_id] = announcement
+            else:
+                for index, regular_id in regular_id_by_index.items():
+                    if anomaly_id == regular_id:
+                        announcements_by_index[index][announcement_id] = announcement
+    for index, item in enumerate(items):
+        summaries = [
+            response_announcement_summary(announcement, item)
+            for announcement in announcements_by_index[index].values()
+        ]
+        summaries.sort(key=bgp_response_announcement_sort_key, reverse=True)
+        selected = summaries[0] if summaries else None
+        auto_status = clean_text(item.get("auto_mitigation_status")).lower()
+        auto_reason = clean_text(item.get("auto_mitigation_reason"))
+        auto_updated_at = clean_text(item.get("auto_mitigation_updated_at"))
+        linked_ids = anomaly_linked_announcement_ids(item)
+        linked_summary_exists = any(int(summary.get("announcement_id") or 0) in linked_ids for summary in summaries)
+        standalone_outcome = bool(auto_status and not linked_summary_exists)
+        selected_is_priority_state = bool(selected and bgp_response_announcement_rank(selected) >= 2)
+        selected_updated = parse_datetime_text((selected or {}).get("updated_at"))
+        outcome_updated = parse_datetime_text(auto_updated_at)
+        outcome_wins = bool(
+            standalone_outcome
+            and not selected_is_priority_state
+            and (
+                selected is None
+                or (outcome_updated is not None and (selected_updated is None or outcome_updated >= selected_updated))
+            )
+        )
+        response_selected = None if outcome_wins else selected
+        item["response_announcements"] = summaries
+        item["response_outcome"] = {
+            "status": auto_status,
+            "reason": auto_reason,
+            "updated_at": auto_updated_at,
+            "details": item.get("auto_mitigation_details") if isinstance(item.get("auto_mitigation_details"), dict) else {},
+            "standalone": standalone_outcome,
+        } if auto_status else None
+        item["response_announcement"] = response_selected
+        item["response_status"] = auto_status if outcome_wins else clean_text((response_selected or {}).get("effective_status")) or auto_status
+        item["response_reason"] = auto_reason if outcome_wins else clean_text((response_selected or {}).get("reason") or (response_selected or {}).get("last_error"))
+        item["response_updated_at"] = auto_updated_at if outcome_wins else clean_text((response_selected or {}).get("updated_at")) or auto_updated_at
+        item["response_announcement_count"] = len(summaries)
+    return items
 
 
 def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = None, source_engine: str | None = None) -> list[dict[str, Any]]:
@@ -23771,7 +25425,8 @@ def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = No
         items = [item for item in items if clean_text(item.get("status")).lower() == "active"]
     else:
         items = [item for item in items if clean_text(item.get("status")).lower() != "active"]
-    return sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
+    page = sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
+    return enrich_anomalies_with_responses(page)
 
 
 def anomaly_detail_payload(
@@ -24290,11 +25945,14 @@ def anomaly_detail(request: Request, event_id: int):
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         return consolidated_security_anomaly_detail_payload(group)
-    group = find_consolidated_security_anomaly_group(event_id)
-    if group is not None:
-        return consolidated_security_anomaly_detail_payload(group)
+    with sqlite_connection() as lookup_conn:
+        regular_exists = lookup_conn.execute("SELECT 1 FROM anomaly_events WHERE id = ?", (event_id,)).fetchone() is not None
+    if not regular_exists:
+        group = find_consolidated_security_anomaly_group(event_id)
+        if group is not None:
+            return consolidated_security_anomaly_detail_payload(group)
     with sqlite_connection() as conn:
-        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+        security_item = None if regular_exists else resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
         if security_item is not None:
             event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
             conversations = {}
@@ -24593,23 +26251,27 @@ def anomaly_detail_pdf(request: Request, event_id: int):
 
 
 @app.post("/api/anomalies/{event_id}/mitigation/evaluate")
-def evaluate_anomaly_mitigation(request: Request, event_id: int):
+def evaluate_anomaly_mitigation(
+    request: Request,
+    event_id: int,
+    payload: BgpAnomalyMitigationEvaluatePayload | None = None,
+):
     require_admin(request)
-    payload = evaluated_mitigation_candidates(event_id)
-    evidence_status = "complete" if payload["candidates"] else "insufficient"
-    automatic_candidates = [candidate for candidate in payload["candidates"] if candidate.get("allow_auto")]
+    evaluation = evaluated_mitigation_candidates(event_id, payload.connector_id if payload else None)
+    evidence_status = "complete" if evaluation["candidates"] else "insufficient"
+    automatic_candidates = [candidate for candidate in evaluation["candidates"] if candidate.get("allow_auto")]
+    actionable_candidates = [candidate for candidate in evaluation["candidates"] if candidate.get("actionable")]
     return {
-        "anomaly": payload["anomaly"],
+        "anomaly": evaluation["anomaly"],
         "evidence_status": evidence_status,
-        "mitigation_allowed": bool(payload["candidates"]),
-        "recommended_action": "automatic_dry_run" if automatic_candidates else "manual_review" if payload["candidates"] else "alert_only",
+        "mitigation_allowed": bool(actionable_candidates),
+        "recommended_action": "automatic" if automatic_candidates else "manual_review" if evaluation["candidates"] else "alert_only",
         "manual_approval_required": not bool(automatic_candidates),
-        "apply_enabled": False,
-        "dry_run": True,
-        "dry_run_message": "Seria aplicado automaticamente; nao aplicado porque e dry-run." if automatic_candidates else "Dry-run: nenhuma acao de mitigacao foi enviada.",
-        "legacy_dns_mitigation_disabled": bool(payload.get("legacy_dns_mitigation_disabled")),
-        "message": payload.get("message") or "",
-        "candidates": payload["candidates"],
+        "apply_enabled": bool(actionable_candidates),
+        "evaluation_only": True,
+        "message": evaluation.get("message") or "Avaliacao concluida; nenhum comando foi enviado.",
+        "legacy_dns_mitigation_disabled": bool(evaluation.get("legacy_dns_mitigation_disabled")),
+        "candidates": evaluation["candidates"],
     }
 
 
@@ -24628,12 +26290,78 @@ def apply_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomal
             raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
         candidate.pop("policy_decision", None)
         candidate.pop("rendered_command", None)
+        if payload.connector_id is not None:
+            candidate["operator_connector_id"] = int(payload.connector_id)
         selected.append(candidate)
     with sqlite_connection() as conn:
         selected_dns_target_ips = {clean_ip(item) for item in payload.selected_dns_target_ips or [] if clean_ip(item)}
-        item = apply_mitigation_candidates(conn, selected, payload.mode, bgp_current_user(request), selected_dns_target_ips)
+        try:
+            item = apply_mitigation_candidates(conn, selected, payload.mode, bgp_current_user(request), selected_dns_target_ips)
+        except HTTPException:
+            # Validation/policy failures deliberately persist the manual
+            # outcome before returning 4xx. Do not let the connection context
+            # roll that audit trail back.
+            conn.commit()
+            raise
         conn.commit()
+        if (
+            len(selected) == 1
+            and not selected[0].get("multi_target_dns")
+            and isinstance(item, dict)
+            and int(item.get("count") or 0) == 0
+            and item.get("skipped")
+        ):
+            # The outcome update above is durable, but a single manual action
+            # still receives a conflict response so the UI cannot mistake a
+            # deduplicated request for a newly-created announcement.
+            raise HTTPException(status_code=409, detail=clean_text(item["skipped"][0].get("reason")))
         return {"anomaly": evaluated["anomaly"], "announcement": item}
+
+
+@app.post("/api/anomalies/{event_id}/mitigation/reject", status_code=201)
+def reject_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomalyMitigationRejectPayload):
+    require_admin(request)
+    evaluated = evaluated_mitigation_candidates(event_id, payload.connector_id)
+    candidates = evaluated.get("candidates") or []
+    if payload.candidate_index >= len(candidates):
+        raise HTTPException(status_code=400, detail="candidate_index invalido")
+    candidate = dict(candidates[payload.candidate_index])
+    candidate["requested_mode"] = "manual_rejection"
+    policy = candidate.pop("policy_decision", {}) or policy_for_candidate(candidate)
+    validation = candidate.pop("validation", None) or {
+        "errors": candidate.get("validation_errors") or [],
+        "warnings": candidate.get("validation_warnings") or [],
+    }
+    created_by = bgp_current_user(request)
+    reason = clean_text(payload.reason)[:1000] or "manual_rejection"
+    with sqlite_connection() as conn:
+        profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+        connector = active_connector_by_id(conn, payload.connector_id or candidate.get("connector_id"))
+        command = clean_text(candidate.get("announce_command") or candidate.get("rendered_command"))
+        announcement = insert_bgp_mitigation_announcement(
+            conn,
+            candidate,
+            connector,
+            profile,
+            policy,
+            validation,
+            "rejected",
+            command,
+            created_by,
+            reason,
+        )
+        record_auto_mitigation_outcome(
+            conn,
+            candidate,
+            "rejected",
+            reason,
+            profile,
+            announcement,
+            created_by,
+            "manual_rejection",
+        )
+        conn.commit()
+    return {"anomaly": evaluated["anomaly"], "announcement": announcement}
 
 
 @app.post("/api/anomalies/{event_id}/mitigation/withdraw")
@@ -24642,8 +26370,31 @@ def withdraw_anomaly_mitigations(request: Request, event_id: int, payload: BgpAn
     ensure_sensor_db()
     ids = sorted({int(item) for item in payload.announcement_ids or [] if int(item) > 0})
     with sqlite_connection() as conn:
-        filters = ["anomaly_id = ?", "status IN ('active', 'announced', 'pending_approval')"]
-        values: list[Any] = [event_id]
+        security_ids: list[int] = []
+        regular_event = None
+        if event_id >= 0:
+            regular_event = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+        if event_id < 0 or regular_event is None:
+            group = find_consolidated_security_anomaly_group(event_id)
+            if group is not None:
+                security_ids = sorted(int(item["id"]) for item in group.get("items") or [])
+        if security_ids:
+            filters = [
+                f"anomaly_id IN ({','.join('?' for _ in security_ids)})",
+                "lower(COALESCE(anomaly_source, '')) IN ('security_anomaly', 'security_anomalies')",
+            ]
+            values: list[Any] = list(security_ids)
+        else:
+            filters = [
+                "anomaly_id = ?",
+                "lower(COALESCE(anomaly_source, '')) NOT IN ('security_anomaly', 'security_anomalies')",
+            ]
+            values = [event_id]
+        filters.append(
+            "(status IN ('sent', 'advertised', 'active', 'announced', 'failed_withdraw') "
+            "OR (status = 'peer_down' AND (sent_at IS NOT NULL OR advertised_at IS NOT NULL OR announced_at IS NOT NULL)) "
+            "OR (status = 'queued' AND confirmation_level IN ('delivery_attempted', 'withdraw_requested')))"
+        )
         if ids:
             filters.append(f"id IN ({','.join('?' for _ in ids)})")
             values.extend(ids)
@@ -24677,29 +26428,30 @@ def acknowledge_anomaly(request: Request, event_id: int):
         conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
-        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
-        if security_item is not None:
+        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+        if row is not None:
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET status = 'acknowledged',
+                    ended_at = COALESCE(ended_at, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, event_id),
+            )
+            conn.commit()
+        else:
+            security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+            if security_item is None:
+                raise security_anomaly_not_found(event_id)
             anomaly_id = int(security_item["id"])
             conn.execute(
                 "UPDATE security_anomalies SET status = 'acknowledged', updated_at = ? WHERE id = ?",
                 (now, anomaly_id),
             )
             conn.commit()
-            return {"ok": True, "id": anomaly_id, "action_id": anomaly_id}
-        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
-        if row is None:
-            raise security_anomaly_not_found(event_id)
-        conn.execute(
-            """
-            UPDATE anomaly_events
-            SET status = 'acknowledged',
-                ended_at = COALESCE(ended_at, ?),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (now, now, event_id),
-        )
-        conn.commit()
+            return {"ok": True, "id": anomaly_id, "action_id": legacy_consolidated_security_anomaly_id(security_consolidation_key(security_item))}
     return {"ok": True}
 
 
@@ -24722,29 +26474,30 @@ def close_anomaly(request: Request, event_id: int):
         conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
-        security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
-        if security_item is not None:
+        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+        if row is not None:
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET status = 'ended',
+                    ended_at = COALESCE(ended_at, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, event_id),
+            )
+            conn.commit()
+        else:
+            security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
+            if security_item is None:
+                raise security_anomaly_not_found(event_id)
             anomaly_id = int(security_item["id"])
             conn.execute(
                 "UPDATE security_anomalies SET status = 'closed', updated_at = ? WHERE id = ?",
                 (now, anomaly_id),
             )
             conn.commit()
-            return {"ok": True, "id": anomaly_id, "action_id": anomaly_id}
-        row = conn.execute("SELECT id FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
-        if row is None:
-            raise security_anomaly_not_found(event_id)
-        conn.execute(
-            """
-            UPDATE anomaly_events
-            SET status = 'ended',
-                ended_at = COALESCE(ended_at, ?),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (now, now, event_id),
-        )
-        conn.commit()
+            return {"ok": True, "id": anomaly_id, "action_id": legacy_consolidated_security_anomaly_id(security_consolidation_key(security_item))}
     return {"ok": True}
 
 
