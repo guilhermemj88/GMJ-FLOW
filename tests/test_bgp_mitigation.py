@@ -1237,6 +1237,114 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(gm_candidate["connector_resolution_zone_id"], gm_zone)
             self.assertEqual(fib_candidate["connector_resolution_method"], "zone_prefix")
 
+    def test_recently_ended_unprocessed_anomaly_is_retried_once(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1901)
+            recent = main.iso(datetime.now(timezone.utc) - timedelta(seconds=10))
+            conn.execute(
+                "UPDATE anomaly_events SET status = 'ended', ended_at = ?, last_seen_at = ? WHERE id = ?",
+                (recent, recent, event_id),
+            )
+            conn.commit()
+            conn.close()
+
+            calls = []
+            with patch.dict(os.environ, {"GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS": "60"}), \
+                 patch.object(main, "exabgp_write_pipe", side_effect=lambda item, command: calls.append((item["id"], command))):
+                first = main.process_anomaly_mitigation()
+                second = main.process_anomaly_mitigation()
+
+            self.assertEqual(first["retried_ended"], 1)
+            self.assertEqual(second["queued"], 0)
+            self.assertEqual([item[0] for item in calls], [connector["id"]])
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                total = check.execute(
+                    "SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?",
+                    (event_id,),
+                ).fetchone()["total"]
+            self.assertEqual(outcome["auto_mitigation_status"], "applied")
+            self.assertEqual(total, 1)
+
+    def test_ended_anomaly_older_than_retry_window_is_not_processed(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1902)
+            old = main.iso(datetime.now(timezone.utc) - timedelta(minutes=5))
+            conn.execute(
+                "UPDATE anomaly_events SET status = 'ended', ended_at = ?, last_seen_at = ? WHERE id = ?",
+                (old, old, event_id),
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.dict(os.environ, {"GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS": "60"}), \
+                 patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_anomaly_mitigation()
+
+            self.assertEqual(stats["queued"], 0)
+            write_pipe.assert_not_called()
+            with main.sqlite_connection() as check:
+                row = check.execute(
+                    "SELECT auto_mitigation_status FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements").fetchone()["total"]
+            self.assertEqual(row["auto_mitigation_status"], "")
+            self.assertEqual(total, 0)
+
+    def test_transient_database_lock_leaves_event_retryable_after_it_ends(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1903)
+            conn.close()
+
+            with patch.object(main, "build_mitigation_candidates_from_anomaly", side_effect=sqlite3.OperationalError("database is locked")):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                    main.process_anomaly_mitigation()
+
+            recent = main.iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+            with main.sqlite_connection() as conn:
+                before = conn.execute(
+                    "SELECT auto_mitigation_status FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE anomaly_events SET status = 'ended', ended_at = ?, last_seen_at = ? WHERE id = ?",
+                    (recent, recent, event_id),
+                )
+                conn.commit()
+            self.assertEqual(before["auto_mitigation_status"], "")
+
+            calls = []
+            with patch.dict(os.environ, {"GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS": "60"}), \
+                 patch.object(main, "exabgp_write_pipe", side_effect=lambda item, command: calls.append(item["id"])):
+                stats = main.process_anomaly_mitigation()
+
+            self.assertEqual(stats["retried_ended"], 1)
+            self.assertEqual(calls, [connector["id"]])
+
+    def test_persisted_outcome_prevents_active_event_reprocessing(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=1904)
+            conn.execute(
+                "UPDATE anomaly_events SET auto_mitigation_status = 'not_applied', auto_mitigation_reason = 'policy deny' WHERE id = ?",
+                (event_id,),
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_anomaly_mitigation()
+
+            self.assertEqual(stats["queued"], 0)
+            write_pipe.assert_not_called()
+
     def test_ambiguous_zone_connector_resolution_persists_reason_and_does_not_announce(self):
         with temporary_main_db():
             conn, fibinet, profile = self._dns_multi_target_context(add_whitelist=False)

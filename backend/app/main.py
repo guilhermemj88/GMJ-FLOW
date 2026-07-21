@@ -9879,6 +9879,8 @@ def mitigation_origin_ip(candidate: dict[str, Any]) -> str:
     # For outbound anomalies, the persisted top source is authoritative. A
     # normalized src_ip target is the second choice, as requested by the rule.
     values = [candidate.get("top_src_ip"), anomaly.get("top_src_ip")]
+    if clean_text(candidate.get("origin_target_role")).lower() == "src_ip":
+        values.append(candidate.get("origin_target_ip"))
     if clean_text(candidate.get("target_role")).lower() == "src_ip":
         values.append(candidate.get("target_ip"))
     if clean_text(anomaly.get("target_role")).lower() == "src_ip":
@@ -10250,6 +10252,13 @@ def base_mitigation_candidate(event: dict[str, Any], attack_vector_name: str, re
         "attack_vector_name": attack_vector_name,
         "connector_id": None,
         "response_profile_id": None,
+        "sensor_id": event.get("sensor_id"),
+        "zone_id": event.get("zone_id"),
+        "zone_name": clean_text(event.get("zone_name")),
+        "top_src_ip": clean_ip(event.get("top_src_ip")),
+        "top_dst_ip": clean_ip(event.get("top_dst_ip")),
+        "origin_target_ip": clean_ip(event.get("target_ip")),
+        "origin_target_role": clean_text(event.get("target_role")),
         "src_cidr": "",
         "dst_cidr": "",
         "protocol": "udp",
@@ -15287,6 +15296,14 @@ def apply_mitigation_candidate(
             record_auto_mitigation_outcome(conn, connector_candidate, "deduplicated", "equivalent_active_announcement", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, "mitigacao ativa duplicada", connector, profile)
             raise HTTPException(status_code=409, detail=f"Ja existe mitigacao ativa para esta chave no conector {connector.get('name') or connector['id']}.")
+        if mode == "automatic" and not cooldown_allows_mitigation(
+            conn,
+            connector_candidate["mitigation_key"],
+            int(connector_candidate.get("cooldown_seconds") or 0),
+        ):
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "mitigation_cooldown", profile)
+            log_dns_auto_mitigation_skipped(connector_candidate, "mitigation_cooldown", connector, profile)
+            raise HTTPException(status_code=409, detail="Mitigacao equivalente ainda esta em cooldown.")
         policy = policy_for_candidate(connector_candidate, requested_mode)
         command = render_exabgp_flowspec_command("announce", connector_candidate)
         validation = validate_mitigation_candidate(connector_candidate, connector, profile or {
@@ -15299,27 +15316,38 @@ def apply_mitigation_candidate(
             "approval_mode": "manual_approval",
         })
         if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "duration_exceeds_maximum", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, "duracao excede maximo", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
         if policy["decision"] == "deny":
-            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny"), connector, profile, policy, validation, command)
+            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny")
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by))
             continue
         if validation["errors"]:
-            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error"), connector, profile, policy, validation, command)
+            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error")
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
         if mode == "automatic" and policy["decision"] != "allow_auto":
-            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "politica nao permitiu automatico"), connector, profile, policy, validation, command)
+            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "politica nao permitiu automatico")
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile)
+            log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Politica nao permite automatico; aprovacao manual exigida.")
         if mode == "manual_approval" or policy["decision"] == "require_manual_approval" and mode != "announce_now":
-            log_dns_auto_mitigation_skipped(connector_candidate, dns_policy_skip_reason(connector_candidate, policy, validation, profile, "profile nao auto"), connector, profile, policy, validation, command)
+            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "profile nao auto")
+            record_auto_mitigation_outcome(conn, connector_candidate, "pending_approval", outcome_reason, profile)
+            log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "pending_approval", command, created_by))
             continue
         if connector_is_dry_run(connector):
+            record_auto_mitigation_outcome(conn, connector_candidate, "dry_run", "connector_dry_run", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, "connector_dry_run", connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "dry_run", command, created_by))
             continue
         if connector.get("backend_type") != "exabgp":
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "connector_backend_not_exabgp", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, "conector nao exabgp", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Conector precisa estar com backend exabgp para anunciar.")
         try:
@@ -15328,6 +15356,7 @@ def apply_mitigation_candidate(
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "announced", command, created_by))
             record_auto_mitigation_outcome(conn, connector_candidate, "applied", "", profile)
         except HTTPException as exc:
+            record_auto_mitigation_outcome(conn, connector_candidate, "failed", clean_text(exc.detail) or "exabgp_pipe_write_failed", profile)
             log_dns_auto_mitigation_skipped(connector_candidate, clean_text(exc.detail) or "falha ao escrever pipe", connector, profile, policy, validation, command)
             results.append(insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "failed", command, created_by, clean_text(exc.detail)))
     if len(results) == 1:
@@ -15408,29 +15437,124 @@ def start_bgp_expiration_thread() -> None:
     BGP_EXPIRATION_THREAD.start()
 
 
+def anomaly_mitigation_retry_window_seconds() -> int:
+    raw = os.getenv("GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS", "900")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 900
+
+
+def anomaly_mitigation_queue(
+    conn: sqlite3.Connection,
+    limit: int = 500,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return active or recently-ended persisted anomalies without an outcome.
+
+    A blank outcome is the durable retry marker. Once any final outcome is
+    recorded, an active anomaly is not evaluated again on every scheduler pass.
+    Ended events are bounded by a configurable window so old traffic can never
+    be announced long after it disappeared.
+    """
+    retry_window = anomaly_mitigation_retry_window_seconds()
+    reference = now or datetime.now(timezone.utc)
+    cutoff = iso(reference - timedelta(seconds=retry_window))
+    rows = conn.execute(
+        """
+        SELECT
+            e.*,
+            v.name AS attack_vector_name,
+            v.display_name AS attack_vector_display_name,
+            v.domain_type AS attack_domain_type,
+            s.name AS sensor_name
+        FROM anomaly_events e
+        LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+        LEFT JOIN sensors s ON s.id = e.sensor_id
+        WHERE COALESCE(e.auto_mitigation_status, '') = ''
+          AND (
+                e.status = 'active'
+                OR (
+                    e.status = 'ended'
+                    AND COALESCE(e.ended_at, e.last_seen_at, e.updated_at) >= ?
+                )
+          )
+        ORDER BY e.last_seen_at DESC, e.id DESC
+        LIMIT ?
+        """,
+        (cutoff, max(1, int(limit))),
+    ).fetchall()
+    return [anomaly_event_row_to_dict(row) for row in rows]
+
+
+def anomaly_auto_mitigation_status(conn: sqlite3.Connection, anomaly_id: Any) -> str:
+    value = int_or_none(anomaly_id)
+    if value is None or value <= 0:
+        return ""
+    row = conn.execute(
+        "SELECT auto_mitigation_status FROM anomaly_events WHERE id = ?",
+        (value,),
+    ).fetchone()
+    return clean_text(row["auto_mitigation_status"] if row else "")
+
+
 def process_anomaly_mitigation() -> dict[str, int]:
     ensure_sensor_db()
-    stats = {"checked": 0, "active": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "expired": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
-    active = anomaly_list("active", 500)
+    stats = {
+        "checked": 0,
+        "queued": 0,
+        "retried_ended": 0,
+        "active": 0,
+        "announced": 0,
+        "pending_approval": 0,
+        "rejected_by_policy": 0,
+        "expired": 0,
+        "withdrawn": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     with sqlite_connection() as conn:
         expired = process_expired_bgp_announcements(conn)
         stats["withdrawn"] += expired["withdrawn"]
         stats["failed"] += expired["failed"]
-        for event in active:
+        # Do not keep expiration writes open while candidates are evaluated.
+        # Each anomaly acquires its own write lock before any pipe write so a
+        # transient SQLite lock cannot result in an untracked BGP announcement.
+        conn.commit()
+        events = anomaly_mitigation_queue(conn, 500)
+        stats["queued"] = len(events)
+        stats["retried_ended"] = sum(clean_text(event.get("status")).lower() == "ended" for event in events)
+        for event in events:
             context = fetch_anomaly_mitigation_context(conn, int(event["id"]))
-            for candidate in build_mitigation_candidates_from_anomaly(context):
+            candidates = build_mitigation_candidates_from_anomaly(context)
+            conn.execute("BEGIN IMMEDIATE")
+            if anomaly_auto_mitigation_status(conn, event.get("id")):
+                conn.rollback()
+                stats["skipped"] += 1
+                continue
+            handled = False
+            outcome_candidate = {
+                "anomaly_id": event.get("id"),
+                "response_profile_id": event.get("response_profile_id"),
+                "sensor_id": event.get("sensor_id"),
+                "zone_id": event.get("zone_id"),
+                "top_src_ip": event.get("top_src_ip"),
+                "top_dst_ip": event.get("top_dst_ip"),
+                "target_ip": event.get("target_ip"),
+                "target_role": event.get("target_role"),
+                "raw_payload": {"anomaly": event},
+            }
+            for candidate in candidates:
                 stats["checked"] += 1
-                if active_mitigation_exists(conn, candidate["mitigation_key"]):
-                    stats["skipped"] += 1
-                    continue
-                if not cooldown_allows_mitigation(conn, candidate["mitigation_key"], int(candidate.get("cooldown_seconds") or 0)):
-                    stats["skipped"] += 1
-                    continue
                 mode = clean_text(candidate.get("mitigation_mode")) or "disabled"
                 if mode in {"disabled", "analysis_only"} or candidate.get("never_announce"):
                     stats["skipped"] += 1
+                    if mode == "disabled" and not handled:
+                        record_auto_mitigation_outcome(conn, candidate, "not_applied", "mitigation_disabled")
+                        handled = True
                     continue
                 if mode in {"automatic", "auto"}:
+                    handled = True
                     try:
                         item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
                     except HTTPException as exc:
@@ -15438,21 +15562,35 @@ def process_anomaly_mitigation() -> dict[str, int]:
                             stats["skipped"] += 1
                         else:
                             stats["failed"] += 1
+                        if not anomaly_auto_mitigation_status(conn, candidate.get("anomaly_id")):
+                            status = "failed" if exc.status_code >= 500 else "not_applied"
+                            record_auto_mitigation_outcome(conn, candidate, status, clean_text(exc.detail) or "automatic_mitigation_failed")
                         log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "automatico nao aplicado")
                         continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
+                    handled = True
                     try:
                         item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
                     except HTTPException as exc:
                         stats["failed"] += 1
+                        if not anomaly_auto_mitigation_status(conn, candidate.get("anomaly_id")):
+                            status = "failed" if exc.status_code >= 500 else "not_applied"
+                            record_auto_mitigation_outcome(conn, candidate, status, clean_text(exc.detail) or "manual_mitigation_failed")
                         log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "manual nao aplicado")
                         continue
                 else:
                     stats["skipped"] += 1
+                    if not handled:
+                        record_auto_mitigation_outcome(conn, candidate, "not_applied", f"unsupported_mitigation_mode:{mode}")
+                        handled = True
                     continue
                 status = item.get("status") or ""
                 if status in stats:
                     stats[status] += 1
+            if not handled:
+                reason = "no_mitigation_candidate" if not candidates else "no_actionable_mitigation_candidate"
+                record_auto_mitigation_outcome(conn, outcome_candidate, "not_applied", reason)
+            conn.commit()
         conn.commit()
     return stats
 
