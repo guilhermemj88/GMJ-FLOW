@@ -53,7 +53,9 @@ def bgp_status(service: str, peer_ip: str, listen_port: int) -> dict[str, object
         },
         "listener": {"listening": listening, "expected_port": listen_port},
         "session": {"tcp_established": established, "peer_ip": peer_ip},
-        "bgp_state": "established" if established else "down" if listening else "not_verified",
+        # A TCP/179 socket proves transport only; it is not the BGP FSM and
+        # must not be promoted to an established BGP/FlowSpec peer.
+        "bgp_state": "not_verified",
         "flowspec_state": "not_verified",
         "logs_tail": log_output[-4000:] if log_code == 0 else "",
     }

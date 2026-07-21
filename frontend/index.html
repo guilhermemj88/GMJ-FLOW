@@ -735,7 +735,7 @@
 
     .anomaly-table {
       table-layout: fixed;
-      min-width: 1040px;
+      min-width: 1200px;
     }
 
     .anomaly-table th,
@@ -759,7 +759,49 @@
     .anomaly-col-peak { width: 96px; }
     .anomaly-col-total { width: 112px; }
     .anomaly-col-last { width: 134px; }
+    .anomaly-col-response { width: 174px; }
     .anomaly-col-actions { width: 112px; }
+
+    .anomaly-table .anomaly-response-cell {
+      white-space: normal;
+    }
+
+    .anomaly-response-badge {
+      max-width: 100%;
+      min-height: 24px;
+      border: 0;
+      line-height: 1.15;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .anomaly-response-badge:focus-visible {
+      outline: 2px solid #2563eb;
+      outline-offset: 2px;
+    }
+
+    .anomaly-response-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: .65rem .85rem;
+    }
+
+    .anomaly-response-detail-item {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .anomaly-response-detail-label {
+      color: #64748b;
+      font-size: .7rem;
+      font-weight: 700;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+
+    .anomaly-response-attempt + .anomaly-response-attempt {
+      margin-top: .75rem;
+    }
 
     .anomaly-actions {
       display: inline-flex;
@@ -3522,6 +3564,7 @@
                   <col class="anomaly-col-peak">
                   <col class="anomaly-col-total">
                   <col class="anomaly-col-last">
+                  <col class="anomaly-col-response">
                   <col class="anomaly-col-actions">
                 </colgroup>
                 <thead>
@@ -3534,6 +3577,7 @@
                     <th class="text-end">Pico</th>
                     <th class="text-end">Total estimado</th>
                     <th>Ultima detecção</th>
+                    <th>Resposta</th>
                     <th>Ações</th>
                   </tr>
                 </thead>
@@ -4353,7 +4397,7 @@
           <div class="view-header">
             <div>
               <h1 class="view-title">BGP / Mitigação</h1>
-              <div id="bgpStatus" class="subtle">Fase 1: configuração, validação e dry-run</div>
+              <div id="bgpStatus" class="subtle">Estados de aprovação, envio e confirmação operacional do FlowSpec</div>
             </div>
             <div class="toolbar">
               <button id="bgpPdfButton" type="button" class="btn btn-sm btn-outline-secondary">
@@ -4367,7 +4411,7 @@
 
           <section class="panel p-3 mb-3">
             <div class="database-metrics-grid mb-0">
-              <div class="metric-card"><div class="metric-label">Ativas</div><div id="bgpSummaryActive" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">FlowSpec ativos</div><div id="bgpSummaryActive" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Pendentes</div><div id="bgpSummaryPending" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Falhas</div><div id="bgpSummaryFailed" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Expiradas hoje</div><div id="bgpSummaryExpiredToday" class="metric-value">0</div></div>
@@ -4556,7 +4600,7 @@
 
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Teste manual / laboratorio</div>
-            <div class="subtle mb-2">TTL e interno do GMJ-FLOW. Nao e enviado ao BGP. O ExaBGP recebe somente announce ou withdraw.</div>
+            <div class="subtle mb-2">O TTL controla a retirada automática no GMJ-FLOW e não comprova anúncio ao peer. O estado abaixo informa se houve somente prévia, envio ao ExaBGP ou confirmação operacional local.</div>
             <div class="flow-search-grid mb-2">
               <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpDryAction">Ação</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
@@ -4579,9 +4623,11 @@
           </section>
 
           <section class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Sugestoes pending_approval</div>
+            <div class="panel-title mb-2">Sugestões aguardando aprovação</div>
             <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Connector</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
-            <div class="panel-title mb-2">Announcements ativos</div>
+            <div class="panel-title mb-2">Em processamento / sem confirmação</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Ação</th><th>Alvo</th><th>Confirmação</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpInFlightAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">FlowSpec ativos confirmados pela aplicação</div>
             <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Alvo</th><th>Retirada automatica</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
             <div class="panel-title mb-2">Histórico</div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Withdrawn</th><th>Status</th><th>Connector</th><th>Profile</th><th>Decision</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
@@ -5129,10 +5175,28 @@
     </div>
   </div>
 
+  <div id="anomalyResponseModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="anomalyResponseModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="anomalyResponseModalTitle" class="view-title">Detalhes da resposta</h2>
+        <button type="button" class="icon-button" data-close-modal="anomalyResponseModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="anomalyResponseSummary" class="subtle mb-3">Carregando...</div>
+        <div id="anomalyResponseDetailBody"></div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-success" data-close-modal="anomalyResponseModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <div id="bgpMitigationModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="bgpMitigationModalTitle">
     <div class="gmj-dialog">
       <div class="gmj-dialog-header">
-        <h2 id="bgpMitigationModalTitle" class="view-title">Dry-run BGP</h2>
+        <h2 id="bgpMitigationModalTitle" class="view-title">Avaliar mitigação BGP</h2>
         <button type="button" class="icon-button" data-close-modal="bgpMitigationModal" aria-label="Fechar">
           <i data-lucide="x"></i>
         </button>
@@ -5481,9 +5545,12 @@
     let currentAnomalyDetailId = null;
     let currentAnomalyDetailEvent = null;
     let currentAnomalyDetailPayload = null;
+    let currentAnomalyResponseId = null;
+    let anomalyResponseRefreshPromise = null;
     let currentBgpMitigationAnomalyId = null;
     let currentBgpMitigationCandidates = [];
     let currentBgpMitigationEvaluation = null;
+    let currentBgpMitigationConnectorId = null;
     let currentAiMitigationAnalysis = null;
     let aiProfiles = [];
     let bgpConnectors = [];
@@ -7773,9 +7840,9 @@
         bgpProfileSrcPortSelector: 'Porta de origem usada no match FlowSpec.',
         bgpProfileDstPortSelector: 'Porta de destino usada no match FlowSpec.',
         bgpProfileRateLimit: 'Valor de rate-limit usado quando action=rate_limit.',
-        bgpProfileDuration: 'TTL interno padrão para retirada automática. Não é enviado ao BGP.',
+        bgpProfileDuration: 'Prazo interno para retirada automática; não indica nem confirma anúncio ao peer BGP.',
         bgpProfileMaxDuration: 'Duração máxima permitida para anúncios gerados pelo profile.',
-        bgpDryDuration: 'TTL interno no GMJ-FLOW para retirada automática. O TTL não é enviado ao BGP.',
+        bgpDryDuration: 'Prazo interno para retirada automática; consulte o estado operacional para confirmar o anúncio.',
         bgpDryConnector: 'Conector ExaBGP usado no laboratório manual.',
         bgpDryThenAction: 'Ação FlowSpec renderizada no comando announce.',
         bgpDryRateLimit: 'Rate-limit do FlowSpec manual quando a ação é rate_limit.',
@@ -8921,8 +8988,179 @@
       `).join('') || '<tr><td colspan="8" class="text-muted">Sem politicas</td></tr>';
     }
 
+    const BGP_ANNOUNCEMENT_STATUS_PRESENTATION = {
+      pending_approval: {
+        label: 'Aguardando aprovação',
+        badge: 'warn',
+        confirmation: 'Apenas registrado; ainda sem aprovação.',
+        note: 'Não anunciado: aguarda decisão do operador.'
+      },
+      queued: {
+        label: 'Na fila de envio',
+        badge: '',
+        confirmation: 'Aprovado; envio ainda não tentado.',
+        note: 'Não anunciado: aprovado e aguardando tentativa de envio.'
+      },
+      sent: {
+        label: 'Enviado ao ExaBGP',
+        badge: '',
+        confirmation: 'Comando entregue ao ExaBGP; peer e rota ainda não confirmados.',
+        note: 'Comando entregue ao processo ExaBGP, sem confirmação de anúncio pelo peer BGP.'
+      },
+      advertised: {
+        label: 'FlowSpec ativo',
+        badge: 'ok',
+        confirmation: 'Peer estabelecido e anúncio solicitado; confirmação operacional local.',
+        note: 'Anúncio solicitado com o peer BGP estabelecido; o GMJ-FLOW o considera ativo.'
+      },
+      peer_down: {
+        label: 'Peer BGP indisponível',
+        badge: 'down',
+        confirmation: 'Não enviado porque o peer estava indisponível.',
+        note: 'Não anunciado: a sessão BGP estava indisponível na tentativa de envio.'
+      },
+      failed: {
+        label: 'Falhou',
+        badge: 'down',
+        confirmation: 'Falha antes da confirmação do anúncio.',
+        note: 'Não anunciado: a tentativa falhou. Consulte o último erro.'
+      },
+      failed_withdraw: {
+        label: 'Falha na retirada',
+        badge: 'down',
+        confirmation: 'A retirada não foi confirmada; a resposta pode continuar ativa.',
+        note: 'Falha ao entregar ou persistir o withdraw. Consulte o último erro.'
+      },
+      dry_run: {
+        label: 'Simulação',
+        badge: 'off',
+        confirmation: 'Prévia local; nenhum comando operacional enviado.',
+        note: 'Não anunciado: conector ou operação em modo dry-run.'
+      },
+      withdrawn: {
+        label: 'Retirado',
+        badge: 'off',
+        confirmation: 'Anúncio retirado; não está ativo.',
+        note: 'Não está ativo: foi solicitada a retirada do anúncio.'
+      },
+      expired: {
+        label: 'Expirado',
+        badge: 'off',
+        confirmation: 'TTL encerrado; não está ativo.',
+        note: 'Não está ativo: o TTL interno expirou.'
+      },
+      rejected: {
+        label: 'Rejeitado',
+        badge: 'off',
+        confirmation: 'Rejeitado pelo operador; não anunciado.',
+        note: 'Não anunciado: a proposta foi rejeitada.'
+      },
+      rejected_by_policy: {
+        label: 'Bloqueado por política',
+        badge: 'down',
+        confirmation: 'Bloqueado antes do envio.',
+        note: 'Não anunciado: a política impediu o envio.'
+      },
+      deduplicated: {
+        label: 'Resposta já existente',
+        badge: 'off',
+        confirmation: 'Nenhum novo comando enviado; foi encontrado um registro equivalente.',
+        note: 'Este registro não confirma sozinho o estado operacional da resposta equivalente.'
+      },
+      active: {
+        label: 'Enviado (legado, sem confirmação)',
+        badge: 'warn',
+        confirmation: 'Registro legado; peer e instalação da rota não confirmados.',
+        note: 'Registro legado marcado active. Trate como enviado, sem confirmação operacional.'
+      },
+      announced: {
+        label: 'Enviado (legado, sem confirmação)',
+        badge: 'warn',
+        confirmation: 'Registro legado; peer e instalação da rota não confirmados.',
+        note: 'Registro legado marcado announced. Trate como enviado, sem confirmação operacional.'
+      }
+    };
+
+    function bgpAnnouncementStatusCode(item = {}) {
+      return String(item.status || '').trim().toLowerCase();
+    }
+
+    function bgpAnnouncementStatusInfo(item = {}) {
+      const code = bgpAnnouncementStatusCode(item);
+      const presentation = BGP_ANNOUNCEMENT_STATUS_PRESENTATION[code] || {
+        label: code || 'Sem estado',
+        badge: 'off',
+        confirmation: 'Estado sem confirmação operacional.',
+        note: 'Este registro não comprova que um FlowSpec esteja ativo no peer BGP.'
+      };
+      const peerDownAfterDelivery = code === 'peer_down' && Boolean(item.sent_at || item.advertised_at || item.announced_at);
+      const confirmationLevel = String(item.confirmation_level || '').trim().toLowerCase();
+      const ttlElapsed = item.ttl_elapsed === true || (item.expires_at && Number.isFinite(new Date(item.expires_at).getTime()) && new Date(item.expires_at) <= new Date());
+      const intentPresentation = confirmationLevel === 'withdraw_requested'
+        ? {
+            label: 'Retirada pendente',
+            badge: 'warn',
+            confirmation: 'O pedido de retirada foi registrado; a entrega do withdraw ainda não foi confirmada.',
+            note: 'A regra pode continuar ativa até o ExaBGP receber a retirada.'
+          }
+        : confirmationLevel === 'delivery_attempted' && code === 'queued'
+          ? {
+              label: 'Entrega em andamento',
+              badge: 'warn',
+              confirmation: 'A tentativa foi registrada; o resultado da escrita ainda é incerto.',
+              note: 'O reconciliador fará uma retirada de segurança se a confirmação não for persistida.'
+            }
+          : ttlElapsed && code === 'advertised'
+            ? {
+                label: 'FlowSpec ativo · retirada atrasada',
+                badge: 'warn',
+                confirmation: 'O TTL encerrou, mas o withdraw ainda não foi confirmado.',
+                note: 'Trate a regra como potencialmente ativa até o estado mudar para Expirado ou Retirado.'
+              }
+            : {};
+      return {
+        code,
+        ...presentation,
+        ...(peerDownAfterDelivery ? {
+          confirmation: 'O peer caiu após o envio/anúncio; o histórico de entrega foi preservado.',
+          note: 'Estado operacional perdido após a entrega. Retire a regra para impedir reanúncio ao reconectar.'
+        } : {}),
+        ...intentPresentation
+      };
+    }
+
+    function bgpAnnouncementStatusBadge(item) {
+      const info = bgpAnnouncementStatusInfo(item);
+      return `<span class="badge-soft ${info.badge}" title="status: ${escapeHtml(item?.status || '-')}">${escapeHtml(info.label)}</span>`;
+    }
+
+    function bgpAnnouncementTimeline(item = {}) {
+      const rawStatus = String(item.status || '').trim().toLowerCase();
+      const operationalAnnouncementAt = item.advertised_at || (rawStatus === 'advertised' ? item.announced_at : null);
+      const legacyAnnouncementAt = ['active', 'announced'].includes(rawStatus) ? item.announced_at : null;
+      const values = [
+        ['Criado', item.created_at],
+        ['Na fila', item.queued_at],
+        ['Enviado ao ExaBGP', item.sent_at],
+        ['Anunciado (confirmação local)', operationalAnnouncementAt],
+        ['Envio registrado (legado)', legacyAnnouncementAt],
+        ['Retirado', item.withdrawn_at],
+        ['Expira', item.expires_at],
+        ['Última tentativa', item.last_attempt_at]
+      ].filter(([, value]) => value);
+      if (!values.length) return '';
+      return `<div class="subtle mt-2">${values.map(([label, value]) => `${escapeHtml(label)}: ${escapeHtml(formatDateTime(value))}`).join(' · ')}</div>`;
+    }
+
     function bgpCommandDetails(item) {
-      return `<details><summary>Comandos</summary><div class="subtle mt-2">TTL interno do GMJ-FLOW; nao enviado ao BGP.</div><pre class="mb-2" style="white-space:pre-wrap">announce:
+      const info = bgpAnnouncementStatusInfo(item);
+      return `<details><summary>Detalhes / comandos</summary>
+<div class="fw-semibold mt-2">${escapeHtml(info.label)}</div>
+<div class="subtle">${escapeHtml(info.note)}</div>
+<div class="subtle">Nível de confirmação: ${escapeHtml(info.confirmation)}</div>
+<div class="subtle">O TTL é controlado internamente pelo GMJ-FLOW e, isoladamente, não confirma anúncio ao peer.</div>
+${bgpAnnouncementTimeline(item)}
+<pre class="mb-2 mt-2" style="white-space:pre-wrap">announce:
 ${escapeHtml(item.announce_command || item.rendered_command || '-')}</pre><pre class="mb-0" style="white-space:pre-wrap">withdraw:
 ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
@@ -8963,23 +9201,39 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function bgpAnnouncementIsOperationalActive(item) {
-      if (!['active', 'announced'].includes(item?.status)) return false;
-      if (!item.expires_at) return true;
-      const expires = new Date(item.expires_at);
-      return Number.isFinite(expires.getTime()) && expires > new Date();
+      return String(item?.status || '').toLowerCase() === 'advertised';
+    }
+
+    function bgpAnnouncementIsInFlight(item) {
+      return ['queued', 'sent', 'peer_down', 'active', 'announced', 'failed_withdraw'].includes(String(item?.status || '').toLowerCase());
+    }
+
+    function bgpInFlightActions(item) {
+      const status = String(item?.status || '').toLowerCase();
+      const confirmation = String(item?.confirmation_level || '').toLowerCase();
+      const details = item?.status_details && typeof item.status_details === 'object' ? item.status_details : {};
+      const wasDelivered = Boolean(item?.sent_at || item?.advertised_at || item?.announced_at || details.send_claim_token || ['active', 'announced', 'failed_withdraw'].includes(status) || ['delivery_attempted', 'delivery_persistence_failed', 'withdraw_failed', 'withdraw_requested'].includes(confirmation));
+      const canReject = (status === 'queued' || ['peer_down', 'failed'].includes(status)) && !wasDelivered;
+      const canWithdraw = ['sent', 'active', 'announced', 'failed_withdraw'].includes(status) || (['queued', 'peer_down', 'failed'].includes(status) && wasDelivered);
+      return `
+        ${canReject ? `<button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}" title="Rejeitar"><i data-lucide="x"></i></button>` : ''}
+        ${canWithdraw ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}" title="Retirar"><i data-lucide="undo-2"></i></button>` : ''}
+        ${!canReject && !canWithdraw ? '<span class="subtle">Sem ação disponível</span>' : ''}
+      `;
     }
 
     function renderBgpAnnouncements() {
-      const pending = bgpAnnouncements.filter(item => item.status === 'pending_approval');
+      const pending = bgpAnnouncements.filter(item => bgpAnnouncementStatusCode(item) === 'pending_approval');
       const active = bgpAnnouncements.filter(item => bgpAnnouncementIsOperationalActive(item));
-      const history = bgpAnnouncements.filter(item => !bgpAnnouncementIsOperationalActive(item) && item.status !== 'pending_approval');
+      const inFlight = bgpAnnouncements.filter(item => bgpAnnouncementIsInFlight(item));
+      const history = bgpAnnouncements.filter(item => !bgpAnnouncementIsOperationalActive(item) && !bgpAnnouncementIsInFlight(item) && bgpAnnouncementStatusCode(item) !== 'pending_approval');
       document.getElementById('bgpPendingSuggestionsTable').innerHTML = pending.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td>${item.anomaly_id ? `#${escapeHtml(item.anomaly_id)}` : '-'}</td>
           <td>${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}</td>
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
-          <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${bgpAnnouncementStatusBadge(item)}<br>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
@@ -8988,33 +9242,48 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestoes pendentes</td></tr>';
+      `).join('') || '<tr><td colspan="9" class="text-muted">Sem sugestões aguardando aprovação</td></tr>';
+      document.getElementById('bgpInFlightAnnouncementsTable').innerHTML = inFlight.map(item => {
+        const info = bgpAnnouncementStatusInfo(item);
+        return `
+        <tr>
+          <td>#${item.id}</td>
+          <td>${bgpAnnouncementStatusBadge(item)}</td>
+          <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
+          <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
+          <td>${escapeHtml(bgpActionLabel(item))}</td>
+          <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
+          <td>${escapeHtml(info.confirmation)}</td>
+          <td>${bgpCommandDetails(item)}</td>
+          <td>${bgpInFlightActions(item)}</td>
+        </tr>
+      `;
+      }).join('') || '<tr><td colspan="9" class="text-muted">Nenhum envio aguardando confirmação</td></tr>';
       document.getElementById('bgpActiveAnnouncementsTable').innerHTML = active.map(item => `
         <tr>
           <td>#${item.id}</td>
-          <td><span class="badge-soft ${item.validation_errors?.length ? '' : item.status === 'dry_run' ? 'off' : 'ok'}">${escapeHtml(item.status)}</span></td>
+          <td>${bgpAnnouncementStatusBadge(item)}</td>
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(item.policy_decision || '-')}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${formatDateTime(item.expires_at)}<br><span class="subtle">UTC: ${escapeHtml(item.expires_at || '-')}</span></td>
           <td>${bgpCommandDetails(item)}</td>
           <td>
-            <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
             <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="10" class="text-muted">Sem announcements ativos</td></tr>';
+      `).join('') || '<tr><td colspan="10" class="text-muted">Sem FlowSpec com status advertised ativo</td></tr>';
       document.getElementById('bgpHistoryAnnouncementsTable').innerHTML = history.map(item => `
         <tr>
           <td>#${item.id}</td>
           <td>${formatDateTime(item.created_at)}</td>
           <td>${formatDateTime(item.withdrawn_at)}</td>
-          <td>${escapeHtml(item.status)}</td>
+          <td>${bgpAnnouncementStatusBadge(item)}</td>
           <td>${escapeHtml(item.connector_name || item.connector_id || '-')}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(item.policy_decision || '-')}</td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}</td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.last_error || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
@@ -9089,7 +9358,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await refreshBgpConnectorStatuses();
       renderBgpWorkspace();
       await loadAiMitigationStatus().catch(error => setText('aiMitigationStatusText', `Falha IA: ${error.message}`));
-      setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Dry-runs: ${bgpAnnouncements.length}`);
+      setText('bgpStatus', `Conectores: ${bgpConnectors.length} / Profiles: ${bgpProfiles.length} / Registros BGP: ${bgpAnnouncements.length}`);
     }
 
     function aiProfileText(profileId) {
@@ -9494,7 +9763,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const candidate = result.candidate || {};
       document.getElementById('bgpDryRunOutput').textContent = [
         `Profile #${id} ${result.validation?.validation_status || candidate.validation_status || ''}`,
-        'TTL interno do GMJ-FLOW. Nao e enviado ao BGP.',
+        'Prévia local do profile: não anunciada ao peer BGP.',
+        'O TTL é controlado internamente pelo GMJ-FLOW e não confirma anúncio.',
         `announce:\n${candidate.rendered_command_preview || candidate.announce_command || '-'}`,
         `withdraw:\n${candidate.withdraw_command || '-'}`
       ].filter(Boolean).join('\n\n');
@@ -9586,22 +9856,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function bgpDryRunText(item) {
+      const statusInfo = bgpAnnouncementStatusInfo(item || {});
       const errors = (item.validation_errors || []).map(value => `ERRO: ${value}`).join('\n');
       const warnings = (item.validation_warnings || []).map(value => `AVISO: ${value}`).join('\n');
       const policy = [
-        item.policy_decision ? `Decision: ${item.policy_decision}` : '',
+        item.policy_decision ? `Decisão: ${mitigationDecisionLabel(item.policy_decision)}` : '',
         item.policy_severity ? `Severity: ${item.policy_severity}` : '',
         ...(item.policy_reasons || []).map(value => `Motivo: ${value}`),
         ...(item.policy_warnings || []).map(value => `Warning: ${value}`)
       ].filter(Boolean).join('\n');
       const expires = item.expires_at ? `Retirada automatica em: ${formatDateTime(item.expires_at)}\nUTC: ${item.expires_at}` : '';
       const commands = [
-        'TTL interno do GMJ-FLOW. Nao e enviado ao BGP.',
+        `Estado: ${statusInfo.label}`,
+        statusInfo.note,
+        `Nível de confirmação: ${statusInfo.confirmation}`,
+        'O TTL é controlado internamente pelo GMJ-FLOW e não confirma anúncio ao peer.',
         expires,
         `announce:\n${item.announce_command || item.rendered_command || item.command || '-'}`,
         `withdraw:\n${item.withdraw_command || '-'}`
       ].filter(Boolean).join('\n\n');
-      return [`#${item.id} ${item.status}`, policy, errors, warnings, commands].filter(Boolean).join('\n\n');
+      return [`#${item.id || '-'} ${statusInfo.label}`, policy, errors, warnings, commands].filter(Boolean).join('\n\n');
     }
 
     function updateBgpDryRateLimitUi() {
@@ -9657,7 +9931,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       try {
         const item = await apiRequest(`/api/bgp/connectors/${connectorId}/manual-flowspec/dry-run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         document.getElementById('bgpDryRunOutput').textContent = bgpDryRunText(item);
-        setText('bgpStatus', action === 'announce' && item.status !== 'dry_run' ? 'FlowSpec anunciado/processado pelo laboratorio' : 'Preview FlowSpec gerado');
+        const statusInfo = bgpAnnouncementStatusInfo(item);
+        setText('bgpStatus', statusInfo.code === 'advertised' ? 'FlowSpec anunciado com confirmação operacional local' : statusInfo.note);
         await loadBgpView();
         await refreshOpsSummary();
       } catch (error) {
@@ -9670,8 +9945,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function openBgpMitigationModal(anomalyId) {
       currentBgpMitigationAnomalyId = Number(anomalyId);
       currentBgpMitigationEvaluation = null;
+      currentBgpMitigationCandidates = [];
+      currentBgpMitigationConnectorId = null;
       currentAiMitigationAnalysis = null;
-      await loadBgpView();
+      setText('bgpMitigationModalTitle', 'Avaliar mitigação BGP');
       setText('bgpMitigationSummary', `Anomalia #${anomalyId}`);
       document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="subtle">Avaliando mitigação sugerida...</div>';
       document.getElementById('bgpMitigationAiRecommendation').classList.add('d-none');
@@ -9681,9 +9958,107 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await runBgpAnomalyDryRun();
     }
 
+    const MITIGATION_DECISION_LABELS = {
+      allow_auto: 'Elegível para resposta automática',
+      require_manual_approval: 'Aguardando aprovação',
+      deny: 'Não permitido',
+      dry_run: 'Simulação',
+      rejected: 'Rejeitado',
+      rejected_by_policy: 'Bloqueado por política'
+    };
+
+    function mitigationPolicy(candidate = {}) {
+      const policy = candidate.policy_decision;
+      if (policy && typeof policy === 'object') return policy;
+      return { decision: String(policy || '') };
+    }
+
+    function mitigationDecisionLabel(decision) {
+      const code = String(decision || '').trim();
+      return MITIGATION_DECISION_LABELS[code] || code || '-';
+    }
+
     function mitigationDecisionBadge(decision) {
-      const klass = decision === 'allow_auto' ? 'ok' : decision === 'deny' ? '' : 'off';
-      return `<span class="badge-soft ${klass}">${escapeHtml(decision || '-')}</span>`;
+      const code = String(decision || '').trim();
+      const klass = code === 'allow_auto'
+        ? 'ok'
+        : ['deny', 'rejected_by_policy'].includes(code)
+          ? 'down'
+          : ['require_manual_approval'].includes(code)
+            ? 'warn'
+            : 'off';
+      return `<span class="badge-soft ${klass}" title="${escapeHtml(code || '-')}">${escapeHtml(mitigationDecisionLabel(code))}</span>`;
+    }
+
+    function mitigationEligibleConnectors(candidate = {}) {
+      return (Array.isArray(candidate.eligible_connectors) ? candidate.eligible_connectors : [])
+        .filter(connector => Number(connector?.id || 0) > 0);
+    }
+
+    function mitigationCandidateConnectorId(candidate = {}) {
+      const directId = Number(candidate.connector_id || 0);
+      if (directId > 0) return directId;
+      const eligible = mitigationEligibleConnectors(candidate);
+      const selectedId = Number(currentBgpMitigationConnectorId || 0);
+      if (selectedId > 0 && eligible.some(connector => Number(connector.id) === selectedId)) return selectedId;
+      return eligible.length === 1 ? Number(eligible[0].id) : null;
+    }
+
+    function mitigationConnectorLabel(connector = {}) {
+      const mode = [connector.backend_type, connector.mode].filter(Boolean).join(' / ');
+      return `${connector.name || `#${connector.id}`}${mode ? ` (${mode})` : ''}`;
+    }
+
+    function renderMitigationConnectorChoice(candidate, index) {
+      const eligible = mitigationEligibleConnectors(candidate);
+      const selectedId = mitigationCandidateConnectorId(candidate);
+      if (!eligible.length) {
+        return '<div class="text-danger mb-2">Não elegível para mitigação: nenhum conector elegível foi encontrado.</div>';
+      }
+      if (eligible.length === 1 && !candidate.requires_connector_selection) {
+        return `<div class="metric-readout mb-2">Conector escolhido: ${escapeHtml(mitigationConnectorLabel(eligible[0]))}</div>`;
+      }
+      return `
+        <div class="field mb-2">
+          <label for="bgpMitigationConnector-${index}">Conector da mitigação</label>
+          <select id="bgpMitigationConnector-${index}" class="form-select form-select-sm bgp-mitigation-connector" data-index="${index}">
+            <option value="">Selecione o conector para recalcular</option>
+            ${eligible.map(connector => `<option value="${Number(connector.id)}" ${Number(connector.id) === Number(selectedId) ? 'selected' : ''}>${escapeHtml(mitigationConnectorLabel(connector))}</option>`).join('')}
+          </select>
+          <div class="subtle mt-1">A seleção apenas recalcula política, validação, cooldown e comando; nenhum anúncio é enviado.</div>
+        </div>
+      `;
+    }
+
+    function renderEquivalentMitigationAnnouncement(announcement) {
+      if (!announcement || typeof announcement !== 'object') return '';
+      const target = announcement.dst_prefix || announcement.target_prefix || announcement.src_prefix || '-';
+      const statusInfo = bgpAnnouncementStatusInfo(announcement);
+      const operationallyActive = bgpAnnouncementIsOperationalActive(announcement);
+      return `
+        <div class="badge-soft ${operationallyActive ? 'ok' : 'warn'} mb-2">${operationallyActive ? 'Resposta equivalente já ativa' : 'Resposta equivalente registrada, sem confirmação'}</div>
+        <details class="bgp-peer-details mb-2">
+          <summary>Abrir detalhes${announcement.id ? ` do anúncio #${escapeHtml(announcement.id)}` : ''}</summary>
+          <div class="metric-readout mt-2">Status: ${escapeHtml(statusInfo.label)}</div>
+          <div class="subtle">${escapeHtml(statusInfo.confirmation)}</div>
+          <div class="metric-readout">Conector: ${escapeHtml(announcement.connector_name || announcement.connector_id || '-')}</div>
+          <div class="metric-readout">Alvo: ${escapeHtml(target)}</div>
+          ${announcement.rendered_command || announcement.announce_command ? `<pre class="bg-light border rounded p-2 mt-2 mb-0" style="white-space:pre-wrap">${escapeHtml(announcement.announce_command || announcement.rendered_command)}</pre>` : ''}
+        </details>
+      `;
+    }
+
+    function updateBgpMitigationModalTitle(candidates) {
+      const resolved = (Array.isArray(candidates) ? candidates : []).filter(candidate => {
+        return mitigationCandidateConnectorId(candidate) && !candidate.requires_connector_selection;
+      });
+      const allResolvedDryRun = resolved.length > 0 && resolved.every(candidate => candidate.connector_dry_run === true);
+      const title = allResolvedDryRun
+        ? 'Dry-run BGP'
+        : resolved.length > 0
+          ? 'Proposta de FlowSpec'
+          : 'Avaliar mitigação BGP';
+      setText('bgpMitigationModalTitle', title);
     }
 
     function renderDnsMultiTargetBlock(candidate, index, canApply) {
@@ -9727,11 +10102,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function renderBgpMitigationCandidates(candidates) {
       const container = document.getElementById('bgpMitigationCandidates');
       container.innerHTML = candidates.map((candidate, index) => {
-        const policy = candidate.policy_decision || {};
+        const policy = mitigationPolicy(candidate);
+        const validation = candidate.validation && typeof candidate.validation === 'object' ? candidate.validation : {};
         const aiCandidateIndex = currentAiMitigationAnalysis?.recommended_candidate_index;
         const aiCandidateCount = Number(currentAiMitigationAnalysis?.candidate_count ?? candidates.length);
         const isAiRecommended = Number.isInteger(Number(aiCandidateIndex)) && aiCandidateIndex !== null && aiCandidateIndex !== undefined && aiCandidateCount > 0 && Number(aiCandidateIndex) === index && !currentAiMitigationAnalysis.error_message;
-        const reasons = [...(policy.reasons || []), ...(policy.warnings || [])].join(' | ');
+        const validationErrors = Array.isArray(validation.errors) ? validation.errors : [];
+        const validationWarnings = Array.isArray(validation.warnings) ? validation.warnings : [];
+        const reasons = [...new Set([...(policy.reasons || []), ...(policy.warnings || []), ...validationErrors, ...validationWarnings].filter(Boolean))].join(' | ');
         const basis = candidate.mitigation_basis === 'top_conversation'
           ? 'Mitigação por conversa principal'
           : ['aggregated_dst_port', 'aggregated_src_port'].includes(candidate.mitigation_basis)
@@ -9759,7 +10137,25 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           && !Boolean(candidate.dst_prefix || candidate.dst_cidr);
         const dnsSrcProfile = ['FLOWSPEC_BLOCK_SRC_DNS'].includes(String(candidate.profile || candidate.response_profile_name || '').toUpperCase());
         const dnsWithoutDestination = dnsSourceOnly || dnsSrcProfile;
-        const canApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny' || dnsWithoutDestination);
+        const legacyCanApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny' || dnsWithoutDestination);
+        const actionable = Object.prototype.hasOwnProperty.call(candidate, 'actionable') ? Boolean(candidate.actionable) : legacyCanApply;
+        const selectedConnectorId = mitigationCandidateConnectorId(candidate);
+        const selectionPending = Boolean(candidate.requires_connector_selection) && !Number(candidate.connector_id || currentBgpMitigationConnectorId || 0);
+        const equivalentAnnouncement = candidate.equivalent_announcement || null;
+        const canSubmitApproval = actionable && !selectionPending && !equivalentAnnouncement && (
+          Object.prototype.hasOwnProperty.call(candidate, 'can_submit_approval') ? Boolean(candidate.can_submit_approval) : legacyCanApply
+        );
+        const canAnnounceNow = actionable && !selectionPending && !equivalentAnnouncement && (
+          Object.prototype.hasOwnProperty.call(candidate, 'can_announce_now') ? Boolean(candidate.can_announce_now) : legacyCanApply
+        );
+        const ineligibleMessage = candidate.rejection_persisted
+          ? '<div class="text-danger fw-semibold mb-2">Rejeitado pelo operador.</div>'
+          : !actionable && !selectionPending && !equivalentAnnouncement
+            ? `<div class="text-danger fw-semibold mb-2">Não elegível para mitigação${connectorResolutionReason ? `: ${escapeHtml(connectorResolutionReason)}` : ''}</div>`
+          : '';
+        const selectionMessage = selectionPending
+          ? '<div class="text-warning fw-semibold mb-2">Selecione um conector para recalcular a proposta.</div>'
+          : '';
         return `
           <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -9767,25 +10163,39 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 <div class="panel-title">${isAiRecommended ? 'Recomendado pela IA - ' : ''}${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
                 <div class="subtle">${escapeHtml(candidate.reason || '-')}</div>
               </div>
-              ${mitigationDecisionBadge(policy.decision)}
+              <div class="d-flex flex-wrap gap-1">
+                ${mitigationDecisionBadge(policy.decision)}
+                ${candidate.connector_dry_run ? mitigationDecisionBadge('dry_run') : ''}
+              </div>
             </div>
             <div class="metric-readout mb-2">${escapeHtml(candidateRole || basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
             ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}
-            ${renderDnsMultiTargetBlock(candidate, index, canApply)}
+            ${renderMitigationConnectorChoice(candidate, index)}
+            ${renderDnsMultiTargetBlock(candidate, index, canAnnounceNow)}
             ${connectorText ? `<div class="metric-readout mb-2">Conector: ${escapeHtml(connectorText)}</div>` : ''}
-            ${connectorResolutionReason ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
+            ${selectedConnectorId ? `<div class="subtle mb-2">connector_id selecionado: #${escapeHtml(selectedConnectorId)}</div>` : ''}
+            ${connectorResolutionReason && !selectionPending ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
+            ${ineligibleMessage}
+            ${selectionMessage}
+            ${renderEquivalentMitigationAnnouncement(equivalentAnnouncement)}
+            ${validationErrors.length ? `<div class="text-danger mb-2">${escapeHtml(validationErrors.join(' | '))}</div>` : ''}
+            ${validationWarnings.length ? `<div class="text-warning mb-2">${escapeHtml(validationWarnings.join(' | '))}</div>` : ''}
             <div class="metric-readout mb-2">${escapeHtml(reasons || 'Sem avisos adicionais')}</div>
             <div class="metric-readout mb-2">${escapeHtml(bgpActionImpactText(candidate))}</div>
             <pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(candidate.rendered_command || '-')}</pre>
             <div class="toolbar">
-              ${canApply ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>` : ''}
-              ${canApply ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Criar sugestao</span></button>` : '<span class="subtle">Informativo: sem ação de mitigação.</span>'}
-              <button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>
+              ${canSubmitApproval ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-mitigation-apply" data-index="${index}" data-mode="manual_approval"><i data-lucide="inbox"></i><span>Enviar para aprovação</span></button>` : ''}
+              ${canAnnounceNow ? `<button type="button" class="btn btn-sm btn-success bgp-mitigation-apply" data-index="${index}" data-mode="announce_now"><i data-lucide="radio-tower"></i><span>Aprovar e anunciar</span></button>` : ''}
+              ${!canSubmitApproval && !canAnnounceNow && !selectionPending && !equivalentAnnouncement ? '<span class="subtle">Informativo: sem ação de mitigação.</span>' : ''}
+              ${candidate.rejection_persisted
+                ? '<button type="button" class="btn btn-sm btn-outline-danger" disabled><i data-lucide="x"></i><span>Rejeitado</span></button>'
+                : `<button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>`}
             </div>
           </div>
         `;
       }).join('') || '<div class="subtle">Nenhum candidato de mitigação foi montado para esta anomalia.</div>';
+      updateBgpMitigationModalTitle(candidates);
       createIcons();
     }
 
@@ -9873,35 +10283,106 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderBgpAiRecommendation();
     }
 
-    async function runBgpAnomalyDryRun() {
+    function uniqueMitigationConnectorForRecalculation(candidates) {
+      const connectorIds = (Array.isArray(candidates) ? candidates : [])
+        .filter(candidate => !Number(candidate.connector_id || 0))
+        .map(candidate => mitigationEligibleConnectors(candidate))
+        .filter(connectors => connectors.length === 1)
+        .map(connectors => Number(connectors[0].id));
+      const uniqueIds = [...new Set(connectorIds)];
+      return uniqueIds.length === 1 ? uniqueIds[0] : null;
+    }
+
+    async function runBgpAnomalyDryRun(connectorId = currentBgpMitigationConnectorId, allowAutomaticConnectorSelection = true) {
       if (!currentBgpMitigationAnomalyId) return;
+      const selectedConnectorId = Number(connectorId || 0) || null;
+      currentBgpMitigationConnectorId = selectedConnectorId;
       document.getElementById('bgpMitigationOutput').textContent = 'Avaliando candidatos...';
-      const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, { method: 'POST' });
+      const evaluationPayload = selectedConnectorId ? { connector_id: selectedConnectorId } : {};
+      const payload = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(evaluationPayload)
+      });
       currentBgpMitigationEvaluation = payload || {};
       currentBgpMitigationCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
       if (payload.legacy_dns_mitigation_disabled) {
+        setText('bgpMitigationModalTitle', 'Avaliar mitigação BGP');
         document.getElementById('bgpMitigationCandidates').innerHTML = '<div class="text-warning">Detector legacy: mitigação automática desativada. Use templates de detecção.</div>';
         document.getElementById('bgpMitigationOutput').textContent = 'Mitigação automática desativada para DNS legacy.';
         return;
       }
+      const automaticConnectorId = uniqueMitigationConnectorForRecalculation(currentBgpMitigationCandidates);
+      if (allowAutomaticConnectorSelection && !selectedConnectorId && automaticConnectorId) {
+        document.getElementById('bgpMitigationOutput').textContent = `Conector único #${automaticConnectorId} selecionado. Recalculando proposta...`;
+        await runBgpAnomalyDryRun(automaticConnectorId, false);
+        return;
+      }
       await loadBgpAiRecommendation();
       renderBgpMitigationCandidates(currentBgpMitigationCandidates);
-      document.getElementById('bgpMitigationOutput').textContent = `${currentBgpMitigationCandidates.length} candidato(s) avaliados.`;
-      await loadBgpView();
+      document.getElementById('bgpMitigationOutput').textContent = `${currentBgpMitigationCandidates.length} candidato(s) avaliados.${selectedConnectorId ? ` Conector #${selectedConnectorId} selecionado.` : ''}`;
     }
 
     async function applyBgpMitigationCandidate(index, mode) {
       if (!currentBgpMitigationAnomalyId) return;
-      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigação...' : 'Criando sugestao...';
-      const payload = { candidate_index: Number(index), mode };
-      const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
+      const anomalyId = currentBgpMitigationAnomalyId;
+      const candidate = currentBgpMitigationCandidates[Number(index)] || {};
+      const connectorId = mitigationCandidateConnectorId(candidate);
+      if (candidate.requires_connector_selection && !connectorId) {
+        document.getElementById('bgpMitigationOutput').textContent = 'Selecione um conector e aguarde o recálculo antes de continuar.';
+        return;
+      }
+      try {
+        document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigação...' : 'Enviando para aprovação...';
+        const payload = { candidate_index: Number(index), mode, connector_id: connectorId };
+        const result = await apiRequest(`/api/anomalies/${anomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
+      } finally {
+        await refreshAnomalyResponseRows(anomalyId).catch(error => console.warn('Falha ao atualizar resposta da anomalia:', error));
+      }
       await loadBgpView();
+      await refreshOpsSummary();
+    }
+
+    async function rejectBgpMitigationCandidate(index) {
+      if (!currentBgpMitigationAnomalyId) return;
+      const anomalyId = currentBgpMitigationAnomalyId;
+      const candidateIndex = Number(index);
+      const candidate = currentBgpMitigationCandidates[candidateIndex] || {};
+      const connectorId = mitigationCandidateConnectorId(candidate);
+      const payload = {
+        candidate_index: candidateIndex,
+        connector_id: connectorId,
+        reason: 'rejected_by_operator'
+      };
+      try {
+        document.getElementById('bgpMitigationOutput').textContent = `Persistindo rejeição do candidato ${candidateIndex + 1}...`;
+        const result = await apiRequest(`/api/anomalies/${anomalyId}/mitigation/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const rejectedPolicy = { ...mitigationPolicy(candidate), decision: 'rejected' };
+        currentBgpMitigationCandidates[candidateIndex] = {
+          ...candidate,
+          ...(result.candidate || {}),
+          policy_decision: rejectedPolicy,
+          actionable: false,
+          can_submit_approval: false,
+          can_announce_now: false,
+          rejection_persisted: true
+        };
+        renderBgpMitigationCandidates(currentBgpMitigationCandidates);
+        document.getElementById('bgpMitigationOutput').textContent = result.message || `Candidato ${candidateIndex + 1} rejeitado e persistido.`;
+      } finally {
+        await refreshAnomalyResponseRows(anomalyId).catch(error => console.warn('Falha ao atualizar resposta da anomalia:', error));
+      }
       await refreshOpsSummary();
     }
 
     async function applyBgpMitigationDnsTargets(index, mode, selectedOnly = false) {
       if (!currentBgpMitigationAnomalyId) return;
+      const anomalyId = currentBgpMitigationAnomalyId;
       const candidate = currentBgpMitigationCandidates[Number(index)] || {};
       const targets = Array.isArray(candidate.dns_targets) ? candidate.dns_targets : [];
       let selectedIps = targets.map(target => target.dst_ip).filter(Boolean);
@@ -9914,16 +10395,25 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('bgpMitigationOutput').textContent = 'Nenhum destino DNS selecionado.';
         return;
       }
-      document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigações DNS...' : 'Criando sugestões DNS...';
-      const payload = { candidate_index: Number(index), mode, selected_dns_target_ips: selectedIps };
-      const result = await apiRequest(`/api/anomalies/${currentBgpMitigationAnomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
+      try {
+        document.getElementById('bgpMitigationOutput').textContent = mode === 'announce_now' ? 'Anunciando mitigações DNS...' : 'Criando sugestões DNS...';
+        const connectorId = mitigationCandidateConnectorId(candidate);
+        const payload = { candidate_index: Number(index), mode, connector_id: connectorId, selected_dns_target_ips: selectedIps };
+        const result = await apiRequest(`/api/anomalies/${anomalyId}/mitigation/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        document.getElementById('bgpMitigationOutput').textContent = bgpDryRunText(result.announcement || {});
+      } finally {
+        await refreshAnomalyResponseRows(anomalyId).catch(error => console.warn('Falha ao atualizar resposta da anomalia:', error));
+      }
       await loadBgpView();
       await refreshOpsSummary();
     }
 
     async function updateBgpAnnouncement(id, action) {
-      await apiRequest(`/api/bgp/announcements/${id}/${action}`, { method: 'POST' });
+      try {
+        await apiRequest(`/api/bgp/announcements/${id}/${action}`, { method: 'POST' });
+      } finally {
+        await refreshAnomalyResponseRows().catch(error => console.warn('Falha ao atualizar respostas das anomalias:', error));
+      }
       await loadBgpView();
       await refreshOpsSummary();
     }
@@ -11554,6 +12044,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (document.getElementById('view-bgp')?.classList.contains('active')) {
           await refreshBgpConnectorStatuses();
         }
+        if (document.getElementById('view-anomalies')?.classList.contains('active')) {
+          await refreshAnomalyResponseRows();
+        }
       } finally {
         opsSummaryRefreshInFlight = false;
       }
@@ -11716,6 +12209,542 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return text || 'both';
     }
 
+    const ANOMALY_RESPONSE_STATUS_PRESENTATION = {
+      '': {
+        label: 'Sem resposta',
+        badge: 'off',
+        confirmation: 'Nenhuma resposta registrada para esta anomalia.'
+      },
+      pending_approval: {
+        label: 'Aguardando aprovação',
+        badge: 'warn',
+        confirmation: 'Apenas registrado; aguarda decisão do operador.'
+      },
+      queued: {
+        label: 'Na fila de envio',
+        badge: '',
+        confirmation: 'Aprovado; envio ao ExaBGP ainda não tentado.'
+      },
+      sent: {
+        label: 'Enviado ao ExaBGP',
+        badge: '',
+        confirmation: 'Comando entregue ao ExaBGP; peer e rota ainda não confirmados.'
+      },
+      advertised: {
+        label: 'FlowSpec ativo',
+        badge: 'ok',
+        confirmation: 'Peer estabelecido e anúncio solicitado; confirmação operacional local.'
+      },
+      peer_down: {
+        label: 'Peer BGP indisponível',
+        badge: 'down',
+        confirmation: 'Não enviado porque o peer estava indisponível.'
+      },
+      dry_run: {
+        label: 'Dry-run',
+        badge: '',
+        confirmation: 'Simulação local; nenhum comando operacional enviado.'
+      },
+      deduplicated: {
+        label: 'Duplicado',
+        badge: 'off',
+        confirmation: 'Nenhum novo comando enviado; resposta equivalente já registrada.'
+      },
+      not_applied: {
+        label: 'Não aplicado',
+        badge: 'warn',
+        confirmation: 'A resposta não foi aplicada.'
+      },
+      rejected: {
+        label: 'Rejeitado',
+        badge: 'off',
+        confirmation: 'Rejeitado antes do envio.'
+      },
+      rejected_by_policy: {
+        label: 'Bloqueado por política',
+        badge: 'down',
+        confirmation: 'A política bloqueou a resposta antes do envio.'
+      },
+      failed: {
+        label: 'Falhou',
+        badge: 'down',
+        confirmation: 'A tentativa falhou antes da confirmação operacional.'
+      },
+      failed_withdraw: {
+        label: 'Falha na retirada',
+        badge: 'down',
+        confirmation: 'A retirada falhou; a resposta pode continuar ativa.'
+      },
+      withdrawn: {
+        label: 'Aplicado e retirado',
+        badge: 'off',
+        confirmation: 'O anúncio foi enviado e depois retirado.'
+      },
+      expired: {
+        label: 'Expirado',
+        badge: 'off',
+        confirmation: 'O prazo interno encerrou; a resposta não está ativa.'
+      },
+      applied: {
+        label: 'Aplicado sem confirmação',
+        badge: 'warn',
+        confirmation: 'Há registro de aplicação, mas não confirmação de anúncio ao peer.'
+      },
+      active: {
+        label: 'Enviado (legado, sem confirmação)',
+        badge: 'warn',
+        confirmation: 'Registro legado active; peer e instalação da rota não confirmados.'
+      },
+      announced: {
+        label: 'Enviado (legado, sem confirmação)',
+        badge: 'warn',
+        confirmation: 'Registro legado announced; peer e instalação da rota não confirmados.'
+      }
+    };
+
+    const ANOMALY_RESPONSE_REFRESH_FIELDS = [
+      'response_status',
+      'response_reason',
+      'response_updated_at',
+      'response_announcement',
+      'response_announcements',
+      'response_outcome',
+      'auto_mitigation_status',
+      'auto_mitigation_reason',
+      'auto_mitigation_details',
+      'auto_mitigation_updated_at'
+    ];
+
+    const ANOMALY_RESPONSE_CONFIRMATION_LABELS = {
+      registered: 'Apenas registrado',
+      approved: 'Aprovado',
+      delivered_to_exabgp: 'Enviado ao ExaBGP',
+      peer_established: 'Peer estabelecido',
+      peer_established_announce_requested: 'Anúncio solicitado com peer estabelecido (confirmação local)',
+      peer_unavailable: 'Peer indisponível; não enviado',
+      peer_not_ready: 'Peer ainda não estabelecido; não enviado',
+      simulation_only: 'Somente simulação',
+      operator_rejected: 'Rejeitado pelo operador',
+      withdrawn: 'Anúncio retirado',
+      withdraw_failed: 'Falha ao retirar o anúncio',
+      withdraw_requested: 'Retirada solicitada; entrega ainda não confirmada',
+      delivery_attempted: 'Tentativa de entrega registrada; resultado ainda incerto',
+      delivery_persistence_failed: 'Enviado, mas houve falha ao persistir a confirmação',
+      compensating_withdraw_delivered: 'Withdraw compensatório entregue',
+      superseded_by_newer_delivery: 'Tentativa substituída por um anúncio equivalente mais novo'
+    };
+
+    function anomalyResponseAnnouncements(event = {}) {
+      const attempts = Array.isArray(event.response_announcements)
+        ? event.response_announcements.filter(item => item && typeof item === 'object')
+        : [];
+      if (attempts.length) return attempts;
+      return event.response_announcement && typeof event.response_announcement === 'object'
+        ? [event.response_announcement]
+        : [];
+    }
+
+    function anomalyResponseAnnouncementIsOperational(announcement = {}) {
+      if (String(announcement.status || '').trim().toLowerCase() !== 'advertised') return false;
+      if (announcement.legacy_unconfirmed === true) return false;
+      if (Object.prototype.hasOwnProperty.call(announcement, 'operationally_active')) {
+        return announcement.operationally_active === true;
+      }
+      return bgpAnnouncementIsOperationalActive(announcement);
+    }
+
+    function anomalyResponseAnnouncementStatusCode(announcement = {}) {
+      const rawStatus = String(announcement.status || '').trim().toLowerCase();
+      if (rawStatus !== 'advertised') return rawStatus;
+      return anomalyResponseAnnouncementIsOperational(announcement) ? 'advertised' : 'applied';
+    }
+
+    function anomalyResponseAttemptTimestamp(announcement = {}) {
+      const value = announcement.last_attempt_at
+        || announcement.advertised_at
+        || announcement.announced_at
+        || announcement.sent_at
+        || announcement.queued_at
+        || announcement.created_at
+        || '';
+      const timestamp = new Date(value).getTime();
+      return Number.isFinite(timestamp) ? timestamp : 0;
+    }
+
+    function anomalyResponseAttemptPriority(announcement = {}) {
+      const status = anomalyResponseAnnouncementStatusCode(announcement);
+      if (status === 'advertised') return 0;
+      if (['sent', 'queued'].includes(status)) return 1;
+      if (status === 'pending_approval') return 2;
+      return 3;
+    }
+
+    function anomalyPrimaryResponseAnnouncement(event = {}) {
+      if (Object.prototype.hasOwnProperty.call(event, 'response_announcement')) {
+        return event.response_announcement && typeof event.response_announcement === 'object'
+          ? event.response_announcement
+          : null;
+      }
+      const attempts = anomalyResponseAnnouncements(event).slice();
+      attempts.sort((left, right) => {
+        return anomalyResponseAttemptPriority(left) - anomalyResponseAttemptPriority(right)
+          || anomalyResponseAttemptTimestamp(right) - anomalyResponseAttemptTimestamp(left);
+      });
+      return attempts[0] || null;
+    }
+
+    function anomalyResponseStatusCode(event = {}) {
+      const primary = anomalyPrimaryResponseAnnouncement(event);
+      const rawStatus = String(event.response_status || primary?.status || event.auto_mitigation_status || '').trim().toLowerCase();
+      if (rawStatus !== 'advertised') return rawStatus;
+      if (!primary) return 'applied';
+      const primaryStatus = String(primary.status || '').trim().toLowerCase();
+      if (['active', 'announced', 'applied'].includes(primaryStatus)) return primaryStatus;
+      return anomalyResponseAnnouncementStatusCode({ ...primary, status: 'advertised' });
+    }
+
+    function anomalyResponseIntentPresentation(announcement = {}, code = '') {
+      const confirmation = String(announcement.confirmation_level || '').trim().toLowerCase();
+      const ttlElapsed = announcement.ttl_elapsed === true || (announcement.expires_at && Number.isFinite(new Date(announcement.expires_at).getTime()) && new Date(announcement.expires_at) <= new Date());
+      if (confirmation === 'withdraw_requested') {
+        return {
+          label: 'Retirada pendente',
+          badge: 'warn',
+          confirmation: 'O withdraw foi solicitado, mas sua entrega ainda não foi confirmada.'
+        };
+      }
+      if (confirmation === 'delivery_attempted' && code === 'queued') {
+        return {
+          label: 'Entrega em andamento',
+          badge: 'warn',
+          confirmation: 'A tentativa foi registrada; o resultado da escrita ainda é incerto.'
+        };
+      }
+      if (ttlElapsed && code === 'advertised') {
+        return {
+          label: 'FlowSpec ativo · retirada atrasada',
+          badge: 'warn',
+          confirmation: 'O TTL encerrou, mas a retirada ainda não foi confirmada.'
+        };
+      }
+      return {};
+    }
+
+    function anomalyResponseStatusInfo(event = {}) {
+      const code = anomalyResponseStatusCode(event);
+      const primary = anomalyPrimaryResponseAnnouncement(event) || {};
+      const presentation = ANOMALY_RESPONSE_STATUS_PRESENTATION[code] || {
+        label: code ? 'Resposta registrada' : 'Sem resposta',
+        badge: 'off',
+        confirmation: 'Estado sem confirmação operacional conhecida.'
+      };
+      const peerDownAfterDelivery = code === 'peer_down' && Boolean(primary.sent_at || primary.advertised_at || primary.announced_at);
+      return {
+        code,
+        ...presentation,
+        ...(peerDownAfterDelivery ? { confirmation: 'O peer caiu após o envio/anúncio; o histórico foi preservado.' } : {}),
+        ...anomalyResponseIntentPresentation(primary, code)
+      };
+    }
+
+    function anomalyResponseAnnouncementStatusInfo(announcement = {}) {
+      const code = anomalyResponseAnnouncementStatusCode(announcement);
+      const presentation = ANOMALY_RESPONSE_STATUS_PRESENTATION[code] || {
+        label: code ? 'Resposta registrada' : 'Sem resposta',
+        badge: 'off',
+        confirmation: 'Estado sem confirmação operacional conhecida.'
+      };
+      const peerDownAfterDelivery = code === 'peer_down' && Boolean(announcement.sent_at || announcement.advertised_at || announcement.announced_at);
+      return {
+        code,
+        ...presentation,
+        ...(peerDownAfterDelivery ? { confirmation: 'O peer caiu após o envio/anúncio; o histórico foi preservado.' } : {}),
+        ...anomalyResponseIntentPresentation(announcement, code)
+      };
+    }
+
+    function anomalyResponseIsSecurityItem(event = {}) {
+      const source = String(event.source || event.anomaly_source || '').trim().toLowerCase();
+      return ['security_anomaly', 'security_anomalies'].includes(source);
+    }
+
+    function anomalyResponseLookupKeys(event = {}) {
+      const keys = [];
+      const actionId = anomalyActionId(event);
+      const rowId = Number(event.id || 0);
+      if (actionId) keys.push(`action:${actionId}`);
+      if (rowId && !anomalyResponseIsSecurityItem(event)) keys.push(`row:${rowId}`);
+      return [...new Set(keys)];
+    }
+
+    function anomalyResponseMatchesId(event = {}, requestedId = null) {
+      const targetId = Number(requestedId || 0);
+      if (!targetId) return false;
+      if (anomalyActionId(event) === targetId) return true;
+      return !anomalyResponseIsSecurityItem(event) && Number(event.id || 0) === targetId;
+    }
+
+    function anomalyResponseConfirmationText(value, fallback = '') {
+      const code = String(value || '').trim();
+      return ANOMALY_RESPONSE_CONFIRMATION_LABELS[code.toLowerCase()] || code || fallback;
+    }
+
+    function anomalyResponseTypeLabel(value) {
+      const code = String(value || '').trim().toLowerCase();
+      if (!code || code === 'flowspec') return 'FlowSpec BGP';
+      if (code === 'blackhole') return 'Blackhole BGP';
+      return String(value);
+    }
+
+    function anomalyResponsePeerStatusLabel(value) {
+      const code = String(value || '').trim().toLowerCase();
+      if (code === 'established') return 'Estabelecido';
+      if (['down', 'idle', 'inactive', 'unavailable'].includes(code)) return 'Indisponível';
+      return value || '';
+    }
+
+    function anomalyResponseCellHtml(event = {}) {
+      const info = anomalyResponseStatusInfo(event);
+      const anomalyId = anomalyActionId(event) || Number(event.id || 0);
+      const reason = event.response_reason || event.auto_mitigation_reason || info.confirmation;
+      return `<button type="button" class="badge-soft ${info.badge} anomaly-response-badge" data-anomaly-id="${anomalyId}" data-response-status="${escapeHtml(info.code || 'none')}" title="${escapeHtml(reason)}" aria-label="Abrir detalhes da resposta: ${escapeHtml(info.label)}">${escapeHtml(info.label)}</button>`;
+    }
+
+    function anomalyResponseHasValue(value) {
+      if (value === null || value === undefined) return false;
+      if (typeof value === 'string') return value.trim() !== '';
+      if (Array.isArray(value)) return value.length > 0;
+      return true;
+    }
+
+    function anomalyResponseDetailField(label, value) {
+      let displayValue = value;
+      if (Array.isArray(displayValue)) displayValue = displayValue.filter(anomalyResponseHasValue).join(', ');
+      if (displayValue && typeof displayValue === 'object') {
+        displayValue = displayValue.label || displayValue.status || displayValue.state || displayValue.name || '';
+      }
+      if (!anomalyResponseHasValue(displayValue)) return '';
+      return `<div class="anomaly-response-detail-item"><div class="anomaly-response-detail-label">${escapeHtml(label)}</div><div>${escapeHtml(displayValue)}</div></div>`;
+    }
+
+    function anomalyResponseDateText(value) {
+      if (!value) return '';
+      const timestamp = new Date(value).getTime();
+      return Number.isFinite(timestamp) ? formatDateTime(value) : String(value);
+    }
+
+    function anomalyResponseNamedId(name, id) {
+      if (name && id) return `${name} (#${id})`;
+      if (name) return String(name);
+      return id ? `#${id}` : '';
+    }
+
+    function anomalyResponseOriginMode(announcement = {}) {
+      if (typeof announcement.automatic === 'boolean') return announcement.automatic ? 'Automático' : 'Manual';
+      if (typeof announcement.is_automatic === 'boolean') return announcement.is_automatic ? 'Automático' : 'Manual';
+      const origin = String(announcement.response_origin || announcement.mitigation_origin || announcement.origin || announcement.source || '').trim();
+      if (origin.toLowerCase() === 'automatic') return 'Automático';
+      if (origin.toLowerCase() === 'manual') return 'Manual';
+      return origin;
+    }
+
+    function anomalyResponseAttemptHtml(announcement = {}, index, primary = null) {
+      const info = anomalyResponseAnnouncementStatusInfo(announcement);
+      const rawStatus = String(announcement.status || '').trim().toLowerCase();
+      const isPrimary = primary === announcement
+        || (primary?.id && announcement.id && String(primary.id) === String(announcement.id));
+      const connector = anomalyResponseNamedId(announcement.connector_name, announcement.connector_id);
+      const zone = anomalyResponseNamedId(announcement.zone_name, announcement.zone_id);
+      const internalOrigin = announcement.origin_ip
+        || announcement.internal_origin_ip
+        || announcement.origin_internal_ip
+        || announcement.internal_source_ip
+        || announcement.origin_target_ip
+        || announcement.top_src_ip
+        || '';
+      const target = announcement.dst_prefix || announcement.target_prefix || announcement.src_prefix || '';
+      const protocol = announcement.protocol ? String(announcement.protocol).toUpperCase() : '';
+      const port = announcement.dst_port
+        ? `Destino ${announcement.dst_port}`
+        : announcement.src_port ? `Origem ${announcement.src_port}` : '';
+      const action = announcement.action || announcement.then_action ? bgpActionLabel(announcement) : '';
+      const confirmation = announcement.confirmation_level
+        || announcement.confirmation
+        || announcement.confirmation_status
+        || info.confirmation;
+      const announcementId = announcement.announcement_id || announcement.id;
+      const advertisedAt = rawStatus === 'advertised'
+        ? announcement.advertised_at || announcement.announced_at
+        : announcement.advertised_at;
+      const legacySentAt = ['active', 'announced'].includes(rawStatus) ? announcement.announced_at : '';
+      const fields = [
+        anomalyResponseDetailField('Tipo da resposta', anomalyResponseTypeLabel(announcement.response_type || announcement.mitigation_type)),
+        anomalyResponseDetailField('Estado atual', info.label),
+        anomalyResponseDetailField('Motivo', announcement.reason || announcement.status_reason),
+        anomalyResponseDetailField('Conector', connector),
+        anomalyResponseDetailField('Estado do peer', anomalyResponsePeerStatusLabel(announcement.peer_status || announcement.bgp_state || announcement.connector_bgp_state)),
+        anomalyResponseDetailField('Zona', zone),
+        anomalyResponseDetailField('Origem interna', internalOrigin),
+        anomalyResponseDetailField('Destino / prefixo', target),
+        anomalyResponseDetailField('Protocolo', protocol),
+        anomalyResponseDetailField('Porta', port),
+        anomalyResponseDetailField('Ação', action),
+        anomalyResponseDetailField('Criado em', anomalyResponseDateText(announcement.created_at)),
+        anomalyResponseDetailField('Aprovado em', anomalyResponseDateText(announcement.approved_at)),
+        anomalyResponseDetailField('Na fila em', anomalyResponseDateText(announcement.queued_at)),
+        anomalyResponseDetailField('Enviado em', anomalyResponseDateText(announcement.sent_at)),
+        anomalyResponseDetailField('Anunciado em', anomalyResponseDateText(advertisedAt)),
+        anomalyResponseDetailField('Envio legado registrado em', anomalyResponseDateText(legacySentAt)),
+        anomalyResponseDetailField('Retirado em', anomalyResponseDateText(announcement.withdrawn_at)),
+        anomalyResponseDetailField('Expira em', anomalyResponseDateText(announcement.expires_at)),
+        anomalyResponseDetailField('Última tentativa', anomalyResponseDateText(announcement.last_attempt_at)),
+        anomalyResponseDetailField('Último erro', announcement.last_error),
+        anomalyResponseDetailField('ID do anúncio', announcementId ? `#${announcementId}` : ''),
+        anomalyResponseDetailField('Tentativa anterior', announcement.retry_of_announcement_id ? `#${announcement.retry_of_announcement_id}` : ''),
+        anomalyResponseDetailField('Autor', announcement.created_by || announcement.user_name || announcement.username),
+        anomalyResponseDetailField('Origem da execução', anomalyResponseOriginMode(announcement)),
+        anomalyResponseDetailField('Modo solicitado', announcement.requested_mode || announcement.mode),
+        anomalyResponseDetailField('Nível de confirmação', anomalyResponseConfirmationText(confirmation, info.confirmation))
+      ].filter(Boolean).join('');
+      return `
+        <section class="panel p-3 anomaly-response-attempt">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div class="fw-semibold">Tentativa ${announcementId ? `#${escapeHtml(announcementId)}` : index + 1}${isPrimary ? ' · prioritária' : ''}</div>
+            <span class="badge-soft ${info.badge}">${escapeHtml(info.label)}</span>
+          </div>
+          <div class="anomaly-response-detail-grid">${fields}</div>
+        </section>
+      `;
+    }
+
+    function renderAnomalyResponseDetail(event = {}) {
+      const info = anomalyResponseStatusInfo(event);
+      const primary = anomalyPrimaryResponseAnnouncement(event);
+      const attempts = anomalyResponseAnnouncements(event).slice().sort((left, right) => {
+        return anomalyResponseAttemptTimestamp(right) - anomalyResponseAttemptTimestamp(left);
+      });
+      const reason = event.response_reason || event.auto_mitigation_reason || '';
+      const updatedAt = event.response_updated_at || event.auto_mitigation_updated_at || '';
+      const outcomeDetails = event.auto_mitigation_details && typeof event.auto_mitigation_details === 'object'
+        ? event.auto_mitigation_details
+        : event.response_outcome?.details && typeof event.response_outcome.details === 'object'
+          ? event.response_outcome.details
+          : {};
+      const outcomeConnector = anomalyResponseNamedId(outcomeDetails.connector_name, outcomeDetails.connector_id);
+      const outcomeZone = anomalyResponseNamedId(outcomeDetails.zone_name || event.zone_name, outcomeDetails.zone_id || event.zone_id);
+      const overviewFields = [
+        anomalyResponseDetailField('Estado atual', info.label),
+        anomalyResponseDetailField('Motivo', reason),
+        anomalyResponseDetailField('Atualizado em', anomalyResponseDateText(updatedAt)),
+        anomalyResponseDetailField('Tentativa prioritária', primary?.announcement_id || primary?.id ? `#${primary.announcement_id || primary.id}` : ''),
+        anomalyResponseDetailField('Conector', primary ? '' : outcomeConnector),
+        anomalyResponseDetailField('Zona', primary ? '' : outcomeZone),
+        anomalyResponseDetailField('Origem interna', primary ? '' : outcomeDetails.source_ip),
+        anomalyResponseDetailField('Autor', primary ? '' : outcomeDetails.created_by),
+        anomalyResponseDetailField('Origem da execução', primary ? '' : anomalyResponseOriginMode(outcomeDetails)),
+        anomalyResponseDetailField('Modo solicitado', primary ? '' : outcomeDetails.requested_mode),
+        anomalyResponseDetailField('Nível de confirmação', anomalyResponseConfirmationText(primary?.confirmation_level || primary?.confirmation || outcomeDetails.confirmation_level, info.confirmation))
+      ].filter(Boolean).join('');
+      const anomalyId = Number(event.id || 0) || anomalyActionId(event);
+      setText('anomalyResponseModalTitle', `Resposta da anomalia #${anomalyId || '-'}`);
+      setText('anomalyResponseSummary', `${info.label}${updatedAt ? ` · ${anomalyResponseDateText(updatedAt)}` : ''}`);
+      document.getElementById('anomalyResponseDetailBody').innerHTML = `
+        <section class="panel p-3 mb-3">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div class="panel-title">Resposta selecionada</div>
+            <span class="badge-soft ${info.badge}">${escapeHtml(info.label)}</span>
+          </div>
+          <div class="anomaly-response-detail-grid">${overviewFields}</div>
+        </section>
+        <div class="panel-title mb-2">Todas as tentativas (${attempts.length})</div>
+        ${attempts.length
+          ? attempts.map((announcement, index) => anomalyResponseAttemptHtml(announcement, index, primary)).join('')
+          : '<div class="panel p-3 text-muted">Nenhuma tentativa BGP relacionada. A resposta acima usa somente o resultado persistido na anomalia.</div>'}
+      `;
+    }
+
+    function anomalyResponseEventFromPayload(payload = {}, requestedId = null) {
+      const source = payload.event || payload.anomaly || payload;
+      const event = { ...(source || {}) };
+      ANOMALY_RESPONSE_REFRESH_FIELDS.forEach(field => {
+        if (event[field] === undefined && payload[field] !== undefined) event[field] = payload[field];
+      });
+      if (!event.id && requestedId) event.id = Number(requestedId);
+      if (!event.action_id && Number(requestedId) < 0) event.action_id = Number(requestedId);
+      return event;
+    }
+
+    async function openAnomalyResponseDetail(anomalyId) {
+      currentAnomalyResponseId = Number(anomalyId);
+      setText('anomalyResponseModalTitle', `Resposta da anomalia #${anomalyId}`);
+      setText('anomalyResponseSummary', 'Carregando...');
+      document.getElementById('anomalyResponseDetailBody').innerHTML = '<div class="subtle">Carregando detalhes da resposta...</div>';
+      openModal('anomalyResponseModal');
+      const localEvent = anomalyItems.find(item => anomalyResponseMatchesId(item, anomalyId));
+      if (localEvent) {
+        renderAnomalyResponseDetail(localEvent);
+        return;
+      }
+      try {
+        const payload = await apiRequest(`/api/anomalies/${anomalyId}`);
+        if (currentAnomalyResponseId !== Number(anomalyId)) return;
+        renderAnomalyResponseDetail(anomalyResponseEventFromPayload(payload, anomalyId));
+      } catch (error) {
+        setText('anomalyResponseSummary', `Falha: ${error.message}`);
+        document.getElementById('anomalyResponseDetailBody').innerHTML = '';
+      }
+    }
+
+    function mergeAnomalyResponseFields(current = {}, fresh = {}) {
+      const merged = { ...current };
+      ANOMALY_RESPONSE_REFRESH_FIELDS.forEach(field => {
+        if (Object.prototype.hasOwnProperty.call(fresh, field)) merged[field] = fresh[field];
+      });
+      return merged;
+    }
+
+    function patchAnomalyResponseCell(event = {}) {
+      const anomalyId = anomalyActionId(event) || Number(event.id || 0);
+      if (!anomalyId) return;
+      const cell = document.querySelector(`#anomaliesTable tr[data-anomaly-row-id="${anomalyId}"] .anomaly-response-cell`);
+      if (cell) cell.innerHTML = anomalyResponseCellHtml(event);
+    }
+
+    async function refreshAnomalyResponseRows(anomalyId = null) {
+      if (!anomalyItems.length) return;
+      if (anomalyResponseRefreshPromise) return anomalyResponseRefreshPromise;
+      anomalyResponseRefreshPromise = (async () => {
+        const payload = await apiRequest(anomalyActiveTab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
+        const freshItems = Array.isArray(payload.items) ? payload.items : [];
+        const freshByKey = new Map();
+        freshItems.forEach(item => {
+          anomalyResponseLookupKeys(item).forEach(key => freshByKey.set(key, item));
+        });
+        const requestedId = Number(anomalyId || 0);
+        anomalyItems = anomalyItems.map(item => {
+          if (requestedId && !anomalyResponseMatchesId(item, requestedId)) return item;
+          const fresh = anomalyResponseLookupKeys(item).map(key => freshByKey.get(key)).find(Boolean);
+          if (!fresh) return item;
+          const merged = mergeAnomalyResponseFields(item, fresh);
+          patchAnomalyResponseCell(merged);
+          return merged;
+        });
+        if (currentAnomalyDetailEvent) {
+          const fresh = anomalyResponseLookupKeys(currentAnomalyDetailEvent).map(key => freshByKey.get(key)).find(Boolean);
+          if (fresh) currentAnomalyDetailEvent = mergeAnomalyResponseFields(currentAnomalyDetailEvent, fresh);
+        }
+        if (document.getElementById('anomalyResponseModal')?.classList.contains('open') && currentAnomalyResponseId) {
+          const modalEvent = anomalyItems.find(item => anomalyResponseMatchesId(item, currentAnomalyResponseId));
+          if (modalEvent) renderAnomalyResponseDetail(modalEvent);
+        }
+      })();
+      try {
+        return await anomalyResponseRefreshPromise;
+      } finally {
+        anomalyResponseRefreshPromise = null;
+      }
+    }
+
     function anomalyActionId(event) {
       return Number(event?.action_id || event?.security_anomaly_id || event?.id || 0);
     }
@@ -11741,7 +12770,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function syncAnomalyListItemFromDetail(detailEvent, requestedId) {
       const targetId = Number(requestedId);
-      const index = anomalyItems.findIndex(item => anomalyActionId(item) === targetId || Number(item.id || 0) === Number(detailEvent?.id || 0));
+      const index = anomalyItems.findIndex(item => anomalyResponseMatchesId(item, targetId));
       if (index < 0) return;
       anomalyItems[index] = { ...anomalyItems[index], ...detailEvent };
       if (anomalyActiveTab === 'active' && anomalyOperationalStatus(anomalyItems[index]) !== 'active') {
@@ -11754,12 +12783,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const tbody = document.getElementById('anomaliesTable');
       const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
       const tabItems = displayAnomalyItems(items);
-      const visibleItems = idSearch ? tabItems.filter(event => String(anomalyActionId(event) || event.id || '') === idSearch) : tabItems;
+      const visibleItems = idSearch ? tabItems.filter(event => [event.id, anomalyActionId(event)].some(value => String(value || '') === idSearch)) : tabItems;
       tbody.innerHTML = visibleItems.map(event => {
         const actionId = anomalyActionId(event);
         const legacyDns = isLegacyDnsAnomaly(event);
         return `
-        <tr>
+        <tr data-anomaly-row-id="${actionId}">
           <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
           <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
           <td>#${escapeHtml(event.id || '-')}</td>
@@ -11771,6 +12800,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end">${formatMetricValue(event.peak_value, event.metric_unit)}</td>
           <td class="text-end">${formatBytes(event.estimated_bytes)}</td>
           <td>${formatDateTime(event.last_seen_at)}<div class="subtle">${anomalyDuration(event)}</div></td>
+          <td class="anomaly-response-cell">${anomalyResponseCellHtml(event)}</td>
           <td>
             <div class="anomaly-actions" role="group">
               <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}" title="Ver detalhes" aria-label="Ver detalhes">
@@ -11785,7 +12815,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           </td>
         </tr>
       `;
-      }).join('') || '<tr><td colspan="9" class="text-muted">Sem anomalias</td></tr>';
+      }).join('') || '<tr><td colspan="10" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -12045,7 +13075,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (currentAnomalyDetailId !== Number(anomalyId)) return;
         const detail = payload || {};
         currentAnomalyDetailPayload = detail;
-        const event = detail.event || detail.anomaly || detail;
+        const event = anomalyResponseEventFromPayload(detail, anomalyId);
         syncAnomalyListItemFromDetail(event, anomalyId);
         currentAnomalyDetailEvent = event;
         document.getElementById('anomalyInvestigatePeakButton').disabled = false;
@@ -15394,11 +16424,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     document.getElementById('anomaliesTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const response = target?.closest('.anomaly-response-badge');
       const detail = target?.closest('.anomaly-detail');
       const mitigate = target?.closest('.anomaly-mitigate');
       const ack = target?.closest('.anomaly-ack');
       const close = target?.closest('.anomaly-close');
-      if (detail) {
+      if (response) {
+        openAnomalyResponseDetail(Number(response.dataset.anomalyId)).catch(console.error);
+      } else if (detail) {
         openAnomalyDetail(Number(detail.dataset.anomalyId)).catch(console.error);
       } else if (mitigate) {
         openBgpMitigationModal(Number(mitigate.dataset.anomalyId)).catch(console.error);
@@ -15449,8 +16482,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else if (apply) {
         applyBgpMitigationCandidate(Number(apply.dataset.index), apply.dataset.mode).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
       } else if (reject) {
-        document.getElementById('bgpMitigationOutput').textContent = `Candidato ${Number(reject.dataset.index) + 1} rejeitado nesta revisao.`;
+        rejectBgpMitigationCandidate(Number(reject.dataset.index)).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
       }
+    });
+    document.getElementById('bgpMitigationCandidates').addEventListener('change', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const connectorSelect = target?.closest('.bgp-mitigation-connector');
+      if (!connectorSelect) return;
+      const connectorId = Number(connectorSelect.value || 0);
+      if (!connectorId) {
+        currentBgpMitigationConnectorId = null;
+        document.getElementById('bgpMitigationOutput').textContent = 'Selecione um conector para recalcular a proposta.';
+        return;
+      }
+      currentBgpMitigationConnectorId = connectorId;
+      runBgpAnomalyDryRun(connectorId, false).catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; });
     });
     document.getElementById('bgpConnectorsTable').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
@@ -15494,6 +16540,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const reject = target?.closest('.bgp-ann-reject');
       const withdraw = target?.closest('.bgp-ann-withdraw');
       if (approve) updateBgpAnnouncement(approve.dataset.id, 'approve').catch(error => setText('bgpStatus', `Falha ao aprovar: ${error.message}`));
+      if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
+      if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
+    });
+    document.getElementById('bgpInFlightAnnouncementsTable').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      const reject = target?.closest('.bgp-ann-reject');
+      const withdraw = target?.closest('.bgp-ann-withdraw');
       if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
       if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
     });

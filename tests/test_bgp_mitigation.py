@@ -139,6 +139,22 @@ class temporary_main_db:
 
 @unittest.skipIf(SKIP_RUNTIME_IMPORT, "backend/app/main.py requires Python 3.10+ for runtime import tests")
 class BgpMitigationTest(unittest.TestCase):
+    def setUp(self):
+        self._real_pipe_guard = patch.object(
+            main,
+            "exabgp_write_pipe",
+            side_effect=AssertionError("Teste tentou escrever no pipe ExaBGP real."),
+        )
+        self.exabgp_pipe_guard = self._real_pipe_guard.start()
+        self.addCleanup(self._real_pipe_guard.stop)
+        self._readiness_guard_patch = patch.object(
+            main,
+            "check_bgp_connector_readiness",
+            side_effect=lambda _conn, connector: self._readiness_result(connector),
+        )
+        self.bgp_readiness_guard = self._readiness_guard_patch.start()
+        self.addCleanup(self._readiness_guard_patch.stop)
+
     def _admin_request(self):
         return types.SimpleNamespace(state=types.SimpleNamespace(user={"role": "admin", "username": "tester"}))
 
@@ -172,6 +188,70 @@ class BgpMitigationTest(unittest.TestCase):
         profile = main.fetch_bgp_profile(conn, profile_id)
         return conn, connector, profile
 
+    def _stage2_candidate(self, connector, profile, mitigation_key="stage2-attempt", anomaly_id=None):
+        return {
+            "response_profile_id": profile["id"],
+            "connector_id": connector["id"],
+            "response_type": "flowspec",
+            "action": "discard",
+            "then_action": "discard",
+            "target_prefix": "203.0.113.10/32",
+            "dst_prefix": "203.0.113.10/32",
+            "dst_ip": "203.0.113.10",
+            "protocol": "udp",
+            "dst_port": "53",
+            "duration_seconds": 300,
+            "mitigation_key": mitigation_key,
+            "anomaly_id": anomaly_id,
+            "source": "stage2_test",
+            "source_id": str(anomaly_id or mitigation_key),
+        }
+
+    def _readiness_result(self, connector, peer_state="established", ready=None, reason=""):
+        if ready is None:
+            ready = peer_state == "established"
+        confirmation_level = "peer_established" if ready else "peer_not_ready"
+        status = {
+            "connector_id": connector["id"],
+            "bgp_state": peer_state,
+            "flowspec_state": peer_state if ready else "not_verified",
+            "pipe_state": "ok" if ready else "not_verified",
+            "last_checked_at": main.utc_now_iso(),
+            "pipes": {"ok": ready, "status": "ok" if ready else "not_verified"},
+            "session": {"tcp_established": ready},
+            "service": {"active": ready},
+            "verification": {
+                "bgp_verified": peer_state in {"established", "down"},
+                "flowspec_verified": ready,
+                "pipe_verified": ready,
+            },
+        }
+        details = {
+            "checked_at": status["last_checked_at"],
+            "bgp_state": status["bgp_state"],
+            "flowspec_state": status["flowspec_state"],
+            "pipe_state": status["pipe_state"],
+            "pipe_ok": ready,
+        }
+        return {
+            "ready": ready,
+            "peer_state": peer_state,
+            "confirmation_level": confirmation_level,
+            "reason": reason or ("peer_established" if ready else f"peer_{peer_state}"),
+            "failure_status": "" if ready else "peer_down",
+            "status": status,
+            "details": details,
+        }
+
+    def _announcement_event_types(self, conn, announcement_id):
+        return [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM bgp_announcement_events WHERE announcement_id = ? ORDER BY id",
+                (announcement_id,),
+            ).fetchall()
+        ]
+
     def _dns_multi_target_context(self, max_active_rules=50, min_packets_s=1000, add_whitelist=True):
         conn = main.sqlite_connection()
         now = main.utc_now_iso()
@@ -197,6 +277,20 @@ class BgpMitigationTest(unittest.TestCase):
             """
             INSERT INTO bgp_protected_prefixes (cidr, name, enabled, block_rtbh, block_flowspec, created_at, updated_at)
             VALUES ('45.5.248.0/24', 'Fibinet clientes', 1, 1, 1, ?, ?)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO ip_zones (id, name, connector_id, active, created_at, updated_at)
+            VALUES (1, 'Clientes', ?, 1, ?, ?)
+            """,
+            (connector_id, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO ip_zone_prefixes (zone_id, cidr, name, active, created_at, updated_at)
+            VALUES (1, '45.5.248.0/24', 'Fibinet clientes', 1, ?, ?)
             """,
             (now, now),
         )
@@ -340,6 +434,70 @@ class BgpMitigationTest(unittest.TestCase):
         conn.commit()
         return event_id
 
+    def _insert_udp_many_anomaly_event(
+        self,
+        conn,
+        event_id=1767,
+        src_ip="45.5.248.205",
+        dst_ip="51.222.110.42",
+        dst_port=9987,
+        zone_id=None,
+        sensor_id=None,
+    ):
+        now = main.utc_now_iso()
+        values = {
+            "id": event_id,
+            "sensor_id": sensor_id,
+            "target_ip": dst_ip,
+            "target_cidr": main.host_cidr_for_ip(dst_ip),
+            "target_role": "dst_ip",
+            "zone_id": zone_id,
+            "zone_name": "Clientes" if zone_id else "",
+            "vector_name": main.UDP_UPLOAD_MANY_CLIENTS_VECTOR,
+            "scope_type": "external_dst_ip_port",
+            "direction": "sends",
+            "decoder": "UDP",
+            "severity": "warning",
+            "metric_unit": "packets_s",
+            "threshold_value": 10000,
+            "observed_value": 40000,
+            "peak_value": 40000,
+            "started_at": now,
+            "last_seen_at": now,
+            "status": "active",
+            "estimated_bytes": 4000000,
+            "estimated_packets": 40000,
+            "flow_count": 1,
+            "summary": "UDP outbound para destino/porta agregados",
+            "dedupe_key": f"udp-many-{event_id}",
+            "created_at": now,
+            "updated_at": now,
+            "top_src_ip": src_ip,
+            "top_dst_ip": dst_ip,
+            "top_src_port": 45000,
+            "top_dst_port": dst_port,
+            "top_packets": 40000,
+            "top_bytes": 4000000,
+            "protocol": "udp",
+        }
+        columns = list(values)
+        conn.execute(
+            f"INSERT INTO anomaly_events ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            tuple(values[column] for column in columns),
+        )
+        conn.execute(
+            """
+            INSERT INTO anomaly_event_flows (
+                anomaly_event_id, flow_time, sensor, exporter_ip, src_ip, dst_ip,
+                src_port, dst_port, proto, bytes, packets, flow_count
+            )
+            VALUES (?, ?, 'sensor-test', '192.0.2.10', ?, ?, 45000, ?, 17, 4000000, 40000, 1)
+            """,
+            (event_id, now, src_ip, dst_ip, dst_port),
+        )
+        conn.commit()
+        return event_id
+
     def _insert_zone_connector_mapping(self, conn, name, cidr, connector_id, zone_id=None):
         now = main.utc_now_iso()
         if zone_id is None:
@@ -395,7 +553,96 @@ class BgpMitigationTest(unittest.TestCase):
         conn.commit()
         return event_id
 
-    def test_announce_command_has_no_ttl_and_expires_at_is_internal(self):
+    def _insert_response_announcement(
+        self,
+        conn,
+        anomaly_id,
+        status,
+        updated_at,
+        *,
+        anomaly_source="anomaly_events",
+        expires_at=None,
+        dst_prefix="203.0.113.10/32",
+        last_error="",
+    ):
+        queued_at = updated_at if status in {"queued", "sent", "advertised"} else None
+        sent_at = updated_at if status in {"sent", "advertised"} else None
+        advertised_at = updated_at if status == "advertised" else None
+        cursor = conn.execute(
+            """
+            INSERT INTO bgp_announcements (
+                anomaly_id, status, route_type, response_type, action,
+                target_prefix, dst_prefix, protocol, dst_port, duration_seconds,
+                expires_at, queued_at, sent_at, advertised_at, last_attempt_at,
+                peer_state, confirmation_level, requested_mode,
+                source, source_id, anomaly_source, last_error,
+                created_by, created_at, updated_at
+            )
+            VALUES (?, ?, 'flowspec', 'flowspec', 'discard',
+                    ?, ?, 'udp', '9987', 900,
+                    ?, ?, ?, ?, ?,
+                    ?, ?, 'announce_now',
+                    'manual', ?, ?, ?,
+                    'response-test', ?, ?)
+            """,
+            (
+                anomaly_id,
+                status,
+                dst_prefix,
+                dst_prefix,
+                expires_at,
+                queued_at,
+                sent_at,
+                advertised_at,
+                updated_at,
+                "established" if status == "advertised" else "down" if status == "peer_down" else "",
+                "announce_requested_peer_established" if status == "advertised" else "registered",
+                str(anomaly_id),
+                anomaly_source,
+                last_error,
+                updated_at,
+                updated_at,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def _insert_security_response_anomaly(self, conn, anomaly_id, src_ip="45.5.248.210", dst_ip="198.51.100.210"):
+        now = main.utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO security_anomalies (
+                id, vector, severity, status, zone_id, zone_name,
+                domain, direction, src_ip, dst_ip, target_ip, target_cidr,
+                target_role, scope_type, protocol, packets_s, bits_s, flows,
+                first_seen, last_seen, message, dedupe_key,
+                anomaly_source, source_engine, source_id, source_name,
+                created_at, updated_at
+            )
+            VALUES (?, 'UDP_UPLOAD_MANY_CLIENTS_SAME_DST_PORT', 'warning', 'active', 7, 'Security zone',
+                    'internal_ip', 'transmits', ?, ?, ?, ?,
+                    'src_ip', 'internal_ip_32', 'udp', 22000, 1000000, 10,
+                    ?, ?, 'Security anomaly response test', ?,
+                    'detection_template_rule', 'detection_templates', ?, 'Security response test',
+                    ?, ?)
+            """,
+            (
+                anomaly_id,
+                src_ip,
+                dst_ip,
+                src_ip,
+                f"{src_ip}/32",
+                now,
+                now,
+                f"security-response-{anomaly_id}",
+                str(anomaly_id),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return anomaly_id
+
+    def test_dry_run_has_no_ttl_and_does_not_start_expiration(self):
         with temporary_main_db():
             conn, connector, profile = self._connector_and_profile()
             payload = main.BgpAnnouncementDryRunPayload(
@@ -413,7 +660,8 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertNotIn("ttl", item["announce_command"].lower())
             self.assertNotIn("duration", item["announce_command"].lower())
             self.assertEqual(item["duration_seconds"], 300)
-            self.assertTrue(item["expires_at"])
+            self.assertIsNone(item["expires_at"])
+            self.assertFalse(item["operationally_active"])
 
     def test_manual_announce_blocks_duration_above_max_before_pipe(self):
         with temporary_main_db():
@@ -442,7 +690,7 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertIn("Nenhum anuncio foi enviado", str(ctx.exception.detail))
 
-    def test_scheduler_expires_active_announcement_with_saved_withdraw(self):
+    def test_scheduler_expires_advertised_announcement_with_saved_withdraw(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()
             now = main.utc_now_iso()
@@ -455,7 +703,7 @@ class BgpMitigationTest(unittest.TestCase):
                     expires_at, announced_at, announce_command, withdraw_command, rendered_command,
                     created_at, updated_at
                 )
-                VALUES (?, ?, 'active', 'flowspec', 'flowspec', 'discard',
+                VALUES (?, ?, 'advertised', 'flowspec', 'flowspec', 'discard',
                         '203.0.113.10/32', '203.0.113.10/32', 'udp', '53', 60,
                         ?, ?, 'announce flow route X', 'withdraw flow route X', 'announce flow route X',
                         ?, ?)
@@ -474,6 +722,564 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(calls, ["withdraw flow route X"])
             row = conn.execute("SELECT status FROM bgp_announcements").fetchone()
             self.assertEqual(row["status"], "expired")
+
+    def test_sent_transition_starts_safety_ttl_before_advertised(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "sent-safety-ttl")
+            policy = main.policy_for_candidate(candidate)
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+            queued = main.insert_bgp_mitigation_announcement(
+                conn,
+                candidate,
+                connector,
+                profile,
+                policy,
+                validation,
+                "queued",
+                main.render_exabgp_flowspec_command("announce", candidate),
+                "tester",
+            )
+            sent = main.transition_bgp_announcement(
+                conn,
+                queued["id"],
+                "sent",
+                "sent",
+                "Comando entregue no teste.",
+                "tester",
+            )
+            self.assertTrue(sent["sent_at"])
+            self.assertTrue(sent["expires_at"])
+            self.assertIsNone(sent["advertised_at"])
+            self.assertFalse(sent["operationally_active"])
+
+    def test_scheduler_withdraws_all_delivered_states_and_preserves_pending(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            inserted = {}
+            for status, sent_at, advertised_at, announced_at in (
+                ("sent", now, None, None),
+                ("peer_down", now, now, now),
+                ("active", None, None, now),
+                ("pending_approval", None, None, None),
+            ):
+                inserted[status] = conn.execute(
+                    """
+                    INSERT INTO bgp_announcements (
+                        connector_id, status, route_type, response_type, action,
+                        target_prefix, dst_prefix, duration_seconds, expires_at,
+                        sent_at, advertised_at, announced_at, withdraw_command,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, 'flowspec', 'flowspec', 'discard',
+                            '203.0.113.10/32', '203.0.113.10/32', 60, ?,
+                            ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        connector["id"],
+                        status,
+                        past,
+                        sent_at,
+                        advertised_at,
+                        announced_at,
+                        f"withdraw flow route {status}",
+                        now,
+                        now,
+                    ),
+                ).lastrowid
+            conn.commit()
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_expired_bgp_announcements(conn)
+
+            self.assertEqual(stats, {"withdrawn": 3, "failed": 0})
+            self.assertEqual(write_pipe.call_count, 3)
+            rows = {
+                row["id"]: row
+                for row in conn.execute("SELECT id, status, expires_at FROM bgp_announcements").fetchall()
+            }
+            for status in ("sent", "peer_down", "active"):
+                self.assertEqual(rows[inserted[status]]["status"], "expired")
+                self.assertEqual(rows[inserted[status]]["expires_at"], past)
+                self.assertIn("withdraw_requested", self._announcement_event_types(conn, inserted[status]))
+            self.assertEqual(rows[inserted["pending_approval"]]["status"], "pending_approval")
+            self.assertNotIn("withdraw_requested", self._announcement_event_types(conn, inserted["pending_approval"]))
+
+    def test_delivery_intent_left_by_a_crash_gets_a_safety_withdraw(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "crash-after-send-intent")
+            policy = main.policy_for_candidate(candidate)
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+            queued = main.insert_bgp_mitigation_announcement(
+                conn,
+                candidate,
+                connector,
+                profile,
+                policy,
+                validation,
+                "queued",
+                main.render_exabgp_flowspec_command("announce", candidate),
+                "tester",
+            )
+            conn.commit()
+
+            claim_token = main.persist_bgp_send_intent(conn, queued["id"], "tester", queued["announce_command"])
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            conn.execute("UPDATE bgp_announcements SET expires_at = ? WHERE id = ?", (past, queued["id"]))
+            conn.commit()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_expired_bgp_announcements(conn)
+
+            stored = main.fetch_bgp_announcement(conn, queued["id"])
+            self.assertTrue(claim_token)
+            self.assertEqual(stats, {"withdrawn": 1, "failed": 0})
+            self.assertEqual(stored["status"], "expired")
+            self.assertEqual(stored["confirmation_level"], "withdrawn")
+            self.assertIn("delivery_attempted", self._announcement_event_types(conn, queued["id"]))
+            self.assertIn("withdraw_requested", self._announcement_event_types(conn, queued["id"]))
+            write_pipe.assert_called_once_with(connector, queued["withdraw_command"])
+
+    def test_failed_withdraw_is_retried_and_remains_reserved_until_success(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "failed-withdraw-retry")
+            policy = main.policy_for_candidate(candidate)
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+            advertised = main.insert_bgp_mitigation_announcement(
+                conn,
+                candidate,
+                connector,
+                profile,
+                policy,
+                validation,
+                "advertised",
+                main.render_exabgp_flowspec_command("announce", candidate),
+                "tester",
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(main, "exabgp_write_pipe", side_effect=HTTPException(status_code=503, detail="pipe busy")):
+                failed = main.withdraw_bgp_announcement(self._admin_request(), advertised["id"])
+            self.assertEqual(failed["status"], "failed_withdraw")
+            with main.sqlite_connection() as check:
+                self.assertTrue(main.active_mitigation_exists(check, candidate["mitigation_key"]))
+                stale = (datetime.now(timezone.utc) - timedelta(seconds=31)).isoformat().replace("+00:00", "Z")
+                check.execute("UPDATE bgp_announcements SET updated_at = ? WHERE id = ?", (stale, advertised["id"]))
+                check.commit()
+                with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                    stats = main.process_expired_bgp_announcements(check)
+                stored = main.fetch_bgp_announcement(check, advertised["id"])
+                self.assertFalse(main.active_mitigation_exists(check, candidate["mitigation_key"]))
+            self.assertEqual(stats, {"withdrawn": 1, "failed": 0})
+            self.assertEqual(stored["status"], "withdrawn")
+            write_pipe.assert_called_once()
+
+    def test_expiring_older_equivalent_attempt_does_not_withdraw_newer_delivery(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+            ids = []
+            for index, expires_at in enumerate((past, future)):
+                ids.append(conn.execute(
+                    """
+                    INSERT INTO bgp_announcements (
+                        connector_id, status, route_type, response_type, action,
+                        target_prefix, dst_prefix, protocol, dst_port, mitigation_key,
+                        duration_seconds, expires_at, sent_at, advertised_at,
+                        withdraw_command, created_at, updated_at
+                    ) VALUES (?, 'advertised', 'flowspec', 'flowspec', 'discard',
+                              '203.0.113.10/32', '203.0.113.10/32', 'udp', '53',
+                              ?, 300, ?, ?, ?, 'withdraw flow route SAME', ?, ?)
+                    """,
+                    (connector["id"], f"historical-race-{index}", expires_at, now, now, now, now),
+                ).lastrowid)
+            conn.commit()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_expired_bgp_announcements(conn)
+
+            older = main.fetch_bgp_announcement(conn, ids[0])
+            newer = main.fetch_bgp_announcement(conn, ids[1])
+            self.assertEqual(stats, {"withdrawn": 1, "failed": 0})
+            self.assertEqual(older["status"], "expired")
+            self.assertEqual(older["confirmation_level"], "superseded_by_newer_delivery")
+            self.assertEqual(older["status_details"]["superseded_by_announcement_id"], ids[1])
+            self.assertEqual(newer["status"], "advertised")
+            write_pipe.assert_not_called()
+
+    def test_elapsed_ttl_keeps_dedup_and_capacity_until_withdraw_is_confirmed(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            conn.execute("UPDATE bgp_connectors SET max_active_rules = 1 WHERE id = ?", (connector["id"],))
+            connector = main.fetch_bgp_connector(conn, connector["id"])
+            candidate = self._stage2_candidate(connector, profile, "expired-equivalent")
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, response_profile_id, status, route_type, response_type,
+                    action, target_prefix, dst_prefix, protocol, dst_port,
+                    duration_seconds, expires_at, mitigation_key, created_at, updated_at
+                )
+                VALUES (?, ?, 'advertised', 'flowspec', 'flowspec',
+                        'discard', ?, ?, 'udp', '53', 300, ?, ?, ?, ?)
+                """,
+                (
+                    connector["id"],
+                    profile["id"],
+                    candidate["target_prefix"],
+                    candidate["dst_prefix"],
+                    past,
+                    candidate["mitigation_key"],
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+
+            self.assertIsNotNone(main.equivalent_mitigation_announcement(conn, candidate["mitigation_key"]))
+            self.assertTrue(main.active_mitigation_exists(conn, candidate["mitigation_key"]))
+            self.assertTrue(any("equivalente ativa" in error for error in validation["errors"]))
+            self.assertIn("Limite de regras ativas do conector excedido.", validation["errors"])
+
+    def test_stage2_schema_adds_traceable_attempt_fields_without_replacing_legacy_columns(self):
+        with temporary_main_db():
+            with main.sqlite_connection() as conn:
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(bgp_announcements)").fetchall()
+                }
+            self.assertTrue(
+                {
+                    "queued_at",
+                    "sent_at",
+                    "advertised_at",
+                    "last_attempt_at",
+                    "peer_state",
+                    "confirmation_level",
+                    "status_details_json",
+                    "requested_mode",
+                    "retry_of_announcement_id",
+                    "announced_at",
+                    "expires_at",
+                }.issubset(columns)
+            )
+
+    def test_pending_approval_never_checks_peer_writes_pipe_or_counts_as_active(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "stage2-pending")
+            with patch.object(main, "check_bgp_connector_readiness") as readiness, \
+                 patch.object(main, "exabgp_write_pipe") as write_pipe:
+                item = main.apply_mitigation_candidate(conn, candidate, "manual_approval", "tester")
+            conn.commit()
+
+            self.assertEqual(item["status"], "pending_approval")
+            self.assertFalse(item["operationally_active"])
+            self.assertIsNone(item["queued_at"])
+            self.assertIsNone(item["sent_at"])
+            self.assertIsNone(item["advertised_at"])
+            self.assertIsNone(item["last_attempt_at"])
+            self.assertIsNone(item["expires_at"])
+            self.assertEqual(item["requested_mode"], "manual_approval")
+            readiness.assert_not_called()
+            write_pipe.assert_not_called()
+            summary = main.bgp_summary_payload(conn)
+            self.assertEqual(summary["active_bgp_announcements"], 0)
+            self.assertEqual(summary["pending_bgp_announcements"], 1)
+            events = self._announcement_event_types(conn, item["id"])
+            self.assertIn("pending_approval", events)
+            self.assertNotIn("queued", events)
+            self.assertNotIn("sent", events)
+            self.assertNotIn("advertised", events)
+            conn.close()
+
+    def test_peer_down_or_unverified_persists_peer_down_without_pipe_write(self):
+        for peer_state in ("down", "not_verified"):
+            with self.subTest(peer_state=peer_state), temporary_main_db():
+                conn, connector, profile = self._connector_and_profile()
+                candidate = self._stage2_candidate(
+                    connector,
+                    profile,
+                    f"stage2-peer-{peer_state}",
+                )
+                readiness_result = self._readiness_result(
+                    connector,
+                    peer_state=peer_state,
+                    ready=False,
+                    reason=f"peer_{peer_state}",
+                )
+                with patch.object(
+                    main,
+                    "check_bgp_connector_readiness",
+                    return_value=readiness_result,
+                ) as readiness, patch.object(main, "exabgp_write_pipe") as write_pipe:
+                    item = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+                conn.commit()
+
+                self.assertEqual(item["status"], "peer_down")
+                self.assertFalse(item["operationally_active"])
+                self.assertTrue(item["queued_at"])
+                self.assertTrue(item["last_attempt_at"])
+                self.assertIsNone(item["sent_at"])
+                self.assertIsNone(item["advertised_at"])
+                self.assertIsNone(item["announced_at"])
+                self.assertIsNone(item["expires_at"])
+                self.assertFalse(item["status_details"].get("send_claim_token"))
+                self.assertEqual(item["status_details"]["send_claim_cancelled_reason"], f"peer_{peer_state}")
+                self.assertEqual(item["peer_state"], peer_state)
+                self.assertIn(peer_state, item["last_error"])
+                self.assertEqual(item["status_details"]["bgp_state"], peer_state)
+                readiness.assert_called_once()
+                write_pipe.assert_not_called()
+                events = self._announcement_event_types(conn, item["id"])
+                self.assertLess(events.index("queued"), events.index("peer_down"))
+                self.assertNotIn("sent", events)
+                self.assertNotIn("advertised", events)
+                conn.close()
+
+    def test_peer_down_before_delivery_can_be_rejected_without_a_withdraw(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "peer-down-rejectable")
+            readiness_result = self._readiness_result(
+                connector,
+                peer_state="down",
+                ready=False,
+                reason="peer_bgp_down",
+            )
+            with patch.object(main, "check_bgp_connector_readiness", return_value=readiness_result), \
+                 patch.object(main, "exabgp_write_pipe") as write_pipe:
+                item = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.commit()
+            conn.close()
+
+            rejected = main.reject_bgp_announcement(self._admin_request(), item["id"])
+
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertIsNone(rejected["sent_at"])
+            write_pipe.assert_not_called()
+
+    def test_peer_up_and_pipe_success_trace_queued_sent_advertised_and_start_ttl(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "stage2-success")
+            readiness_result = self._readiness_result(connector)
+            with patch.object(
+                main,
+                "check_bgp_connector_readiness",
+                return_value=readiness_result,
+            ) as readiness, patch.object(main, "exabgp_write_pipe") as write_pipe:
+                item = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.commit()
+
+            self.assertEqual(item["status"], "advertised")
+            self.assertTrue(item["operationally_active"])
+            self.assertTrue(item["queued_at"])
+            self.assertTrue(item["sent_at"])
+            self.assertTrue(item["advertised_at"])
+            self.assertTrue(item["announced_at"])
+            self.assertTrue(item["last_attempt_at"])
+            self.assertTrue(item["expires_at"])
+            self.assertEqual(item["peer_state"], "established")
+            self.assertNotEqual(item["confirmation_level"], "registered")
+            self.assertEqual(item["requested_mode"], "announce_now")
+            self.assertEqual(item["status_details"]["bgp_state"], "established")
+            readiness.assert_called_once()
+            write_pipe.assert_called_once()
+            self.assertEqual(write_pipe.call_args.args[0]["id"], connector["id"])
+            self.assertEqual(write_pipe.call_args.args[1], item["announce_command"])
+            events = self._announcement_event_types(conn, item["id"])
+            self.assertLess(events.index("queued"), events.index("sent"))
+            self.assertLess(events.index("sent"), events.index("advertised"))
+            self.assertEqual(main.bgp_summary_payload(conn)["active_bgp_announcements"], 1)
+            conn.close()
+
+    def test_pipe_failure_after_peer_check_is_failed_without_ttl(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "stage2-pipe-failure")
+            readiness_result = self._readiness_result(connector)
+            with patch.object(
+                main,
+                "check_bgp_connector_readiness",
+                return_value=readiness_result,
+            ), patch.object(
+                main,
+                "exabgp_write_pipe",
+                side_effect=HTTPException(status_code=400, detail="pipe down"),
+            ) as write_pipe:
+                item = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.commit()
+
+            self.assertEqual(item["status"], "failed")
+            self.assertFalse(item["operationally_active"])
+            self.assertTrue(item["queued_at"])
+            self.assertTrue(item["last_attempt_at"])
+            self.assertIsNone(item["sent_at"])
+            self.assertIsNone(item["advertised_at"])
+            self.assertIsNone(item["announced_at"])
+            self.assertIsNone(item["expires_at"])
+            self.assertFalse(item["status_details"].get("send_claim_token"))
+            self.assertEqual(item["status_details"]["send_claim_cancelled_reason"], "pipe down")
+            self.assertIn("pipe down", item["last_error"])
+            write_pipe.assert_called_once()
+            events = self._announcement_event_types(conn, item["id"])
+            self.assertLess(events.index("queued"), events.index("announce_failed"))
+            self.assertNotIn("sent", events)
+            self.assertNotIn("advertised", events)
+            self.assertEqual(main.bgp_summary_payload(conn)["active_bgp_announcements"], 0)
+            conn.close()
+
+    def test_approval_uses_the_same_queued_sent_advertised_attempt_flow(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "stage2-approval")
+            pending = main.apply_mitigation_candidate(conn, candidate, "manual_approval", "tester")
+            conn.commit()
+            conn.close()
+
+            readiness_result = self._readiness_result(connector)
+            with patch.object(
+                main,
+                "check_bgp_connector_readiness",
+                return_value=readiness_result,
+            ) as readiness, patch.object(main, "exabgp_write_pipe") as write_pipe:
+                item = main.approve_bgp_announcement(self._admin_request(), pending["id"])
+
+            self.assertEqual(item["id"], pending["id"])
+            self.assertEqual(item["status"], "advertised")
+            self.assertTrue(item["queued_at"])
+            self.assertTrue(item["sent_at"])
+            self.assertTrue(item["advertised_at"])
+            self.assertTrue(item["expires_at"])
+            readiness.assert_called_once()
+            write_pipe.assert_called_once()
+            with main.sqlite_connection() as check:
+                events = self._announcement_event_types(check, item["id"])
+            self.assertLess(events.index("pending_approval"), events.index("queued"))
+            self.assertLess(events.index("queued"), events.index("sent"))
+            self.assertLess(events.index("sent"), events.index("advertised"))
+
+    def test_advertised_announcement_cannot_be_rejected_without_withdraw(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "reject-advertised")
+            with patch.object(main, "check_bgp_connector_readiness", return_value=self._readiness_result(connector)), \
+                 patch.object(main, "exabgp_write_pipe"):
+                advertised = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.commit()
+            conn.close()
+
+            with self.assertRaises(HTTPException) as raised:
+                main.reject_bgp_announcement(self._admin_request(), advertised["id"])
+
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertIn("withdraw", str(raised.exception.detail))
+            with main.sqlite_connection() as check:
+                stored = main.fetch_bgp_announcement(check, advertised["id"])
+                events = self._announcement_event_types(check, advertised["id"])
+            self.assertEqual(stored["status"], "advertised")
+            self.assertNotIn("rejected", events)
+
+    def test_delivered_withdraw_without_operational_connector_is_failed_not_withdrawn(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "withdraw-unavailable")
+            with patch.object(main, "check_bgp_connector_readiness", return_value=self._readiness_result(connector)), \
+                 patch.object(main, "exabgp_write_pipe"):
+                advertised = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.execute(
+                "UPDATE bgp_connectors SET backend_type = 'dry_run', mode = 'dry_run' WHERE id = ?",
+                (connector["id"],),
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                result = main.withdraw_bgp_announcement(self._admin_request(), advertised["id"])
+
+            self.assertEqual(result["status"], "failed_withdraw")
+            self.assertIn("nao enviado", result["last_error"])
+            self.assertEqual(result["confirmation_level"], "withdraw_failed")
+            self.assertIn("withdraw_requested", [event["event_type"] for event in result["events"]])
+            write_pipe.assert_not_called()
+
+    def test_reannounce_after_peer_returns_creates_a_linked_new_attempt(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "stage2-retry")
+            down = self._readiness_result(connector, peer_state="down", ready=False, reason="peer_bgp_down")
+            up = self._readiness_result(connector)
+            with patch.object(
+                main,
+                "check_bgp_connector_readiness",
+                side_effect=[down, up],
+            ) as readiness, patch.object(main, "exabgp_write_pipe") as write_pipe:
+                first = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+                conn.commit()
+                second = main.apply_mitigation_candidate(conn, candidate, "announce_now", "tester")
+            conn.commit()
+
+            self.assertEqual(first["status"], "peer_down")
+            self.assertEqual(second["status"], "advertised")
+            self.assertNotEqual(first["id"], second["id"])
+            self.assertEqual(second["retry_of_announcement_id"], first["id"])
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) AS count FROM bgp_announcements").fetchone()["count"],
+                2,
+            )
+            self.assertIn("peer_down", self._announcement_event_types(conn, first["id"]))
+            second_events = self._announcement_event_types(conn, second["id"])
+            self.assertLess(second_events.index("queued"), second_events.index("sent"))
+            self.assertLess(second_events.index("sent"), second_events.index("advertised"))
+            self.assertEqual(readiness.call_count, 2)
+            write_pipe.assert_called_once()
+            conn.close()
+
+    def test_expire_and_anomaly_withdraw_ignore_pending_approval(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(
+                connector,
+                profile,
+                "stage2-pending-withdraw",
+                anomaly_id=404,
+            )
+            pending = main.apply_mitigation_candidate(conn, candidate, "manual_approval", "tester")
+            past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+            conn.execute(
+                "UPDATE bgp_announcements SET expires_at = ? WHERE id = ?",
+                (past, pending["id"]),
+            )
+            conn.commit()
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_expired_bgp_announcements(conn)
+                withdrawn = main.withdraw_anomaly_mitigations(
+                    self._admin_request(),
+                    404,
+                    main.BgpAnomalyMitigationWithdrawPayload(),
+                )
+            row = conn.execute(
+                "SELECT status, withdrawn_at FROM bgp_announcements WHERE id = ?",
+                (pending["id"],),
+            ).fetchone()
+
+            self.assertEqual(stats["withdrawn"], 0)
+            self.assertEqual(withdrawn["count"], 0)
+            self.assertEqual(row["status"], "pending_approval")
+            self.assertIsNone(row["withdrawn_at"])
+            write_pipe.assert_not_called()
+            conn.close()
 
     def test_response_profile_status_connector_validation(self):
         with temporary_main_db():
@@ -545,6 +1351,14 @@ class BgpMitigationTest(unittest.TestCase):
         with temporary_main_db():
             conn = main.sqlite_connection()
             now = main.utc_now_iso()
+            zone_id = conn.execute(
+                "INSERT INTO ip_zones (name, active, created_at, updated_at) VALUES ('Clientes', 1, ?, ?)",
+                (now, now),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO ip_zone_prefixes (zone_id, cidr, active, created_at, updated_at) VALUES (?, '198.51.100.0/24', 1, ?, ?)",
+                (zone_id, now, now),
+            )
             conn.execute(
                 """
                 INSERT INTO bgp_protected_prefixes (
@@ -563,7 +1377,13 @@ class BgpMitigationTest(unittest.TestCase):
             )
             conn.commit()
 
-            def validate_target(target: str, require_protected: bool, protected_cidr: str | None = None):
+            def validate_target(
+                target: str,
+                require_protected: bool,
+                *,
+                direction: str = "outbound",
+                source_ip: str = "198.51.100.10",
+            ):
                 profile = {
                     "id": 1,
                     "name": "RESPONSE_DNS-UPLOAD",
@@ -582,8 +1402,8 @@ class BgpMitigationTest(unittest.TestCase):
                     "require_protected_prefix": require_protected,
                 }
                 anomaly = {
-                    "direction": "outbound",
-                    "top_src_ip": "198.51.100.10",
+                    "direction": direction,
+                    "top_src_ip": source_ip,
                     "top_dst_ip": target,
                     "protocol": "udp",
                     "top_dst_port": 53,
@@ -605,15 +1425,18 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertFalse(protected_result["allow_auto"])
 
             outside_result = validate_target("203.0.113.10", True)
-            self.assertEqual(outside_result["validation_status"], "target_not_in_protected_prefixes")
-            self.assertIn("target_not_in_protected_prefixes", outside_result["errors"])
-            self.assertIn("Destino 203.0.113.10/32 nao pertence a nenhum prefixo protegido habilitado.", outside_result["validation_messages"])
+            self.assertEqual(outside_result["validation_status"], "valid")
+            self.assertEqual(outside_result["errors"], [])
+
+            unauthorized_origin = validate_target("203.0.113.10", True, source_ip="192.0.2.10")
+            self.assertEqual(unauthorized_origin["validation_status"], "origin_not_in_authorized_zone_or_prefix")
+            self.assertIn("origin_not_in_authorized_zone_or_prefix", unauthorized_origin["errors"])
 
             disabled_requirement_result = validate_target("203.0.113.10", False)
             self.assertEqual(disabled_requirement_result["validation_status"], "valid")
             self.assertEqual(disabled_requirement_result["errors"], [])
 
-            blocked_action_result = validate_target("8.8.4.4", True)
+            blocked_action_result = validate_target("8.8.4.4", True, direction="inbound")
             self.assertEqual(blocked_action_result["validation_status"], "protected_prefix_action_not_allowed")
             self.assertIn("protected_prefix_action_not_allowed", blocked_action_result["errors"])
 
@@ -833,7 +1656,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["advertised"], 0)
             self.assertEqual(stats["pending_approval"], 0)
             with main.sqlite_connection() as check:
                 count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
@@ -979,7 +1802,7 @@ class BgpMitigationTest(unittest.TestCase):
                 stats = main.process_anomaly_mitigation()
             finally:
                 main.exabgp_write_pipe = original
-            self.assertEqual(stats["active"], 1)
+            self.assertEqual(stats["advertised"], 1)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], connector["id"])
             self.assertIn("destination 103.100.169.200/32", calls[0][1])
@@ -997,7 +1820,7 @@ class BgpMitigationTest(unittest.TestCase):
                     """,
                     (event_id,),
                 ).fetchone()
-            self.assertEqual(announcement["status"], "active")
+            self.assertEqual(announcement["status"], "advertised")
             self.assertEqual(announcement["response_profile_id"], profile["id"])
             self.assertEqual(announcement["sensor_id"], 9)
             self.assertEqual(announcement["dst_ip"], "103.100.169.200")
@@ -1074,10 +1897,10 @@ class BgpMitigationTest(unittest.TestCase):
             flows[0]["src_ip"] = "198.51.100.10"
             candidate = main.build_mitigation_candidates_from_anomaly({"event": event, "flows": flows})[0]
             policy = main.policy_for_candidate(candidate)
-            self.assertEqual(policy["decision"], "require_manual_approval")
-            self.assertIn("Origem/internal_ip nao confirmada dentro de prefixo protegido.", policy["reasons"])
+            self.assertEqual(policy["decision"], "deny")
+            self.assertIn("Origem interna nao confirmada em zona ou prefixo autorizado.", policy["reasons"])
 
-    def test_dns_query_outbound_dry_run_reports_auto_without_pipe_write(self):
+    def test_dns_query_outbound_evaluation_reports_auto_without_pipe_write(self):
         with temporary_main_db():
             conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
             event_id = self._insert_dns_query_anomaly_event(conn)
@@ -1093,7 +1916,9 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertTrue(evaluated["candidates"][0]["allow_auto"])
             self.assertFalse(evaluated["candidates"][0]["manual_approval_required"])
             self.assertEqual(evaluated["candidates"][0]["policy_decision"]["decision"], "allow_auto")
-            self.assertIn("dry-run", evaluated["candidates"][0]["dry_run_message"].lower())
+            self.assertTrue(evaluated["candidates"][0]["evaluation_only"])
+            self.assertFalse(evaluated["candidates"][0]["dry_run"])
+            self.assertIn("nenhum comando foi enviado", evaluated["candidates"][0]["dry_run_message"].lower())
             self.assertEqual(evaluated["candidates"][0]["connector_name"], "BGP-SENSOR-ORIGIN")
             self.assertEqual(evaluated["candidates"][0]["mitigation_target_mode"], "sensor_origin")
             self.assertEqual(evaluated["candidates"][0]["pipe_path"], "/run/exabgp/exabgp.in")
@@ -1111,7 +1936,7 @@ class BgpMitigationTest(unittest.TestCase):
                     stats = main.process_anomaly_mitigation()
             finally:
                 main.exabgp_write_pipe = original
-            self.assertEqual(stats["active"], 1)
+            self.assertEqual(stats["advertised"], 1)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], connector["id"])
             self.assertNotIn("source ", calls[0][1])
@@ -1125,7 +1950,7 @@ class BgpMitigationTest(unittest.TestCase):
                     WHERE anomaly_id = 140
                     """
                 ).fetchone()
-            self.assertEqual(row["status"], "active")
+            self.assertEqual(row["status"], "advertised")
             self.assertEqual(row["connector_id"], connector["id"])
             self.assertEqual(row["response_profile_id"], profile["id"])
             self.assertEqual(row["sensor_id"], 9)
@@ -1159,13 +1984,13 @@ class BgpMitigationTest(unittest.TestCase):
                 stats = main.process_anomaly_mitigation()
             finally:
                 main.exabgp_write_pipe = original
-            self.assertEqual(stats["active"], 1)
+            self.assertEqual(stats["advertised"], 1)
             self.assertEqual(calls[0][0], connector["id"])
             with main.sqlite_connection() as check:
                 row = check.execute("SELECT connector_id, sensor_id, status FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()
             self.assertEqual(row["connector_id"], connector["id"])
             self.assertIsNone(row["sensor_id"])
-            self.assertEqual(row["status"], "active")
+            self.assertEqual(row["status"], "advertised")
 
     def test_dns_query_outbound_sensor_null_uses_selected_connector_ids(self):
         with temporary_main_db():
@@ -1197,7 +2022,7 @@ class BgpMitigationTest(unittest.TestCase):
                 stats = main.process_anomaly_mitigation()
             finally:
                 main.exabgp_write_pipe = original
-            self.assertEqual(stats["active"], 1)
+            self.assertEqual(stats["advertised"], 1)
             self.assertEqual([call[0] for call in calls], [connector["id"]])
 
     def test_sensor_null_resolves_fibinet_and_gm_connectors_from_origin_prefix(self):
@@ -1236,6 +2061,518 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(fib_candidate["connector_resolution_zone_id"], fib_zone)
             self.assertEqual(gm_candidate["connector_resolution_zone_id"], gm_zone)
             self.assertEqual(fib_candidate["connector_resolution_method"], "zone_prefix")
+
+    def test_udp_outbound_uses_top_src_zone_and_allows_external_destination_host(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-ZONE", "/tmp/test-zone.in")
+            zone_id = self._insert_zone_connector_mapping(
+                conn,
+                "Clientes",
+                "45.5.248.0/24",
+                connector_id,
+            )
+            event_id = self._insert_udp_many_anomaly_event(conn, zone_id=zone_id)
+            conn.close()
+
+            evaluated = main.evaluated_mitigation_candidates(event_id)
+            candidate = evaluated["candidates"][0]
+
+            self.assertEqual(candidate["top_src_ip"], "45.5.248.205")
+            self.assertEqual(candidate["dst_prefix"], "51.222.110.42/32")
+            self.assertEqual(candidate["selected_connector_id"], connector_id)
+            self.assertEqual(candidate["connector_resolution_method"], "zone_id")
+            self.assertTrue(candidate["policy_decision"]["outbound_destination"])
+            self.assertTrue(candidate["policy_decision"]["origin_authorization"]["authorized"])
+            self.assertNotIn("Destino nao confirmado dentro de prefixo protegido.", candidate["policy_decision"]["reasons"])
+            self.assertEqual(candidate["validation_errors"], [])
+            self.assertTrue(candidate["actionable"])
+            self.assertTrue(candidate["can_submit_approval"])
+            self.assertTrue(candidate["can_announce_now"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_persisted_zone_has_priority_over_sensor_connector(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            zone_connector_id = self._insert_flowspec_connector(conn, "BGP-ZONE", "/tmp/test-zone.in")
+            sensor_connector_id = self._insert_flowspec_connector(conn, "BGP-SENSOR", "/tmp/test-sensor.in")
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO sensors (id, name, exporter_ip, created_at, updated_at) VALUES (9, 'sensor-9', '192.0.2.9', ?, ?)",
+                (now, now),
+            )
+            conn.execute("UPDATE bgp_connectors SET sensor_id = 9 WHERE id = ?", (sensor_connector_id,))
+            zone_id = self._insert_zone_connector_mapping(
+                conn,
+                "Clientes",
+                "45.5.248.0/24",
+                zone_connector_id,
+            )
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1768, zone_id=zone_id, sensor_id=9)
+            conn.close()
+
+            candidate = main.evaluated_mitigation_candidates(event_id)["candidates"][0]
+
+            self.assertEqual(candidate["selected_connector_id"], zone_connector_id)
+            self.assertNotEqual(candidate["selected_connector_id"], sensor_connector_id)
+            self.assertEqual(candidate["connector_resolution_method"], "zone_id")
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_inbound_persisted_zone_does_not_validate_the_external_top_source_as_origin(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-INBOUND-ZONE", "/tmp/test-inbound.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Cliente inbound", "45.5.248.0/24", connector_id)
+            conn.commit()
+            candidate = {
+                "zone_id": zone_id,
+                "top_src_ip": "198.51.100.200",
+                "top_dst_ip": "45.5.248.205",
+                "dst_prefix": "45.5.248.205/32",
+                "target_role": "dst_ip",
+                "direction": "receives",
+                "scope_type": "internal_ip_32",
+                "raw_payload": {
+                    "anomaly": {
+                        "zone_id": zone_id,
+                        "top_src_ip": "198.51.100.200",
+                        "top_dst_ip": "45.5.248.205",
+                        "target_ip": "45.5.248.205",
+                        "target_role": "dst_ip",
+                        "direction": "receives",
+                    }
+                },
+            }
+
+            resolved = main.resolve_mitigation_target_connectors(conn, candidate, {})
+            conn.close()
+
+            self.assertEqual([item["id"] for item in resolved], [connector_id])
+            self.assertEqual(candidate["connector_resolution_method"], "zone_id")
+            self.assertNotIn("connector_resolution_error", candidate)
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_sensor_connector_has_priority_over_ambiguous_origin_prefixes(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            sensor_connector_id = self._insert_flowspec_connector(conn, "BGP-SENSOR", "/tmp/test-sensor.in")
+            first_prefix_connector_id = self._insert_flowspec_connector(conn, "BGP-PREFIX-1", "/tmp/test-prefix-1.in")
+            second_prefix_connector_id = self._insert_flowspec_connector(conn, "BGP-PREFIX-2", "/tmp/test-prefix-2.in")
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO sensors (id, name, exporter_ip, created_at, updated_at) VALUES (9, 'sensor-9', '192.0.2.9', ?, ?)",
+                (now, now),
+            )
+            conn.execute("UPDATE bgp_connectors SET sensor_id = 9 WHERE id = ?", (sensor_connector_id,))
+            self._insert_zone_connector_mapping(conn, "Overlap 1", "45.5.248.0/24", first_prefix_connector_id)
+            self._insert_zone_connector_mapping(conn, "Overlap 2", "45.5.248.0/24", second_prefix_connector_id)
+            conn.commit()
+
+            candidate = {
+                "sensor_id": 9,
+                "top_src_ip": "45.5.248.205",
+                "dst_prefix": "51.222.110.42/32",
+                "target_role": "dst_ip",
+                "direction": "sends",
+                "scope_type": "external_dst_ip_port",
+                "raw_payload": {
+                    "anomaly": {
+                        "sensor_id": 9,
+                        "top_src_ip": "45.5.248.205",
+                        "target_ip": "51.222.110.42",
+                        "target_role": "dst_ip",
+                        "direction": "sends",
+                        "scope_type": "external_dst_ip_port",
+                    }
+                },
+            }
+
+            resolved = main.resolve_mitigation_target_connectors(conn, candidate, {})
+            conn.close()
+
+            self.assertEqual([item["id"] for item in resolved], [sensor_connector_id])
+            self.assertEqual(candidate["connector_resolution_method"], "sensor")
+            self.assertEqual(candidate["candidate_connector_ids"], [sensor_connector_id])
+            self.assertNotIn("connector_resolution_error", candidate)
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_mitigation_key_includes_every_route_and_action_dimension(self):
+        base = {
+            "connector_id": 7,
+            "response_type": "flowspec",
+            "src_prefix": "45.5.248.0/32",
+            "dst_prefix": "203.0.113.10/32",
+            "protocol": "tcp",
+            "src_port": "12345",
+            "dst_port": "443",
+            "tcp_flags": "syn",
+            "action": "rate_limit",
+            "rate_limit_bps": 1_000_000,
+        }
+        base_key = main.mitigation_key_for_candidate(base)
+        for field, value in (
+            ("connector_id", 8),
+            ("response_type", "rtbh"),
+            ("src_prefix", "45.5.248.1/32"),
+            ("dst_prefix", "203.0.113.11/32"),
+            ("protocol", "udp"),
+            ("src_port", "12346"),
+            ("dst_port", "444"),
+            ("tcp_flags", "ack"),
+            ("action", "discard"),
+            ("rate_limit_bps", 2_000_000),
+        ):
+            with self.subTest(field=field):
+                self.assertNotEqual(base_key, main.mitigation_key_for_candidate({**base, field: value}))
+
+    def test_udp_outbound_origin_without_authorized_zone_or_prefix_is_not_actionable(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            self._insert_flowspec_connector(conn, "BGP-ONLY", "/tmp/test-only.in")
+            event_id = self._insert_udp_many_anomaly_event(
+                conn,
+                event_id=1769,
+                src_ip="192.0.2.20",
+                zone_id=None,
+                sensor_id=None,
+            )
+            conn.close()
+
+            candidate = main.evaluated_mitigation_candidates(event_id)["candidates"][0]
+
+            self.assertEqual(candidate["policy_decision"]["decision"], "deny")
+            self.assertIn("Origem interna nao confirmada em zona ou prefixo autorizado.", candidate["policy_decision"]["reasons"])
+            self.assertIn("Origem interna nao pertence a uma zona ou prefixo autorizado.", candidate["validation_errors"])
+            self.assertEqual(candidate["automatic_not_applied_reason"], "origin_not_in_authorized_zone_or_prefix")
+            self.assertFalse(candidate["actionable"])
+            self.assertFalse(candidate["can_submit_approval"])
+            self.assertFalse(candidate["can_announce_now"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_manual_apply_failure_commits_the_persisted_outcome_before_4xx(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('45.5.248.0/24', 1, ?, ?)",
+                (now, now),
+            )
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=17691)
+            conn.close()
+
+            with self.assertRaises(HTTPException) as raised:
+                main.apply_anomaly_mitigation(
+                    self._admin_request(),
+                    event_id,
+                    main.BgpAnomalyMitigationApplyPayload(candidate_index=0, mode="manual_approval"),
+                )
+
+            self.assertEqual(raised.exception.status_code, 400)
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason, auto_mitigation_updated_at FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+            self.assertIn("connector", outcome["auto_mitigation_reason"])
+            self.assertTrue(outcome["auto_mitigation_updated_at"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_udp_outbound_unique_connector_is_selected_when_origin_is_protected(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-ONLY", "/tmp/test-only.in")
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('45.5.248.0/24', 1, ?, ?)",
+                (now, now),
+            )
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1770)
+            conn.close()
+
+            candidate = main.evaluated_mitigation_candidates(event_id)["candidates"][0]
+
+            self.assertEqual(candidate["selected_connector_id"], connector_id)
+            self.assertEqual(candidate["connector_resolution_method"], "single_active_connector")
+            self.assertEqual(candidate["eligible_connectors"][0]["id"], connector_id)
+            self.assertFalse(candidate["requires_connector_selection"])
+            self.assertTrue(candidate["actionable"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_ambiguous_connectors_require_selection_and_manual_choice_recalculates(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            first_id = self._insert_flowspec_connector(conn, "BGP-FIRST", "/tmp/test-first.in")
+            second_id = self._insert_flowspec_connector(conn, "BGP-SECOND", "/tmp/test-second.in")
+            now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('45.5.248.0/24', 1, ?, ?)",
+                (now, now),
+            )
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1771)
+            conn.close()
+
+            unresolved = main.evaluated_mitigation_candidates(event_id)["candidates"][0]
+            first = main.evaluated_mitigation_candidates(event_id, first_id)["candidates"][0]
+            second = main.evaluated_mitigation_candidates(event_id, second_id)["candidates"][0]
+
+            self.assertEqual(
+                [item["id"] for item in unresolved["eligible_connectors"]],
+                sorted([first_id, second_id]),
+            )
+            self.assertTrue(unresolved["requires_connector_selection"])
+            self.assertFalse(unresolved["actionable"])
+            self.assertNotEqual(unresolved["policy_decision"]["decision"], "deny")
+            self.assertEqual(unresolved["validation_errors"], [])
+            self.assertEqual(first["selected_connector_id"], first_id)
+            self.assertEqual(second["selected_connector_id"], second_id)
+            self.assertEqual(first["connector_resolution_method"], "operator_connector_id")
+            self.assertEqual(second["connector_resolution_method"], "operator_connector_id")
+            self.assertNotEqual(first["mitigation_key"], second["mitigation_key"])
+            self.assertEqual(first["policy_decision"]["decision"], "require_manual_approval")
+            self.assertEqual(second["policy_decision"]["decision"], "require_manual_approval")
+            self.assertEqual(first["validation_errors"], [])
+            self.assertEqual(second["validation_errors"], [])
+            self.assertTrue(first["actionable"])
+            self.assertTrue(second["actionable"])
+            self.assertTrue(first["cooldown_allowed"])
+            self.assertTrue(second["cooldown_allowed"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_manual_connector_must_belong_to_the_authorized_origin_zone(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            zone_connector_id = self._insert_flowspec_connector(conn, "BGP-ZONE", "/tmp/test-zone.in")
+            other_connector_id = self._insert_flowspec_connector(conn, "BGP-OTHER", "/tmp/test-other.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", zone_connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=17710, zone_id=zone_id)
+            conn.close()
+
+            candidate = main.evaluated_mitigation_candidates(event_id, other_connector_id)["candidates"][0]
+
+            self.assertIsNone(candidate["selected_connector_id"])
+            self.assertEqual(candidate["automatic_not_applied_reason"], "operator_connector_not_eligible_for_origin")
+            self.assertEqual(candidate["policy_decision"]["decision"], "deny")
+            self.assertFalse(candidate["actionable"])
+            self.assertFalse(candidate["can_submit_approval"])
+            self.assertFalse(candidate["can_announce_now"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_manual_rejection_persists_anomaly_and_related_announcement(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-REJECT", "/tmp/test-reject.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1772, zone_id=zone_id)
+            conn.close()
+
+            result = main.reject_anomaly_mitigation(
+                self._admin_request(),
+                event_id,
+                main.BgpAnomalyMitigationRejectPayload(
+                    candidate_index=0,
+                    connector_id=connector_id,
+                    reason="rejeitado pelo operador no teste",
+                ),
+            )
+
+            announcement = result["announcement"]
+            self.assertEqual(announcement["status"], "rejected")
+            self.assertEqual(announcement["anomaly_id"], event_id)
+            self.assertEqual(announcement["connector_id"], connector_id)
+            self.assertEqual(announcement["created_by"], "tester")
+            with main.sqlite_connection() as check:
+                anomaly = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason, auto_mitigation_details_json FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                total = check.execute(
+                    "SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?",
+                    (event_id,),
+                ).fetchone()["total"]
+            details = json.loads(anomaly["auto_mitigation_details_json"])
+            self.assertEqual(anomaly["auto_mitigation_status"], "rejected")
+            self.assertEqual(anomaly["auto_mitigation_reason"], "rejeitado pelo operador no teste")
+            self.assertEqual(details["connector_id"], connector_id)
+            self.assertEqual(details["announcement_id"], announcement["id"])
+            self.assertEqual(details["created_by"], "tester")
+            self.assertEqual(details["origin"], "manual")
+            self.assertEqual(details["requested_mode"], "manual_rejection")
+            self.assertTrue(details["mitigation_key"])
+            self.assertEqual(total, 1)
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_send_for_manual_approval_creates_related_pending_announcement_without_pipe(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-APPROVAL", "/tmp/test-approval.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1773, zone_id=zone_id)
+            conn.close()
+
+            result = main.apply_anomaly_mitigation(
+                self._admin_request(),
+                event_id,
+                main.BgpAnomalyMitigationApplyPayload(
+                    candidate_index=0,
+                    connector_id=connector_id,
+                    mode="manual_approval",
+                ),
+            )
+
+            announcement = result["announcement"]
+            self.assertEqual(announcement["status"], "pending_approval")
+            self.assertEqual(announcement["anomaly_id"], event_id)
+            self.assertEqual(announcement["connector_id"], connector_id)
+            self.assertEqual(announcement["created_by"], "tester")
+            with main.sqlite_connection() as check:
+                anomaly = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_details_json FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            details = json.loads(anomaly["auto_mitigation_details_json"])
+            self.assertEqual(anomaly["auto_mitigation_status"], "pending_approval")
+            self.assertEqual(details["announcement_id"], announcement["id"])
+            self.assertEqual(details["connector_id"], connector_id)
+            self.assertEqual(details["created_by"], "tester")
+            self.assertEqual(details["requested_mode"], "manual_approval")
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_manual_announce_uses_selected_connector_and_links_announcement(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-ANNOUNCE", "/tmp/test-announce.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1774, zone_id=zone_id)
+            conn.close()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                result = main.apply_anomaly_mitigation(
+                    self._admin_request(),
+                    event_id,
+                    main.BgpAnomalyMitigationApplyPayload(
+                        candidate_index=0,
+                        connector_id=connector_id,
+                        mode="announce_now",
+                    ),
+                )
+
+            announcement = result["announcement"]
+            write_pipe.assert_called_once()
+            self.assertEqual(write_pipe.call_args.args[0]["id"], connector_id)
+            self.assertIn("destination 51.222.110.42/32", write_pipe.call_args.args[1])
+            self.assertEqual(announcement["anomaly_id"], event_id)
+            self.assertEqual(announcement["connector_id"], connector_id)
+            self.assertEqual(announcement["created_by"], "tester")
+            self.assertEqual(announcement["status"], "advertised")
+            with main.sqlite_connection() as check:
+                anomaly = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_details_json FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            details = json.loads(anomaly["auto_mitigation_details_json"])
+            self.assertEqual(details["announcement_id"], announcement["id"])
+            self.assertEqual(details["connector_id"], connector_id)
+            self.assertEqual(details["requested_mode"], "announce_now")
+
+    def test_equivalent_manual_response_is_exposed_and_not_duplicated(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-DEDUP", "/tmp/test-dedup.in")
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1775, zone_id=zone_id)
+            conn.close()
+            request = self._admin_request()
+            payload = main.BgpAnomalyMitigationApplyPayload(
+                candidate_index=0,
+                connector_id=connector_id,
+                mode="manual_approval",
+            )
+
+            first = main.apply_anomaly_mitigation(request, event_id, payload)["announcement"]
+            evaluated = main.evaluated_mitigation_candidates(event_id, connector_id)["candidates"][0]
+
+            self.assertEqual(evaluated["equivalent_announcement"]["id"], first["id"])
+            self.assertFalse(evaluated["actionable"])
+            self.assertFalse(evaluated["can_submit_approval"])
+            self.assertFalse(evaluated["can_announce_now"])
+            with self.assertRaises(HTTPException) as ctx:
+                main.apply_anomaly_mitigation(request, event_id, payload)
+            self.assertEqual(ctx.exception.status_code, 409)
+            self.assertIn(f"#{first['id']}", str(ctx.exception.detail))
+            with main.sqlite_connection() as check:
+                count = check.execute(
+                    "SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?",
+                    (event_id,),
+                ).fetchone()["total"]
+                anomaly = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_details_json FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(count, 1)
+            self.assertEqual(anomaly["auto_mitigation_status"], "deduplicated")
+            self.assertEqual(json.loads(anomaly["auto_mitigation_details_json"])["announcement_id"], first["id"])
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_dry_run_connector_never_writes_pipe_or_offers_announce_now(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            connector_id = self._insert_flowspec_connector(conn, "BGP-DRY", "/run/exabgp/must-not-open.in")
+            conn.execute(
+                "UPDATE bgp_connectors SET backend_type = 'dry_run', mode = 'dry_run' WHERE id = ?",
+                (connector_id,),
+            )
+            zone_id = self._insert_zone_connector_mapping(conn, "Clientes", "45.5.248.0/24", connector_id)
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1776, zone_id=zone_id)
+            conn.close()
+
+            candidate = main.evaluated_mitigation_candidates(event_id, connector_id)["candidates"][0]
+            self.assertTrue(candidate["connector_dry_run"])
+            self.assertTrue(candidate["dry_run"])
+            self.assertTrue(candidate["can_submit_approval"])
+            self.assertFalse(candidate["can_announce_now"])
+
+            result = main.apply_anomaly_mitigation(
+                self._admin_request(),
+                event_id,
+                main.BgpAnomalyMitigationApplyPayload(
+                    candidate_index=0,
+                    connector_id=connector_id,
+                    mode="announce_now",
+                ),
+            )
+            self.assertEqual(result["announcement"]["status"], "dry_run")
+            self.exabgp_pipe_guard.assert_not_called()
+
+    def test_analysis_only_candidate_cannot_overwrite_primary_outcome(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            event_id = self._insert_udp_many_anomaly_event(conn, event_id=1777)
+            conn.execute(
+                "UPDATE anomaly_events SET auto_mitigation_status = 'pending_approval', auto_mitigation_reason = 'primary' WHERE id = ?",
+                (event_id,),
+            )
+            main.record_auto_mitigation_outcome(
+                conn,
+                {
+                    "anomaly_id": event_id,
+                    "mitigation_mode": "analysis_only",
+                    "candidate_role": "analysis_only",
+                    "raw_payload": {"anomaly": {"id": event_id, "source": "anomaly_events"}},
+                },
+                "failed",
+                "auxiliary candidate",
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT auto_mitigation_status, auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            conn.close()
+
+            self.assertEqual(row["auto_mitigation_status"], "pending_approval")
+            self.assertEqual(row["auto_mitigation_reason"], "primary")
+            self.exabgp_pipe_guard.assert_not_called()
 
     def test_recently_ended_unprocessed_anomaly_is_retried_once(self):
         with temporary_main_db():
@@ -1390,6 +2727,7 @@ class BgpMitigationTest(unittest.TestCase):
             conn, _fibinet, _profile = self._dns_multi_target_context(add_whitelist=False)
             self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
             event_id = self._insert_dns_query_anomaly_event(conn, event_id=1727)
+            conn.execute("UPDATE ip_zone_prefixes SET active = 0")
             conn.execute("UPDATE anomaly_events SET sensor_id = NULL, zone_id = NULL WHERE id = ?", (event_id,))
             conn.commit()
             conn.close()
@@ -1408,8 +2746,11 @@ class BgpMitigationTest(unittest.TestCase):
         with temporary_main_db():
             conn, fibinet, _profile = self._dns_multi_target_context(add_whitelist=False)
             self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
-            self._insert_zone_connector_mapping(conn, "Clientes FIBINET", "179.189.83.0/24", fibinet["id"], zone_id=1)
             now = main.utc_now_iso()
+            conn.execute(
+                "INSERT INTO ip_zone_prefixes (zone_id, cidr, active, created_at, updated_at) VALUES (1, '179.189.83.0/24', 1, ?, ?)",
+                (now, now),
+            )
             conn.execute(
                 "INSERT INTO bgp_protected_prefixes (cidr, enabled, created_at, updated_at) VALUES ('179.189.83.0/24', 1, ?, ?)",
                 (now, now),
@@ -1427,7 +2768,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(len(calls), 1)
-            self.assertEqual(stats["active"], 1)
+            self.assertEqual(stats["advertised"], 1)
             self.assertGreaterEqual(stats["skipped"], 2)
             with main.sqlite_connection() as check:
                 rows = check.execute(
@@ -1497,7 +2838,8 @@ class BgpMitigationTest(unittest.TestCase):
                 (now, now),
             )
             event_id = self._insert_dns_query_anomaly_event(conn)
-            conn.execute("UPDATE anomaly_events SET sensor_id = NULL WHERE id = ?", (event_id,))
+            conn.execute("UPDATE ip_zone_prefixes SET active = 0")
+            conn.execute("UPDATE anomaly_events SET sensor_id = NULL, zone_id = NULL WHERE id = ?", (event_id,))
             conn.commit()
             conn.close()
             calls = []
@@ -1509,7 +2851,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["advertised"], 0)
             with main.sqlite_connection() as check:
                 total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(total, 0)
@@ -1532,7 +2874,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["advertised"], 0)
             with main.sqlite_connection() as check:
                 total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(total, 0)
@@ -1553,18 +2895,30 @@ class BgpMitigationTest(unittest.TestCase):
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
             with main.sqlite_connection() as check:
-                row = check.execute("SELECT status FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()
+                row = check.execute("SELECT * FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()
                 summary = main.bgp_summary_payload(check)
-            self.assertEqual(row["status"], "dry_run")
+            item = main.bgp_announcement_row_to_dict(row)
+            self.assertEqual(item["status"], "dry_run")
+            self.assertFalse(item["operationally_active"])
+            self.assertIsNone(item["expires_at"])
+            self.assertIsNone(item["advertised_at"])
             self.assertEqual(summary["active_bgp_announcements"], 0)
 
-    def test_bgp_summary_counts_active_and_excludes_expired_announcements(self):
+    def test_bgp_summary_counts_only_current_advertised_and_marks_legacy_unconfirmed(self):
         with temporary_main_db():
             conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
             now = main.utc_now_iso()
             future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
             past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
-            for status, expires_at in (("active", future), ("announced", None), ("active", past), ("pending_approval", None), ("failed", None)):
+            for status, expires_at in (
+                ("advertised", future),
+                ("advertised", None),
+                ("advertised", past),
+                ("active", future),
+                ("announced", None),
+                ("pending_approval", None),
+                ("failed", None),
+            ):
                 conn.execute(
                     """
                     INSERT INTO bgp_announcements (
@@ -1577,9 +2931,16 @@ class BgpMitigationTest(unittest.TestCase):
                 )
             conn.commit()
             summary = main.bgp_summary_payload(conn)
-            self.assertEqual(summary["active_bgp_announcements"], 2)
+            self.assertEqual(summary["active_bgp_announcements"], 3)
             self.assertEqual(summary["pending_bgp_announcements"], 1)
             self.assertEqual(summary["failed_bgp_announcements"], 1)
+            legacy_rows = conn.execute(
+                "SELECT * FROM bgp_announcements WHERE status IN ('active', 'announced') ORDER BY id"
+            ).fetchall()
+            for row in legacy_rows:
+                item = main.bgp_announcement_row_to_dict(row)
+                self.assertTrue(item["legacy_unconfirmed"])
+                self.assertFalse(item["operationally_active"])
 
     def test_template_dns_destination_whitelist_does_not_apply(self):
         with temporary_main_db():
@@ -1595,7 +2956,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["advertised"], 0)
             with main.sqlite_connection() as check:
                 count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(count, 0)
@@ -1615,7 +2976,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertEqual(stats["active"], 0)
+            self.assertEqual(stats["advertised"], 0)
             with main.sqlite_connection() as check:
                 count = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(count, 0)
@@ -1670,7 +3031,7 @@ class BgpMitigationTest(unittest.TestCase):
                     "SELECT status, connector_id, sensor_id, dst_ip, protocol, dst_port, announce_command, withdraw_command, pipe_path FROM bgp_announcements ORDER BY dst_ip"
                 ).fetchall()
             self.assertEqual(len(rows), 10)
-            self.assertTrue(all(row["status"] == "active" for row in rows))
+            self.assertTrue(all(row["status"] == "advertised" for row in rows))
             self.assertTrue(all(row["connector_id"] == connector["id"] for row in rows))
             self.assertTrue(all(row["sensor_id"] == 9 for row in rows))
             self.assertTrue(all(row["protocol"] == "udp" and row["dst_port"] == "53" for row in rows))
@@ -1696,7 +3057,7 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(second["count"], 0)
             self.assertEqual(len(second["skipped"]), 10)
             with main.sqlite_connection() as check:
-                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'active'").fetchone()["total"]
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'advertised'").fetchone()["total"]
             self.assertEqual(total, 10)
 
     def test_dns_outbound_multi_target_respects_max_active_rules_and_pipe_failure(self):
@@ -1715,7 +3076,7 @@ class BgpMitigationTest(unittest.TestCase):
                 main.exabgp_write_pipe = original
             self.assertEqual(result["count"], 3)
             with main.sqlite_connection() as check:
-                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'active'").fetchone()["total"]
+                total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE status = 'advertised'").fetchone()["total"]
             self.assertEqual(total, 3)
 
         with temporary_main_db():
@@ -1756,6 +3117,12 @@ class BgpMitigationTest(unittest.TestCase):
                 main.exabgp_write_pipe = original
             self.assertEqual(stats["withdrawn"], 10)
             self.assertEqual(len([command for command in calls if command.startswith("withdraw flow route")]), 10)
+            with main.sqlite_connection() as check:
+                expired_statuses = {
+                    row["status"]
+                    for row in check.execute("SELECT status FROM bgp_announcements").fetchall()
+                }
+            self.assertEqual(expired_statuses, {"expired"})
 
         with temporary_main_db():
             conn, _connector, _profile = self._dns_multi_target_context()
@@ -1773,6 +3140,12 @@ class BgpMitigationTest(unittest.TestCase):
                 main.exabgp_write_pipe = original
             self.assertEqual(result["count"], 10)
             self.assertEqual(len([command for command in calls if command.startswith("withdraw flow route")]), 10)
+            with main.sqlite_connection() as check:
+                withdrawn_statuses = {
+                    row["status"]
+                    for row in check.execute("SELECT status FROM bgp_announcements").fetchall()
+                }
+            self.assertEqual(withdrawn_statuses, {"withdrawn"})
 
     def test_dns_outbound_source_only_gets_warning_and_is_not_recommended(self):
         with temporary_main_db():
@@ -1855,6 +3228,7 @@ class BgpMitigationTest(unittest.TestCase):
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
             self.assertEqual(item["status"], "dry_run")
+            self.assertIsNone(item["expires_at"])
             self.assertIn("announce flow route", item["announce_command"])
             self.assertIn("withdraw flow route", item["withdraw_command"])
             self.assertNotIn("ttl", item["announce_command"].lower())
@@ -1862,14 +3236,16 @@ class BgpMitigationTest(unittest.TestCase):
                 count = check.execute("SELECT COUNT(*) AS count FROM bgp_announcements").fetchone()["count"]
             self.assertEqual(count, 0)
 
-    def test_manual_flowspec_announce_saves_all_columns_and_active_ttl(self):
+    def test_manual_flowspec_announce_uses_shared_attempt_and_starts_advertised_ttl(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()
             conn.close()
-            calls = []
-            original = main.exabgp_write_pipe
-            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
-            try:
+            readiness_result = self._readiness_result(connector)
+            with patch.object(
+                main,
+                "check_bgp_connector_readiness",
+                return_value=readiness_result,
+            ) as readiness, patch.object(main, "exabgp_write_pipe") as write_pipe:
                 item = main.test_bgp_connector_flowspec(
                     self._admin_request(),
                     connector["id"],
@@ -1882,23 +3258,90 @@ class BgpMitigationTest(unittest.TestCase):
                         confirm="ANUNCIAR",
                     ),
                 )
-            finally:
-                main.exabgp_write_pipe = original
-            self.assertEqual(len(main.MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS), 41)
-            self.assertEqual(calls, [item["announce_command"]])
-            self.assertEqual(item["status"], "active")
+            self.assertTrue(
+                {
+                    "queued_at",
+                    "sent_at",
+                    "advertised_at",
+                    "last_attempt_at",
+                    "peer_state",
+                    "confirmation_level",
+                    "status_details_json",
+                    "requested_mode",
+                    "retry_of_announcement_id",
+                }.issubset(set(main.MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS))
+            )
+            readiness.assert_called_once()
+            write_pipe.assert_called_once()
+            self.assertEqual(write_pipe.call_args.args[0]["id"], connector["id"])
+            self.assertEqual(write_pipe.call_args.args[1], item["announce_command"])
+            self.assertEqual(item["status"], "advertised")
+            self.assertTrue(item["queued_at"])
+            self.assertTrue(item["sent_at"])
+            self.assertTrue(item["advertised_at"])
             self.assertTrue(item["announced_at"])
+            self.assertTrue(item["last_attempt_at"])
             self.assertTrue(item["expires_at"])
+            self.assertEqual(item["peer_state"], "established")
+            self.assertTrue(item["operationally_active"])
             self.assertNotIn("ttl", item["announce_command"].lower())
             self.assertNotIn("duration", item["announce_command"].lower())
             with main.sqlite_connection() as check:
-                row = check.execute("SELECT status, expires_at, announce_command, withdraw_command FROM bgp_announcements").fetchone()
-            self.assertEqual(row["status"], "active")
+                row = check.execute(
+                    "SELECT status, expires_at, announce_command, withdraw_command FROM bgp_announcements"
+                ).fetchone()
+                events = self._announcement_event_types(check, item["id"])
+            self.assertEqual(row["status"], "advertised")
             self.assertTrue(row["expires_at"])
             self.assertEqual(row["announce_command"], item["announce_command"])
             self.assertEqual(row["withdraw_command"], item["withdraw_command"])
+            self.assertLess(events.index("queued"), events.index("sent"))
+            self.assertLess(events.index("sent"), events.index("advertised"))
 
-    def test_flowspec_peer_is_verified_when_active_flowspec_exists_and_bgp_is_up(self):
+    def test_manual_flowspec_withdraw_terminalizes_the_tracked_advertisement(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            payload = main.BgpFlowspecTestPayload(
+                action="announce",
+                dst_cidr="203.0.113.10",
+                protocol="udp",
+                dst_port="53",
+                duration_seconds=300,
+                confirm="ANUNCIAR",
+            )
+            with patch.object(main, "exabgp_write_pipe"):
+                advertised = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    payload,
+                )
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                withdrawn = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="withdraw",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                    ),
+                )
+
+            self.assertEqual(withdrawn["id"], advertised["id"])
+            self.assertEqual(withdrawn["matched_announcement_id"], advertised["id"])
+            self.assertEqual(withdrawn["status"], "withdrawn")
+            self.assertFalse(withdrawn["operationally_active"])
+            write_pipe.assert_called_once_with(connector, advertised["withdraw_command"])
+            with main.sqlite_connection() as check:
+                rows = check.execute(
+                    "SELECT id, status FROM bgp_announcements ORDER BY id"
+                ).fetchall()
+            self.assertEqual([(row["id"], row["status"]) for row in rows], [(advertised["id"], "withdrawn")])
+
+    def test_legacy_active_record_does_not_infer_a_flowspec_session(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()
             connector["router_check_enabled"] = True
@@ -1922,9 +3365,10 @@ class BgpMitigationTest(unittest.TestCase):
             with patch.object(main, "router_ssh_status", return_value={"enabled": True, "bgp_state": "established", "flowspec_state": "not_verified", "message": ""}), \
                  patch.object(main, "host_agent_status", return_value={"enabled": False, "message": ""}):
                 status = main.bgp_connector_status(connector)
-            self.assertEqual(status["flowspec_state"], "established")
-            self.assertTrue(status["verification"]["flowspec_verified"])
-            self.assertEqual(status["verification"]["flowspec_active_announcements"], 1)
+            self.assertEqual(status["bgp_state"], "established")
+            self.assertEqual(status["flowspec_state"], "not_verified")
+            self.assertFalse(status["verification"]["flowspec_verified"])
+            self.assertEqual(status["verification"]["flowspec_active_announcements"], 0)
 
     def test_bgp_status_worker_checks_periodically(self):
         calls = []
@@ -1987,7 +3431,160 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(result["pipe_state"], "ok")
             self.assertEqual(result["message"], "persisted")
 
-    def test_router_check_disabled_keeps_pipe_check_and_persists_disabled_states(self):
+    def test_later_explicit_peer_down_marks_only_advertised_and_preserves_delivery_history(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=1776)
+            candidate = self._stage2_candidate(
+                connector,
+                profile,
+                "stage2-later-peer-down",
+                anomaly_id=anomaly_id,
+            )
+            with patch.object(main, "exabgp_write_pipe"):
+                advertised = main.apply_mitigation_candidate(
+                    conn,
+                    candidate,
+                    "announce_now",
+                    "tester",
+                )
+            now = main.utc_now_iso()
+            sent_id = conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, status, route_type, response_type, action,
+                    sent_at, last_attempt_at, created_at, updated_at
+                )
+                VALUES (?, 'sent', 'flowspec', 'flowspec', 'discard', ?, ?, ?, ?)
+                """,
+                (connector["id"], now, now, now, now),
+            ).lastrowid
+            conn.commit()
+            original_timestamps = {
+                key: advertised[key]
+                for key in ("queued_at", "sent_at", "advertised_at", "announced_at", "last_attempt_at")
+            }
+            conn.close()
+
+            down_status = self._readiness_result(
+                connector,
+                peer_state="down",
+                ready=False,
+                reason="peer_bgp_down",
+            )["status"]
+            down_status["flowspec_state"] = "down"
+            down_status["pipes"] = {"ok": True, "status": "ok"}
+            down_status["pipe_state"] = "ok"
+            with patch.object(main, "bgp_connector_status", return_value=down_status):
+                checked = main.check_and_persist_bgp_connector_status(connector["id"])
+
+            self.assertEqual(checked["bgp_state"], "down")
+            with main.sqlite_connection() as check:
+                changed = main.fetch_bgp_announcement(check, advertised["id"])
+                untouched = main.fetch_bgp_announcement(check, sent_id)
+                outcome = check.execute(
+                    """
+                    SELECT auto_mitigation_status, auto_mitigation_reason,
+                           auto_mitigation_details_json, auto_mitigation_updated_at
+                    FROM anomaly_events
+                    WHERE id = ?
+                    """,
+                    (anomaly_id,),
+                ).fetchone()
+                summary = main.bgp_summary_payload(check)
+
+            self.assertEqual(changed["status"], "peer_down")
+            self.assertEqual(changed["peer_state"], "down")
+            self.assertIn("indisponivel", changed["last_error"].lower())
+            for key, value in original_timestamps.items():
+                self.assertEqual(changed[key], value)
+            self.assertIn("peer_down", [event["event_type"] for event in changed["events"]])
+            self.assertEqual(untouched["status"], "sent")
+            self.assertEqual(outcome["auto_mitigation_status"], "peer_down")
+            self.assertEqual(outcome["auto_mitigation_reason"], "peer_bgp_down_after_advertisement")
+            self.assertTrue(outcome["auto_mitigation_updated_at"])
+            details = json.loads(outcome["auto_mitigation_details_json"])
+            self.assertEqual(details["announcement_id"], advertised["id"])
+            self.assertEqual(details["peer_state"], "down")
+            self.assertEqual(summary["active_bgp_announcements"], 0)
+
+    def test_peer_down_checker_does_not_overwrite_a_withdraw_claim(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            candidate = self._stage2_candidate(connector, profile, "withdraw-peer-race")
+            policy = main.policy_for_candidate(candidate)
+            validation = main.validate_mitigation_candidate(candidate, connector, profile)
+            advertised = main.insert_bgp_mitigation_announcement(
+                conn,
+                candidate,
+                connector,
+                profile,
+                policy,
+                validation,
+                "advertised",
+                main.render_exabgp_flowspec_command("announce", candidate),
+                "tester",
+            )
+            conn.commit()
+            token = main.persist_bgp_withdraw_intent(
+                conn,
+                advertised["id"],
+                "tester",
+                "Retirada concorrente em teste.",
+                expected_statuses={"advertised"},
+            )
+            down_status = self._readiness_result(
+                connector,
+                peer_state="down",
+                ready=False,
+                reason="peer_bgp_down",
+            )["status"]
+            down_status["flowspec_state"] = "down"
+
+            changed = main.mark_connector_advertisements_peer_down(conn, connector, down_status)
+            stored = main.fetch_bgp_announcement(conn, advertised["id"])
+
+            self.assertEqual(changed, 0)
+            self.assertEqual(stored["status"], "advertised")
+            self.assertEqual(stored["confirmation_level"], "withdraw_requested")
+            self.assertEqual(stored["status_details"]["withdraw_claim_token"], token)
+
+    def test_unknown_peer_check_does_not_demote_advertised_announcement(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            now = main.utc_now_iso()
+            announcement_id = conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, status, route_type, response_type, action,
+                    queued_at, sent_at, advertised_at, announced_at, last_attempt_at,
+                    created_at, updated_at
+                )
+                VALUES (?, 'advertised', 'flowspec', 'flowspec', 'discard',
+                        ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (connector["id"], now, now, now, now, now, now, now),
+            ).lastrowid
+            conn.commit()
+            conn.close()
+
+            unknown_status = self._readiness_result(
+                connector,
+                peer_state="unknown",
+                ready=False,
+                reason="peer_bgp_not_verified",
+            )["status"]
+            unknown_status["flowspec_state"] = "unknown"
+            with patch.object(main, "bgp_connector_status", return_value=unknown_status):
+                checked = main.check_and_persist_bgp_connector_status(connector["id"])
+
+            self.assertEqual(checked["bgp_state"], "unknown")
+            with main.sqlite_connection() as check:
+                item = main.fetch_bgp_announcement(check, announcement_id)
+            self.assertEqual(item["status"], "advertised")
+            self.assertNotIn("peer_down", [event["event_type"] for event in item["events"]])
+
+    def test_router_check_disabled_keeps_pipe_check_without_inferring_peer_state(self):
         with temporary_main_db():
             conn, connector, _profile = self._connector_and_profile()
             with tempfile.NamedTemporaryFile() as pipe_in, tempfile.NamedTemporaryFile() as pipe_out:
@@ -2006,8 +3603,8 @@ class BgpMitigationTest(unittest.TestCase):
                      patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}):
                     status = main.check_and_persist_bgp_connector_status(connector["id"])
             self.assertEqual(status["pipe_state"], "ok")
-            self.assertEqual(status["bgp_state"], "verification_disabled")
-            self.assertEqual(status["flowspec_state"], "verification_disabled")
+            self.assertEqual(status["bgp_state"], "not_verified")
+            self.assertEqual(status["flowspec_state"], "not_verified")
             self.assertIn("desabilitada", status["message"].lower())
             ssh_command.assert_not_called()
             with main.sqlite_connection() as check:
@@ -2015,10 +3612,31 @@ class BgpMitigationTest(unittest.TestCase):
                     "SELECT bgp_state, flowspec_state, pipe_state, last_checked_at FROM bgp_connectors WHERE id = ?",
                     (connector["id"],),
                 ).fetchone()
-            self.assertEqual(persisted["bgp_state"], "verification_disabled")
-            self.assertEqual(persisted["flowspec_state"], "verification_disabled")
+            self.assertEqual(persisted["bgp_state"], "not_verified")
+            self.assertEqual(persisted["flowspec_state"], "not_verified")
             self.assertEqual(persisted["pipe_state"], "ok")
             self.assertTrue(persisted["last_checked_at"])
+
+    def test_log_heuristic_never_authorizes_an_announcement(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            with tempfile.NamedTemporaryFile() as pipe_in, tempfile.NamedTemporaryFile() as pipe_out:
+                connector.update(
+                    {
+                        "router_check_enabled": False,
+                        "exabgp_pipe_in": pipe_in.name,
+                        "exabgp_pipe_out": pipe_out.name,
+                    }
+                )
+                with patch.object(main, "exabgp_peer_from_pipe", return_value={"state": "unknown", "source": "exabgp_pipe"}), \
+                     patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "established", "source": "exabgp_log_heuristic"}), \
+                     patch.object(main, "host_agent_status", return_value={"enabled": False}):
+                    status = main.bgp_connector_status(connector)
+            conn.close()
+        self.assertEqual(status["bgp_state"], "not_verified")
+        self.assertEqual(status["exabgp_peer"]["state"], "unknown")
+        self.assertEqual(status["exabgp_log_peer"]["state"], "established")
+        self.assertTrue(any("nao autoriza" in message for message in status["messages"]))
 
     def test_router_ssh_status_parses_bgp_and_flowspec_established(self):
         connector = {
@@ -2034,6 +3652,28 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(command.call_args_list[0].args[1], "display bgp peer")
         self.assertEqual(command.call_args_list[1].args[1], "display bgp flow peer")
+
+    def test_huawei_parser_does_not_treat_up_down_header_without_requested_peer_as_state(self):
+        output = """
+        BGP local router ID : 203.0.113.254
+        Peer        V    AS  MsgRcvd  MsgSent  OutQ  Up/Down       State  PrefRcv
+        198.51.100.2 4 65002       10       10     0 00:10:00 Established       12
+        """
+        parsed = main.parse_huawei_vrp_peer_state(output, "192.0.2.2")
+        self.assertEqual(parsed["state"], "unknown")
+        self.assertEqual(parsed["peer_ip"], "192.0.2.2")
+
+    def test_exabgp_parser_uses_only_the_requested_peer_line(self):
+        output = "\n".join(
+            [
+                "neighbor 198.51.100.2 state established",
+                "neighbor 192.0.2.2 state down",
+            ]
+        )
+        requested = main.parse_exabgp_peer_state(output, "192.0.2.2")
+        missing = main.parse_exabgp_peer_state(output, "203.0.113.2")
+        self.assertEqual(requested["state"], "down")
+        self.assertEqual(missing["state"], "unknown")
 
     def test_router_ssh_timeout_is_reported_and_persisted(self):
         with temporary_main_db():
@@ -2189,8 +3829,33 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertFalse(body["ok"])
             self.assertFalse(body["rollback_attempted"])
 
+    def test_manual_flowspec_insert_failure_before_withdraw_sends_nothing(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.close()
+            with patch.object(main, "exabgp_write_pipe") as write_pipe, patch.object(
+                main,
+                "insert_manual_flowspec_announcement",
+                side_effect=sqlite3.OperationalError("insert failed"),
+            ):
+                response = main.test_bgp_connector_flowspec(
+                    self._admin_request(),
+                    connector["id"],
+                    main.BgpFlowspecTestPayload(
+                        action="withdraw",
+                        dst_cidr="203.0.113.10",
+                        protocol="udp",
+                        dst_port="53",
+                        duration_seconds=300,
+                    ),
+                )
+            self.assertEqual(response.status_code, 500)
+            write_pipe.assert_not_called()
+            with main.sqlite_connection() as check:
+                self.assertEqual(check.execute("SELECT COUNT(*) FROM bgp_announcements").fetchone()[0], 0)
+
     def test_manual_flowspec_update_failure_after_announce_rolls_back_with_withdraw(self):
-        class FailingActiveUpdateConnection:
+        class FailingSentTransitionConnection:
             def __init__(self, inner):
                 self.inner = inner
 
@@ -2202,8 +3867,12 @@ class BgpMitigationTest(unittest.TestCase):
                 return self.inner.__exit__(*exc)
 
             def execute(self, sql, params=()):
-                if "UPDATE bgp_announcements" in sql and "status = 'active'" in sql:
-                    raise sqlite3.OperationalError("active update failed")
+                if (
+                    "UPDATE bgp_announcements SET" in sql
+                    and params
+                    and params[0] == "sent"
+                ):
+                    raise sqlite3.OperationalError("sent transition failed")
                 return self.inner.execute(sql, params)
 
             def __getattr__(self, name):
@@ -2216,7 +3885,7 @@ class BgpMitigationTest(unittest.TestCase):
             original_pipe = main.exabgp_write_pipe
             original_sqlite_connection = main.sqlite_connection
             main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
-            main.sqlite_connection = lambda: FailingActiveUpdateConnection(original_sqlite_connection())
+            main.sqlite_connection = lambda: FailingSentTransitionConnection(original_sqlite_connection())
             try:
                 response = main.test_bgp_connector_flowspec(
                     self._admin_request(),
@@ -2236,15 +3905,15 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertTrue(calls[0].startswith("announce flow route"))
             self.assertTrue(calls[1].startswith("withdraw flow route"))
-            self.assertEqual(response.status_code, 500)
-            body = json.loads(response.body.decode("utf-8"))
-            self.assertFalse(body["ok"])
-            self.assertTrue(body["rollback_attempted"])
-            self.assertTrue(body["rollback_success"])
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["status"], "failed")
+            self.assertIsNone(response["expires_at"])
+            self.assertIn("withdraw compensatorio executado", response["last_error"])
+            self.assertIn("announce_db_failure", [event["event_type"] for event in response["events"]])
             with main.sqlite_connection() as check:
                 row = check.execute("SELECT status, last_error FROM bgp_announcements").fetchone()
             self.assertEqual(row["status"], "failed")
-            self.assertIn("rollback withdraw executado", row["last_error"])
+            self.assertIn("withdraw compensatorio executado", row["last_error"])
 
     def test_manual_lab_port_without_protocol_has_clear_error(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -2252,6 +3921,637 @@ class BgpMitigationTest(unittest.TestCase):
                 main.BgpFlowspecTestPayload(action="dry_run", dst_cidr="75.131.245.200", protocol="", dst_port="53")
             )
         self.assertIn("Protocolo e obrigatorio quando porta e informada", str(ctx.exception.detail))
+
+    def test_anomaly_list_response_contract_handles_empty_and_auto_only_outcomes(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            empty_id = self._insert_udp_many_anomaly_event(conn, event_id=3101)
+            applied_id = self._insert_udp_many_anomaly_event(conn, event_id=3102, dst_ip="51.222.110.43")
+            outcome_at = "2026-07-20T12:00:00Z"
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'applied',
+                    auto_mitigation_reason = 'Aplicado sem anuncio relacionado',
+                    auto_mitigation_details_json = '{"origin":"manual"}',
+                    auto_mitigation_updated_at = ?
+                WHERE id = ?
+                """,
+                (outcome_at, applied_id),
+            )
+            conn.commit()
+            conn.close()
+
+            items = {item["id"]: item for item in main.anomaly_list("active", 20)}
+            empty = items[empty_id]
+            self.assertEqual(empty["response_status"], "")
+            self.assertEqual(empty["response_reason"], "")
+            self.assertEqual(empty["response_updated_at"], "")
+            self.assertIsNone(empty["response_announcement"])
+            self.assertEqual(empty["response_announcements"], [])
+
+            applied = items[applied_id]
+            self.assertEqual(applied["response_status"], "applied")
+            self.assertEqual(applied["response_reason"], "Aplicado sem anuncio relacionado")
+            self.assertEqual(applied["response_updated_at"], outcome_at)
+            self.assertIsNone(applied["response_announcement"])
+            self.assertEqual(applied["response_announcements"], [])
+
+    def test_anomaly_list_exposes_principal_announcement_states(self):
+        statuses = (
+            "pending_approval",
+            "queued",
+            "sent",
+            "advertised",
+            "peer_down",
+            "dry_run",
+            "deduplicated",
+            "rejected",
+            "failed",
+            "withdrawn",
+            "expired",
+        )
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            expected = {}
+            for offset, status in enumerate(statuses):
+                anomaly_id = 3120 + offset
+                self._insert_udp_many_anomaly_event(
+                    conn,
+                    event_id=anomaly_id,
+                    dst_ip=f"51.222.111.{offset + 1}",
+                )
+                updated_at = f"2026-07-20T12:{offset:02d}:00Z"
+                announcement_id = self._insert_response_announcement(
+                    conn,
+                    anomaly_id,
+                    status,
+                    updated_at,
+                    expires_at="2099-01-01T00:00:00Z" if status == "advertised" else None,
+                    dst_prefix=f"203.0.113.{offset + 1}/32",
+                )
+                conn.execute(
+                    """
+                    UPDATE anomaly_events
+                    SET auto_mitigation_status = 'applied',
+                        auto_mitigation_reason = 'Resultado persistido',
+                        auto_mitigation_details_json = ?,
+                        auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                    WHERE id = ?
+                    """,
+                    (json.dumps({"announcement_id": announcement_id}), anomaly_id),
+                )
+                expected[anomaly_id] = (status, announcement_id, updated_at)
+            conn.commit()
+            conn.close()
+
+            items = {item["id"]: item for item in main.anomaly_list("active", 100)}
+            for anomaly_id, (status, announcement_id, updated_at) in expected.items():
+                with self.subTest(status=status):
+                    item = items[anomaly_id]
+                    self.assertEqual(item["response_status"], status)
+                    self.assertEqual(item["response_reason"], "Resultado persistido")
+                    self.assertEqual(item["response_updated_at"], updated_at)
+                    self.assertEqual(item["response_announcement"]["id"], announcement_id)
+                    self.assertEqual(
+                        [announcement["id"] for announcement in item["response_announcements"]],
+                        [announcement_id],
+                    )
+
+    def test_anomaly_list_uses_persisted_outcome_states_without_announcement(self):
+        statuses = ("not_applied", "rejected_by_policy", "rejected", "deduplicated")
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            expected = {}
+            for offset, status in enumerate(statuses):
+                anomaly_id = 3140 + offset
+                self._insert_udp_many_anomaly_event(
+                    conn,
+                    event_id=anomaly_id,
+                    dst_ip=f"51.222.113.{offset + 1}",
+                )
+                updated_at = f"2026-07-20T12:2{offset}:00Z"
+                reason = f"outcome-{status}"
+                conn.execute(
+                    """
+                    UPDATE anomaly_events
+                    SET auto_mitigation_status = ?, auto_mitigation_reason = ?,
+                        auto_mitigation_updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, reason, updated_at, anomaly_id),
+                )
+                expected[anomaly_id] = (status, reason, updated_at)
+            conn.commit()
+            conn.close()
+
+            items = {item["id"]: item for item in main.anomaly_list("active", 20)}
+            for anomaly_id, (status, reason, updated_at) in expected.items():
+                with self.subTest(status=status):
+                    item = items[anomaly_id]
+                    self.assertEqual(item["response_status"], status)
+                    self.assertEqual(item["response_reason"], reason)
+                    self.assertEqual(item["response_updated_at"], updated_at)
+                    self.assertIsNone(item["response_announcement"])
+                    self.assertEqual(item["response_announcements"], [])
+
+    def test_new_standalone_failure_outcome_wins_over_an_older_terminal_announcement(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3165)
+            old_announcement_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "withdrawn",
+                "2026-07-20T10:00:00Z",
+            )
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'not_applied',
+                    auto_mitigation_reason = 'no_connector_resolved',
+                    auto_mitigation_details_json = '{"origin":"manual","connector_id":null}',
+                    auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                WHERE id = ?
+                """,
+                (anomaly_id,),
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+
+            self.assertEqual(item["response_status"], "not_applied")
+            self.assertEqual(item["response_reason"], "no_connector_resolved")
+            self.assertEqual(item["response_updated_at"], "2026-07-20T11:00:00Z")
+            self.assertIsNone(item["response_announcement"])
+            self.assertEqual([attempt["id"] for attempt in item["response_announcements"]], [old_announcement_id])
+            self.assertTrue(item["response_outcome"]["standalone"])
+
+    def test_operational_advertised_still_wins_over_a_newer_standalone_failure(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3166)
+            advertised_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "advertised",
+                "2026-07-20T10:00:00Z",
+                expires_at="2099-01-01T00:00:00Z",
+            )
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'failed', auto_mitigation_reason = 'new_attempt_failed',
+                    auto_mitigation_details_json = '{}', auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                WHERE id = ?
+                """,
+                (anomaly_id,),
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+
+            self.assertEqual(item["response_status"], "advertised")
+            self.assertEqual(item["response_announcement"]["id"], advertised_id)
+            self.assertEqual(item["response_reason"], "")
+
+    def test_each_announcement_keeps_its_own_execution_origin(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3167)
+            automatic_id = self._insert_response_announcement(conn, anomaly_id, "withdrawn", "2026-07-20T10:00:00Z")
+            manual_id = self._insert_response_announcement(conn, anomaly_id, "failed", "2026-07-20T11:00:00Z")
+            conn.execute(
+                "UPDATE bgp_announcements SET requested_mode = 'automatic', created_by = 'worker' WHERE id = ?",
+                (automatic_id,),
+            )
+            conn.execute(
+                "UPDATE bgp_announcements SET requested_mode = 'announce_now', created_by = 'tester' WHERE id = ?",
+                (manual_id,),
+            )
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'failed', auto_mitigation_reason = 'manual_failure',
+                    auto_mitigation_details_json = ?, auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                WHERE id = ?
+                """,
+                (json.dumps({"announcement_id": manual_id, "origin": "manual"}), anomaly_id),
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+            attempts = {attempt["id"]: attempt for attempt in item["response_announcements"]}
+
+            self.assertEqual(attempts[automatic_id]["response_origin"], "automatic")
+            self.assertEqual(attempts[manual_id]["response_origin"], "manual")
+            self.assertEqual(attempts[automatic_id]["reason"], "")
+            self.assertEqual(attempts[manual_id]["reason"], "manual_failure")
+
+    def test_anomaly_list_response_reason_falls_back_to_announcement_error(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3150)
+            updated_at = "2026-07-20T13:00:00Z"
+            self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "failed",
+                updated_at,
+                last_error="Falha simulada de entrega",
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+            self.assertEqual(item["response_status"], "failed")
+            self.assertEqual(item["response_reason"], "Falha simulada de entrega")
+            self.assertEqual(item["response_updated_at"], updated_at)
+
+    def test_anomaly_history_list_uses_the_same_response_contract(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3151)
+            conn.execute("UPDATE anomaly_events SET status = 'closed' WHERE id = ?", (anomaly_id,))
+            announcement_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "withdrawn",
+                "2026-07-20T13:10:00Z",
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("history", 20) if item["id"] == anomaly_id)
+            self.assertEqual(item["response_status"], "withdrawn")
+            self.assertEqual(item["response_announcement"]["id"], announcement_id)
+            self.assertEqual([announcement["id"] for announcement in item["response_announcements"]], [announcement_id])
+
+    def test_anomaly_list_prioritizes_active_advertised_and_keeps_all_announcements(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3160)
+            advertised_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "advertised",
+                "2026-07-20T10:00:00Z",
+                expires_at="2099-01-01T00:00:00Z",
+                dst_prefix="203.0.113.10/32",
+            )
+            other_ids = {
+                self._insert_response_announcement(conn, anomaly_id, "sent", "2026-07-20T11:00:00Z", dst_prefix="203.0.113.11/32"),
+                self._insert_response_announcement(conn, anomaly_id, "queued", "2026-07-20T12:00:00Z", dst_prefix="203.0.113.12/32"),
+                self._insert_response_announcement(conn, anomaly_id, "pending_approval", "2026-07-20T13:00:00Z", dst_prefix="203.0.113.13/32"),
+                self._insert_response_announcement(conn, anomaly_id, "failed", "2026-07-20T14:00:00Z", dst_prefix="203.0.113.14/32"),
+            }
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+            self.assertEqual(item["response_status"], "advertised")
+            self.assertEqual(item["response_announcement"]["id"], advertised_id)
+            self.assertTrue(item["response_announcement"]["operationally_active"])
+            self.assertEqual(
+                {announcement["id"] for announcement in item["response_announcements"]},
+                {advertised_id, *other_ids},
+            )
+
+    def test_primary_advertised_does_not_inherit_failure_reason_from_another_attempt(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3161)
+            advertised_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "advertised",
+                "2026-07-20T10:00:00Z",
+                expires_at="2099-01-01T00:00:00Z",
+            )
+            failed_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "failed",
+                "2026-07-20T11:00:00Z",
+                last_error="pipe failure on second connector",
+            )
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'failed', auto_mitigation_reason = 'pipe failure on second connector',
+                    auto_mitigation_details_json = ?, auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                WHERE id = ?
+                """,
+                (json.dumps({"announcement_id": failed_id}), anomaly_id),
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+            attempts = {attempt["id"]: attempt for attempt in item["response_announcements"]}
+            self.assertEqual(item["response_status"], "advertised")
+            self.assertEqual(item["response_announcement"]["id"], advertised_id)
+            self.assertEqual(item["response_reason"], "")
+            self.assertEqual(attempts[advertised_id]["reason"], "")
+            self.assertEqual(attempts[failed_id]["reason"], "pipe failure on second connector")
+
+    def test_anomaly_list_response_priority_uses_tiers_then_recency(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+
+            sent_or_queued_id = self._insert_udp_many_anomaly_event(conn, event_id=3170)
+            self._insert_response_announcement(conn, sent_or_queued_id, "sent", "2026-07-20T10:00:00Z")
+            queued_id = self._insert_response_announcement(conn, sent_or_queued_id, "queued", "2026-07-20T11:00:00Z")
+            self._insert_response_announcement(conn, sent_or_queued_id, "pending_approval", "2026-07-20T12:00:00Z")
+            self._insert_response_announcement(conn, sent_or_queued_id, "failed", "2026-07-20T13:00:00Z")
+
+            pending_id = self._insert_udp_many_anomaly_event(conn, event_id=3171, dst_ip="51.222.110.44")
+            pending_announcement_id = self._insert_response_announcement(conn, pending_id, "pending_approval", "2026-07-20T10:00:00Z")
+            self._insert_response_announcement(conn, pending_id, "failed", "2026-07-20T11:00:00Z")
+
+            newest_id = self._insert_udp_many_anomaly_event(conn, event_id=3172, dst_ip="51.222.110.45")
+            self._insert_response_announcement(conn, newest_id, "withdrawn", "2026-07-20T10:00:00Z")
+            failed_id = self._insert_response_announcement(conn, newest_id, "failed", "2026-07-20T11:00:00Z")
+            conn.commit()
+            conn.close()
+
+            items = {item["id"]: item for item in main.anomaly_list("active", 20)}
+            self.assertEqual(items[sent_or_queued_id]["response_status"], "queued")
+            self.assertEqual(items[sent_or_queued_id]["response_announcement"]["id"], queued_id)
+            self.assertEqual(items[pending_id]["response_status"], "pending_approval")
+            self.assertEqual(items[pending_id]["response_announcement"]["id"], pending_announcement_id)
+            self.assertEqual(items[newest_id]["response_status"], "failed")
+            self.assertEqual(items[newest_id]["response_announcement"]["id"], failed_id)
+
+    def test_elapsed_ttl_advertised_remains_primary_until_withdraw_is_confirmed(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3180)
+            sent_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "sent",
+                "2026-07-20T10:00:00Z",
+                dst_prefix="203.0.113.20/32",
+            )
+            expired_advertised_id = self._insert_response_announcement(
+                conn,
+                anomaly_id,
+                "advertised",
+                "2026-07-20T11:00:00Z",
+                expires_at="2000-01-01T00:00:00Z",
+                dst_prefix="203.0.113.21/32",
+            )
+            conn.commit()
+            conn.close()
+
+            item = next(item for item in main.anomaly_list("active", 20) if item["id"] == anomaly_id)
+            self.assertEqual(item["response_status"], "advertised")
+            self.assertEqual(item["response_announcement"]["id"], expired_advertised_id)
+            expired = next(
+                announcement
+                for announcement in item["response_announcements"]
+                if announcement["id"] == expired_advertised_id
+            )
+            self.assertTrue(expired["operationally_active"])
+            self.assertTrue(expired["ttl_elapsed"])
+
+    def test_anomaly_list_does_not_cross_associate_colliding_table_ids(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            shared_id = self._insert_udp_many_anomaly_event(conn, event_id=3190)
+            self._insert_security_response_anomaly(conn, shared_id)
+            anomaly_event_announcement_id = self._insert_response_announcement(
+                conn,
+                shared_id,
+                "sent",
+                "2026-07-20T10:00:00Z",
+                anomaly_source="anomaly_events",
+                dst_prefix="203.0.113.30/32",
+            )
+            security_announcement_id = self._insert_response_announcement(
+                conn,
+                shared_id,
+                "pending_approval",
+                "2026-07-20T11:00:00Z",
+                anomaly_source="security_anomalies",
+                dst_prefix="203.0.113.31/32",
+            )
+            raw_security = main.security_anomaly_row_to_dict(
+                conn.execute("SELECT * FROM security_anomalies WHERE id = ?", (shared_id,)).fetchone()
+            )
+            conn.commit()
+            conn.close()
+
+            colliding = [item for item in main.anomaly_list("active", 20) if item["id"] == shared_id]
+            self.assertEqual(len(colliding), 2)
+            security = next(item for item in colliding if item.get("source") == "security_anomalies")
+            anomaly_event = next(item for item in colliding if item.get("source") != "security_anomalies")
+            self.assertEqual(security["response_status"], "pending_approval")
+            self.assertEqual(security["response_announcement"]["id"], security_announcement_id)
+            self.assertEqual([item["id"] for item in security["response_announcements"]], [security_announcement_id])
+            self.assertEqual(anomaly_event["response_status"], "sent")
+            self.assertEqual(anomaly_event["response_announcement"]["id"], anomaly_event_announcement_id)
+            self.assertEqual([item["id"] for item in anomaly_event["response_announcements"]], [anomaly_event_announcement_id])
+            self.assertLess(security["action_id"], 0)
+            self.assertEqual(raw_security["action_id"], security["action_id"])
+            self.assertEqual(anomaly_event.get("action_id") or anomaly_event["id"], shared_id)
+            with main.sqlite_connection() as check:
+                regular_context = main.fetch_anomaly_mitigation_context(check, shared_id)
+                security_context = main.fetch_anomaly_mitigation_context(check, security["action_id"])
+            self.assertNotIn("security_anomalies", regular_context)
+            self.assertEqual(regular_context["event"]["top_dst_ip"], "51.222.110.42")
+            self.assertEqual(security_context["event"]["source"], "security_anomalies")
+
+    def test_negative_security_action_id_withdraws_its_positive_announcement(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            security_id = self._insert_security_response_anomaly(conn, 3195)
+            raw_security = main.security_anomaly_row_to_dict(
+                conn.execute("SELECT * FROM security_anomalies WHERE id = ?", (security_id,)).fetchone()
+            )
+            announcement_id = self._insert_response_announcement(
+                conn,
+                security_id,
+                "advertised",
+                "2026-07-20T10:00:00Z",
+                anomaly_source="security_anomalies",
+                expires_at="2099-01-01T00:00:00Z",
+            )
+            conn.execute(
+                """
+                UPDATE bgp_announcements
+                SET connector_id = ?, connector_name = ?, withdraw_command = 'withdraw flow route SECURITY'
+                WHERE id = ?
+                """,
+                (connector["id"], connector["name"], announcement_id),
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                result = main.withdraw_anomaly_mitigations(
+                    self._admin_request(),
+                    raw_security["action_id"],
+                    main.BgpAnomalyMitigationWithdrawPayload(),
+                )
+
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(result["items"][0]["id"], announcement_id)
+            self.assertEqual(result["items"][0]["status"], "withdrawn")
+            write_pipe.assert_called_once()
+
+    def test_legacy_from_anomaly_preview_links_negative_security_action_to_response(self):
+        with temporary_main_db():
+            conn, connector, profile = self._connector_and_profile()
+            security_id = self._insert_security_response_anomaly(conn, 3196)
+            raw_security = main.security_anomaly_row_to_dict(
+                conn.execute("SELECT * FROM security_anomalies WHERE id = ?", (security_id,)).fetchone()
+            )
+            payload = main.BgpAnnouncementDryRunPayload(
+                response_profile_id=profile["id"],
+                duration_seconds=300,
+            )
+
+            candidate = main.candidate_from_anomaly(
+                conn,
+                raw_security["action_id"],
+                payload,
+                profile,
+            )
+            positive_id_candidate = main.candidate_from_anomaly(
+                conn,
+                security_id,
+                payload,
+                profile,
+            )
+
+            self.assertEqual(candidate["dst_prefix"], "198.51.100.210/32")
+            self.assertEqual(candidate["protocol"], "udp")
+            self.assertEqual(candidate["anomaly_id"], security_id)
+            self.assertEqual(candidate["anomaly_source"], "security_anomalies")
+            self.assertEqual(candidate["raw_payload"]["anomaly_id"], security_id)
+            self.assertEqual(candidate["raw_payload"]["anomaly_action_id"], raw_security["action_id"])
+            self.assertEqual(positive_id_candidate["anomaly_id"], security_id)
+            self.assertEqual(positive_id_candidate["anomaly_source"], "security_anomalies")
+            conn.close()
+
+            item = main.create_bgp_dry_run_from_anomaly(
+                self._admin_request(),
+                raw_security["action_id"],
+                main.BgpAnnouncementDryRunPayload(
+                    response_profile_id=profile["id"],
+                    connector_id=connector["id"],
+                    duration_seconds=300,
+                ),
+            )
+
+            self.assertEqual(item["anomaly_id"], security_id)
+            self.assertEqual(item["anomaly_source"], "security_anomalies")
+            self.assertTrue(item["mitigation_key"])
+            security = next(
+                event
+                for event in main.anomaly_list("active", 20)
+                if event.get("source") == "security_anomalies" and event["id"] == security_id
+            )
+            self.assertEqual(security["response_status"], "dry_run")
+            self.assertEqual(security["response_announcement"]["id"], item["id"])
+
+    def test_explicit_deduplicated_reference_does_not_steal_announcement_from_original_anomaly(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            original_anomaly_id = self._insert_udp_many_anomaly_event(conn, event_id=3191)
+            deduplicated_anomaly_id = self._insert_udp_many_anomaly_event(
+                conn,
+                event_id=3192,
+                dst_ip="51.222.110.46",
+            )
+            announcement_id = self._insert_response_announcement(
+                conn,
+                original_anomaly_id,
+                "advertised",
+                "2026-07-20T10:00:00Z",
+                expires_at="2099-01-01T00:00:00Z",
+                anomaly_source="anomaly_events",
+                dst_prefix="203.0.113.40/32",
+            )
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = 'deduplicated',
+                    auto_mitigation_reason = 'Resposta equivalente ja ativa',
+                    auto_mitigation_details_json = ?,
+                    auto_mitigation_updated_at = '2026-07-20T11:00:00Z'
+                WHERE id = ?
+                """,
+                (json.dumps({"announcement_id": announcement_id}), deduplicated_anomaly_id),
+            )
+            conn.commit()
+            conn.close()
+
+            items = {item["id"]: item for item in main.anomaly_list("active", 20)}
+            original = items[original_anomaly_id]
+            deduplicated = items[deduplicated_anomaly_id]
+
+            self.assertEqual(original["response_status"], "advertised")
+            self.assertEqual(original["response_announcement"]["id"], announcement_id)
+            self.assertEqual(
+                [announcement["id"] for announcement in original["response_announcements"]],
+                [announcement_id],
+            )
+            self.assertEqual(deduplicated["response_status"], "advertised")
+            self.assertEqual(deduplicated["response_reason"], "Resposta equivalente ja ativa")
+            self.assertEqual(deduplicated["response_announcement"]["id"], announcement_id)
+            self.assertEqual(
+                [announcement["id"] for announcement in deduplicated["response_announcements"]],
+                [announcement_id],
+            )
+
+    def test_anomaly_list_loads_related_announcements_in_one_batch_query(self):
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            for offset in range(3):
+                anomaly_id = 3200 + offset
+                self._insert_udp_many_anomaly_event(
+                    conn,
+                    event_id=anomaly_id,
+                    dst_ip=f"51.222.112.{offset + 1}",
+                )
+                self._insert_response_announcement(
+                    conn,
+                    anomaly_id,
+                    "pending_approval",
+                    f"2026-07-20T12:0{offset}:00Z",
+                )
+            conn.commit()
+            conn.close()
+
+            traced_sql = []
+            original_sqlite_connection = main.sqlite_connection
+
+            def traced_connection():
+                traced = original_sqlite_connection()
+                traced.set_trace_callback(traced_sql.append)
+                return traced
+
+            with patch.object(main, "sqlite_connection", side_effect=traced_connection):
+                items = main.anomaly_list("active", 20)
+
+            self.assertEqual(len([item for item in items if 3200 <= item["id"] <= 3202]), 3)
+            response_queries = [
+                sql
+                for sql in traced_sql
+                if "bgp_announcements" in sql.lower()
+                and sql.lstrip().lower().startswith(("select", "with"))
+            ]
+            self.assertEqual(
+                len(response_queries),
+                1,
+                f"Esperava uma consulta em lote, recebeu: {response_queries}",
+            )
 
     def test_anomaly_source_backfill_prefers_legacy_vector(self):
         source = main.anomaly_source_fields_from_row(
