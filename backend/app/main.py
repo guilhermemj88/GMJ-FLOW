@@ -570,6 +570,10 @@ GMJFLOW_EXABGP_LOG_PATH = (
     os.getenv("GMJFLOW_EXABGP_LOG_PATH", "/var/log/exabgp-gmj-flow.log").strip()
     or "/var/log/exabgp-gmj-flow.log"
 )
+GMJFLOW_EXABGP_CONFIG_PATH = (
+    os.getenv("GMJFLOW_EXABGP_CONFIG_PATH", "/etc/exabgp/gmj-flow-ne8000.conf").strip()
+    or "/etc/exabgp/gmj-flow-ne8000.conf"
+)
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
 BGP_MODES = {"detection_only", "dry_run", "manual_approval", "semi_auto", "auto", "automatic"}
 BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion", "blackhole", "rate_limit", "alert_only", "webhook"}
@@ -8393,6 +8397,7 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
             "listen_port": int(connector.get("listen_port") or 179),
             "pipe_path": clean_text(connector.get("exabgp_pipe_in")),
             "log_path": GMJFLOW_EXABGP_LOG_PATH,
+            "config_path": GMJFLOW_EXABGP_CONFIG_PATH,
         }
     )
     try:
@@ -8545,6 +8550,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         messages.append("Log recente sugere peer conectado, mas essa heuristica nao autoriza anuncio.")
     agent_status = host_agent_status(connector)
     agent_available = bool(agent_status.get("enabled") and agent_status.get("available"))
+    agent_pipe: dict[str, Any] = {}
     if agent_available:
         agent_service = agent_status.get("service") or {}
         agent_listener = agent_status.get("listener") or {}
@@ -8582,12 +8588,19 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             }
             pipes_ok = pipe_ok
 
+    agent_pipe_ok = bool(
+        agent_pipe.get("exists")
+        and agent_pipe.get("is_fifo")
+        and agent_pipe.get("reader_active")
+    )
     agent_bgp_state = clean_text(agent_status.get("bgp_state")).lower()
     agent_flowspec_state = clean_text(agent_status.get("flowspec_state")).lower()
     agent_confirms_exabgp = bool(
         agent_available
+        and service_active
         and agent_bgp_state == "established"
         and agent_flowspec_state == "established"
+        and agent_pipe_ok
     )
     if connector.get("router_check_enabled") and not agent_confirms_exabgp:
         try:
@@ -8764,7 +8777,13 @@ def bgp_readiness_reason_message(reason: str) -> str:
 
 
 def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
-    peer_state = bgp_peer_state_from_status(status)
+    raw_peer_state = clean_text(status.get("bgp_state")).lower()
+    if raw_peer_state in {"established", "up"}:
+        peer_state = "established"
+    elif raw_peer_state in {"idle", "active", "connect", "down", "not_established"}:
+        peer_state = "down"
+    else:
+        peer_state = "not_verified"
     service_active = bool((status.get("service") or {}).get("active"))
     flowspec_state = clean_text(status.get("flowspec_state")).lower()
     pipes = status.get("pipes") or {}

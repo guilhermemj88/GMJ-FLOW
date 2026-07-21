@@ -69,12 +69,25 @@ display bgp flow peer
 Host Agent opcional:
 
 ```sh
-sudo python3 scripts/host-agent.py --host 127.0.0.1 --port 18080 --log-path /var/log/exabgp-gmj-flow.log
-GMJFLOW_HOST_AGENT_URL=http://127.0.0.1:18080
+sudo python3 scripts/host-agent.py --host 172.18.0.1 --port 18080 \
+  --log-path /var/log/exabgp-gmj-flow.log \
+  --config-path /etc/exabgp/gmj-flow-ne8000.conf
+GMJFLOW_HOST_AGENT_URL=http://172.18.0.1:18080
 GMJFLOW_EXABGP_LOG_PATH=/var/log/exabgp-gmj-flow.log
+GMJFLOW_EXABGP_CONFIG_PATH=/etc/exabgp/gmj-flow-ne8000.conf
 ```
 
-O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&log_path=/var/log/exabgp-gmj-flow.log` retornando JSON com `bgp_state` e `flowspec_state`. O `log_path` aceito deve coincidir exatamente com o caminho configurado na inicializacao do agente.
+O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&log_path=/var/log/exabgp-gmj-flow.log&config_path=/etc/exabgp/gmj-flow-ne8000.conf` retornando JSON com `bgp_state` e `flowspec_state`. Os caminhos aceitos devem coincidir exatamente com os caminhos configurados na inicializacao do agente. O arquivo de configuracao comprova apenas que `ipv4 flow` esta habilitado no bloco `family` do neighbor solicitado; isso nao confirma a instalacao da rota no Huawei.
+
+O backend precisa receber as tres variaveis acima. Preserve o mount existente `/run/exabgp:/run/exabgp`; nao e necessario adicionar mounts para os arquivos do host, pois eles sao lidos somente pelo Host Agent.
+
+O `docker-compose.yml` atual declara o ambiente do backend de forma explicita. Portanto, colocar os valores apenas no `.env` nao os injeta no container ate que o operador adicione, no bloco `backend.environment` da configuracao de producao, os tres mapeamentos abaixo (esta alteracao nao e feita automaticamente):
+
+```yaml
+GMJFLOW_HOST_AGENT_URL: "${GMJFLOW_HOST_AGENT_URL-http://172.18.0.1:18080}"
+GMJFLOW_EXABGP_LOG_PATH: "${GMJFLOW_EXABGP_LOG_PATH-/var/log/exabgp-gmj-flow.log}"
+GMJFLOW_EXABGP_CONFIG_PATH: "${GMJFLOW_EXABGP_CONFIG_PATH-/etc/exabgp/gmj-flow-ne8000.conf}"
+```
 
 ### Estados e nivel de confirmacao dos anuncios
 

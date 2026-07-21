@@ -493,15 +493,23 @@ class FrontendBgpProfilesTest(unittest.TestCase):
             "BGP estabelecido",
             "BGP não verificado",
             "BGP indisponível",
-            "FlowSpec estabelecido",
+            "FlowSpec habilitado no ExaBGP",
             "FlowSpec não verificado",
             "FlowSpec indisponível",
             "Pipe OK",
+            "Pipe sem leitor",
             "Pipe indisponível",
+            "Pronto",
+            "Não pronto",
         ):
             self.assertIn(label, HTML)
         self.assertIn("conector(es) checado(s)", HTML)
         self.assertNotIn("conector(es) verificado(s)` : '-'", HTML)
+        self.assertIn("FlowSpec habilitados no ExaBGP", HTML)
+        self.assertIn(
+            "FlowSpec habilitado no ExaBGP. Isso não confirma instalação da rota no Huawei.",
+            HTML,
+        )
 
     def test_unverified_and_down_response_labels_follow_technical_reason(self):
         presentation_start = HTML.index("function bgpTechnicalFailurePresentation")
