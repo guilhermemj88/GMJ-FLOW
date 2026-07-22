@@ -507,6 +507,10 @@
       display: flex;
     }
 
+    .ai-subview.active {
+      display: block;
+    }
+
     .sensor-layout {
       display: grid;
       grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
@@ -1242,6 +1246,9 @@
         </button>
         <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors">
           <i data-lucide="network"></i><span>BGP / Conectores</span>
+        </button>
+        <button id="aiNavButton" type="button" data-nav-view="ai">
+          <i data-lucide="brain-circuit"></i><span>IA</span>
         </button>
         <button id="systemNavButton" type="button" data-nav-view="system">
           <i data-lucide="activity"></i><span>Sistema</span>
@@ -4308,6 +4315,174 @@
           </section>
         </section>
 
+        <section id="view-ai" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">IA</h1>
+              <div id="aiPageStatus" class="subtle">Providers, modelos, roteamento, prompts, testes e histórico</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshAiButton" type="button" class="btn btn-sm btn-success"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+            </div>
+          </div>
+          <div id="aiTabs" class="tab-strip mb-3" role="tablist" aria-label="Seções de IA">
+            <button type="button" class="active" data-ai-tab="overview">Visão geral</button>
+            <button type="button" data-ai-tab="providers">Provedores</button>
+            <button type="button" data-ai-tab="models">Modelos locais</button>
+            <button type="button" data-ai-tab="routing">Roteamento</button>
+            <button type="button" data-ai-tab="prompts">Prompts</button>
+            <button type="button" data-ai-tab="tests">Testes</button>
+            <button type="button" data-ai-tab="history">Histórico</button>
+          </div>
+
+          <section id="aiOverviewPanel" class="flow-subview ai-subview active">
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card"><div class="metric-label">IA global</div><div id="aiOverviewEnabled" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Provider padrão</div><div id="aiOverviewProvider" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Modelo padrão</div><div id="aiOverviewModel" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Fallback</div><div id="aiOverviewFallback" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Ollama</div><div id="aiOverviewOllama" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">RAM total</div><div id="aiOverviewRamTotal" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">RAM disponível</div><div id="aiOverviewRamAvailable" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Requisições 24h</div><div id="aiOverviewRequests" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Sucessos / falhas</div><div id="aiOverviewResults" class="metric-value">0 / 0</div></div>
+              <div class="metric-card"><div class="metric-label">Tempo médio</div><div id="aiOverviewLatency" class="metric-value">0 ms</div></div>
+              <div class="metric-card"><div class="metric-label">Tokens estimados</div><div id="aiOverviewTokens" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Custo estimado</div><div id="aiOverviewCost" class="metric-value">Custo não informado</div></div>
+            </div>
+            <div class="alert alert-info">A IA fornece análise e recomendação. A execução é controlada pelas políticas determinísticas do GMJ-FLOW.</div>
+            <div class="panel p-3 mb-3">
+              <div class="panel-title mb-2">Estado dos provedores</div>
+              <div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Estado</th><th>Latência</th><th>Última checagem</th></tr></thead><tbody id="aiOverviewProvidersTable"></tbody></table></div>
+            </div>
+            <div class="panel p-3 ai-admin-control">
+              <div class="panel-title mb-2">Política global</div>
+              <div class="flow-search-grid mb-2">
+                <div class="field"><label for="aiGlobalEnabled">IA global</label><select id="aiGlobalEnabled" class="form-select form-select-sm"><option value="false">Desativada</option><option value="true">Ativada</option></select></div>
+                <div class="field"><label for="aiHistoryContentPolicy">Conteúdo no histórico</label><select id="aiHistoryContentPolicy" class="form-select form-select-sm"><option value="none">Não salvar conteúdo</option><option value="sanitized">Salvar sanitizado</option><option value="full">Completo para administradores</option></select></div>
+                <div class="field"><label for="aiHistoryRetentionDays">Retenção (dias)</label><input id="aiHistoryRetentionDays" type="number" min="1" max="3650" class="form-control form-control-sm" value="30"></div>
+                <div class="field"><label for="aiExternalIpPolicy">Privacidade externa</label><select id="aiExternalIpPolicy" class="form-select form-select-sm"><option value="never_internal_full">Nunca enviar IP interno completo</option><option value="route_policy">Usar política da função</option></select></div>
+              </div>
+              <button id="saveAiGlobalSettingsButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar política</span></button>
+            </div>
+          </section>
+
+          <section id="aiProvidersPanel" class="flow-subview ai-subview">
+            <div class="panel p-3 mb-3 ai-admin-control">
+              <div class="panel-title mb-2">Cadastro de provedor</div>
+              <input id="aiProviderEditorId" type="hidden">
+              <div class="flow-search-grid mb-2">
+                <div class="field"><label for="aiProviderEditorName">Nome</label><input id="aiProviderEditorName" class="form-control form-control-sm" placeholder="Ollama Produção"></div>
+                <div class="field"><label for="aiProviderEditorType">Tipo</label><select id="aiProviderEditorType" class="form-select form-select-sm"><option value="ollama">Ollama local</option><option value="openai_compatible">API compatível com OpenAI</option><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option><option value="groq">Groq</option><option value="openrouter">OpenRouter</option><option value="custom_http">HTTP personalizado</option></select></div>
+                <div class="field"><label for="aiProviderEditorEnabled">Estado</label><select id="aiProviderEditorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Inativo</option></select></div>
+                <div class="field grid-span-2"><label for="aiProviderEditorBaseUrl">Base URL</label><input id="aiProviderEditorBaseUrl" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorApiKey">API key</label><input id="aiProviderEditorApiKey" type="password" autocomplete="new-password" class="form-control form-control-sm" placeholder="Deixe vazio para preservar"></div>
+                <div class="field"><label for="aiProviderEditorOrganization">Organização</label><input id="aiProviderEditorOrganization" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorProject">Projeto</label><input id="aiProviderEditorProject" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorDefaultModel">Modelo padrão</label><input id="aiProviderEditorDefaultModel" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorTimeout">Timeout (s)</label><input id="aiProviderEditorTimeout" type="number" min="1" max="300" value="30" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorContext">Contexto (tokens)</label><input id="aiProviderEditorContext" type="number" min="256" value="8192" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorOutput">Saída máxima</label><input id="aiProviderEditorOutput" type="number" min="1" value="1024" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorTemperature">Temperatura</label><input id="aiProviderEditorTemperature" type="number" min="0" max="2" step="0.1" value="0.1" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorTopP">top_p</label><input id="aiProviderEditorTopP" type="number" min="0" max="1" step="0.05" value="1" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorRetries">Tentativas</label><input id="aiProviderEditorRetries" type="number" min="0" max="10" value="1" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorRetryInterval">Retry (ms)</label><input id="aiProviderEditorRetryInterval" type="number" min="0" value="500" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorPriority">Prioridade</label><input id="aiProviderEditorPriority" type="number" min="1" value="100" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorRpm">Requisições/min</label><input id="aiProviderEditorRpm" type="number" min="0" value="0" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorTpm">Tokens/min</label><input id="aiProviderEditorTpm" type="number" min="0" value="0" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorDailyCalls">Chamadas/dia</label><input id="aiProviderEditorDailyCalls" type="number" min="0" value="0" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorDailyCost">Custo diário</label><input id="aiProviderEditorDailyCost" type="number" min="0" step="0.01" value="0" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorMonthlyCost">Custo mensal</label><input id="aiProviderEditorMonthlyCost" type="number" min="0" step="0.01" value="0" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiProviderEditorBlockLimit">Ao atingir limite</label><select id="aiProviderEditorBlockLimit" class="form-select form-select-sm"><option value="true">Bloquear provider</option><option value="false">Somente registrar</option></select></div>
+                <div class="field"><label for="aiProviderEditorFallbackLimit">Fallback local no limite</label><select id="aiProviderEditorFallbackLimit" class="form-select form-select-sm"><option value="false">Não</option><option value="true">Sim</option></select></div>
+                <div class="field"><label for="aiProviderEditorJson">JSON estruturado</label><select id="aiProviderEditorJson" class="form-select form-select-sm"><option value="true">Suportado</option><option value="false">Não suportado</option></select></div>
+                <div class="field"><label for="aiProviderEditorTools">Tools/functions</label><select id="aiProviderEditorTools" class="form-select form-select-sm"><option value="false">Não suportado</option><option value="true">Suportado</option></select></div>
+                <div class="field"><label for="aiProviderEditorKeepAlive">Keep alive (Ollama)</label><input id="aiProviderEditorKeepAlive" class="form-control form-control-sm" placeholder="30m"></div>
+                <div class="field"><label for="aiProviderEditorModelsEndpoint">Endpoint modelos</label><input id="aiProviderEditorModelsEndpoint" class="form-control form-control-sm" placeholder="/v1/models"></div>
+                <div class="field"><label for="aiProviderEditorChatEndpoint">Endpoint chat</label><input id="aiProviderEditorChatEndpoint" class="form-control form-control-sm" placeholder="/v1/chat/completions"></div>
+                <div class="field grid-span-2"><label for="aiProviderEditorHeaders">Headers extras (JSON)</label><textarea id="aiProviderEditorHeaders" class="form-control form-control-sm" rows="2">{}</textarea></div>
+                <div class="field grid-span-2"><label for="aiProviderEditorNotes">Observações</label><textarea id="aiProviderEditorNotes" class="form-control form-control-sm" rows="2"></textarea></div>
+              </div>
+              <div id="aiProviderCredentialState" class="subtle mb-2">Credencial não configurada.</div>
+              <div class="toolbar"><button id="saveAiProviderButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar provedor</span></button><button id="newAiProviderButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button></div>
+            </div>
+            <div class="panel p-3">
+              <div class="panel-title mb-2">Provedores configurados</div>
+              <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Base URL</th><th>Modelo padrão</th><th>Estado</th><th>Latência</th><th>Prioridade</th><th>Ações</th></tr></thead><tbody id="aiProvidersTable"></tbody></table></div>
+            </div>
+          </section>
+
+          <section id="aiModelsPanel" class="flow-subview ai-subview">
+            <div class="panel p-3 mb-3">
+              <div class="panel-title mb-2">Modelos locais e catálogos</div>
+              <div class="toolbar mb-2"><select id="aiModelsProvider" class="form-select form-select-sm" aria-label="Provider de modelos"></select><input id="aiModelPullName" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"><button id="refreshAiModelsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="list"></i><span>Listar/atualizar</span></button><button id="registerAiModelButton" type="button" class="btn btn-sm btn-outline-secondary ai-admin-control"><i data-lucide="plus"></i><span>Cadastrar nome</span></button><button id="pullAiModelButton" type="button" class="btn btn-sm btn-success ai-admin-control"><i data-lucide="download"></i><span>Baixar no Ollama</span></button><button id="cancelAiModelPullButton" type="button" class="btn btn-sm btn-outline-danger ai-admin-control"><i data-lucide="x"></i><span>Cancelar</span></button></div>
+              <div id="aiLocalProviderSummary" class="subtle mb-2">Selecione um provider.</div>
+              <div class="toolbar mb-2 ai-admin-control"><button id="editAiLocalProviderButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="settings"></i><span>Editar URL, contexto, keep alive e timeout</span></button><button id="testAiLocalModelButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="activity"></i><span>Testar modelo</span></button></div>
+              <div id="aiModelOperationStatus" class="subtle">Nenhuma operação em andamento.</div>
+            </div>
+            <div class="database-metrics-grid mb-3"><div class="metric-card"><div class="metric-label">Espaço em disco</div><div id="aiModelsDisk" class="metric-value">-</div></div><div class="metric-card"><div class="metric-label">RAM disponível</div><div id="aiModelsRam" class="metric-value">-</div></div><div class="metric-card"><div class="metric-label">Modelo recomendado</div><div id="aiModelsRecommendation" class="metric-value">-</div></div></div>
+            <div class="panel p-3"><div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>Provider</th><th>Modelo</th><th>Tamanho</th><th>RAM estimada</th><th>Download</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="aiModelsTable"></tbody></table></div></div>
+          </section>
+
+          <section id="aiRoutingPanel" class="flow-subview ai-subview">
+            <div class="panel p-3 mb-3 ai-admin-control">
+              <div class="panel-title mb-2">Roteamento por função</div>
+              <div class="flow-search-grid mb-2">
+                <div class="field"><label for="aiRouteFunction">Função</label><select id="aiRouteFunction" class="form-select form-select-sm"></select></div>
+                <div class="field"><label for="aiRouteEnabled">Estado</label><select id="aiRouteEnabled" class="form-select form-select-sm"><option value="true">Ativada</option><option value="false">Desativada</option></select></div>
+                <div class="field"><label for="aiRoutePrimaryProvider">Provider principal</label><select id="aiRoutePrimaryProvider" class="form-select form-select-sm"></select></div>
+                <div class="field"><label for="aiRoutePrimaryModel">Modelo principal</label><input id="aiRoutePrimaryModel" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteFallbackProvider">Provider fallback</label><select id="aiRouteFallbackProvider" class="form-select form-select-sm"></select></div>
+                <div class="field"><label for="aiRouteFallbackModel">Modelo fallback</label><input id="aiRouteFallbackModel" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteTimeout">Timeout (s)</label><input id="aiRouteTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteTemperature">Temperatura</label><input id="aiRouteTemperature" type="number" min="0" max="2" step="0.1" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteContext">Contexto máximo</label><input id="aiRouteContext" type="number" min="1000" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteTopFlows">Top flows</label><input id="aiRouteTopFlows" type="number" min="1" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRouteAttempts">Tentativas</label><input id="aiRouteAttempts" type="number" min="1" max="10" class="form-control form-control-sm"></div>
+                <div class="field"><label for="aiRoutePrivacy">Dados sensíveis</label><select id="aiRoutePrivacy" class="form-select form-select-sm"><option value="full">Permitir completo</option><option value="mask_ips">Mascarar IP</option><option value="remove_internal_ips">Remover IP interno</option><option value="remove_client_names">Remover nome do cliente</option><option value="remove_descriptions">Remover descrição</option><option value="aggregates_only">Somente agregados</option></select></div>
+                <div class="field"><label for="aiRouteStructured">Resposta estruturada</label><select id="aiRouteStructured" class="form-select form-select-sm"><option value="true">Obrigatória</option><option value="false">Opcional</option></select></div>
+                <div class="field"><label for="aiRouteRepairJson">Correção de JSON</label><select id="aiRouteRepairJson" class="form-select form-select-sm"><option value="true">Uma tentativa</option><option value="false">Não tentar</option></select></div>
+                <div class="field"><label for="aiRouteFallbackTimeout">Fallback em timeout</label><select id="aiRouteFallbackTimeout" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></div>
+                <div class="field"><label for="aiRouteFallbackRateLimit">Fallback em 429</label><select id="aiRouteFallbackRateLimit" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></div>
+                <div class="field"><label for="aiRouteFallbackServerError">Fallback em 5xx/indisponível</label><select id="aiRouteFallbackServerError" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></div>
+                <div class="field"><label for="aiRouteFallbackInvalidJson">Fallback em JSON inválido</label><select id="aiRouteFallbackInvalidJson" class="form-select form-select-sm"><option value="false">Não</option><option value="true">Sim</option></select></div>
+                <div class="field"><label for="aiRouteFallbackCost">Fallback em limite financeiro</label><select id="aiRouteFallbackCost" class="form-select form-select-sm"><option value="false">Não</option><option value="true">Sim</option></select></div>
+              </div>
+              <button id="saveAiRouteButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar rota</span></button>
+            </div>
+            <div class="panel p-3"><div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Função</th><th>Principal</th><th>Fallback</th><th>Timeout</th><th>Privacidade</th><th>JSON</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="aiRoutesTable"></tbody></table></div></div>
+          </section>
+
+          <section id="aiPromptsPanel" class="flow-subview ai-subview">
+            <div class="panel p-3 mb-3 ai-admin-control">
+              <div class="panel-title mb-2">Editor de prompt</div><input id="aiPromptId" type="hidden">
+              <div class="flow-search-grid mb-2"><div class="field"><label for="aiPromptName">Nome</label><input id="aiPromptName" class="form-control form-control-sm"></div><div class="field"><label for="aiPromptFunction">Função</label><select id="aiPromptFunction" class="form-select form-select-sm"></select></div><div class="field"><label for="aiPromptEnabled">Estado</label><select id="aiPromptEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Inativo</option></select></div><div class="field"><label for="aiPromptRecommendedModel">Modelo recomendado</label><input id="aiPromptRecommendedModel" class="form-control form-control-sm"></div></div>
+              <div class="field mb-2"><label for="aiPromptSystem">System prompt</label><textarea id="aiPromptSystem" class="form-control form-control-sm" rows="4"></textarea></div>
+              <div class="field mb-2"><label for="aiPromptUserTemplate">Template do usuário</label><textarea id="aiPromptUserTemplate" class="form-control form-control-sm" rows="5"></textarea></div>
+              <div class="flow-search-grid mb-2"><div class="field grid-span-2"><label for="aiPromptVariables">Variáveis (JSON)</label><textarea id="aiPromptVariables" class="form-control form-control-sm" rows="3">[]</textarea></div><div class="field grid-span-2"><label for="aiPromptSchema">Schema JSON</label><textarea id="aiPromptSchema" class="form-control form-control-sm" rows="5">{}</textarea></div></div>
+              <div class="subtle mb-2">Disponíveis conforme a função: {{anomaly_id}}, {{sensor_name}}, {{connector_name}}, {{source_ip}}, {{destination_ip}}, {{protocol}}, {{source_port}}, {{destination_port}}, {{pps}}, {{bps}}, {{duration}}, {{severity}}, {{rule_name}}, {{flows}}, {{current_mitigations}} e {{bgp_status}}.</div>
+              <div class="toolbar"><button id="saveAiPromptButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar nova versão</span></button><button id="newAiPromptButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button><button id="previewAiPromptButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eye"></i><span>Visualizar renderizado</span></button></div>
+              <div id="aiPromptPreview" class="result-box mt-2">Nenhum preview.</div>
+            </div>
+            <div class="panel p-3"><div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Função</th><th>Versão</th><th>Modelo</th><th>Alterado</th><th>Estado</th><th>Ações</th></tr></thead><tbody id="aiPromptsTable"></tbody></table></div></div>
+          </section>
+
+          <section id="aiTestsPanel" class="flow-subview ai-subview">
+            <div class="panel p-3">
+              <div class="panel-title mb-2">Playground seguro</div><div class="subtle mb-2">Executa somente geração de texto. Não altera anomalias, não envia FlowSpec, não escreve em FIFO e não executa mitigação.</div>
+              <div class="flow-search-grid mb-2"><div class="field"><label for="aiPlaygroundProvider">Provider</label><select id="aiPlaygroundProvider" class="form-select form-select-sm"></select></div><div class="field"><label for="aiPlaygroundModel">Modelo</label><input id="aiPlaygroundModel" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundFunction">Função</label><select id="aiPlaygroundFunction" class="form-select form-select-sm"></select></div><div class="field"><label for="aiPlaygroundTemperature">Temperatura</label><input id="aiPlaygroundTemperature" type="number" min="0" max="2" step="0.1" value="0.1" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundTimeout">Timeout</label><input id="aiPlaygroundTimeout" type="number" min="1" max="300" value="30" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundStructured">JSON</label><select id="aiPlaygroundStructured" class="form-select form-select-sm"><option value="false">Texto</option><option value="true">Estruturado</option></select></div></div>
+              <div class="field mb-2"><label for="aiPlaygroundPrompt">Prompt</label><textarea id="aiPlaygroundPrompt" class="form-control form-control-sm" rows="4" placeholder="Use dados sintéticos."></textarea></div><div class="field mb-2"><label for="aiPlaygroundContext">Contexto</label><textarea id="aiPlaygroundContext" class="form-control form-control-sm" rows="3"></textarea></div>
+              <div class="toolbar"><button id="runAiPlaygroundButton" type="button" class="btn btn-sm btn-success"><i data-lucide="play"></i><span>Executar</span></button><button id="cancelAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="square"></i><span>Cancelar</span></button><button id="clearAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eraser"></i><span>Limpar</span></button><button id="copyAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="copy"></i><span>Copiar resposta</span></button><button id="toggleAiPlaygroundRawButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="braces"></i><span>JSON bruto</span></button></div>
+              <pre id="aiPlaygroundOutput" class="result-box mt-2">Nenhum teste executado.</pre><pre id="aiPlaygroundRaw" class="result-box mt-2 d-none"></pre><div id="aiPlaygroundUsage" class="subtle mt-2"></div>
+            </div>
+          </section>
+
+          <section id="aiHistoryPanel" class="flow-subview ai-subview">
+            <div class="panel p-3 mb-3"><div class="panel-title mb-2">Chamadas de IA</div><div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>ID</th><th>Data/hora</th><th>Função</th><th>Provider</th><th>Modelo</th><th>Duração</th><th>Status</th><th>Tentativas</th><th>Fallback</th><th>Tokens</th><th>Custo</th><th>Erro</th></tr></thead><tbody id="aiHistoryTable"></tbody></table></div></div>
+            <div class="panel p-3"><div class="panel-title mb-2">Auditoria de configuração</div><div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data/hora</th><th>Usuário</th><th>Ação</th><th>Entidade</th><th>Detalhes</th></tr></thead><tbody id="aiAuditTable"></tbody></table></div></div>
+          </section>
+        </section>
+
         <section id="view-system" class="app-view">
           <div class="view-header">
             <div>
@@ -4357,36 +4532,19 @@
             <div class="col-12 col-xl-5">
               <div class="panel p-3">
                 <div class="panel-title mb-2">IA Local</div>
-                <div class="subtle mb-2">IA habilitada gera análise e sugestão. Não aplica mitigação automática.</div>
-                <div class="flow-search-grid mb-2">
-                  <div class="field"><label for="systemAiEnabled">IA</label><select id="systemAiEnabled" class="form-select form-select-sm"><option value="false">Desativada</option><option value="true">Ativada</option></select></div>
-                  <div class="field"><label for="systemAiProvider">Provedor</label><select id="systemAiProvider" class="form-select form-select-sm"><option value="ollama">ollama</option></select></div>
-                  <div class="field grid-span-2"><label for="systemAiBaseUrl">Base URL</label><input id="systemAiBaseUrl" class="form-control form-control-sm" placeholder="http://gmj-flow-ollama:11434"></div>
-                  <div class="field grid-span-2"><label for="systemAiModel">Modelo</label><input id="systemAiModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
-                  <div class="field"><label for="systemAiTimeout">Timeout</label><input id="systemAiTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
-                  <div class="field"><label for="systemAiTopFlows">Top flows</label><input id="systemAiTopFlows" type="number" min="1" max="200" class="form-control form-control-sm"></div>
-                  <div class="field"><label for="systemAiContextChars">Contexto</label><input id="systemAiContextChars" type="number" min="1000" max="100000" class="form-control form-control-sm"></div>
-                  <div class="field"><label for="systemAiKeepAlive">Keep alive</label><input id="systemAiKeepAlive" class="form-control form-control-sm" placeholder="30m"></div>
-                  <div class="field"><label for="systemAiPullModel">Baixar modelo</label><input id="systemAiPullModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
+                <div class="subtle mb-2">Resumo operacional. A configuração e os modelos ficam centralizados na página IA.</div>
+                <div class="database-metrics-grid mb-2">
+                  <div class="metric-card"><div class="metric-label">Estado</div><div id="systemOllamaState" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Modelo ativo</div><div id="systemOllamaLoadedModel" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Memória</div><div id="systemOllamaMemory" class="metric-value">-</div></div>
                 </div>
-                <div class="toolbar mb-2">
-                  <button id="systemAiSaveButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
-                  <button id="systemAiModelsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="list"></i><span>Listar</span></button>
-                  <button id="systemAiPullButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="download"></i><span>Baixar</span></button>
-                  <button id="systemAiTestButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="activity"></i><span>Testar</span></button>
-                </div>
-                <pre id="systemAiOutput" class="result-box">IA local não carregada.</pre>
+                <div id="systemOllamaUrl" class="subtle mb-2">URL: -</div>
+                <button id="manageAiModelsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="cpu"></i><span>Gerenciar na página IA</span></button>
               </div>
             </div>
           </section>
           <section class="row g-3 mt-1">
-            <div class="col-12 col-xl-6">
-              <div class="panel p-3">
-                <div class="panel-title mb-2">Ollama / Modelos</div>
-                <div id="systemOllamaList" class="d-grid gap-2"></div>
-              </div>
-            </div>
-            <div class="col-12 col-xl-6">
+            <div class="col-12">
               <div class="panel p-3">
                 <div class="panel-title mb-2">ExaBGP / Autostart</div>
                 <div id="systemExabgpStatus" class="d-grid gap-2"></div>
@@ -4526,36 +4684,16 @@
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
                 <div class="panel-title">IA para mitigação</div>
-                <div id="aiMitigationStatusText" class="metric-readout">IA desativada por padrão</div>
+                <div id="mitigationAiState" class="metric-readout">IA desativada por padrão</div>
               </div>
-              <div class="toolbar">
-                <button id="saveAiMitigationButton" type="button" class="btn btn-sm btn-success">
-                  <i data-lucide="save"></i><span>Salvar IA</span>
-                </button>
-                <button id="testAiMitigationButton" type="button" class="btn btn-sm btn-outline-secondary">
-                  <i data-lucide="activity"></i><span>Testar IA</span>
-                </button>
-              </div>
-            </div>
-            <div class="flow-search-grid mb-2">
-              <div class="field"><label for="aiEnabled">Ativar IA</label><select id="aiEnabled" class="form-select form-select-sm"><option value="false">Desativada</option><option value="true">Ativada</option></select></div>
-              <div class="field"><label for="aiProvider">Provider</label><select id="aiProvider" class="form-select form-select-sm"><option value="ollama">ollama</option><option value="llama.cpp">llama.cpp</option><option value="openai-compatible">openai-compatible</option></select></div>
-              <div class="field"><label for="aiBaseUrl">Base URL</label><input id="aiBaseUrl" class="form-control form-control-sm" placeholder="http://gmj-flow-ollama:11434"></div>
-              <div class="field"><label for="aiProfile">Perfil de memoria</label><select id="aiProfile" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="aiModel">Modelo selecionado</label><input id="aiModel" class="form-control form-control-sm" placeholder="qwen2.5:3b-instruct"></div>
-              <div class="field"><label for="aiTimeout">Timeout (s)</label><input id="aiTimeout" type="number" min="1" max="300" class="form-control form-control-sm"></div>
-              <div class="field"><label for="aiTopFlows">Top flows</label><input id="aiTopFlows" type="number" min="1" max="200" class="form-control form-control-sm"></div>
-              <div class="field"><label for="aiContextChars">Contexto max</label><input id="aiContextChars" type="number" min="1000" max="100000" class="form-control form-control-sm"></div>
+              <button id="configureMitigationAiButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="settings"></i><span>Configurar IA</span></button>
             </div>
             <div class="database-metrics-grid mb-2">
-              <div class="metric-card"><div class="metric-label">RAM total</div><div id="aiRamTotal" class="metric-value">-</div></div>
-              <div class="metric-card"><div class="metric-label">RAM disponivel</div><div id="aiRamAvailable" class="metric-value">-</div></div>
-              <div class="metric-card"><div class="metric-label">Recomendacao</div><div id="aiRecommendation" class="metric-value">-</div></div>
-              <div class="metric-card"><div class="metric-label">Provider</div><div id="aiReachable" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Função</div><div class="metric-value">Análise de mitigação</div></div>
+              <div class="metric-card"><div class="metric-label">Provider</div><div id="mitigationAiProvider" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Modelo</div><div id="mitigationAiModel" class="metric-value">-</div></div>
             </div>
-            <div id="aiProfileDescription" class="subtle"></div>
-            <div id="aiWarnings" class="text-warning mt-2"></div>
-            <pre id="aiTestOutput" class="result-box mt-2">Nenhum teste executado.</pre>
+            <div class="subtle">A IA fornece análise e recomendação. Toda execução continua sujeita às políticas determinísticas e aprovação do GMJ-FLOW.</div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -5617,7 +5755,18 @@
     let currentBgpMitigationEvaluation = null;
     let currentBgpMitigationConnectorId = null;
     let currentAiMitigationAnalysis = null;
-    let aiProfiles = [];
+    let aiOverviewState = null;
+    let aiProviders = [];
+    let aiModels = [];
+    let aiRoutes = [];
+    let aiRouteFunctions = [];
+    let aiPrompts = [];
+    let pendingAiRouteFunction = null;
+    let aiPlaygroundAbortController = null;
+    let aiModelPullAbortController = null;
+    let aiModelPullJobId = null;
+    let aiModelPullProviderId = null;
+    let aiModelPullPollTimer = null;
     let bgpConnectors = [];
     let bgpProfiles = [];
     let pendingBgpConnectorDetailsId = null;
@@ -5627,7 +5776,9 @@
     let bgpAnnouncements = [];
     let bgpPortPolicies = [];
     let bgpConnectorStatuses = [];
-    let bgpStatusesRefreshInFlight = false;
+    let bgpStatusesRefreshInFlight = null;
+    const bgpConnectorChecksInFlight = new Map();
+    let bgpBulkCheckInFlight = false;
     let opsSummaryRefreshTimer = null;
     let opsSummaryRefreshInFlight = false;
     let activeCustomRangeTarget = null;
@@ -5879,6 +6030,9 @@
       document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('bgpNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('mitigationNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.querySelectorAll('.ai-admin-control').forEach(element => {
+        element.classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      });
       setLoginStatus('');
       const requestedView = viewFromLocationHash();
       if (requestedView !== 'dashboard') {
@@ -6163,11 +6317,17 @@
     function requestBodyPreview(options = {}) {
       const body = options.body;
       if (!body) return '';
-      if (typeof body === 'string') return body.length > 1200 ? `${body.slice(0, 1200)}...` : body;
+      const redact = value => String(value || '')
+        .replace(/("[^"]*(?:api[_-]?key|authorization|credential|secret|token)[^"]*"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2')
+        .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, '$1[REDACTED]');
+      if (typeof body === 'string') {
+        const safeBody = redact(body);
+        return safeBody.length > 1200 ? `${safeBody.slice(0, 1200)}...` : safeBody;
+      }
       try {
-        return JSON.stringify(body).slice(0, 1200);
+        return redact(JSON.stringify(body)).slice(0, 1200);
       } catch (error) {
-        return String(body);
+        return redact(String(body));
       }
     }
 
@@ -6299,7 +6459,11 @@
       if (!response.ok) {
         const detail = apiDetailMessage(payload.detail) || payload.message || payload.error_message || text || response.statusText;
         const preview = requestBodyPreview(options);
-        throw new Error(`Backend retornou HTTP ${response.status}: ${detail}. URL: ${endpoint}${preview ? `. Payload: ${preview}` : ''}`);
+        const apiError = new Error(`Backend retornou HTTP ${response.status}: ${detail}. URL: ${endpoint}${preview ? `. Payload: ${preview}` : ''}`);
+        apiError.status = response.status;
+        apiError.payload = payload;
+        apiError.retryAfter = response.headers.get('Retry-After') || '';
+        throw apiError;
       }
       return payload;
     }
@@ -9042,6 +9206,7 @@
     function renderBgpPeerStatus() {
       const rows = bgpConnectors.map(connector => {
         const status = bgpStatusForConnector(connector);
+        const checking = bgpConnectorChecksInFlight.has(Number(connector.id));
         const bgpState = bgpPeerOperationalState(status);
         const flowspecState = bgpFlowspecOperationalState(status, connector);
         const pipeState = bgpPipeDetailedState(status, connector);
@@ -9061,7 +9226,7 @@
             <td>${bgpReadinessBadge(readiness)}</td>
             <td>${escapeHtml(formatDateTime(status?.last_checked_at) || '-')}</td>
             <td><div class="d-flex flex-wrap gap-1">
-              <button type="button" class="btn btn-sm btn-outline-success bgp-status-check" data-id="${connector.id}" title="Verificar agora"><i data-lucide="activity"></i></button>
+              <button type="button" class="btn btn-sm btn-outline-success bgp-status-check" data-id="${connector.id}" title="${checking ? 'Verificação em andamento' : 'Verificar agora'}" ${checking ? 'disabled aria-busy="true"' : ''}><i data-lucide="activity"></i></button>
               <button type="button" class="btn btn-sm btn-outline-secondary bgp-status-details" data-id="${connector.id}" title="Ver detalhes"><i data-lucide="eye"></i></button>
               <button type="button" class="btn btn-sm btn-outline-secondary bgp-connector-edit" data-id="${connector.id}" title="Editar conector"><i data-lucide="pencil"></i></button>
               <button type="button" class="btn btn-sm btn-outline-secondary bgp-status-history" data-id="${connector.id}" title="Abrir histórico técnico"><i data-lucide="history"></i></button>
@@ -9620,10 +9785,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
-    async function refreshBgpConnectorStatuses() {
-      if (bgpStatusesRefreshInFlight) return;
-      bgpStatusesRefreshInFlight = true;
-      try {
+    async function refreshBgpConnectorStatuses(options = {}) {
+      const activeRefresh = bgpStatusesRefreshInFlight;
+      if (activeRefresh) {
+        await activeRefresh.catch(() => {});
+        if (!options.afterCurrent) return;
+        return refreshBgpConnectorStatuses(options);
+      }
+      const refreshRequest = (async () => {
         bgpConnectorStatuses = await Promise.all(bgpConnectors.map(connector =>
           apiRequest(`/api/bgp/connectors/${connector.id}/status`).catch(error => ({
             connector_id: connector.id,
@@ -9638,30 +9807,104 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ));
         renderBgpPeerStatus();
         createIcons();
+      })();
+      bgpStatusesRefreshInFlight = refreshRequest;
+      try {
+        await refreshRequest;
       } finally {
-        bgpStatusesRefreshInFlight = false;
+        if (bgpStatusesRefreshInFlight === refreshRequest) bgpStatusesRefreshInFlight = null;
       }
     }
 
+    function updateBgpCheckButtonsState() {
+      ['checkAllBgpConnectorsButton', 'checkBgpStatusButton'].forEach(id => {
+        const button = document.getElementById(id);
+        if (!button) return;
+        button.disabled = bgpBulkCheckInFlight;
+        button.setAttribute('aria-busy', bgpBulkCheckInFlight ? 'true' : 'false');
+      });
+      document.querySelectorAll('.bgp-status-check').forEach(button => {
+        const checking = bgpConnectorChecksInFlight.has(Number(button.dataset.id));
+        button.disabled = checking;
+        button.setAttribute('aria-busy', checking ? 'true' : 'false');
+        button.title = checking ? 'Verificação em andamento' : 'Verificar agora';
+      });
+    }
+
+    function bgpCheckConflict(error) {
+      const payload = error?.payload?.detail || error?.payload || {};
+      return error?.status === 409 && payload.error === 'bgp_check_in_progress' ? payload : null;
+    }
+
     async function checkBgpConnectorStatusesNow() {
+      if (bgpBulkCheckInFlight) return;
       const connectors = bgpConnectors.filter(connector => connector.enabled !== false && connector.is_active !== false);
+      bgpBulkCheckInFlight = true;
+      updateBgpCheckButtonsState();
       setText('bgpPeerStatusText', 'Verificando conectores...');
-      const results = await Promise.allSettled(connectors.map(connector =>
-        apiRequest(`/api/bgp/connectors/${connector.id}/check-router`, { method: 'POST' })
-      ));
-      await refreshBgpConnectorStatuses();
-      const failed = results.filter(result => result.status === 'rejected').length;
-      setText('bgpPeerStatusText', failed
-        ? `${connectors.length - failed} checado(s), ${failed} falha(s)`
-        : `${connectors.length} conector(es) checado(s)`);
+      try {
+        const results = await Promise.allSettled(connectors.map(connector =>
+          checkBgpConnectorStatusNow(connector.id, { refresh: false, quiet: true })
+        ));
+        await refreshBgpConnectorStatuses({ afterCurrent: true });
+        const failed = results.filter(result => result.status === 'rejected').length;
+        const inProgress = results.filter(result => result.status === 'fulfilled' && result.value?.state === 'check_in_progress').length;
+        const checked = connectors.length - failed - inProgress;
+        setText('bgpPeerStatusText', [
+          `${checked} checado(s)`,
+          inProgress ? `${inProgress} já em andamento` : '',
+          failed ? `${failed} falha(s)` : ''
+        ].filter(Boolean).join(', '));
+      } finally {
+        bgpBulkCheckInFlight = false;
+        updateBgpCheckButtonsState();
+      }
     }
 
     async function checkBgpConnectorStatusNow(connectorId) {
+      const options = arguments[1] || {};
       const connector = bgpConnectors.find(item => Number(item.id) === Number(connectorId));
       if (!connector) return;
-      setText('bgpPeerStatusText', `Checando ${connector.name || `#${connector.id}`}...`);
-      await apiRequest(`/api/bgp/connectors/${connector.id}/check-router`, { method: 'POST' });
-      await refreshBgpConnectorStatuses();
+      const connectorKey = Number(connector.id);
+      let request = bgpConnectorChecksInFlight.get(connectorKey);
+      if (!request) {
+        request = (async () => {
+          try {
+            return await apiRequest(`/api/bgp/connectors/${connector.id}/check-router`, { method: 'POST' });
+          } catch (error) {
+            const conflict = bgpCheckConflict(error);
+            if (conflict) return { ...conflict, state: 'check_in_progress' };
+            throw error;
+          }
+        })();
+        const trackedRequest = request.finally(() => {
+          if (bgpConnectorChecksInFlight.get(connectorKey) === trackedRequest) {
+            bgpConnectorChecksInFlight.delete(connectorKey);
+          }
+          updateBgpCheckButtonsState();
+        });
+        bgpConnectorChecksInFlight.set(connectorKey, trackedRequest);
+        request = trackedRequest;
+        updateBgpCheckButtonsState();
+      }
+      if (!options.quiet) setText('bgpPeerStatusText', `Checando ${connector.name || `#${connector.id}`}...`);
+      let result;
+      try {
+        result = await request;
+      } finally {
+        // Preserve badges until the authoritative persisted snapshot is read,
+        // regardless of success, 409, 504, 5xx or a network error.
+        if (options.refresh !== false) await refreshBgpConnectorStatuses({ afterCurrent: true });
+      }
+      if (!options.quiet) {
+        if (result?.state === 'check_in_progress') {
+          const retry = Number(result.retry_after_seconds || 1);
+          setText('bgpPeerStatusText', `${connector.name || `#${connector.id}`}: verificação já em andamento; tente novamente em ${retry}s.`);
+        } else {
+          setText('bgpPeerStatusText', `${connector.name || `#${connector.id}`} verificado.`);
+        }
+      }
+      return result;
     }
 
     async function loadBgpConnectorsView() {
@@ -9695,7 +9938,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
       renderOpsSummary(summary);
       renderMitigationWorkspace();
-      await loadAiMitigationStatus().catch(error => setText('aiMitigationStatusText', `Falha IA: ${error.message}`));
+      await loadMitigationAiSummary().catch(error => setText('mitigationAiState', `Falha IA: ${error.message}`));
       setText('bgpStatus', `Perfis: ${bgpProfiles.length} / Registros de mitigação: ${bgpAnnouncements.length}`);
     }
 
@@ -9703,75 +9946,377 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return loadMitigationView();
     }
 
-    function aiProfileText(profileId) {
-      const profile = aiProfiles.find(item => item.profile_id === profileId);
-      return profile ? profile.name : profileId || '-';
+    function aiStatusLabel(value) {
+      return ({
+        available: 'Disponível', unavailable: 'Indisponível', not_configured: 'Não configurado',
+        limited: 'Limitado', credential_invalid: 'Credencial inválida', timeout: 'Timeout',
+        rate_limit: 'Limite atingido', server_error: 'Indisponível', invalid_response: 'Degradado',
+        policy: 'Rejeitado por política', degraded: 'Degradado', disabled: 'Desativado', success: 'Sucesso', failed: 'Falha', cancelled: 'Cancelado'
+      })[String(value || '').toLowerCase()] || String(value || 'Não configurado');
     }
 
-    function renderAiMitigationStatus(status) {
-      setBoolSelect('aiEnabled', Boolean(status.enabled));
-      setValue('aiProvider', status.provider || 'ollama');
-      setValue('aiBaseUrl', status.base_url || '');
-      setValue('aiModel', status.selected_model || '');
-      setValue('aiTimeout', status.timeout_seconds || '');
-      setValue('aiTopFlows', status.max_top_flows || '');
-      setValue('aiContextChars', status.max_context_chars || '');
-      document.getElementById('aiProfile').innerHTML = optionList(aiProfiles.map(profile => [profile.profile_id, profile.name]), status.selected_profile || 'recommended');
-      const profile = aiProfiles.find(item => item.profile_id === (status.selected_profile || 'recommended'));
-      setText('aiRamTotal', status.system_memory_total_gb ? `${status.system_memory_total_gb} GB` : '-');
-      setText('aiRamAvailable', status.system_memory_available_gb ? `${status.system_memory_available_gb} GB` : '-');
-      setText('aiRecommendation', aiProfileText(status.recommendation));
-      setText('aiReachable', status.enabled ? (status.reachable ? 'OK' : 'Offline') : 'Desativada');
-      setText('aiMitigationStatusText', status.enabled ? `IA ativa: ${status.provider} / ${status.selected_model}` : 'IA desativada por padrão');
-      setText('aiProfileDescription', profile ? `${profile.name}: ${profile.description} RAM modelo ${profile.estimated_model_ram_gb} GB. Livre recomendado: ${profile.recommended_free_ram_gb} GB.` : '');
-      setText('aiWarnings', (status.warnings || []).join(' | '));
+    function aiBadge(value) {
+      const status = String(value || 'not_configured').toLowerCase();
+      const tone = ['available', 'success'].includes(status) ? 'ok' : ['degraded', 'timeout', 'limited', 'rate_limit', 'invalid_response'].includes(status) ? 'warn' : 'off';
+      return `<span class="badge-soft ${tone}">${escapeHtml(aiStatusLabel(status))}</span>`;
     }
 
-    async function loadAiMitigationStatus() {
-      const [profiles, status] = await Promise.all([
-        apiRequest('/api/ai/profiles'),
-        apiRequest('/api/ai/status')
-      ]);
-      aiProfiles = Array.isArray(profiles.items) ? profiles.items : [];
-      renderAiMitigationStatus(status);
+    function aiProviderName(providerId) {
+      return aiProviders.find(item => Number(item.id) === Number(providerId))?.name || 'Não configurado';
     }
 
-    async function saveAiMitigationSettings() {
-      setText('aiMitigationStatusText', 'Salvando configuração IA...');
-      const payload = {
-        enabled: boolSelectValue('aiEnabled'),
-        provider: selectValue('aiProvider', 'ollama'),
-        base_url: selectValue('aiBaseUrl').trim(),
-        selected_profile: selectValue('aiProfile', 'recommended'),
-        selected_model: selectValue('aiModel').trim(),
-        timeout_seconds: numberValue('aiTimeout', 20),
-        max_top_flows: numberValue('aiTopFlows', 30),
-        max_context_chars: numberValue('aiContextChars', 12000),
-        allow_auto: false,
-        require_policy_validation: true
+    function showAiTab(tab = 'overview') {
+      const selected = ['overview', 'providers', 'models', 'routing', 'prompts', 'tests', 'history'].includes(tab) ? tab : 'overview';
+      document.querySelectorAll('[data-ai-tab]').forEach(button => button.classList.toggle('active', button.dataset.aiTab === selected));
+      document.querySelectorAll('.ai-subview').forEach(panel => panel.classList.remove('active'));
+      document.getElementById(`ai${selected.charAt(0).toUpperCase()}${selected.slice(1)}Panel`)?.classList.add('active');
+    }
+
+    function renderAiOverview(overview, settings) {
+      const usage = overview.usage_24h || {};
+      const memory = overview.memory || {};
+      setText('aiOverviewEnabled', overview.global_enabled ? 'Ativada' : 'Desativada');
+      setText('aiOverviewProvider', overview.default_provider || 'Não configurado');
+      setText('aiOverviewModel', overview.default_model || 'Não configurado');
+      setText('aiOverviewFallback', overview.fallback_provider || 'Não configurado');
+      setText('aiOverviewOllama', aiStatusLabel(overview.ollama_status));
+      setText('aiOverviewRamTotal', memory.total ? `${memory.total} GB` : '-');
+      setText('aiOverviewRamAvailable', memory.available ? `${memory.available} GB` : '-');
+      setText('aiOverviewRequests', usage.requests || 0);
+      setText('aiOverviewResults', `${usage.successes || 0} / ${usage.failures || 0}`);
+      setText('aiOverviewLatency', `${usage.avg_duration_ms || 0} ms`);
+      setText('aiOverviewTokens', usage.tokens || 0);
+      setText('aiOverviewCost', Number(usage.cost || 0) > 0 ? Number(usage.cost).toLocaleString('pt-BR', { style: 'currency', currency: 'USD' }) : 'Custo não informado');
+      setBoolSelect('aiGlobalEnabled', String(settings.global_enabled) === 'true');
+      setValue('aiHistoryContentPolicy', settings.history_content_policy || 'sanitized');
+      setValue('aiHistoryRetentionDays', settings.history_retention_days || 30);
+      setValue('aiExternalIpPolicy', settings.external_ip_policy || 'never_internal_full');
+      document.getElementById('aiOverviewProvidersTable').innerHTML = aiProviders.map(provider => `
+        <tr><td>${escapeHtml(provider.name)}</td><td>${escapeHtml(provider.provider_type)}</td><td>${aiBadge(provider.enabled ? provider.status : 'disabled')}</td><td>${Number(provider.last_latency_ms || 0)} ms</td><td>${escapeHtml(formatDateTime(provider.last_checked_at) || '-')}</td></tr>
+      `).join('') || '<tr><td colspan="5" class="subtle">Nenhum provedor configurado.</td></tr>';
+    }
+
+    function aiProviderOptions(selected = '', includeEmpty = true) {
+      const options = aiProviders.map(provider => [String(provider.id), provider.name]);
+      if (includeEmpty) options.unshift(['', 'Não configurado']);
+      return optionList(options, String(selected || ''));
+    }
+
+    function syncAiProviderSelectors() {
+      ['aiModelsProvider', 'aiPlaygroundProvider'].forEach(id => {
+        const current = selectValue(id);
+        document.getElementById(id).innerHTML = aiProviderOptions(current, false);
+      });
+      ['aiRoutePrimaryProvider', 'aiRouteFallbackProvider'].forEach(id => {
+        const current = selectValue(id);
+        document.getElementById(id).innerHTML = aiProviderOptions(current, true);
+      });
+      renderAiLocalProviderSummary();
+    }
+
+    function renderAiLocalProviderSummary() {
+      const provider = aiProviders.find(item => Number(item.id) === Number(selectValue('aiModelsProvider')));
+      if (!provider) {
+        setText('aiLocalProviderSummary', 'Selecione um provider.');
+        return;
+      }
+      setText('aiLocalProviderSummary', `URL: ${provider.base_url || '-'} | Modelo: ${provider.default_model || '-'} | Perfil: ${provider.custom_options?.model_profile || 'recomendado'} | Contexto: ${provider.max_context_tokens || '-'} | Keep alive: ${provider.custom_options?.keep_alive || '-'} | Timeout: ${provider.timeout_seconds || '-'}s`);
+    }
+
+    function renderAiProviders() {
+      document.getElementById('aiProvidersTable').innerHTML = aiProviders.map(provider => `
+        <tr>
+          <td>${escapeHtml(provider.name)}</td><td>${escapeHtml(provider.provider_type)}</td><td>${escapeHtml(provider.base_url || '-')}</td>
+          <td>${escapeHtml(provider.default_model || '-')}</td><td>${aiBadge(provider.enabled ? provider.status : 'disabled')}</td>
+          <td>${Number(provider.last_latency_ms || 0)} ms</td><td>${Number(provider.priority || 0)}</td>
+          <td><div class="toolbar">
+            ${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="test" data-id="${provider.id}">Testar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="edit" data-id="${provider.id}">Editar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="duplicate" data-id="${provider.id}">Duplicar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="toggle" data-id="${provider.id}">${provider.enabled ? 'Desativar' : 'Ativar'}</button><button type="button" class="btn btn-sm btn-outline-danger ai-provider-action" data-action="delete" data-id="${provider.id}">Excluir</button>` : ''}
+            <button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="history" data-id="${provider.id}">Histórico</button>
+          </div></td>
+        </tr>`).join('') || '<tr><td colspan="8" class="subtle">Nenhum provedor configurado.</td></tr>';
+      syncAiProviderSelectors();
+    }
+
+    function resetAiProviderEditor() {
+      setValue('aiProviderEditorId', '');
+      setValue('aiProviderEditorName', '');
+      setValue('aiProviderEditorType', 'ollama');
+      setValue('aiProviderEditorEnabled', 'true');
+      setValue('aiProviderEditorBaseUrl', 'http://gmj-flow-ollama:11434');
+      setValue('aiProviderEditorApiKey', '');
+      setValue('aiProviderEditorOrganization', ''); setValue('aiProviderEditorProject', ''); setValue('aiProviderEditorDefaultModel', '');
+      setValue('aiProviderEditorTimeout', 30); setValue('aiProviderEditorContext', 8192); setValue('aiProviderEditorOutput', 1024);
+      setValue('aiProviderEditorTemperature', 0.1); setValue('aiProviderEditorTopP', 1); setValue('aiProviderEditorRetries', 1);
+      setValue('aiProviderEditorRetryInterval', 500); setValue('aiProviderEditorPriority', 100); setValue('aiProviderEditorRpm', 0);
+      setValue('aiProviderEditorTpm', 0); setValue('aiProviderEditorDailyCalls', 0); setValue('aiProviderEditorDailyCost', 0); setValue('aiProviderEditorMonthlyCost', 0);
+      setValue('aiProviderEditorBlockLimit', 'true'); setValue('aiProviderEditorFallbackLimit', 'false'); setValue('aiProviderEditorJson', 'true'); setValue('aiProviderEditorTools', 'false'); setValue('aiProviderEditorKeepAlive', '30m'); setValue('aiProviderEditorModelsEndpoint', '/api/tags');
+      setValue('aiProviderEditorHeaders', '{}');
+      setValue('aiProviderEditorChatEndpoint', '/api/generate'); setValue('aiProviderEditorNotes', '');
+      setText('aiProviderCredentialState', 'Credencial não configurada.');
+    }
+
+    function editAiProvider(providerId) {
+      const provider = aiProviders.find(item => Number(item.id) === Number(providerId));
+      if (!provider) return;
+      const fields = {
+        aiProviderEditorId: provider.id, aiProviderEditorName: provider.name, aiProviderEditorType: provider.provider_type,
+        aiProviderEditorEnabled: String(Boolean(provider.enabled)), aiProviderEditorBaseUrl: provider.base_url,
+        aiProviderEditorOrganization: provider.organization, aiProviderEditorProject: provider.project,
+        aiProviderEditorDefaultModel: provider.default_model, aiProviderEditorTimeout: provider.timeout_seconds,
+        aiProviderEditorContext: provider.max_context_tokens, aiProviderEditorOutput: provider.max_output_tokens,
+        aiProviderEditorTemperature: provider.temperature, aiProviderEditorTopP: provider.top_p, aiProviderEditorRetries: provider.retries,
+        aiProviderEditorRetryInterval: provider.retry_interval_ms, aiProviderEditorPriority: provider.priority,
+        aiProviderEditorRpm: provider.requests_per_minute, aiProviderEditorTpm: provider.tokens_per_minute,
+        aiProviderEditorDailyCalls: provider.calls_per_day, aiProviderEditorDailyCost: provider.daily_cost_limit,
+        aiProviderEditorMonthlyCost: provider.monthly_cost_limit, aiProviderEditorBlockLimit: String(Boolean(provider.block_on_limit)), aiProviderEditorFallbackLimit: String(Boolean(provider.fallback_local_on_limit)), aiProviderEditorJson: String(Boolean(provider.supports_json)),
+        aiProviderEditorTools: String(Boolean(provider.supports_tools)), aiProviderEditorModelsEndpoint: provider.models_endpoint,
+        aiProviderEditorKeepAlive: provider.custom_options?.keep_alive || '30m', aiProviderEditorChatEndpoint: provider.chat_endpoint, aiProviderEditorHeaders: JSON.stringify(provider.extra_headers || {}, null, 2), aiProviderEditorNotes: provider.notes
       };
-      try {
-        const status = await apiRequest('/api/ai/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        renderAiMitigationStatus(status);
-        setText('aiTestOutput', 'Configuração IA salva.');
-      } catch (error) {
-        setText('aiMitigationStatusText', `Falha ao salvar IA: ${error.message}`);
-      }
+      Object.entries(fields).forEach(([id, value]) => setValue(id, value ?? ''));
+      setValue('aiProviderEditorApiKey', '');
+      setText('aiProviderCredentialState', provider.has_api_key ? `Credencial atual: ${provider.api_key_masked}. Deixe vazio para preservar.` : 'Credencial não configurada.');
+      showAiTab('providers');
     }
 
-    async function testAiMitigation() {
-      setText('aiTestOutput', 'Testando provider IA...');
-      try {
-        const result = await apiRequest('/api/ai/test', { method: 'POST' });
-        setText('aiTestOutput', JSON.stringify(result, null, 2));
-        await loadAiMitigationStatus();
-      } catch (error) {
-        setText('aiTestOutput', `Falha: ${error.message}`);
+    function aiProviderEditorPayload() {
+      const existing = aiProviders.find(item => Number(item.id) === Number(selectValue('aiProviderEditorId') || 0));
+      return {
+        name: selectValue('aiProviderEditorName').trim(), provider_type: selectValue('aiProviderEditorType'), enabled: boolSelectValue('aiProviderEditorEnabled'),
+        base_url: selectValue('aiProviderEditorBaseUrl').trim(), api_key: selectValue('aiProviderEditorApiKey'), organization: selectValue('aiProviderEditorOrganization'), project: selectValue('aiProviderEditorProject'),
+        default_model: selectValue('aiProviderEditorDefaultModel').trim(), timeout_seconds: numberValue('aiProviderEditorTimeout', 30), max_context_tokens: numberValue('aiProviderEditorContext', 8192),
+        max_output_tokens: numberValue('aiProviderEditorOutput', 1024), temperature: numberValue('aiProviderEditorTemperature', 0.1), top_p: numberValue('aiProviderEditorTopP', 1), retries: numberValue('aiProviderEditorRetries', 1),
+        retry_interval_ms: numberValue('aiProviderEditorRetryInterval', 500), priority: numberValue('aiProviderEditorPriority', 100), requests_per_minute: numberValue('aiProviderEditorRpm', 0),
+        tokens_per_minute: numberValue('aiProviderEditorTpm', 0), calls_per_day: numberValue('aiProviderEditorDailyCalls', 0), daily_cost_limit: numberValue('aiProviderEditorDailyCost', 0), monthly_cost_limit: numberValue('aiProviderEditorMonthlyCost', 0),
+        block_on_limit: boolSelectValue('aiProviderEditorBlockLimit'), fallback_local_on_limit: boolSelectValue('aiProviderEditorFallbackLimit'), supports_json: boolSelectValue('aiProviderEditorJson'), supports_tools: boolSelectValue('aiProviderEditorTools'),
+        models_endpoint: selectValue('aiProviderEditorModelsEndpoint'), chat_endpoint: selectValue('aiProviderEditorChatEndpoint'), extra_headers: JSON.parse(selectValue('aiProviderEditorHeaders') || '{}'), custom_options: { ...(existing?.custom_options || {}), keep_alive: selectValue('aiProviderEditorKeepAlive').trim() || '30m' }, notes: selectValue('aiProviderEditorNotes')
+      };
+    }
+
+    async function saveAiProviderFromEditor() {
+      const providerId = Number(selectValue('aiProviderEditorId') || 0);
+      setText('aiPageStatus', 'Salvando provedor...');
+      await apiRequest(providerId ? `/api/ai/providers/${providerId}` : '/api/ai/providers', { method: providerId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(aiProviderEditorPayload()) });
+      resetAiProviderEditor();
+      await loadAiWorkspace();
+    }
+
+    async function handleAiProviderAction(action, providerId) {
+      if (action === 'edit') return editAiProvider(providerId);
+      if (action === 'history') { showAiTab('history'); return; }
+      if (action === 'delete' && !window.confirm('Excluir este provedor? Rotas em uso impedirão a remoção.')) return;
+      setText('aiPageStatus', `${action === 'test' ? 'Testando' : 'Atualizando'} provedor...`);
+      const path = action === 'delete' ? `/api/ai/providers/${providerId}` : `/api/ai/providers/${providerId}/${action}`;
+      const result = await apiRequest(path, { method: action === 'delete' ? 'DELETE' : 'POST' });
+      setText('aiPageStatus', action === 'test' ? `${result.ok ? 'Teste concluído' : 'Teste falhou'}: ${result.error || result.response_preview || aiStatusLabel(result.status)}` : 'Provider atualizado.');
+      await loadAiWorkspace();
+    }
+
+    function renderAiModels() {
+      setText('aiModelsDisk', aiModels.some(item => item.disk_bytes) ? formatBytes(aiModels.reduce((sum, item) => sum + Number(item.disk_bytes || item.size_bytes || 0), 0)) : '-');
+      setText('aiModelsRam', aiOverviewState?.memory?.available ? `${aiOverviewState.memory.available} GB` : '-');
+      const recommended = aiModels.filter(item => item.provider_type === 'ollama').sort((a, b) => Number(a.estimated_ram_bytes || a.size_bytes) - Number(b.estimated_ram_bytes || b.size_bytes))[0];
+      setText('aiModelsRecommendation', recommended?.name || 'Sem modelo local catalogado');
+      document.getElementById('aiModelsTable').innerHTML = aiModels.map(model => `
+        <tr><td>${escapeHtml(model.provider_name)}</td><td>${escapeHtml(model.name)}</td><td>${model.size_bytes ? formatBytes(model.size_bytes) : '-'}</td><td>${model.estimated_ram_bytes ? formatBytes(model.estimated_ram_bytes) : '-'}</td><td>${escapeHtml(model.downloaded_at || model.modified_at || '-')}</td><td>${aiBadge(model.loaded ? 'available' : model.state)}</td><td>${currentAuthUser?.role === 'admin' && (model.provider_type === 'ollama' || model.manually_configured) ? `<button type="button" class="btn btn-sm btn-outline-danger ai-model-remove" data-provider-id="${model.provider_id}" data-model="${escapeHtml(model.name)}">Remover</button>` : '-'}</td></tr>
+      `).join('') || '<tr><td colspan="7" class="subtle">Nenhum modelo catalogado. Selecione um provider e atualize a lista.</td></tr>';
+    }
+
+    async function refreshAiProviderModels() {
+      const providerId = Number(selectValue('aiModelsProvider') || 0);
+      if (!providerId) throw new Error('Selecione um provider.');
+      setText('aiModelOperationStatus', 'Atualizando catálogo de modelos...');
+      const result = await apiRequest(`/api/ai/providers/${providerId}/models/refresh`, { method: 'POST' });
+      aiModels = Array.isArray(result.items) ? result.items : [];
+      setText('aiModelOperationStatus', `${aiModels.length} modelo(s) catalogado(s).`);
+      await loadAiWorkspace();
+    }
+
+    async function registerAiModel() {
+      const providerId = Number(selectValue('aiModelsProvider') || 0);
+      const model = selectValue('aiModelPullName').trim();
+      if (!providerId || !model) throw new Error('Selecione o provider e informe o modelo.');
+      setText('aiModelOperationStatus', `Cadastrando ${model}...`);
+      await apiRequest(`/api/ai/providers/${providerId}/models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+      setText('aiModelOperationStatus', `${model} cadastrado no catálogo.`);
+      await loadAiWorkspace();
+    }
+
+    async function pullAiModel() {
+      const providerId = Number(selectValue('aiModelsProvider') || 0);
+      const model = selectValue('aiModelPullName').trim();
+      if (!providerId || !model) throw new Error('Selecione o provider e informe o modelo.');
+      aiModelPullAbortController?.abort();
+      aiModelPullAbortController = new AbortController();
+      setText('aiModelOperationStatus', `Solicitando download de ${model}...`);
+      const result = await apiRequest(`/api/ai/providers/${providerId}/models/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }), signal: aiModelPullAbortController.signal });
+      aiModelPullAbortController = null;
+      aiModelPullJobId = result.job_id;
+      aiModelPullProviderId = providerId;
+      setText('aiModelOperationStatus', result.message || `Download de ${model} iniciado.`);
+      scheduleAiModelPullStatus();
+    }
+
+    function scheduleAiModelPullStatus(delay = 800) {
+      if (aiModelPullPollTimer) clearTimeout(aiModelPullPollTimer);
+      aiModelPullPollTimer = null;
+      if (activeView !== 'ai' || !aiModelPullJobId || !aiModelPullProviderId) return;
+      aiModelPullPollTimer = setTimeout(() => pollAiModelPullStatus().catch(error => setText('aiModelOperationStatus', `Falha: ${error.message}`)), delay);
+    }
+
+    async function pollAiModelPullStatus() {
+      aiModelPullPollTimer = null;
+      if (activeView !== 'ai' || !aiModelPullJobId || !aiModelPullProviderId) return;
+      const status = await apiRequest(`/api/ai/providers/${aiModelPullProviderId}/models/pull/${aiModelPullJobId}`);
+      const bytes = status.total_bytes ? ` (${formatBytes(status.completed_bytes)} / ${formatBytes(status.total_bytes)})` : '';
+      setText('aiModelOperationStatus', `${status.message || status.status} ${Number(status.progress_percent || 0).toFixed(1)}%${bytes}`);
+      if (['completed', 'failed', 'cancelled'].includes(status.status)) {
+        aiModelPullJobId = null;
+        aiModelPullProviderId = null;
+        await loadAiWorkspace();
+        return;
       }
+      scheduleAiModelPullStatus(1000);
+    }
+
+    async function removeAiModel(providerId, model) {
+      if (!window.confirm(`Remover o modelo ${model}?`)) return;
+      await apiRequest(`/api/ai/providers/${providerId}/models/${encodeURIComponent(model)}`, { method: 'DELETE' });
+      await refreshAiProviderModels();
+    }
+
+    function renderAiRoutes() {
+      const functionOptions = aiRouteFunctions.map(item => [item.key, item.name]);
+      const current = pendingAiRouteFunction || selectValue('aiRouteFunction') || aiRoutes[0]?.function_key || '';
+      pendingAiRouteFunction = null;
+      document.getElementById('aiRouteFunction').innerHTML = optionList(functionOptions, current);
+      ['aiPromptFunction', 'aiPlaygroundFunction'].forEach(id => {
+        const selected = selectValue(id);
+        document.getElementById(id).innerHTML = optionList(functionOptions, selected);
+      });
+      document.getElementById('aiRoutesTable').innerHTML = aiRoutes.map(route => `
+        <tr><td>${escapeHtml(route.display_name)}</td><td>${escapeHtml(route.primary_provider_name || 'Não configurado')} / ${escapeHtml(route.primary_model || '-')}</td><td>${escapeHtml(route.fallback_provider_name || 'Não configurado')} / ${escapeHtml(route.fallback_model || '-')}</td><td>${route.timeout_seconds}s</td><td>${escapeHtml(route.sensitive_data_policy)}</td><td>${route.require_structured ? 'Obrigatório' : 'Opcional'}</td><td>${aiBadge(route.enabled ? 'available' : 'disabled')}</td><td><button type="button" class="btn btn-sm btn-outline-secondary ai-route-edit" data-function="${escapeHtml(route.function_key)}">Editar</button></td></tr>
+      `).join('');
+      editAiRoute(current);
+    }
+
+    function editAiRoute(functionKey) {
+      const route = aiRoutes.find(item => item.function_key === functionKey);
+      if (!route) return;
+      setValue('aiRouteFunction', route.function_key); setBoolSelect('aiRouteEnabled', route.enabled);
+      setValue('aiRoutePrimaryProvider', route.primary_provider_id || ''); setValue('aiRoutePrimaryModel', route.primary_model || '');
+      setValue('aiRouteFallbackProvider', route.fallback_provider_id || ''); setValue('aiRouteFallbackModel', route.fallback_model || '');
+      setValue('aiRouteTimeout', route.timeout_seconds); setValue('aiRouteTemperature', route.temperature); setValue('aiRouteContext', route.max_context_chars);
+      setValue('aiRouteTopFlows', route.max_top_flows); setValue('aiRouteAttempts', route.max_attempts); setValue('aiRoutePrivacy', route.sensitive_data_policy); setBoolSelect('aiRouteStructured', route.require_structured);
+      setBoolSelect('aiRouteRepairJson', route.repair_json_once); setBoolSelect('aiRouteFallbackTimeout', route.fallback_on_timeout); setBoolSelect('aiRouteFallbackRateLimit', route.fallback_on_rate_limit);
+      setBoolSelect('aiRouteFallbackServerError', route.fallback_on_server_error); setBoolSelect('aiRouteFallbackInvalidJson', route.fallback_on_invalid_json); setBoolSelect('aiRouteFallbackCost', route.fallback_on_cost_limit);
+    }
+
+    async function saveAiRouteFromEditor() {
+      const functionKey = selectValue('aiRouteFunction');
+      const payload = {
+        enabled: boolSelectValue('aiRouteEnabled'), primary_provider_id: Number(selectValue('aiRoutePrimaryProvider')) || null, primary_model: selectValue('aiRoutePrimaryModel').trim(),
+        fallback_provider_id: Number(selectValue('aiRouteFallbackProvider')) || null, fallback_model: selectValue('aiRouteFallbackModel').trim(), timeout_seconds: numberValue('aiRouteTimeout', 30),
+        temperature: numberValue('aiRouteTemperature', 0.1), max_context_chars: numberValue('aiRouteContext', 12000), max_top_flows: numberValue('aiRouteTopFlows', 30), max_attempts: numberValue('aiRouteAttempts', 1),
+        sensitive_data_policy: selectValue('aiRoutePrivacy', 'mask_ips'), require_structured: boolSelectValue('aiRouteStructured'), repair_json_once: boolSelectValue('aiRouteRepairJson'),
+        fallback_on_timeout: boolSelectValue('aiRouteFallbackTimeout'), fallback_on_rate_limit: boolSelectValue('aiRouteFallbackRateLimit'), fallback_on_server_error: boolSelectValue('aiRouteFallbackServerError'), fallback_on_invalid_json: boolSelectValue('aiRouteFallbackInvalidJson'), fallback_on_cost_limit: boolSelectValue('aiRouteFallbackCost')
+      };
+      await apiRequest(`/api/ai/routes/${encodeURIComponent(functionKey)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      await loadAiWorkspace();
+    }
+
+    function renderAiPrompts() {
+      document.getElementById('aiPromptsTable').innerHTML = aiPrompts.map(prompt => `
+        <tr><td>${escapeHtml(prompt.name)}</td><td>${escapeHtml(prompt.function_key)}</td><td>${prompt.version}</td><td>${escapeHtml(prompt.recommended_model || '-')}</td><td>${escapeHtml(formatDateTime(prompt.updated_at) || '-')}</td><td>${aiBadge(prompt.enabled ? 'available' : 'disabled')}</td><td><div class="toolbar">${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="edit" data-id="${prompt.id}">Editar</button>` : ''}<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="versions" data-id="${prompt.id}">Versões</button>${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="duplicate" data-id="${prompt.id}">Duplicar</button>` : ''}</div></td></tr>
+      `).join('') || '<tr><td colspan="7" class="subtle">Nenhum prompt cadastrado.</td></tr>';
+    }
+
+    function resetAiPromptEditor() {
+      setValue('aiPromptId', ''); setValue('aiPromptName', ''); setValue('aiPromptEnabled', 'true'); setValue('aiPromptSystem', ''); setValue('aiPromptUserTemplate', ''); setValue('aiPromptVariables', '[]'); setValue('aiPromptSchema', '{}'); setValue('aiPromptRecommendedModel', ''); setText('aiPromptPreview', 'Nenhum preview.');
+    }
+
+    function editAiPrompt(promptId) {
+      const prompt = aiPrompts.find(item => Number(item.id) === Number(promptId));
+      if (!prompt) return;
+      setValue('aiPromptId', prompt.id); setValue('aiPromptName', prompt.name); setValue('aiPromptFunction', prompt.function_key); setBoolSelect('aiPromptEnabled', prompt.enabled);
+      setValue('aiPromptSystem', prompt.system_prompt); setValue('aiPromptUserTemplate', prompt.user_template); setValue('aiPromptVariables', JSON.stringify(prompt.variables || [], null, 2)); setValue('aiPromptSchema', JSON.stringify(prompt.schema || {}, null, 2)); setValue('aiPromptRecommendedModel', prompt.recommended_model || '');
+      showAiTab('prompts');
+    }
+
+    function aiPromptEditorPayload() {
+      return { name: selectValue('aiPromptName').trim(), function_key: selectValue('aiPromptFunction'), enabled: boolSelectValue('aiPromptEnabled'), system_prompt: selectValue('aiPromptSystem'), user_template: selectValue('aiPromptUserTemplate'), variables: JSON.parse(selectValue('aiPromptVariables') || '[]'), schema: JSON.parse(selectValue('aiPromptSchema') || '{}'), expected_format: 'json', recommended_model: selectValue('aiPromptRecommendedModel') };
+    }
+
+    async function saveAiPromptFromEditor() {
+      const promptId = Number(selectValue('aiPromptId') || 0);
+      await apiRequest(promptId ? `/api/ai/prompts/${promptId}` : '/api/ai/prompts', { method: promptId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(aiPromptEditorPayload()) });
+      resetAiPromptEditor(); await loadAiWorkspace();
+    }
+
+    async function previewAiPrompt() {
+      const variables = JSON.parse(selectValue('aiPromptVariables') || '[]');
+      const examples = Object.fromEntries((Array.isArray(variables) ? variables : Object.keys(variables)).map(name => [name, `<${name}>`]));
+      const result = await apiRequest('/api/ai/prompts/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ template: selectValue('aiPromptUserTemplate'), variables: examples }) });
+      setText('aiPromptPreview', `${selectValue('aiPromptSystem')}\n\n${result.rendered}`);
+    }
+
+    async function showAiPromptVersions(promptId) {
+      const result = await apiRequest(`/api/ai/prompts/${promptId}/versions`);
+      document.getElementById('aiPromptPreview').innerHTML = (result.items || []).map(item => `<div class="d-flex justify-content-between gap-2"><span>Versão ${item.version} — ${escapeHtml(formatDateTime(item.created_at) || '-')} — ${escapeHtml(item.changed_by || '-')}</span>${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-restore" data-id="${promptId}" data-version="${item.version}">Restaurar</button>` : ''}</div>`).join('') || 'Nenhuma versão.';
+    }
+
+    async function handleAiPromptAction(action, promptId) {
+      if (action === 'edit') return editAiPrompt(promptId);
+      if (action === 'versions') return showAiPromptVersions(promptId);
+      await apiRequest(`/api/ai/prompts/${promptId}/duplicate`, { method: 'POST' });
+      await loadAiWorkspace();
+    }
+
+    function renderAiHistory(history, audit) {
+      document.getElementById('aiHistoryTable').innerHTML = history.map(item => `<tr><td>${item.id}</td><td>${escapeHtml(formatDateTime(item.created_at) || '-')}</td><td>${escapeHtml(item.function_key)}</td><td>${escapeHtml(item.provider_name || '-')}</td><td>${escapeHtml(item.model || '-')}</td><td>${item.duration_ms || 0} ms</td><td>${aiBadge(item.status)}</td><td>${item.attempts || 0}</td><td>${item.fallback_used ? 'Sim' : 'Não'}</td><td>${Number(item.input_tokens || 0) + Number(item.output_tokens || 0)}</td><td>${item.estimated_cost ? Number(item.estimated_cost).toFixed(6) : '-'}</td><td>${escapeHtml(item.error_message || '-')}</td></tr>`).join('') || '<tr><td colspan="12" class="subtle">Nenhuma chamada registrada.</td></tr>';
+      document.getElementById('aiAuditTable').innerHTML = audit.map(item => `<tr><td>${escapeHtml(formatDateTime(item.created_at) || '-')}</td><td>${escapeHtml(item.actor)}</td><td>${escapeHtml(item.action)}</td><td>${escapeHtml(item.entity_type)}${item.entity_id ? ` #${item.entity_id}` : ''}</td><td>${escapeHtml(JSON.stringify(item.details || {}))}</td></tr>`).join('') || '<tr><td colspan="5" class="subtle">Nenhuma alteração registrada.</td></tr>';
+    }
+
+    async function runAiPlayground() {
+      aiPlaygroundAbortController?.abort();
+      aiPlaygroundAbortController = new AbortController();
+      setText('aiPlaygroundOutput', 'Executando geração de texto segura...');
+      const payload = { provider_id: Number(selectValue('aiPlaygroundProvider') || 0), model: selectValue('aiPlaygroundModel').trim(), function_key: selectValue('aiPlaygroundFunction'), prompt: selectValue('aiPlaygroundPrompt'), context: selectValue('aiPlaygroundContext'), temperature: numberValue('aiPlaygroundTemperature', 0.1), timeout_seconds: numberValue('aiPlaygroundTimeout', 30), structured: boolSelectValue('aiPlaygroundStructured') };
+      const result = await apiRequest('/api/ai/playground', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: aiPlaygroundAbortController.signal });
+      setText('aiPlaygroundOutput', result.ok ? result.content : `Falha: ${result.error_message || result.status}`);
+      setText('aiPlaygroundRaw', JSON.stringify(result, null, 2));
+      setText('aiPlaygroundUsage', `Provider: ${result.provider || '-'} | Modelo: ${result.model || '-'} | Duração: ${result.duration_ms || 0} ms | Tokens: ${Number(result.usage?.input_tokens || 0) + Number(result.usage?.output_tokens || 0)}`);
+      aiPlaygroundAbortController = null;
+    }
+
+    function cancelAiPlayground() {
+      aiPlaygroundAbortController?.abort(); aiPlaygroundAbortController = null; setText('aiPlaygroundOutput', 'Execução cancelada pelo operador.');
+    }
+
+    async function saveAiGlobalSettings() {
+      await apiRequest('/api/ai/settings/central', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ global_enabled: boolSelectValue('aiGlobalEnabled'), history_content_policy: selectValue('aiHistoryContentPolicy'), history_retention_days: numberValue('aiHistoryRetentionDays', 30), external_ip_policy: selectValue('aiExternalIpPolicy') }) });
+      await loadAiWorkspace();
+    }
+
+    async function loadAiWorkspace() {
+      setText('aiPageStatus', 'Carregando configuração centralizada...');
+      const [overview, providers, models, routes, prompts, settings, history, audit] = await Promise.all([
+        apiRequest('/api/ai/overview'), apiRequest('/api/ai/providers'), apiRequest('/api/ai/models'), apiRequest('/api/ai/routes'), apiRequest('/api/ai/prompts'), apiRequest('/api/ai/settings/central'), apiRequest('/api/ai/history?limit=200'), apiRequest('/api/ai/audit?limit=200')
+      ]);
+      if (activeView !== 'ai') return;
+      aiOverviewState = overview; aiProviders = providers.items || []; aiModels = models.items || []; aiRoutes = routes.items || []; aiRouteFunctions = routes.functions || []; aiPrompts = prompts.items || [];
+      renderAiOverview(overview, settings); renderAiProviders(); renderAiModels(); renderAiRoutes(); renderAiPrompts(); renderAiHistory(history.items || [], audit.items || []);
+      setText('aiPageStatus', `${aiProviders.length} provider(s), ${aiModels.length} modelo(s), ${aiRoutes.length} rota(s).`);
+      if (aiModelPullJobId) scheduleAiModelPullStatus();
+      createIcons();
+    }
+
+    async function loadMitigationAiSummary() {
+      const overview = await apiRequest('/api/ai/overview');
+      const route = (overview.routes || []).find(item => item.function_key === 'mitigation_analysis') || {};
+      const provider = (overview.providers || []).find(item => Number(item.id) === Number(route.primary_provider_id));
+      setText('mitigationAiProvider', route.primary_provider_name || 'Não configurado');
+      setText('mitigationAiModel', route.primary_model || 'Não configurado');
+      setText('mitigationAiState', !overview.global_enabled || !route.enabled ? 'Desativada' : aiStatusLabel(provider?.status || 'not_configured'));
     }
 
     async function exportBgpPdf() {
@@ -16122,31 +16667,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `;
     }
 
-    function renderSystemAiStatus(ai) {
-      setBoolSelect('systemAiEnabled', Boolean(ai.enabled));
-      setValue('systemAiProvider', ai.provider || 'ollama');
-      setValue('systemAiBaseUrl', ai.base_url || 'http://gmj-flow-ollama:11434');
-      setValue('systemAiModel', ai.selected_model || ai.model || 'qwen2.5:3b-instruct');
-      setValue('systemAiPullModel', ai.selected_model || ai.model || 'qwen2.5:3b-instruct');
-      setValue('systemAiTimeout', ai.timeout_seconds || 20);
-      setValue('systemAiTopFlows', ai.max_top_flows || 30);
-      setValue('systemAiContextChars', ai.max_context_chars || 12000);
-      setValue('systemAiKeepAlive', ai.keep_alive || '30m');
-      setText('systemAiOutput', JSON.stringify({
-        enabled: ai.enabled,
-        source: ai.source || ai.config_source,
-        env_enabled: ai.env_enabled,
-        system_settings_enabled: ai.system_settings_enabled,
-        overrides_env: ai.overrides_env,
-        override_message: ai.override_message,
-        provider: ai.provider,
-        model: ai.selected_model,
-        reachable: ai.reachable ?? ai.ollama_reachable,
-        ollama_reachable: ai.ollama_reachable,
-        keep_alive: ai.keep_alive || '30m',
-        allow_auto: false,
-        require_policy_validation: ai.require_policy_validation
-      }, null, 2));
+    function renderSystemAiStatus(setup) {
+      const ollama = setup.ollama || {};
+      const provider = setup.ollama_provider || {};
+      const models = ollama.models || [];
+      const loaded = models.find(item => item.loaded) || models.find(item => item.name === provider.default_model) || models[0];
+      setText('systemOllamaState', ollama.reachable ? 'Disponível' : ollama.running ? 'Indisponível' : 'Parado');
+      setText('systemOllamaLoadedModel', loaded?.name || provider.default_model || 'Nenhum');
+      setText('systemOllamaMemory', loaded?.estimated_ram_bytes ? formatBytes(loaded.estimated_ram_bytes) : loaded?.size ? `~${formatBytes(loaded.size)}` : '-');
+      setText('systemOllamaUrl', `URL: ${provider.base_url || 'Não configurada'}`);
     }
 
     function renderSetupStatus(setup) {
@@ -16174,7 +16703,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('setupOverallBadge', recs.length ? `${recs.length} ação(ões)` : 'OK');
       document.getElementById('setupOverallBadge').className = recs.length ? 'badge-soft warn' : 'badge-soft ok';
       setText('setupRecommendations', recs.length ? recs.join('\n') : 'Setup sem recomendações críticas.');
-      document.getElementById('systemOllamaList').innerHTML = modelNames.map(name => `<div class="metric-readout"><strong>${escapeHtml(name)}</strong></div>`).join('') || '<div class="subtle">Nenhum modelo listado.</div>';
       document.getElementById('systemExabgpStatus').innerHTML = [
         metricChipHtml('Serviço ExaBGP', setup.exabgp?.service?.active ? 'active' : 'inactive/unavailable'),
         metricChipHtml('Pipes backend', setup.exabgp?.pipes?.backend_mount_visible ? 'visíveis' : 'não visíveis'),
@@ -16186,7 +16714,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         'sudo ./scripts/install-systemd-service.sh --profile ai --with-exabgp',
         setup.exabgp?.install_command || ''
       ].filter(Boolean).join('\n'));
-      renderSystemAiStatus(setup.ai || {});
+      renderSystemAiStatus(setup);
     }
 
     async function loadSystemView() {
@@ -16224,62 +16752,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
-    async function saveSystemAiConfig() {
-      setText('systemAiOutput', 'Salvando IA local...');
-      const payload = {
-        enabled: boolSelectValue('systemAiEnabled'),
-        provider: selectValue('systemAiProvider', 'ollama'),
-        base_url: selectValue('systemAiBaseUrl').trim(),
-        model: selectValue('systemAiModel').trim(),
-        timeout_seconds: numberValue('systemAiTimeout', 20),
-        max_top_flows: numberValue('systemAiTopFlows', 30),
-        max_context_chars: numberValue('systemAiContextChars', 12000),
-        keep_alive: selectValue('systemAiKeepAlive').trim() || '30m',
-        allow_auto: false,
-        require_policy_validation: true
-      };
-      const status = await apiRequest('/api/system/ai/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      renderSystemAiStatus(status);
-      setText('systemStatus', 'Configuração IA salva.');
-    }
-
-    async function listSystemAiModels() {
-      setText('systemAiOutput', 'Listando modelos...');
-      const result = await apiRequest('/api/system/ai/ollama/models');
-      setText('systemAiOutput', JSON.stringify(result, null, 2));
-      document.getElementById('systemOllamaList').innerHTML = (result.items || []).map(item => `<div class="metric-readout"><strong>${escapeHtml(item.name || '-')}</strong></div>`).join('') || '<div class="subtle">Nenhum modelo instalado.</div>';
-    }
-
-    async function pullSystemAiModel() {
-      const model = selectValue('systemAiPullModel').trim() || selectValue('systemAiModel').trim();
-      setText('systemAiOutput', `Baixando ${model}...`);
-      const result = await apiRequest('/api/system/ai/ollama/pull', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model })
-      });
-      setText('systemAiOutput', JSON.stringify(result, null, 2));
-      await listSystemAiModels();
-    }
-
-    async function testSystemAiModel() {
-      setText('systemAiOutput', 'Testando modelo...');
-      const result = await apiRequest('/api/system/ai/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: 'Explique UDP flood outbound em uma frase' })
-      });
-      setText('systemAiOutput', JSON.stringify(result, null, 2));
-    }
-
     function canonicalNavigationView(view) {
       const value = String(view || '').replace(/^#/, '').trim();
       if (value === 'bgp' || value === 'bgp-mitigation') return 'mitigation';
       if (['map', 'geo', 'traffic-map', 'network-map'].includes(value)) return 'global-map';
+      if (['ai-settings', 'local-ai', 'mitigation-ai'].includes(value)) return 'ai';
       return value || 'dashboard';
     }
 
@@ -16299,6 +16776,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       if (view !== 'global-map') {
         deactivateGlobalMapView();
+      }
+      if (view !== 'ai') {
+        aiPlaygroundAbortController?.abort();
+        aiPlaygroundAbortController = null;
+        aiModelPullAbortController?.abort();
+        aiModelPullAbortController = null;
+        if (aiModelPullPollTimer) clearTimeout(aiModelPullPollTimer);
+        aiModelPullPollTimer = null;
       }
       activeView = view === 'placeholder' ? 'placeholder' : view;
       if (view !== 'placeholder' && window.location.hash !== `#${view}`) {
@@ -16370,6 +16855,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-bgp-connectors').classList.add('active');
         document.querySelector('[data-nav-view="bgp-connectors"]').classList.add('active');
         loadBgpConnectorsView().catch(error => setText('bgpConnectorsStatus', `Falha: ${error.message}`));
+      } else if (view === 'ai') {
+        document.getElementById('view-ai').classList.add('active');
+        document.querySelector('[data-nav-view="ai"]').classList.add('active');
+        loadAiWorkspace().catch(error => setText('aiPageStatus', `Falha: ${error.message}`));
       } else if (view === 'system') {
         document.getElementById('view-system').classList.add('active');
         document.querySelector('[data-nav-view="system"]').classList.add('active');
@@ -16619,10 +17108,88 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
-    document.getElementById('systemAiSaveButton').addEventListener('click', () => saveSystemAiConfig().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
-    document.getElementById('systemAiModelsButton').addEventListener('click', () => listSystemAiModels().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
-    document.getElementById('systemAiPullButton').addEventListener('click', () => pullSystemAiModel().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
-    document.getElementById('systemAiTestButton').addEventListener('click', () => testSystemAiModel().catch(error => setText('systemAiOutput', `Falha: ${error.message}`)));
+    document.getElementById('manageAiModelsButton').addEventListener('click', () => { showView('ai'); showAiTab('models'); });
+    document.getElementById('configureMitigationAiButton').addEventListener('click', () => { pendingAiRouteFunction = 'mitigation_analysis'; showView('ai'); showAiTab('routing'); });
+    document.getElementById('refreshAiButton').addEventListener('click', () => loadAiWorkspace().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
+    document.querySelectorAll('[data-ai-tab]').forEach(button => button.addEventListener('click', () => showAiTab(button.dataset.aiTab)));
+    document.getElementById('saveAiGlobalSettingsButton').addEventListener('click', () => saveAiGlobalSettings().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
+    document.getElementById('newAiProviderButton').addEventListener('click', resetAiProviderEditor);
+    document.getElementById('aiProviderEditorType').addEventListener('change', event => {
+      if (selectValue('aiProviderEditorId')) return;
+      const defaults = {
+        ollama: ['http://gmj-flow-ollama:11434', '/api/tags', '/api/generate'],
+        openai: ['https://api.openai.com', '/v1/models', '/v1/chat/completions'],
+        gemini: ['https://generativelanguage.googleapis.com', '/v1beta/models', '/v1beta/models/{model}:generateContent'],
+        anthropic: ['https://api.anthropic.com', '/v1/models', '/v1/messages'],
+        groq: ['https://api.groq.com/openai', '/v1/models', '/v1/chat/completions'],
+        openrouter: ['https://openrouter.ai/api', '/v1/models', '/v1/chat/completions'],
+        openai_compatible: ['', '/v1/models', '/v1/chat/completions'],
+        custom_http: ['', '/models', '/generate']
+      };
+      const values = defaults[event.target.value] || defaults.custom_http;
+      setValue('aiProviderEditorBaseUrl', values[0]); setValue('aiProviderEditorModelsEndpoint', values[1]); setValue('aiProviderEditorChatEndpoint', values[2]);
+    });
+    document.getElementById('saveAiProviderButton').addEventListener('click', () => saveAiProviderFromEditor().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
+    document.getElementById('aiProvidersTable').addEventListener('click', event => {
+      const button = event.target.closest('.ai-provider-action');
+      if (button) handleAiProviderAction(button.dataset.action, Number(button.dataset.id)).catch(error => setText('aiPageStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('refreshAiModelsButton').addEventListener('click', () => refreshAiProviderModels().catch(error => setText('aiModelOperationStatus', `Falha: ${error.message}`)));
+    document.getElementById('registerAiModelButton').addEventListener('click', () => registerAiModel().catch(error => setText('aiModelOperationStatus', `Falha: ${error.message}`)));
+    document.getElementById('aiModelsProvider').addEventListener('change', renderAiLocalProviderSummary);
+    document.getElementById('editAiLocalProviderButton').addEventListener('click', () => {
+      const providerId = Number(selectValue('aiModelsProvider') || 0);
+      if (providerId) editAiProvider(providerId);
+    });
+    document.getElementById('testAiLocalModelButton').addEventListener('click', () => {
+      const providerId = Number(selectValue('aiModelsProvider') || 0);
+      if (providerId) handleAiProviderAction('test', providerId).catch(error => setText('aiModelOperationStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('pullAiModelButton').addEventListener('click', () => pullAiModel().catch(error => {
+      if (error.name !== 'AbortError') setText('aiModelOperationStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('cancelAiModelPullButton').addEventListener('click', () => {
+      aiModelPullAbortController?.abort();
+      aiModelPullAbortController = null;
+      if (aiModelPullPollTimer) clearTimeout(aiModelPullPollTimer);
+      aiModelPullPollTimer = null;
+      if (aiModelPullJobId && aiModelPullProviderId) {
+        apiRequest(`/api/ai/providers/${aiModelPullProviderId}/models/pull/${aiModelPullJobId}/cancel`, { method: 'POST' })
+          .then(result => setText('aiModelOperationStatus', result.message || 'Cancelamento solicitado.'))
+          .catch(error => setText('aiModelOperationStatus', `Falha ao cancelar: ${error.message}`));
+      } else {
+        setText('aiModelOperationStatus', 'Download cancelado pelo operador.');
+      }
+    });
+    document.getElementById('aiModelsTable').addEventListener('click', event => {
+      const button = event.target.closest('.ai-model-remove');
+      if (button) removeAiModel(Number(button.dataset.providerId), button.dataset.model).catch(error => setText('aiModelOperationStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('aiRouteFunction').addEventListener('change', event => editAiRoute(event.target.value));
+    document.getElementById('saveAiRouteButton').addEventListener('click', () => saveAiRouteFromEditor().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
+    document.getElementById('aiRoutesTable').addEventListener('click', event => {
+      const button = event.target.closest('.ai-route-edit');
+      if (button) { showAiTab('routing'); editAiRoute(button.dataset.function); }
+    });
+    document.getElementById('newAiPromptButton').addEventListener('click', resetAiPromptEditor);
+    document.getElementById('saveAiPromptButton').addEventListener('click', () => saveAiPromptFromEditor().catch(error => setText('aiPromptPreview', `Falha: ${error.message}`)));
+    document.getElementById('previewAiPromptButton').addEventListener('click', () => previewAiPrompt().catch(error => setText('aiPromptPreview', `Falha: ${error.message}`)));
+    document.getElementById('aiPromptsTable').addEventListener('click', event => {
+      const button = event.target.closest('.ai-prompt-action');
+      if (button) handleAiPromptAction(button.dataset.action, Number(button.dataset.id)).catch(error => setText('aiPromptPreview', `Falha: ${error.message}`));
+    });
+    document.getElementById('aiPromptPreview').addEventListener('click', event => {
+      const button = event.target.closest('.ai-prompt-restore');
+      if (!button || !window.confirm(`Restaurar a versão ${button.dataset.version}? Uma nova versão será criada.`)) return;
+      apiRequest(`/api/ai/prompts/${button.dataset.id}/restore/${button.dataset.version}`, { method: 'POST' }).then(loadAiWorkspace).catch(error => setText('aiPromptPreview', `Falha: ${error.message}`));
+    });
+    document.getElementById('runAiPlaygroundButton').addEventListener('click', () => runAiPlayground().catch(error => {
+      if (error.name !== 'AbortError') setText('aiPlaygroundOutput', `Falha: ${error.message}`);
+    }));
+    document.getElementById('cancelAiPlaygroundButton').addEventListener('click', cancelAiPlayground);
+    document.getElementById('clearAiPlaygroundButton').addEventListener('click', () => { setValue('aiPlaygroundPrompt', ''); setValue('aiPlaygroundContext', ''); setText('aiPlaygroundOutput', 'Nenhum teste executado.'); setText('aiPlaygroundRaw', ''); setText('aiPlaygroundUsage', ''); });
+    document.getElementById('copyAiPlaygroundButton').addEventListener('click', () => navigator.clipboard?.writeText(document.getElementById('aiPlaygroundOutput').textContent || '').catch(console.error));
+    document.getElementById('toggleAiPlaygroundRawButton').addEventListener('click', () => document.getElementById('aiPlaygroundRaw').classList.toggle('d-none'));
     document.getElementById('anomalyTabActive').addEventListener('click', () => loadAnomalies('active').catch(console.error));
     document.getElementById('anomalyTabHistory').addEventListener('click', () => loadAnomalies('history').catch(console.error));
     document.getElementById('ackAnomalyButton').addEventListener('click', () => ackAnomaly().catch(console.error));
@@ -16704,17 +17271,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('peakHunterHistorySource', 'automatic');
       setValue('peakHunterHistoryRunId', runId);
       showPeakHunterTab('history');
-    });
-    document.getElementById('saveAiMitigationButton').addEventListener('click', () => saveAiMitigationSettings().catch(console.error));
-    document.getElementById('testAiMitigationButton').addEventListener('click', () => testAiMitigation().catch(console.error));
-    document.getElementById('aiProfile').addEventListener('change', () => {
-      const profile = aiProfiles.find(item => item.profile_id === selectValue('aiProfile'));
-      if (!profile) return;
-      setValue('aiModel', profile.default_model || '');
-      setValue('aiTimeout', profile.timeout_seconds || '');
-      setValue('aiTopFlows', profile.max_top_flows || '');
-      setValue('aiContextChars', profile.max_context_chars || '');
-      setText('aiProfileDescription', `${profile.name}: ${profile.description} RAM modelo ${profile.estimated_model_ram_gb} GB. Livre recomendado: ${profile.recommended_free_ram_gb} GB.`);
     });
     document.getElementById('attackVectorTestPdfButton').addEventListener('click', () => exportAttackVectorTestPdf().catch(console.error));
 
