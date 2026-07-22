@@ -4471,8 +4471,9 @@
             <div class="panel p-3">
               <div class="panel-title mb-2">Playground seguro</div><div class="subtle mb-2">Executa somente geração de texto. Não altera anomalias, não envia FlowSpec, não escreve em FIFO e não executa mitigação.</div>
               <div class="flow-search-grid mb-2"><div class="field"><label for="aiPlaygroundProvider">Provider</label><select id="aiPlaygroundProvider" class="form-select form-select-sm"></select></div><div class="field"><label for="aiPlaygroundModel">Modelo</label><input id="aiPlaygroundModel" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundFunction">Função</label><select id="aiPlaygroundFunction" class="form-select form-select-sm"></select></div><div class="field"><label for="aiPlaygroundTemperature">Temperatura</label><input id="aiPlaygroundTemperature" type="number" min="0" max="2" step="0.1" value="0.1" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundTimeout">Timeout</label><input id="aiPlaygroundTimeout" type="number" min="1" max="300" value="30" class="form-control form-control-sm"></div><div class="field"><label for="aiPlaygroundStructured">JSON</label><select id="aiPlaygroundStructured" class="form-select form-select-sm"><option value="false">Texto</option><option value="true">Estruturado</option></select></div></div>
+              <div id="aiPlaygroundModelStatus" class="subtle mb-2"></div>
               <div class="field mb-2"><label for="aiPlaygroundPrompt">Prompt</label><textarea id="aiPlaygroundPrompt" class="form-control form-control-sm" rows="4" placeholder="Use dados sintéticos."></textarea></div><div class="field mb-2"><label for="aiPlaygroundContext">Contexto</label><textarea id="aiPlaygroundContext" class="form-control form-control-sm" rows="3"></textarea></div>
-              <div class="toolbar"><button id="runAiPlaygroundButton" type="button" class="btn btn-sm btn-success"><i data-lucide="play"></i><span>Executar</span></button><button id="cancelAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="square"></i><span>Cancelar</span></button><button id="clearAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eraser"></i><span>Limpar</span></button><button id="copyAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="copy"></i><span>Copiar resposta</span></button><button id="toggleAiPlaygroundRawButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="braces"></i><span>JSON bruto</span></button></div>
+              <div class="toolbar"><button id="runAiPlaygroundButton" type="button" class="btn btn-sm btn-success" disabled><i data-lucide="play"></i><span>Executar</span></button><button id="cancelAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="square"></i><span>Cancelar</span></button><button id="clearAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eraser"></i><span>Limpar</span></button><button id="copyAiPlaygroundButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="copy"></i><span>Copiar resposta</span></button><button id="toggleAiPlaygroundRawButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="braces"></i><span>JSON bruto</span></button></div>
               <pre id="aiPlaygroundOutput" class="result-box mt-2">Nenhum teste executado.</pre><pre id="aiPlaygroundRaw" class="result-box mt-2 d-none"></pre><div id="aiPlaygroundUsage" class="subtle mt-2"></div>
             </div>
           </section>
@@ -5763,6 +5764,7 @@
     let aiPrompts = [];
     let pendingAiRouteFunction = null;
     let aiPlaygroundAbortController = null;
+    let aiWorkspaceLoading = false;
     let aiModelPullAbortController = null;
     let aiModelPullJobId = null;
     let aiModelPullProviderId = null;
@@ -9950,9 +9952,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return ({
         available: 'Disponível', unavailable: 'Indisponível', not_configured: 'Não configurado',
         limited: 'Limitado', credential_invalid: 'Credencial inválida', timeout: 'Timeout',
+        client_blocked: 'Cliente HTTP bloqueado',
         rate_limit: 'Limite atingido', server_error: 'Indisponível', invalid_response: 'Degradado',
         policy: 'Rejeitado por política', degraded: 'Degradado', disabled: 'Desativado', success: 'Sucesso', failed: 'Falha', cancelled: 'Cancelado'
       })[String(value || '').toLowerCase()] || String(value || 'Não configurado');
+    }
+
+    function aiProviderFailureMessage(result = {}) {
+      if (
+        result.provider_error === 'cloudflare_1010'
+        || String(result.cloudflare_error_code || '') === '1010'
+        || result.status === 'client_blocked'
+      ) {
+        return 'O provedor bloqueou a assinatura HTTP do cliente. Verifique o User-Agent configurado.';
+      }
+      return result.error_message || result.error || result.response_preview || aiStatusLabel(result.status);
     }
 
     function aiBadge(value) {
@@ -9970,6 +9984,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.querySelectorAll('[data-ai-tab]').forEach(button => button.classList.toggle('active', button.dataset.aiTab === selected));
       document.querySelectorAll('.ai-subview').forEach(panel => panel.classList.remove('active'));
       document.getElementById(`ai${selected.charAt(0).toUpperCase()}${selected.slice(1)}Panel`)?.classList.add('active');
+      if (selected === 'tests') syncAiPlaygroundProviderDefaults();
     }
 
     function renderAiOverview(overview, settings) {
@@ -10000,6 +10015,86 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const options = aiProviders.map(provider => [String(provider.id), provider.name]);
       if (includeEmpty) options.unshift(['', 'Não configurado']);
       return optionList(options, String(selected || ''));
+    }
+
+    function syncAiPlaygroundProviderDefaults({ providerChanged = false } = {}) {
+      const providerSelect = document.getElementById('aiPlaygroundProvider');
+      const modelInput = document.getElementById('aiPlaygroundModel');
+      const temperatureInput = document.getElementById('aiPlaygroundTemperature');
+      const timeoutInput = document.getElementById('aiPlaygroundTimeout');
+      const structuredSelect = document.getElementById('aiPlaygroundStructured');
+      const runButton = document.getElementById('runAiPlaygroundButton');
+      if (!providerSelect || !modelInput || !temperatureInput || !timeoutInput || !structuredSelect || !runButton) return null;
+      if (aiWorkspaceLoading) {
+        runButton.disabled = true;
+        setText('aiPlaygroundModelStatus', 'Carregando providers e modelos...');
+        return null;
+      }
+
+      const providerId = Number(providerSelect.value || 0);
+      const provider = aiProviders.find(item => Number(item.id) === providerId);
+      const previousProviderId = Number(modelInput.dataset.providerId || 0);
+      const changed = providerChanged || previousProviderId !== providerId;
+      if (!provider) {
+        if (changed) {
+          modelInput.value = '';
+          modelInput.dataset.manual = 'false';
+          modelInput.dataset.providerId = String(providerId || '');
+        }
+        structuredSelect.value = 'false';
+        structuredSelect.disabled = true;
+        runButton.disabled = true;
+        setText('aiPlaygroundModelStatus', aiProviders.length ? 'Selecione um provider para executar o teste.' : 'Nenhum provider disponível para o Playground.');
+        return null;
+      }
+
+      const catalogModel = aiModels.find(item => (
+        Number(item.provider_id) === providerId
+        && item.enabled !== false
+        && String(item.state || '').toLowerCase() !== 'disabled'
+        && String(item.name || item.model || '').trim()
+      ));
+      const providerDefaultModel = String(provider.default_model || '').trim();
+      const automaticModel = providerDefaultModel || String(catalogModel?.name || catalogModel?.model || '').trim();
+      if (changed) {
+        modelInput.value = '';
+        modelInput.dataset.manual = 'false';
+      }
+      if (changed || modelInput.dataset.manual !== 'true' || !modelInput.value.trim()) {
+        modelInput.value = automaticModel;
+        modelInput.dataset.manual = 'false';
+      }
+      modelInput.dataset.providerId = String(providerId);
+      modelInput.dataset.automaticModel = automaticModel;
+
+      [
+        [temperatureInput, provider.temperature, value => Number.isFinite(value) && value >= 0 && value <= 2],
+        [timeoutInput, provider.timeout_seconds, value => Number.isFinite(value) && value > 0],
+      ].forEach(([input, configuredValue, valid]) => {
+        const numericValue = Number(configuredValue);
+        if (changed) input.dataset.manual = 'false';
+        if (valid(numericValue) && (changed || input.dataset.manual !== 'true' || !String(input.value).trim())) {
+          input.value = String(configuredValue);
+          input.dataset.manual = 'false';
+        }
+        input.dataset.providerId = String(providerId);
+      });
+
+      const supportsStructured = Boolean(provider.supports_structured ?? provider.supports_json);
+      structuredSelect.disabled = !supportsStructured;
+      if (!supportsStructured) structuredSelect.value = 'false';
+      structuredSelect.dataset.providerId = String(providerId);
+
+      const selectedModel = modelInput.value.trim();
+      runButton.disabled = !selectedModel;
+      if (!selectedModel) {
+        setText('aiPlaygroundModelStatus', `${provider.name} não possui default_model nem modelo catalogado ativo.`);
+      } else if (!providerDefaultModel && catalogModel && modelInput.dataset.manual !== 'true') {
+        setText('aiPlaygroundModelStatus', `Usando o modelo catalogado ${selectedModel}, pois o provider não possui default_model.`);
+      } else {
+        setText('aiPlaygroundModelStatus', '');
+      }
+      return { provider, model: selectedModel, supportsStructured };
     }
 
     function syncAiProviderSelectors() {
@@ -10107,7 +10202,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText('aiPageStatus', `${action === 'test' ? 'Testando' : 'Atualizando'} provedor...`);
       const path = action === 'delete' ? `/api/ai/providers/${providerId}` : `/api/ai/providers/${providerId}/${action}`;
       const result = await apiRequest(path, { method: action === 'delete' ? 'DELETE' : 'POST' });
-      setText('aiPageStatus', action === 'test' ? `${result.ok ? 'Teste concluído' : 'Teste falhou'}: ${result.error || result.response_preview || aiStatusLabel(result.status)}` : 'Provider atualizado.');
+      setText('aiPageStatus', action === 'test' ? `${result.ok ? 'Teste concluído' : 'Teste falhou'}: ${result.ok ? (result.response_preview || aiStatusLabel(result.status)) : aiProviderFailureMessage(result)}` : 'Provider atualizado.');
       await loadAiWorkspace();
     }
 
@@ -10277,12 +10372,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function runAiPlayground() {
+      const playgroundDefaults = syncAiPlaygroundProviderDefaults();
+      if (!playgroundDefaults?.provider) throw new Error('Selecione um provider para executar o Playground.');
+      if (!playgroundDefaults.model) throw new Error('O provider selecionado não possui modelo padrão ou catalogado.');
       aiPlaygroundAbortController?.abort();
       aiPlaygroundAbortController = new AbortController();
       setText('aiPlaygroundOutput', 'Executando geração de texto segura...');
       const payload = { provider_id: Number(selectValue('aiPlaygroundProvider') || 0), model: selectValue('aiPlaygroundModel').trim(), function_key: selectValue('aiPlaygroundFunction'), prompt: selectValue('aiPlaygroundPrompt'), context: selectValue('aiPlaygroundContext'), temperature: numberValue('aiPlaygroundTemperature', 0.1), timeout_seconds: numberValue('aiPlaygroundTimeout', 30), structured: boolSelectValue('aiPlaygroundStructured') };
       const result = await apiRequest('/api/ai/playground', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: aiPlaygroundAbortController.signal });
-      setText('aiPlaygroundOutput', result.ok ? result.content : `Falha: ${result.error_message || result.status}`);
+      setText('aiPlaygroundOutput', result.ok ? result.content : `Falha: ${aiProviderFailureMessage(result)}`);
       setText('aiPlaygroundRaw', JSON.stringify(result, null, 2));
       setText('aiPlaygroundUsage', `Provider: ${result.provider || '-'} | Modelo: ${result.model || '-'} | Duração: ${result.duration_ms || 0} ms | Tokens: ${Number(result.usage?.input_tokens || 0) + Number(result.usage?.output_tokens || 0)}`);
       aiPlaygroundAbortController = null;
@@ -10298,16 +10396,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadAiWorkspace() {
+      aiWorkspaceLoading = true;
+      document.getElementById('runAiPlaygroundButton').disabled = true;
       setText('aiPageStatus', 'Carregando configuração centralizada...');
-      const [overview, providers, models, routes, prompts, settings, history, audit] = await Promise.all([
-        apiRequest('/api/ai/overview'), apiRequest('/api/ai/providers'), apiRequest('/api/ai/models'), apiRequest('/api/ai/routes'), apiRequest('/api/ai/prompts'), apiRequest('/api/ai/settings/central'), apiRequest('/api/ai/history?limit=200'), apiRequest('/api/ai/audit?limit=200')
-      ]);
-      if (activeView !== 'ai') return;
-      aiOverviewState = overview; aiProviders = providers.items || []; aiModels = models.items || []; aiRoutes = routes.items || []; aiRouteFunctions = routes.functions || []; aiPrompts = prompts.items || [];
-      renderAiOverview(overview, settings); renderAiProviders(); renderAiModels(); renderAiRoutes(); renderAiPrompts(); renderAiHistory(history.items || [], audit.items || []);
-      setText('aiPageStatus', `${aiProviders.length} provider(s), ${aiModels.length} modelo(s), ${aiRoutes.length} rota(s).`);
-      if (aiModelPullJobId) scheduleAiModelPullStatus();
-      createIcons();
+      try {
+        const [overview, providers, models, routes, prompts, settings, history, audit] = await Promise.all([
+          apiRequest('/api/ai/overview'), apiRequest('/api/ai/providers'), apiRequest('/api/ai/models'), apiRequest('/api/ai/routes'), apiRequest('/api/ai/prompts'), apiRequest('/api/ai/settings/central'), apiRequest('/api/ai/history?limit=200'), apiRequest('/api/ai/audit?limit=200')
+        ]);
+        if (activeView !== 'ai') return;
+        aiOverviewState = overview; aiProviders = providers.items || []; aiModels = models.items || []; aiRoutes = routes.items || []; aiRouteFunctions = routes.functions || []; aiPrompts = prompts.items || [];
+        renderAiOverview(overview, settings); renderAiProviders(); renderAiModels(); renderAiRoutes(); renderAiPrompts(); renderAiHistory(history.items || [], audit.items || []);
+        aiWorkspaceLoading = false;
+        syncAiPlaygroundProviderDefaults();
+        setText('aiPageStatus', `${aiProviders.length} provider(s), ${aiModels.length} modelo(s), ${aiRoutes.length} rota(s).`);
+        if (aiModelPullJobId) scheduleAiModelPullStatus();
+        createIcons();
+      } finally {
+        aiWorkspaceLoading = false;
+      }
     }
 
     async function loadMitigationAiSummary() {
@@ -17112,6 +17218,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('configureMitigationAiButton').addEventListener('click', () => { pendingAiRouteFunction = 'mitigation_analysis'; showView('ai'); showAiTab('routing'); });
     document.getElementById('refreshAiButton').addEventListener('click', () => loadAiWorkspace().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
     document.querySelectorAll('[data-ai-tab]').forEach(button => button.addEventListener('click', () => showAiTab(button.dataset.aiTab)));
+    document.getElementById('aiPlaygroundProvider').addEventListener('change', () => syncAiPlaygroundProviderDefaults({ providerChanged: true }));
+    document.getElementById('aiPlaygroundModel').addEventListener('input', event => {
+      event.target.dataset.manual = 'true';
+      syncAiPlaygroundProviderDefaults();
+    });
+    ['aiPlaygroundTemperature', 'aiPlaygroundTimeout'].forEach(id => document.getElementById(id).addEventListener('input', event => {
+      event.target.dataset.manual = 'true';
+    }));
     document.getElementById('saveAiGlobalSettingsButton').addEventListener('click', () => saveAiGlobalSettings().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
     document.getElementById('newAiProviderButton').addEventListener('click', resetAiProviderEditor);
     document.getElementById('aiProviderEditorType').addEventListener('change', event => {

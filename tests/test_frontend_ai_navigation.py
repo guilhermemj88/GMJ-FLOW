@@ -145,6 +145,64 @@ class FrontendAiNavigationTest(unittest.TestCase):
         self.assertIn("setValue('aiProviderEditorApiKey', '')", editor)
         self.assertNotIn("api_key_masked", editor.split("setValue('aiProviderEditorApiKey', '')")[0])
 
+    def test_playground_sync_uses_selected_provider_default_and_same_provider_catalog(self):
+        source = function_source("syncAiPlaygroundProviderDefaults", "syncAiProviderSelectors")
+        self.assertIn("aiProviders.find(item => Number(item.id) === providerId)", source)
+        self.assertIn("provider.default_model", source)
+        self.assertIn("Number(item.provider_id) === providerId", source)
+        self.assertIn("item.enabled !== false", source)
+        self.assertIn("modelInput.value = automaticModel", source)
+        self.assertIn("não possui default_model nem modelo catalogado ativo", source)
+
+    def test_playground_provider_change_replaces_previous_provider_model(self):
+        source = function_source("syncAiPlaygroundProviderDefaults", "syncAiProviderSelectors")
+        self.assertIn("modelInput.value = ''", source)
+        self.assertIn("modelInput.dataset.manual = 'false'", source)
+        self.assertIn("changed || modelInput.dataset.manual !== 'true'", source)
+        self.assertEqual(1, HTML.count("getElementById('aiPlaygroundProvider').addEventListener('change'"))
+        self.assertIn("syncAiPlaygroundProviderDefaults({ providerChanged: true })", HTML)
+
+    def test_playground_load_refresh_and_tests_tab_sync_before_enabling_run(self):
+        tab_source = function_source("showAiTab", "renderAiOverview")
+        self.assertIn("selected === 'tests'", tab_source)
+        self.assertIn("syncAiPlaygroundProviderDefaults()", tab_source)
+        load_source = function_source("loadAiWorkspace", "loadMitigationAiSummary")
+        self.assertLess(load_source.index("aiProviders = providers.items || []"), load_source.index("renderAiProviders()"))
+        self.assertLess(load_source.index("renderAiProviders()"), load_source.index("syncAiPlaygroundProviderDefaults()"))
+        self.assertIn("runAiPlaygroundButton').disabled = true", load_source)
+        self.assertIn("getElementById('refreshAiButton').addEventListener('click', () => loadAiWorkspace()", HTML)
+
+    def test_playground_manual_model_is_preserved_only_for_same_provider(self):
+        source = function_source("syncAiPlaygroundProviderDefaults", "syncAiProviderSelectors")
+        self.assertIn("previousProviderId !== providerId", source)
+        self.assertIn("modelInput.dataset.manual !== 'true'", source)
+        self.assertIn("modelInput.dataset.providerId = String(providerId)", source)
+        self.assertIn("event.target.dataset.manual = 'true'", HTML)
+
+    def test_playground_structured_temperature_and_timeout_follow_provider_capabilities(self):
+        source = function_source("syncAiPlaygroundProviderDefaults", "syncAiProviderSelectors")
+        self.assertIn("provider.supports_structured ?? provider.supports_json", source)
+        self.assertIn("structuredSelect.disabled = !supportsStructured", source)
+        self.assertIn("[temperatureInput, provider.temperature", source)
+        self.assertIn("[timeoutInput, provider.timeout_seconds", source)
+
+    def test_playground_payload_uses_the_automatically_synchronized_model(self):
+        source = function_source("runAiPlayground", "cancelAiPlayground")
+        self.assertLess(source.index("syncAiPlaygroundProviderDefaults()"), source.index("const payload ="))
+        self.assertIn("model: selectValue('aiPlaygroundModel').trim()", source)
+        self.assertIn("if (!playgroundDefaults.model)", source)
+
+    def test_cloudflare_client_block_has_a_friendly_provider_message(self):
+        source = function_source("aiProviderFailureMessage", "aiBadge")
+        self.assertIn("provider_error === 'cloudflare_1010'", source)
+        self.assertIn("cloudflare_error_code || '') === '1010'", source)
+        self.assertIn("status === 'client_blocked'", source)
+        self.assertIn("O provedor bloqueou a assinatura HTTP do cliente. Verifique o User-Agent configurado.", source)
+        provider_action = function_source("handleAiProviderAction", "renderAiModels")
+        playground = function_source("runAiPlayground", "cancelAiPlayground")
+        self.assertIn("aiProviderFailureMessage(result)", provider_action)
+        self.assertIn("aiProviderFailureMessage(result)", playground)
+
     def test_operator_mutations_are_hidden_and_safety_notice_is_visible(self):
         self.assertIn("document.querySelectorAll('.ai-admin-control')", HTML)
         self.assertIn("A IA fornece análise e recomendação. A execução é controlada pelas políticas determinísticas do GMJ-FLOW.", HTML)

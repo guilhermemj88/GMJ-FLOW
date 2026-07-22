@@ -50,6 +50,7 @@ from app.services.ai_integration import (
     ai_history,
     ai_overview as centralized_ai_overview,
     central_ai_effective_config,
+    compose_ai_http_headers,
     delete_ai_provider,
     duplicate_ai_provider,
     ensure_ai_schema,
@@ -14024,12 +14025,26 @@ def ai_disk_warnings() -> list[str]:
     return []
 
 
+def legacy_ai_http_headers(config: dict[str, Any] | None = None, json_request: bool = False) -> dict[str, str]:
+    values = config or {}
+    provider_type = clean_text(values.get("provider_type") or values.get("provider")).lower().replace("-", "_")
+    api_key = clean_text(values.get("api_key"))
+    bearer_provider = provider_type in {"openai", "openai_compatible", "groq", "openrouter", "llama.cpp", "llamacpp"}
+    authentication = {"Authorization": f"Bearer {api_key}"} if bearer_provider and api_key else {}
+    return compose_ai_http_headers(
+        json_request=json_request,
+        authentication_headers=authentication,
+        extra_headers=dict(values.get("extra_headers") or {}),
+        protect_authorization=bearer_provider,
+    )
+
+
 def ai_provider_reachable(config: dict[str, Any]) -> bool:
     try:
         base_url = clean_text(config.get("base_url")).rstrip("/")
         provider = clean_text(config.get("provider")).lower()
-        path = "/api/tags" if provider == "ollama" else "/v1/models"
-        request = urllib.request.Request(f"{base_url}{path}", method="GET")
+        path = "/api/tags" if provider == "ollama" else "/models" if provider == "groq" and base_url.endswith("/openai/v1") else "/v1/models"
+        request = urllib.request.Request(f"{base_url}{path}", headers=legacy_ai_http_headers(config), method="GET")
         with urllib.request.urlopen(request, timeout=min(int(config.get("timeout_seconds") or 5), 5)) as response:
             return 200 <= int(response.status) < 500
     except Exception:
@@ -14788,7 +14803,7 @@ def call_ollama_mitigation_ai(config: dict[str, Any], prompt: str) -> str:
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=legacy_ai_http_headers(config, json_request=True),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
@@ -14923,7 +14938,7 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
             },
         }
     else:
-        endpoint = f"{base_url}/v1/chat/completions"
+        endpoint = f"{base_url}/chat/completions" if provider == "groq" and base_url.endswith("/openai/v1") else f"{base_url}/v1/chat/completions"
         body = {
             "model": config["selected_model"],
             "messages": [
@@ -14935,7 +14950,7 @@ def ai_provider_chat(config: dict[str, Any], user_prompt: str) -> tuple[str, int
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=legacy_ai_http_headers(config, json_request=True),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
@@ -14967,7 +14982,7 @@ def ai_provider_prompt(config: dict[str, Any], prompt: str) -> tuple[str, int]:
             },
         }
     else:
-        endpoint = f"{base_url}/v1/chat/completions"
+        endpoint = f"{base_url}/chat/completions" if provider == "groq" and base_url.endswith("/openai/v1") else f"{base_url}/v1/chat/completions"
         body = {
             "model": config["selected_model"],
             "messages": [{"role": "user", "content": prompt}],
@@ -14976,7 +14991,7 @@ def ai_provider_prompt(config: dict[str, Any], prompt: str) -> tuple[str, int]:
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=legacy_ai_http_headers(config, json_request=True),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=int(config["timeout_seconds"])) as response:
@@ -15756,7 +15771,7 @@ def ai_model_pull_worker(job_id: str, provider_id: int, model: str, actor: str) 
         pull_request = urllib.request.Request(
             f"{base_url}/api/pull",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=legacy_ai_http_headers(config, json_request=True),
             method="POST",
         )
         with urllib.request.urlopen(pull_request, timeout=max(30, int(config.get("timeout_seconds") or 30))) as response:
@@ -15894,7 +15909,7 @@ def ai_provider_model_remove(request: Request, provider_id: int, model_name: str
         delete_request = urllib.request.Request(
             f"{clean_text(config.get('base_url')).rstrip('/')}/api/delete",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=legacy_ai_http_headers(config, json_request=True),
             method="DELETE",
         )
         with urllib.request.urlopen(delete_request, timeout=max(10, int(config.get("timeout_seconds") or 30))) as response:
@@ -16275,7 +16290,7 @@ def ollama_models_from_config(config: dict[str, Any]) -> dict[str, Any]:
     if not base_url:
         return {"reachable": False, "models": [], "error": "base_url vazio"}
     try:
-        request = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+        request = urllib.request.Request(f"{base_url}/api/tags", headers=legacy_ai_http_headers(config), method="GET")
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
         models = [
@@ -16494,7 +16509,7 @@ def system_ai_ollama_pull(request: Request, payload: OllamaPullPayload):
     base_url = clean_text(config["base_url"]).rstrip("/")
     try:
         body = json.dumps({"name": model, "stream": False}).encode("utf-8")
-        pull_request = urllib.request.Request(f"{base_url}/api/pull", data=body, headers={"Content-Type": "application/json"}, method="POST")
+        pull_request = urllib.request.Request(f"{base_url}/api/pull", data=body, headers=legacy_ai_http_headers(config, json_request=True), method="POST")
         with urllib.request.urlopen(pull_request, timeout=900) as response:
             result = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
         return {"ok": True, "model": model, "result": result, "models": ollama_models_from_config(config)["models"]}

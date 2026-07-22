@@ -264,6 +264,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
 
         def fake_urlopen(request, timeout):
             captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["headers"] = {str(key).lower(): str(value) for key, value in request.header_items()}
             captured["timeout"] = timeout
             return FakeResponse()
 
@@ -274,6 +275,26 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(captured["body"]["options"]["num_predict"], 96)
         self.assertNotIn("format", captured["body"])
         self.assertEqual(captured["timeout"], 2)
+        self.assertEqual(captured["headers"]["user-agent"], "GMJ-FLOW/1.0")
+        self.assertEqual(captured["headers"]["accept"], "application/json")
+        self.assertEqual(captured["headers"]["content-type"], "application/json")
+
+    def test_legacy_external_ai_headers_use_the_shared_protected_composer(self):
+        headers = {
+            key.lower(): value
+            for key, value in backend_main.legacy_ai_http_headers(
+                {
+                    "provider": "groq",
+                    "api_key": "gsk-real-key",
+                    "extra_headers": {"Authorization": "", "User-Agent": "Mozilla/5.0"},
+                },
+                json_request=True,
+            ).items()
+        }
+        self.assertEqual(headers["user-agent"], "GMJ-FLOW/1.0")
+        self.assertEqual(headers["accept"], "application/json")
+        self.assertEqual(headers["content-type"], "application/json")
+        self.assertEqual(headers["authorization"], "Bearer gsk-real-key")
 
     def test_persisted_analysis_saves_fallback_when_ollama_fails(self):
         tmpdir = tempfile.mkdtemp()
