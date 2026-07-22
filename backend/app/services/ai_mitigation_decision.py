@@ -6,6 +6,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from app.services.ai_integration import compose_ai_http_headers
+
 
 AI_PROMPT = (
     "Voce e um assistente de mitigacao DDoS para provedor ISP.\n"
@@ -97,7 +99,7 @@ def _ollama_decision(incident: dict[str, Any], candidates: list[dict[str, Any]],
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=compose_ai_http_headers(json_request=True),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=float(os.getenv("MITIGATION_AI_TIMEOUT", "8"))) as response:

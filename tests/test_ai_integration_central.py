@@ -30,6 +30,10 @@ class FakeResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+def request_headers(request):
+    return {str(key).lower(): str(value) for key, value in request.header_items()}
+
+
 def database(legacy=None):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -179,6 +183,29 @@ class CentralAiProviderTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(all(auth == "Bearer secret-1234" for _, auth in seen))
 
+    def test_extra_headers_cannot_override_required_or_authentication_headers(self):
+        secret = "gsk_protected_credential_123456"
+        provider_instance = ai.GroqProvider({
+            "provider_type": "groq",
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key": secret,
+            "extra_headers": {
+                "Authorization": "",
+                "authorization": "Bearer attacker-value",
+                "User-Agent": "",
+                "user-agent": "Mozilla/5.0",
+                "Accept": "text/html",
+                "Content-Type": "",
+                "X-Admin-Header": "allowed",
+            },
+        })
+        headers = {key.lower(): value for key, value in provider_instance.headers(json_request=True).items()}
+        self.assertEqual("GMJ-FLOW/1.0", headers["user-agent"])
+        self.assertEqual("application/json", headers["accept"])
+        self.assertEqual("application/json", headers["content-type"])
+        self.assertEqual(f"Bearer {secret}", headers["authorization"])
+        self.assertEqual("allowed", headers["x-admin-header"])
+
     def test_groq_uses_trimmed_credential_canonical_urls_and_safe_diagnostic(self):
         conn = database()
         secret = "gsk_test_credential_1234567890"
@@ -200,7 +227,7 @@ class CentralAiProviderTest(unittest.TestCase):
 
         def opener(request, timeout=0):
             payload = json.loads(request.data.decode("utf-8")) if request.data else {}
-            seen.append((request.full_url, request.get_header("Authorization"), payload.get("model")))
+            seen.append((request.full_url, request_headers(request), payload.get("model")))
             if request.full_url.endswith("/models"):
                 return FakeResponse({"data": [{"id": "openai/gpt-oss-120b"}]})
             return FakeResponse({"model": "openai/gpt-oss-120b", "choices": [{"message": {"content": "OK"}}]})
@@ -216,7 +243,11 @@ class CentralAiProviderTest(unittest.TestCase):
             ],
             [entry[0] for entry in seen],
         )
-        self.assertTrue(all(entry[1] == f"Bearer {secret}" for entry in seen))
+        self.assertTrue(all(entry[1]["user-agent"] == "GMJ-FLOW/1.0" for entry in seen))
+        self.assertTrue(all(entry[1]["accept"] == "application/json" for entry in seen))
+        self.assertTrue(all(entry[1]["authorization"] == f"Bearer {secret}" for entry in seen))
+        self.assertNotIn("content-type", seen[0][1])
+        self.assertEqual("application/json", seen[1][1]["content-type"])
         diagnostic = result["diagnostic"]
         self.assertTrue(diagnostic["starts_with_gsk"])
         self.assertEqual(len(secret), diagnostic["credential_length"])
@@ -224,6 +255,10 @@ class CentralAiProviderTest(unittest.TestCase):
         self.assertEqual("https://api.groq.com/openai/v1/chat/completions", diagnostic["final_url"])
         self.assertTrue(diagnostic["authorization_present"])
         self.assertTrue(diagnostic["authorization_is_bearer_credential"])
+        self.assertTrue(diagnostic["user_agent_present"])
+        self.assertEqual("GMJ-FLOW/1.0", diagnostic["user_agent_value"])
+        self.assertTrue(diagnostic["accept_header_present"])
+        self.assertEqual("application/json", diagnostic["content_type"])
         self.assertEqual("openai/gpt-oss-120b", diagnostic["model"])
         self.assertNotIn(secret, json.dumps(result))
 
@@ -264,7 +299,7 @@ class CentralAiProviderTest(unittest.TestCase):
         )
 
         def opener(request, timeout=0):
-            body = json.dumps({"error": {"message": "organization is not authorized", "credential": secret}}).encode("utf-8")
+            body = json.dumps({"error": {"message": f"Invalid API key: {secret}", "type": "authentication_error", "code": "invalid_api_key", "credential": secret}}).encode("utf-8")
             raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(body))
 
         result = ai.execute_ai_playground(
@@ -278,15 +313,129 @@ class CentralAiProviderTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual("credential_invalid", result["error_type"])
         self.assertIn("HTTP 403 Forbidden", result["error_message"])
-        self.assertIn("organization is not authorized", result["error_message"])
+        self.assertEqual("invalid_api_key", result["provider_error_code"])
+        self.assertEqual("authentication_error", result["provider_error_type"])
         self.assertNotIn(secret, result["error_message"])
         self.assertEqual("https://api.groq.com/openai/v1/chat/completions", result["diagnostic"]["final_url"])
         self.assertEqual("openai/gpt-oss-120b", result["diagnostic"]["model"])
         self.assertTrue(result["diagnostic"]["authorization_present"])
         self.assertTrue(result["diagnostic"]["authorization_is_bearer_credential"])
+        self.assertFalse(result["retryable"])
+
+    def test_cloudflare_1010_is_client_blocked_with_safe_structured_details(self):
+        conn = database()
+        secret = "gsk_cloudflare_credential_123456"
+        item = provider(
+            conn,
+            "Groq Cloudflare",
+            "https://api.groq.com/openai/v1",
+            "groq",
+            api_key=secret,
+            default_model="openai/gpt-oss-120b",
+        )
+        seen = []
+
+        def opener(request, timeout=0):
+            seen.append((request.full_url, request_headers(request)))
+            body = f"""
+                <html><title>Access denied</title>
+                <span class="cf-error-code">1010</span>
+                <div>browser_signature_banned</div>
+                <div>Authorization: Bearer {secret}</div>
+                <div>Ray ID: body-ray-id</div></html>
+            """.encode("utf-8")
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {"CF-Ray": "header-ray-id-GRU"}, io.BytesIO(body))
+
+        with mock.patch.object(ai.socket, "getaddrinfo", return_value=[("", "", "", "", "")]):
+            tested = ai.test_ai_provider(conn, item["id"], "admin", opener=opener)
+        played = ai.execute_ai_playground(
+            conn,
+            item["id"],
+            "operator_explanation",
+            "synthetic",
+            model="openai/gpt-oss-120b",
+            opener=opener,
+        )
+
+        for result in (tested, played):
+            self.assertFalse(result["ok"])
+            self.assertEqual("client_blocked", result["status"])
+            self.assertEqual("client_blocked", result["error_type"])
+            self.assertEqual(403, result["http_status"])
+            self.assertEqual("cloudflare_1010", result["provider_error"])
+            self.assertEqual("1010", result["provider_error_code"])
+            self.assertEqual("browser_signature_banned", result["provider_error_type"])
+            self.assertEqual("browser_signature_banned", result["provider_message"])
+            self.assertTrue(result["cloudflare_error"])
+            self.assertEqual("1010", result["cloudflare_error_code"])
+            self.assertEqual("header-ray-id-GRU", result["cloudflare_ray_id"])
+            self.assertFalse(result["retryable"])
+            self.assertTrue(result["user_agent_present"])
+            self.assertEqual("1010", result["diagnostic"]["cloudflare_error_code"])
+            self.assertFalse(result["diagnostic"]["retryable"])
+            self.assertTrue(result["diagnostic"]["user_agent_present"])
+            self.assertEqual("GMJ-FLOW/1.0", result["diagnostic"]["user_agent_value"])
+            self.assertTrue(result["diagnostic"]["accept_header_present"])
+            self.assertNotIn(secret, json.dumps(result))
+            self.assertNotIn("Authorization: Bearer", json.dumps(result))
+
+        self.assertEqual("https://api.groq.com/openai/v1/models", tested["final_url"])
+        self.assertEqual("https://api.groq.com/openai/v1/chat/completions", played["final_url"])
+        self.assertEqual("", tested["diagnostic"]["content_type"])
+        self.assertEqual("application/json", played["diagnostic"]["content_type"])
+        self.assertTrue(all(headers["user-agent"] == "GMJ-FLOW/1.0" for _, headers in seen))
+        self.assertTrue(all(headers["accept"] == "application/json" for _, headers in seen))
+        stored_error = conn.execute("SELECT last_error FROM ai_providers WHERE id = ?", (item["id"],)).fetchone()[0]
+        self.assertNotIn(secret, stored_error)
+        self.assertNotIn(secret, json.dumps(ai.ai_history(conn)))
 
 
 class CentralAiRoutingTest(unittest.TestCase):
+    def test_cloudflare_client_block_is_not_retried_or_sent_to_fallback(self):
+        conn = database()
+        primary = provider(conn, "Blocked", "https://api.groq.com/openai/v1", "groq", api_key="gsk_blocked_123456", retries=2)
+        fallback = provider(conn, "Must not run", "https://fallback.example", "openai_compatible", api_key="fallback-secret")
+        route(conn, primary, fallback, max_attempts=3)
+        calls = []
+
+        def opener(request, timeout=0):
+            calls.append(request.full_url)
+            body = b'<span class="cf-error-code">1010</span><div>browser_signature_banned</div>'
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(body))
+
+        result = ai.execute_ai_route(conn, "mitigation_analysis", "synthetic", schema=SCHEMA, opener=opener)
+        self.assertFalse(result["ok"])
+        self.assertEqual("client_blocked", result["status"])
+        self.assertEqual("client_blocked", result["error_type"])
+        self.assertEqual("cloudflare_1010", result["provider_error"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(1, len(calls))
+        self.assertTrue(all("fallback.example" not in url for url in calls))
+
+    def test_routing_and_fallback_use_the_shared_external_headers(self):
+        conn = database()
+        primary = provider(conn, "Primary external", "https://primary.example", "openai_compatible", api_key="primary-secret")
+        fallback = provider(conn, "Fallback external", "https://fallback.example", "openai_compatible", api_key="fallback-secret")
+        route(conn, primary, fallback)
+        seen = []
+
+        def opener(request, timeout=0):
+            headers = request_headers(request)
+            seen.append((request.full_url, headers))
+            if "primary.example" in request.full_url:
+                raise socket.timeout("slow")
+            return FakeResponse({"model": "model-b", "choices": [{"message": {"content": '{"summary":"fallback"}'}}]})
+
+        result = ai.execute_ai_route(conn, "mitigation_analysis", "synthetic", schema=SCHEMA, opener=opener)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(2, len(seen))
+        self.assertTrue(all(headers["user-agent"] == "GMJ-FLOW/1.0" for _, headers in seen))
+        self.assertTrue(all(headers["accept"] == "application/json" for _, headers in seen))
+        self.assertTrue(all(headers["content-type"] == "application/json" for _, headers in seen))
+        self.assertEqual("Bearer primary-secret", seen[0][1]["authorization"])
+        self.assertEqual("Bearer fallback-secret", seen[1][1]["authorization"])
+
     def test_timeout_retries_then_succeeds(self):
         conn = database()
         primary = provider(conn, "Retry", "http://retry", retries=1, retry_interval_ms=0)

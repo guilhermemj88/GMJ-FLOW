@@ -88,6 +88,8 @@ PROVIDER_DEFAULTS = {
     "custom_http": {"base_url": "", "models_endpoint": "/models", "chat_endpoint": "/generate"},
 }
 
+AI_HTTP_USER_AGENT = "GMJ-FLOW/1.0"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -236,6 +238,49 @@ def sanitize_error(error: Any, secrets: list[str] | None = None) -> str:
     return text[:2000]
 
 
+def compose_ai_http_headers(
+    *,
+    json_request: bool = False,
+    authentication_headers: dict[str, Any] | None = None,
+    provider_specific_headers: dict[str, Any] | None = None,
+    extra_headers: dict[str, Any] | None = None,
+    protect_authorization: bool = False,
+) -> dict[str, str]:
+    headers = {"User-Agent": AI_HTTP_USER_AGENT, "Accept": "application/json"}
+    if json_request:
+        headers["Content-Type"] = "application/json"
+
+    def merge_header(name: Any, value: Any) -> None:
+        header_name = clean_text(name)
+        if not header_name:
+            return
+        existing = next((key for key in headers if key.lower() == header_name.lower()), None)
+        if existing is not None:
+            headers.pop(existing, None)
+        headers[header_name] = clean_text(value)
+
+    for layer in (authentication_headers or {}, provider_specific_headers or {}):
+        for name, value in layer.items():
+            if clean_text(value):
+                merge_header(name, value)
+
+    for name, value in (extra_headers or {}).items():
+        header_name = clean_text(name)
+        header_value = clean_text(value)
+        normalized_name = header_name.lower()
+        if normalized_name in {"user-agent", "accept"}:
+            continue
+        if normalized_name == "content-type" and json_request:
+            continue
+        if normalized_name == "authorization":
+            existing_authorization = next((item for key, item in headers.items() if key.lower() == "authorization"), "")
+            if protect_authorization or existing_authorization or not header_value:
+                continue
+        if header_name and header_value:
+            merge_header(header_name, header_value)
+    return headers
+
+
 def safe_request_diagnostic(
     api_key: Any,
     final_url: Any,
@@ -245,6 +290,7 @@ def safe_request_diagnostic(
     credential = clean_text(api_key)
     effective_headers = {clean_text(key).lower(): clean_text(value) for key, value in (headers or {}).items()}
     authorization = effective_headers.get("authorization", "")
+    user_agent = effective_headers.get("user-agent", "")
     return {
         "starts_with_gsk": credential.startswith("gsk_"),
         "credential_length": len(credential),
@@ -252,12 +298,18 @@ def safe_request_diagnostic(
         "final_url": clean_text(final_url),
         "authorization_present": bool(authorization),
         "authorization_is_bearer_credential": bool(credential) and authorization == f"Bearer {credential}",
+        "user_agent_present": bool(user_agent),
+        "user_agent_value": user_agent,
+        "accept_header_present": effective_headers.get("accept", "").lower() == "application/json",
+        "content_type": effective_headers.get("content-type", ""),
         "credential_placeholder_rejected": False,
+        "cloudflare_error_code": "",
+        "retryable": False,
         "model": clean_text((payload or {}).get("model")),
     }
 
 
-def sanitized_http_error(exc: urllib.error.HTTPError, secrets: list[str] | None = None) -> str:
+def parse_provider_http_error(exc: urllib.error.HTTPError, secrets: list[str] | None = None) -> dict[str, Any]:
     try:
         raw_body = exc.read()
     except Exception:
@@ -266,9 +318,83 @@ def sanitized_http_error(exc: urllib.error.HTTPError, secrets: list[str] | None 
         body = raw_body.decode("utf-8", errors="replace")
     else:
         body = clean_text(raw_body)
-    status = f"HTTP {int(exc.code)} {clean_text(getattr(exc, 'reason', ''))}".strip()
     sanitized_body = sanitize_error(body, secrets)
-    return sanitize_error(f"{status}: {sanitized_body}" if sanitized_body else status, secrets)
+    parsed = json_loads(body, {})
+    parsed_error = parsed.get("error") if isinstance(parsed, dict) else {}
+    if isinstance(parsed_error, str):
+        parsed_error = {"message": parsed_error}
+    if not isinstance(parsed_error, dict):
+        parsed_error = {}
+    provider_error_code = clean_text(parsed_error.get("code") or (parsed.get("code") if isinstance(parsed, dict) else ""))
+    provider_error_type = clean_text(parsed_error.get("type") or (parsed.get("type") if isinstance(parsed, dict) else ""))
+    provider_message = sanitize_error(
+        parsed_error.get("message") or (parsed.get("message") if isinstance(parsed, dict) else ""),
+        secrets,
+    )
+    reason = clean_text(getattr(exc, "reason", ""))
+    lower_body = body.lower()
+    cloudflare_match = re.search(r"(?i)(?:error(?:\s+code)?|cf-error-code[^>]*>)\s*[:#]?\s*(10\d{2})", body)
+    cloudflare_error_code = clean_text(cloudflare_match.group(1) if cloudflare_match else "")
+    if not cloudflare_error_code and "browser_signature_banned" in lower_body:
+        cloudflare_error_code = "1010"
+    cloudflare_error = cloudflare_error_code == "1010" or "browser_signature_banned" in lower_body
+    headers = getattr(exc, "headers", None)
+    cloudflare_ray_id = ""
+    if headers is not None and hasattr(headers, "items"):
+        cloudflare_ray_id = clean_text(next((value for key, value in headers.items() if clean_text(key).lower() == "cf-ray"), ""))
+    if not cloudflare_ray_id:
+        ray_match = re.search(r"(?i)(?:cloudflare\s+)?ray\s+id\s*[:#]?\s*([A-Za-z0-9-]+)", body)
+        cloudflare_ray_id = clean_text(ray_match.group(1) if ray_match else "")
+
+    auth_evidence = " ".join((provider_error_code, provider_error_type, provider_message, reason)).lower()
+    invalid_credential = any(
+        marker in auth_evidence
+        for marker in (
+            "invalid_api_key",
+            "invalid api key",
+            "incorrect api key",
+            "authentication_error",
+            "authentication failed",
+            "unauthorized",
+        )
+    )
+    http_status = int(exc.code)
+    if cloudflare_error:
+        category = "client_blocked"
+        provider_error = "cloudflare_1010"
+        retryable = False
+    elif http_status == 429:
+        category = "rate_limit"
+        provider_error = provider_error_code or provider_error_type or "http_429"
+        retryable = True
+    elif invalid_credential:
+        category = "credential_invalid"
+        provider_error = provider_error_code or provider_error_type or "invalid_api_key"
+        retryable = False
+    elif http_status >= 500:
+        category = "server_error"
+        provider_error = provider_error_code or provider_error_type or f"http_{http_status}"
+        retryable = True
+    else:
+        category = "policy"
+        provider_error = provider_error_code or provider_error_type or f"http_{http_status}"
+        retryable = False
+
+    status_text = f"HTTP {http_status} {reason}".strip()
+    error_message = sanitize_error(f"{status_text}: {sanitized_body}" if sanitized_body else status_text, secrets)
+    return {
+        "category": category,
+        "error_message": error_message,
+        "http_status": http_status,
+        "provider_error": provider_error,
+        "provider_error_code": provider_error_code or (cloudflare_error_code if cloudflare_error else ""),
+        "provider_error_type": provider_error_type or ("browser_signature_banned" if cloudflare_error else ""),
+        "provider_message": provider_message or ("browser_signature_banned" if cloudflare_error else ""),
+        "cloudflare_error": cloudflare_error,
+        "cloudflare_error_code": cloudflare_error_code,
+        "cloudflare_ray_id": cloudflare_ray_id,
+        "retryable": retryable,
+    }
 
 
 def _provider_defaults(provider_type: str) -> dict[str, str]:
@@ -1059,6 +1185,7 @@ class AIProviderError(Exception):
     category: str = "unavailable"
     status_code: int | None = None
     diagnostic: dict[str, Any] | None = None
+    details: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -1079,10 +1206,23 @@ class AIProvider:
     def base_url(self) -> str:
         return clean_text(self.config.get("base_url")).rstrip("/")
 
-    def headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        headers.update({str(key): str(value) for key, value in (self.config.get("extra_headers") or {}).items()})
-        return headers
+    def authentication_headers(self) -> dict[str, str]:
+        return {}
+
+    def provider_specific_headers(self) -> dict[str, str]:
+        return {}
+
+    def protects_authorization_header(self) -> bool:
+        return False
+
+    def headers(self, json_request: bool = True) -> dict[str, str]:
+        return compose_ai_http_headers(
+            json_request=json_request,
+            authentication_headers=self.authentication_headers(),
+            provider_specific_headers=self.provider_specific_headers(),
+            extra_headers=self.config.get("extra_headers") or {},
+            protect_authorization=self.protects_authorization_header(),
+        )
 
     def _url(self, path: str) -> str:
         if path.startswith("http://") or path.startswith("https://"):
@@ -1093,7 +1233,7 @@ class AIProvider:
         if not self.base_url:
             raise AIProviderError("Base URL não configurada", "not_configured")
         final_url = self._url(path)
-        effective_headers = self.headers()
+        effective_headers = self.headers(json_request=payload is not None)
         self.last_request_diagnostic = safe_request_diagnostic(self.api_key, final_url, effective_headers, payload)
         self.last_request_diagnostic["credential_placeholder_rejected"] = bool(self.config.get("credential_placeholder_rejected"))
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -1104,16 +1244,25 @@ class AIProvider:
                 data = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
                 return data if isinstance(data, dict) else {"items": data}, int((time.monotonic() - started) * 1000)
         except urllib.error.HTTPError as exc:
-            category = "rate_limit" if exc.code == 429 else "credential_invalid" if exc.code in {401, 403} else "server_error" if exc.code >= 500 else "policy"
-            raise AIProviderError(sanitized_http_error(exc, [self.api_key]), category, exc.code, dict(self.last_request_diagnostic)) from exc
+            error = parse_provider_http_error(exc, [self.api_key])
+            category = clean_text(error.pop("category")) or "policy"
+            error_message = clean_text(error.pop("error_message"))
+            error["final_url"] = self.last_request_diagnostic.get("final_url", "")
+            error["user_agent_present"] = bool(self.last_request_diagnostic.get("user_agent_present"))
+            self.last_request_diagnostic["cloudflare_error_code"] = clean_text(error.get("cloudflare_error_code"))
+            self.last_request_diagnostic["retryable"] = bool(error.get("retryable"))
+            raise AIProviderError(error_message, category, exc.code, dict(self.last_request_diagnostic), error) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic)) from exc
+            self.last_request_diagnostic["retryable"] = True
+            raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic), details={"retryable": True, "final_url": final_url, "user_agent_present": bool(self.last_request_diagnostic.get("user_agent_present"))}) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic)) from exc
-            raise AIProviderError(sanitize_error(exc.reason, [self.api_key]), "unavailable", diagnostic=dict(self.last_request_diagnostic)) from exc
+                self.last_request_diagnostic["retryable"] = True
+                raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic), details={"retryable": True, "final_url": final_url, "user_agent_present": bool(self.last_request_diagnostic.get("user_agent_present"))}) from exc
+            self.last_request_diagnostic["retryable"] = True
+            raise AIProviderError(sanitize_error(exc.reason, [self.api_key]), "unavailable", diagnostic=dict(self.last_request_diagnostic), details={"retryable": True, "final_url": final_url, "user_agent_present": bool(self.last_request_diagnostic.get("user_agent_present"))}) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise AIProviderError("Resposta HTTP inválida", "invalid_response", diagnostic=dict(self.last_request_diagnostic)) from exc
+            raise AIProviderError("Resposta HTTP inválida", "invalid_response", diagnostic=dict(self.last_request_diagnostic), details={"retryable": False, "final_url": final_url, "user_agent_present": bool(self.last_request_diagnostic.get("user_agent_present"))}) from exc
 
     def health(self) -> dict[str, Any]:
         started = time.monotonic()
@@ -1129,7 +1278,7 @@ class AIProvider:
             models = self.list_models()
             return {"ok": True, "dns_ok": dns_ok, "models": models, "latency_ms": int((time.monotonic() - started) * 1000), "status": "available", "error": "", "diagnostic": dict(self.last_request_diagnostic)}
         except AIProviderError as exc:
-            return {"ok": False, "dns_ok": dns_ok, "models": [], "latency_ms": int((time.monotonic() - started) * 1000), "status": exc.category, "error": sanitize_error(exc, [self.api_key]), "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
+            return {"ok": False, "dns_ok": dns_ok, "models": [], "latency_ms": int((time.monotonic() - started) * 1000), "status": exc.category, "error_type": exc.category, "error": sanitize_error(exc, [self.api_key]), **dict(exc.details or {}), "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
 
     def test_connection(self) -> dict[str, Any]:
         health = self.health()
@@ -1139,7 +1288,7 @@ class AIProvider:
             response = self.generate("Responda somente: OK", model=clean_text(self.config.get("default_model")), structured=False)
             return {**health, "generation_ok": True, "model": response.get("model") or self.config.get("default_model"), "response_preview": clean_text(response.get("content"))[:160], "diagnostic": dict(self.last_request_diagnostic)}
         except AIProviderError as exc:
-            return {**health, "ok": False, "generation_ok": False, "status": exc.category, "error": sanitize_error(exc, [self.api_key]), "response_preview": "", "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
+            return {**health, "ok": False, "generation_ok": False, "status": exc.category, "error_type": exc.category, "error": sanitize_error(exc, [self.api_key]), **dict(exc.details or {}), "response_preview": "", "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
 
     def list_models(self) -> list[dict[str, Any]]:
         payload, _ = self._request(clean_text(self.config.get("models_endpoint")) or "/models")
@@ -1210,10 +1359,17 @@ class OllamaProvider(AIProvider):
 class OpenAICompatibleProvider(AIProvider):
     provider_type = "openai_compatible"
 
-    def headers(self) -> dict[str, str]:
-        headers = super().headers()
+    def authentication_headers(self) -> dict[str, str]:
+        headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def protects_authorization_header(self) -> bool:
+        return True
+
+    def provider_specific_headers(self) -> dict[str, str]:
+        headers = {}
         if clean_text(self.config.get("organization")):
             headers["OpenAI-Organization"] = clean_text(self.config.get("organization"))
         if clean_text(self.config.get("project")):
@@ -1256,8 +1412,8 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 class GeminiProvider(AIProvider):
     provider_type = "gemini"
 
-    def headers(self) -> dict[str, str]:
-        headers = super().headers()
+    def authentication_headers(self) -> dict[str, str]:
+        headers = {}
         if self.api_key:
             headers["x-goog-api-key"] = self.api_key
         return headers
@@ -1281,10 +1437,14 @@ class GeminiProvider(AIProvider):
 class AnthropicProvider(AIProvider):
     provider_type = "anthropic"
 
-    def headers(self) -> dict[str, str]:
-        headers = super().headers()
+    def authentication_headers(self) -> dict[str, str]:
+        headers = {}
         if self.api_key:
             headers["x-api-key"] = self.api_key
+        return headers
+
+    def provider_specific_headers(self) -> dict[str, str]:
+        headers = {}
         headers["anthropic-version"] = "2023-06-01"
         return headers
 
@@ -1557,6 +1717,8 @@ def execute_ai_route(
         candidates.append((int(route["fallback_provider_id"]), clean_text(route.get("fallback_model")), True))
     last_error = ""
     last_category = "unavailable"
+    last_error_details: dict[str, Any] = {}
+    last_diagnostic: dict[str, Any] = {}
     fallback_attempted = False
     total_attempts = 0
     last_provider_config: dict[str, Any] | None = None
@@ -1568,6 +1730,8 @@ def execute_ai_route(
         if provider_config is None:
             last_error = "Provider removido"
             last_category = "unavailable"
+            last_error_details = {}
+            last_diagnostic = {}
             if fallback_used or not _should_fallback(route, last_category):
                 break
             continue
@@ -1576,11 +1740,15 @@ def execute_ai_route(
         if not sqlite_bool(provider_config.get("enabled")):
             last_error = "Provider desativado ou removido"
             last_category = "credential_disabled"
+            last_error_details = {}
+            last_diagnostic = {}
             break
         allowed, limit_message = provider_usage_state(conn, provider_config)
         if not allowed:
             last_error = limit_message
             last_category = "cost_limit" if "financeiro" in limit_message.lower() else "rate_limit"
+            last_error_details = {"retryable": last_category == "rate_limit"}
+            last_diagnostic = {}
             conn.execute(
                 "UPDATE ai_providers SET status = 'limited', last_error = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
                 (sanitize_error(limit_message), utc_now_iso(), utc_now_iso(), provider_id),
@@ -1659,12 +1827,18 @@ def execute_ai_route(
             except AIProviderError as exc:
                 last_error = sanitize_error(exc, [provider_config.get("api_key") or ""])
                 last_category = exc.category
+                last_error_details = dict(exc.details or {})
+                last_diagnostic = dict(exc.diagnostic or provider.last_request_diagnostic)
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = sanitize_error(exc)
                 last_category = "invalid_json"
+                last_error_details = {"retryable": False}
+                last_diagnostic = dict(provider.last_request_diagnostic)
             except Exception as exc:  # defensive boundary: provider failures never escape into detection/mitigation
                 last_error = sanitize_error(exc, [provider_config.get("api_key") or ""])
                 last_category = "timeout" if isinstance(exc, (TimeoutError, socket.timeout)) else "unavailable"
+                last_error_details = {"retryable": True}
+                last_diagnostic = dict(provider.last_request_diagnostic)
             if attempt < attempts and last_category in {"timeout", "rate_limit", "server_error", "unavailable"}:
                 delay = max(0, int(provider_config.get("retry_interval_ms") or 0)) / 1000
                 if delay:
@@ -1687,9 +1861,11 @@ def execute_ai_route(
         "ok": False,
         "request_id": request_id,
         "function_key": function_key,
-        "status": "failed",
+        "status": last_category if last_category == "client_blocked" else "failed",
         "error_type": last_category,
         "error_message": last_error or "Todos os providers falharam",
+        **last_error_details,
+        "diagnostic": last_diagnostic,
         "duration_ms": duration_ms,
         "attempts": total_attempts,
         "fallback_used": fallback_attempted,
@@ -1762,6 +1938,7 @@ def execute_ai_playground(
     except Exception as exc:
         error = sanitize_error(exc, [config.get("api_key") or ""])
         category = exc.category if isinstance(exc, AIProviderError) else "unavailable"
+        details = dict(exc.details or {}) if isinstance(exc, AIProviderError) else {"retryable": True}
         duration_ms = int((time.monotonic() - started) * 1000)
         request_id = _log_ai_request(
             conn, function_key or "playground", config, selected_model, "failed", duration_ms,
@@ -1769,7 +1946,7 @@ def execute_ai_playground(
             sanitized_prompt=sanitized,
         )
         diagnostic = dict(exc.diagnostic or provider.last_request_diagnostic) if isinstance(exc, AIProviderError) else dict(provider.last_request_diagnostic)
-        return {"ok": False, "request_id": request_id, "status": "failed", "error_type": category, "error_message": error, "duration_ms": duration_ms, "diagnostic": diagnostic}
+        return {"ok": False, "request_id": request_id, "status": category if category == "client_blocked" else "failed", "error_type": category, "error_message": error, "duration_ms": duration_ms, **details, "diagnostic": diagnostic}
 
 
 def ai_overview(conn: sqlite3.Connection, memory: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1840,6 +2017,7 @@ __all__ = [
     "audit_ai_action",
     "build_ai_provider",
     "central_ai_effective_config",
+    "compose_ai_http_headers",
     "delete_ai_provider",
     "duplicate_ai_provider",
     "encrypt_secret",
