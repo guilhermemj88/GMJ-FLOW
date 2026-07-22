@@ -83,7 +83,7 @@ PROVIDER_DEFAULTS = {
     "openai": {"base_url": "https://api.openai.com", "models_endpoint": "/v1/models", "chat_endpoint": "/v1/chat/completions"},
     "gemini": {"base_url": "https://generativelanguage.googleapis.com", "models_endpoint": "/v1beta/models", "chat_endpoint": "/v1beta/models/{model}:generateContent"},
     "anthropic": {"base_url": "https://api.anthropic.com", "models_endpoint": "/v1/models", "chat_endpoint": "/v1/messages"},
-    "groq": {"base_url": "https://api.groq.com/openai", "models_endpoint": "/v1/models", "chat_endpoint": "/v1/chat/completions"},
+    "groq": {"base_url": "https://api.groq.com/openai/v1", "models_endpoint": "/models", "chat_endpoint": "/chat/completions"},
     "openrouter": {"base_url": "https://openrouter.ai/api", "models_endpoint": "/v1/models", "chat_endpoint": "/v1/chat/completions"},
     "custom_http": {"base_url": "", "models_endpoint": "/models", "chat_endpoint": "/generate"},
 }
@@ -95,6 +95,59 @@ def utc_now_iso() -> str:
 
 def clean_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def is_masked_credential(value: Any) -> bool:
+    """Identify UI placeholders that must never be encrypted as credentials."""
+    candidate = clean_text(value)
+    if not candidate:
+        return False
+    lowered = candidate.casefold()
+    if lowered in {"[configured]", "configured", "not configured", "nao configurada", "não configurada"}:
+        return True
+    if "•" in candidate or "â€¢" in candidate:
+        return True
+    return bool(re.fullmatch(r"(?i)(?:key|gsk|sk)[-_]?(?:\*|x){3,}[A-Za-z0-9_-]{0,8}", candidate))
+
+
+def normalize_provider_transport(
+    provider_type: Any,
+    base_url: Any,
+    models_endpoint: Any,
+    chat_endpoint: Any,
+) -> tuple[str, str, str]:
+    """Return canonical transport settings while accepting legacy Groq records."""
+    normalized_type = clean_text(provider_type).lower().replace("-", "_")
+    defaults = _provider_defaults(normalized_type)
+    normalized_base = clean_text(base_url) or defaults["base_url"]
+    normalized_models = clean_text(models_endpoint) or defaults["models_endpoint"]
+    normalized_chat = clean_text(chat_endpoint) or defaults["chat_endpoint"]
+
+    if normalized_type == "groq":
+        parsed = urllib.parse.urlsplit(normalized_base.rstrip("/"))
+        if (parsed.hostname or "").lower() == "api.groq.com":
+            normalized_base = "https://api.groq.com/openai/v1"
+        if normalized_base.rstrip("/").endswith("/openai/v1"):
+            if normalized_models == "/v1/models":
+                normalized_models = "/models"
+            if normalized_chat == "/v1/chat/completions":
+                normalized_chat = "/chat/completions"
+
+    return normalized_base.rstrip("/"), normalized_models, normalized_chat
+
+
+def normalize_provider_config(config: dict[str, Any]) -> dict[str, Any]:
+    item = dict(config)
+    base_url, models_endpoint, chat_endpoint = normalize_provider_transport(
+        item.get("provider_type") or item.get("provider"),
+        item.get("base_url"),
+        item.get("models_endpoint"),
+        item.get("chat_endpoint"),
+    )
+    item["base_url"] = base_url
+    item["models_endpoint"] = models_endpoint
+    item["chat_endpoint"] = chat_endpoint
+    return item
 
 
 def sqlite_bool(value: Any) -> bool:
@@ -143,7 +196,7 @@ def decrypt_secret(value: str, explicit_seed: str | None = None) -> str:
     if not token.startswith("fernet:v1:"):
         raise ValueError("Formato de credencial não suportado")
     try:
-        return credential_cipher(explicit_seed).decrypt(token.split(":", 2)[2].encode("ascii")).decode("utf-8")
+        return clean_text(credential_cipher(explicit_seed).decrypt(token.split(":", 2)[2].encode("ascii")).decode("utf-8"))
     except (InvalidToken, UnicodeDecodeError) as exc:
         raise ValueError("Credencial não pôde ser descriptografada") from exc
 
@@ -179,7 +232,43 @@ def sanitize_error(error: Any, secrets: list[str] | None = None) -> str:
     text = re.sub(r"(?i)([A-Za-z0-9_-]*(?:authorization|api[_-]?key|token|secret|credential)[A-Za-z0-9_-]*)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", text)
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", text)
     text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-[REDACTED]", text)
+    text = re.sub(r"\bgsk_[A-Za-z0-9_-]{8,}\b", "gsk_[REDACTED]", text)
     return text[:2000]
+
+
+def safe_request_diagnostic(
+    api_key: Any,
+    final_url: Any,
+    headers: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    credential = clean_text(api_key)
+    effective_headers = {clean_text(key).lower(): clean_text(value) for key, value in (headers or {}).items()}
+    authorization = effective_headers.get("authorization", "")
+    return {
+        "starts_with_gsk": credential.startswith("gsk_"),
+        "credential_length": len(credential),
+        "credential_fingerprint_sha256": hashlib.sha256(credential.encode("utf-8")).hexdigest()[:12] if credential else "",
+        "final_url": clean_text(final_url),
+        "authorization_present": bool(authorization),
+        "authorization_is_bearer_credential": bool(credential) and authorization == f"Bearer {credential}",
+        "credential_placeholder_rejected": False,
+        "model": clean_text((payload or {}).get("model")),
+    }
+
+
+def sanitized_http_error(exc: urllib.error.HTTPError, secrets: list[str] | None = None) -> str:
+    try:
+        raw_body = exc.read()
+    except Exception:
+        raw_body = b""
+    if isinstance(raw_body, bytes):
+        body = raw_body.decode("utf-8", errors="replace")
+    else:
+        body = clean_text(raw_body)
+    status = f"HTTP {int(exc.code)} {clean_text(getattr(exc, 'reason', ''))}".strip()
+    sanitized_body = sanitize_error(body, secrets)
+    return sanitize_error(f"{status}: {sanitized_body}" if sanitized_body else status, secrets)
 
 
 def _provider_defaults(provider_type: str) -> dict[str, str]:
@@ -557,7 +646,7 @@ def audit_ai_action(conn: sqlite3.Connection, actor: str, action: str, entity_ty
 
 
 def provider_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
+    item = normalize_provider_config(dict(row))
     encrypted = clean_text(item.pop("api_key_encrypted", ""))
     last4 = clean_text(item.pop("api_key_last4", ""))
     item["enabled"] = sqlite_bool(item.get("enabled"))
@@ -577,9 +666,11 @@ def provider_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def provider_runtime(row: sqlite3.Row | dict[str, Any], explicit_seed: str | None = None) -> dict[str, Any]:
-    item = dict(row)
+    item = normalize_provider_config(dict(row))
     encrypted = clean_text(item.get("api_key_encrypted"))
-    item["api_key"] = decrypt_secret(encrypted, explicit_seed) if encrypted else ""
+    decrypted = clean_text(decrypt_secret(encrypted, explicit_seed)) if encrypted else ""
+    item["credential_placeholder_rejected"] = is_masked_credential(decrypted)
+    item["api_key"] = "" if item["credential_placeholder_rejected"] else decrypted
     item["extra_headers"] = decode_extra_headers(item.get("extra_headers_json"), explicit_seed)
     item["custom_options"] = json_loads(item.get("custom_options_json"), {})
     return item
@@ -601,7 +692,6 @@ def save_ai_provider(conn: sqlite3.Connection, payload: dict[str, Any], actor: s
     provider_type = clean_text(payload.get("provider_type") or payload.get("type")).lower().replace("-", "_")
     if provider_type not in AI_PROVIDER_TYPES:
         raise ValueError("Tipo de provider inválido")
-    defaults = _provider_defaults(provider_type)
     name = clean_text(payload.get("name"))
     if not name:
         raise ValueError("Nome do provider é obrigatório")
@@ -610,6 +700,8 @@ def save_ai_provider(conn: sqlite3.Connection, payload: dict[str, Any], actor: s
     api_key = clean_text(payload.get("api_key"))
     encrypted = clean_text(existing["api_key_encrypted"]) if existing is not None else ""
     last4 = clean_text(existing["api_key_last4"]) if existing is not None else ""
+    if is_masked_credential(api_key):
+        api_key = ""
     if api_key:
         encrypted = encrypt_secret(api_key)
         last4 = api_key[-4:]
@@ -622,11 +714,17 @@ def save_ai_provider(conn: sqlite3.Connection, payload: dict[str, Any], actor: s
         if value == "[configured]" and key in existing_headers:
             incoming_headers[key] = existing_headers[key]
     encrypted_headers = encrypt_secret(json_dumps(incoming_headers)) if incoming_headers else "{}"
+    base_url, models_endpoint, chat_endpoint = normalize_provider_transport(
+        provider_type,
+        payload.get("base_url"),
+        payload.get("models_endpoint"),
+        payload.get("chat_endpoint"),
+    )
     values = {
         "name": name,
         "provider_type": provider_type,
         "enabled": 1 if payload.get("enabled", True) else 0,
-        "base_url": clean_text(payload.get("base_url")) or defaults["base_url"],
+        "base_url": base_url,
         "api_key_encrypted": encrypted,
         "api_key_last4": last4,
         "organization": clean_text(payload.get("organization")),
@@ -650,8 +748,8 @@ def save_ai_provider(conn: sqlite3.Connection, payload: dict[str, Any], actor: s
         "supports_json": 1 if payload.get("supports_json", True) else 0,
         "supports_tools": 1 if payload.get("supports_tools", False) else 0,
         "notes": clean_text(payload.get("notes")),
-        "models_endpoint": clean_text(payload.get("models_endpoint")) or defaults["models_endpoint"],
-        "chat_endpoint": clean_text(payload.get("chat_endpoint")) or defaults["chat_endpoint"],
+        "models_endpoint": models_endpoint,
+        "chat_endpoint": chat_endpoint,
         "extra_headers_json": encrypted_headers,
         "custom_options_json": json_dumps(payload.get("custom_options") or {}),
         "updated_at": now,
@@ -960,6 +1058,7 @@ class AIProviderError(Exception):
     message: str
     category: str = "unavailable"
     status_code: int | None = None
+    diagnostic: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -969,9 +1068,12 @@ class AIProvider:
     provider_type = "custom_http"
 
     def __init__(self, config: dict[str, Any], opener: Callable[..., Any] | None = None):
-        self.config = config
+        provider_config = dict(config)
+        provider_config.setdefault("provider_type", self.provider_type)
+        self.config = normalize_provider_config(provider_config)
         self.opener = opener or urllib.request.urlopen
-        self.api_key = clean_text(config.get("api_key"))
+        self.api_key = clean_text(self.config.get("api_key"))
+        self.last_request_diagnostic: dict[str, Any] = {}
 
     @property
     def base_url(self) -> str:
@@ -990,8 +1092,12 @@ class AIProvider:
     def _request(self, path: str, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int | None = None) -> tuple[dict[str, Any], int]:
         if not self.base_url:
             raise AIProviderError("Base URL não configurada", "not_configured")
+        final_url = self._url(path)
+        effective_headers = self.headers()
+        self.last_request_diagnostic = safe_request_diagnostic(self.api_key, final_url, effective_headers, payload)
+        self.last_request_diagnostic["credential_placeholder_rejected"] = bool(self.config.get("credential_placeholder_rejected"))
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
-        request = urllib.request.Request(self._url(path), data=body, headers=self.headers(), method=method)
+        request = urllib.request.Request(final_url, data=body, headers=effective_headers, method=method)
         started = time.monotonic()
         try:
             with self.opener(request, timeout=timeout or int(self.config.get("timeout_seconds") or 30)) as response:
@@ -999,15 +1105,15 @@ class AIProvider:
                 return data if isinstance(data, dict) else {"items": data}, int((time.monotonic() - started) * 1000)
         except urllib.error.HTTPError as exc:
             category = "rate_limit" if exc.code == 429 else "credential_invalid" if exc.code in {401, 403} else "server_error" if exc.code >= 500 else "policy"
-            raise AIProviderError(sanitize_error(exc, [self.api_key]), category, exc.code) from exc
+            raise AIProviderError(sanitized_http_error(exc, [self.api_key]), category, exc.code, dict(self.last_request_diagnostic)) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise AIProviderError("Timeout do provider", "timeout") from exc
+            raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic)) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise AIProviderError("Timeout do provider", "timeout") from exc
-            raise AIProviderError(sanitize_error(exc.reason, [self.api_key]), "unavailable") from exc
+                raise AIProviderError("Timeout do provider", "timeout", diagnostic=dict(self.last_request_diagnostic)) from exc
+            raise AIProviderError(sanitize_error(exc.reason, [self.api_key]), "unavailable", diagnostic=dict(self.last_request_diagnostic)) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise AIProviderError("Resposta HTTP inválida", "invalid_response") from exc
+            raise AIProviderError("Resposta HTTP inválida", "invalid_response", diagnostic=dict(self.last_request_diagnostic)) from exc
 
     def health(self) -> dict[str, Any]:
         started = time.monotonic()
@@ -1021,9 +1127,9 @@ class AIProvider:
                 dns_ok = False
         try:
             models = self.list_models()
-            return {"ok": True, "dns_ok": dns_ok, "models": models, "latency_ms": int((time.monotonic() - started) * 1000), "status": "available", "error": ""}
+            return {"ok": True, "dns_ok": dns_ok, "models": models, "latency_ms": int((time.monotonic() - started) * 1000), "status": "available", "error": "", "diagnostic": dict(self.last_request_diagnostic)}
         except AIProviderError as exc:
-            return {"ok": False, "dns_ok": dns_ok, "models": [], "latency_ms": int((time.monotonic() - started) * 1000), "status": exc.category, "error": sanitize_error(exc, [self.api_key])}
+            return {"ok": False, "dns_ok": dns_ok, "models": [], "latency_ms": int((time.monotonic() - started) * 1000), "status": exc.category, "error": sanitize_error(exc, [self.api_key]), "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
 
     def test_connection(self) -> dict[str, Any]:
         health = self.health()
@@ -1031,9 +1137,9 @@ class AIProvider:
             return health
         try:
             response = self.generate("Responda somente: OK", model=clean_text(self.config.get("default_model")), structured=False)
-            return {**health, "generation_ok": True, "model": response.get("model") or self.config.get("default_model"), "response_preview": clean_text(response.get("content"))[:160]}
+            return {**health, "generation_ok": True, "model": response.get("model") or self.config.get("default_model"), "response_preview": clean_text(response.get("content"))[:160], "diagnostic": dict(self.last_request_diagnostic)}
         except AIProviderError as exc:
-            return {**health, "ok": False, "generation_ok": False, "status": exc.category, "error": sanitize_error(exc, [self.api_key]), "response_preview": ""}
+            return {**health, "ok": False, "generation_ok": False, "status": exc.category, "error": sanitize_error(exc, [self.api_key]), "response_preview": "", "diagnostic": dict(exc.diagnostic or self.last_request_diagnostic)}
 
     def list_models(self) -> list[dict[str, Any]]:
         payload, _ = self._request(clean_text(self.config.get("models_endpoint")) or "/models")
@@ -1652,7 +1758,7 @@ def execute_ai_playground(
             conn, function_key or "playground", config, selected_model, "success", duration_ms,
             1, False, usage, prompt=combined, sanitized_prompt=sanitized, response=content,
         )
-        return {"ok": True, "request_id": request_id, "content": content, "raw": content, "provider": config["name"], "model": generated.get("model") or selected_model, "duration_ms": duration_ms, "usage": usage}
+        return {"ok": True, "request_id": request_id, "content": content, "raw": content, "provider": config["name"], "model": generated.get("model") or selected_model, "duration_ms": duration_ms, "usage": usage, "diagnostic": dict(provider.last_request_diagnostic)}
     except Exception as exc:
         error = sanitize_error(exc, [config.get("api_key") or ""])
         category = exc.category if isinstance(exc, AIProviderError) else "unavailable"
@@ -1662,7 +1768,8 @@ def execute_ai_playground(
             1, False, {}, error_type=category, error_message=error, prompt=combined,
             sanitized_prompt=sanitized,
         )
-        return {"ok": False, "request_id": request_id, "status": "failed", "error_type": category, "error_message": error, "duration_ms": duration_ms}
+        diagnostic = dict(exc.diagnostic or provider.last_request_diagnostic) if isinstance(exc, AIProviderError) else dict(provider.last_request_diagnostic)
+        return {"ok": False, "request_id": request_id, "status": "failed", "error_type": category, "error_message": error, "duration_ms": duration_ms, "diagnostic": diagnostic}
 
 
 def ai_overview(conn: sqlite3.Connection, memory: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1,8 +1,11 @@
+import hashlib
+import io
 import json
 import socket
 import sqlite3
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -175,6 +178,112 @@ class CentralAiProviderTest(unittest.TestCase):
             result = ai.test_ai_provider(conn, item["id"], "admin", opener=opener)
         self.assertTrue(result["ok"])
         self.assertTrue(all(auth == "Bearer secret-1234" for _, auth in seen))
+
+    def test_groq_uses_trimmed_credential_canonical_urls_and_safe_diagnostic(self):
+        conn = database()
+        secret = "gsk_test_credential_1234567890"
+        item = provider(
+            conn,
+            "Groq",
+            "https://api.groq.com/openai",
+            "groq",
+            api_key=f"  {secret}\r\n",
+            default_model="openai/gpt-oss-120b",
+            models_endpoint="/v1/models",
+            chat_endpoint="/v1/chat/completions",
+        )
+        self.assertEqual("https://api.groq.com/openai/v1", item["base_url"])
+        self.assertEqual("/models", item["models_endpoint"])
+        self.assertEqual("/chat/completions", item["chat_endpoint"])
+        self.assertEqual(secret, ai.get_ai_provider(conn, item["id"], runtime=True)["api_key"])
+        seen = []
+
+        def opener(request, timeout=0):
+            payload = json.loads(request.data.decode("utf-8")) if request.data else {}
+            seen.append((request.full_url, request.get_header("Authorization"), payload.get("model")))
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"data": [{"id": "openai/gpt-oss-120b"}]})
+            return FakeResponse({"model": "openai/gpt-oss-120b", "choices": [{"message": {"content": "OK"}}]})
+
+        with mock.patch.object(ai.socket, "getaddrinfo", return_value=[("", "", "", "", "")]):
+            result = ai.test_ai_provider(conn, item["id"], "admin", opener=opener)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [
+                "https://api.groq.com/openai/v1/models",
+                "https://api.groq.com/openai/v1/chat/completions",
+            ],
+            [entry[0] for entry in seen],
+        )
+        self.assertTrue(all(entry[1] == f"Bearer {secret}" for entry in seen))
+        diagnostic = result["diagnostic"]
+        self.assertTrue(diagnostic["starts_with_gsk"])
+        self.assertEqual(len(secret), diagnostic["credential_length"])
+        self.assertEqual(hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12], diagnostic["credential_fingerprint_sha256"])
+        self.assertEqual("https://api.groq.com/openai/v1/chat/completions", diagnostic["final_url"])
+        self.assertTrue(diagnostic["authorization_present"])
+        self.assertTrue(diagnostic["authorization_is_bearer_credential"])
+        self.assertEqual("openai/gpt-oss-120b", diagnostic["model"])
+        self.assertNotIn(secret, json.dumps(result))
+
+    def test_masked_credential_never_overwrites_encrypted_secret(self):
+        conn = database()
+        secret = "gsk_original_credential_123456"
+        item = provider(conn, "Groq mask", "https://api.groq.com/openai/v1", "groq", api_key=secret)
+        encrypted_before = conn.execute("SELECT api_key_encrypted FROM ai_providers WHERE id = ?", (item["id"],)).fetchone()[0]
+        ai.save_ai_provider(conn, {**item, "api_key": item["api_key_masked"]}, "admin", item["id"])
+        encrypted_after = conn.execute("SELECT api_key_encrypted FROM ai_providers WHERE id = ?", (item["id"],)).fetchone()[0]
+        self.assertEqual(encrypted_before, encrypted_after)
+        self.assertEqual(secret, ai.get_ai_provider(conn, item["id"], runtime=True)["api_key"])
+
+    def test_legacy_encrypted_visual_mask_is_rejected_before_header_creation(self):
+        conn = database()
+        item = provider(conn, "Legacy mask", "https://api.groq.com/openai/v1", "groq", api_key="gsk_original_123456")
+        visual_mask = item["api_key_masked"]
+        conn.execute(
+            "UPDATE ai_providers SET api_key_encrypted = ?, api_key_last4 = ? WHERE id = ?",
+            (ai.encrypt_secret(visual_mask), visual_mask[-4:], item["id"]),
+        )
+        runtime = ai.get_ai_provider(conn, item["id"], runtime=True)
+        self.assertEqual("", runtime["api_key"])
+        self.assertTrue(runtime["credential_placeholder_rejected"])
+        built = ai.build_ai_provider(runtime)
+        self.assertNotIn("Authorization", built.headers())
+
+    def test_playground_preserves_sanitized_http_error_body_and_diagnostic(self):
+        conn = database()
+        secret = "gsk_rejected_credential_123456"
+        item = provider(
+            conn,
+            "Groq error",
+            "https://api.groq.com/openai/v1",
+            "groq",
+            api_key=secret,
+            default_model="openai/gpt-oss-120b",
+        )
+
+        def opener(request, timeout=0):
+            body = json.dumps({"error": {"message": "organization is not authorized", "credential": secret}}).encode("utf-8")
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, io.BytesIO(body))
+
+        result = ai.execute_ai_playground(
+            conn,
+            item["id"],
+            "operator_explanation",
+            "synthetic",
+            model="openai/gpt-oss-120b",
+            opener=opener,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual("credential_invalid", result["error_type"])
+        self.assertIn("HTTP 403 Forbidden", result["error_message"])
+        self.assertIn("organization is not authorized", result["error_message"])
+        self.assertNotIn(secret, result["error_message"])
+        self.assertEqual("https://api.groq.com/openai/v1/chat/completions", result["diagnostic"]["final_url"])
+        self.assertEqual("openai/gpt-oss-120b", result["diagnostic"]["model"])
+        self.assertTrue(result["diagnostic"]["authorization_present"])
+        self.assertTrue(result["diagnostic"]["authorization_is_bearer_credential"])
 
 
 class CentralAiRoutingTest(unittest.TestCase):
