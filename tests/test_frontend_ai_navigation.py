@@ -139,6 +139,12 @@ class FrontendAiNavigationTest(unittest.TestCase):
             self.assertIn(key, source)
         self.assertIn("[REDACTED]", source)
 
+    def test_groq_editor_uses_canonical_transport_and_never_reuses_visual_mask(self):
+        self.assertIn("groq: ['https://api.groq.com/openai/v1', '/models', '/chat/completions']", HTML)
+        editor = function_source("editAiProvider", "aiProviderEditorPayload")
+        self.assertIn("setValue('aiProviderEditorApiKey', '')", editor)
+        self.assertNotIn("api_key_masked", editor.split("setValue('aiProviderEditorApiKey', '')")[0])
+
     def test_operator_mutations_are_hidden_and_safety_notice_is_visible(self):
         self.assertIn("document.querySelectorAll('.ai-admin-control')", HTML)
         self.assertIn("A IA fornece análise e recomendação. A execução é controlada pelas políticas determinísticas do GMJ-FLOW.", HTML)
