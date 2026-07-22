@@ -17,7 +17,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
@@ -39,6 +41,39 @@ from app.services.humanize import format_bits_per_second, format_bytes, format_f
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
+from app.services.ai_integration import (
+    AI_FUNCTIONS,
+    AI_PROVIDER_TYPES,
+    MITIGATION_SCHEMA,
+    audit_ai_action,
+    ai_audit_history,
+    ai_history,
+    ai_overview as centralized_ai_overview,
+    central_ai_effective_config,
+    delete_ai_provider,
+    duplicate_ai_provider,
+    ensure_ai_schema,
+    execute_ai_playground,
+    execute_ai_route,
+    get_ai_provider,
+    global_ai_settings,
+    list_ai_prompts,
+    list_ai_providers,
+    list_ai_routes,
+    list_provider_models,
+    prompt_versions,
+    refresh_provider_models,
+    render_prompt,
+    restore_prompt_version,
+    save_ai_prompt,
+    save_ai_provider,
+    save_ai_route,
+    sanitize_ai_content,
+    sanitize_error,
+    test_ai_provider as run_ai_provider_test,
+    toggle_ai_provider,
+    update_global_ai_settings,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -161,6 +196,8 @@ SENSOR_DB_READY = False
 SYSTEM_SETTINGS_READY_KEYS: set[str] = set()
 DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
+AI_MODEL_PULL_JOBS: dict[str, dict[str, Any]] = {}
+AI_MODEL_PULL_LOCK = threading.Lock()
 GEOIP_MMDB_PATH = os.getenv("GMJFLOW_GEOIP_MMDB_PATH", "/app/data/GeoLite2-City.mmdb").strip()
 GEOIP_LAST_ERROR = ""
 
@@ -364,7 +401,12 @@ BGP_EXPIRATION_THREAD: threading.Thread | None = None
 BGP_STATUS_CHECK_STOP = threading.Event()
 BGP_STATUS_CHECK_THREAD: threading.Thread | None = None
 BGP_STATUS_CHECK_CYCLE_LOCK = threading.Lock()
-BGP_STATUS_CHECK_LOCK = threading.Lock()
+BGP_STATUS_CHECK_LOCKS_GUARD = threading.Lock()
+BGP_STATUS_CHECK_LOCKS: dict[int, dict[str, Any]] = {}
+BGP_STATUS_CHECK_EXECUTOR_GUARD = threading.Lock()
+BGP_STATUS_CHECK_EXECUTOR: ThreadPoolExecutor | None = None
+BGP_STATUS_CHECK_EXECUTOR_WORKERS = 0
+BGP_STATUS_CHECK_EXPIRED_TOTAL = 0
 SYSTEM_SETTING_DEFAULTS = {
     "database_retention_enabled": "1",
     "flow_retention_days": "7",
@@ -3528,6 +3570,7 @@ def ensure_sensor_db() -> None:
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
+        ensure_ai_schema(conn, get_system_settings(conn))
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
             now = utc_now_iso()
@@ -3560,6 +3603,7 @@ def startup() -> None:
     start_snmp_polling_thread()
     start_database_retention_thread()
     start_bgp_expiration_thread()
+    start_bgp_status_check_executor()
     start_bgp_status_check_thread()
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
@@ -3572,6 +3616,7 @@ def shutdown() -> None:
     DATABASE_RETENTION_STOP.set()
     BGP_EXPIRATION_STOP.set()
     stop_bgp_status_check_thread()
+    shutdown_bgp_status_check_executor()
     ANOMALY_DETECTION_STOP.set()
     ASN_RESOLVER_STOP.set()
     PEAK_HUNTER_RUNNER_STOP.set()
@@ -8221,50 +8266,19 @@ def parse_exabgp_peer_state(text: str, peer_ip: str = "") -> dict[str, Any]:
 
 
 def exabgp_peer_from_pipe(connector: dict[str, Any], timeout: float = 1.2) -> dict[str, Any]:
-    pipe_in = clean_text(connector.get("exabgp_pipe_in"))
-    pipe_out = clean_text(connector.get("exabgp_pipe_out"))
+    """Return an explicitly unverified state without writing diagnostic commands.
+
+    ExaBGP's control API requires a FIFO write even for read-style commands.
+    Health checks are intentionally side-effect free, so peer evidence must
+    come from Host Agent, TCP/socket state, logs, persisted state or Router SSH.
+    """
     peer_ip = clean_text(connector.get("peer_ip"))
-    if not pipe_in or not pipe_out or not Path(pipe_in).exists() or not Path(pipe_out).exists():
-        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-    if not os.access(pipe_in, os.W_OK):
-        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-
-    fd_out: int | None = None
-    try:
-        fd_out = os.open(pipe_out, os.O_RDONLY | os.O_NONBLOCK)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                if not os.read(fd_out, 8192):
-                    break
-            except BlockingIOError:
-                break
-        try:
-            exabgp_write_pipe(connector, "show neighbor summary")
-        except HTTPException:
-            return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-
-        chunks: list[bytes] = []
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                chunk = os.read(fd_out, 8192)
-                if chunk:
-                    chunks.append(chunk)
-                    continue
-            except BlockingIOError:
-                pass
-            time.sleep(0.05)
-        response = b"".join(chunks).decode("utf-8", errors="replace")
-        return parse_exabgp_peer_state(response, peer_ip)
-    except OSError:
-        return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-    finally:
-        if fd_out is not None:
-            try:
-                os.close(fd_out)
-            except OSError:
-                pass
+    return {
+        "state": "not_verified",
+        "peer_ip": peer_ip,
+        "source": "exabgp_pipe_read_disabled",
+        "message": "Consulta de peer via FIFO desabilitada para manter a checagem sem efeitos colaterais.",
+    }
 
 
 def exabgp_peer_from_log_heuristic(connector: dict[str, Any]) -> dict[str, Any]:
@@ -8541,7 +8555,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     pipes = exabgp_pipe_status(connector)
     pipes_ok = bool(pipes["ok"])
     exabgp_peer = exabgp_peer_from_pipe(connector) if pipes_ok else {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_pipe"}
-    heuristic_peer = exabgp_peer_from_log_heuristic(connector) if exabgp_peer.get("state") == "unknown" else {
+    heuristic_peer = exabgp_peer_from_log_heuristic(connector) if exabgp_peer.get("state") in {"unknown", "not_verified"} else {
         "state": "not_checked",
         "peer_ip": peer_ip,
         "source": "exabgp_log_heuristic",
@@ -8836,31 +8850,318 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class BgpStatusCheckInProgress(RuntimeError):
+    def __init__(self, connector_id: int, metadata: dict[str, Any]):
+        self.connector_id = int(connector_id)
+        self.started_at = clean_text(metadata.get("started_at"))
+        self.owner = clean_text(metadata.get("owner"))
+        self.expires_at = clean_text(metadata.get("expires_at"))
+        expires_monotonic = float(metadata.get("expires_monotonic") or time.monotonic())
+        self.retry_after_seconds = max(1, int(expires_monotonic - time.monotonic() + 0.999))
+        super().__init__(f"Ja existe uma checagem BGP/FlowSpec em andamento para o conector {self.connector_id}.")
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "error": "bgp_check_in_progress",
+            "connector_id": self.connector_id,
+            "started_at": self.started_at,
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+class BgpStatusCheckTimedOut(RuntimeError):
+    def __init__(self, connector_id: int, started_at: str, retry_after_seconds: int = 1):
+        self.connector_id = int(connector_id)
+        self.started_at = clean_text(started_at)
+        self.retry_after_seconds = max(1, int(retry_after_seconds))
+        super().__init__(f"A checagem BGP excedeu o prazo para o conector {self.connector_id}.")
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "check_state": "timed_out",
+            "error": "bgp_check_timeout",
+            "connector_id": self.connector_id,
+            "started_at": self.started_at,
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+def bgp_status_check_timeout_seconds() -> int:
+    try:
+        configured = int(os.getenv("GMJFLOW_BGP_STATUS_CHECK_TIMEOUT_SECONDS", "45"))
+    except ValueError:
+        configured = 45
+    return max(5, min(configured, 300))
+
+
+def cleanup_bgp_status_check_locks(now_monotonic: float | None = None) -> int:
+    """Drop only inactive connector locks which have not been reused recently."""
+    now_value = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    removed = 0
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        stale_ids = [
+            connector_id
+            for connector_id, entry in BGP_STATUS_CHECK_LOCKS.items()
+            if not entry["lock"].locked()
+            and now_value - float(entry.get("last_used_monotonic") or 0.0) >= 300.0
+        ]
+        for connector_id in stale_ids:
+            BGP_STATUS_CHECK_LOCKS.pop(connector_id, None)
+            removed += 1
+    return removed
+
+
+def acquire_bgp_status_check_lock(connector_id: int, owner: str = "") -> dict[str, Any]:
+    connector_key = int(connector_id)
+    now_monotonic = time.monotonic()
+    cleanup_bgp_status_check_locks(now_monotonic)
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(connector_key)
+        if entry is None:
+            entry = {
+                "lock": threading.Lock(),
+                "token": "",
+                "state": "idle",
+                "future": None,
+                "completed_monotonic": 0.0,
+                "started_at": "",
+                "owner": "",
+                "expires_at": "",
+                "expires_monotonic": 0.0,
+                "last_used_monotonic": now_monotonic,
+            }
+            BGP_STATUS_CHECK_LOCKS[connector_key] = entry
+        if not entry["lock"].acquire(blocking=False):
+            raise BgpStatusCheckInProgress(connector_key, entry)
+        timeout_seconds = bgp_status_check_timeout_seconds()
+        started = datetime.now(timezone.utc)
+        token = uuid.uuid4().hex
+        entry.update(
+            {
+                "token": token,
+                "state": "running",
+                "future": None,
+                "completed_monotonic": 0.0,
+                "started_at": started.isoformat(),
+                "owner": clean_text(owner) or f"thread:{threading.current_thread().name}:{threading.get_ident()}",
+                "expires_at": (started + timedelta(seconds=timeout_seconds)).isoformat(),
+                "expires_monotonic": now_monotonic + timeout_seconds,
+                "last_used_monotonic": now_monotonic,
+            }
+        )
+        return {
+            "connector_id": connector_key,
+            "token": token,
+            "started_at": entry["started_at"],
+            "owner": entry["owner"],
+            "expires_at": entry["expires_at"],
+            "expires_monotonic": entry["expires_monotonic"],
+        }
+
+
+def release_bgp_status_check_lock(connector_id: int, token: str) -> bool:
+    connector_key = int(connector_id)
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        current = BGP_STATUS_CHECK_LOCKS.get(connector_key)
+        if current is None or not token or clean_text(current.get("token")) != clean_text(token):
+            return False
+        future = current.get("future")
+        if isinstance(future, Future) and not future.done():
+            return False
+        if current["lock"].locked():
+            current["lock"].release()
+        current.update(
+            {
+                "token": "",
+                "state": "idle",
+                "future": None,
+                "completed_monotonic": 0.0,
+                "started_at": "",
+                "owner": "",
+                "expires_at": "",
+                "expires_monotonic": 0.0,
+                "last_used_monotonic": time.monotonic(),
+            }
+        )
+        return True
+
+
+def bgp_status_check_future_done(connector_id: int, token: str, future: Future) -> None:
+    should_release = False
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(int(connector_id))
+        if entry is None or clean_text(entry.get("token")) != clean_text(token):
+            return
+        entry["completed_monotonic"] = time.monotonic()
+        should_release = clean_text(entry.get("state")) == "timed_out"
+    if should_release:
+        release_bgp_status_check_lock(connector_id, token)
+
+
+def start_bgp_status_check_executor() -> ThreadPoolExecutor:
+    """Return the single bounded executor used for every BGP health check.
+
+    The executor is created once during application startup (or lazily when
+    automatic checks are disabled) and is shut down by the application
+    shutdown hook. Connector checks never create private executors.
+    """
+    global BGP_STATUS_CHECK_EXECUTOR, BGP_STATUS_CHECK_EXECUTOR_WORKERS
+    with BGP_STATUS_CHECK_EXECUTOR_GUARD:
+        if BGP_STATUS_CHECK_EXECUTOR is None:
+            workers = bgp_status_check_workers()
+            BGP_STATUS_CHECK_EXECUTOR = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="bgp-status",
+            )
+            BGP_STATUS_CHECK_EXECUTOR_WORKERS = workers
+        return BGP_STATUS_CHECK_EXECUTOR
+
+
+def shutdown_bgp_status_check_executor(wait: bool = True) -> None:
+    global BGP_STATUS_CHECK_EXECUTOR, BGP_STATUS_CHECK_EXECUTOR_WORKERS
+    with BGP_STATUS_CHECK_EXECUTOR_GUARD:
+        executor = BGP_STATUS_CHECK_EXECUTOR
+        BGP_STATUS_CHECK_EXECUTOR = None
+        BGP_STATUS_CHECK_EXECUTOR_WORKERS = 0
+    if executor is None:
+        return
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        executions = []
+        for connector_id, entry in BGP_STATUS_CHECK_LOCKS.items():
+            future = entry.get("future")
+            token = clean_text(entry.get("token"))
+            if not isinstance(future, Future) or not token:
+                continue
+            entry["state"] = "timed_out"
+            executions.append((connector_id, token, future))
+    for _connector_id, _token, future in executions:
+        future.cancel()
+    executor.shutdown(wait=wait)
+    for connector_id, token, _future in executions:
+        release_bgp_status_check_lock(connector_id, token)
+
+
+def submit_bgp_connector_status_check(connector: dict[str, Any], lease: dict[str, Any]) -> Future:
+    connector_id = int(connector["id"])
+    token = clean_text(lease.get("token"))
+    executor = start_bgp_status_check_executor()
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(connector_id)
+        if entry is None or clean_text(entry.get("token")) != token or entry.get("state") != "running":
+            raise BgpStatusCheckTimedOut(connector_id, clean_text(lease.get("started_at")))
+        future = executor.submit(bgp_connector_status, connector)
+        entry["future"] = future
+    future.add_done_callback(
+        lambda completed, connector_key=connector_id, execution_token=token: bgp_status_check_future_done(
+            connector_key,
+            execution_token,
+            completed,
+        )
+    )
+    return future
+
+
+def expire_bgp_status_check(connector_id: int, lease: dict[str, Any], future: Future) -> BgpStatusCheckTimedOut:
+    global BGP_STATUS_CHECK_EXPIRED_TOTAL
+    token = clean_text(lease.get("token"))
+    matched = False
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(int(connector_id))
+        if entry is not None and clean_text(entry.get("token")) == token:
+            entry["state"] = "timed_out"
+            BGP_STATUS_CHECK_EXPIRED_TOTAL += 1
+            matched = True
+    if matched:
+        future.cancel()
+        if future.done():
+            release_bgp_status_check_lock(connector_id, token)
+        logger.warning(
+            "Checagem BGP expirou connector_id=%s token=%s active_checks=%s expired_total=%s",
+            connector_id,
+            token,
+            bgp_active_status_check_count(),
+            BGP_STATUS_CHECK_EXPIRED_TOTAL,
+        )
+    return BgpStatusCheckTimedOut(connector_id, clean_text(lease.get("started_at")), 1)
+
+
+def await_bgp_connector_status_check(
+    connector: dict[str, Any],
+    lease: dict[str, Any],
+    future: Future,
+) -> dict[str, Any]:
+    connector_id = int(connector["id"])
+    remaining = max(0.0, float(lease.get("expires_monotonic") or 0.0) - time.monotonic())
+    try:
+        result = future.result(timeout=remaining)
+    except CancelledError as exc:
+        raise expire_bgp_status_check(connector_id, lease, future) from exc
+    except FutureTimeoutError as exc:
+        raise expire_bgp_status_check(connector_id, lease, future) from exc
+    token = clean_text(lease.get("token"))
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(connector_id)
+        if entry is None or clean_text(entry.get("token")) != token:
+            valid = False
+        else:
+            completed = float(entry.get("completed_monotonic") or time.monotonic())
+            valid = entry.get("state") == "running" and completed <= float(entry.get("expires_monotonic") or 0.0)
+    if not valid:
+        raise expire_bgp_status_check(connector_id, lease, future)
+    return result
+
+
+def bgp_active_status_check_count() -> int:
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        return sum(1 for entry in BGP_STATUS_CHECK_LOCKS.values() if entry["lock"].locked())
+
+
+def bgp_status_check_metadata(connector_id: int) -> dict[str, Any] | None:
+    with BGP_STATUS_CHECK_LOCKS_GUARD:
+        entry = BGP_STATUS_CHECK_LOCKS.get(int(connector_id))
+        if entry is None or not entry["lock"].locked():
+            return None
+        expires_monotonic = float(entry.get("expires_monotonic") or time.monotonic())
+        internal_state = clean_text(entry.get("state"))
+        return {
+            "state": "timed_out" if internal_state == "timed_out" else "check_in_progress",
+            "connector_id": int(connector_id),
+            "token": clean_text(entry.get("token")),
+            "started_at": clean_text(entry.get("started_at")),
+            "owner": clean_text(entry.get("owner")),
+            "expires_at": clean_text(entry.get("expires_at")),
+            "retry_after_seconds": max(1, int(expires_monotonic - time.monotonic() + 0.999)),
+        }
+
+
 def check_bgp_connector_readiness(conn: sqlite3.Connection, connector: dict[str, Any]) -> dict[str, Any]:
     """Run a fresh check and persist it through the caller's SQLite connection."""
-    acquired = BGP_STATUS_CHECK_LOCK.acquire(blocking=False)
+    connector_id = int(connector["id"])
+    lease = acquire_bgp_status_check_lock(connector_id)
+    future: Future | None = None
     try:
-        if not acquired:
-            raise BgpStatusCheckInProgress("Ja existe uma checagem BGP/FlowSpec em andamento.")
-        raw_status = bgp_connector_status(connector)
-    except Exception as exc:
-        error = f"Falha ao verificar conector BGP: {exc}"
-        raw_status = {
-            "connector_id": connector["id"],
-            "name": connector.get("name") or "",
-            "pipes": {"ok": False, "status": "unknown"},
-            "bgp_state": "unknown",
-            "flowspec_state": "unknown",
-            "errors": [error],
-            "messages": [error],
-        }
+        future = submit_bgp_connector_status_check(connector, lease)
+        try:
+            raw_status = await_bgp_connector_status_check(connector, lease, future)
+        except BgpStatusCheckTimedOut:
+            raise
+        except Exception as exc:
+            error = f"Falha ao verificar conector BGP: {exc}"
+            raw_status = {
+                "connector_id": connector["id"],
+                "name": connector.get("name") or "",
+                "pipes": {"ok": False, "status": "unknown"},
+                "bgp_state": "unknown",
+                "flowspec_state": "unknown",
+                "errors": [error],
+                "messages": [error],
+            }
+        status = normalize_bgp_connector_status_snapshot(connector, raw_status)
+        persist_bgp_connector_status_snapshot(conn, connector, status)
+        readiness = evaluate_bgp_connector_readiness(status)
+        return {**readiness, "status": status}
     finally:
-        if acquired:
-            BGP_STATUS_CHECK_LOCK.release()
-    status = normalize_bgp_connector_status_snapshot(connector, raw_status)
-    persist_bgp_connector_status_snapshot(conn, connector, status)
-    readiness = evaluate_bgp_connector_readiness(status)
-    return {**readiness, "status": status}
+        release_bgp_status_check_lock(connector_id, clean_text(lease.get("token")))
 
 
 def mark_connector_advertisements_peer_down(
@@ -8935,10 +9236,6 @@ def mark_connector_advertisements_peer_down(
     return changed
 
 
-class BgpStatusCheckInProgress(RuntimeError):
-    pass
-
-
 def persisted_bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     snapshot = connector.get("status_snapshot")
     if not isinstance(snapshot, dict) or not snapshot:
@@ -8992,13 +9289,33 @@ def bgp_connector_for_status_check(connector_id_or_connector: int | dict[str, An
     return connector
 
 
-def check_and_persist_bgp_connector_status(connector_id_or_connector: int | dict[str, Any]) -> dict[str, Any]:
-    if not BGP_STATUS_CHECK_LOCK.acquire(blocking=False):
-        raise BgpStatusCheckInProgress("Ja existe uma checagem BGP/FlowSpec em andamento.")
+def begin_bgp_connector_status_check(
+    connector_id_or_connector: int | dict[str, Any],
+    owner: str = "",
+) -> dict[str, Any]:
+    connector = bgp_connector_for_status_check(connector_id_or_connector)
+    connector_id = int(connector["id"])
+    lease = acquire_bgp_status_check_lock(connector_id, owner)
     try:
-        connector = bgp_connector_for_status_check(connector_id_or_connector)
+        future = submit_bgp_connector_status_check(connector, lease)
+    except Exception:
+        release_bgp_status_check_lock(connector_id, clean_text(lease.get("token")))
+        raise
+    return {"connector": connector, "lease": lease, "future": future}
+
+
+def finish_bgp_connector_status_check(execution: dict[str, Any]) -> dict[str, Any]:
+    connector = execution["connector"]
+    lease = execution["lease"]
+    future = execution["future"]
+    connector_id = int(connector["id"])
+    try:
         try:
-            status = bgp_connector_status(connector)
+            status = await_bgp_connector_status_check(connector, lease, future)
+        except BgpStatusCheckTimedOut:
+            # Coordination timeouts describe the verification infrastructure,
+            # not peer health. Keep the last valid snapshot and announcements.
+            raise
         except Exception as exc:
             disabled = not connector.get("router_check_enabled")
             error = f"Falha ao verificar conector BGP: {exc}"
@@ -9023,7 +9340,12 @@ def check_and_persist_bgp_connector_status(connector_id_or_connector: int | dict
             conn.commit()
         return status
     finally:
-        BGP_STATUS_CHECK_LOCK.release()
+        release_bgp_status_check_lock(connector_id, clean_text(lease.get("token")))
+
+
+def check_and_persist_bgp_connector_status(connector_id_or_connector: int | dict[str, Any]) -> dict[str, Any]:
+    execution = begin_bgp_connector_status_check(connector_id_or_connector)
+    return finish_bgp_connector_status_check(execution)
 
 
 def bgp_auto_check_enabled() -> bool:
@@ -9037,10 +9359,21 @@ def bgp_check_interval_seconds() -> int:
         return 30
 
 
+def bgp_status_check_workers(connector_count: int | None = None) -> int:
+    try:
+        configured = int(os.getenv("GMJFLOW_BGP_STATUS_CHECK_WORKERS", "4"))
+    except ValueError:
+        configured = 4
+    workers = max(1, min(configured, 16))
+    if connector_count is not None and int(connector_count) > 0:
+        return min(workers, int(connector_count))
+    return workers
+
+
 def run_bgp_connector_status_checks_once() -> dict[str, int | bool]:
     if not BGP_STATUS_CHECK_CYCLE_LOCK.acquire(blocking=False):
-        return {"checked": 0, "failed": 0, "skipped": 1, "concurrent": True}
-    stats: dict[str, int | bool] = {"checked": 0, "failed": 0, "skipped": 0, "concurrent": False}
+        return {"checked": 0, "failed": 0, "skipped": 1, "expired": 0, "active": bgp_active_status_check_count(), "concurrent": True}
+    stats: dict[str, int | bool] = {"checked": 0, "failed": 0, "skipped": 0, "expired": 0, "active": 0, "concurrent": False}
     try:
         ensure_sensor_db()
         with sqlite_connection() as conn:
@@ -9050,15 +9383,38 @@ def run_bgp_connector_status_checks_once() -> dict[str, int | bool]:
                     "SELECT id FROM bgp_connectors WHERE enabled = 1 AND is_active = 1 ORDER BY id"
                 ).fetchall()
             ]
+        if not connector_ids:
+            return stats
+        executions: list[dict[str, Any]] = []
         for connector_id in connector_ids:
             try:
-                check_and_persist_bgp_connector_status(connector_id)
-                stats["checked"] = int(stats["checked"]) + 1
+                executions.append(begin_bgp_connector_status_check(connector_id, owner="automatic"))
             except BgpStatusCheckInProgress:
                 stats["skipped"] = int(stats["skipped"]) + 1
             except Exception as exc:
                 stats["failed"] = int(stats["failed"]) + 1
+                logger.warning("Falha ao iniciar checagem BGP connector_id=%s: %s", connector_id, exc)
+        stats["active"] = bgp_active_status_check_count()
+        for execution in executions:
+            connector_id = int(execution["connector"]["id"])
+            try:
+                finish_bgp_connector_status_check(execution)
+                stats["checked"] = int(stats["checked"]) + 1
+            except BgpStatusCheckTimedOut:
+                stats["expired"] = int(stats["expired"]) + 1
+            except Exception as exc:
+                stats["failed"] = int(stats["failed"]) + 1
                 logger.warning("Falha na checagem BGP connector_id=%s: %s", connector_id, exc)
+        stats["active"] = bgp_active_status_check_count()
+        logger.info(
+            "Ciclo BGP concluido checked=%s failed=%s skipped=%s expired=%s active=%s executor_workers=%s",
+            stats["checked"],
+            stats["failed"],
+            stats["skipped"],
+            stats["expired"],
+            stats["active"],
+            BGP_STATUS_CHECK_EXECUTOR_WORKERS,
+        )
         return stats
     finally:
         BGP_STATUS_CHECK_CYCLE_LOCK.release()
@@ -13521,8 +13877,13 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
     owns_connection = conn is None
     if conn is None:
         conn = sqlite_connection()
+    central_config = None
     try:
         raw_settings = get_persisted_system_settings(conn)
+        try:
+            central_config = central_ai_effective_config(conn, "mitigation_analysis")
+        except sqlite3.OperationalError:
+            central_config = None
     finally:
         if owns_connection:
             conn.close()
@@ -13549,7 +13910,7 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
     persisted_enabled = setting_bool(raw_settings, "ai_mitigation_enabled") if "ai_mitigation_enabled" in raw_settings else None
     source = settings_source["ai_mitigation_enabled"]
     overrides_env = persisted_enabled is not None and persisted_enabled != env_enabled
-    return {
+    config = {
         "enabled": setting_bool(settings, "ai_mitigation_enabled"),
         "source": source,
         "config_source": source,
@@ -13574,6 +13935,16 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "allow_auto": setting_bool(settings, "ai_allow_auto"),
         "require_policy_validation": setting_bool(settings, "ai_require_policy_validation"),
     }
+    if central_config is not None:
+        config.update(central_config)
+        config.update({
+            "source": "ai_routes",
+            "config_source": "ai_routes",
+            "centralized": True,
+            "allow_auto": False,
+            "require_policy_validation": True,
+        })
+    return config
 
 
 def system_memory_gb() -> dict[str, float | None]:
@@ -14427,6 +14798,24 @@ def call_ollama_mitigation_ai(config: dict[str, Any], prompt: str) -> str:
     return clean_text(payload.get("response") or payload.get("message", {}).get("content") or "")
 
 
+def call_routed_mitigation_ai(config: dict[str, Any], prompt: str, anomaly_id: int | None = None) -> str:
+    if not config.get("centralized"):
+        return call_ollama_mitigation_ai(config, prompt)
+    with sqlite_connection() as conn:
+        result = execute_ai_route(
+            conn,
+            "mitigation_analysis",
+            prompt,
+            system_prompt=AI_SYSTEM_PROMPT,
+            schema=MITIGATION_SCHEMA,
+            anomaly_id=anomaly_id,
+        )
+        conn.commit()
+    if not result.get("ok"):
+        raise RuntimeError(clean_text(result.get("error_message")) or "Todos os providers de IA falharam")
+    return clean_text(result.get("content"))
+
+
 def normalize_mitigation_ai_response(value: dict[str, Any] | str, request_payload: dict[str, Any]) -> dict[str, Any]:
     parsed = extract_json_object(value) if isinstance(value, str) else dict(value or {})
     candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
@@ -15122,7 +15511,7 @@ def anomaly_ai_analysis_result(
     response_json: dict[str, Any]
     error_message = ""
     try:
-        response_text = call_ollama_mitigation_ai(config, prompt)
+        response_text = call_routed_mitigation_ai(config, prompt, event_id)
         response_json = normalize_mitigation_ai_response(response_text, request_payload)
         logger.info(
             "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=true error_type= error_message=",
@@ -15171,6 +15560,531 @@ def anomaly_ai_analysis_result(
     return saved
 
 
+def ai_actor(request: Request) -> str:
+    user = getattr(request.state, "user", None) or {}
+    return clean_text(user.get("username")) or clean_text(user.get("role")) or "operator"
+
+
+def ai_http_error(exc: Exception, status_code: int = 400) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=clean_text(exc) or "Falha na configuração de IA")
+
+
+@app.get("/api/ai/overview")
+def ai_overview(request: Request):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return centralized_ai_overview(conn, system_memory_gb())
+
+
+@app.get("/api/ai/providers")
+def ai_provider_list(request: Request):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_ai_providers(conn), "types": sorted(AI_PROVIDER_TYPES)}
+
+
+@app.get("/api/ai/providers/{provider_id}")
+def ai_provider_detail(request: Request, provider_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        item = get_ai_provider(conn, provider_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Provider não encontrado")
+    return item
+
+
+@app.post("/api/ai/providers")
+def ai_provider_create(request: Request, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = save_ai_provider(conn, payload, ai_actor(request))
+            conn.commit()
+            return item
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.put("/api/ai/providers/{provider_id}")
+def ai_provider_update(request: Request, provider_id: int, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            if get_ai_provider(conn, provider_id) is None:
+                raise HTTPException(status_code=404, detail="Provider não encontrado")
+            item = save_ai_provider(conn, payload, ai_actor(request), provider_id)
+            conn.commit()
+            return item
+    except HTTPException:
+        raise
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.delete("/api/ai/providers/{provider_id}")
+def ai_provider_remove(request: Request, provider_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            delete_ai_provider(conn, provider_id, ai_actor(request))
+            conn.commit()
+        return {"ok": True}
+    except ValueError as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.post("/api/ai/providers/{provider_id}/duplicate")
+def ai_provider_duplicate(request: Request, provider_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = duplicate_ai_provider(conn, provider_id, ai_actor(request))
+            conn.commit()
+            return item
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.post("/api/ai/providers/{provider_id}/toggle")
+def ai_provider_toggle(request: Request, provider_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = toggle_ai_provider(conn, provider_id, ai_actor(request))
+            conn.commit()
+            return item
+    except ValueError as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.post("/api/ai/providers/{provider_id}/test")
+def ai_provider_connection_test(request: Request, provider_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = run_ai_provider_test(conn, provider_id, ai_actor(request))
+            conn.commit()
+            return result
+    except ValueError as exc:
+        raise ai_http_error(exc, 404) from exc
+
+
+@app.get("/api/ai/providers/{provider_id}/models")
+def ai_provider_models(request: Request, provider_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if get_ai_provider(conn, provider_id) is None:
+            raise HTTPException(status_code=404, detail="Provider não encontrado")
+        return {"items": list_provider_models(conn, provider_id)}
+
+
+@app.post("/api/ai/providers/{provider_id}/models")
+def ai_provider_model_create(request: Request, provider_id: int, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    model = clean_text(payload.get("model") or payload.get("name"))
+    if not model:
+        raise HTTPException(status_code=400, detail="Modelo obrigatório")
+    with sqlite_connection() as conn:
+        if get_ai_provider(conn, provider_id) is None:
+            raise HTTPException(status_code=404, detail="Provider não encontrado")
+        now = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO ai_models (
+                provider_id, name, display_name, enabled, manually_configured,
+                state, created_at, updated_at
+            ) VALUES (?, ?, ?, 1, 1, 'configured', ?, ?)
+            ON CONFLICT(provider_id, name) DO UPDATE SET
+                manually_configured = 1,
+                enabled = 1,
+                state = 'configured',
+                updated_at = excluded.updated_at
+            """,
+            (provider_id, model, model, now, now),
+        )
+        audit_ai_action(conn, ai_actor(request), "register_model", "ai_provider", provider_id, {"model": model})
+        conn.commit()
+        return {"items": list_provider_models(conn, provider_id)}
+
+
+@app.post("/api/ai/providers/{provider_id}/models/refresh")
+def ai_provider_models_refresh(request: Request, provider_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            items = refresh_provider_models(conn, provider_id, ai_actor(request))
+            conn.commit()
+            return {"items": items}
+    except Exception as exc:
+        raise ai_http_error(exc, 502) from exc
+
+
+def ai_model_pull_public(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"cancel_event", "thread"}
+    }
+
+
+def ai_model_pull_worker(job_id: str, provider_id: int, model: str, actor: str) -> None:
+    with AI_MODEL_PULL_LOCK:
+        job = AI_MODEL_PULL_JOBS.get(job_id)
+        if job is None:
+            return
+        job["status"] = "downloading"
+        job["started_at"] = utc_now_iso()
+        cancel_event = job["cancel_event"]
+    config: dict[str, Any] = {}
+    try:
+        with sqlite_connection() as conn:
+            config = get_ai_provider(conn, provider_id, runtime=True) or {}
+        if clean_text(config.get("provider_type")) != "ollama":
+            raise ValueError("Download gerenciado está disponível somente para provider Ollama")
+        base_url = clean_text(config.get("base_url")).rstrip("/")
+        if not base_url:
+            raise ValueError("Base URL do Ollama não configurada")
+        body = json.dumps({"name": model, "stream": True}).encode("utf-8")
+        pull_request = urllib.request.Request(
+            f"{base_url}/api/pull",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(pull_request, timeout=max(30, int(config.get("timeout_seconds") or 30))) as response:
+            for raw_line in response:
+                if cancel_event.is_set():
+                    with AI_MODEL_PULL_LOCK:
+                        job["status"] = "cancelled"
+                        job["message"] = "Download cancelado pelo operador."
+                    return
+                try:
+                    progress = json.loads(raw_line.decode("utf-8", errors="replace") or "{}")
+                except json.JSONDecodeError:
+                    continue
+                total = int(progress.get("total") or 0)
+                completed = int(progress.get("completed") or 0)
+                with AI_MODEL_PULL_LOCK:
+                    job["total_bytes"] = total
+                    job["completed_bytes"] = completed
+                    job["progress_percent"] = round(completed * 100 / total, 1) if total else 0
+                    job["message"] = clean_text(progress.get("status")) or "Baixando modelo..."
+        if cancel_event.is_set():
+            with AI_MODEL_PULL_LOCK:
+                job["status"] = "cancelled"
+                job["message"] = "Download cancelado pelo operador."
+            return
+        with sqlite_connection() as conn:
+            refresh_provider_models(conn, provider_id, actor)
+            conn.execute(
+                "UPDATE ai_models SET downloaded_at = ?, state = 'available', updated_at = ? WHERE provider_id = ? AND name = ?",
+                (utc_now_iso(), utc_now_iso(), provider_id, model),
+            )
+            audit_ai_action(conn, actor, "pull_model", "ai_provider", provider_id, {"model": model})
+            conn.commit()
+        with AI_MODEL_PULL_LOCK:
+            job["status"] = "completed"
+            job["progress_percent"] = 100
+            job["message"] = f"Modelo {model} baixado."
+    except Exception as exc:
+        with AI_MODEL_PULL_LOCK:
+            job["status"] = "failed"
+            job["message"] = sanitize_error(exc, [clean_text(config.get("api_key"))])
+    finally:
+        with AI_MODEL_PULL_LOCK:
+            job["finished_at"] = utc_now_iso()
+
+
+@app.post("/api/ai/providers/{provider_id}/models/pull")
+def ai_provider_model_pull(request: Request, provider_id: int, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    model = clean_text(payload.get("model") or payload.get("name"))
+    if not model:
+        raise HTTPException(status_code=400, detail="Modelo obrigatório")
+    with sqlite_connection() as conn:
+        provider = get_ai_provider(conn, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider não encontrado")
+    if provider.get("provider_type") != "ollama":
+        raise HTTPException(status_code=400, detail="Download gerenciado está disponível somente para provider Ollama")
+    job_id = hashlib.sha256(f"{provider_id}|{model}|{time.time_ns()}".encode("utf-8")).hexdigest()[:20]
+    job = {
+        "job_id": job_id,
+        "provider_id": provider_id,
+        "model": model,
+        "status": "queued",
+        "progress_percent": 0,
+        "completed_bytes": 0,
+        "total_bytes": 0,
+        "message": "Download enfileirado.",
+        "created_at": utc_now_iso(),
+        "started_at": "",
+        "finished_at": "",
+        "cancel_event": threading.Event(),
+    }
+    thread = threading.Thread(
+        target=ai_model_pull_worker,
+        args=(job_id, provider_id, model, ai_actor(request)),
+        name=f"gmj-flow-ai-model-{job_id}",
+        daemon=True,
+    )
+    job["thread"] = thread
+    with AI_MODEL_PULL_LOCK:
+        AI_MODEL_PULL_JOBS[job_id] = job
+    thread.start()
+    return ai_model_pull_public(job)
+
+
+@app.get("/api/ai/providers/{provider_id}/models/pull/{job_id}")
+def ai_provider_model_pull_status(request: Request, provider_id: int, job_id: str):
+    require_admin(request)
+    with AI_MODEL_PULL_LOCK:
+        job = AI_MODEL_PULL_JOBS.get(job_id)
+        if job is None or int(job.get("provider_id") or 0) != int(provider_id):
+            raise HTTPException(status_code=404, detail="Download não encontrado")
+        return ai_model_pull_public(job)
+
+
+@app.post("/api/ai/providers/{provider_id}/models/pull/{job_id}/cancel")
+def ai_provider_model_pull_cancel(request: Request, provider_id: int, job_id: str):
+    require_admin(request)
+    with AI_MODEL_PULL_LOCK:
+        job = AI_MODEL_PULL_JOBS.get(job_id)
+        if job is None or int(job.get("provider_id") or 0) != int(provider_id):
+            raise HTTPException(status_code=404, detail="Download não encontrado")
+        job["cancel_event"].set()
+        if job.get("status") == "queued":
+            job["status"] = "cancelled"
+        job["message"] = "Cancelamento solicitado."
+        return ai_model_pull_public(job)
+
+
+@app.delete("/api/ai/providers/{provider_id}/models/{model_name:path}")
+def ai_provider_model_remove(request: Request, provider_id: int, model_name: str):
+    require_admin(request)
+    ensure_sensor_db()
+    model = clean_text(urllib.parse.unquote(model_name))
+    with sqlite_connection() as conn:
+        config = get_ai_provider(conn, provider_id, runtime=True)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Provider não encontrado")
+    if config.get("provider_type") != "ollama":
+        with sqlite_connection() as conn:
+            row = conn.execute(
+                "SELECT manually_configured FROM ai_models WHERE provider_id = ? AND name = ?",
+                (provider_id, model),
+            ).fetchone()
+            if row is None or not sqlite_bool(row["manually_configured"]):
+                raise HTTPException(status_code=400, detail="Somente modelos cadastrados manualmente podem ser removidos deste provider")
+            conn.execute("DELETE FROM ai_models WHERE provider_id = ? AND name = ?", (provider_id, model))
+            audit_ai_action(conn, ai_actor(request), "remove_model", "ai_provider", provider_id, {"model": model})
+            conn.commit()
+        return {"ok": True, "model": model}
+    try:
+        body = json.dumps({"name": model}).encode("utf-8")
+        delete_request = urllib.request.Request(
+            f"{clean_text(config.get('base_url')).rstrip('/')}/api/delete",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(delete_request, timeout=max(10, int(config.get("timeout_seconds") or 30))) as response:
+            response.read()
+        with sqlite_connection() as conn:
+            conn.execute("DELETE FROM ai_models WHERE provider_id = ? AND name = ?", (provider_id, model))
+            audit_ai_action(conn, ai_actor(request), "remove_model", "ai_provider", provider_id, {"model": model})
+            conn.commit()
+        return {"ok": True, "model": model}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha ao remover modelo Ollama: {sanitize_error(exc, [clean_text(config.get('api_key'))])}") from exc
+
+
+@app.get("/api/ai/models")
+def ai_model_list(request: Request, provider_id: int | None = None):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_provider_models(conn, provider_id)}
+
+
+@app.get("/api/ai/routes")
+def ai_route_list(request: Request):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_ai_routes(conn), "functions": [{"key": key, "name": name} for key, name in AI_FUNCTIONS]}
+
+
+@app.put("/api/ai/routes/{function_key}")
+def ai_route_update(request: Request, function_key: str, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = save_ai_route(conn, function_key, payload, ai_actor(request))
+            conn.commit()
+            return item
+    except ValueError as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.get("/api/ai/prompts")
+def ai_prompt_list(request: Request):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_ai_prompts(conn)}
+
+
+@app.post("/api/ai/prompts")
+def ai_prompt_create(request: Request, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = save_ai_prompt(conn, payload, ai_actor(request))
+            conn.commit()
+            return item
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.put("/api/ai/prompts/{prompt_id}")
+def ai_prompt_update(request: Request, prompt_id: int, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = save_ai_prompt(conn, payload, ai_actor(request), prompt_id)
+            conn.commit()
+            return item
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.post("/api/ai/prompts/{prompt_id}/duplicate")
+def ai_prompt_duplicate(request: Request, prompt_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        source = next((item for item in list_ai_prompts(conn) if int(item["id"]) == int(prompt_id)), None)
+        if source is None:
+            raise HTTPException(status_code=404, detail="Prompt não encontrado")
+        existing_names = {clean_text(item.get("name")) for item in list_ai_prompts(conn)}
+        base_name = f"{source['name']} (cópia)"
+        copy_name = base_name
+        copy_index = 2
+        while copy_name in existing_names:
+            copy_name = f"{base_name} {copy_index}"
+            copy_index += 1
+        source["name"] = copy_name
+        try:
+            item = save_ai_prompt(conn, source, ai_actor(request))
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            raise ai_http_error(exc) from exc
+        conn.commit()
+        return item
+
+
+@app.get("/api/ai/prompts/{prompt_id}/versions")
+def ai_prompt_version_list(request: Request, prompt_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": prompt_versions(conn, prompt_id)}
+
+
+@app.post("/api/ai/prompts/{prompt_id}/restore/{version}")
+def ai_prompt_restore(request: Request, prompt_id: int, version: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            item = restore_prompt_version(conn, prompt_id, version, ai_actor(request))
+            conn.commit()
+            return item
+    except (ValueError, sqlite3.IntegrityError) as exc:
+        raise ai_http_error(exc) from exc
+
+
+@app.post("/api/ai/prompts/preview")
+def ai_prompt_preview(request: Request, payload: dict[str, Any]):
+    template = clean_text(payload.get("template"))
+    return {"rendered": render_prompt(template, dict(payload.get("variables") or {}))}
+
+
+@app.get("/api/ai/settings/central")
+def ai_central_settings(request: Request):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return global_ai_settings(conn)
+
+
+@app.put("/api/ai/settings/central")
+def ai_central_settings_update(request: Request, payload: dict[str, Any]):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        settings = update_global_ai_settings(conn, payload, ai_actor(request))
+        conn.commit()
+        return settings
+
+
+@app.post("/api/ai/playground")
+def ai_playground(request: Request, payload: dict[str, Any]):
+    ensure_sensor_db()
+    provider_id = int(payload.get("provider_id") or 0)
+    if not provider_id:
+        raise HTTPException(status_code=400, detail="Provider obrigatório")
+    function_key = clean_text(payload.get("function_key")) or "operator_explanation"
+    if function_key not in {key for key, _ in AI_FUNCTIONS}:
+        raise HTTPException(status_code=400, detail="Função de IA inválida")
+    with sqlite_connection() as conn:
+        result = execute_ai_playground(
+            conn,
+            provider_id,
+            function_key,
+            clean_text(payload.get("prompt")),
+            model=clean_text(payload.get("model")),
+            context=clean_text(payload.get("context")),
+            temperature=payload.get("temperature"),
+            timeout_seconds=payload.get("timeout_seconds"),
+            structured=bool(payload.get("structured", False)),
+        )
+        conn.commit()
+        return result
+
+
+@app.get("/api/ai/history")
+def ai_request_history(request: Request, limit: int = Query(200, ge=1, le=1000)):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        items = ai_history(conn, limit)
+    user = getattr(request.state, "user", None) or {}
+    if clean_text(user.get("role")) != "admin":
+        items = [
+            {
+                **item,
+                "prompt_snapshot": sanitize_ai_content(clean_text(item.get("prompt_snapshot")), "mask_ips", external_provider=True),
+                "response_snapshot": sanitize_ai_content(clean_text(item.get("response_snapshot")), "mask_ips", external_provider=True),
+            }
+            for item in items
+        ]
+    return {"items": items}
+
+
+@app.get("/api/ai/audit")
+def ai_audit_log(request: Request, limit: int = Query(200, ge=1, le=1000)):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": ai_audit_history(conn, limit)}
+
+
 @app.get("/api/ai/profiles")
 def ai_profiles(request: Request):
     require_admin(request)
@@ -15201,6 +16115,50 @@ def ai_status(request: Request):
     }
 
 
+def sync_legacy_ai_payload_to_central(conn: sqlite3.Connection, values: dict[str, str], actor: str) -> None:
+    provider_type = clean_text(values.get("ai_provider")).lower().replace("-", "_")
+    if provider_type in {"llama.cpp", "llamacpp"}:
+        provider_type = "openai_compatible"
+    if provider_type not in AI_PROVIDER_TYPES:
+        provider_type = "openai_compatible"
+    existing = next((item for item in list_ai_providers(conn) if item.get("legacy_key") == "legacy_default"), None)
+    if existing is None:
+        existing = next((item for item in list_ai_providers(conn) if item.get("provider_type") == provider_type), None)
+    provider_payload = {
+        **(existing or {}),
+        "name": clean_text((existing or {}).get("name")) or ("Ollama Produção" if provider_type == "ollama" else "Provider migrado"),
+        "provider_type": provider_type,
+        "enabled": sqlite_bool(values.get("ai_mitigation_enabled")),
+        "base_url": clean_text(values.get("ai_base_url")),
+        "default_model": clean_text(values.get("ai_model")),
+        "timeout_seconds": int(values.get("ai_timeout_seconds") or 20),
+        "max_context_tokens": int(values.get("ai_max_context_chars") or 12000),
+        "max_output_tokens": int(values.get("ai_num_predict") or 160),
+        "custom_options": {
+            **dict((existing or {}).get("custom_options") or {}),
+            "keep_alive": clean_text(values.get("ai_keep_alive")) or "30m",
+            "model_profile": clean_text(values.get("ai_model_profile")) or "recommended",
+        },
+    }
+    provider_item = save_ai_provider(conn, provider_payload, actor, int(existing["id"]) if existing else None)
+    current_route = next(item for item in list_ai_routes(conn) if item["function_key"] == "mitigation_analysis")
+    save_ai_route(
+        conn,
+        "mitigation_analysis",
+        {
+            **current_route,
+            "enabled": sqlite_bool(values.get("ai_mitigation_enabled")),
+            "primary_provider_id": provider_item["id"],
+            "primary_model": clean_text(values.get("ai_model")),
+            "timeout_seconds": int(values.get("ai_timeout_seconds") or 20),
+            "max_context_chars": int(values.get("ai_max_context_chars") or 12000),
+            "max_top_flows": int(values.get("ai_max_top_flows") or 30),
+        },
+        actor,
+    )
+    update_global_ai_settings(conn, {"global_enabled": sqlite_bool(values.get("ai_mitigation_enabled"))}, actor)
+
+
 @app.post("/api/ai/settings")
 def save_ai_settings(request: Request, payload: AiSettingsPayload):
     require_admin(request)
@@ -15224,6 +16182,7 @@ def save_ai_settings(request: Request, payload: AiSettingsPayload):
     }
     with sqlite_connection() as conn:
         set_system_settings(conn, values)
+        sync_legacy_ai_payload_to_central(conn, values, ai_actor(request))
         conn.commit()
     return ai_status(request)
 
@@ -15234,27 +16193,16 @@ def ai_test(request: Request):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         config = ai_effective_config(conn)
-    if not config["enabled"]:
-        return {"ok": False, "latency_ms": 0, "provider": config["provider"], "model": config["selected_model"], "response_preview": "", "error_message": "IA desativada."}
-    try:
-        response_text, latency_ms = ai_provider_chat(config, "Responda somente JSON: {\"ok\": true, \"message\": \"pong\"}")
-        return {
-            "ok": True,
-            "latency_ms": latency_ms,
-            "provider": config["provider"],
-            "model": config["selected_model"],
-            "response_preview": response_text[:500],
-            "error_message": "",
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "latency_ms": 0,
-            "provider": config["provider"],
-            "model": config["selected_model"],
-            "response_preview": "",
-            "error_message": str(exc),
-        }
+        if not config["enabled"] or not config.get("provider_id"):
+            return {"ok": False, "latency_ms": 0, "provider": config["provider"], "model": config["selected_model"], "response_preview": "", "error_message": "IA desativada."}
+        result = run_ai_provider_test(conn, int(config["provider_id"]), ai_actor(request))
+        conn.commit()
+    return {
+        **result,
+        "provider": config.get("provider_name") or config["provider"],
+        "model": result.get("model") or config["selected_model"],
+        "error_message": result.get("error") or "",
+    }
 
 
 def system_run_command(args: list[str], timeout: float = 5.0) -> dict[str, Any]:
@@ -15521,6 +16469,7 @@ def system_ai_config(request: Request, payload: SystemAiConfigPayload):
     }
     with sqlite_connection() as conn:
         set_system_settings(conn, values)
+        sync_legacy_ai_payload_to_central(conn, values, ai_actor(request))
         conn.commit()
     return system_ai_status(request)
 
@@ -15629,7 +16578,9 @@ def system_setup_status(request: Request):
     container_by_name = {item["name"]: item for item in containers}
     with sqlite_connection() as conn:
         ai_config = ai_effective_config(conn)
-    ollama_models = ollama_models_from_config(ai_config)
+        ollama_provider = next((item for item in list_ai_providers(conn) if item.get("provider_type") == "ollama"), None)
+        ollama_runtime = get_ai_provider(conn, int(ollama_provider["id"]), runtime=True) if ollama_provider else None
+    ollama_models = ollama_models_from_config(ollama_runtime or {"base_url": ""})
     clickhouse = setup_clickhouse_status()
     sqlite_status = {"healthy": False, "path": str(sqlite_path())}
     try:
@@ -15680,6 +16631,7 @@ def system_setup_status(request: Request):
         "restart_policy": restart_policy,
         "systemd": systemd_status,
         "ai": {**ai_config, "allow_auto": False if ai_config.get("allow_auto") is False else ai_config.get("allow_auto")},
+        "ollama_provider": ollama_provider or {},
         "ollama": {
             "container_exists": "gmj-flow-ollama" in container_by_name,
             "running": bool(container_by_name.get("gmj-flow-ollama", {}).get("running")),
@@ -16138,6 +17090,12 @@ def attempt_bgp_announcement(
     current = fetch_bgp_announcement(conn, announcement_id, include_events=False)
     if current["status"] not in {"queued", "pending_approval"}:
         raise HTTPException(status_code=409, detail=f"Anuncio nao pode ser enviado no estado {current['status']}.")
+    # Readiness is side-effect free. A coordination timeout must happen before
+    # any announcement claim or transition so a late health-check worker cannot
+    # alter the pending announcement.
+    readiness = check_bgp_connector_readiness(conn, connector)
+    details = readiness.get("details") if isinstance(readiness.get("details"), dict) else {}
+    peer_state = clean_text(readiness.get("peer_state")) or "not_verified"
     if current["status"] == "pending_approval":
         transition_bgp_announcement(
             conn,
@@ -16154,9 +17112,6 @@ def attempt_bgp_announcement(
     # write.  A crash can therefore never leave an untracked announcement.
     conn.commit()
     claim_token = persist_bgp_send_intent(conn, announcement_id, created_by, command)
-    readiness = check_bgp_connector_readiness(conn, connector)
-    details = readiness.get("details") if isinstance(readiness.get("details"), dict) else {}
-    peer_state = clean_text(readiness.get("peer_state")) or "not_verified"
     if not readiness.get("ready"):
         failure_status = clean_text(readiness.get("failure_status")) or "peer_down"
         reason = clean_text(readiness.get("reason")) or "peer_bgp_not_verified"
@@ -17233,7 +18188,13 @@ def get_bgp_connector_status(request: Request, connector_id: int):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         connector = fetch_bgp_connector(conn, connector_id)
-    return persisted_bgp_connector_status(connector)
+    status = persisted_bgp_connector_status(connector)
+    in_progress = bgp_status_check_metadata(connector_id)
+    return {
+        **status,
+        "check_state": in_progress.get("state") if in_progress else "idle",
+        "check_in_progress": in_progress,
+    }
 
 
 @app.post("/api/bgp/connectors/{connector_id}/check-router")
@@ -17243,7 +18204,17 @@ def check_bgp_connector_router(request: Request, connector_id: int):
     try:
         status = check_and_persist_bgp_connector_status(connector_id)
     except BgpStatusCheckInProgress as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+        return JSONResponse(
+            status_code=409,
+            content=exc.payload(),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
+    except BgpStatusCheckTimedOut as exc:
+        return JSONResponse(
+            status_code=504,
+            content=exc.payload(),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        )
     router_status = status.get("router_check") or {}
     return {
         **status,

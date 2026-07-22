@@ -3705,19 +3705,25 @@ class BgpMitigationTest(unittest.TestCase):
             ).lastrowid
             conn.commit()
             conn.close()
-            checked = []
+            finished = []
 
-            def check_connector(connector_id):
+            def begin_connector(connector_id, owner=""):
                 if connector_id == first["id"]:
                     raise RuntimeError("first failed")
-                checked.append(connector_id)
-                return {"connector_id": connector_id}
+                self.assertEqual(owner, "automatic")
+                return {"connector": {"id": connector_id}}
 
-            with patch.object(main, "check_and_persist_bgp_connector_status", side_effect=check_connector):
+            def finish_connector(execution):
+                finished.append(execution["connector"]["id"])
+                return {"connector_id": execution["connector"]["id"]}
+
+            with patch.object(main, "begin_bgp_connector_status_check", side_effect=begin_connector), \
+                 patch.object(main, "finish_bgp_connector_status_check", side_effect=finish_connector), \
+                 patch.object(main, "bgp_active_status_check_count", return_value=0):
                 result = main.run_bgp_connector_status_checks_once()
             self.assertEqual(result["failed"], 1)
             self.assertEqual(result["checked"], 1)
-            self.assertEqual(checked, [second_id])
+            self.assertEqual(finished, [second_id])
 
     def test_bgp_worker_rejects_concurrent_cycle(self):
         self.assertTrue(main.BGP_STATUS_CHECK_CYCLE_LOCK.acquire(blocking=False))

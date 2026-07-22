@@ -402,7 +402,8 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertNotIn("refreshBgpConnectorStatuses", refresh_source)
         self.assertNotIn("checkBgpConnectorStatusesNow", refresh_source)
         self.assertEqual(HTML.count("setInterval(() =>"), 1)
-        self.assertIn("if (bgpStatusesRefreshInFlight) return", HTML)
+        self.assertIn("const activeRefresh = bgpStatusesRefreshInFlight", HTML)
+        self.assertIn("return refreshBgpConnectorStatuses(options)", HTML)
         self.assertEqual(HTML.count("opsSummaryRefreshTimer = setInterval"), 1)
 
     def test_bgp_manual_check_and_disabled_labels_use_persisted_status(self):
@@ -551,7 +552,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         load_start = HTML.index("async function loadBgpConnectorsView()")
         load_end = HTML.index("async function loadMitigationView()", load_start)
         load_source = HTML[load_start:load_end]
-        refresh_start = HTML.index("async function refreshBgpConnectorStatuses()")
+        refresh_start = HTML.index("async function refreshBgpConnectorStatuses(options = {})")
         refresh_end = HTML.index("async function checkBgpConnectorStatusesNow()", refresh_start)
         refresh_source = HTML[refresh_start:refresh_end]
         self.assertIn("apiRequest('/api/bgp/connectors')", load_source)
@@ -567,7 +568,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         check_end = HTML.index("async function loadBgpConnectorsView()", check_start)
         source = HTML[check_start:check_end]
         self.assertIn("/check-router`, { method: 'POST' }", source)
-        self.assertIn("refreshBgpConnectorStatuses()", source)
+        self.assertIn("refreshBgpConnectorStatuses({ afterCurrent: true })", source)
         self.assertNotIn("/announcements", source)
         self.assertNotIn("runBgpDryRun", source)
         self.assertNotIn("updateBgpAnnouncement", source)
