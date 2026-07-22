@@ -1219,7 +1219,7 @@
         <button type="button" data-nav-view="flows">
           <i data-lucide="search"></i><span>Flows</span>
         </button>
-        <button type="button" data-nav-view="global-map">
+        <button id="globalMapNavButton" type="button" data-nav-view="global-map">
           <i data-lucide="globe-2"></i><span>Mapa Global</span>
         </button>
         <button type="button" data-nav-view="sensors">
@@ -1742,7 +1742,7 @@
             </div>
           </div>
 
-          <section id="bgpInfrastructurePanel" class="panel p-3 mb-3">
+          <section id="globalMapPanel" class="panel p-3 mb-3">
             <div class="sensor-form-grid mb-3">
               <div class="field">
                 <label for="mapSrcAsn">ASN origem</label>
@@ -4426,8 +4426,71 @@
             </div>
           </section>
 
-          <div id="bgpInfrastructureMount"></div>
-          <div id="bgpConnectorEditorMount"></div>
+          <section id="bgpInfrastructurePanel" class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Prontidão dos conectores</div>
+                <div id="bgpPeerStatusText" class="metric-readout">Nenhum conector foi checado ainda.</div>
+              </div>
+              <button id="checkBgpStatusButton" type="button" class="btn btn-sm btn-outline-success">
+                <i data-lucide="activity"></i><span>Verificar agora</span>
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm bgp-peer-table mb-0">
+                <thead>
+                  <tr>
+                    <th>Nome</th>
+                    <th>Peer</th>
+                    <th>AS local</th>
+                    <th>AS remoto</th>
+                    <th>BGP</th>
+                    <th>FlowSpec</th>
+                    <th>Pipe</th>
+                    <th>Serviço ExaBGP</th>
+                    <th>Prontidão</th>
+                    <th>Última checagem</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="bgpPeerStatusRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section id="bgpConnectorEditorPanel" class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Configuração dos conectores</div>
+            <div class="flow-search-grid mb-2">
+              <input id="bgpConnectorId" type="hidden">
+              <div class="field"><label for="bgpConnectorName">Nome</label><input id="bgpConnectorName" class="form-control form-control-sm" placeholder="EDGE-RTBH-DRYRUN"></div>
+              <div class="field"><label for="bgpConnectorRole">Role</label><select id="bgpConnectorRole" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorBackend">Backend</label><select id="bgpConnectorBackend" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorMode">Modo</label><select id="bgpConnectorMode" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpConnectorLocalAsn">Local ASN</label><input id="bgpConnectorLocalAsn" type="number" min="1" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorPeerAsn">Peer ASN</label><input id="bgpConnectorPeerAsn" type="number" min="1" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorPeerIp">Peer IP</label><input id="bgpConnectorPeerIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpConnectorLocalAddress">Local address</label><input id="bgpConnectorLocalAddress" class="form-control form-control-sm" placeholder="172.20.10.40"></div>
+              <div class="field"><label for="bgpConnectorListenPort">Listen port</label><input id="bgpConnectorListenPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="179"></div>
+              <div class="field"><label for="bgpConnectorNextHop">Next-hop default</label><input id="bgpConnectorNextHop" class="form-control form-control-sm" placeholder="10.66.66.66"></div>
+              <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="268568:666"></div>
+              <div class="field"><label for="bgpConnectorService">Systemd service</label><input id="bgpConnectorService" class="form-control form-control-sm" placeholder="exabgp-gmj-flow"></div>
+              <div class="field"><label for="bgpConnectorPipeIn">Pipe input</label><input id="bgpConnectorPipeIn" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.in"></div>
+              <div class="field"><label for="bgpConnectorPipeOut">Pipe output</label><input id="bgpConnectorPipeOut" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.out"></div>
+              <div class="field"><label for="bgpConnectorConfigPath">Config path</label><input id="bgpConnectorConfigPath" class="form-control form-control-sm" placeholder="/etc/exabgp/gmj-flow-ne8000.conf"></div>
+              <div class="field"><label for="bgpConnectorPassive">Passive/listen</label><select id="bgpConnectorPassive" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterCheck">Router SSH</label><select id="bgpConnectorRouterCheck" class="form-select form-select-sm"><option value="false">Nao verificar</option><option value="true">Verificar</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterVendor">Vendor</label><select id="bgpConnectorRouterVendor" class="form-select form-select-sm"><option value="huawei_vrp">Huawei VRP</option></select></div>
+              <div class="field"><label for="bgpConnectorRouterMgmtIp">Router mgmt IP</label><input id="bgpConnectorRouterMgmtIp" class="form-control form-control-sm" placeholder="192.168.1.1"></div>
+              <div class="field"><label for="bgpConnectorRouterUsername">Router user</label><input id="bgpConnectorRouterUsername" class="form-control form-control-sm" autocomplete="off"></div>
+              <div class="field"><label for="bgpConnectorRouterPassword">Router senha</label><input id="bgpConnectorRouterPassword" type="password" class="form-control form-control-sm" autocomplete="new-password" placeholder="manter vazio para preservar"></div>
+              <div class="field"><label for="bgpConnectorEnabled">Ativo</label><select id="bgpConnectorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="saveBgpConnectorButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar conector</span></button>
+              <button id="clearBgpConnectorButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+            </div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Role</th><th>Backend</th><th>Modo</th><th>Peer</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpConnectorsTable"></tbody></table></div>
+          </section>
         </section>
 
         <section id="view-mitigation" class="app-view">
@@ -4493,72 +4556,6 @@
             <div id="aiProfileDescription" class="subtle"></div>
             <div id="aiWarnings" class="text-warning mt-2"></div>
             <pre id="aiTestOutput" class="result-box mt-2">Nenhum teste executado.</pre>
-          </section>
-
-          <section class="panel p-3">
-            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
-              <div>
-                <div class="panel-title">Prontidão dos conectores</div>
-                <div id="bgpPeerStatusText" class="metric-readout">Nenhum conector foi checado ainda.</div>
-              </div>
-              <button id="checkBgpStatusButton" type="button" class="btn btn-sm btn-outline-success">
-                <i data-lucide="activity"></i><span>Verificar agora</span>
-              </button>
-            </div>
-            <div class="table-wrap">
-              <table class="table table-sm bgp-peer-table mb-0">
-                <thead>
-                  <tr>
-                    <th>Nome</th>
-                    <th>Peer</th>
-                    <th>AS local</th>
-                    <th>AS remoto</th>
-                    <th>BGP</th>
-                    <th>FlowSpec</th>
-                    <th>Pipe</th>
-                    <th>Serviço ExaBGP</th>
-                    <th>Prontidão</th>
-                    <th>Última checagem</th>
-                    <th>Ações</th>
-                  </tr>
-                </thead>
-                <tbody id="bgpPeerStatusRows"></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section id="bgpConnectorEditorPanel" class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Configuração dos conectores</div>
-            <div class="flow-search-grid mb-2">
-              <input id="bgpConnectorId" type="hidden">
-              <div class="field"><label for="bgpConnectorName">Nome</label><input id="bgpConnectorName" class="form-control form-control-sm" placeholder="EDGE-RTBH-DRYRUN"></div>
-              <div class="field"><label for="bgpConnectorRole">Role</label><select id="bgpConnectorRole" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpConnectorBackend">Backend</label><select id="bgpConnectorBackend" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpConnectorMode">Modo</label><select id="bgpConnectorMode" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpConnectorLocalAsn">Local ASN</label><input id="bgpConnectorLocalAsn" type="number" min="1" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpConnectorPeerAsn">Peer ASN</label><input id="bgpConnectorPeerAsn" type="number" min="1" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpConnectorPeerIp">Peer IP</label><input id="bgpConnectorPeerIp" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpConnectorLocalAddress">Local address</label><input id="bgpConnectorLocalAddress" class="form-control form-control-sm" placeholder="172.20.10.40"></div>
-              <div class="field"><label for="bgpConnectorListenPort">Listen port</label><input id="bgpConnectorListenPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="179"></div>
-              <div class="field"><label for="bgpConnectorNextHop">Next-hop default</label><input id="bgpConnectorNextHop" class="form-control form-control-sm" placeholder="10.66.66.66"></div>
-              <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="268568:666"></div>
-              <div class="field"><label for="bgpConnectorService">Systemd service</label><input id="bgpConnectorService" class="form-control form-control-sm" placeholder="exabgp-gmj-flow"></div>
-              <div class="field"><label for="bgpConnectorPipeIn">Pipe input</label><input id="bgpConnectorPipeIn" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.in"></div>
-              <div class="field"><label for="bgpConnectorPipeOut">Pipe output</label><input id="bgpConnectorPipeOut" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.out"></div>
-              <div class="field"><label for="bgpConnectorConfigPath">Config path</label><input id="bgpConnectorConfigPath" class="form-control form-control-sm" placeholder="/etc/exabgp/gmj-flow-ne8000.conf"></div>
-              <div class="field"><label for="bgpConnectorPassive">Passive/listen</label><select id="bgpConnectorPassive" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Nao</option></select></div>
-              <div class="field"><label for="bgpConnectorRouterCheck">Router SSH</label><select id="bgpConnectorRouterCheck" class="form-select form-select-sm"><option value="false">Nao verificar</option><option value="true">Verificar</option></select></div>
-              <div class="field"><label for="bgpConnectorRouterVendor">Vendor</label><select id="bgpConnectorRouterVendor" class="form-select form-select-sm"><option value="huawei_vrp">Huawei VRP</option></select></div>
-              <div class="field"><label for="bgpConnectorRouterMgmtIp">Router mgmt IP</label><input id="bgpConnectorRouterMgmtIp" class="form-control form-control-sm" placeholder="192.168.1.1"></div>
-              <div class="field"><label for="bgpConnectorRouterUsername">Router user</label><input id="bgpConnectorRouterUsername" class="form-control form-control-sm" autocomplete="off"></div>
-              <div class="field"><label for="bgpConnectorRouterPassword">Router senha</label><input id="bgpConnectorRouterPassword" type="password" class="form-control form-control-sm" autocomplete="new-password" placeholder="manter vazio para preservar"></div>
-              <div class="field"><label for="bgpConnectorEnabled">Ativo</label><select id="bgpConnectorEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
-            </div>
-            <div class="toolbar mb-2">
-              <button id="saveBgpConnectorButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar conector</span></button>
-              <button id="clearBgpConnectorButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
-            </div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>Role</th><th>Backend</th><th>Modo</th><th>Peer</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpConnectorsTable"></tbody></table></div>
           </section>
 
           <section class="panel p-3 mt-3">
@@ -5643,6 +5640,8 @@
     let dashboardAbortController = null;
     let mapAbortController = null;
     let mapDebounceTimer = null;
+    let mapResizeTimer = null;
+    let mapViewActivation = 0;
     let mapBackoffUntil = 0;
     let globalLeafletMap = null;
     let globalLeafletLayer = null;
@@ -6540,12 +6539,14 @@
     }
 
     async function loadMapInterfaces(sensorId = selectedMapSensorId()) {
+      if (activeView !== 'global-map') return;
       mapInterfaceCache = [];
       document.getElementById('mapInterface').value = '';
       renderMapInterfaceSelect();
       if (!sensorId) return;
       try {
         const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
+        if (activeView !== 'global-map') return;
         mapInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
         renderMapInterfaceSelect();
       } catch (error) {
@@ -9590,17 +9591,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `).join('') || '<tr><td colspan="10" class="text-muted">Nenhum registro no histórico.</td></tr>';
     }
 
-    function organizeBgpPageSections() {
-      const infrastructureMount = document.getElementById('bgpInfrastructureMount');
-      const editorMount = document.getElementById('bgpConnectorEditorMount');
-      const infrastructure = document.getElementById('bgpInfrastructurePanel');
-      const editor = document.getElementById('bgpConnectorEditorPanel');
-      if (infrastructureMount && infrastructure && infrastructure.parentElement !== infrastructureMount) infrastructureMount.appendChild(infrastructure);
-      if (editorMount && editor && editor.parentElement !== editorMount) editorMount.appendChild(editor);
-    }
-
     function renderBgpWorkspace() {
-      organizeBgpPageSections();
       renderBgpSelects();
       renderBgpPeerStatus();
       renderBgpConnectors();
@@ -9613,7 +9604,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function renderBgpConnectorsWorkspace() {
-      organizeBgpPageSections();
       renderBgpSelects();
       renderBgpConnectors();
       renderBgpPeerStatus();
@@ -9621,7 +9611,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function renderMitigationWorkspace() {
-      organizeBgpPageSections();
       renderBgpSelects();
       renderBgpProfiles();
       renderBgpProtected();
@@ -9676,7 +9665,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadBgpConnectorsView() {
-      organizeBgpPageSections();
       setText('bgpConnectorsStatus', 'Carregando conectores e últimos estados persistidos...');
       const connectors = await apiRequest('/api/bgp/connectors');
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
@@ -9691,7 +9679,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadMitigationView() {
-      organizeBgpPageSections();
       setText('bgpStatus', 'Carregando Mitigação...');
       const [connectors, profiles, protectedPrefixes, policies, announcements, summary] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
@@ -14601,6 +14588,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function ensureLeafletMap() {
+      if (activeView !== 'global-map') return false;
       if (!window.L) {
         setMapMessage('Biblioteca de mapa não carregada.');
         return false;
@@ -14626,11 +14614,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function resizeLeafletMap() {
-      if (!globalLeafletMap) return;
+      if (activeView !== 'global-map' || !globalLeafletMap) return;
       globalLeafletMap.invalidateSize();
       if (globalLeafletBounds) {
         globalLeafletMap.fitBounds(globalLeafletBounds, { padding: [28, 28], maxZoom: 6 });
       }
+    }
+
+    function scheduleMapResize(delay = 50) {
+      if (activeView !== 'global-map') return;
+      if (mapResizeTimer) clearTimeout(mapResizeTimer);
+      mapResizeTimer = setTimeout(() => {
+        mapResizeTimer = null;
+        resizeLeafletMap();
+      }, delay);
     }
 
     function fitGlobalMapBounds() {
@@ -14690,7 +14687,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
       globalLeafletBounds = L.latLngBounds(bounds);
       fitGlobalMapBounds();
-      setTimeout(resizeLeafletMap, 50);
+      scheduleMapResize();
     }
 
     function mapRouteRow(edge) {
@@ -14749,6 +14746,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         clearTimeout(mapDebounceTimer);
         mapDebounceTimer = null;
       }
+      if (mapResizeTimer) {
+        clearTimeout(mapResizeTimer);
+        mapResizeTimer = null;
+      }
+    }
+
+    function deactivateGlobalMapView() {
+      mapViewActivation += 1;
+      abortMapRequest();
+    }
+
+    async function loadGlobalMapView() {
+      if (activeView !== 'global-map') return;
+      abortMapRequest();
+      const activation = ++mapViewActivation;
+      await loadDashboardSensors();
+      if (activeView !== 'global-map' || activation !== mapViewActivation) return;
+      await loadMapInterfaces();
+      if (activeView !== 'global-map' || activation !== mapViewActivation) return;
+      await loadGlobalMap({ force: true });
+      if (activeView !== 'global-map' || activation !== mapViewActivation) return;
+      scheduleMapResize();
     }
 
     function debounceGlobalMapLoad(delay = 400) {
@@ -14771,6 +14790,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const controller = new AbortController();
       mapAbortController = controller;
       status.textContent = 'Atualizando mapa global...';
+      setMapMessage('Carregando dados geográficos...');
+      renderTableMessage('globalMapRoutesTable', 8, 'Carregando rotas...');
+      renderTableMessage('globalMapMissingTable', 8, 'Carregando rotas sem coordenadas...');
       try {
         const mode = document.getElementById('mapMode')?.value || 'flows';
         const endpoint = mode === 'flows' ? '/api/geo/flows' : '/api/geo/anomalies';
@@ -14794,6 +14816,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         console.error('Falha ao carregar Mapa Global', error);
         status.textContent = `Falha no mapa: ${error.message}`;
         clearLeafletMap();
+        setMapMessage('Erro ao carregar dados geográficos. Tente atualizar novamente.');
         renderTableMessage('globalMapRoutesTable', 8, 'Erro ao carregar mapa', true);
         renderTableMessage('globalMapMissingTable', 8, 'Erro ao carregar mapa', true);
       } finally {
@@ -16256,6 +16279,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function canonicalNavigationView(view) {
       const value = String(view || '').replace(/^#/, '').trim();
       if (value === 'bgp' || value === 'bgp-mitigation') return 'mitigation';
+      if (['map', 'geo', 'traffic-map', 'network-map'].includes(value)) return 'global-map';
       return value || 'dashboard';
     }
 
@@ -16274,7 +16298,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         dashboardRefreshInFlight = false;
       }
       if (view !== 'global-map') {
-        abortMapRequest();
+        deactivateGlobalMapView();
       }
       activeView = view === 'placeholder' ? 'placeholder' : view;
       if (view !== 'placeholder' && window.location.hash !== `#${view}`) {
@@ -16304,11 +16328,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else if (view === 'global-map') {
         document.getElementById('view-global-map').classList.add('active');
         document.querySelector('[data-nav-view="global-map"]').classList.add('active');
-        loadDashboardSensors()
-          .then(() => loadMapInterfaces())
-          .then(() => loadGlobalMap({ force: true }))
-          .then(() => setTimeout(resizeLeafletMap, 50))
-          .catch(console.error);
+        loadGlobalMapView().catch(console.error);
       } else if (view === 'sensors') {
         document.getElementById('view-sensors').classList.add('active');
         document.querySelector('[data-nav-view="sensors"]').classList.add('active');
