@@ -154,6 +154,22 @@ class BgpMitigationTest(unittest.TestCase):
         )
         self.bgp_readiness_guard = self._readiness_guard_patch.start()
         self.addCleanup(self._readiness_guard_patch.stop)
+        self._automatic_ai_gate_patch = patch.object(
+            main,
+            "run_automatic_mitigation_ai_analysis",
+            return_value=(
+                {
+                    "id": 1,
+                    "apply_mitigation": True,
+                    "reason": "Teste: automacao autorizada.",
+                    "status": "success",
+                    "error_message": "",
+                },
+                {"allow_auto": True},
+            ),
+        )
+        self.automatic_ai_gate = self._automatic_ai_gate_patch.start()
+        self.addCleanup(self._automatic_ai_gate_patch.stop)
 
     def _admin_request(self):
         return types.SimpleNamespace(state=types.SimpleNamespace(user={"role": "admin", "username": "tester"}))
@@ -1536,7 +1552,10 @@ class BgpMitigationTest(unittest.TestCase):
         source = Path(ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
         start = source.find("def process_anomaly_mitigation")
         end = source.find("def anomaly_detection_enabled")
-        self.assertIn('"automatic", "worker"', source[start:end])
+        worker = source[start:end]
+        self.assertIn("automatic_mitigation_execution_mode", worker)
+        self.assertIn("application_mode, \"worker\"", worker)
+        self.assertIn("run_automatic_mitigation_ai_analysis", worker)
 
     def test_dns_outbound_related_flow_recommends_destination_candidate_first(self):
         with temporary_main_db():
@@ -1969,6 +1988,43 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertIn("top_src_ip=45.5.248.205", log_text)
             self.assertIn("top_dst_ip=103.100.169.200", log_text)
             self.assertIn("destination 103.100.169.200/32", log_text)
+
+    def test_dns_query_outbound_ai_veto_or_error_keeps_manual_proposal_without_pipe_write(self):
+        decisions = (
+            ("success", False, "IA nao recomenda a automacao.", ""),
+            ("timeout", False, "Timeout do provider.", "timed out"),
+            ("invalid_json", False, "JSON invalido.", "invalid json"),
+        )
+        for status, apply_mitigation, reason, error_message in decisions:
+            with self.subTest(status=status), temporary_main_db():
+                conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+                self._insert_dns_query_anomaly_event(conn)
+                conn.close()
+                self.automatic_ai_gate.return_value = (
+                    {
+                        "id": 91,
+                        "apply_mitigation": apply_mitigation,
+                        "reason": reason,
+                        "status": status,
+                        "error_message": error_message,
+                    },
+                    {"allow_auto": True},
+                )
+                calls = []
+                with patch.object(main, "exabgp_write_pipe", side_effect=lambda _connector, command: calls.append(command)):
+                    stats = main.process_anomaly_mitigation()
+                self.assertEqual(calls, [])
+                self.assertEqual(stats["advertised"], 0)
+                self.assertGreaterEqual(stats["pending_approval"], 1)
+                with main.sqlite_connection() as check:
+                    row = check.execute(
+                        "SELECT status, dst_prefix, protocol, dst_port, announce_command FROM bgp_announcements WHERE anomaly_id = 140 ORDER BY id LIMIT 1"
+                    ).fetchone()
+                self.assertEqual(row["status"], "pending_approval")
+                self.assertEqual(row["dst_prefix"], "103.100.169.200/32")
+                self.assertEqual(row["protocol"], "udp")
+                self.assertEqual(row["dst_port"], "53")
+                self.assertIn("destination 103.100.169.200/32; protocol =udp; destination-port =53", row["announce_command"])
 
     def test_dns_query_outbound_sensor_null_uses_single_active_flowspec_connector(self):
         with temporary_main_db():

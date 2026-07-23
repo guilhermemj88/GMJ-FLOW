@@ -185,51 +185,38 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertIn("raw_bytes * sample_rate AS bytes", query)
         self.assertIn("total_flow_count AS flow_count", query)
 
-    def test_prompt_is_compact_safe_and_uses_existing_candidates_only(self):
+    def test_prompt_is_compact_safe_and_requests_only_boolean_decision(self):
         prompt = backend_main.build_mitigation_ai_prompt(mitigation_payload())
-        self.assertIn("Escolha somente um candidate_index existente", prompt)
-        self.assertIn("Nao crie FlowSpec", prompt)
-        self.assertIn("allow_auto deve ser false", prompt)
+        self.assertIn("apply_mitigation (boolean) e reason", prompt)
+        self.assertIn("Nao gere, copie, escolha nem altere comando ExaBGP", prompt)
         self.assertIn('"playbook":', prompt)
         self.assertNotIn('"related_flows"', prompt)
+        self.assertNotIn('"dst_prefix"', prompt)
+        self.assertNotIn('"dst_port"', prompt)
+        self.assertNotIn('"action"', prompt)
 
-    def test_normalize_requires_existing_candidate_and_forces_manual_review(self):
+    def test_normalize_accepts_only_apply_mitigation_and_reason(self):
         payload = mitigation_payload()
         result = backend_main.normalize_mitigation_ai_response(
-            json.dumps(
-                {
-                    "recommended_candidate_index": 0,
-                    "confidence": "high",
-                    "risk": "low",
-                    "classification": "dns_abuse_outbound",
-                    "reason": "Revisar candidato existente.",
-                    "operator_summary": "Revisao manual do cliente.",
-                    "allow_auto": True,
-                }
-            ),
+            json.dumps({"apply_mitigation": True, "reason": "Evidencia suficiente."}),
             payload,
         )
-        self.assertEqual(result["recommended_candidate_index"], 0)
-        self.assertEqual(result["confidence_label"], "high")
-        self.assertFalse(result["allow_auto"])
-        self.assertTrue(result["manual_approval_required"])
-        self.assertFalse(result["mitigation_allowed"])
-        self.assertEqual(result["recommended_action"], "manual_review")
+        self.assertEqual(result, {"apply_mitigation": True, "reason": "Evidencia suficiente."})
 
         with self.assertRaises(ValueError):
-            backend_main.normalize_mitigation_ai_response('{"recommended_candidate_index": 9}', payload)
+            backend_main.normalize_mitigation_ai_response(
+                '{"apply_mitigation":true,"reason":"ok","dst_prefix":"203.0.113.1/32"}',
+                payload,
+            )
 
-    def test_deterministic_fallback_selects_safe_candidate_and_never_allows_auto(self):
+    def test_deterministic_fallback_vetoes_automation(self):
         payload = mitigation_payload("udp_flood_outbound")
         result = backend_main.deterministic_mitigation_fallback(payload, "timeout")
-        self.assertEqual(result["recommended_candidate_index"], 0)
-        self.assertFalse(result["allow_auto"])
-        self.assertTrue(result["manual_approval_required"])
-        self.assertEqual(result["recommended_action"], "manual_review")
-        self.assertEqual(result["classification"], "udp_flood_outbound")
-        self.assertEqual(result["reason"], "Fallback deterministico: IA local falhou ou excedeu timeout.")
+        self.assertFalse(result["apply_mitigation"])
+        self.assertIn("proposta mantida para aprovacao manual", result["reason"])
+        self.assertIn("timeout", result["reason"])
 
-    def test_deterministic_fallback_does_not_select_analysis_only_candidate(self):
+    def test_deterministic_fallback_never_selects_or_changes_candidate(self):
         payload = mitigation_payload("DNS_INTERNAL_IP_HIGH_BITS")
         payload["candidates"][0].update(
             {
@@ -242,12 +229,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
             }
         )
         result = backend_main.deterministic_mitigation_fallback(payload, "invalid json")
-        self.assertIsNone(result["recommended_candidate_index"])
-        self.assertEqual(result["recommended_action"], "alert_only")
-        self.assertEqual(result["risk"], "none")
-        self.assertFalse(result["allow_auto"])
-        self.assertTrue(result["manual_approval_required"])
-        self.assertIn("sem candidato", result["reason"])
+        self.assertEqual(set(result), {"apply_mitigation", "reason"})
+        self.assertFalse(result["apply_mitigation"])
+        self.assertEqual(payload["candidates"][0]["mitigation_mode"], "analysis_only")
 
     def test_call_ollama_mitigation_ai_uses_num_predict_without_format_json(self):
         captured = {}
@@ -260,7 +244,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"response":"{\\"recommended_candidate_index\\":0}"}'
+                return b'{"response":"{\\"apply_mitigation\\":true,\\"reason\\":\\"ok\\"}"}'
 
         def fake_urlopen(request, timeout):
             captured["body"] = json.loads(request.data.decode("utf-8"))
@@ -271,7 +255,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
         with mock.patch.object(backend_main.urllib.request, "urlopen", side_effect=fake_urlopen):
             response = backend_main.call_ollama_mitigation_ai({**mitigation_config(), "num_predict": 96}, "prompt")
 
-        self.assertIn("recommended_candidate_index", response)
+        self.assertIn("apply_mitigation", response)
         self.assertEqual(captured["body"]["options"]["num_predict"], 96)
         self.assertNotIn("format", captured["body"])
         self.assertEqual(captured["timeout"], 2)
@@ -314,10 +298,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["anomaly_id"], 24)
-                self.assertEqual(result["recommended_candidate_index"], 0)
-                self.assertFalse(result["allow_auto"])
-                self.assertTrue(result["manual_approval_required"])
-                self.assertIn("Fallback deterministico", result["reason"])
+                self.assertFalse(result["apply_mitigation"])
+                self.assertEqual(result["status"], "timeout")
+                self.assertIn("automacao vetada", result["reason"])
                 self.assertIn("timed out", result["error_message"])
 
                 with backend_main.sqlite_connection() as conn:
@@ -326,7 +309,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_ai_timeout_fallback_creates_pending_approval_without_pipe_write(self):
+    def test_ai_timeout_persists_veto_without_creating_or_writing_rule(self):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = str(Path(tmpdir) / "gmjflow.db")
@@ -372,31 +355,17 @@ class AiMitigationRefactorTest(unittest.TestCase):
                     )
 
                 self.assertEqual(result["anomaly_id"], 64)
-                self.assertEqual(result["recommended_candidate_index"], 0)
-                self.assertEqual(result["pending_approval"]["status"], "pending_approval")
+                self.assertFalse(result["apply_mitigation"])
+                self.assertEqual(result["status"], "timeout")
+                self.assertNotIn("pending_approval", result)
                 self.assertEqual(pipe_calls, [])
                 with backend_main.sqlite_connection() as conn:
                     row = conn.execute("SELECT * FROM bgp_announcements WHERE anomaly_id = 64").fetchone()
-                self.assertEqual(row["status"], "pending_approval")
-                self.assertEqual(row["connector_id"], connector["id"])
-                self.assertEqual(row["response_profile_id"], profile["id"])
-                self.assertEqual(row["route_type"], "flowspec")
-                self.assertEqual(row["response_type"], "flowspec")
-                self.assertEqual(row["action"], "discard")
-                self.assertEqual(row["dst_prefix"], "92.38.143.209/32")
-                self.assertEqual(row["protocol"], "udp")
-                self.assertEqual(row["dst_port"], "53")
-                self.assertIn("announce flow route", row["announce_command"])
-                self.assertIn("withdraw flow route", row["withdraw_command"])
-                self.assertIn('"dst_prefix"', row["match_json"])
-                self.assertIn('"action"', row["then_json"])
-                self.assertEqual(row["policy_decision"], "require_manual_approval")
-                self.assertTrue(row["created_at"])
-                self.assertTrue(row["updated_at"])
+                self.assertIsNone(row)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_ai_pending_approval_failure_returns_controlled_error(self):
+    def test_ai_analysis_never_calls_pending_approval_insert(self):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = str(Path(tmpdir) / "gmjflow.db")
@@ -431,8 +400,8 @@ class AiMitigationRefactorTest(unittest.TestCase):
                         endpoint="persisted",
                     )
                 self.assertEqual(result["anomaly_id"], 65)
-                self.assertIn("pending_approval_error", result)
-                self.assertIn("42 values for 44 columns", result["pending_approval_error"])
+                self.assertNotIn("pending_approval_error", result)
+                self.assertFalse(result["apply_mitigation"])
                 with backend_main.sqlite_connection() as conn:
                     ai_total = conn.execute("SELECT COUNT(*) AS total FROM ai_mitigation_analysis WHERE anomaly_id = 65").fetchone()["total"]
                     bgp_total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 65").fetchone()["total"]
@@ -781,11 +750,9 @@ class AiMitigationRefactorTest(unittest.TestCase):
                         request_payload=payload,
                         endpoint="persisted",
                     )
-                self.assertIsNone(result["recommended_candidate_index"])
                 self.assertEqual(result["candidate_count"], 0)
-                self.assertEqual(result["recommended_action"], "alert_only")
+                self.assertFalse(result["apply_mitigation"])
                 self.assertNotIn("pending_approval", result)
-                self.assertIn("Nao foi criada sugestao de FlowSpec", result["operator_summary"])
                 with backend_main.sqlite_connection() as conn:
                     total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 66").fetchone()["total"]
                 self.assertEqual(int(total), 0)
@@ -835,8 +802,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
                         request_payload=payload,
                         endpoint="persisted",
                     )
-                self.assertIsNone(result["recommended_candidate_index"])
-                self.assertEqual(result["recommended_action"], "alert_only")
+                self.assertFalse(result["apply_mitigation"])
                 self.assertEqual(result["candidate_count"], 1)
                 self.assertNotIn("pending_approval", result)
                 with backend_main.sqlite_connection() as conn:
@@ -890,9 +856,7 @@ class AiMitigationRefactorTest(unittest.TestCase):
                         request_payload=payload,
                         endpoint="persisted",
                     )
-                self.assertEqual(result["recommended_candidate_index"], 0)
-                self.assertIn("pending_approval_error", result)
-                self.assertIn("dns_outbound_cannot_use_flowspec_block_src_dns", result["pending_approval_error"])
+                self.assertFalse(result["apply_mitigation"])
                 self.assertNotIn("pending_approval", result)
                 with backend_main.sqlite_connection() as conn:
                     total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 68").fetchone()["total"]
@@ -998,14 +962,11 @@ class AiMitigationRefactorTest(unittest.TestCase):
                         request_payload=payload,
                         endpoint="persisted",
                     )
-                self.assertIn("pending_approval", result)
-                self.assertNotIn("source-port", result.get("rendered_command_preview") or "")
-                pending = result["pending_approval"]
-                self.assertEqual(pending["announce_command"], expected)
-                self.assertEqual(pending.get("src_port") or "", "")
-                self.assertEqual(pending.get("src_prefix") or "", "")
-                self.assertNotIn("source-port", pending["announce_command"])
-                self.assertNotIn("source ", pending["announce_command"])
+                self.assertFalse(result["apply_mitigation"])
+                self.assertNotIn("pending_approval", result)
+                with backend_main.sqlite_connection() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 69").fetchone()["total"]
+                self.assertEqual(int(total), 0)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1138,6 +1099,104 @@ class AiMitigationRefactorTest(unittest.TestCase):
         self.assertEqual(profile["validation_status"], "invalid_connector")
         self.assertEqual(profile["profile_status"], "invalid_connector")
         self.assertIn("Connector", profile["validation_reason"])
+
+    def test_ai_boolean_decision_is_the_last_automatic_gate(self):
+        self.assertEqual(set(backend_main.MITIGATION_SCHEMA["properties"]), {"apply_mitigation", "reason"})
+        self.assertEqual(backend_main.MITIGATION_SCHEMA["required"], ["apply_mitigation", "reason"])
+        self.assertFalse(backend_main.MITIGATION_SCHEMA["additionalProperties"])
+        proposal = {"auto_allowed": True, "eligible": True}
+        config = {"allow_auto": True}
+        approved = {"id": 9, "apply_mitigation": True, "status": "success", "error_message": ""}
+        self.assertEqual(backend_main.automatic_mitigation_execution_mode(proposal, config, approved), "automatic")
+
+        for analysis in (
+            {**approved, "apply_mitigation": False},
+            {**approved, "status": "timeout", "error_message": "timed out"},
+            {**approved, "status": "invalid_json", "error_message": "invalid json"},
+            None,
+        ):
+            self.assertEqual(backend_main.automatic_mitigation_execution_mode(proposal, config, analysis), "manual_approval")
+        self.assertEqual(backend_main.automatic_mitigation_execution_mode({"auto_allowed": True, "eligible": False}, config, approved), "manual_approval")
+        self.assertEqual(backend_main.automatic_mitigation_execution_mode({"eligible": True}, config, approved), "manual_approval")
+        self.assertEqual(backend_main.automatic_mitigation_execution_mode(proposal, {"allow_auto": False}, approved), "manual_approval")
+
+    def test_ai_cannot_modify_deterministic_dns_rule(self):
+        payload = {
+            "candidates": [{
+                "dst_prefix": "92.38.143.209/32",
+                "protocol": "udp",
+                "dst_port": "53",
+                "action": "discard",
+                "rendered_command": "deterministic-command",
+            }]
+        }
+        original = json.loads(json.dumps(payload))
+        decision = backend_main.normalize_mitigation_ai_response(
+            '{"apply_mitigation":true,"reason":"evidencia suficiente"}',
+            payload,
+        )
+        self.assertTrue(decision["apply_mitigation"])
+        self.assertEqual(payload, original)
+        for forbidden_field in ("dst_prefix", "dst_port", "protocol", "action", "connector_id", "command"):
+            with self.assertRaises(ValueError):
+                backend_main.normalize_mitigation_ai_response(
+                    json.dumps({"apply_mitigation": True, "reason": "ok", forbidden_field: "malicious"}),
+                    payload,
+                )
+
+    def test_ai_analysis_persists_decision_metadata_and_sanitized_raw_response(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                config = {**mitigation_config(), "provider_id": 2, "provider_name": "Groq", "api_key": "gsk-secret-value"}
+                execution = {
+                    "provider_id": 2,
+                    "provider": "Groq",
+                    "model": "openai/gpt-oss-120b",
+                    "duration_ms": 321,
+                    "usage": {"input_tokens": 11, "output_tokens": 7},
+                }
+                with backend_main.sqlite_connection() as conn:
+                    saved = backend_main.save_ai_analysis(
+                        conn,
+                        77,
+                        config,
+                        mitigation_payload(),
+                        {"apply_mitigation": True, "reason": "Ataque confirmado."},
+                        execution=execution,
+                        status="success",
+                        raw_response='{"apply_mitigation":true,"reason":"203.0.113.8 gsk-secret-value"}',
+                    )
+                    conn.commit()
+                self.assertTrue(saved["apply_mitigation"])
+                self.assertEqual(saved["provider_id"], 2)
+                self.assertEqual(saved["provider_name"], "Groq")
+                self.assertEqual(saved["model"], "openai/gpt-oss-120b")
+                self.assertEqual(saved["latency_ms"], 321)
+                self.assertEqual(saved["tokens"], 18)
+                self.assertEqual(saved["status"], "success")
+                self.assertNotIn("gsk-secret-value", saved["raw_response"])
+                self.assertNotIn("203.0.113.8", saved["raw_response"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_automatic_apply_requires_explicit_proposal_and_ai_gates(self):
+        candidate = {
+            "mitigation_mode": "automatic",
+            "auto_allowed": True,
+            "eligible": True,
+            "ai_apply_mitigation": True,
+            "ai_decision_status": "success",
+        }
+        for missing in ("auto_allowed", "eligible", "ai_apply_mitigation", "ai_decision_status", "ai_analysis_id"):
+            incomplete = {**candidate, "ai_analysis_id": 1}
+            incomplete.pop(missing, None)
+            with self.assertRaises(backend_main.HTTPException):
+                backend_main.apply_mitigation_candidate(mock.MagicMock(), incomplete, "automatic", "test")
 
 
 if __name__ == "__main__":

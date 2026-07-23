@@ -5301,7 +5301,7 @@
               <div id="anomalyAiStatus" class="metric-readout">Nenhuma análise carregada.</div>
             </div>
             <button id="runAnomalyAiButton" type="button" class="btn btn-sm btn-outline-secondary">
-              <i data-lucide="sparkles"></i><span>Analisar com IA</span>
+              <i data-lucide="sparkles"></i><span>Reanalisar</span>
             </button>
           </div>
           <div id="anomalyAiAnalysisBlock" class="subtle">Sem análise IA para esta anomalia.</div>
@@ -11097,9 +11097,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       container.innerHTML = candidates.map((candidate, index) => {
         const policy = mitigationPolicy(candidate);
         const validation = candidate.validation && typeof candidate.validation === 'object' ? candidate.validation : {};
-        const aiCandidateIndex = currentAiMitigationAnalysis?.recommended_candidate_index;
-        const aiCandidateCount = Number(currentAiMitigationAnalysis?.candidate_count ?? candidates.length);
-        const isAiRecommended = Number.isInteger(Number(aiCandidateIndex)) && aiCandidateIndex !== null && aiCandidateIndex !== undefined && aiCandidateCount > 0 && Number(aiCandidateIndex) === index && !currentAiMitigationAnalysis.error_message;
         const validationErrors = Array.isArray(validation.errors) ? validation.errors : [];
         const validationWarnings = Array.isArray(validation.warnings) ? validation.warnings : [];
         const reasons = [...new Set([...(policy.reasons || []), ...(policy.warnings || []), ...validationErrors, ...validationWarnings].filter(Boolean))].join(' | ');
@@ -11150,10 +11147,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? '<div class="text-warning fw-semibold mb-2">Selecione um conector para recalcular a proposta.</div>'
           : '';
         return `
-          <div class="panel p-2 ${isAiRecommended ? 'ai-recommended-candidate' : ''}">
+          <div class="panel p-2">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
               <div>
-                <div class="panel-title">${isAiRecommended ? 'Recomendado pela IA - ' : ''}${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
+                <div class="panel-title">${escapeHtml(candidate.attack_vector_name || `Candidato ${index + 1}`)}</div>
                 <div class="subtle">${escapeHtml(candidate.reason || '-')}</div>
               </div>
               <div class="d-flex flex-wrap gap-1">
@@ -11192,33 +11189,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
-    function renderBgpAiRecommendation() {
+    function renderBgpAiDecision() {
       const box = document.getElementById('bgpMitigationAiRecommendation');
-      if (!currentAiMitigationAnalysis) {
-        box.classList.add('d-none');
-        box.innerHTML = '';
-        return;
-      }
+      const analysis = currentAiMitigationAnalysis;
       box.classList.remove('d-none');
-      if (currentAiMitigationAnalysis.error_message) {
-        box.innerHTML = `<div class="panel-title mb-1">Análise IA</div><div class="text-danger">${escapeHtml(currentAiMitigationAnalysis.error_message)}</div>`;
+      if (!analysis || analysis.available === false) {
+        box.innerHTML = `
+          <div class="d-flex justify-content-between align-items-center gap-2">
+            <div><div class="panel-title mb-1">Análise IA</div><div class="subtle">Nenhuma análise IA salva para esta anomalia.</div></div>
+            <button type="button" class="btn btn-sm btn-outline-secondary bgp-ai-reanalyze"><i data-lucide="sparkles"></i><span>Reanalisar</span></button>
+          </div>`;
+        createIcons();
         return;
       }
-      const candidateIndex = currentAiMitigationAnalysis.recommended_candidate_index;
-      const candidateCount = Number(currentAiMitigationAnalysis.candidate_count ?? -1);
-      const candidateText = Number.isInteger(Number(candidateIndex)) && candidateIndex !== null && candidateIndex !== undefined && candidateCount !== 0
-        ? `#${Number(candidateIndex) + 1}`
-        : 'sem candidato';
+      const succeeded = analysis.status === 'success' && !analysis.error_message;
+      const authorized = succeeded && analysis.apply_mitigation === true;
+      const decision = authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
+      const provider = analysis.provider_name || analysis.provider || '-';
       box.innerHTML = `
-        <div class="panel-title mb-1">Recomendacao IA</div>
-        <div class="d-flex flex-wrap gap-2 mb-2">
-          <div class="metric-chip"><span>Candidato:</span> ${escapeHtml(candidateText)}</div>
-          <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(currentAiMitigationAnalysis.classification || '-')}</div>
-          <div class="metric-chip"><span>Risco:</span> ${escapeHtml(currentAiMitigationAnalysis.risk || '-')}</div>
-          <div class="metric-chip"><span>Confianca:</span> ${(Number(currentAiMitigationAnalysis.confidence || 0) * 100).toFixed(1)}%</div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+          <div class="panel-title">Análise IA</div>
+          <button type="button" class="btn btn-sm btn-outline-secondary bgp-ai-reanalyze"><i data-lucide="refresh-cw"></i><span>Reanalisar</span></button>
         </div>
-        <div class="metric-readout">${escapeHtml(currentAiMitigationAnalysis.reason || '-')}</div>
-      `;
+        <div class="mb-2"><span class="badge-soft ${authorized ? 'ok' : 'warn'}">Decisão: ${escapeHtml(decision)}</span></div>
+        ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
+        <div class="metric-readout mb-2"><span>Motivo:</span> ${escapeHtml(analysis.reason || analysis.error_message || '-')}</div>
+        <div class="d-flex flex-wrap gap-2">
+          <div class="metric-chip"><span>Provider:</span> ${escapeHtml(provider)}</div>
+          <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')}</div>
+          <div class="metric-chip"><span>Latência:</span> ${escapeHtml(`${Number(analysis.latency_ms || 0)} ms`)}</div>
+          <div class="metric-chip"><span>Data/hora:</span> ${escapeHtml(formatDateTime(analysis.created_at))}</div>
+        </div>`;
+      createIcons();
     }
 
     function anomalyAiAnalysisEndpoint(anomalyId) {
@@ -11273,7 +11275,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } catch (error) {
         currentAiMitigationAnalysis = null;
       }
-      renderBgpAiRecommendation();
+      renderBgpAiDecision();
+    }
+
+    async function runBgpAiReanalysis() {
+      if (!currentBgpMitigationAnomalyId) return;
+      document.getElementById('bgpMitigationAiRecommendation').innerHTML = '<div class="subtle">Reanalisando a proposta determinística...</div>';
+      try {
+        currentAiMitigationAnalysis = await apiRequest(
+          anomalyAiAnalysisEndpoint(currentBgpMitigationAnomalyId),
+          anomalyAiRequestOptions(currentBgpMitigationAnomalyId, true)
+        );
+      } catch (error) {
+        currentAiMitigationAnalysis = { apply_mitigation: false, status: 'error', error_message: error.message, reason: error.message };
+      }
+      renderBgpAiDecision();
     }
 
     function uniqueMitigationConnectorForRecalculation(candidates) {
@@ -13972,68 +13988,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         block.innerHTML = '<div class="subtle">Sem análise IA para esta anomalia.</div>';
         return;
       }
-      if (analysis.error_message && !analysis.request_payload?.deterministic_analysis) {
-        setText('anomalyAiStatus', `Falha IA em ${formatDateTime(analysis.created_at)}`);
-        block.innerHTML = `<div class="text-danger">${escapeHtml(analysis.error_message)}</div>`;
-        return;
-      }
-      const checks = Array.isArray(analysis.checks_before_approve) ? analysis.checks_before_approve : [];
-      const risks = Array.isArray(analysis.risks) ? analysis.risks : [];
-      const requestPayload = analysis.request_payload || {};
-      const deterministic = requestPayload.deterministic_analysis || {};
-      const fallbackCandidates = Array.isArray(deterministic.fallback_analysis_candidates) ? deterministic.fallback_analysis_candidates : [];
-      const topFlow = deterministic.top_flow_by_packets || {};
-      const topSrc = deterministic.top_src_ip_by_packets || {};
-      const topDstPort = deterministic.top_dst_port_pair_by_packets || deterministic.top_dst_port_by_packets || {};
-      const commandPreview = analysis.rendered_command_preview || analysis.response?.rendered_command_preview || '';
-      const candidateIndex = analysis.recommended_candidate_index;
-      const candidateCount = Number(analysis.candidate_count ?? fallbackCandidates.length);
-      const candidateText = Number.isInteger(Number(candidateIndex)) && candidateIndex !== null && candidateIndex !== undefined && candidateCount > 0
-        ? `#${Number(candidateIndex) + 1}`
-        : 'sem candidato';
-      setText('anomalyAiStatus', `${analysis.classification || 'unknown'} / risco ${analysis.risk || '-'}`);
+      const succeeded = analysis.status === 'success' && !analysis.error_message;
+      const authorized = succeeded && analysis.apply_mitigation === true;
+      const decision = authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
+      const provider = analysis.provider_name || analysis.provider || '-';
+      setText('anomalyAiStatus', `Decisão: ${decision}`);
       block.innerHTML = `
-        <div class="mb-2"><span class="badge-soft off">Análise IA sem mitigação automatica</span></div>
+        <div class="mb-2"><span class="badge-soft ${authorized ? 'ok' : 'warn'}">${escapeHtml(decision)}</span></div>
         ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
-        <div class="d-flex flex-wrap gap-2 mb-2">
-          <div class="metric-chip"><span>Anomalia:</span> #${escapeHtml(analysis.anomaly_id || requestPayload.anomaly?.id || '-')}</div>
-          <div class="metric-chip"><span>Classificacao:</span> ${escapeHtml(analysis.classification || '-')}</div>
-          <div class="metric-chip"><span>Risco:</span> ${escapeHtml(analysis.risk || '-')}</div>
-          <div class="metric-chip"><span>Confianca:</span> ${(Number(analysis.confidence || 0) * 100).toFixed(1)}%</div>
-          <div class="metric-chip"><span>Candidato:</span> ${escapeHtml(candidateText)}</div>
-          <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')} / ${escapeHtml(analysis.profile || '-')}</div>
-        </div>
-        <div class="metric-readout mb-2">${escapeHtml(analysis.reason || '-')}</div>
-        <div class="subtle mb-2">${escapeHtml(analysis.operator_summary || '-')}</div>
-        ${deterministic.source ? `
-          <div class="panel p-2 mb-2">
-            <div class="panel-title mb-2">Análise deterministica</div>
-            <div class="d-flex flex-wrap gap-2 mb-2">
-              <div class="metric-chip"><span>Top flow:</span> ${escapeHtml(topFlow.src_ip || '-')}:${escapeHtml(topFlow.src_port || '-')} -> ${escapeHtml(topFlow.dst_ip || '-')}:${escapeHtml(topFlow.dst_port || '-')} ${escapeHtml(topFlow.protocol || '-')}</div>
-              <div class="metric-chip"><span>Packets:</span> ${formatNumber(topFlow.packets || 0)}</div>
-              <div class="metric-chip"><span>Bytes:</span> ${formatBytes(topFlow.bytes || 0)}</div>
-              <div class="metric-chip"><span>Share top flow:</span> ${escapeHtml(deterministic.packet_share_percent || 0)}%</div>
-              <div class="metric-chip"><span>Top src:</span> ${escapeHtml(topSrc.key || '-')} (${formatNumber(topSrc.packets || 0)} packets)</div>
-              <div class="metric-chip"><span>Top dst:port:</span> ${escapeHtml(topDstPort.key || '-')} (${formatNumber(topDstPort.packets || 0)} packets)</div>
-              <div class="metric-chip"><span>Unicos:</span> src ${formatNumber(deterministic.unique_src_ips || 0)} / dst ${formatNumber(deterministic.unique_dst_ips || 0)} / portas ${formatNumber(deterministic.unique_dst_ports || 0)}</div>
-            </div>
-            ${fallbackCandidates.length ? `
-              <div class="panel-title mb-1">Candidates fallback_analysis</div>
-              <div class="d-grid gap-2">
-                ${fallbackCandidates.map((candidate, index) => `
-                  <div class="metric-readout">
-                    #${index + 1} ${escapeHtml(candidate.attack_vector_name || 'fallback_analysis')} - ${escapeHtml(candidate.reason || candidate.mitigation_reason || '-')}<br>
-                    <span class="subtle">${escapeHtml(candidate.rendered_command_preview || '-')}</span>
-                  </div>
-                `).join('')}
-              </div>
-            ` : '<div class="subtle">Sem candidates fallback_analysis.</div>'}
-          </div>
-        ` : ''}
-        ${commandPreview ? `<pre class="bg-light border rounded p-2 mb-2" style="white-space:pre-wrap">${escapeHtml(commandPreview)}</pre>` : ''}
-        ${risks.length ? `<div class="subtle mb-2">Riscos: ${escapeHtml(risks.join(' | '))}</div>` : ''}
-        ${checks.length ? `<ul class="mb-0">${checks.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
-      `;
+        <div class="metric-readout mb-2"><span>Motivo:</span> ${escapeHtml(analysis.reason || analysis.error_message || '-')}</div>
+        <div class="d-flex flex-wrap gap-2">
+          <div class="metric-chip"><span>Provider:</span> ${escapeHtml(provider)}</div>
+          <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')}</div>
+          <div class="metric-chip"><span>Latência:</span> ${escapeHtml(`${Number(analysis.latency_ms || 0)} ms`)}</div>
+          <div class="metric-chip"><span>Data/hora:</span> ${escapeHtml(formatDateTime(analysis.created_at))}</div>
+        </div>`;
     }
 
     async function loadAnomalyAiAnalysis(anomalyId) {
@@ -17549,6 +17518,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('bgpDryThenAction').addEventListener('change', updateBgpDryRateLimitUi);
     document.getElementById('bgpDryRateLimit').addEventListener('input', updateBgpDryRateLimitUi);
     document.getElementById('runBgpAnomalyDryRunButton').addEventListener('click', () => runBgpAnomalyDryRun().catch(error => { document.getElementById('bgpMitigationOutput').textContent = `Falha: ${error.message}`; }));
+    document.getElementById('bgpMitigationAiRecommendation').addEventListener('click', event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      if (target?.closest('.bgp-ai-reanalyze')) runBgpAiReanalysis().catch(console.error);
+    });
     document.getElementById('bgpMitigationCandidates').addEventListener('click', event => {
       const target = event.target instanceof Element ? event.target : event.target.parentElement;
       const apply = target?.closest('.bgp-mitigation-apply');
