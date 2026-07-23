@@ -33,10 +33,10 @@ class SetupInstallPdfTest(unittest.TestCase):
 
     def test_flows_pdf_uses_humanized_metrics_and_summary(self):
         self.assertIn("def flow_pdf_rows", MAIN)
-        self.assertIn("format_bits_per_second(top_bits.get('bits_s'))", MAIN)
-        self.assertIn("format_packets_per_second(top_pps.get('packets_s'))", MAIN)
-        self.assertIn('"label": "Bits/s"', MAIN)
-        self.assertIn('"label": "Pacotes/s"', MAIN)
+        self.assertIn('"Taxa por registro"', MAIN)
+        self.assertIn('"Indisponivel sem duracao real exportada pelo flow"', MAIN)
+        self.assertIn('"label": "Duracao"', MAIN)
+        self.assertIn('"label": "Taxa"', MAIN)
         self.assertNotIn('"headers": ["flow_time", "sensor", "src_ip", "src_port", "dst_ip", "dst_port", "proto_name", "bytes", "packets", "bits_s", "packets_s"]', MAIN)
 
     def test_nginx_uses_dynamic_docker_resolver(self):
@@ -131,12 +131,12 @@ class SetupInstallPdfTest(unittest.TestCase):
         self.assertIn('"bgp_state": bgp_state', MAIN)
         self.assertIn('"flowspec_state": flowspec_state', MAIN)
         self.assertIn('"pipe_verified": pipes_ok', MAIN)
-        self.assertIn("Sessao BGP real nao verificada. Configure Router SSH ou Host Agent.", MAIN)
+        self.assertIn("Estado do peer BGP nao confirmado pelo ExaBGP.", MAIN)
 
         html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Pipe ExaBGP", html)
-        self.assertIn("Sessao BGP nao verificada", html)
-        self.assertIn("FlowSpec nao verificado", html)
+        self.assertIn("BGP não verificado", html)
+        self.assertIn("FlowSpec não verificado", html)
         self.assertIn("bgpConnectorRouterCheck", html)
         self.assertIn("bgpConnectorRouterMgmtIp", html)
 

@@ -77,7 +77,11 @@ GMJFLOW_EXABGP_LOG_PATH=/var/log/exabgp-gmj-flow.log
 GMJFLOW_EXABGP_CONFIG_PATH=/etc/exabgp/gmj-flow-ne8000.conf
 ```
 
-O agente deve expor `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&log_path=/var/log/exabgp-gmj-flow.log&config_path=/etc/exabgp/gmj-flow-ne8000.conf` retornando JSON com `bgp_state` e `flowspec_state`. Os caminhos aceitos devem coincidir exatamente com os caminhos configurados na inicializacao do agente. O arquivo de configuracao comprova apenas que `ipv4 flow` esta habilitado no bloco `family` do neighbor solicitado; isso nao confirma a instalacao da rota no Huawei.
+O agente expõe `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&pipe_path=<fifo>&log_path=/var/log/exabgp-gmj-flow.log&config_path=/etc/exabgp/gmj-flow-ne8000.conf`. Cada consulta usa o FIFO do conector e é somente leitura: ela nunca abre nem escreve no FIFO. `bgp_ok` vem da sessão TCP ESTABLISHED do peer solicitado e `flowspec_ok` vem do bloco `family { ipv4 flow; }` desse mesmo neighbor.
+
+Administradores podem acionar `POST /api/bgp/connectors/recover-sessions` pela tela de conectores. O backend chama `POST /bgp/recover` no Host Agent, que pode reiniciar exclusivamente `exabgp-gmj-flow.service` quando o diagnóstico manual indicar necessidade. A operação preserva banco, histórico, FIFOs e anúncios e grava auditoria em `bgp_admin_audit`.
+
+Os alertas são configuráveis com `GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD` (padrão 5) e `GMJFLOW_BGP_RECV_Q_ALERT_THRESHOLD` (padrão 0). O diagnóstico periódico apenas alerta; nunca reinicia o serviço automaticamente.
 
 O backend precisa receber as tres variaveis acima. Preserve o mount existente `/run/exabgp:/run/exabgp`; nao e necessario adicionar mounts para os arquivos do host, pois eles sao lidos somente pelo Host Agent.
 

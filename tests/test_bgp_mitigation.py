@@ -4661,7 +4661,7 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(readiness["confirmation_level"], "peer_established")
         self.assertIn("Familia FlowSpec nao confirmada", readiness["reason_message"])
 
-    def test_readiness_never_uses_tcp_or_auxiliary_peer_without_established_bgp_state(self):
+    def test_readiness_uses_peer_specific_tcp_session_as_bgp_source_of_truth(self):
         status = {
             "service": {"active": True},
             "bgp_state": "not_verified",
@@ -4671,8 +4671,9 @@ class BgpMitigationTest(unittest.TestCase):
             "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
         }
         readiness = main.evaluate_bgp_connector_readiness(status)
-        self.assertFalse(readiness["ready"])
-        self.assertEqual(readiness["reason"], "peer_bgp_not_verified")
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["bgp_ok"])
+        self.assertEqual(readiness["confirmation_level"], "peer_established")
 
     def test_established_peer_with_unavailable_pipe_is_not_ready(self):
         status = {
@@ -4783,6 +4784,223 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(status["flowspec_state"], "established")
         self.assertTrue(status["pipes"]["ok"])
         self.assertTrue(main.evaluate_bgp_connector_readiness(status)["ready"])
+
+    def test_shared_service_fallback_makes_two_established_connectors_ready(self):
+        with temporary_main_db():
+            now = main.utc_now_iso()
+            with main.sqlite_connection() as conn:
+                connector_ids = []
+                for name, peer, pipe_path, service in (
+                    (
+                        "BGP-FIBINET-BORDA",
+                        "179.189.80.0",
+                        "/run/exabgp/exabgp.in",
+                        "exabgp-gmj-flow",
+                    ),
+                    (
+                        "BGP-GM-BORDA",
+                        "45.5.249.0",
+                        "/run/exabgp/gm-teste.in",
+                        "",
+                    ),
+                ):
+                    connector_ids.append(
+                        conn.execute(
+                            """
+                            INSERT INTO bgp_connectors (
+                                name, role, backend_type, mode, peer_ip,
+                                exabgp_config_path, exabgp_pipe_in,
+                                systemd_service_name, enabled, is_active,
+                                created_at, updated_at
+                            )
+                            VALUES (?, 'flowspec_mitigation', 'exabgp',
+                                    'manual_approval', ?,
+                                    '/etc/exabgp/gmj-flow-ne8000.conf', ?, ?,
+                                    1, 1, ?, ?)
+                            """,
+                            (name, peer, pipe_path, service, now, now),
+                        ).lastrowid
+                    )
+                conn.commit()
+
+            def agent_status(connector):
+                pipe_path = connector["exabgp_pipe_in"]
+                return {
+                    "enabled": True,
+                    "available": True,
+                    "service": {
+                        "name": "exabgp-gmj-flow.service",
+                        "active": True,
+                        "raw": "active",
+                    },
+                    "listener": {"listening": True},
+                    "session": {
+                        "tcp_established": True,
+                        "query_ok": True,
+                        "close_wait_count": 0,
+                        "close_wait_alert_threshold": 5,
+                        "recv_q_max": 0,
+                    },
+                    "bgp_state": "established",
+                    "flowspec_state": "established",
+                    "pipe": {
+                        "path": pipe_path,
+                        "exists": True,
+                        "is_fifo": True,
+                        "reader_active": True,
+                        "reader_waiting_for_writer": True,
+                    },
+                    "evidence": {
+                        "neighbor_found": True,
+                        "family_block_found": True,
+                        "ipv4_flow_configured": True,
+                    },
+                }
+
+            statuses = []
+            with patch.object(main, "host_agent_status", side_effect=agent_status), \
+                 patch.object(main, "exabgp_pipe_status", return_value={"ok": False, "status": "down", "message": "container sem mount"}), \
+                 patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}), \
+                 patch.object(main, "active_flowspec_announcement_count", return_value=0), \
+                 patch.object(main, "exabgp_write_pipe") as write_pipe, \
+                 patch.object(main.shutil, "which", return_value=None):
+                for connector_id in connector_ids:
+                    connector = main.bgp_connector_for_status_check(connector_id)
+                    statuses.append(main.bgp_connector_status(connector))
+            write_pipe.assert_not_called()
+            self.assertEqual(
+                [status["pipes"]["input_path"] for status in statuses],
+                ["/run/exabgp/exabgp.in", "/run/exabgp/gm-teste.in"],
+            )
+            for status in statuses:
+                self.assertEqual(
+                    status["service"]["name"],
+                    "exabgp-gmj-flow.service",
+                )
+                self.assertTrue(status["service_ok"])
+                self.assertTrue(status["listener_ok"])
+                self.assertTrue(status["bgp_ok"])
+                self.assertTrue(status["flowspec_ok"])
+                self.assertTrue(status["pipe_ok"])
+                self.assertTrue(status["readiness"]["ready"])
+            self.assertTrue(statuses[1]["service"]["fallback_used"])
+            self.assertEqual(
+                statuses[1]["service"]["resolution_source"],
+                "shared_connector",
+            )
+
+    def test_connector_save_defaults_shared_service_but_preserves_explicit_value(self):
+        with temporary_main_db():
+            payload = main.BgpConnectorPayload(
+                name="BGP-GM-BORDA",
+                role="flowspec_mitigation",
+                backend_type="exabgp",
+                mode="manual_approval",
+                peer_ip="45.5.249.0",
+                exabgp_config_path="/etc/exabgp/gmj-flow-ne8000.conf",
+                exabgp_pipe_in="/run/exabgp/gm-teste.in",
+                systemd_service_name="",
+            )
+            created = main.create_bgp_connector(self._admin_request(), payload)
+            self.assertEqual(
+                created["systemd_service_name"],
+                "exabgp-gmj-flow",
+            )
+            explicit = main.BgpConnectorPayload(
+                **{
+                    **main.dump_model(payload),
+                    "systemd_service_name": "custom-exabgp.service",
+                }
+            )
+            updated = main.update_bgp_connector(
+                self._admin_request(),
+                created["id"],
+                explicit,
+            )
+            self.assertEqual(
+                updated["systemd_service_name"],
+                "custom-exabgp.service",
+            )
+
+    def test_manual_recovery_is_audited_without_touching_announcements_or_fifo(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._connector_and_profile()
+            conn.execute(
+                """
+                UPDATE bgp_connectors
+                SET systemd_service_name = 'exabgp-gmj-flow',
+                    peer_ip = '179.189.80.0',
+                    exabgp_pipe_in = '/run/exabgp/exabgp.in'
+                WHERE id = ?
+                """,
+                (connector["id"],),
+            )
+            now = main.utc_now_iso()
+            announcement_id = conn.execute(
+                """
+                INSERT INTO bgp_announcements (
+                    connector_id, status, route_type, response_type, action,
+                    announce_command, created_at, updated_at
+                )
+                VALUES (?, 'advertised', 'flowspec', 'flowspec', 'discard',
+                        'announce flow route test', ?, ?)
+                """,
+                (connector["id"], now, now),
+            ).lastrowid
+            conn.commit()
+            conn.close()
+            agent_result = {
+                "ok": True,
+                "restart_attempted": True,
+                "service": "exabgp-gmj-flow.service",
+                "after": {
+                    "session": {
+                        "established_peers": ["179.189.80.0"],
+                        "close_wait_count": 0,
+                    }
+                },
+                "data_preserved": {
+                    "database": True,
+                    "history": True,
+                    "fifos": True,
+                    "announcements": True,
+                },
+            }
+            with patch.object(
+                main,
+                "host_agent_recover_bgp_sessions",
+                return_value=agent_result,
+            ), patch.object(main, "exabgp_write_pipe") as write_pipe:
+                result = main.recover_bgp_connector_sessions(
+                    self._admin_request()
+                )
+            write_pipe.assert_not_called()
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["audit_id"])
+            with main.sqlite_connection() as check:
+                announcement = check.execute(
+                    "SELECT status, announce_command FROM bgp_announcements WHERE id = ?",
+                    (announcement_id,),
+                ).fetchone()
+                audit = check.execute(
+                    "SELECT action, service_name, details_json FROM bgp_admin_audit WHERE id = ?",
+                    (result["audit_id"],),
+                ).fetchone()
+            self.assertEqual(announcement["status"], "advertised")
+            self.assertEqual(
+                announcement["announce_command"],
+                "announce flow route test",
+            )
+            self.assertEqual(audit["action"], "recover_bgp_sessions")
+            self.assertEqual(
+                audit["service_name"],
+                "exabgp-gmj-flow.service",
+            )
+            self.assertFalse(
+                json.loads(audit["details_json"])["preservation_guarantee"][
+                    "fifo_written"
+                ]
+            )
 
 
 if __name__ == "__main__":

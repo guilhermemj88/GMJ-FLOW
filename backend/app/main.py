@@ -617,6 +617,11 @@ GMJFLOW_EXABGP_CONFIG_PATH = (
     os.getenv("GMJFLOW_EXABGP_CONFIG_PATH", "/etc/exabgp/gmj-flow-ne8000.conf").strip()
     or "/etc/exabgp/gmj-flow-ne8000.conf"
 )
+GMJFLOW_EXABGP_SYSTEMD_SERVICE = (
+    os.getenv("GMJFLOW_EXABGP_SYSTEMD_SERVICE", "exabgp-gmj-flow").strip()
+    or "exabgp-gmj-flow"
+)
+SYSTEMD_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+(?:\.service)?$")
 BGP_CONNECTOR_ROLES = {"flowspec_mitigation", "rtbh_blackhole", "diversion_mitigation", "generic_bgp"}
 BGP_MODES = {"detection_only", "dry_run", "manual_approval", "semi_auto", "auto", "automatic"}
 BGP_RESPONSE_TYPES = {"detection_only", "flowspec", "rtbh", "diversion", "blackhole", "rate_limit", "alert_only", "webhook"}
@@ -3184,6 +3189,18 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "ip_zones", "connector_id", "connector_id INTEGER")
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS bgp_admin_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            service_name TEXT NOT NULL DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS bgp_protected_prefixes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cidr TEXT NOT NULL,
@@ -3413,6 +3430,7 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_connectors_enabled ON bgp_connectors(enabled, role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_admin_audit_created ON bgp_admin_audit(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_profiles_enabled ON bgp_response_profiles(enabled, response_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_protected_enabled ON bgp_protected_prefixes(enabled)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcements_status ON bgp_announcements(status, updated_at)")
@@ -8031,6 +8049,120 @@ def normalize_bgp_host_or_cidr(value: Any, field_name: str = "target") -> str:
         raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
 
 
+def normalize_systemd_service_name(value: Any, *, with_suffix: bool = True) -> str:
+    service = clean_text(value)
+    if not service:
+        service = clean_text(GMJFLOW_EXABGP_SYSTEMD_SERVICE) or "exabgp-gmj-flow"
+    if not SYSTEMD_SERVICE_NAME_RE.fullmatch(service):
+        raise HTTPException(status_code=400, detail="systemd_service_name invalido")
+    if with_suffix and not service.endswith(".service"):
+        return f"{service}.service"
+    if not with_suffix and service.endswith(".service"):
+        return service[: -len(".service")]
+    return service
+
+
+def bgp_connector_config_key(connector: dict[str, Any]) -> str:
+    return clean_text(connector.get("exabgp_config_path")) or GMJFLOW_EXABGP_CONFIG_PATH
+
+
+def bgp_connector_uses_shared_exabgp_service(connector: dict[str, Any]) -> bool:
+    backend = clean_text(
+        connector.get("backend_type") or connector.get("backend")
+    ).lower()
+    return bool(
+        backend == "exabgp"
+        and bgp_connector_config_key(connector) == GMJFLOW_EXABGP_CONFIG_PATH
+    )
+
+
+def shared_bgp_service_from_connectors(
+    conn: sqlite3.Connection,
+    connector: dict[str, Any],
+    exclude_connector_id: int | None = None,
+) -> str:
+    config_key = bgp_connector_config_key(connector)
+    rows = conn.execute(
+        """
+        SELECT id, backend_type, exabgp_config_path, systemd_service_name
+        FROM bgp_connectors
+        WHERE systemd_service_name != ''
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in rows:
+        if exclude_connector_id is not None and int(row["id"]) == int(exclude_connector_id):
+            continue
+        candidate = dict(row)
+        if clean_text(candidate.get("backend_type")).lower() != "exabgp":
+            continue
+        if bgp_connector_config_key(candidate) != config_key:
+            continue
+        return normalize_systemd_service_name(
+            candidate.get("systemd_service_name"),
+            with_suffix=False,
+        )
+    return ""
+
+
+def apply_bgp_connector_service_default(
+    conn: sqlite3.Connection,
+    values: dict[str, Any],
+    connector_id: int | None = None,
+) -> None:
+    explicit = clean_text(values.get("systemd_service_name"))
+    if explicit:
+        # Validate explicit values but preserve exactly what the operator typed.
+        normalize_systemd_service_name(explicit)
+        return
+    backend = clean_text(values.get("backend_type") or values.get("backend")).lower()
+    if backend != "exabgp":
+        return
+    shared = shared_bgp_service_from_connectors(conn, values, connector_id)
+    if shared:
+        values["systemd_service_name"] = shared
+    elif bgp_connector_uses_shared_exabgp_service(values):
+        values["systemd_service_name"] = normalize_systemd_service_name(
+            GMJFLOW_EXABGP_SYSTEMD_SERVICE,
+            with_suffix=False,
+        )
+
+
+def resolve_bgp_connector_service(
+    connector: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    explicit = clean_text(connector.get("systemd_service_name"))
+    if explicit:
+        return {
+            "configured_name": explicit,
+            "name": normalize_systemd_service_name(explicit),
+            "fallback_used": False,
+            "source": "connector",
+        }
+    shared = clean_text(connector.get("_shared_systemd_service_name"))
+    if not shared and conn is not None:
+        shared = shared_bgp_service_from_connectors(
+            conn,
+            connector,
+            int(connector["id"]) if connector.get("id") is not None else None,
+        )
+    if shared:
+        return {
+            "configured_name": "",
+            "name": normalize_systemd_service_name(shared),
+            "fallback_used": True,
+            "source": clean_text(connector.get("_systemd_service_source"))
+            or "shared_connector",
+        }
+    return {
+        "configured_name": "",
+        "name": normalize_systemd_service_name(GMJFLOW_EXABGP_SYSTEMD_SERVICE),
+        "fallback_used": True,
+        "source": "global_default",
+    }
+
+
 def bgp_connector_payload_to_values(payload: BgpConnectorPayload) -> dict[str, Any]:
     name = clean_text(payload.name)
     if not name:
@@ -8300,7 +8432,7 @@ def exabgp_peer_from_pipe(connector: dict[str, Any], timeout: float = 1.2) -> di
 
 
 def exabgp_peer_from_log_heuristic(connector: dict[str, Any]) -> dict[str, Any]:
-    service_name = clean_text(connector.get("systemd_service_name"))
+    service_name = resolve_bgp_connector_service(connector)["name"]
     peer_ip = clean_text(connector.get("peer_ip"))
     if not service_name or shutil.which("journalctl") is None:
         return {"state": "unknown", "peer_ip": peer_ip, "source": "exabgp_log_heuristic"}
@@ -8422,9 +8554,10 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
             "method": "host_agent",
             "message": "Host Agent nao configurado. Defina GMJFLOW_HOST_AGENT_URL para status systemd/ss/logs do host.",
         }
+    service = resolve_bgp_connector_service(connector)
     params = urllib.parse.urlencode(
         {
-            "service": clean_text(connector.get("systemd_service_name")),
+            "service": service["name"],
             "peer_ip": clean_text(connector.get("peer_ip")),
             "listen_port": int(connector.get("listen_port") or 179),
             "pipe_path": clean_text(connector.get("exabgp_pipe_in")),
@@ -8441,6 +8574,106 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
         return {"enabled": True, "method": "host_agent", **payload}
     except Exception as exc:
         return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
+
+
+def bgp_close_wait_alert_threshold() -> int:
+    try:
+        configured = int(os.getenv("GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD", "5"))
+    except ValueError:
+        configured = 5
+    return max(0, min(configured, 1_000_000))
+
+
+def bgp_recv_q_alert_threshold() -> int:
+    try:
+        configured = int(os.getenv("GMJFLOW_BGP_RECV_Q_ALERT_THRESHOLD", "0"))
+    except ValueError:
+        configured = 0
+    return max(0, min(configured, 1_000_000_000))
+
+
+def host_agent_recover_bgp_sessions(
+    connectors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not GMJFLOW_HOST_AGENT_URL:
+        return {
+            "ok": False,
+            "available": False,
+            "message": "Host Agent nao configurado.",
+        }
+    target_service = normalize_systemd_service_name(
+        GMJFLOW_EXABGP_SYSTEMD_SERVICE
+    )
+    peer_ips = list(
+        dict.fromkeys(
+            clean_text(connector.get("peer_ip"))
+            for connector in connectors
+            if clean_text(connector.get("peer_ip"))
+            and resolve_bgp_connector_service(connector)["name"] == target_service
+        )
+    )
+    if not peer_ips:
+        return {
+            "ok": False,
+            "available": True,
+            "message": f"Nenhum peer associado a {target_service}.",
+        }
+    payload = {
+        "service": target_service,
+        "peer_ips": peer_ips,
+        "listen_port": 179,
+        "close_wait_threshold": bgp_close_wait_alert_threshold(),
+        "recv_q_threshold": bgp_recv_q_alert_threshold(),
+    }
+    request = urllib.request.Request(
+        f"{GMJFLOW_HOST_AGENT_URL}/bgp/recover",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=40) as response:
+            result = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(result, dict):
+            raise ValueError("Resposta Host Agent invalida")
+        return {"available": True, **result}
+    except urllib.error.HTTPError as exc:
+        try:
+            result = json.loads(exc.read().decode("utf-8", errors="replace"))
+        except (ValueError, json.JSONDecodeError):
+            result = {"message": str(exc)}
+        return {"available": True, "ok": False, **result}
+    except Exception as exc:
+        return {
+            "available": False,
+            "ok": False,
+            "message": str(exc),
+        }
+
+
+def record_bgp_admin_audit(
+    conn: sqlite3.Connection,
+    actor: str,
+    action: str,
+    service_name: str,
+    details: dict[str, Any],
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO bgp_admin_audit (
+            actor, action, service_name, details_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            clean_text(actor) or "admin",
+            clean_text(action),
+            clean_text(service_name),
+            json.dumps(details, ensure_ascii=True, default=str),
+            utc_now_iso(),
+        ),
+    )
+    return int(cursor.lastrowid)
 
 
 def prefer_verified_state(*states: Any) -> str:
@@ -8510,21 +8743,21 @@ def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
-    service_name = clean_text(connector.get("systemd_service_name"))
+    service_resolution = resolve_bgp_connector_service(connector)
+    service_name = service_resolution["name"]
     service_raw = "unknown"
     service_active = False
     service_severity = "unknown"
-    if service_name:
-        if shutil.which("systemctl") is None:
-            service_raw = "unavailable_in_container"
-            messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
-        else:
-            code, output = bgp_run_command(["systemctl", "is-active", service_name])
-            service_raw = clean_text(output) or ("active" if code == 0 else "unknown")
-            service_active = code == 0 and service_raw == "active"
-            service_severity = "ok" if service_active else "down"
-            if code not in {0, 3}:
-                errors.append(f"systemctl: {service_raw}")
+    if shutil.which("systemctl") is None:
+        service_raw = "unavailable_in_container"
+        messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
+    else:
+        code, output = bgp_run_command(["systemctl", "is-active", service_name])
+        service_raw = clean_text(output) or ("active" if code == 0 else "unknown")
+        service_active = code == 0 and service_raw == "active"
+        service_severity = "ok" if service_active else "down"
+        if code not in {0, 3}:
+            errors.append(f"systemctl: {service_raw}")
 
     local_address = clean_text(connector.get("local_address"))
     peer_ip = clean_text(connector.get("peer_ip"))
@@ -8535,6 +8768,13 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     tcp_established = False
     session_status = "unknown_missing_ss"
     session_severity = "unknown"
+    close_wait_count = 0
+    close_wait_alert_threshold = 0
+    close_wait_alert = False
+    recv_q_total = 0
+    recv_q_max = 0
+    recv_q_alert_threshold = 0
+    recv_q_alert = False
     ss_available = shutil.which("ss") is not None
     if not ss_available:
         if not any("Backend containerizado" in message for message in messages):
@@ -8597,6 +8837,17 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         tcp_established = bool(agent_session.get("tcp_established"))
         session_status = "established" if tcp_established else "not_established"
         session_severity = "ok" if tcp_established else "down"
+        close_wait_count = int(agent_session.get("close_wait_count") or 0)
+        close_wait_alert_threshold = int(
+            agent_session.get("close_wait_alert_threshold") or 0
+        )
+        close_wait_alert = bool(agent_session.get("close_wait_alert"))
+        recv_q_total = int(agent_session.get("recv_q_total") or 0)
+        recv_q_max = int(agent_session.get("recv_q_max") or 0)
+        recv_q_alert_threshold = int(
+            agent_session.get("recv_q_alert_threshold") or 0
+        )
+        recv_q_alert = bool(agent_session.get("recv_q_alert"))
         if agent_pipe:
             pipe_ok = bool(
                 agent_pipe.get("exists")
@@ -8609,6 +8860,9 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
                 "input_exists": bool(agent_pipe.get("exists")),
                 "is_fifo": bool(agent_pipe.get("is_fifo")),
                 "reader_active": bool(agent_pipe.get("reader_active")),
+                "reader_waiting_for_writer": bool(
+                    agent_pipe.get("reader_waiting_for_writer")
+                ),
                 "reader_process_pid": agent_pipe.get("reader_process_pid"),
                 "reader_process_cmdline": clean_text(agent_pipe.get("reader_process_cmdline")),
                 "reader_detection_method": clean_text(agent_pipe.get("reader_detection_method")),
@@ -8620,19 +8874,12 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             }
             pipes_ok = pipe_ok
 
-    agent_pipe_ok = bool(
-        agent_pipe.get("exists")
-        and agent_pipe.get("is_fifo")
-        and agent_pipe.get("reader_active")
-    )
     agent_bgp_state = clean_text(agent_status.get("bgp_state")).lower()
     agent_flowspec_state = clean_text(agent_status.get("flowspec_state")).lower()
     agent_confirms_exabgp = bool(
         agent_available
-        and service_active
         and agent_bgp_state == "established"
         and agent_flowspec_state == "established"
-        and agent_pipe_ok
     )
     if connector.get("router_check_enabled") and not agent_confirms_exabgp:
         try:
@@ -8655,8 +8902,14 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "message": "Verificacao Router SSH nao exigida; lado ExaBGP confirmado pelo Host Agent." if agent_confirms_exabgp else "Verificacao BGP/FlowSpec desabilitada para este conector.",
         }
 
-    if agent_available and agent_bgp_state in {"established", "down", "not_verified"}:
-        bgp_state = agent_bgp_state
+    if agent_available:
+        bgp_state = "established" if tcp_established else (
+            "down"
+            if bool((agent_status.get("session") or {}).get("query_ok", True))
+            else "not_verified"
+        )
+    elif ss_available and session_status in {"established", "not_established"}:
+        bgp_state = "established" if tcp_established else "down"
     else:
         bgp_state = prefer_verified_state(
             exabgp_peer.get("state"),
@@ -8691,15 +8944,56 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         messages.append("Familia FlowSpec nao confirmada pelo ExaBGP.")
     if agent_status.get("enabled") and agent_status.get("message"):
         messages.append(f"Host Agent: {agent_status['message']}")
+    if close_wait_alert:
+        messages.append(
+            f"CLOSE_WAIT acima do limite: {close_wait_count} conexoes "
+            f"(limite {close_wait_alert_threshold})."
+        )
+    if recv_q_alert:
+        messages.append(
+            f"Recv-Q acima do limite: maximo {recv_q_max} bytes "
+            f"(limite {recv_q_alert_threshold})."
+        )
     if router_status.get("message"):
         messages.append(f"Router SSH: {router_status['message']}")
-    return {
+    service_info = {
+        "name": service_name,
+        "configured_name": service_resolution["configured_name"],
+        "active": service_active,
+        "raw": service_raw,
+        "severity": service_severity,
+        "shared": service_name
+        == normalize_systemd_service_name(GMJFLOW_EXABGP_SYSTEMD_SERVICE),
+        "fallback_used": bool(service_resolution["fallback_used"]),
+        "resolution_source": service_resolution["source"],
+    }
+    session_info = {
+        "tcp_established": tcp_established,
+        "peer_ip": peer_ip,
+        "status": session_status,
+        "severity": session_severity,
+        "close_wait_count": close_wait_count,
+        "close_wait_alert_threshold": close_wait_alert_threshold,
+        "close_wait_alert": close_wait_alert,
+        "recv_q_total": recv_q_total,
+        "recv_q_max": recv_q_max,
+        "recv_q_alert_threshold": recv_q_alert_threshold,
+        "recv_q_alert": recv_q_alert,
+    }
+    checks = {
+        "service_ok": service_active,
+        "listener_ok": listening,
+        "bgp_ok": tcp_established,
+        "flowspec_ok": flowspec_state == "established",
+        "pipe_ok": pipes_ok,
+    }
+    result = {
         "connector_id": connector["id"],
         "name": connector["name"],
         "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
         "role": connector.get("role") or "",
         "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
-        "service": {"name": service_name, "active": service_active, "raw": service_raw, "severity": service_severity},
+        "service": service_info,
         "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
         "pipes": pipes,
         "exabgp_peer": exabgp_peer,
@@ -8715,13 +9009,17 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "pipe_verified": pipes_ok,
             "source": "host_agent" if agent_available else "fallback",
         },
-        "session": {"tcp_established": tcp_established, "peer_ip": peer_ip, "status": session_status, "severity": session_severity},
+        "session": session_info,
+        "checks": checks,
+        **checks,
         "bgp_state": bgp_state,
         "flowspec_state": flowspec_state,
         "last_checked_at": utc_now_iso(),
         "errors": errors,
         "messages": sorted(set(messages)),
     }
+    result["readiness"] = evaluate_bgp_connector_readiness(result)
+    return result
 
 
 def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
@@ -8734,6 +9032,10 @@ def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: d
     result["errors"] = [clean_text(error) for error in result.get("errors") or [] if clean_text(error)]
     result["messages"] = sorted({clean_text(message) for message in result.get("messages") or [] if clean_text(message)})
     result["message"] = " | ".join(result["messages"])
+    readiness = evaluate_bgp_connector_readiness(result)
+    result["readiness"] = readiness
+    result["checks"] = readiness["checks"]
+    result.update(readiness["checks"])
     return result
 
 
@@ -8781,7 +9083,14 @@ def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
 def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
     host_agent = status.get("host_agent") or {}
     pipes = status.get("pipes") or {}
-    pipe_ok = bool(pipes.get("ok") and pipes.get("is_fifo") and pipes.get("reader_active"))
+    checks = status.get("checks") or {}
+    pipe_ok = bool(
+        checks["pipe_ok"]
+        if isinstance(checks.get("pipe_ok"), bool)
+        else pipes.get("ok")
+        and pipes.get("is_fifo", True)
+        and pipes.get("reader_active", True)
+    )
     return {
         "checked_at": status.get("last_checked_at") or "",
         "bgp_state": status.get("bgp_state") or "unknown",
@@ -8790,6 +9099,10 @@ def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
         "pipe_ok": pipe_ok,
         "tcp_established": bool((status.get("session") or {}).get("tcp_established")),
         "service_active": bool((status.get("service") or {}).get("active")),
+        "listener_ok": bool((status.get("listener") or {}).get("listening")),
+        "close_wait_count": int((status.get("session") or {}).get("close_wait_count") or 0),
+        "recv_q_max": int((status.get("session") or {}).get("recv_q_max") or 0),
+        "checks": status.get("checks") or {},
         "host_agent_evidence": host_agent.get("evidence") or {},
         "host_agent_pipe": host_agent.get("pipe") or {},
         "messages": status.get("messages") or [],
@@ -8804,6 +9117,7 @@ def bgp_readiness_reason_message(reason: str) -> str:
         "flowspec_not_verified": "Familia FlowSpec nao confirmada; anuncio nao enviado.",
         "flowspec_down": "Familia FlowSpec indisponivel; anuncio nao enviado.",
         "exabgp_service_inactive": "Servico ExaBGP indisponivel; anuncio nao enviado.",
+        "tcp_listener_unavailable": "Listener TCP/179 indisponivel; anuncio nao enviado.",
         "exabgp_pipe_unavailable": "Pipe ExaBGP indisponivel ou sem leitor ativo; anuncio nao enviado.",
     }.get(clean_text(reason), clean_text(reason))
 
@@ -8816,51 +9130,101 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         peer_state = "down"
     else:
         peer_state = "not_verified"
-    service_active = bool((status.get("service") or {}).get("active"))
+    status_checks = status.get("checks") or {}
+    service_active = bool(
+        status_checks.get("service_ok")
+        if isinstance(status_checks.get("service_ok"), bool)
+        else (status.get("service") or {}).get("active")
+    )
+    listener = status.get("listener") or {}
+    session = status.get("session") or {}
+    if isinstance(status_checks.get("listener_ok"), bool):
+        listener_ok = bool(status_checks["listener_ok"])
+    elif "listening" in listener:
+        listener_ok = bool(listener.get("listening"))
+    else:
+        # Compatibility for persisted snapshots from versions that did not
+        # expose listener evidence separately.
+        listener_ok = (
+            bool(session.get("tcp_established"))
+            if "tcp_established" in session
+            else peer_state == "established"
+        )
+    if isinstance(status_checks.get("bgp_ok"), bool):
+        bgp_ok = bool(status_checks["bgp_ok"])
+    elif "tcp_established" in session:
+        bgp_ok = bool(session.get("tcp_established"))
+    else:
+        bgp_ok = peer_state == "established"
     flowspec_state = clean_text(status.get("flowspec_state")).lower()
     pipes = status.get("pipes") or {}
-    pipe_ok = bool(pipes.get("ok") and pipes.get("is_fifo") and pipes.get("reader_active"))
-    if not service_active:
-        reason = "exabgp_service_inactive"
-        failure_status = "peer_down"
-        confirmation_level = "peer_down"
-    elif peer_state == "down":
-        reason = "peer_bgp_down"
-        failure_status = "peer_down"
-        confirmation_level = "peer_down"
-    elif peer_state != "established":
-        reason = "peer_bgp_not_verified"
-        failure_status = "failed"
-        confirmation_level = "peer_not_verified"
-    elif flowspec_state in {"idle", "active", "connect", "down", "not_established"}:
-        reason = "flowspec_down"
-        failure_status = "failed"
-        confirmation_level = "peer_established"
-    elif flowspec_state != "established":
-        reason = "flowspec_not_verified"
-        failure_status = "failed"
-        confirmation_level = "peer_established"
-    elif not pipe_ok:
-        reason = "exabgp_pipe_unavailable"
-        failure_status = "failed"
-        confirmation_level = "peer_established"
+    if isinstance(status_checks.get("flowspec_ok"), bool):
+        flowspec_ok = bool(status_checks["flowspec_ok"])
     else:
-        reason = ""
-        failure_status = ""
-        confirmation_level = "peer_established"
-    ready = bool(
-        service_active
-        and peer_state == "established"
-        and flowspec_state == "established"
-        and pipe_ok
+        flowspec_ok = flowspec_state == "established"
+    if isinstance(status_checks.get("pipe_ok"), bool):
+        pipe_ok = bool(status_checks["pipe_ok"])
+    else:
+        pipe_ok = bool(
+            pipes.get("ok")
+            and pipes.get("is_fifo", True)
+            and pipes.get("reader_active", True)
+        )
+    failed_reasons: list[str] = []
+    if not service_active:
+        failed_reasons.append("exabgp_service_inactive")
+    if not bgp_ok:
+        failed_reasons.append(
+            "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
+        )
+    if not listener_ok:
+        failed_reasons.append("tcp_listener_unavailable")
+    if not flowspec_ok:
+        failed_reasons.append(
+            "flowspec_down"
+            if flowspec_state in {"idle", "active", "connect", "down", "not_established"}
+            else "flowspec_not_verified"
+        )
+    if not pipe_ok:
+        failed_reasons.append("exabgp_pipe_unavailable")
+    reason = failed_reasons[0] if failed_reasons else ""
+    failure_status = (
+        "peer_down"
+        if "peer_bgp_down" in failed_reasons
+        else "failed"
+        if failed_reasons
+        else ""
     )
+    confirmation_level = (
+        "peer_established"
+        if bgp_ok
+        else "peer_down"
+        if peer_state == "down"
+        else "peer_not_verified"
+    )
+    checks = {
+        "service_ok": service_active,
+        "listener_ok": listener_ok,
+        "bgp_ok": bgp_ok,
+        "flowspec_ok": flowspec_ok,
+        "pipe_ok": pipe_ok,
+    }
+    ready = all(checks.values())
     details = compact_bgp_status_details(status)
     details["technical_reason"] = reason
     details["reason_message"] = bgp_readiness_reason_message(reason)
+    details["failed_checks"] = [
+        check_name for check_name, ok in checks.items() if not ok
+    ]
+    details["reasons"] = failed_reasons
     return {
         "ready": ready,
         "peer_state": peer_state,
+        "checks": checks,
+        **checks,
         "reason": reason,
+        "reasons": failed_reasons,
+        "failed_checks": details["failed_checks"],
         "reason_message": bgp_readiness_reason_message(reason),
         "failure_status": failure_status,
         "confirmation_level": confirmation_level,
@@ -9154,6 +9518,12 @@ def bgp_status_check_metadata(connector_id: int) -> dict[str, Any] | None:
 
 def check_bgp_connector_readiness(conn: sqlite3.Connection, connector: dict[str, Any]) -> dict[str, Any]:
     """Run a fresh check and persist it through the caller's SQLite connection."""
+    connector = dict(connector)
+    service_resolver = globals().get("resolve_bgp_connector_service")
+    if callable(service_resolver):
+        service = service_resolver(connector, conn)
+        connector["_shared_systemd_service_name"] = service["name"]
+        connector["_systemd_service_source"] = service["source"]
     connector_id = int(connector["id"])
     lease = acquire_bgp_status_check_lock(connector_id)
     future: Future | None = None
@@ -9290,6 +9660,10 @@ def persisted_bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "message": connector.get("status_message") or result.get("message") or "",
         "errors": connector.get("status_errors") or result.get("errors") or [],
     })
+    readiness = evaluate_bgp_connector_readiness(result)
+    result["readiness"] = readiness
+    result["checks"] = readiness["checks"]
+    result.update(readiness["checks"])
     return result
 
 
@@ -9300,10 +9674,13 @@ def bgp_connector_for_status_check(connector_id_or_connector: int | dict[str, An
     ensure_sensor_db()
     with sqlite_connection() as conn:
         row = conn.execute("SELECT * FROM bgp_connectors WHERE id = ?", (int(connector_id),)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Conector BGP nao encontrado")
-    connector = bgp_connector_row_to_dict(row)
-    connector["router_password"] = row["router_password"] if "router_password" in row.keys() else ""
+        if row is None:
+            raise HTTPException(status_code=404, detail="Conector BGP nao encontrado")
+        connector = bgp_connector_row_to_dict(row)
+        connector["router_password"] = row["router_password"] if "router_password" in row.keys() else ""
+        service = resolve_bgp_connector_service(connector, conn)
+        connector["_shared_systemd_service_name"] = service["name"]
+        connector["_systemd_service_source"] = service["source"]
     return connector
 
 
@@ -18337,6 +18714,58 @@ def list_bgp_connectors(request: Request, include_disabled: bool = False):
     return {"items": [bgp_connector_row_to_dict(row) for row in rows]}
 
 
+@app.post("/api/bgp/connectors/recover-sessions")
+def recover_bgp_connector_sessions(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM bgp_connectors
+            WHERE enabled = 1 AND is_active = 1 AND backend_type = 'exabgp'
+            ORDER BY id
+            """
+        ).fetchall()
+        connectors = [bgp_connector_row_to_dict(row) for row in rows]
+        for connector in connectors:
+            service = resolve_bgp_connector_service(connector, conn)
+            connector["_shared_systemd_service_name"] = service["name"]
+            connector["_systemd_service_source"] = service["source"]
+    result = host_agent_recover_bgp_sessions(connectors)
+    actor = (
+        clean_text((getattr(request.state, "user", None) or {}).get("username"))
+        or "admin"
+    )
+    target_service = normalize_systemd_service_name(
+        GMJFLOW_EXABGP_SYSTEMD_SERVICE
+    )
+    with sqlite_connection() as conn:
+        audit_id = record_bgp_admin_audit(
+            conn,
+            actor,
+            "recover_bgp_sessions",
+            target_service,
+            {
+                "connector_ids": [int(item["id"]) for item in connectors],
+                "peer_ips": [
+                    clean_text(item.get("peer_ip"))
+                    for item in connectors
+                    if clean_text(item.get("peer_ip"))
+                ],
+                "result": result,
+                "preservation_guarantee": {
+                    "database_cleared": False,
+                    "history_cleared": False,
+                    "fifo_written": False,
+                    "announcements_modified": False,
+                },
+            },
+        )
+        conn.commit()
+    return {**result, "audit_id": audit_id}
+
+
 @app.post("/api/bgp/connectors", status_code=201)
 def create_bgp_connector(request: Request, payload: BgpConnectorPayload):
     require_admin(request)
@@ -18353,6 +18782,7 @@ def create_bgp_connector(request: Request, payload: BgpConnectorPayload):
         "enabled", "is_active", "notes",
     )
     with sqlite_connection() as conn:
+        apply_bgp_connector_service_default(conn, values)
         cursor = conn.execute(
             f"INSERT INTO bgp_connectors ({', '.join(columns)}, created_at, updated_at) VALUES ({', '.join('?' for _ in columns)}, ?, ?)",
             tuple(values[column] for column in columns) + (now, now),
@@ -18630,6 +19060,7 @@ def update_bgp_connector(request: Request, connector_id: int, payload: BgpConnec
         current = conn.execute("SELECT router_password FROM bgp_connectors WHERE id = ?", (connector_id,)).fetchone()
         if current is None:
             raise HTTPException(status_code=404, detail="Conector BGP nao encontrado")
+        apply_bgp_connector_service_default(conn, values, connector_id)
         if not clean_text(payload.router_password):
             values["router_password"] = current["router_password"] or ""
         conn.execute(
