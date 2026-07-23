@@ -8,6 +8,7 @@ import posixpath
 import re
 import stat
 import subprocess
+import time as time_module
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,10 +45,38 @@ TIME_ONLY_LOG_TIMESTAMP_RE = re.compile(
 )
 DEFAULT_EXABGP_LOG_PATH = "/var/log/exabgp-gmj-flow.log"
 DEFAULT_EXABGP_CONFIG_PATH = "/etc/exabgp/gmj-flow-ne8000.conf"
+DEFAULT_EXABGP_SYSTEMD_SERVICE = "exabgp-gmj-flow.service"
+DEFAULT_CLOSE_WAIT_ALERT_THRESHOLD = 5
+DEFAULT_RECV_Q_ALERT_THRESHOLD = 0
 MAX_LOG_READ_BYTES = 4 * 1024 * 1024
 MAX_CONFIG_READ_BYTES = 1024 * 1024
 PERSISTENT_FIFO_WRAPPER_PATHS = {"/usr/local/sbin/exabgp-fifo-reader.sh"}
 SHELL_EXECUTABLES = {"/bin/sh", "/bin/bash", "/bin/dash", "sh", "bash", "dash"}
+SYSTEMD_SERVICE_RE = re.compile(r"^[A-Za-z0-9_.@:-]+(?:\.service)?$")
+
+
+def normalize_systemd_service_name(value: Any) -> str:
+    service = str(value or "").strip()
+    if not service:
+        service = DEFAULT_EXABGP_SYSTEMD_SERVICE
+    if not SYSTEMD_SERVICE_RE.fullmatch(service):
+        raise ValueError("invalid systemd service name")
+    if not service.endswith(".service"):
+        service = f"{service}.service"
+    return service
+
+
+def configured_int(
+    name: str,
+    default: int,
+    minimum: int = 0,
+    maximum: int = 1_000_000,
+) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def run(args: list[str], timeout: float = 2.0) -> tuple[int, str]:
@@ -577,6 +606,7 @@ def unavailable_config_evidence(config_path: str, error: str) -> dict[str, Any]:
 def empty_reader_evidence() -> dict[str, Any]:
     return {
         "reader_active": False,
+        "reader_waiting_for_writer": False,
         "reader_process_pid": None,
         "reader_process_cmdline": "",
         "reader_detection_method": "",
@@ -631,6 +661,7 @@ def fifo_reader_evidence(
             wrapper_matches.append(
                 {
                     "reader_active": True,
+                    "reader_waiting_for_writer": True,
                     "reader_process_pid": int(process.name),
                     "reader_process_cmdline": cmdline,
                     "reader_detection_method": "persistent_wrapper",
@@ -657,6 +688,7 @@ def fifo_reader_evidence(
                 if access_mode != os.O_WRONLY:
                     return {
                         "reader_active": True,
+                        "reader_waiting_for_writer": False,
                         "reader_process_pid": int(process.name),
                         "reader_process_cmdline": cmdline,
                         "reader_detection_method": "direct_fifo_reader",
@@ -691,6 +723,138 @@ def fifo_status(path: str) -> dict[str, Any]:
     }
 
 
+def socket_line_state_and_recv_q(line: str) -> tuple[str, int]:
+    fields = line.split()
+    known_states = {
+        "ESTAB",
+        "ESTABLISHED",
+        "CLOSE-WAIT",
+        "CLOSE_WAIT",
+        "LISTEN",
+        "SYN-SENT",
+        "SYN-RECV",
+        "TIME-WAIT",
+        "LAST-ACK",
+        "FIN-WAIT-1",
+        "FIN-WAIT-2",
+        "CLOSING",
+    }
+    for index, field in enumerate(fields):
+        state = field.upper()
+        if state not in known_states:
+            continue
+        try:
+            recv_q = int(fields[index + 1])
+        except (IndexError, ValueError):
+            recv_q = 0
+        return state, recv_q
+    return "", 0
+
+
+def socket_line_matches_peer(line: str, peer_ip: str) -> bool:
+    if not peer_ip:
+        return False
+    return (
+        re.search(
+            rf"(?<![0-9A-Fa-f:.])\[?{re.escape(peer_ip)}\]?(?=[:\s])",
+            line,
+        )
+        is not None
+    )
+
+
+def tcp_socket_diagnostics(
+    session_output: str,
+    peer_ips: list[str],
+    listen_port: int,
+    command_ok: bool = True,
+    close_wait_threshold: int | None = None,
+    recv_q_threshold: int | None = None,
+) -> dict[str, Any]:
+    peers = list(
+        dict.fromkeys(
+            str(peer or "").strip()
+            for peer in peer_ips
+            if str(peer or "").strip()
+        )
+    )
+    established_peers: list[str] = []
+    close_wait_by_peer = {peer: 0 for peer in peers}
+    recv_q_by_peer = {peer: 0 for peer in peers}
+    recv_q_total = 0
+    recv_q_max = 0
+    close_wait_count = 0
+    for line in session_output.splitlines() if command_ok else []:
+        if f":{listen_port}" not in line:
+            continue
+        state, recv_q = socket_line_state_and_recv_q(line)
+        matching_peers = [peer for peer in peers if socket_line_matches_peer(line, peer)]
+        if not matching_peers:
+            continue
+        recv_q_total += recv_q
+        recv_q_max = max(recv_q_max, recv_q)
+        for peer in matching_peers:
+            recv_q_by_peer[peer] = max(recv_q_by_peer[peer], recv_q)
+            if state in {"ESTAB", "ESTABLISHED"} and peer not in established_peers:
+                established_peers.append(peer)
+            if state in {"CLOSE-WAIT", "CLOSE_WAIT"}:
+                close_wait_by_peer[peer] += 1
+        if state in {"CLOSE-WAIT", "CLOSE_WAIT"}:
+            close_wait_count += 1
+    close_limit = (
+        configured_int(
+            "GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD",
+            DEFAULT_CLOSE_WAIT_ALERT_THRESHOLD,
+        )
+        if close_wait_threshold is None
+        else max(0, int(close_wait_threshold))
+    )
+    recv_limit = (
+        configured_int(
+            "GMJFLOW_BGP_RECV_Q_ALERT_THRESHOLD",
+            DEFAULT_RECV_Q_ALERT_THRESHOLD,
+            maximum=1_000_000_000,
+        )
+        if recv_q_threshold is None
+        else max(0, int(recv_q_threshold))
+    )
+    return {
+        "query_ok": bool(command_ok),
+        "established_peers": established_peers,
+        "missing_peers": [peer for peer in peers if peer not in established_peers],
+        "close_wait_count": close_wait_count,
+        "close_wait_by_peer": close_wait_by_peer,
+        "close_wait_alert_threshold": close_limit,
+        "close_wait_alert": close_wait_count > close_limit,
+        "recv_q_total": recv_q_total,
+        "recv_q_max": recv_q_max,
+        "recv_q_by_peer": recv_q_by_peer,
+        "recv_q_alert_threshold": recv_limit,
+        "recv_q_alert": recv_q_max > recv_limit,
+    }
+
+
+def systemd_service_status(service: str) -> dict[str, Any]:
+    code, output = run(["systemctl", "is-active", service])
+    return {
+        "name": service,
+        "active": code == 0 and output.strip() == "active",
+        "raw": output,
+        "returncode": code,
+    }
+
+
+def listener_status(listen_port: int) -> dict[str, Any]:
+    code, output = run(["ss", "-lntp"])
+    listening = code == 0 and any(f":{listen_port}" in line for line in output.splitlines())
+    return {
+        "listening": listening,
+        "expected_port": listen_port,
+        "query_ok": code == 0,
+        "raw": output if code != 0 else "",
+    }
+
+
 def bgp_status(
     service: str,
     peer_ip: str,
@@ -701,35 +865,29 @@ def bgp_status(
     config_path: str = "",
     configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
 ) -> dict[str, object]:
-    service_code, service_output = run(["systemctl", "is-active", service]) if service else (1, "service not configured")
+    service = normalize_systemd_service_name(service)
+    service_status = systemd_service_status(service)
     invocation_code, invocation_output = (
         run(["systemctl", "show", service, "--property=InvocationID", "--value"])
-        if service else (1, "")
     )
     started_code, started_output = (
         run(["systemctl", "show", service, "--property=ExecMainStartTimestamp", "--value"])
-        if service else (1, "")
     )
     listen_code, listen_output = run(["ss", "-lntp"])
     session_code, session_output = run(["ss", "-antp"])
     log_code, log_output = (
         run(["journalctl", "-u", service, "-n", "1000", "--no-pager", "-o", "json"], timeout=4.0)
-        if service else (1, "")
     )
 
-    service_active = service_code == 0 and service_output.strip() == "active"
+    service_active = bool(service_status["active"])
     listening = listen_code == 0 and any(f":{listen_port}" in line for line in listen_output.splitlines())
-    tcp_established = False
-    if session_code == 0:
-        for line in session_output.splitlines():
-            upper = line.upper()
-            if "ESTAB" not in upper and "ESTABLISHED" not in upper:
-                continue
-            if peer_ip and peer_ip not in line:
-                continue
-            if f":{listen_port}" in line:
-                tcp_established = True
-                break
+    socket_status = tcp_socket_diagnostics(
+        session_output,
+        [peer_ip],
+        listen_port,
+        command_ok=session_code == 0,
+    )
+    tcp_established = peer_ip in socket_status["established_peers"]
 
     current_invocation = invocation_output.strip() if invocation_code == 0 else ""
     service_started_at = parse_timestamp(started_output) if started_code == 0 else None
@@ -766,40 +924,199 @@ def bgp_status(
     evidence["source"] = f"{log_evidence_source} + exabgp_config"
 
     pipe = fifo_status(pipe_path)
-    explicit_down = bool(evidence["explicit_disconnect"] or evidence["explicit_shutdown"])
-    if not service_active or explicit_down or (evidence["connected_current"] and not tcp_established):
-        bgp_state = "down"
-    elif tcp_established and evidence["connected_current"]:
-        bgp_state = "established"
-    else:
-        bgp_state = "not_verified"
+    bgp_state = (
+        "established"
+        if tcp_established
+        else "down"
+        if session_code == 0 and bool(peer_ip)
+        else "not_verified"
+    )
     config_verified = bool(
         evidence["config_readable"]
         and evidence["config_parse_valid"]
         and evidence["neighbor_found"]
     )
-    if bgp_state == "down":
-        flowspec_state = "down"
-    elif bgp_state != "established":
+    flowspec_ok = bool(
+        config_verified
+        and evidence["family_block_found"]
+        and evidence["ipv4_flow_configured"]
+    )
+    if not config_verified:
         flowspec_state = "not_verified"
-    elif not config_verified:
-        flowspec_state = "not_verified"
-    elif not evidence["family_block_found"] or not evidence["ipv4_flow_configured"]:
-        flowspec_state = "down"
-    elif pipe["ok"]:
-        flowspec_state = "established"
     else:
-        flowspec_state = "not_verified"
+        flowspec_state = "established" if flowspec_ok else "down"
+    checks = {
+        "service_ok": service_active,
+        "listener_ok": listening,
+        "bgp_ok": tcp_established,
+        "flowspec_ok": flowspec_ok,
+        "pipe_ok": bool(pipe["ok"]),
+    }
 
     return {
         "available": True,
-        "service": {"name": service, "active": service_active, "raw": service_output},
-        "listener": {"listening": listening, "expected_port": listen_port},
-        "session": {"tcp_established": tcp_established, "peer_ip": peer_ip},
+        "service": service_status,
+        "listener": {
+            "listening": listening,
+            "expected_port": listen_port,
+            "query_ok": listen_code == 0,
+        },
+        "session": {
+            "tcp_established": tcp_established,
+            "peer_ip": peer_ip,
+            **socket_status,
+        },
         "bgp_state": bgp_state,
         "flowspec_state": flowspec_state,
+        "checks": checks,
+        **checks,
         "pipe": pipe,
         "evidence": evidence,
+    }
+
+
+def recovery_snapshot(
+    service: str,
+    peer_ips: list[str],
+    listen_port: int,
+    close_wait_threshold: int,
+    recv_q_threshold: int,
+) -> dict[str, Any]:
+    service_result = systemd_service_status(service)
+    listener_result = listener_status(listen_port)
+    session_code, session_output = run(["ss", "-antp"])
+    sockets = tcp_socket_diagnostics(
+        session_output,
+        peer_ips,
+        listen_port,
+        command_ok=session_code == 0,
+        close_wait_threshold=close_wait_threshold,
+        recv_q_threshold=recv_q_threshold,
+    )
+    return {
+        "service": service_result,
+        "listener": listener_result,
+        "session": sockets,
+        "checks": {
+            "service_ok": bool(service_result["active"]),
+            "listener_ok": bool(listener_result["listening"]),
+            "all_peers_established": not sockets["missing_peers"],
+        },
+    }
+
+
+def recover_bgp_sessions(
+    service: str,
+    peer_ips: list[str],
+    listen_port: int = 179,
+    close_wait_threshold: int | None = None,
+    recv_q_threshold: int | None = None,
+    wait_attempts: int = 20,
+    wait_interval_seconds: float = 0.5,
+) -> dict[str, Any]:
+    normalized_service = normalize_systemd_service_name(service)
+    if normalized_service != DEFAULT_EXABGP_SYSTEMD_SERVICE:
+        raise ValueError(
+            f"recovery is restricted to {DEFAULT_EXABGP_SYSTEMD_SERVICE}"
+        )
+    peers = list(
+        dict.fromkeys(
+            str(peer or "").strip()
+            for peer in peer_ips
+            if str(peer or "").strip()
+        )
+    )
+    if not peers:
+        raise ValueError("at least one peer_ip is required")
+    close_limit = (
+        configured_int(
+            "GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD",
+            DEFAULT_CLOSE_WAIT_ALERT_THRESHOLD,
+        )
+        if close_wait_threshold is None
+        else max(0, int(close_wait_threshold))
+    )
+    recv_limit = (
+        configured_int(
+            "GMJFLOW_BGP_RECV_Q_ALERT_THRESHOLD",
+            DEFAULT_RECV_Q_ALERT_THRESHOLD,
+            maximum=1_000_000_000,
+        )
+        if recv_q_threshold is None
+        else max(0, int(recv_q_threshold))
+    )
+    before = recovery_snapshot(
+        normalized_service,
+        peers,
+        listen_port,
+        close_limit,
+        recv_limit,
+    )
+    restart_reasons: list[str] = []
+    if not before["checks"]["service_ok"]:
+        restart_reasons.append("service_inactive")
+    if not before["checks"]["listener_ok"]:
+        restart_reasons.append("listener_unavailable")
+    if not before["checks"]["all_peers_established"]:
+        restart_reasons.append("peers_missing")
+    if before["session"]["close_wait_alert"]:
+        restart_reasons.append("close_wait_above_threshold")
+    if before["session"]["recv_q_alert"]:
+        restart_reasons.append("recv_q_above_threshold")
+
+    restart_attempted = bool(restart_reasons)
+    restart_returncode = 0
+    restart_output = ""
+    if restart_attempted:
+        restart_returncode, restart_output = run(
+            ["systemctl", "restart", normalized_service],
+            timeout=20.0,
+        )
+
+    after = before
+    if restart_attempted and restart_returncode == 0:
+        attempts = max(1, min(int(wait_attempts), 120))
+        for attempt in range(attempts):
+            after = recovery_snapshot(
+                normalized_service,
+                peers,
+                listen_port,
+                close_limit,
+                recv_limit,
+            )
+            if (
+                after["checks"]["service_ok"]
+                and after["checks"]["listener_ok"]
+                and after["checks"]["all_peers_established"]
+            ):
+                break
+            if attempt + 1 < attempts and wait_interval_seconds > 0:
+                time_module.sleep(min(float(wait_interval_seconds), 2.0))
+
+    ok = bool(
+        after["checks"]["service_ok"]
+        and after["checks"]["listener_ok"]
+        and after["checks"]["all_peers_established"]
+        and (not restart_attempted or restart_returncode == 0)
+    )
+    return {
+        "ok": ok,
+        "service": normalized_service,
+        "peer_ips": peers,
+        "listen_port": listen_port,
+        "restart_needed": bool(restart_reasons),
+        "restart_attempted": restart_attempted,
+        "restart_reasons": restart_reasons,
+        "restart_returncode": restart_returncode,
+        "restart_output": restart_output,
+        "before": before,
+        "after": after,
+        "data_preserved": {
+            "database": True,
+            "history": True,
+            "fifos": True,
+            "announcements": True,
+        },
     }
 
 
@@ -823,18 +1140,71 @@ class Handler(BaseHTTPRequestHandler):
             listen_port = int(params.get("listen_port", ["179"])[0])
         except ValueError:
             listen_port = 179
-        payload = bgp_status(
-            service,
-            peer_ip,
-            listen_port,
-            pipe_path,
-            log_path,
-            self.configured_log_path,
-            config_path,
-            self.configured_config_path,
-        )
+        try:
+            payload = bgp_status(
+                service,
+                peer_ip,
+                listen_port,
+                pipe_path,
+                log_path,
+                self.configured_log_path,
+                config_path,
+                self.configured_config_path,
+            )
+            status_code = 200
+        except ValueError as exc:
+            payload = {"available": False, "error": str(exc)}
+            status_code = 400
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path != "/bgp/recover":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length <= 0 or content_length > 64 * 1024:
+                raise ValueError("invalid request body size")
+            request_payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            if not isinstance(request_payload, dict):
+                raise ValueError("invalid JSON payload")
+            payload = recover_bgp_sessions(
+                str(request_payload.get("service") or ""),
+                list(request_payload.get("peer_ips") or []),
+                int(request_payload.get("listen_port") or 179),
+                int(
+                    request_payload.get(
+                        "close_wait_threshold",
+                        configured_int(
+                            "GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD",
+                            DEFAULT_CLOSE_WAIT_ALERT_THRESHOLD,
+                        ),
+                    )
+                ),
+                int(
+                    request_payload.get(
+                        "recv_q_threshold",
+                        configured_int(
+                            "GMJFLOW_BGP_RECV_Q_ALERT_THRESHOLD",
+                            DEFAULT_RECV_Q_ALERT_THRESHOLD,
+                            maximum=1_000_000_000,
+                        ),
+                    )
+                ),
+            )
+            status_code = 200 if payload["ok"] else 503
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            payload = {"ok": False, "error": str(exc)}
+            status_code = 400
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

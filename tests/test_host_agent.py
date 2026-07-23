@@ -46,10 +46,12 @@ class HostAgentStatusTest(unittest.TestCase):
         started_at="2026-07-21T09:59:00Z",
         config_text=None,
         config_error="",
+        service_active=True,
+        service="exabgp-gmj-flow.service",
     ):
         def fake_run(args, timeout=2.0):
             if args[:2] == ["systemctl", "is-active"]:
-                return 0, "active"
+                return (0, "active") if service_active else (3, "inactive")
             if "--property=InvocationID" in args:
                 return 0, invocation
             if "--property=ExecMainStartTimestamp" in args:
@@ -65,8 +67,9 @@ class HostAgentStatusTest(unittest.TestCase):
         fifo_stat = types.SimpleNamespace(st_mode=stat.S_IFIFO | 0o600, st_dev=1, st_ino=2)
         reader_evidence = {
             "reader_active": reader,
+            "reader_waiting_for_writer": False,
             "reader_process_pid": 4321 if reader else None,
-            "reader_process_cmdline": "/bin/cat /run/exabgp/exabgp.in" if reader else "",
+            "reader_process_cmdline": f"/bin/cat {self.pipe_path}" if reader else "",
             "reader_detection_method": "direct_fifo_reader" if reader else "",
         }
         file_result = (
@@ -93,7 +96,7 @@ class HostAgentStatusTest(unittest.TestCase):
              patch.object(host_agent, "read_log_file", return_value=file_result), \
              patch.object(host_agent, "read_config_file", return_value=config_result):
             return host_agent.bgp_status(
-                "exabgp-gmj-flow.service",
+                service,
                 self.peer_ip,
                 179,
                 self.pipe_path,
@@ -125,11 +128,11 @@ class HostAgentStatusTest(unittest.TestCase):
         self.assertEqual(status["evidence"]["source"], "exabgp_journal + exabgp_config")
         self.assertNotIn("never-expose-this", json.dumps(status))
 
-    def test_tcp_without_exabgp_evidence_is_not_verified(self):
+    def test_tcp_established_is_bgp_evidence_without_log_dependency(self):
         status = self.run_status([])
         self.assertTrue(status["session"]["tcp_established"])
-        self.assertEqual(status["bgp_state"], "not_verified")
-        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
 
     def test_empty_journal_uses_current_log_file_events(self):
         status = self.run_status(
@@ -143,17 +146,17 @@ class HostAgentStatusTest(unittest.TestCase):
         self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(status["evidence"]["source"], "exabgp_log_file + exabgp_config")
 
-    def test_log_file_connected_only_before_restart_is_not_verified(self):
+    def test_old_log_does_not_override_current_established_tcp(self):
         status = self.run_status(
             [],
             started_at="2026-07-21T10:00:00Z",
             file_logs=[f"2026-07-21 09:58:00Z | connected to peer-1 with {self.peer_ip}"],
         )
-        self.assertEqual(status["bgp_state"], "not_verified")
-        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(status["evidence"]["last_connected_at"], "")
 
-    def test_current_log_file_connected_followed_by_shutdown_is_down(self):
+    def test_shutdown_log_does_not_override_current_established_tcp(self):
         status = self.run_status(
             [],
             file_logs=[
@@ -162,8 +165,8 @@ class HostAgentStatusTest(unittest.TestCase):
                 "2026-07-21 10:02:00Z | performing shutdown after SIGTERM",
             ],
         )
-        self.assertEqual(status["bgp_state"], "down")
-        self.assertEqual(status["flowspec_state"], "down")
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
         self.assertTrue(status["evidence"]["explicit_shutdown"])
 
     def test_time_only_log_timestamp_is_correlated_to_current_start(self):
@@ -181,23 +184,23 @@ class HostAgentStatusTest(unittest.TestCase):
         self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(status["evidence"]["last_connected_at"], "2026-07-21T10:00:00Z")
 
-    def test_old_connected_followed_by_shutdown_is_down(self):
+    def test_journal_shutdown_does_not_override_current_established_tcp(self):
         logs = self.current_established_logs() + [
             journal_record("2026-07-21T10:02:00Z", "performing shutdown after SIGTERM")
         ]
         status = self.run_status(logs)
-        self.assertEqual(status["bgp_state"], "down")
-        self.assertEqual(status["flowspec_state"], "down")
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(status["evidence"]["last_shutdown_at"], "2026-07-21T10:02:00Z")
 
-    def test_connected_from_previous_process_is_not_current(self):
+    def test_previous_process_log_does_not_override_current_established_tcp(self):
         logs = [
             journal_record("2026-07-21T10:00:00Z", f"connected to peer-1 with {self.peer_ip}", "old-invocation"),
             journal_record("2026-07-21T10:00:01Z", "peer-1 family-allowed in-open ipv4 flow", "old-invocation"),
         ]
         status = self.run_status(logs, invocation="new-invocation")
-        self.assertEqual(status["bgp_state"], "not_verified")
-        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
         self.assertEqual(status["evidence"]["last_connected_at"], "")
 
     def test_absent_pipe_is_not_ready(self):
@@ -210,7 +213,63 @@ class HostAgentStatusTest(unittest.TestCase):
         self.assertTrue(status["pipe"]["is_fifo"])
         self.assertFalse(status["pipe"]["reader_active"])
         self.assertFalse(status["pipe"]["ok"])
-        self.assertEqual(status["flowspec_state"], "not_verified")
+        self.assertEqual(status["flowspec_state"], "established")
+
+    def test_service_inactive_does_not_reclassify_bgp_or_flowspec(self):
+        status = self.run_status(
+            self.current_established_logs(),
+            service_active=False,
+        )
+        self.assertFalse(status["service_ok"])
+        self.assertTrue(status["bgp_ok"])
+        self.assertTrue(status["flowspec_ok"])
+        self.assertEqual(status["bgp_state"], "established")
+        self.assertEqual(status["flowspec_state"], "established")
+
+    def test_two_peers_two_fifos_share_one_normalized_service_and_are_ready(self):
+        original_peer = self.peer_ip
+        original_pipe = self.pipe_path
+        config = """
+        neighbor 179.189.80.0 { family { ipv4 unicast; ipv4 flow; } }
+        neighbor 45.5.249.0 { family { ipv4 unicast; ipv4 flow; } }
+        """
+        try:
+            results = []
+            for peer, pipe, configured_service in (
+                ("179.189.80.0", "/run/exabgp/exabgp.in", "exabgp-gmj-flow"),
+                ("45.5.249.0", "/run/exabgp/gm-teste.in", ""),
+            ):
+                self.peer_ip = peer
+                self.pipe_path = pipe
+                with patch.object(
+                    host_agent.os,
+                    "write",
+                    side_effect=AssertionError("consulta de status escreveu no FIFO"),
+                ):
+                    results.append(
+                        self.run_status(
+                            [
+                                journal_record(
+                                    "2026-07-21T10:00:00Z",
+                                    f"connected to peer with {peer}",
+                                )
+                            ],
+                            config_text=config,
+                            service=configured_service,
+                        )
+                    )
+        finally:
+            self.peer_ip = original_peer
+            self.pipe_path = original_pipe
+        self.assertEqual(
+            [item["pipe"]["path"] for item in results],
+            ["/run/exabgp/exabgp.in", "/run/exabgp/gm-teste.in"],
+        )
+        for status in results:
+            self.assertEqual(status["service"]["name"], "exabgp-gmj-flow.service")
+            self.assertTrue(all(status["checks"].values()))
+            self.assertTrue(status["bgp_ok"])
+            self.assertTrue(status["flowspec_ok"])
 
     def test_ipv4_flow_only_in_another_neighbor_is_not_established(self):
         config = """
@@ -352,6 +411,92 @@ class HostAgentFifoReaderTest(unittest.TestCase):
         self.assertEqual(evidence["reader_process_cmdline"], f"/bin/cat {self.fifo_path}")
 
 
+class HostAgentRecoveryTest(unittest.TestCase):
+    peers = ["179.189.80.0", "45.5.249.0"]
+
+    def test_healthy_manual_recovery_does_not_restart_service(self):
+        commands = []
+
+        def fake_run(args, timeout=2.0):
+            commands.append(args)
+            if args[:2] == ["systemctl", "is-active"]:
+                return 0, "active"
+            if args[:2] == ["ss", "-lntp"]:
+                return 0, "LISTEN 0 128 0.0.0.0:179 0.0.0.0:*"
+            if args[:2] == ["ss", "-antp"]:
+                return 0, "\n".join(
+                    f"ESTAB 0 0 192.0.2.10:179 {peer}:50000"
+                    for peer in self.peers
+                )
+            raise AssertionError(f"Comando inesperado: {args}")
+
+        with patch.object(host_agent, "run", side_effect=fake_run):
+            result = host_agent.recover_bgp_sessions(
+                "exabgp-gmj-flow",
+                self.peers,
+                wait_interval_seconds=0,
+            )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["restart_attempted"])
+        self.assertNotIn(
+            ["systemctl", "restart", "exabgp-gmj-flow.service"],
+            commands,
+        )
+
+    def test_manual_recovery_restarts_only_shared_service_for_close_wait_alert(self):
+        commands = []
+        restarted = {"value": False}
+
+        def fake_run(args, timeout=2.0):
+            commands.append(args)
+            if args[:2] == ["systemctl", "is-active"]:
+                return 0, "active"
+            if args[:2] == ["systemctl", "restart"]:
+                restarted["value"] = True
+                return 0, ""
+            if args[:2] == ["ss", "-lntp"]:
+                return 0, "LISTEN 0 128 0.0.0.0:179 0.0.0.0:*"
+            if args[:2] == ["ss", "-antp"]:
+                established = "\n".join(
+                    f"ESTAB 0 0 192.0.2.10:179 {peer}:50000"
+                    for peer in self.peers
+                )
+                if restarted["value"]:
+                    return 0, established
+                return 0, (
+                    established
+                    + "\nCLOSE-WAIT 32 0 192.0.2.10:179 179.189.80.0:50001"
+                )
+            raise AssertionError(f"Comando inesperado: {args}")
+
+        with patch.object(host_agent, "run", side_effect=fake_run):
+            result = host_agent.recover_bgp_sessions(
+                "exabgp-gmj-flow.service",
+                self.peers,
+                close_wait_threshold=0,
+                wait_interval_seconds=0,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            commands.count(
+                ["systemctl", "restart", "exabgp-gmj-flow.service"]
+            ),
+            1,
+        )
+        self.assertIn("close_wait_above_threshold", result["restart_reasons"])
+        self.assertEqual(result["before"]["session"]["close_wait_count"], 1)
+        self.assertEqual(result["after"]["session"]["close_wait_count"], 0)
+        self.assertTrue(all(result["data_preserved"].values()))
+
+    def test_recovery_rejects_any_other_systemd_service(self):
+        with self.assertRaises(ValueError):
+            host_agent.recover_bgp_sessions(
+                "another.service",
+                self.peers,
+                wait_interval_seconds=0,
+            )
+
+
 class HostAgentLogSafetyTest(unittest.TestCase):
     def test_request_cannot_select_an_unconfigured_log_file(self):
         with patch.object(host_agent.os, "lstat") as lstat_call, \
@@ -433,10 +578,10 @@ class HostAgentConfigSafetyTest(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(accepted, self.config_path)
         self.assertEqual(
-            open_call.call_args.args[1] & getattr(host_agent.os, "O_ACCMODE", 3),
+            open_call.call_args[0][1] & getattr(host_agent.os, "O_ACCMODE", 3),
             host_agent.os.O_RDONLY,
         )
-        self.assertEqual(read_call.call_args_list[0].args, (99, host_agent.MAX_CONFIG_READ_BYTES + 1))
+        self.assertEqual(read_call.call_args_list[0][0], (99, host_agent.MAX_CONFIG_READ_BYTES + 1))
         write_call.assert_not_called()
 
 

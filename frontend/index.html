@@ -4568,6 +4568,9 @@
               <button id="checkAllBgpConnectorsButton" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="activity"></i><span>Verificar agora</span>
               </button>
+              <button id="recoverBgpSessionsButton" type="button" class="btn btn-sm btn-outline-danger">
+                <i data-lucide="rotate-cw"></i><span>Recuperar sessões BGP</span>
+              </button>
             </div>
           </div>
 
@@ -4601,12 +4604,13 @@
                   <tr>
                     <th>Nome</th>
                     <th>Peer</th>
-                    <th>AS local</th>
-                    <th>AS remoto</th>
-                    <th>BGP</th>
-                    <th>FlowSpec</th>
-                    <th>Pipe</th>
-                    <th>Serviço ExaBGP</th>
+                    <th>Serviço compartilhado</th>
+                    <th>Listener TCP/179</th>
+                    <th>Sessão BGP</th>
+                    <th>IPv4 FlowSpec</th>
+                    <th>FIFO configurado</th>
+                    <th>Leitor do FIFO</th>
+                    <th>CLOSE_WAIT</th>
                     <th>Prontidão</th>
                     <th>Última checagem</th>
                     <th>Ações</th>
@@ -5781,6 +5785,7 @@
     let bgpStatusesRefreshInFlight = null;
     const bgpConnectorChecksInFlight = new Map();
     let bgpBulkCheckInFlight = false;
+    let bgpRecoveryInFlight = false;
     let opsSummaryRefreshTimer = null;
     let opsSummaryRefreshInFlight = false;
     let activeCustomRangeTarget = null;
@@ -9081,11 +9086,14 @@
 
     function bgpConnectorReadinessState(status, connector = null) {
       if (!status || !status.last_checked_at) return 'NOT_VERIFIED';
+      if (status.readiness && typeof status.readiness.ready === 'boolean') {
+        return status.readiness.ready ? 'READY' : 'NOT_READY';
+      }
       const bgpState = bgpPeerOperationalState(status);
       const flowspecState = bgpFlowspecOperationalState(status, connector);
       const pipeState = bgpPipeDetailedState(status, connector);
-      if (status.service?.active && bgpState === 'UP' && flowspecState === 'UP' && pipeState === 'OK') return 'READY';
-      if (!status.service?.active || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
+      if (status.service?.active && status.listener?.listening && bgpState === 'UP' && flowspecState === 'UP' && pipeState === 'OK') return 'READY';
+      if (!status.service?.active || !status.listener?.listening || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
       return 'NOT_VERIFIED';
     }
 
@@ -9142,6 +9150,7 @@
       if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP. A instalação da rota no Huawei não foi verificada.';
       if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
       if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
+      if (!status.listener?.listening) return 'Listener TCP/179 indisponível no host.';
       if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
       if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
       if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise o bloco family e a diretiva ipv4 flow do neighbor na configuração ExaBGP.';
@@ -9159,10 +9168,23 @@
       const readerActive = pipe.reader_active;
       const flowspecEnabled = status && bgpFlowspecOperationalState(status, connector) === 'UP';
       const calculated = [
+        bgpConnectorDetailField('Serviço compartilhado', status?.service?.active ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('Listener TCP/179', status?.listener?.listening ? 'Em escuta' : status ? 'Indisponível' : 'Não verificado'),
         bgpConnectorDetailField('BGP', status ? (bgpPeerOperationalState(status) === 'UP' ? 'Estabelecido' : bgpPeerOperationalState(status) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
         bgpConnectorDetailField('FlowSpec', status ? (flowspecEnabled ? 'Habilitado no ExaBGP' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
         bgpConnectorDetailField('Pipe', bgpPipeDetailedState(status, connector).replace('NO_READER', 'Pipe sem leitor').replace('NOT_VERIFIED', 'Não verificado').replace('UNAVAILABLE', 'Indisponível').replace('ABSENT', 'Ausente').replace('OK', 'OK')),
-        bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto'))
+        bgpConnectorDetailField('CLOSE_WAIT', status?.session?.close_wait_count ?? 0),
+        bgpConnectorDetailField('Recv-Q máximo', status?.session?.recv_q_max ?? 0),
+        bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto')),
+        bgpConnectorDetailField('Motivo exato', (status?.readiness?.reasons || []).map(reason => ({
+          exabgp_service_inactive: 'serviço systemd inativo',
+          tcp_listener_unavailable: 'listener TCP/179 indisponível',
+          peer_bgp_down: 'sessão BGP do peer indisponível',
+          peer_bgp_not_verified: 'sessão BGP do peer não verificada',
+          flowspec_down: 'IPv4 FlowSpec ausente na configuração',
+          flowspec_not_verified: 'configuração IPv4 FlowSpec não verificada',
+          exabgp_pipe_unavailable: 'FIFO ausente, inválido ou sem leitor'
+        }[reason] || reason)).join('; '))
       ].join('');
       const identity = [
         bgpConnectorDetailField('Nome', connector.name),
@@ -9170,7 +9192,8 @@
         bgpConnectorDetailField('Endereço local', connector.local_address),
         bgpConnectorDetailField('AS local', connector.local_asn),
         bgpConnectorDetailField('AS remoto', connector.peer_asn),
-        bgpConnectorDetailField('Serviço systemd', connector.systemd_service_name),
+        bgpConnectorDetailField('Serviço systemd', status?.service?.name || connector.systemd_service_name),
+        bgpConnectorDetailField('Origem do serviço', status?.service?.resolution_source),
         bgpConnectorDetailField('Status do serviço', status?.service?.active ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
         bgpConnectorDetailField('Listener', status?.listener?.listening ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
         bgpConnectorDetailField('Sessão TCP', status?.session?.tcp_established ? 'Estabelecida' : status ? 'Não estabelecida' : 'Não verificada'),
@@ -9211,20 +9234,28 @@
         const checking = bgpConnectorChecksInFlight.has(Number(connector.id));
         const bgpState = bgpPeerOperationalState(status);
         const flowspecState = bgpFlowspecOperationalState(status, connector);
-        const pipeState = bgpPipeDetailedState(status, connector);
         const readiness = bgpConnectorReadinessState(status, connector);
         const bgpKind = bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : bgpState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
         const flowKind = flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : flowspecState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
+        const pipe = status?.host_agent?.pipe || status?.pipes || {};
+        const fifoExists = pipe.exists ?? pipe.input_exists;
+        const fifoValid = pipe.is_fifo;
+        const readerActive = pipe.reader_active;
+        const readerWaiting = pipe.reader_waiting_for_writer;
+        const closeWaitCount = Number(status?.session?.close_wait_count || 0);
+        const closeWaitAlert = Boolean(status?.session?.close_wait_alert);
+        const serviceName = status?.service?.name || connector.systemd_service_name || 'exabgp-gmj-flow.service';
         return `
           <tr>
             <td>${escapeHtml(connector.name || `#${connector.id}`)}</td>
             <td>${escapeHtml(connector.peer_ip || '-')}</td>
-            <td>${escapeHtml(connector.local_asn || '-')}</td>
-            <td>${escapeHtml(connector.peer_asn || '-')}</td>
+            <td>${bgpStatusBadge(`${serviceName} · ${status?.service?.active ? 'ativo' : 'indisponível'}`, status?.service?.active ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(status?.listener?.listening ? 'TCP/179 em escuta' : status ? 'Listener indisponível' : 'Listener não verificado', status?.listener?.listening ? 'ok' : status ? 'down' : 'not_verified')}</td>
             <td>${bgpStatusBadge(bgpState === 'UP' ? 'BGP estabelecido' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'NAO VERIFICADO' ? 'BGP não verificado' : bgpState, bgpKind)}</td>
             <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec habilitado no ExaBGP' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
-            <td>${bgpPipeDetailedBadge(pipeState)}</td>
-            <td>${bgpStatusBadge(status?.service?.active ? 'Serviço ativo' : status ? 'Serviço indisponível' : 'Serviço não verificado', status?.service?.active ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(fifoExists && fifoValid ? 'FIFO válido' : fifoExists === false ? 'FIFO ausente' : 'FIFO não verificado', fifoExists && fifoValid ? 'ok' : fifoExists === false ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(readerActive ? (readerWaiting ? 'Leitor aguardando escritor' : 'Leitor ativo') : status ? 'Sem leitor' : 'Leitor não verificado', readerActive ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(`${closeWaitCount}${closeWaitAlert ? ' · alerta' : ''}`, closeWaitAlert ? 'down' : 'ok')}</td>
             <td>${bgpReadinessBadge(readiness)}</td>
             <td>${escapeHtml(formatDateTime(status?.last_checked_at) || '-')}</td>
             <td><div class="d-flex flex-wrap gap-1">
@@ -9236,7 +9267,7 @@
           </tr>
         `;
       }).join('');
-      document.getElementById('bgpPeerStatusRows').innerHTML = rows || '<tr><td colspan="11" class="text-muted">Nenhum conector configurado.</td></tr>';
+      document.getElementById('bgpPeerStatusRows').innerHTML = rows || '<tr><td colspan="12" class="text-muted">Nenhum conector configurado.</td></tr>';
       const checked = bgpConnectorStatuses.filter(status => status.last_checked_at).length;
       setText('bgpPeerStatusText', !bgpConnectors.length ? 'Nenhum conector configurado.' : checked ? `${checked} conector(es) checado(s)` : 'Nenhum conector foi checado ainda.');
       renderBgpInfrastructureSummary();
@@ -9831,6 +9862,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         button.setAttribute('aria-busy', checking ? 'true' : 'false');
         button.title = checking ? 'Verificação em andamento' : 'Verificar agora';
       });
+      const recoveryButton = document.getElementById('recoverBgpSessionsButton');
+      if (recoveryButton) {
+        recoveryButton.disabled = bgpRecoveryInFlight;
+        recoveryButton.setAttribute('aria-busy', bgpRecoveryInFlight ? 'true' : 'false');
+      }
     }
 
     function bgpCheckConflict(error) {
@@ -9859,6 +9895,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ].filter(Boolean).join(', '));
       } finally {
         bgpBulkCheckInFlight = false;
+        updateBgpCheckButtonsState();
+      }
+    }
+
+    async function recoverBgpSessions() {
+      if (bgpRecoveryInFlight) return;
+      if (!window.confirm('Recuperar as sessões reiniciará somente exabgp-gmj-flow.service se o diagnóstico indicar necessidade. Continuar?')) return;
+      bgpRecoveryInFlight = true;
+      updateBgpCheckButtonsState();
+      setText('bgpPeerStatusText', 'Diagnosticando e recuperando sessões BGP...');
+      try {
+        const result = await apiRequest('/api/bgp/connectors/recover-sessions', { method: 'POST' });
+        await checkBgpConnectorStatusesNow();
+        const returnedPeers = result?.after?.session?.established_peers || [];
+        const closeWait = Number(result?.after?.session?.close_wait_count || 0);
+        setText('bgpPeerStatusText', result.ok
+          ? `Recuperação concluída; ${returnedPeers.length} peer(s) estabelecido(s), CLOSE_WAIT=${closeWait}. Auditoria #${result.audit_id}.`
+          : `Recuperação executada, mas a confirmação está incompleta: ${result.message || (result?.after?.session?.missing_peers || []).join(', ') || 'verifique os detalhes'}. Auditoria #${result.audit_id}.`);
+      } finally {
+        bgpRecoveryInFlight = false;
         updateBgpCheckButtonsState();
       }
     }
@@ -17492,6 +17548,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
     document.getElementById('refreshBgpConnectorsButton').addEventListener('click', () => loadBgpConnectorsView().catch(error => setText('bgpConnectorsStatus', `Falha: ${error.message}`)));
     document.getElementById('checkAllBgpConnectorsButton').addEventListener('click', () => checkBgpConnectorStatusesNow().catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`)));
+    document.getElementById('recoverBgpSessionsButton').addEventListener('click', () => recoverBgpSessions().catch(error => setText('bgpPeerStatusText', `Falha na recuperação: ${error.message}`)));
     document.getElementById('bgpPdfButton').addEventListener('click', () => exportBgpPdf().catch(console.error));
     document.getElementById('checkBgpStatusButton').addEventListener('click', () => checkBgpConnectorStatusesNow().catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`)));
     document.getElementById('saveBgpConnectorButton').addEventListener('click', () => saveBgpConnector().catch(error => setText('bgpConnectorsStatus', `Falha ao salvar conector: ${error.message}`)));

@@ -512,6 +512,23 @@ class FrontendBgpProfilesTest(unittest.TestCase):
             HTML,
         )
 
+    def test_connector_status_separates_shared_service_listener_fifo_reader_and_close_wait(self):
+        for label in (
+            "Serviço compartilhado",
+            "Listener TCP/179",
+            "Sessão BGP",
+            "IPv4 FlowSpec",
+            "FIFO configurado",
+            "Leitor do FIFO",
+            "CLOSE_WAIT",
+            "Motivo exato",
+            "Recuperar sessões BGP",
+        ):
+            self.assertIn(label, HTML)
+        self.assertIn("/api/bgp/connectors/recover-sessions", HTML)
+        self.assertIn("reader_waiting_for_writer", HTML)
+        self.assertIn("status?.readiness?.reasons", HTML)
+
     def test_unverified_and_down_response_labels_follow_technical_reason(self):
         presentation_start = HTML.index("function bgpTechnicalFailurePresentation")
         presentation_end = HTML.index("function bgpAnnouncementStatusInfo", presentation_start)
