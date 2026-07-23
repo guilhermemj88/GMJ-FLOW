@@ -203,6 +203,30 @@ class FrontendAiNavigationTest(unittest.TestCase):
         self.assertIn("aiProviderFailureMessage(result)", provider_action)
         self.assertIn("aiProviderFailureMessage(result)", playground)
 
+    def test_flowspec_proposal_modal_renders_saved_boolean_ai_decision(self):
+        render = function_source("renderBgpAiDecision", "anomalyAiAnalysisEndpoint")
+        for expected in (
+            "Decisão:",
+            "Autoriza mitigação",
+            "Não recomenda mitigação",
+            "Motivo:",
+            "Provider:",
+            "Modelo:",
+            "Latência:",
+            "Data/hora:",
+            "Reanalisar",
+        ):
+            self.assertIn(expected, render)
+        self.assertIn("analysis.apply_mitigation === true", render)
+        self.assertNotIn("recommended_candidate_index", render)
+
+    def test_flowspec_proposal_reanalysis_posts_only_to_ai_analysis(self):
+        source = function_source("runBgpAiReanalysis", "uniqueMitigationConnectorForRecalculation")
+        self.assertIn("anomalyAiAnalysisEndpoint(currentBgpMitigationAnomalyId)", source)
+        self.assertIn("anomalyAiRequestOptions(currentBgpMitigationAnomalyId, true)", source)
+        for forbidden in ("/mitigation/apply", "/api/bgp/", "manual-flowspec", "announce_now"):
+            self.assertNotIn(forbidden, source)
+
     def test_operator_mutations_are_hidden_and_safety_notice_is_visible(self):
         self.assertIn("document.querySelectorAll('.ai-admin-control')", HTML)
         self.assertIn("A IA fornece análise e recomendação. A execução é controlada pelas políticas determinísticas do GMJ-FLOW.", HTML)

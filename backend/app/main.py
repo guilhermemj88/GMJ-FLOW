@@ -702,11 +702,10 @@ AI_MODEL_PROFILES = {
 }
 
 AI_SYSTEM_PROMPT = (
-    "Voce e um analista NOC/ISP. Analise anomalias NetFlow e escolha a mitigacao "
-    "mais segura entre candidatos fornecidos. Nao invente comandos. Nao recomende "
-    "bloqueio amplo. Se o candidato vier de fallback_analysis fraco, nao diga que "
-    "descarte e a opcao mais segura; diga: \"Nao ha evidencia suficiente para recomendar "
-    "descarte. Confirmar top flows no ClickHouse/roteador.\" Retorne somente JSON valido."
+    "Voce e um analista NOC/ISP que apenas autoriza ou veta a automacao de uma proposta "
+    "deterministica imutavel. Nunca gere ou altere IP, prefixo, porta, protocolo, acao, "
+    "conector, comando ExaBGP ou regra FlowSpec. Retorne somente JSON valido com exatamente "
+    "apply_mitigation (boolean) e reason (string objetiva)."
 )
 
 AI_RESPONSE_CLASSIFICATIONS = {
@@ -1773,10 +1772,28 @@ def ensure_attack_vector_db(conn: sqlite3.Connection) -> None:
             candidate_count INTEGER NOT NULL DEFAULT 0,
             timeout_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            error_message TEXT NOT NULL DEFAULT ''
+            error_message TEXT NOT NULL DEFAULT '',
+            apply_mitigation INTEGER NOT NULL DEFAULT 0,
+            provider_id INTEGER,
+            provider_name TEXT NOT NULL DEFAULT '',
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            tokens INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT '',
+            raw_response TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "apply_mitigation", "apply_mitigation INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "provider_id", "provider_id INTEGER")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "provider_name", "provider_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "latency_ms", "latency_ms INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "input_tokens", "input_tokens INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "output_tokens", "output_tokens INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "tokens", "tokens INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "status", "status TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "ai_mitigation_analysis", "raw_response", "raw_response TEXT NOT NULL DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_template ON attack_vectors(template_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_attack_vectors_enabled ON attack_vectors(enabled, parent_enabled)")
     ensure_vector_display_name_columns(conn)
@@ -11525,6 +11542,10 @@ def record_auto_mitigation_outcome(
         ) else "manual",
         "requested_mode": clean_text(requested_mode or candidate.get("requested_mode")),
         "mitigation_key": (announcement or {}).get("mitigation_key") or candidate.get("mitigation_key") or "",
+        "ai_analysis_id": int_or_none(candidate.get("ai_analysis_id")),
+        "ai_apply_mitigation": candidate.get("ai_apply_mitigation") if isinstance(candidate.get("ai_apply_mitigation"), bool) else None,
+        "ai_decision_status": clean_text(candidate.get("ai_decision_status")),
+        "ai_decision_reason": clean_text(candidate.get("ai_decision_reason"))[:1000],
     }
     details.update(extra_details or {})
     candidate["auto_mitigation_status"] = clean_text(status)
@@ -12416,6 +12437,10 @@ def evaluated_mitigation_candidates(
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
         policy_allows_auto = policy.get("decision") == "allow_auto"
+        auto_allowed = bool(
+            policy_allows_auto
+            and any("AUTO_ALLOWED" in clean_text(reason).upper() for reason in policy.get("reasons") or [])
+        )
         analysis_only = bool(candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only")
         actionable = bool(
             preview_connector
@@ -12446,12 +12471,14 @@ def evaluated_mitigation_candidates(
                 "equivalent_announcement": equivalent_announcement,
                 "cooldown_allowed": cooldown_allowed,
                 "actionable": actionable,
+                "eligible": actionable,
                 "can_submit_approval": actionable,
                 "can_announce_now": actionable and not connector_is_dry_run(preview_connector),
                 "connector_dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "apply_enabled": actionable,
-                "manual_approval_required": not policy_allows_auto,
-                "allow_auto": policy_allows_auto,
+                "manual_approval_required": not auto_allowed,
+                "allow_auto": auto_allowed,
+                "auto_allowed": auto_allowed,
                 "evaluation_only": True,
                 "dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "dry_run_message": "Selecione um conector para recalcular a proposta." if requires_connector_selection else f"Nao elegivel para mitigacao: {connector_resolution_reason}." if connector_resolution_reason else "Avaliacao concluida; nenhum comando foi enviado.",
@@ -13937,12 +13964,13 @@ def ai_effective_config(conn: sqlite3.Connection | None = None) -> dict[str, Any
         "require_policy_validation": setting_bool(settings, "ai_require_policy_validation"),
     }
     if central_config is not None:
+        automatic_policy_enabled = bool(config.get("allow_auto"))
         config.update(central_config)
         config.update({
             "source": "ai_routes",
             "config_source": "ai_routes",
             "centralized": True,
-            "allow_auto": False,
+            "allow_auto": automatic_policy_enabled,
             "require_policy_validation": True,
         })
     return config
@@ -14057,10 +14085,16 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
     item = dict(row)
     response = bgp_json_loads(item.get("response_json"), {})
     request_payload = bgp_json_loads(item.get("request_payload_json"), {})
+    apply_mitigation = sqlite_bool(item.get("apply_mitigation"))
+    if "apply_mitigation" not in item and isinstance(response, dict):
+        apply_mitigation = response.get("apply_mitigation") is True
     return {
         "id": item.get("id"),
         "anomaly_id": item.get("anomaly_id"),
-        "provider": item.get("provider") or "",
+        "available": True,
+        "provider_id": item.get("provider_id"),
+        "provider": item.get("provider_name") or item.get("provider") or "",
+        "provider_name": item.get("provider_name") or item.get("provider") or "",
         "model": item.get("model") or "",
         "profile": item.get("profile") or "",
         "request_payload": request_payload,
@@ -14071,6 +14105,7 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "classification": item.get("classification") or "",
         "manual_approval_required": sqlite_bool(item.get("manual_approval_required")),
         "allow_auto": sqlite_bool(item.get("allow_auto")),
+        "apply_mitigation": apply_mitigation,
         "recommended_action": response.get("recommended_action") if isinstance(response, dict) else "",
         "reason": item.get("reason") or "",
         "operator_summary": item.get("operator_summary") or "",
@@ -14082,6 +14117,12 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "prompt_chars": int(item.get("prompt_chars") or 0),
         "candidate_count": int(item.get("candidate_count") or 0),
         "timeout_seconds": int(item.get("timeout_seconds") or 0),
+        "latency_ms": int(item.get("latency_ms") or 0),
+        "input_tokens": int(item.get("input_tokens") or 0),
+        "output_tokens": int(item.get("output_tokens") or 0),
+        "tokens": int(item.get("tokens") or 0),
+        "status": item.get("status") or ("error" if item.get("error_message") else "success"),
+        "raw_response": item.get("raw_response") or "",
         "created_at": item.get("created_at") or "",
         "error_message": item.get("error_message") or "",
     }
@@ -14722,28 +14763,29 @@ def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> i
 
 
 def compact_mitigation_ai_candidate(candidate: dict[str, Any], index: int) -> dict[str, Any]:
-    compacted = compact_ai_candidate(candidate, index, text_limit=180)
-    for key in ("attack_vector_name", "template", "response_type", "target_prefix", "src_prefix", "dst_prefix", "target_scope"):
-        value = candidate.get(key)
-        if ai_keep_value(value):
-            compacted[key] = value
-    compacted["candidate_index"] = index
-    compacted["allow_auto"] = False
-    compacted["manual_approval_required"] = True
-    compacted["apply_enabled"] = False
-    return compacted
+    """Expose evidence and deterministic gates, never rule-building fields."""
+    policy = candidate.get("policy_decision") if isinstance(candidate.get("policy_decision"), dict) else {}
+    validation = candidate.get("validation") if isinstance(candidate.get("validation"), dict) else {}
+    return {
+        "proposal_index": index,
+        "proposal_kind": clean_text(candidate.get("candidate_role") or candidate.get("mitigation_basis") or "deterministic"),
+        "evidence_reason": ai_compact_text(candidate.get("mitigation_reason") or candidate.get("reason"), 300),
+        "confidence": candidate.get("confidence"),
+        "auto_allowed": ai_bool(candidate.get("auto_allowed")),
+        "eligible": ai_bool(candidate.get("eligible")),
+        "policy_decision": clean_text(policy.get("decision")),
+        "policy_reasons": normalize_string_list(policy.get("reasons")),
+        "validation_errors": normalize_string_list(validation.get("errors") or candidate.get("validation_errors")),
+        "validation_warnings": normalize_string_list(validation.get("warnings") or candidate.get("validation_warnings")),
+    }
 
 
 def mitigation_ai_playbook(anomaly: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    classification = mitigation_ai_classification(anomaly, candidates[0] if candidates else None)
     return {
-        "classification_hint": classification,
-        "manual_review_required": True,
-        "allow_auto": False,
-        "choose_only_existing_candidate": True,
+        "decision_only": True,
         "never_create_new_rule": True,
-        "never_block_client_ip_only": True,
-        "apply_enabled": False,
+        "never_change_deterministic_proposal": True,
+        "allowed_response_fields": ["apply_mitigation", "reason"],
     }
 
 
@@ -14760,14 +14802,11 @@ def build_mitigation_ai_prompt(request_payload: dict[str, Any]) -> str:
         "candidates": candidates,
     }
     instruction = (
-        "Voce e um assistente de mitigacao DDoS para ISP. "
-        "Nao crie FlowSpec, blackhole, ACL, rate-limit ou regra nova. "
-        "Escolha somente um candidate_index existente. "
-        "Todo bloqueio exige aprovacao manual. Nunca recomende bloqueio somente do IP do cliente. "
-        "allow_auto deve ser false. Responda somente JSON curto com: "
-        "recommended_candidate_index, confidence(low|medium|high), risk(low|medium|high|none), "
-        "classification(dns_abuse_outbound|udp_flood_outbound|tcp_syn_flood|icmp_flood|unknown), "
-        "reason, operator_summary."
+        "Voce atua somente como uma decisao adicional de automacao sobre propostas deterministicas ja prontas. "
+        "Nao gere, copie, escolha nem altere comando ExaBGP, regra FlowSpec, IP, prefixo, porta, protocolo, acao ou conector. "
+        "Responda exclusivamente um objeto JSON com exatamente dois campos: "
+        "apply_mitigation (boolean) e reason (string curta e objetiva). "
+        "Se houver duvida, erro impeditivo ou evidencia insuficiente, use apply_mitigation=false."
     )
     return instruction + "\nPayload: " + json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
 
@@ -14813,9 +14852,21 @@ def call_ollama_mitigation_ai(config: dict[str, Any], prompt: str) -> str:
     return clean_text(payload.get("response") or payload.get("message", {}).get("content") or "")
 
 
-def call_routed_mitigation_ai(config: dict[str, Any], prompt: str, anomaly_id: int | None = None) -> str:
+def call_routed_mitigation_ai(config: dict[str, Any], prompt: str, anomaly_id: int | None = None) -> dict[str, Any]:
     if not config.get("centralized"):
-        return call_ollama_mitigation_ai(config, prompt)
+        started = time.monotonic()
+        content = call_ollama_mitigation_ai(config, prompt)
+        return {
+            "ok": True,
+            "provider_id": config.get("provider_id"),
+            "provider": config.get("provider_name") or config.get("provider") or "",
+            "model": config.get("selected_model") or "",
+            "content": content,
+            "structured": None,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "usage": {},
+            "status": "success",
+        }
     with sqlite_connection() as conn:
         result = execute_ai_route(
             conn,
@@ -14826,90 +14877,30 @@ def call_routed_mitigation_ai(config: dict[str, Any], prompt: str, anomaly_id: i
             anomaly_id=anomaly_id,
         )
         conn.commit()
-    if not result.get("ok"):
-        raise RuntimeError(clean_text(result.get("error_message")) or "Todos os providers de IA falharam")
-    return clean_text(result.get("content"))
+    return result
 
 
 def normalize_mitigation_ai_response(value: dict[str, Any] | str, request_payload: dict[str, Any]) -> dict[str, Any]:
     parsed = extract_json_object(value) if isinstance(value, str) else dict(value or {})
-    candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
-    if not candidates:
-        raise ValueError("Nao ha candidates para escolher.")
-    try:
-        index = int(parsed.get("recommended_candidate_index"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("recommended_candidate_index invalido.") from exc
-    if index < 0 or index >= len(candidates):
-        raise ValueError("recommended_candidate_index fora da lista de candidates.")
-    confidence_label = clean_text(parsed.get("confidence")).lower()
-    if confidence_label not in MITIGATION_AI_CONFIDENCE_LABELS:
-        confidence_label = "medium"
-    risk = clean_text(parsed.get("risk")).lower()
-    if risk not in MITIGATION_AI_RISKS:
-        risk = clean_text(candidates[index].get("risk")).lower() if clean_text(candidates[index].get("risk")).lower() in MITIGATION_AI_RISKS else "medium"
-    classification = clean_text(parsed.get("classification")).lower()
-    if classification not in MITIGATION_AI_CLASSIFICATIONS:
-        classification = mitigation_ai_classification(dict(request_payload.get("anomaly") or {}), candidates[index])
-    reason = ai_compact_text(parsed.get("reason") or "Candidate existente escolhido para revisao manual.", 300)
-    operator_summary = ai_compact_text(parsed.get("operator_summary") or reason, 500)
-    return {
-        "recommended_candidate_index": index,
-        "candidate_count": len(candidates),
-        "confidence": mitigation_ai_confidence_score(confidence_label),
-        "confidence_label": confidence_label,
-        "risk": risk,
-        "classification": classification,
-        "reason": reason,
-        "operator_summary": operator_summary,
-        "report_summary": operator_summary,
-        "manual_approval_required": True,
-        "allow_auto": False,
-        "recommended_action": "manual_review",
-        "mitigation_allowed": False,
-        "checks_before_approve": ["Revisar candidate existente e confirmar top flows antes de qualquer aprovacao manual."],
-        "risks": [],
-    }
+    unexpected = sorted(set(parsed) - {"apply_mitigation", "reason"})
+    if unexpected:
+        raise ValueError(f"Resposta IA contem campos nao permitidos: {', '.join(unexpected)}")
+    if type(parsed.get("apply_mitigation")) is not bool:
+        raise ValueError("apply_mitigation deve ser boolean.")
+    reason = ai_compact_text(parsed.get("reason"), 1000)
+    if not reason:
+        raise ValueError("reason deve ser uma string nao vazia.")
+    return {"apply_mitigation": parsed["apply_mitigation"], "reason": reason}
 
 
 def deterministic_mitigation_fallback(request_payload: dict[str, Any], error_message: str = "") -> dict[str, Any]:
-    anomaly = dict(request_payload.get("anomaly") or {})
     candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
-    index = first_safe_mitigation_candidate_index(candidates)
-    candidate = candidates[index] if index is not None else {}
-    vector = clean_text(anomaly.get("vector_name") or anomaly.get("attack_vector_name") or anomaly.get("decoder") or anomaly.get("protocol") or "unknown")
-    target = clean_text(anomaly.get("target_cidr") or anomaly.get("target_ip") or candidate.get("target_scope") or candidate.get("dst_cidr") or candidate.get("src_cidr") or "-")
-    metric = clean_text(anomaly.get("metric_unit") or "metric")
-    value = anomaly.get("peak_value") if anomaly.get("peak_value") not in (None, "") else anomaly.get("observed_value")
-    risk = clean_text(candidate.get("risk")).lower()
-    if risk not in MITIGATION_AI_RISKS:
-        risk = "medium" if index is not None else "none"
-    classification = mitigation_ai_classification(anomaly, candidate)
-    if index is None:
-        operator_summary = (
-            f"Trafego {vector} alto detectado em {target}; pico {value or '-'} {metric}, "
-            "mas sem dst_ip/dst_port confiavel nos related_flows. Nao foi criada sugestao de FlowSpec."
-        )[:500]
-    else:
-        operator_summary = f"{vector} em {target}; pico {value or '-'} {metric}. Revisar candidate existente manualmente."[:500]
-    return {
-        "recommended_candidate_index": index,
-        "candidate_count": len(candidates),
-        "confidence": 0.55 if index is not None else 0.0,
-        "confidence_label": "medium" if index is not None else "low",
-        "risk": risk,
-        "classification": classification,
-        "reason": "Fallback deterministico: IA local falhou ou excedeu timeout." if index is not None else "Fallback deterministico: sem candidato de mitigacao seguro.",
-        "operator_summary": operator_summary,
-        "report_summary": operator_summary,
-        "manual_approval_required": True,
-        "allow_auto": False,
-        "recommended_action": "manual_review" if index is not None else "alert_only",
-        "mitigation_allowed": False,
-        "ai_error": clean_text(error_message)[:500],
-        "checks_before_approve": ["Confirmar top flows no ClickHouse/roteador antes de qualquer aprovacao manual."],
-        "risks": [],
-    }
+    reason = "Analise IA indisponivel; automacao vetada e proposta mantida para aprovacao manual."
+    if not candidates:
+        reason = "Analise IA indisponivel e nenhuma proposta deterministica foi gerada."
+    if clean_text(error_message):
+        reason = f"{reason} Motivo: {clean_text(error_message)[:500]}"
+    return {"apply_mitigation": False, "reason": reason[:1000]}
 
 
 def ai_prompt_for_payload(payload: dict[str, Any]) -> str:
@@ -15022,81 +15013,9 @@ def parse_ai_json_response(text: str) -> dict[str, Any]:
 
 
 def validate_ai_analysis_response(response: dict[str, Any], candidates: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
-    if not candidates:
-        raise ValueError("Nao ha candidates para a IA escolher.")
-    try:
-        index = int(response.get("recommended_candidate_index"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("recommended_candidate_index invalido.") from exc
-    if index < 0 or index >= len(candidates):
-        raise ValueError("recommended_candidate_index fora da lista de candidates.")
-    try:
-        confidence = max(0.0, min(float(response.get("confidence") or 0), 1.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    risk = clean_text(response.get("risk")).lower()
-    if risk not in {"low", "medium", "high"}:
-        risk = "medium"
-    classification = clean_text(response.get("classification")).lower()
-    if classification not in AI_RESPONSE_CLASSIFICATIONS:
-        classification = "unknown"
-    candidate = candidates[index]
-    if clean_text(candidate.get("source")) == "fallback_analysis":
-        packets = int(candidate.get("packets") or 0)
-        bytes_value = int(candidate.get("bytes") or 0)
-        share = float(candidate.get("share_top_flow_percent") or candidate.get("top_packet_share") or 0)
-        has_scope = bool(candidate.get("top_src") or candidate.get("top_dst") or candidate.get("top_port") or candidate.get("src_prefix") or candidate.get("dst_prefix"))
-        if (
-            packets < MIN_FALLBACK_CANDIDATE_PACKETS
-            or bytes_value < MIN_FALLBACK_CANDIDATE_BYTES
-            or share < MIN_FALLBACK_SHARE_PERCENT
-            or share == 0
-            or not has_scope
-        ):
-            raise ValueError("fallback_analysis rejeitado por evidencia insuficiente.")
-    policy = candidate.get("policy_decision") or {}
-    policy_denied = policy.get("decision") == "deny"
-    action = normalize_flowspec_action(candidate.get("action") or candidate.get("then_action") or "discard")
-    never_announce = (
-        ai_bool(candidate.get("never_announce"))
-        or clean_text(candidate.get("mitigation_mode")) == "analysis_only"
-        or clean_text(candidate.get("source")) == "fallback_analysis"
-    )
-    candidate_manual_required = ai_bool(candidate.get("manual_approval_required"))
-    candidate_allows_auto = ai_bool(candidate.get("allow_auto"))
-    allow_auto = (
-        ai_bool(response.get("allow_auto"))
-        and bool(config.get("allow_auto"))
-        and candidate_allows_auto
-        and not candidate_manual_required
-        and not policy_denied
-        and action != "accept"
-        and not never_announce
-    )
-    manual_required = ai_bool(response.get("manual_approval_required")) or not allow_auto or policy_denied or never_announce or candidate_manual_required
-    checks_before_approve = normalize_string_list(response.get("checks_before_approve"))
-    if not checks_before_approve:
-        checks_before_approve = [
-            "Confirmar top flow diretamente no ClickHouse/roteador.",
-            "Validar impacto do FlowSpec antes de qualquer aprovação manual.",
-        ]
-    return {
-        **response,
-        "recommended_candidate_index": index,
-        "confidence": confidence,
-        "risk": risk,
-        "classification": classification,
-        "manual_approval_required": manual_required,
-        "allow_auto": allow_auto,
-        "reason": clean_text(response.get("reason"))[:1000],
-        "operator_summary": clean_text(response.get("operator_summary"))[:2000],
-        "report_summary": clean_text(response.get("report_summary"))[:2000],
-        "rendered_command_preview": clean_text(response.get("rendered_command_preview") or candidate.get("rendered_command_preview"))[:2000],
-        "risks": normalize_string_list(response.get("risks")),
-        "warnings": normalize_string_list(response.get("warnings")),
-        "reasons": normalize_string_list(response.get("reasons")),
-        "checks_before_approve": checks_before_approve,
-    }
+    # Compatibility entry point: candidates and configuration can no longer
+    # expand the two-field decision contract.
+    return normalize_mitigation_ai_response(response, {"candidates": candidates})
 
 
 def save_ai_analysis(
@@ -15107,14 +15026,30 @@ def save_ai_analysis(
     response_json: dict[str, Any] | None = None,
     error_message: str = "",
     prompt: str = "",
+    execution: dict[str, Any] | None = None,
+    status: str = "success",
+    raw_response: str = "",
 ) -> dict[str, Any]:
     response_json = response_json or {}
+    execution = execution or {}
     now = utc_now_iso()
     request_payload_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str)
     request_payload_chars = len(request_payload_json)
     prompt_chars = len(prompt)
     candidate_count = len(list(request_payload.get("candidates") or []))
     timeout_seconds = int(config.get("timeout_seconds") or 0)
+    usage = execution.get("usage") if isinstance(execution.get("usage"), dict) else {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    provider_id = int_or_none(execution.get("provider_id") or config.get("provider_id"))
+    provider_name = clean_text(execution.get("provider") or config.get("provider_name") or config.get("provider"))
+    model = clean_text(execution.get("model") or config.get("selected_model"))
+    latency_ms = int(execution.get("duration_ms") or execution.get("latency_ms") or 0)
+    safe_raw_response = sanitize_ai_content(
+        sanitize_error(clean_text(raw_response), [clean_text(config.get("api_key"))]),
+        "mask_ips",
+        external_provider=True,
+    )[:12000]
     logger.info(
         "ai_analysis_diagnostic anomaly_id=%s model=%s request_payload_chars=%s prompt_chars=%s candidate_count=%s timeout_seconds=%s",
         anomaly_id,
@@ -15131,32 +15066,42 @@ def save_ai_analysis(
             recommended_candidate_index, confidence, risk, classification,
             manual_approval_required, allow_auto, reason, operator_summary, report_summary,
             request_payload_chars, prompt_chars, candidate_count, timeout_seconds,
-            created_at, error_message
+            created_at, error_message, apply_mitigation, provider_id, provider_name,
+            latency_ms, input_tokens, output_tokens, tokens, status, raw_response
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             anomaly_id,
             config.get("provider") or "",
-            config.get("selected_model") or "",
+            model,
             config.get("selected_profile") or "",
             request_payload_json,
             json.dumps(response_json, ensure_ascii=False, sort_keys=True, default=str),
-            response_json.get("recommended_candidate_index"),
-            response_json.get("confidence"),
-            response_json.get("risk") or "",
-            response_json.get("classification") or "",
-            1 if response_json.get("manual_approval_required", True) else 0,
-            1 if response_json.get("allow_auto") else 0,
+            None,
+            None,
+            "",
+            "",
+            0 if response_json.get("apply_mitigation") is True else 1,
+            1 if response_json.get("apply_mitigation") is True else 0,
             response_json.get("reason") or "",
-            response_json.get("operator_summary") or "",
-            response_json.get("report_summary") or "",
+            "",
+            "",
             request_payload_chars,
             prompt_chars,
             candidate_count,
             timeout_seconds,
             now,
             clean_text(error_message)[:2000],
+            1 if response_json.get("apply_mitigation") is True else 0,
+            provider_id,
+            provider_name,
+            latency_ms,
+            input_tokens,
+            output_tokens,
+            input_tokens + output_tokens,
+            clean_text(status) or ("error" if error_message else "success"),
+            safe_raw_response,
         ),
     )
     row = conn.execute("SELECT * FROM ai_mitigation_analysis WHERE id = last_insert_rowid()").fetchone()
@@ -15170,31 +15115,47 @@ def draft_ai_analysis(
     response_json: dict[str, Any] | None = None,
     error_message: str = "",
     prompt: str = "",
+    execution: dict[str, Any] | None = None,
+    status: str = "success",
+    raw_response: str = "",
 ) -> dict[str, Any]:
     response_json = response_json or {}
+    execution = execution or {}
+    usage = execution.get("usage") if isinstance(execution.get("usage"), dict) else {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     request_payload_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True, default=str)
     item = ai_analysis_row_to_dict(
         {
             "id": None,
             "anomaly_id": anomaly_id,
-            "provider": config.get("provider") or "",
-            "model": config.get("selected_model") or "",
+            "provider": execution.get("provider") or config.get("provider_name") or config.get("provider") or "",
+            "provider_id": execution.get("provider_id") or config.get("provider_id"),
+            "provider_name": execution.get("provider") or config.get("provider_name") or config.get("provider") or "",
+            "model": execution.get("model") or config.get("selected_model") or "",
             "profile": config.get("selected_profile") or "",
             "request_payload_json": request_payload_json,
             "response_json": json.dumps(response_json, ensure_ascii=False, sort_keys=True, default=str),
-            "recommended_candidate_index": response_json.get("recommended_candidate_index"),
-            "confidence": response_json.get("confidence"),
-            "risk": response_json.get("risk") or "",
-            "classification": response_json.get("classification") or "",
-            "manual_approval_required": 1 if response_json.get("manual_approval_required", True) else 0,
-            "allow_auto": 1 if response_json.get("allow_auto") else 0,
+            "recommended_candidate_index": None,
+            "confidence": None,
+            "risk": "",
+            "classification": "",
+            "manual_approval_required": 0 if response_json.get("apply_mitigation") is True else 1,
+            "allow_auto": 1 if response_json.get("apply_mitigation") is True else 0,
+            "apply_mitigation": 1 if response_json.get("apply_mitigation") is True else 0,
             "reason": response_json.get("reason") or "",
-            "operator_summary": response_json.get("operator_summary") or "",
-            "report_summary": response_json.get("report_summary") or "",
+            "operator_summary": "",
+            "report_summary": "",
             "request_payload_chars": len(request_payload_json),
             "prompt_chars": len(prompt),
             "candidate_count": len(list(request_payload.get("candidates") or [])),
             "timeout_seconds": int(config.get("timeout_seconds") or 0),
+            "latency_ms": int(execution.get("duration_ms") or execution.get("latency_ms") or 0),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tokens": input_tokens + output_tokens,
+            "status": clean_text(status) or ("error" if error_message else "success"),
+            "raw_response": sanitize_ai_content(sanitize_error(clean_text(raw_response), [clean_text(config.get("api_key"))]), "mask_ips", external_provider=True)[:12000],
             "created_at": utc_now_iso(),
             "error_message": clean_text(error_message)[:2000],
         }
@@ -15205,17 +15166,14 @@ def draft_ai_analysis(
 
 
 def ai_recommended_candidate(request_payload: dict[str, Any], response_json: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        index = int(response_json.get("recommended_candidate_index"))
-    except (TypeError, ValueError):
-        return None
-    candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
-    if index < 0 or index >= len(candidates):
-        return None
-    candidate = dict(candidates[index])
-    if not mitigation_candidate_can_create_pending(candidate):
-        return None
-    return candidate
+    # Candidate choice belongs exclusively to the deterministic engine. Ignore
+    # every AI response field, including any attempted candidate index.
+    deterministic_candidates = [candidate for candidate in list(request_payload.get("candidates") or []) if isinstance(candidate, dict)]
+    for deterministic_candidate in deterministic_candidates:
+        candidate = dict(deterministic_candidate)
+        if mitigation_candidate_can_create_pending(candidate):
+            return candidate
+    return None
 
 
 def persist_ai_pending_bgp_approval(
@@ -15525,9 +15483,33 @@ def anomaly_ai_analysis_result(
     call_started = time.monotonic()
     response_json: dict[str, Any]
     error_message = ""
+    raw_response = ""
+    execution: dict[str, Any] = {}
+    analysis_status = "success"
     try:
-        response_text = call_routed_mitigation_ai(config, prompt, event_id)
-        response_json = normalize_mitigation_ai_response(response_text, request_payload)
+        routed_result = call_routed_mitigation_ai(config, prompt, event_id)
+        if isinstance(routed_result, dict):
+            execution = dict(routed_result)
+            raw_response = clean_text(execution.get("content"))
+            if not execution.get("ok"):
+                analysis_status = clean_text(execution.get("error_type") or execution.get("status") or "provider_error")
+                raise RuntimeError(clean_text(execution.get("error_message")) or "Todos os providers de IA falharam")
+            structured = execution.get("structured")
+            response_source: dict[str, Any] | str = structured if isinstance(structured, dict) else raw_response
+        else:
+            # Compatibility for tests and old in-process adapters while every
+            # production path already returns execution metadata.
+            raw_response = clean_text(routed_result)
+            execution = {
+                "ok": True,
+                "provider_id": config.get("provider_id"),
+                "provider": config.get("provider_name") or config.get("provider") or "",
+                "model": config.get("selected_model") or "",
+                "duration_ms": int((time.monotonic() - call_started) * 1000),
+                "usage": {},
+            }
+            response_source = raw_response
+        response_json = normalize_mitigation_ai_response(response_source, request_payload)
         logger.info(
             "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=true error_type= error_message=",
             endpoint,
@@ -15538,7 +15520,16 @@ def anomaly_ai_analysis_result(
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - call_started) * 1000)
         error_message = clean_text(exc)
-        error_type = "timeout" if ai_exception_is_timeout(exc) else "provider_error"
+        if ai_exception_is_timeout(exc):
+            error_type = "timeout"
+        elif analysis_status not in {"", "success"}:
+            error_type = analysis_status
+        elif isinstance(exc, (ValueError, json.JSONDecodeError)):
+            error_type = "invalid_json"
+        else:
+            error_type = "provider_error"
+        analysis_status = error_type
+        execution.setdefault("duration_ms", elapsed_ms)
         logger.warning(
             "ai_analysis_result endpoint=%s anomaly_id=%s is_draft=%s elapsed_ms=%s success=false error_type=%s error_message=%s fallback=true",
             endpoint,
@@ -15550,27 +15541,30 @@ def anomaly_ai_analysis_result(
         )
         response_json = deterministic_mitigation_fallback(request_payload, error_message)
     if not persist:
-        return draft_ai_analysis(event_id, config, request_payload, response_json, error_message, prompt=prompt)
+        return draft_ai_analysis(
+            event_id,
+            config,
+            request_payload,
+            response_json,
+            error_message,
+            prompt=prompt,
+            execution=execution,
+            status=analysis_status,
+            raw_response=raw_response,
+        )
     with sqlite_connection() as conn:
-        saved = save_ai_analysis(conn, event_id, config, request_payload, response_json, error_message, prompt=prompt)
-        try:
-            conn.execute("SAVEPOINT ai_pending_approval")
-            pending = persist_ai_pending_bgp_approval(conn, event_id, request_payload, response_json, created_by="ai")
-            conn.execute("RELEASE SAVEPOINT ai_pending_approval")
-            if pending is not None:
-                saved["pending_approval"] = pending
-        except Exception as exc:
-            try:
-                conn.execute("ROLLBACK TO SAVEPOINT ai_pending_approval")
-                conn.execute("RELEASE SAVEPOINT ai_pending_approval")
-            except sqlite3.Error:
-                pass
-            logger.exception(
-                "Falha ao criar pending_approval BGP para analise IA anomaly_id=%s candidate_index=%s",
-                event_id,
-                response_json.get("recommended_candidate_index"),
-            )
-            saved["pending_approval_error"] = clean_text(exc)[:1000]
+        saved = save_ai_analysis(
+            conn,
+            event_id,
+            config,
+            request_payload,
+            response_json,
+            error_message,
+            prompt=prompt,
+            execution=execution,
+            status=analysis_status,
+            raw_response=raw_response,
+        )
         conn.commit()
     return saved
 
@@ -17402,6 +17396,17 @@ def apply_mitigation_candidate(
     if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
         raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
     mode = normalize_choice(mode, {"manual_approval", "announce_now", "automatic"}, "mode")
+    if mode == "automatic" and not (
+        candidate.get("auto_allowed") is True
+        and candidate.get("eligible") is True
+        and candidate.get("ai_apply_mitigation") is True
+        and clean_text(candidate.get("ai_decision_status")) == "success"
+        and int_or_none(candidate.get("ai_analysis_id")) is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Automacao bloqueada: proposta, politica e decisao IA nao satisfazem todos os gates.",
+        )
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
     if not connectors:
@@ -17912,6 +17917,129 @@ def anomaly_auto_mitigation_status(conn: sqlite3.Connection, anomaly_id: Any) ->
     return clean_text(row["auto_mitigation_status"] if row else "")
 
 
+def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate automation without consulting or merging any AI output."""
+    if clean_text(candidate.get("mitigation_mode")).lower() not in {"auto", "automatic"}:
+        return {"auto_allowed": False, "eligible": False, "reason": "automatic_policy_disabled"}
+    if candidate.get("never_announce") or clean_text(candidate.get("candidate_role")) == "analysis_only":
+        return {"auto_allowed": False, "eligible": False, "reason": "proposal_never_announce"}
+    profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+    connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
+    policy = policy_for_candidate(candidate, "automatic")
+    policy_reasons = normalize_string_list(policy.get("reasons"))
+    auto_marker_present = any("AUTO_ALLOWED" in reason.upper() for reason in policy_reasons)
+    auto_allowed = policy.get("decision") == "allow_auto" and auto_marker_present
+    validation_errors: list[str] = []
+    connector_available = bool(connectors)
+    for connector in connectors:
+        validation = validate_mitigation_candidate(candidate, connector, profile or {
+            "enabled": False,
+            "response_type": "flowspec",
+            "require_protocol_or_port": True,
+            "allow_wide_prefix": False,
+            "max_duration_seconds": BGP_DEFAULT_MAX_DURATION_SECONDS,
+            "default_duration_seconds": 900,
+            "approval_mode": "manual_approval",
+        })
+        validation_errors.extend(clean_text(error) for error in validation.get("errors") or [] if clean_text(error))
+        if connector_is_dry_run(connector):
+            validation_errors.append("connector_dry_run")
+    divergence = clean_text(candidate.get("connector_resolution_error") or candidate.get("automatic_not_applied_reason"))
+    if candidate.get("requires_connector_selection"):
+        divergence = divergence or "connector_selection_required"
+    eligible = bool(auto_allowed and connector_available and not validation_errors and not divergence)
+    return {
+        "auto_allowed": bool(auto_allowed),
+        "eligible": eligible,
+        "policy": policy,
+        "validation_errors": sorted(set(validation_errors)),
+        "connector_available": connector_available,
+        "connector_ids": [int(connector["id"]) for connector in connectors],
+        "reason": divergence or (validation_errors[0] if validation_errors else ""),
+    }
+
+
+def mitigation_ai_analysis_allows_automatic(analysis: dict[str, Any] | None) -> bool:
+    return bool(
+        analysis
+        and analysis.get("apply_mitigation") is True
+        and clean_text(analysis.get("status")) == "success"
+        and not clean_text(analysis.get("error_message"))
+    )
+
+
+def automatic_mitigation_execution_mode(
+    proposal_state: dict[str, Any] | None,
+    config: dict[str, Any] | None,
+    analysis: dict[str, Any] | None,
+) -> str:
+    state = proposal_state or {}
+    automatic_authorized = bool(
+        state.get("auto_allowed") is True
+        and state.get("eligible") is True
+        and (config or {}).get("allow_auto") is True
+        and mitigation_ai_analysis_allows_automatic(analysis)
+    )
+    return "automatic" if automatic_authorized else "manual_approval"
+
+
+def persist_unavailable_mitigation_ai_analysis(
+    anomaly_id: int,
+    config: dict[str, Any],
+    request_payload: dict[str, Any],
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    response_json = {"apply_mitigation": False, "reason": clean_text(reason)[:1000]}
+    with sqlite_connection() as analysis_conn:
+        saved = save_ai_analysis(
+            analysis_conn,
+            anomaly_id,
+            config,
+            request_payload,
+            response_json,
+            clean_text(reason),
+            status=status,
+            raw_response="",
+        )
+        analysis_conn.commit()
+    return saved
+
+
+def run_automatic_mitigation_ai_analysis(
+    anomaly_id: int,
+    context: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with sqlite_connection() as config_conn:
+        config = ai_effective_config(config_conn)
+    request_payload = {
+        "anomaly": dict(context.get("event") or {}),
+        "candidates": [dict(candidate) for candidate in candidates],
+        "security_rules": {
+            "ai_decision_only": True,
+            "deterministic_rule_immutable": True,
+        },
+    }
+    if not config.get("enabled"):
+        analysis = persist_unavailable_mitigation_ai_analysis(
+            anomaly_id,
+            config,
+            request_payload,
+            "disabled",
+            "Analise IA desativada; automacao vetada e proposta mantida para aprovacao manual.",
+        )
+    else:
+        analysis = anomaly_ai_analysis_result(
+            anomaly_id,
+            config,
+            persist=True,
+            request_payload=request_payload,
+            endpoint="automatic",
+        )
+    return analysis, config
+
+
 def process_anomaly_mitigation() -> dict[str, int]:
     ensure_sensor_db()
     stats = {
@@ -17943,8 +18071,28 @@ def process_anomaly_mitigation() -> dict[str, int]:
         stats["queued"] = len(events)
         stats["retried_ended"] = sum(clean_text(event.get("status")).lower() == "ended" for event in events)
         for event in events:
+            if anomaly_auto_mitigation_status(conn, event.get("id")):
+                stats["skipped"] += 1
+                continue
             context = fetch_anomaly_mitigation_context(conn, int(event["id"]))
             candidates = build_mitigation_candidates_from_anomaly(context)
+            proposal_states: dict[int, dict[str, Any]] = {}
+            eligible_automatic_candidates: list[dict[str, Any]] = []
+            for candidate in candidates:
+                state = deterministic_automatic_proposal_state(conn, candidate)
+                proposal_states[id(candidate)] = state
+                candidate["auto_allowed"] = state["auto_allowed"]
+                candidate["eligible"] = state["eligible"]
+                if state["auto_allowed"] and state["eligible"]:
+                    eligible_automatic_candidates.append(candidate)
+            ai_analysis: dict[str, Any] | None = None
+            ai_config: dict[str, Any] = {"allow_auto": False}
+            if eligible_automatic_candidates:
+                ai_analysis, ai_config = run_automatic_mitigation_ai_analysis(
+                    int(event["id"]),
+                    context,
+                    candidates,
+                )
             conn.execute("BEGIN IMMEDIATE")
             if anomaly_auto_mitigation_status(conn, event.get("id")):
                 conn.rollback()
@@ -17975,17 +18123,41 @@ def process_anomaly_mitigation() -> dict[str, int]:
                     continue
                 if mode in {"automatic", "auto"}:
                     handled = True
+                    proposal_state = proposal_states.get(id(candidate)) or {}
+                    deterministic_block_reason = clean_text(proposal_state.get("reason"))
+                    if not proposal_state.get("auto_allowed") or not proposal_state.get("eligible"):
+                        if deterministic_block_reason == "connector_dry_run":
+                            application_mode = "announce_now"
+                        else:
+                            reason = deterministic_block_reason or "deterministic_proposal_not_eligible"
+                            record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, created_by="worker", requested_mode="automatic")
+                            log_dns_auto_mitigation_skipped(candidate, reason)
+                            stats["skipped"] += 1
+                            continue
+                    else:
+                        application_mode = automatic_mitigation_execution_mode(proposal_state, ai_config, ai_analysis)
+                    candidate_for_application = {
+                        **candidate,
+                        "ai_analysis_id": (ai_analysis or {}).get("id"),
+                        "ai_apply_mitigation": (ai_analysis or {}).get("apply_mitigation") is True,
+                        "ai_decision_status": clean_text((ai_analysis or {}).get("status") or "not_available"),
+                        "ai_decision_reason": clean_text(
+                            (ai_analysis or {}).get("reason")
+                            or proposal_state.get("reason")
+                            or ("politica_automatica_desabilitada" if not ai_config.get("allow_auto") else "analise_ia_ausente")
+                        ),
+                    }
                     try:
-                        item = apply_mitigation_candidate(conn, candidate, "automatic", "worker")
+                        item = apply_mitigation_candidate(conn, candidate_for_application, application_mode, "worker")
                     except HTTPException as exc:
                         if exc.status_code == 409:
                             stats["skipped"] += 1
                         else:
                             stats["failed"] += 1
-                        if not anomaly_auto_mitigation_status(conn, candidate.get("anomaly_id")):
+                        if not anomaly_auto_mitigation_status(conn, candidate_for_application.get("anomaly_id")):
                             status = "failed" if exc.status_code >= 500 else "not_applied"
-                            record_auto_mitigation_outcome(conn, candidate, status, clean_text(exc.detail) or "automatic_mitigation_failed")
-                        log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "automatico nao aplicado")
+                            record_auto_mitigation_outcome(conn, candidate_for_application, status, clean_text(exc.detail) or "automatic_mitigation_failed")
+                        log_dns_auto_mitigation_skipped(candidate_for_application, clean_text(exc.detail) or "automatico nao aplicado")
                         continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
                     handled = True
@@ -27330,14 +27502,14 @@ def anomaly_pdf_response(detail: dict[str, Any]) -> Response:
                 "headers": ["Campo", "Valor"],
                 "rows": key_value_rows(
                     [
-                        ("Classificacao", ai_analysis.get("classification")),
-                        ("Risco", ai_analysis.get("risk")),
-                        ("Confianca", ai_analysis.get("confidence")),
-                        ("Candidato recomendado", ai_analysis.get("recommended_candidate_index")),
+                        ("Decisao", "Autoriza mitigacao" if ai_analysis.get("apply_mitigation") is True else "Nao recomenda mitigacao"),
                         ("Motivo", ai_analysis.get("reason")),
-                        ("Resumo relatorio", ai_analysis.get("report_summary")),
-                        ("Checks antes de aprovar", "; ".join(ai_analysis.get("checks_before_approve") or [])),
-                        ("Modelo/perfil", f"{ai_analysis.get('model') or '-'} / {ai_analysis.get('profile') or '-'}"),
+                        ("Provider", ai_analysis.get("provider_name") or ai_analysis.get("provider")),
+                        ("Modelo", ai_analysis.get("model")),
+                        ("Latencia", f"{int(ai_analysis.get('latency_ms') or 0)} ms"),
+                        ("Tokens", ai_analysis.get("tokens")),
+                        ("Status", ai_analysis.get("status")),
+                        ("Data/hora", ai_analysis.get("created_at")),
                         ("Erro", ai_analysis.get("error_message")),
                     ]
                 ),

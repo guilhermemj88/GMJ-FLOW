@@ -46,25 +46,22 @@ AI_FUNCTIONS = (
 
 MITIGATION_SCHEMA = {
     "type": "object",
-    "required": ["recommended_candidate_index", "confidence", "risk", "classification", "reason"],
+    "required": ["apply_mitigation", "reason"],
+    "additionalProperties": False,
     "properties": {
-        "recommended_candidate_index": {"type": "integer"},
-        "confidence": {"type": ["number", "string"]},
-        "risk": {"enum": ["low", "medium", "high", "none"]},
-        "classification": {"type": "string"},
+        "apply_mitigation": {"type": "boolean"},
         "reason": {"type": "string"},
-        "operator_summary": {"type": "string"},
     },
 }
 
 DEFAULT_PROMPTS = {
     "mitigation_analysis": {
-        "name": "Análise consultiva de mitigação",
+        "name": "Análise de mitigação",
         "system_prompt": (
-            "Você analisa evidências e recomenda uma opção já fornecida. Nunca execute mitigação, "
-            "nunca anuncie FlowSpec, nunca escreva em FIFO e nunca ignore políticas determinísticas."
+            "Você apenas autoriza ou veta a automação de uma proposta determinística já pronta. "
+            "Nunca crie ou altere IP, prefixo, porta, protocolo, ação, conector, comando ExaBGP ou regra FlowSpec."
         ),
-        "user_template": "Analise a anomalia {{anomaly_id}} e os candidates existentes: {{flows}}",
+        "user_template": "Analise as evidencias da anomalia {{anomaly_id}} e responda somente apply_mitigation e reason.",
         "variables": ["anomaly_id", "sensor_name", "connector_name", "flows", "bgp_status"],
         "schema": MITIGATION_SCHEMA,
     },
@@ -716,10 +713,11 @@ def _seed_routes_and_prompts(conn: sqlite3.Connection) -> None:
         prompt_id = int(cursor.lastrowid or 0)
         if prompt_id:
             prompt = conn.execute("SELECT * FROM ai_prompts WHERE id = ?", (prompt_id,)).fetchone()
-            conn.execute(
-                "INSERT OR IGNORE INTO ai_prompt_versions (prompt_id, version, snapshot_json, changed_by, created_at) VALUES (?, 1, ?, 'migration', ?)",
-                (prompt_id, json_dumps(dict(prompt)), now),
-            )
+            if prompt is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO ai_prompt_versions (prompt_id, version, snapshot_json, changed_by, created_at) VALUES (?, 1, ?, 'migration', ?)",
+                    (prompt_id, json_dumps(dict(prompt)), now),
+                )
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -1162,6 +1160,10 @@ def validate_structured_response(value: Any, schema: dict[str, Any]) -> dict[str
         value = json.loads(content)
     if not isinstance(value, dict):
         raise ValueError("Resposta estruturada deve ser um objeto JSON")
+    if schema.get("additionalProperties") is False:
+        unexpected = sorted(set(value) - set(schema.get("properties") or {}))
+        if unexpected:
+            raise ValueError(f"Campos nao permitidos na resposta estruturada: {', '.join(unexpected)}")
     for field in schema.get("required") or []:
         if field not in value:
             raise ValueError(f"Campo obrigatório ausente: {field}")
@@ -1869,6 +1871,10 @@ def execute_ai_route(
         "duration_ms": duration_ms,
         "attempts": total_attempts,
         "fallback_used": fallback_attempted,
+        "provider_id": int(last_provider_config["id"]) if last_provider_config and last_provider_config.get("id") else None,
+        "provider": clean_text((last_provider_config or {}).get("name")),
+        "provider_type": clean_text((last_provider_config or {}).get("provider_type")),
+        "model": last_model,
     }
 
 
