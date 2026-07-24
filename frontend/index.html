@@ -3,29 +3,653 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="gmj-map-max-range-days" content="180">
+  <script>
+    (function () {
+      const storageKey = 'gmjFlowAppearanceTheme';
+      const accepted = ['auto', 'light', 'dark', 'noc-dark'];
+      let preference = 'auto';
+      try {
+        const stored = localStorage.getItem(storageKey);
+        if (accepted.includes(stored)) preference = stored;
+      } catch (error) {
+        preference = 'auto';
+      }
+      const systemDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+      const resolved = preference === 'auto' ? (systemDark ? 'dark' : 'light') : preference;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.themePreference = preference;
+      document.documentElement.style.colorScheme = resolved === 'light' ? 'light' : 'dark';
+    }());
+  </script>
   <title>GMJ-FLOW</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">
+  <style id="geo-flow-map-styles">
+/* GeoFlowMap styles:start */
+.geo-flow-map {
+  --geo-bg: var(--map-background, #07111f);
+  --geo-panel: var(--map-surface, #0b1728);
+  --geo-panel-soft: var(--surface-secondary, #0f1d30);
+  --geo-line: var(--border, rgba(148, 163, 184, .18));
+  --geo-ink: var(--map-label, #e5edf8);
+  --geo-muted: var(--text-secondary, #8ea2bc);
+  --geo-accent: var(--accent, #22d3ee);
+  width: 100%;
+  overflow: hidden;
+  color: var(--geo-ink);
+  background:
+    radial-gradient(circle at 25% 0, color-mix(in srgb, var(--geo-accent) 16%, transparent), transparent 38%),
+    linear-gradient(145deg, var(--geo-panel), var(--geo-bg));
+  border: 1px solid rgba(51, 65, 85, .8);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(2, 8, 23, .22);
+}
+
+.geo-flow-map__header,
+.geo-flow-map__body,
+.geo-flow-map__heading,
+.geo-flow-map__controls,
+.geo-flow-map__modes,
+.geo-flow-map__ranking-header,
+.geo-flow-map__rank-meta {
+  display: flex;
+}
+
+.geo-flow-map__header {
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--geo-line);
+  background: color-mix(in srgb, var(--geo-bg) 88%, transparent);
+}
+
+.geo-flow-map__heading,
+.geo-flow-map__controls {
+  align-items: center;
+}
+
+.geo-flow-map__heading {
+  min-width: 190px;
+  gap: 10px;
+}
+
+.geo-flow-map__live-dot {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 12px rgba(52, 211, 153, .75);
+}
+
+.geo-flow-map__live-dot::after {
+  position: absolute;
+  inset: -5px;
+  content: "";
+  border: 1px solid rgba(52, 211, 153, .5);
+  border-radius: inherit;
+  animation: geo-flow-pulse 2s ease-out infinite;
+}
+
+.geo-flow-map__title {
+  font-size: .84rem;
+  font-weight: 800;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+}
+
+.geo-flow-map__subtitle {
+  margin-top: 2px;
+  color: var(--geo-muted);
+  font-size: .74rem;
+}
+
+.geo-flow-map__controls {
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.geo-flow-map__modes {
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--geo-line);
+  border-radius: 8px;
+  background: rgba(15, 29, 48, .72);
+}
+
+.geo-flow-map__modes button {
+  min-height: 28px;
+  padding: 4px 9px;
+  color: var(--geo-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: .72rem;
+  font-weight: 700;
+}
+
+.geo-flow-map__modes button:hover {
+  color: var(--geo-ink);
+  background: rgba(51, 65, 85, .46);
+}
+
+.geo-flow-map__modes button.active {
+  color: #ecfeff;
+  background: rgba(8, 145, 178, .42);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, .28);
+}
+
+.geo-flow-map__group {
+  display: grid;
+  gap: 2px;
+  color: var(--geo-muted);
+  font-size: .61rem;
+  text-transform: uppercase;
+}
+
+.geo-flow-map__group select {
+  min-height: 30px;
+  padding: 3px 28px 3px 8px;
+  color: var(--geo-ink);
+  background-color: var(--geo-panel-soft);
+  border: 1px solid var(--geo-line);
+  border-radius: 7px;
+  font-size: .72rem;
+}
+
+.geo-flow-map__body {
+  min-height: 510px;
+}
+
+.geo-flow-map__canvas-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 510px;
+  background: var(--geo-bg);
+}
+
+.geo-flow-map__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(14, 116, 144, .12), transparent 45%),
+    var(--geo-bg);
+}
+
+.geo-flow-map__ranking {
+  width: 300px;
+  flex: 0 0 300px;
+  min-height: 510px;
+  padding: 13px;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--geo-panel), var(--geo-bg));
+  border-left: 1px solid var(--geo-line);
+}
+
+.geo-flow-map__ranking-header {
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--geo-line);
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.geo-flow-map__ranking-header strong {
+  color: var(--geo-muted);
+  font-size: .65rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.geo-flow-map__ranking-list {
+  max-height: 458px;
+  overflow: auto;
+  scrollbar-color: #334155 transparent;
+  scrollbar-width: thin;
+}
+
+.geo-flow-map__rank-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, .1);
+}
+
+.geo-flow-map__rank-index {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: #a5f3fc;
+  background: rgba(8, 145, 178, .15);
+  border: 1px solid rgba(34, 211, 238, .2);
+  border-radius: 6px;
+  font-size: .65rem;
+  font-weight: 800;
+}
+
+.geo-flow-map__rank-content {
+  min-width: 0;
+}
+
+.geo-flow-map__rank-route {
+  overflow: hidden;
+  color: #dbeafe;
+  font-size: .72rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.geo-flow-map__rank-route span {
+  color: #22d3ee;
+}
+
+.geo-flow-map__rank-meta {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 5px;
+  color: var(--geo-muted);
+  font-size: .62rem;
+}
+
+.geo-flow-map__rank-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.geo-flow-map__rank-meta i,
+.geo-flow-map__legend i {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--geo-color);
+  border-radius: 50%;
+  box-shadow: 0 0 7px var(--geo-color);
+}
+
+.geo-flow-map__rank-meta strong {
+  color: #f8fafc;
+  font-weight: 750;
+}
+
+.geo-flow-map__rank-bar {
+  height: 2px;
+  margin-top: 5px;
+  overflow: hidden;
+  background: rgba(51, 65, 85, .5);
+  border-radius: 99px;
+}
+
+.geo-flow-map__rank-bar i {
+  display: block;
+  height: 100%;
+  background: var(--geo-color);
+  border-radius: inherit;
+  box-shadow: 0 0 7px var(--geo-color);
+}
+
+.geo-flow-map__ranking-empty {
+  padding: 28px 8px;
+  color: var(--geo-muted);
+  font-size: .75rem;
+  text-align: center;
+}
+
+.geo-flow-map__legend {
+  position: absolute;
+  z-index: 500;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  max-width: calc(100% - 24px);
+  padding: 6px 8px;
+  color: #aebfd3;
+  background: rgba(7, 17, 31, .86);
+  border: 1px solid var(--geo-line);
+  border-radius: 7px;
+  backdrop-filter: blur(8px);
+  font-size: .61rem;
+}
+
+.geo-flow-map__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.geo-flow-map__state {
+  position: absolute;
+  z-index: 600;
+  top: 50%;
+  left: 50%;
+  min-width: 210px;
+  max-width: calc(100% - 44px);
+  padding: 12px 15px;
+  color: #cbd5e1;
+  background: rgba(7, 17, 31, .9);
+  border: 1px solid var(--geo-line);
+  border-radius: 9px;
+  box-shadow: 0 12px 32px rgba(2, 6, 23, .36);
+  font-size: .76rem;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.geo-flow-map__state[data-kind="loading"]::before {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 7px;
+  content: "";
+  vertical-align: -2px;
+  border: 2px solid rgba(34, 211, 238, .25);
+  border-top-color: #22d3ee;
+  border-radius: 50%;
+  animation: geo-flow-spin .8s linear infinite;
+}
+
+.geo-flow-map__state[data-kind="error"] {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, .35);
+}
+
+.geo-flow-map .leaflet-container {
+  color: var(--geo-ink);
+  background: var(--geo-bg);
+  font: inherit;
+}
+
+.geo-flow-map .leaflet-control-zoom a {
+  color: #dbeafe;
+  background: rgba(11, 23, 40, .94);
+  border-bottom-color: var(--geo-line);
+}
+
+.geo-flow-map .leaflet-control-zoom a:hover {
+  color: #67e8f9;
+  background: #10243b;
+}
+
+.geo-flow-map .leaflet-control-attribution {
+  color: #64748b;
+  background: rgba(7, 17, 31, .7);
+  font-size: 8px;
+}
+
+.geo-flow-map .leaflet-control-attribution a {
+  color: #7890aa;
+}
+
+.geo-flow-map .leaflet-popup-content-wrapper,
+.geo-flow-map .leaflet-popup-tip {
+  color: #dbeafe;
+  background: #0b1728;
+  box-shadow: 0 12px 32px rgba(2, 6, 23, .4);
+}
+
+.geo-flow-map .leaflet-popup-content {
+  margin: 12px 14px;
+  font-size: .72rem;
+  line-height: 1.65;
+}
+
+.geo-flow-map .leaflet-popup-content strong {
+  color: #67e8f9;
+}
+
+.geo-flow-map .geo-flow-node-label {
+  padding: 2px 5px;
+  color: #dbeafe;
+  background: rgba(7, 17, 31, .78);
+  border: 1px solid rgba(148, 163, 184, .18);
+  border-radius: 4px;
+  box-shadow: none;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.geo-flow-map .geo-flow-node-label::before {
+  display: none;
+}
+
+.geo-flow-map .geo-flow-rate-marker {
+  width: auto !important;
+  height: auto !important;
+  margin: 0 !important;
+  background: transparent;
+  border: 0;
+}
+
+.geo-flow-map .geo-flow-rate-marker span {
+  display: inline-block;
+  min-width: 62px;
+  padding: 3px 6px;
+  color: #ecfeff;
+  background: rgba(8, 47, 73, .88);
+  border: 1px solid rgba(34, 211, 238, .38);
+  border-radius: 99px;
+  box-shadow: 0 0 14px rgba(34, 211, 238, .14);
+  font-size: 9px;
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.geo-flow-map .geo-flow-route.is-animated {
+  animation: geo-flow-dash 2.4s linear infinite;
+}
+
+.geo-flow-map--readonly .geo-flow-map__controls {
+  display: none;
+}
+
+html[data-theme="light"] .geo-flow-map__modes,
+html[data-theme="light"] .geo-flow-map__state,
+html[data-theme="light"] .geo-flow-map__legend,
+html[data-theme="light"] .geo-flow-map .geo-flow-node-label {
+  color: var(--geo-ink);
+  background: color-mix(in srgb, var(--geo-panel) 90%, transparent);
+}
+
+html[data-theme="light"] .geo-flow-map__rank-route,
+html[data-theme="light"] .geo-flow-map__rank-meta strong,
+html[data-theme="light"] .geo-flow-map .leaflet-control-zoom a {
+  color: var(--geo-ink);
+}
+
+html[data-theme="light"] .geo-flow-map .leaflet-control-zoom a,
+html[data-theme="light"] .geo-flow-map .leaflet-popup-content-wrapper,
+html[data-theme="light"] .geo-flow-map .leaflet-popup-tip {
+  color: var(--geo-ink);
+  background: var(--geo-panel);
+}
+
+html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
+  color: var(--geo-ink);
+  background: color-mix(in srgb, var(--geo-panel) 92%, transparent);
+}
+
+.dashboard-geo-flow-map .geo-flow-map__body,
+.dashboard-geo-flow-map .geo-flow-map__canvas-wrap,
+.dashboard-geo-flow-map .geo-flow-map__ranking {
+  min-height: 420px;
+}
+
+.dashboard-geo-flow-map .geo-flow-map__ranking-list {
+  max-height: 368px;
+}
+
+@keyframes geo-flow-dash {
+  to { stroke-dashoffset: -40; }
+}
+
+@keyframes geo-flow-pulse {
+  0% { opacity: .8; transform: scale(.45); }
+  80%, 100% { opacity: 0; transform: scale(1.35); }
+}
+
+@keyframes geo-flow-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .geo-flow-map *,
+  .geo-flow-map *::before,
+  .geo-flow-map *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (max-width: 991.98px) {
+  .geo-flow-map__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .geo-flow-map__controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .geo-flow-map__body {
+    display: block;
+  }
+
+  .geo-flow-map__canvas-wrap {
+    min-height: 440px;
+  }
+
+  .geo-flow-map__ranking {
+    width: 100%;
+    min-height: 0;
+    border-top: 1px solid var(--geo-line);
+    border-left: 0;
+  }
+
+  .geo-flow-map__ranking-list {
+    max-height: 280px;
+  }
+}
+
+@media (max-width: 575.98px) {
+  .geo-flow-map__controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .geo-flow-map__modes {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .geo-flow-map__modes button {
+    padding-inline: 4px;
+  }
+}
+
+/* GeoFlowMap styles:end */
+  </style>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/map/js/world.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <style>
     :root {
-      --page-bg: #f3f5f7;
-      --panel-bg: #ffffff;
-      --ink: #20242a;
-      --muted: #6b7280;
-      --line: #d9dee5;
-      --line-strong: #cbd5e1;
+      --background: #f3f5f7;
+      --surface: #ffffff;
+      --surface-secondary: #eef2f6;
+      --text-primary: #20242a;
+      --text-secondary: #6b7280;
+      --border: #d9dee5;
+      --border-strong: #cbd5e1;
       --accent: #0f766e;
-      --accent-dark: #115e59;
+      --accent-strong: #115e59;
+      --success: #15803d;
       --warning: #b45309;
       --danger: #b91c1c;
       --violet: #6d28d9;
-      --sidebar: #242830;
-      --sidebar-2: #1d2229;
+      --sidebar-background: #242830;
+      --sidebar-active: #1d2229;
+      --map-background: #dce7f2;
+      --map-surface: #f8fafc;
+      --map-label: #0f172a;
+      --chart-grid: #e2e8f0;
+      --overlay: rgba(15, 23, 42, .54);
+      --page-bg: var(--background);
+      --panel-bg: var(--surface);
+      --ink: var(--text-primary);
+      --muted: var(--text-secondary);
+      --line: var(--border);
+      --line-strong: var(--border-strong);
+      --accent-dark: var(--accent-strong);
+      --sidebar: var(--sidebar-background);
+      --sidebar-2: var(--sidebar-active);
       --radius: 8px;
+    }
+
+    html[data-theme="dark"] {
+      --background: #111827;
+      --surface: #1f2937;
+      --surface-secondary: #182231;
+      --text-primary: #f1f5f9;
+      --text-secondary: #a8b3c3;
+      --border: #374151;
+      --border-strong: #4b5563;
+      --accent: #2dd4bf;
+      --accent-strong: #14b8a6;
+      --success: #4ade80;
+      --warning: #fbbf24;
+      --danger: #f87171;
+      --violet: #a78bfa;
+      --sidebar-background: #0b1220;
+      --sidebar-active: #1e293b;
+      --map-background: #0f172a;
+      --map-surface: #111f32;
+      --map-label: #e2e8f0;
+      --chart-grid: #334155;
+      --overlay: rgba(2, 6, 23, .78);
+    }
+
+    html[data-theme="noc-dark"] {
+      --background: #050b14;
+      --surface: #081321;
+      --surface-secondary: #0b1b2d;
+      --text-primary: #e6f7ff;
+      --text-secondary: #8da9bd;
+      --border: #17344a;
+      --border-strong: #24506c;
+      --accent: #22d3ee;
+      --accent-strong: #0891b2;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #fb7185;
+      --violet: #a78bfa;
+      --sidebar-background: #030914;
+      --sidebar-active: #0b2238;
+      --map-background: #030b16;
+      --map-surface: #071525;
+      --map-label: #dff7ff;
+      --chart-grid: #143047;
+      --overlay: rgba(1, 5, 12, .86);
     }
 
     * {
@@ -1068,6 +1692,227 @@
       display: none;
     }
 
+    html[data-theme] body,
+    html[data-theme] .content-shell,
+    html[data-theme] .login-view {
+      color: var(--text-primary);
+      background: var(--background);
+    }
+
+    html[data-theme] .sidebar {
+      color: var(--text-primary);
+      background: var(--sidebar-background);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .side-nav button:hover,
+    html[data-theme] .side-nav button.active {
+      background: var(--sidebar-active);
+    }
+
+    html[data-theme] .panel,
+    html[data-theme] .login-card,
+    html[data-theme] .metric-card,
+    html[data-theme] .metric-chip,
+    html[data-theme] .legacy-section,
+    html[data-theme] .tab-strip,
+    html[data-theme] .icon-button,
+    html[data-theme] .gmj-dialog,
+    html[data-theme] .ip-detail-item,
+    html[data-theme] .filter-badge {
+      color: var(--text-primary);
+      background: var(--surface);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .metric-chip,
+    html[data-theme] .bg-light {
+      background: var(--surface-secondary) !important;
+    }
+
+    html[data-theme] .view-title,
+    html[data-theme] .section-title,
+    html[data-theme] .metric-value,
+    html[data-theme] .ip-detail-value,
+    html[data-theme] .panel-title,
+    html[data-theme] .brand,
+    html[data-theme] h1,
+    html[data-theme] h2,
+    html[data-theme] h3,
+    html[data-theme] h4,
+    html[data-theme] h5,
+    html[data-theme] h6 {
+      color: var(--text-primary);
+    }
+
+    html[data-theme] .subtle,
+    html[data-theme] .metric-readout,
+    html[data-theme] .metric-label,
+    html[data-theme] .ip-detail-label,
+    html[data-theme] .legacy-note,
+    html[data-theme] .bgp-peer-details pre,
+    html[data-theme] .filter-badge {
+      color: var(--text-secondary);
+    }
+
+    html[data-theme] .field label,
+    html[data-theme] .inline-check,
+    html[data-theme] .legacy-section > summary,
+    html[data-theme] .bgp-peer-details summary {
+      color: var(--text-secondary);
+    }
+
+    html[data-theme] .form-control,
+    html[data-theme] .form-select,
+    html[data-theme] textarea,
+    html[data-theme] input,
+    html[data-theme] select,
+    html[data-theme] option,
+    html[data-theme] .dropdown-menu {
+      color: var(--text-primary);
+      background-color: var(--surface);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .form-control::placeholder,
+    html[data-theme] textarea::placeholder,
+    html[data-theme] input::placeholder {
+      color: var(--text-secondary);
+      opacity: .78;
+    }
+
+    html[data-theme] .form-control:focus,
+    html[data-theme] .form-select:focus {
+      color: var(--text-primary);
+      background-color: var(--surface);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+
+    html[data-theme] .table {
+      --bs-table-bg: transparent;
+      --bs-table-color: var(--text-primary);
+      --bs-table-border-color: var(--border);
+      --bs-table-striped-bg: var(--surface-secondary);
+      --bs-table-striped-color: var(--text-primary);
+      --bs-table-hover-bg: var(--surface-secondary);
+      --bs-table-hover-color: var(--text-primary);
+      color: var(--text-primary);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .table > :not(caption) > * > * {
+      color: var(--text-primary);
+      background-color: transparent;
+      border-color: var(--border);
+    }
+
+    html[data-theme] .sensor-list-table tr.active td,
+    html[data-theme] .filter-badge.active {
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+      border-color: var(--accent);
+    }
+
+    html[data-theme] .btn-success,
+    html[data-theme] .tab-strip button.active {
+      color: #ffffff;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    html[data-theme] .btn-outline-secondary,
+    html[data-theme] .btn-outline-success,
+    html[data-theme] .btn-outline-danger,
+    html[data-theme] .icon-button,
+    html[data-theme] .tab-strip button {
+      color: var(--text-secondary);
+      background: transparent;
+      border-color: var(--border-strong);
+    }
+
+    html[data-theme] .btn-outline-secondary:hover,
+    html[data-theme] .btn-outline-success:hover,
+    html[data-theme] .icon-button:hover {
+      color: var(--text-primary);
+      background: var(--surface-secondary);
+      border-color: var(--accent);
+    }
+
+    html[data-theme] .btn-outline-danger,
+    html[data-theme] .text-danger {
+      color: var(--danger) !important;
+    }
+
+    html[data-theme] .alert,
+    html[data-theme] .toast,
+    html[data-theme] [role="alert"] {
+      color: var(--text-primary);
+      background: var(--surface-secondary);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .gmj-modal {
+      background: var(--overlay);
+    }
+
+    html[data-theme] .result-box {
+      color: var(--map-label);
+      background: var(--map-background);
+      border-color: var(--border);
+    }
+
+    html[data-theme] .help-tip,
+    html[data-theme] [data-bs-toggle="tooltip"],
+    html[data-theme] [title] {
+      --bs-tooltip-bg: var(--surface-secondary);
+      --bs-tooltip-color: var(--text-primary);
+    }
+
+    html[data-theme] .badge-soft {
+      color: var(--text-primary);
+      background: var(--surface-secondary);
+      border: 1px solid var(--border);
+    }
+
+    html[data-theme] .badge-soft.ok {
+      color: var(--success);
+      background: color-mix(in srgb, var(--success) 12%, var(--surface));
+    }
+
+    html[data-theme] .badge-soft.warn {
+      color: var(--warning);
+      background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+    }
+
+    html[data-theme] .badge-soft.down {
+      color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    }
+
+    .appearance-options {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
+      gap: 1rem;
+      align-items: end;
+    }
+
+    .appearance-preview {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: .5rem;
+    }
+
+    .appearance-preview span {
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    .appearance-preview span:nth-child(1) { background: var(--background); }
+    .appearance-preview span:nth-child(2) { background: var(--surface); }
+    .appearance-preview span:nth-child(3) { background: var(--accent); }
+
     @media (max-width: 1199.98px) {
       .sensor-form-grid {
         grid-template-columns: repeat(3, minmax(150px, 1fr));
@@ -1125,6 +1970,10 @@
     }
 
     @media (max-width: 767.98px) {
+      .appearance-options {
+        grid-template-columns: 1fr;
+      }
+
       .content {
         padding: 12px;
       }
@@ -1652,7 +2501,10 @@
             <div class="col-12 dashboard-widget hidden-widget" data-widget-id="global-summary" data-widget-width="full" data-widget-height="low">
               <div class="panel p-3 h-100">
                 <div class="d-flex justify-content-between align-items-center mb-2">
-                  <div class="panel-title">Mapa global resumido</div>
+                  <div>
+                    <div class="panel-title">Tráfego geográfico ao vivo</div>
+                    <div id="globalSummaryStatus" class="metric-readout">Mapa reutilizável por país ou cidade</div>
+                  </div>
                   <div class="widget-actions">
                     <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
                     <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
@@ -1664,12 +2516,7 @@
                     <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
                   </div>
                 </div>
-                <div class="table-wrap">
-                  <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>Rota</th><th>Protocolo</th><th class="text-end">Bits/s</th><th class="text-end">Flows</th></tr></thead>
-                    <tbody id="globalSummaryTable"></tbody>
-                  </table>
-                </div>
+                <div id="dashboardGeoFlowMap" class="dashboard-geo-flow-map"></div>
               </div>
             </div>
           </section>
@@ -1681,6 +2528,7 @@
             <div>
               <h1 class="view-title">Mapa Global</h1>
               <div id="globalMapStatus" class="subtle">Fluxos geográficos por país, ASN e protocolo</div>
+              <div id="mapAppliedPeriod" class="subtle">Período aplicado: últimos 30 minutos</div>
             </div>
             <div class="toolbar">
               <select id="mapRangeMinutes" class="form-select form-select-sm" aria-label="Periodo">
@@ -1690,6 +2538,9 @@
                 <option value="60">1 hora</option>
                 <option value="360">6 horas</option>
                 <option value="1440">24 horas</option>
+                <option value="10080">7 dias</option>
+                <option value="43200">30 dias</option>
+                <option value="custom">Customizado...</option>
               </select>
               <select id="mapMode" class="form-select form-select-sm" aria-label="Modo do mapa">
                 <option value="flows" selected>Fluxos</option>
@@ -1806,19 +2657,13 @@
               <div class="metric-card"><div class="metric-label">Rotas localizadas</div><div id="mapLocatedRoutes" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Sem coordenadas</div><div id="mapMissingRoutes" class="metric-value">0</div></div>
             </div>
-            <div class="row g-3">
-              <div class="col-12 col-xl-8">
-                <div id="globalMapChart" class="map-chart"></div>
-                <div id="globalMapMessage" class="map-message mt-2"></div>
-              </div>
-              <div class="col-12 col-xl-4">
-                <div class="table-wrap">
-                  <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>Origem</th><th>Destino</th><th>Protocolo</th><th>ASN Origem</th><th>ASN Destino</th><th class="text-end">Bits/s</th><th class="text-end">Packets/s</th><th class="text-end">Flows</th></tr></thead>
-                    <tbody id="globalMapRoutesTable"></tbody>
-                  </table>
-                </div>
-              </div>
+            <div id="globalMapChart"></div>
+            <div id="globalMapMessage" class="map-message mt-2"></div>
+            <div class="table-wrap mt-3">
+              <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>Origem</th><th>Destino</th><th>Protocolo</th><th>ASN Origem</th><th>ASN Destino</th><th class="text-end">Bits/s</th><th class="text-end">Packets/s</th><th class="text-end">Flows</th></tr></thead>
+                <tbody id="globalMapRoutesTable"></tbody>
+              </table>
             </div>
             <div class="table-wrap mt-3">
               <table class="table table-sm align-middle mb-0">
@@ -4496,6 +5341,24 @@
               </button>
             </div>
           </div>
+          <section id="systemAppearancePanel" class="panel p-3 mb-3">
+            <div class="appearance-options">
+              <div class="field">
+                <label for="appearanceTheme">Aparência</label>
+                <select id="appearanceTheme" class="form-select" aria-describedby="appearanceThemeStatus">
+                  <option value="auto">Automático / Sistema</option>
+                  <option value="light">Claro</option>
+                  <option value="dark">Escuro</option>
+                  <option value="noc-dark">GMJ Dark / NOC Dark</option>
+                </select>
+                <div id="appearanceThemeStatus" class="subtle mt-2">Segue a preferência do sistema.</div>
+              </div>
+              <div>
+                <div class="metric-label mb-2">Prévia dos tokens</div>
+                <div class="appearance-preview" aria-hidden="true"><span></span><span></span><span></span></div>
+              </div>
+            </div>
+          </section>
           <section class="row g-3">
             <div class="col-12 col-xl-4">
               <div class="panel p-3">
@@ -5654,7 +6517,7 @@
   <div id="timeRangeModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="timeRangeModalTitle">
     <div class="gmj-dialog small">
       <div class="gmj-dialog-header">
-        <h2 id="timeRangeModalTitle" class="view-title">Periodo personalizado</h2>
+        <h2 id="timeRangeModalTitle" class="view-title">Período personalizado</h2>
         <button type="button" class="icon-button" data-close-modal="timeRangeModal" aria-label="Fechar">
           <i data-lucide="x"></i>
         </button>
@@ -5662,12 +6525,20 @@
       <div class="gmj-dialog-body">
         <div class="snmp-form-grid">
           <div class="field">
-            <label for="customStartTime">Data inicial</label>
-            <input id="customStartTime" type="datetime-local" class="form-control">
+            <label for="customStartDate">Data inicial</label>
+            <input id="customStartDate" type="date" class="form-control">
           </div>
           <div class="field">
-            <label for="customEndTime">Data final</label>
-            <input id="customEndTime" type="datetime-local" class="form-control">
+            <label for="customStartClock">Hora inicial</label>
+            <input id="customStartClock" type="time" step="60" class="form-control">
+          </div>
+          <div class="field">
+            <label for="customEndDate">Data final</label>
+            <input id="customEndDate" type="date" class="form-control">
+          </div>
+          <div class="field">
+            <label for="customEndClock">Hora final</label>
+            <input id="customEndClock" type="time" step="60" class="form-control">
           </div>
         </div>
         <div id="customRangeStatus" class="subtle mt-2"></div>
@@ -5681,10 +6552,729 @@
     </div>
   </div>
 
+  <script id="geo-flow-map-component">
+/* GeoFlowMap component:start */
+(function (root, factory) {
+  const exported = factory();
+  if (typeof module === 'object' && module.exports) module.exports = exported;
+  if (root) root.GeoFlowMap = exported.GeoFlowMap;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const MODE_FILTERS = Object.freeze({
+    flows: Object.freeze({ metric: 'flows', direction: 'both' }),
+    download: Object.freeze({ metric: 'bits_s', direction: 'download' }),
+    upload: Object.freeze({ metric: 'bits_s', direction: 'upload' }),
+    total: Object.freeze({ metric: 'bits_s', direction: 'both' })
+  });
+
+  const PROTOCOL_COLORS = Object.freeze({
+    TCP: '#38bdf8',
+    UDP: '#34d399',
+    ICMP: '#fbbf24',
+    GRE: '#a78bfa',
+    ESP: '#f472b6',
+    OTHER: '#94a3b8'
+  });
+
+  const DEFAULT_OPTIONS = Object.freeze({
+    title: 'Tráfego geográfico',
+    subtitle: 'Rotas e throughput em tempo real',
+    mode: 'total',
+    metric: 'bits_s',
+    groupBy: 'city',
+    animated: true,
+    interactive: true,
+    rankingLimit: 10,
+    routeLabelLimit: 12,
+    fitMaxZoom: 6,
+    initialCenter: [5, -35],
+    initialZoom: 2,
+    tileUrl: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    lightTileUrl: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    tileAttribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+  });
+
+  function finiteNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function compactNumber(value, maximumFractionDigits = 1) {
+    const number = finiteNumber(value) || 0;
+    return new Intl.NumberFormat('pt-BR', {
+      notation: Math.abs(number) >= 1000 ? 'compact' : 'standard',
+      maximumFractionDigits
+    }).format(number);
+  }
+
+  function formatBits(value) {
+    const number = Math.max(0, finiteNumber(value) || 0);
+    const units = [
+      [1e12, 'Tbps'],
+      [1e9, 'Gbps'],
+      [1e6, 'Mbps'],
+      [1e3, 'Kbps']
+    ];
+    const selected = units.find(([limit]) => number >= limit);
+    if (!selected) return `${compactNumber(number, 0)} bps`;
+    return `${compactNumber(number / selected[0], number >= selected[0] * 100 ? 0 : 1)} ${selected[1]}`;
+  }
+
+  function normalizeProtocol(protocol) {
+    const value = String(protocol || 'OTHER').toUpperCase();
+    if (value.startsWith('TCP')) return 'TCP';
+    if (value.startsWith('UDP')) return 'UDP';
+    if (value.startsWith('ICMP')) return 'ICMP';
+    if (value.startsWith('GRE')) return 'GRE';
+    if (value.startsWith('ESP')) return 'ESP';
+    return 'OTHER';
+  }
+
+  function endpointValue(edge, side, key, fallback = null) {
+    const nested = edge?.[side] && typeof edge[side] === 'object' ? edge[side] : {};
+    const aliases = {
+      lat: [`${side}_lat`, `${side}_latitude`],
+      lon: [`${side}_lon`, `${side}_lng`, `${side}_longitude`],
+      label: [`${side}_label`, `${side}_city`, `${side}_country`, `${side}_ip`],
+      country: [`${side}_country`, `${side}_country_code`],
+      city: [`${side}_city`],
+      asn: [`top_asn_${side}`, `${side}_asn`]
+    };
+    const nestedAliases = {
+      lat: ['lat', 'latitude'],
+      lon: ['lon', 'lng', 'longitude'],
+      label: ['label', 'name', 'city', 'country', 'ip'],
+      country: ['country', 'country_code'],
+      city: ['city'],
+      asn: ['asn']
+    };
+    for (const alias of aliases[key] || []) {
+      if (edge?.[alias] !== null && edge?.[alias] !== undefined && edge?.[alias] !== '') return edge[alias];
+    }
+    for (const alias of nestedAliases[key] || []) {
+      if (nested?.[alias] !== null && nested?.[alias] !== undefined && nested?.[alias] !== '') return nested[alias];
+    }
+    if (key === 'label' && typeof edge?.[side] === 'string') return edge[side];
+    return fallback;
+  }
+
+  function normalizeEdge(edge, index) {
+    const source = edge && typeof edge === 'object' ? edge : {};
+    const srcLabel = endpointValue(source, 'src', 'label', source.src || '-');
+    const dstLabel = endpointValue(source, 'dst', 'label', source.dst || '-');
+    return {
+      ...source,
+      id: source.id || `${srcLabel}:${dstLabel}:${index}`,
+      src_label: String(srcLabel || '-'),
+      dst_label: String(dstLabel || '-'),
+      src_country: String(endpointValue(source, 'src', 'country', '') || ''),
+      dst_country: String(endpointValue(source, 'dst', 'country', '') || ''),
+      src_city: String(endpointValue(source, 'src', 'city', '') || ''),
+      dst_city: String(endpointValue(source, 'dst', 'city', '') || ''),
+      src_lat: finiteNumber(endpointValue(source, 'src', 'lat')),
+      src_lon: finiteNumber(endpointValue(source, 'src', 'lon')),
+      dst_lat: finiteNumber(endpointValue(source, 'dst', 'lat')),
+      dst_lon: finiteNumber(endpointValue(source, 'dst', 'lon')),
+      bits_s: finiteNumber(source.bits_s ?? source.bps ?? source.throughput_bps) || 0,
+      download_bits_s: finiteNumber(source.download_bits_s ?? source.download_bps),
+      upload_bits_s: finiteNumber(source.upload_bits_s ?? source.upload_bps),
+      packets_s: finiteNumber(source.packets_s ?? source.pps) || 0,
+      flows: finiteNumber(source.flows ?? source.flow_count) || 0,
+      top_protocol: String(source.top_protocol || source.protocol || source.proto || 'OTHER'),
+      top_asn_src: finiteNumber(endpointValue(source, 'src', 'asn')) || 0,
+      top_asn_dst: finiteNumber(endpointValue(source, 'dst', 'asn')) || 0
+    };
+  }
+
+  function normalizePayload(payload) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const rawEdges = Array.isArray(source.edges)
+      ? source.edges
+      : (Array.isArray(source.items) ? source.items : []);
+    return {
+      ...source,
+      metric: source.metric || 'bits_s',
+      group_by: source.group_by || source.groupBy || 'city',
+      edges: rawEdges.map(normalizeEdge),
+      nodes: Array.isArray(source.nodes) ? source.nodes : []
+    };
+  }
+
+  function hasCoordinates(edge) {
+    return ['src_lat', 'src_lon', 'dst_lat', 'dst_lon']
+      .every(key => finiteNumber(edge?.[key]) !== null);
+  }
+
+  function metricValue(edge, metric = 'bits_s', mode = 'total') {
+    if (metric === 'flows') return finiteNumber(edge?.flows) || 0;
+    if (metric === 'packets_s') return finiteNumber(edge?.packets_s) || 0;
+    if (mode === 'download' && finiteNumber(edge?.download_bits_s) !== null) {
+      return finiteNumber(edge.download_bits_s) || 0;
+    }
+    if (mode === 'upload' && finiteNumber(edge?.upload_bits_s) !== null) {
+      return finiteNumber(edge.upload_bits_s) || 0;
+    }
+    return finiteNumber(edge?.bits_s) || 0;
+  }
+
+  function formatMetric(value, metric) {
+    if (metric === 'flows') return `${compactNumber(value)} fluxos`;
+    if (metric === 'packets_s') return `${compactNumber(value)} pps`;
+    return formatBits(value);
+  }
+
+  function modeFromFilters(direction, metric) {
+    if (String(metric) === 'flows') return 'flows';
+    if (String(direction) === 'download') return 'download';
+    if (String(direction) === 'upload') return 'upload';
+    return 'total';
+  }
+
+  function normalizeLongitude(value) {
+    let longitude = value;
+    while (longitude > 180) longitude -= 360;
+    while (longitude < -180) longitude += 360;
+    return longitude;
+  }
+
+  function curvedRoutePoints(edge, segments = 32) {
+    if (!hasCoordinates(edge)) return [];
+    const lat1 = Number(edge.src_lat);
+    const lat2 = Number(edge.dst_lat);
+    const lon1 = Number(edge.src_lon);
+    let lon2 = Number(edge.dst_lon);
+    if (Math.abs(lon2 - lon1) > 180) lon2 += lon2 > lon1 ? -360 : 360;
+
+    const deltaLat = lat2 - lat1;
+    const deltaLon = lon2 - lon1;
+    const distance = Math.sqrt((deltaLat * deltaLat) + (deltaLon * deltaLon));
+    if (distance < 0.001) return [[lat1, normalizeLongitude(lon1)]];
+
+    const bend = Math.min(20, Math.max(1.8, distance * 0.18));
+    const middleLat = (lat1 + lat2) / 2;
+    const middleLon = (lon1 + lon2) / 2;
+    const controlLat = middleLat + ((deltaLon / distance) * bend);
+    const controlLon = middleLon - ((deltaLat / distance) * bend);
+    const points = [];
+    const count = Math.max(8, Number(segments) || 32);
+
+    for (let index = 0; index <= count; index += 1) {
+      const t = index / count;
+      const inverse = 1 - t;
+      const lat = (inverse * inverse * lat1) + (2 * inverse * t * controlLat) + (t * t * lat2);
+      const lon = (inverse * inverse * lon1) + (2 * inverse * t * controlLon) + (t * t * lon2);
+      points.push([lat, normalizeLongitude(lon)]);
+    }
+    return points;
+  }
+
+  class GeoFlowMap {
+    constructor(element, options = {}) {
+      if (!element) throw new Error('GeoFlowMap requer um elemento raiz.');
+      this.element = element;
+      this.options = { ...DEFAULT_OPTIONS, ...options };
+      this.mode = MODE_FILTERS[this.options.mode] ? this.options.mode : 'total';
+      this.metric = options.metric || MODE_FILTERS[this.mode].metric;
+      this.groupBy = this.options.groupBy || 'city';
+      this.theme = options.theme || document.documentElement?.dataset?.theme || 'dark';
+      this.payload = normalizePayload({ edges: [], metric: this.metric, group_by: this.groupBy });
+      this.map = null;
+      this.tileLayer = null;
+      this.routeLayer = null;
+      this.bounds = null;
+      this.destroyed = false;
+      this._build();
+      this._initMap();
+    }
+
+    static normalizePayload(payload) {
+      return normalizePayload(payload);
+    }
+
+    static hasCoordinates(edge) {
+      return hasCoordinates(edge);
+    }
+
+    static metricValue(edge, metric, mode) {
+      return metricValue(edge, metric, mode);
+    }
+
+    static curvedRoutePoints(edge, segments) {
+      return curvedRoutePoints(normalizeEdge(edge, 0), segments);
+    }
+
+    static modeFilters(mode) {
+      return { ...(MODE_FILTERS[mode] || MODE_FILTERS.total) };
+    }
+
+    static modeFromFilters(direction, metric) {
+      return modeFromFilters(direction, metric);
+    }
+
+    _build() {
+      this.element.classList.add('geo-flow-map');
+      this.element.innerHTML = `
+        <div class="geo-flow-map__header">
+          <div class="geo-flow-map__heading">
+            <span class="geo-flow-map__live-dot" aria-hidden="true"></span>
+            <div>
+              <div class="geo-flow-map__title">${escapeHtml(this.options.title)}</div>
+              <div class="geo-flow-map__subtitle">${escapeHtml(this.options.subtitle)}</div>
+            </div>
+          </div>
+          <div class="geo-flow-map__controls">
+            <div class="geo-flow-map__modes" role="group" aria-label="Visualização do tráfego">
+              ${[
+                ['flows', 'Fluxos'],
+                ['download', 'Download'],
+                ['upload', 'Upload'],
+                ['total', 'Total']
+              ].map(([value, label]) => `
+                <button type="button" data-geo-mode="${value}" aria-pressed="false">${label}</button>
+              `).join('')}
+            </div>
+            <label class="geo-flow-map__group">
+              <span>Agrupar por</span>
+              <select data-geo-group aria-label="Agrupar mapa">
+                <option value="city">Cidade</option>
+                <option value="country">País</option>
+                <option value="asn">ASN</option>
+                <option value="ip">IP/CIDR</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="geo-flow-map__body">
+          <div class="geo-flow-map__canvas-wrap">
+            <div class="geo-flow-map__canvas" data-geo-canvas></div>
+            <div class="geo-flow-map__state" data-geo-state hidden></div>
+            <div class="geo-flow-map__legend" aria-label="Legenda de protocolos">
+              ${Object.entries(PROTOCOL_COLORS).slice(0, 5).map(([protocol, color]) => `
+                <span><i style="--geo-color:${color}"></i>${protocol}</span>
+              `).join('')}
+            </div>
+          </div>
+          <aside class="geo-flow-map__ranking" aria-label="Ranking de rotas">
+            <div class="geo-flow-map__ranking-header">
+              <span>Ranking</span>
+              <strong data-geo-ranking-count>0 rotas</strong>
+            </div>
+            <div class="geo-flow-map__ranking-list" data-geo-ranking></div>
+          </aside>
+        </div>
+      `;
+      this.canvasElement = this.element.querySelector('[data-geo-canvas]');
+      this.stateElement = this.element.querySelector('[data-geo-state]');
+      this.rankingElement = this.element.querySelector('[data-geo-ranking]');
+      this.rankingCountElement = this.element.querySelector('[data-geo-ranking-count]');
+      this.groupElement = this.element.querySelector('[data-geo-group]');
+
+      this.element.querySelectorAll('[data-geo-mode]').forEach(button => {
+        button.addEventListener('click', () => {
+          if (!this.options.interactive || button.dataset.geoMode === this.mode) return;
+          this.setMode(button.dataset.geoMode);
+        });
+      });
+      this.groupElement.addEventListener('change', () => {
+        if (!this.options.interactive) return;
+        this.setGroupBy(this.groupElement.value);
+      });
+      if (!this.options.interactive) {
+        this.element.classList.add('geo-flow-map--readonly');
+        this.element.querySelectorAll('button, select').forEach(control => {
+          control.disabled = true;
+        });
+      }
+      this._syncControls();
+    }
+
+    _initMap() {
+      if (!globalThis.L) {
+        this.setError('Biblioteca de mapa não carregada.');
+        return;
+      }
+      this.map = globalThis.L.map(this.canvasElement, {
+        worldCopyJump: true,
+        zoomControl: true,
+        preferCanvas: false,
+        minZoom: 1
+      }).setView(this.options.initialCenter, this.options.initialZoom);
+      this.tileLayer = globalThis.L.tileLayer(this._tileUrlForTheme(this.theme), {
+        maxZoom: 18,
+        attribution: this.options.tileAttribution
+      }).addTo(this.map);
+      this.routeLayer = globalThis.L.layerGroup().addTo(this.map);
+    }
+
+    _tileUrlForTheme(theme) {
+      return theme === 'light' ? this.options.lightTileUrl : this.options.tileUrl;
+    }
+
+    _syncControls() {
+      this.element.querySelectorAll('[data-geo-mode]').forEach(button => {
+        const selected = button.dataset.geoMode === this.mode;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+      if (this.groupElement) this.groupElement.value = this.groupBy;
+    }
+
+    _notify(eventName, callbackName, detail) {
+      const callback = this.options[callbackName];
+      if (typeof callback === 'function') callback(detail, this);
+      if (typeof CustomEvent === 'function') {
+        this.element.dispatchEvent(new CustomEvent(`geoflow:${eventName}`, { detail }));
+      }
+    }
+
+    setMode(mode, options = {}) {
+      if (!MODE_FILTERS[mode]) return;
+      const changed = this.mode !== mode;
+      this.mode = mode;
+      if (mode === 'flows') this.metric = 'flows';
+      if (mode !== 'flows' && this.metric === 'flows') this.metric = 'bits_s';
+      this._syncControls();
+      if (!options.silent && changed) {
+        this._notify('modechange', 'onModeChange', { mode, ...GeoFlowMap.modeFilters(mode) });
+      }
+      if (!options.deferRender) this.render();
+    }
+
+    setGroupBy(groupBy, options = {}) {
+      const accepted = ['city', 'country', 'asn', 'ip'];
+      if (!accepted.includes(groupBy)) return;
+      const changed = this.groupBy !== groupBy;
+      this.groupBy = groupBy;
+      this._syncControls();
+      if (!options.silent && changed) {
+        this._notify('groupbychange', 'onGroupByChange', { groupBy });
+      }
+    }
+
+    setTheme(theme) {
+      const selected = theme === 'light' ? 'light' : theme === 'noc-dark' ? 'noc-dark' : 'dark';
+      if (this.theme === selected) return;
+      this.theme = selected;
+      this.element.dataset.mapTheme = selected;
+      if (!this.map || !globalThis.L) return;
+      if (this.tileLayer) this.map.removeLayer(this.tileLayer);
+      this.tileLayer = globalThis.L.tileLayer(this._tileUrlForTheme(selected), {
+        maxZoom: 18,
+        attribution: this.options.tileAttribution
+      }).addTo(this.map);
+      if (this.tileLayer.bringToBack) this.tileLayer.bringToBack();
+    }
+
+    setData(payload, options = {}) {
+      this.payload = normalizePayload(payload);
+      this.metric = options.metric || this.payload.metric || this.metric;
+      this.groupBy = options.groupBy || this.payload.group_by || this.groupBy;
+      if (options.mode) this.mode = options.mode;
+      this._syncControls();
+      this.render({ fit: options.fit !== false });
+    }
+
+    setLoading(message = 'Carregando dados geográficos...') {
+      this._setState(message, 'loading');
+    }
+
+    setError(message = 'Erro ao carregar dados geográficos.') {
+      this.clear({ keepState: true });
+      this._setState(message, 'error');
+    }
+
+    _setState(message = '', kind = '') {
+      if (!this.stateElement) return;
+      this.stateElement.textContent = message;
+      this.stateElement.dataset.kind = kind;
+      this.stateElement.hidden = !message;
+    }
+
+    clear(options = {}) {
+      if (this.routeLayer) this.routeLayer.clearLayers();
+      this.bounds = null;
+      if (this.rankingElement) this.rankingElement.innerHTML = '';
+      if (this.rankingCountElement) this.rankingCountElement.textContent = '0 rotas';
+      if (!options.keepState) this._setState('');
+    }
+
+    render(options = {}) {
+      if (this.destroyed) return;
+      this.clear();
+      const edges = this.payload.edges || [];
+      this._renderRanking(edges);
+      if (!edges.length) {
+        this._setState('Nenhuma rota encontrada para os filtros atuais.', 'empty');
+        return;
+      }
+      if (!this.map || !this.routeLayer) {
+        this._setState('Biblioteca de mapa não carregada.', 'error');
+        return;
+      }
+
+      const located = edges.filter(hasCoordinates);
+      if (!located.length) {
+        this._setState('Nenhuma rota possui coordenadas completas.', 'empty');
+        return;
+      }
+      const values = located.map(edge => metricValue(edge, this.metric, this.mode));
+      const maximum = Math.max(1, ...values);
+      const nodeGroups = new Map();
+      const allPoints = [];
+
+      located.forEach((edge, index) => {
+        const value = metricValue(edge, this.metric, this.mode);
+        const protocol = normalizeProtocol(edge.top_protocol);
+        const color = PROTOCOL_COLORS[protocol] || PROTOCOL_COLORS.OTHER;
+        const weight = Math.max(1.5, Math.min(8, 1.5 + (value / maximum) * 6.5));
+        const points = curvedRoutePoints(edge);
+        const popup = this._routePopup(edge);
+        if (points.length > 1) {
+          globalThis.L.polyline(points, {
+            color,
+            weight,
+            opacity: 0.72,
+            lineCap: 'round',
+            lineJoin: 'round',
+            dashArray: this.options.animated ? '8 12' : null,
+            className: `geo-flow-route${this.options.animated ? ' is-animated' : ''}`
+          }).bindPopup(popup).addTo(this.routeLayer);
+          if (index < this.options.routeLabelLimit) {
+            const middle = points[Math.floor(points.length / 2)];
+            globalThis.L.marker(middle, {
+              interactive: false,
+              icon: globalThis.L.divIcon({
+                className: 'geo-flow-rate-marker',
+                html: `<span>${escapeHtml(formatMetric(value, this.metric))}</span>`,
+                iconSize: [88, 22],
+                iconAnchor: [44, 11]
+              })
+            }).addTo(this.routeLayer);
+          }
+        }
+        [
+          ['src', edge.src_lat, edge.src_lon, edge.src_label],
+          ['dst', edge.dst_lat, edge.dst_lon, edge.dst_label]
+        ].forEach(([side, lat, lon, label]) => {
+          const key = `${Number(lat).toFixed(4)}:${Number(lon).toFixed(4)}:${label}`;
+          const node = nodeGroups.get(key) || {
+            lat: Number(lat),
+            lon: Number(lon),
+            label,
+            value: 0,
+            color,
+            isSource: false,
+            popup
+          };
+          node.value += value;
+          node.isSource = node.isSource || side === 'src';
+          nodeGroups.set(key, node);
+          allPoints.push([Number(lat), Number(lon)]);
+        });
+      });
+
+      const sortedNodes = Array.from(nodeGroups.values()).sort((a, b) => b.value - a.value);
+      sortedNodes.forEach((node, index) => {
+        const radius = Math.max(4, Math.min(10, 4 + (node.value / maximum) * 5));
+        const marker = globalThis.L.circleMarker([node.lat, node.lon], {
+          radius,
+          color: '#e2e8f0',
+          weight: 1.5,
+          fillColor: node.color,
+          fillOpacity: node.isSource ? 0.92 : 0.72,
+          className: 'geo-flow-node'
+        }).bindPopup(node.popup).addTo(this.routeLayer);
+        if (index < 18) {
+          marker.bindTooltip(escapeHtml(node.label), {
+            permanent: true,
+            direction: 'right',
+            offset: [8, 0],
+            className: 'geo-flow-node-label'
+          });
+        }
+      });
+
+      this.bounds = globalThis.L.latLngBounds(allPoints);
+      if (options.fit !== false) this.fit();
+      this.resize();
+    }
+
+    _routePopup(edge) {
+      return [
+        `<strong>${escapeHtml(edge.src_label)} → ${escapeHtml(edge.dst_label)}</strong>`,
+        `Throughput: ${escapeHtml(formatBits(edge.bits_s))}`,
+        `Packets/s: ${escapeHtml(formatMetric(edge.packets_s, 'packets_s'))}`,
+        `Fluxos: ${escapeHtml(compactNumber(edge.flows))}`,
+        `Protocolo: ${escapeHtml(edge.top_protocol || '-')}`,
+        `ASN: ${edge.top_asn_src ? `AS${escapeHtml(edge.top_asn_src)}` : '-'} → ${edge.top_asn_dst ? `AS${escapeHtml(edge.top_asn_dst)}` : '-'}`
+      ].join('<br>');
+    }
+
+    _renderRanking(edges) {
+      const sorted = [...edges]
+        .sort((a, b) => metricValue(b, this.metric, this.mode) - metricValue(a, this.metric, this.mode))
+        .slice(0, this.options.rankingLimit);
+      const maximum = Math.max(1, ...sorted.map(edge => metricValue(edge, this.metric, this.mode)));
+      this.rankingCountElement.textContent = `${compactNumber(edges.length, 0)} rota${edges.length === 1 ? '' : 's'}`;
+      this.rankingElement.innerHTML = sorted.map((edge, index) => {
+        const value = metricValue(edge, this.metric, this.mode);
+        const protocol = normalizeProtocol(edge.top_protocol);
+        const color = PROTOCOL_COLORS[protocol] || PROTOCOL_COLORS.OTHER;
+        const width = Math.max(4, (value / maximum) * 100);
+        return `
+          <article class="geo-flow-map__rank-item">
+            <div class="geo-flow-map__rank-index">${index + 1}</div>
+            <div class="geo-flow-map__rank-content">
+              <div class="geo-flow-map__rank-route" title="${escapeHtml(`${edge.src_label} → ${edge.dst_label}`)}">
+                ${escapeHtml(edge.src_label)} <span>→</span> ${escapeHtml(edge.dst_label)}
+              </div>
+              <div class="geo-flow-map__rank-meta">
+                <span><i style="--geo-color:${color}"></i>${escapeHtml(protocol)}</span>
+                <strong>${escapeHtml(formatMetric(value, this.metric))}</strong>
+              </div>
+              <div class="geo-flow-map__rank-bar"><i style="width:${width}%;--geo-color:${color}"></i></div>
+            </div>
+          </article>
+        `;
+      }).join('') || '<div class="geo-flow-map__ranking-empty">Sem rotas para classificar.</div>';
+    }
+
+    fit() {
+      if (!this.map || !this.bounds || !this.bounds.isValid()) return;
+      this.map.fitBounds(this.bounds, {
+        padding: [32, 32],
+        maxZoom: this.options.fitMaxZoom
+      });
+    }
+
+    resize() {
+      if (!this.map) return;
+      this.map.invalidateSize({ pan: false });
+    }
+
+    destroy() {
+      this.destroyed = true;
+      if (this.map) this.map.remove();
+      this.map = null;
+      this.tileLayer = null;
+      this.routeLayer = null;
+      this.element.innerHTML = '';
+      this.element.classList.remove('geo-flow-map');
+    }
+  }
+
+  return {
+    GeoFlowMap,
+    normalizePayload,
+    hasCoordinates,
+    metricValue,
+    curvedRoutePoints,
+    modeFromFilters
+  };
+}));
+
+/* GeoFlowMap component:end */
+  </script>
   <script>
     const API_BASE = '';
     const AUTH_TOKEN_KEY = 'gmjFlowAuthToken';
+    const APPEARANCE_THEME_KEY = 'gmjFlowAppearanceTheme';
+    const APPEARANCE_THEMES = ['auto', 'light', 'dark', 'noc-dark'];
     let currentAuthUser = null;
+
+    function resolvedAppearanceTheme(preference) {
+      if (preference !== 'auto') return APPEARANCE_THEMES.includes(preference) ? preference : 'light';
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function storedAppearanceTheme() {
+      try {
+        const stored = localStorage.getItem(APPEARANCE_THEME_KEY);
+        return APPEARANCE_THEMES.includes(stored) ? stored : 'auto';
+      } catch (error) {
+        return 'auto';
+      }
+    }
+
+    function themeColor(token, fallback = '') {
+      return getComputedStyle(document.documentElement).getPropertyValue(`--${token}`).trim() || fallback;
+    }
+
+    function refreshChartsForTheme() {
+      const textColor = themeColor('text-secondary', '#64748b');
+      const borderColor = themeColor('border', '#d9dee5');
+      const gridColor = themeColor('chart-grid', '#edf0f3');
+      Object.values(charts).forEach(chart => {
+        const current = chart.getOption() || {};
+        const patch = {
+          backgroundColor: 'transparent',
+          textStyle: { color: textColor }
+        };
+        if (Array.isArray(current.legend) && current.legend.length) {
+          patch.legend = current.legend.map(() => ({ textStyle: { color: textColor } }));
+        }
+        ['xAxis', 'yAxis'].forEach(axisName => {
+          if (!Array.isArray(current[axisName]) || !current[axisName].length) return;
+          patch[axisName] = current[axisName].map(() => ({
+            axisLabel: { color: textColor },
+            axisLine: { lineStyle: { color: borderColor } },
+            splitLine: { lineStyle: { color: gridColor } }
+          }));
+        });
+        chart.setOption(patch, false);
+      });
+    }
+
+    function setAppearanceTheme(preference, { persist = true } = {}) {
+      const selected = APPEARANCE_THEMES.includes(preference) ? preference : 'auto';
+      const resolved = resolvedAppearanceTheme(selected);
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.dataset.themePreference = selected;
+      document.documentElement.style.colorScheme = resolved === 'light' ? 'light' : 'dark';
+      if (persist) {
+        try {
+          localStorage.setItem(APPEARANCE_THEME_KEY, selected);
+        } catch (error) {
+          console.warn('Não foi possível persistir o tema.', error);
+        }
+      }
+      const select = document.getElementById('appearanceTheme');
+      if (select) select.value = selected;
+      const labels = {
+        auto: `Automático · ${resolved === 'dark' ? 'Escuro' : 'Claro'} pelo sistema`,
+        light: 'Tema claro ativo',
+        dark: 'Tema escuro ativo',
+        'noc-dark': 'GMJ Dark / NOC Dark ativo'
+      };
+      setText('appearanceThemeStatus', labels[selected]);
+      globalGeoFlowMap?.setTheme(resolved);
+      dashboardGeoFlowMap?.setTheme(resolved);
+      window.requestAnimationFrame?.(refreshChartsForTheme);
+    }
+
+    function initializeAppearanceTheme() {
+      setAppearanceTheme(storedAppearanceTheme(), { persist: false });
+      const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+      if (!media) return;
+      const handler = () => {
+        if (document.documentElement.dataset.themePreference === 'auto') {
+          setAppearanceTheme('auto', { persist: false });
+        }
+      };
+      if (typeof media.addEventListener === 'function') media.addEventListener('change', handler);
+      else if (typeof media.addListener === 'function') media.addListener(handler);
+    }
 
     const charts = {
       bps: echarts.init(document.getElementById('bpsChart')),
@@ -5706,6 +7296,11 @@
 
     const palette = ['#0f766e', '#b45309', '#6d28d9', '#b91c1c', '#2563eb', '#15803d', '#7c2d12'];
     const protocolPalette = { TCP: '#2563eb', UDP: '#16a34a', ICMP: '#f59e0b', 'TCP+SYN': '#dc2626', OTHER: '#64748b' };
+    const GEO_FLOW_ENDPOINT = '/api/geo/flows';
+    const MAP_MAX_CUSTOM_RANGE_DAYS = Math.max(
+      1,
+      Number(document.querySelector('meta[name="gmj-map-max-range-days"]')?.content || 180)
+    );
     const DASHBOARD_LAYOUT_KEY = 'gmjflow_dashboard_layout_v2';
     const DEFAULT_DASHBOARD_HIDDEN_WIDGETS = ['global-summary'];
     const DEFAULT_DASHBOARD_GRID_ORDER = ['top-conversations', 'syn-src', 'syn-dst', 'global-summary'];
@@ -5801,13 +7396,15 @@
     let mapResizeTimer = null;
     let mapViewActivation = 0;
     let mapBackoffUntil = 0;
-    let globalLeafletMap = null;
-    let globalLeafletLayer = null;
-    let globalLeafletBounds = null;
+    let globalGeoFlowMap = null;
+    let dashboardGeoFlowMap = null;
+    let dashboardGeoMode = 'total';
+    let dashboardGeoGroupBy = 'city';
     const customRanges = {
       dashboard: { start: '', end: '', previous: '60' },
       flow: { start: '', end: '', previous: '60' },
-      top: { start: '', end: '', previous: '60' }
+      top: { start: '', end: '', previous: '60' },
+      map: { start: '', end: '', previous: '30' }
     };
 
     const ATTACK_DOMAIN_OPTIONS = [
@@ -6248,6 +7845,18 @@
       return query.toString();
     }
 
+    function dashboardGeoParams() {
+      const query = new URLSearchParams(dashboardParams({ includeSensorId: true, includeInterfaceId: true }));
+      const filters = window.GeoFlowMap
+        ? GeoFlowMap.modeFilters(dashboardGeoMode)
+        : { metric: 'bits_s', direction: 'both' };
+      query.set('metric', filters.metric);
+      query.set('direction', filters.direction);
+      query.set('group_by', dashboardGeoGroupBy);
+      query.set('top_n', '20');
+      return query.toString();
+    }
+
     function updateDashboardZoneLabels() {
       const zoneId = selectedDashboardZoneId();
       const direction = document.getElementById('dashboardZoneDirection')?.value || 'both';
@@ -6277,7 +7886,7 @@
     function mapParams() {
       const query = new URLSearchParams();
       const mode = document.getElementById('mapMode')?.value || 'flows';
-      query.set('range_minutes', document.getElementById('mapRangeMinutes').value || '30');
+      appendRangeParams(query, 'mapRangeMinutes', 'map');
       query.set('direction', document.getElementById('mapDirection').value || 'both');
       query.set('metric', document.getElementById('mapMetric').value || 'bits_s');
       query.set('group_by', document.getElementById('mapGroupBy').value || 'city');
@@ -14386,7 +15995,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           type: 'time',
           boundaryGap: false,
           axisLabel: { color: '#6b7280', formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) },
-          axisLine: { lineStyle: { color: '#d9dee5' } }
+          axisLine: { lineStyle: { color: themeColor('border', '#d9dee5') } }
         },
         yAxis: {
           type: 'value',
@@ -14399,7 +16008,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             return limit ? Math.ceil(limit * 1.08) : 0;
           },
           axisLabel: { color: '#6b7280', margin: 14, formatter: value => formatter(Math.abs(Number(value) || 0)) },
-          splitLine: { lineStyle: { color: '#edf0f3' } }
+          splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } }
         },
         series
       };
@@ -14524,7 +16133,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             color: '#6b7280',
             formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
           },
-          axisLine: { lineStyle: { color: '#d9dee5' } }
+          axisLine: { lineStyle: { color: themeColor('border', '#d9dee5') } }
         },
         yAxis: {
           type: 'value',
@@ -14541,7 +16150,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             margin: 14,
             formatter: value => formatter(Math.abs(Number(value) || 0))
           },
-          splitLine: { lineStyle: { color: '#edf0f3' } }
+          splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } }
         },
         series
       };
@@ -14588,13 +16197,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         xAxis: {
           type: 'value',
           axisLabel: { color: '#6b7280', formatter: valueKey === 'bps' ? formatBps : formatNumber },
-          splitLine: { lineStyle: { color: '#edf0f3' } }
+          splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } }
         },
         yAxis: {
           type: 'category',
           data: top.map(item => itemLabel(item, type)),
           axisLabel: { color: '#374151', width: 120, overflow: 'truncate' },
-          axisLine: { lineStyle: { color: '#d9dee5' } }
+          axisLine: { lineStyle: { color: themeColor('border', '#d9dee5') } }
         },
         series: [{
           type: 'bar',
@@ -14657,7 +16266,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           type: 'time',
           axisLabel: { color: '#6b7280', formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) }
         },
-        yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } } },
         series: [{
           name: 'Anomalias',
           type: 'bar',
@@ -14676,7 +16285,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         color: palette,
         grid: { left: 8, right: 12, top: 8, bottom: 20, containLabel: true },
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-        xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#edf0f3' } } },
+        xAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } } },
         yAxis: {
           type: 'category',
           data: data.map(item => item[labelKey] || '-'),
@@ -15020,13 +16629,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         xAxis: {
           type: 'value',
           axisLabel: { color: '#6b7280', formatter: formatBps },
-          splitLine: { lineStyle: { color: '#edf0f3' } }
+          splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } }
         },
         yAxis: {
           type: 'category',
           data: data.map(item => item.key),
           axisLabel: { color: '#374151', width: 180, overflow: 'truncate' },
-          axisLine: { lineStyle: { color: '#d9dee5' } }
+          axisLine: { lineStyle: { color: themeColor('border', '#d9dee5') } }
         },
         series: [{ type: 'bar', data: data.map(item => item.bits_s), barMaxWidth: 20 }]
       };
@@ -15210,16 +16819,39 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `).join('') || '<tr><td colspan="3" class="text-muted">Sem dados</td></tr>';
     }
 
-    function renderGlobalSummary(items) {
-      const tbody = document.getElementById('globalSummaryTable');
-      tbody.innerHTML = items.slice(0, 8).map(item => `
-        <tr>
-          <td>${escapeHtml(`${item.src_label || item.src} -> ${item.dst_label || item.dst}`)}</td>
-          <td>${escapeHtml(item.top_protocol || '-')}</td>
-          <td class="text-end">${formatBps(item.bits_s)}</td>
-          <td class="text-end">${formatNumber(item.flows)}</td>
-        </tr>
-      `).join('') || '<tr><td colspan="4" class="text-muted">Sem dados geograficos</td></tr>';
+    function ensureDashboardGeoFlowMap() {
+      if (dashboardGeoFlowMap) return dashboardGeoFlowMap;
+      const target = document.getElementById('dashboardGeoFlowMap');
+      if (!target || !window.GeoFlowMap) return null;
+      dashboardGeoFlowMap = new GeoFlowMap(target, {
+        title: 'Tráfego geográfico ao vivo',
+        subtitle: 'Dashboard · rotas por throughput',
+        mode: dashboardGeoMode,
+        groupBy: dashboardGeoGroupBy,
+        rankingLimit: 8,
+        routeLabelLimit: 8,
+        onModeChange: detail => {
+          dashboardGeoMode = detail.mode;
+          if (activeView === 'dashboard') refresh().catch(console.error);
+        },
+        onGroupByChange: detail => {
+          dashboardGeoGroupBy = detail.groupBy;
+          if (activeView === 'dashboard') refresh().catch(console.error);
+        }
+      });
+      return dashboardGeoFlowMap;
+    }
+
+    function renderGlobalSummary(payload) {
+      const map = ensureDashboardGeoFlowMap();
+      if (!map) return;
+      const filters = GeoFlowMap.modeFilters(dashboardGeoMode);
+      map.setData(payload, {
+        metric: payload?.metric || filters.metric,
+        groupBy: payload?.group_by || dashboardGeoGroupBy,
+        mode: dashboardGeoMode
+      });
+      setText('globalSummaryStatus', `${formatNumber(payload?.total_routes ?? payload?.edges?.length ?? 0)} rotas geográficas`);
     }
 
     function metricDisplay(value, metric) {
@@ -15238,27 +16870,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function routeHasCoordinates(edge) {
-      return ['src_lat', 'src_lon', 'dst_lat', 'dst_lon'].every(key => edge?.[key] !== null && edge?.[key] !== undefined);
-    }
-
-    function routeMetricValue(edge, metric) {
-      return Number(edge?.[metric]) || Number(edge?.bits_s) || 0;
-    }
-
-    function routeLabel(edge) {
-      return `${edge.src_label || edge.src || '-'} -> ${edge.dst_label || edge.dst || '-'}`;
-    }
-
-    function routeAsnText(edge) {
-      const src = edge.top_asn_src ? `AS${edge.top_asn_src}` : '-';
-      const dst = edge.top_asn_dst ? `AS${edge.top_asn_dst}` : '-';
-      return `${src} -> ${dst}`;
-    }
-
-    function routeAsnTooltip(edge) {
-      const src = edge.top_asn_src_name || edge.src_as_name || '';
-      const dst = edge.top_asn_dst_name || edge.dst_as_name || '';
-      return [src, dst].filter(Boolean).join(' -> ');
+      return window.GeoFlowMap
+        ? GeoFlowMap.hasCoordinates(edge)
+        : ['src_lat', 'src_lon', 'dst_lat', 'dst_lon'].every(key => edge?.[key] !== null && edge?.[key] !== undefined);
     }
 
     function routeEndpointAsn(edge, side) {
@@ -15285,37 +16899,45 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (target) target.textContent = message;
     }
 
-    function ensureLeafletMap() {
+    function ensureGeoFlowMap() {
       if (activeView !== 'global-map') return false;
-      if (!window.L) {
-        setMapMessage('Biblioteca de mapa não carregada.');
+      if (!window.GeoFlowMap) {
+        setMapMessage('Componente de mapa não carregado.');
         return false;
       }
-      if (globalLeafletMap) return true;
-      globalLeafletMap = L.map('globalMapChart', {
-        worldCopyJump: true,
-        zoomControl: true,
-        preferCanvas: true
-      }).setView([5, -35], 2);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 18,
-        attribution: '&copy; OpenStreetMap'
-      }).addTo(globalLeafletMap);
-      globalLeafletLayer = L.layerGroup().addTo(globalLeafletMap);
+      if (globalGeoFlowMap) return true;
+      const direction = document.getElementById('mapDirection')?.value || 'both';
+      const metric = document.getElementById('mapMetric')?.value || 'bits_s';
+      globalGeoFlowMap = new GeoFlowMap(document.getElementById('globalMapChart'), {
+        title: 'Mapa de tráfego global',
+        subtitle: 'Origem, destino e throughput por rota',
+        mode: GeoFlowMap.modeFromFilters(direction, metric),
+        metric,
+        groupBy: document.getElementById('mapGroupBy')?.value || 'city',
+        rankingLimit: 10,
+        routeLabelLimit: 12,
+        onModeChange: detail => {
+          document.getElementById('mapDirection').value = detail.direction;
+          document.getElementById('mapMetric').value = detail.metric;
+          debounceGlobalMapLoad(0);
+        },
+        onGroupByChange: detail => {
+          document.getElementById('mapGroupBy').value = detail.groupBy;
+          debounceGlobalMapLoad(0);
+        }
+      });
       return true;
     }
 
-    function clearLeafletMap() {
-      if (globalLeafletLayer) globalLeafletLayer.clearLayers();
-      globalLeafletBounds = null;
+    function clearGeoFlowMap() {
+      if (globalGeoFlowMap) globalGeoFlowMap.clear();
       setMapMessage('');
     }
 
-    function resizeLeafletMap() {
-      if (activeView !== 'global-map' || !globalLeafletMap) return;
-      globalLeafletMap.invalidateSize();
-      if (globalLeafletBounds) {
-        globalLeafletMap.fitBounds(globalLeafletBounds, { padding: [28, 28], maxZoom: 6 });
+    function resizeGeoFlowMaps() {
+      if (activeView === 'global-map' && globalGeoFlowMap) globalGeoFlowMap.resize();
+      if (activeView === 'dashboard' && dashboardGeoFlowMap && isDashboardWidgetVisible('global-summary')) {
+        dashboardGeoFlowMap.resize();
       }
     }
 
@@ -15324,67 +16946,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (mapResizeTimer) clearTimeout(mapResizeTimer);
       mapResizeTimer = setTimeout(() => {
         mapResizeTimer = null;
-        resizeLeafletMap();
+        resizeGeoFlowMaps();
       }, delay);
     }
 
     function fitGlobalMapBounds() {
-      if (!globalLeafletMap || !globalLeafletBounds) return;
-      globalLeafletMap.fitBounds(globalLeafletBounds, { padding: [28, 28], maxZoom: 6 });
+      if (globalGeoFlowMap) globalGeoFlowMap.fit();
     }
 
-    function routePopup(edge) {
-      return [
-        `<strong>${escapeHtml(routeLabel(edge))}</strong>`,
-        `Bits/s: ${formatBps(edge.bits_s)}`,
-        `PPS/s: ${formatPps(edge.packets_s)}`,
-        `Pacotes: ${formatNumber(edge.packets)}`,
-        `Flows: ${formatNumber(edge.flows)}`,
-        `Protocolo: ${escapeHtml(edge.top_protocol || '-')}`,
-        `ASN: ${escapeHtml(routeAsnText(edge))}`,
-        routeAsnTooltip(edge) ? escapeHtml(routeAsnTooltip(edge)) : ''
-      ].filter(Boolean).join('<br>');
-    }
-
-    function drawGlobalLeafletMap(edges, metric) {
-      clearLeafletMap();
-      if (!ensureLeafletMap()) return;
-      const located = edges.filter(routeHasCoordinates);
-      if (!located.length) {
-        setMapMessage('Nenhuma rota com coordenadas completas para desenhar no mapa.');
-        return;
-      }
-      const maxValue = Math.max(1, ...located.map(edge => Number(edge.bits_s) || 0));
-      const bounds = [];
-      located.forEach(edge => {
-        const src = [Number(edge.src_lat), Number(edge.src_lon)];
-        const dst = [Number(edge.dst_lat), Number(edge.dst_lon)];
-        const color = routeColor(edge.top_protocol);
-        const weight = Math.max(2, Math.min(9, 2 + ((Number(edge.bits_s) || 0) / maxValue) * 7));
-        const samePoint = src[0] === dst[0] && src[1] === dst[1];
-        if (!samePoint) {
-          L.polyline([src, dst], {
-            color,
-            weight,
-            opacity: 0.58,
-            lineCap: 'round'
-          }).bindPopup(routePopup(edge)).addTo(globalLeafletLayer);
-          bounds.push(src, dst);
-        }
-        [src, dst].forEach((point, index) => {
-          const radius = samePoint ? Math.max(6, weight + 2) : 5;
-          L.circleMarker(point, {
-            radius,
-            color,
-            weight: 2,
-            fillColor: index === 0 ? '#ffffff' : color,
-            fillOpacity: index === 0 ? 0.92 : 0.72
-          }).bindPopup(routePopup(edge)).addTo(globalLeafletLayer);
-          bounds.push(point);
-        });
+    function renderGeoFlowMap(payload) {
+      if (!ensureGeoFlowMap()) return;
+      const metric = payload?.metric || document.getElementById('mapMetric')?.value || 'bits_s';
+      const direction = document.getElementById('mapDirection')?.value || 'both';
+      globalGeoFlowMap.setData(payload, {
+        metric,
+        groupBy: payload?.group_by || document.getElementById('mapGroupBy')?.value || 'city',
+        mode: GeoFlowMap.modeFromFilters(direction, metric)
       });
-      globalLeafletBounds = L.latLngBounds(bounds);
-      fitGlobalMapBounds();
       scheduleMapResize();
     }
 
@@ -15425,7 +17003,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mapLocatedRoutes').textContent = formatNumber(locatedRoutes);
       document.getElementById('mapMissingRoutes').textContent = formatNumber(missingRoutes);
       const metric = payload.metric || 'bits_s';
-      drawGlobalLeafletMap(edges, metric);
+      renderGeoFlowMap(payload);
       if (!edges.length) {
         setMapMessage('Nenhuma rota encontrada apos aplicar os filtros');
       }
@@ -15480,6 +17058,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function loadGlobalMap({ force = false } = {}) {
       if (activeView !== 'global-map') return;
       const status = document.getElementById('globalMapStatus');
+      if (document.getElementById('mapRangeMinutes')?.value === 'custom') {
+        const range = customRanges.map;
+        const validationMessage = validateCustomRange('map', range.start, range.end);
+        if (validationMessage) {
+          status.textContent = `Período inválido: ${validationMessage}`;
+          setMapMessage(validationMessage);
+          return;
+        }
+      }
       if (Date.now() < mapBackoffUntil) {
         status.textContent = 'Mapa em espera após erro recente';
         return;
@@ -15487,16 +17074,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       abortMapRequest();
       const controller = new AbortController();
       mapAbortController = controller;
-      status.textContent = 'Atualizando mapa global...';
-      setMapMessage('Carregando dados geográficos...');
+      const loadingMessage = isLongMapRange()
+        ? 'Consultando um período extenso. O mapa e o ranking podem levar mais tempo...'
+        : 'Carregando dados geográficos...';
+      status.textContent = loadingMessage;
+      setMapMessage(loadingMessage);
+      if (ensureGeoFlowMap()) globalGeoFlowMap.setLoading(loadingMessage);
       renderTableMessage('globalMapRoutesTable', 8, 'Carregando rotas...');
       renderTableMessage('globalMapMissingTable', 8, 'Carregando rotas sem coordenadas...');
       try {
         const mode = document.getElementById('mapMode')?.value || 'flows';
-        const endpoint = mode === 'flows' ? '/api/geo/flows' : '/api/geo/anomalies';
+        const endpoint = mode === 'flows' ? GEO_FLOW_ENDPOINT : '/api/geo/anomalies';
         const payload = await apiRequest(`${endpoint}?${mapParams()}`, { signal: controller.signal });
         if (controller.signal.aborted || activeView !== 'global-map') return;
         renderGlobalMap(payload);
+        updateMapAppliedPeriod(payload);
         const warning = payload.warning ? ` - ${payload.warning}` : '';
         const totalRoutes = Number(payload.total_routes ?? (payload.edges || []).length);
         const requestedTop = Number(payload.requested_top_n || document.getElementById('mapTopN').value || totalRoutes);
@@ -15513,7 +17105,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         mapBackoffUntil = Date.now() + 60000;
         console.error('Falha ao carregar Mapa Global', error);
         status.textContent = `Falha no mapa: ${error.message}`;
-        clearLeafletMap();
+        clearGeoFlowMap();
+        if (globalGeoFlowMap) globalGeoFlowMap.setError('Erro ao carregar dados geográficos. Tente atualizar novamente.');
         setMapMessage('Erro ao carregar dados geográficos. Tente atualizar novamente.');
         renderTableMessage('globalMapRoutesTable', 8, 'Erro ao carregar mapa', true);
         renderTableMessage('globalMapMissingTable', 8, 'Erro ao carregar mapa', true);
@@ -15781,6 +17374,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (isDashboardWidgetVisible('syn-dst')) {
           entries.push(['synDst', fetchJSON('/api/dashboard/top-syn', `${topQuery}&mode=dst&limit=8`, requestOptions)]);
         }
+        if (isDashboardWidgetVisible('global-summary')) {
+          const geoMap = ensureDashboardGeoFlowMap();
+          if (geoMap) geoMap.setLoading('Atualizando tráfego geográfico...');
+          entries.push(['geo', fetchJSON(GEO_FLOW_ENDPOINT, dashboardGeoParams(), requestOptions)]);
+        }
         const settled = await Promise.allSettled(entries.map(entry => entry[1]));
         if (controller.signal.aborted || activeView !== 'dashboard') return;
         const payloads = Object.fromEntries(entries.map((entry, index) => [entry[0], settledDashboardPayload(entry[0], settled[index])]));
@@ -15888,6 +17486,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           payloads.synDst?.__error
             ? renderTableMessage('topSynDstTable', 3, widgetErrorMessage(payloads.synDst), true)
             : renderSynTable('topSynDstTable', payloadItems(payloads.synDst));
+        }
+        if (isDashboardWidgetVisible('global-summary')) {
+          if (payloads.geo?.__error) {
+            ensureDashboardGeoFlowMap()?.setError('Erro ao atualizar o tráfego geográfico.');
+            setText('globalSummaryStatus', 'Erro ao carregar mapa');
+          } else {
+            renderGlobalSummary(payloads.geo || {});
+          }
         }
         dashboardRefreshFailures = 0;
       } catch (error) {
@@ -16381,21 +17987,124 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById(id).classList.remove('open');
     }
 
+    function rangeSelectId(target) {
+      if (target === 'dashboard') return 'rangeMinutes';
+      if (target === 'top') return 'topFlowRangeMinutes';
+      if (target === 'map') return 'mapRangeMinutes';
+      return 'flowRangeMinutes';
+    }
+
+    function splitLocalDateTime(value) {
+      const [date = '', clock = ''] = String(value || '').split('T');
+      return { date, clock: clock.slice(0, 5) };
+    }
+
+    function setCustomRangeInputs(start, end) {
+      const startParts = splitLocalDateTime(start);
+      const endParts = splitLocalDateTime(end);
+      setValue('customStartDate', startParts.date);
+      setValue('customStartClock', startParts.clock);
+      setValue('customEndDate', endParts.date);
+      setValue('customEndClock', endParts.clock);
+    }
+
+    function readCustomRangeInputs() {
+      const startDate = selectValue('customStartDate');
+      const startClock = selectValue('customStartClock');
+      const endDate = selectValue('customEndDate');
+      const endClock = selectValue('customEndClock');
+      return {
+        start: startDate && startClock ? `${startDate}T${startClock}` : '',
+        end: endDate && endClock ? `${endDate}T${endClock}` : ''
+      };
+    }
+
+    function validateCustomRange(target, start, end, now = new Date()) {
+      if (!start || !end) return 'Informe data e hora inicial e final.';
+      const startDate = new Date(start);
+      const endDate = new Date(end);
+      if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+        return 'Informe datas e horas válidas.';
+      }
+      if (startDate >= endDate) return 'O início precisa ser menor que o fim.';
+      const futureToleranceMs = 60000;
+      if (startDate.getTime() > now.getTime() + futureToleranceMs) {
+        return 'O início não pode estar no futuro.';
+      }
+      if (endDate.getTime() > now.getTime() + futureToleranceMs) {
+        return 'O fim não pode estar no futuro.';
+      }
+      if (target === 'map') {
+        const durationMs = endDate.getTime() - startDate.getTime();
+        const maximumMs = MAP_MAX_CUSTOM_RANGE_DAYS * 86400000;
+        if (durationMs > maximumMs) {
+          return `O intervalo máximo configurado para o mapa é de ${MAP_MAX_CUSTOM_RANGE_DAYS} dias.`;
+        }
+      }
+      return '';
+    }
+
+    function browserTimeZoneLabel() {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'timezone local';
+    }
+
+    function formatMapPeriodDate(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return new Intl.DateTimeFormat('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZoneName: 'short'
+      }).format(date);
+    }
+
+    function updateMapAppliedPeriod(payload = null) {
+      const target = document.getElementById('mapAppliedPeriod');
+      if (!target) return;
+      const range = customRanges.map;
+      const start = payload?.start || (document.getElementById('mapRangeMinutes')?.value === 'custom' ? range.start : '');
+      const end = payload?.end || (document.getElementById('mapRangeMinutes')?.value === 'custom' ? range.end : '');
+      if (start && end) {
+        target.textContent = `Período aplicado: ${formatMapPeriodDate(start)} → ${formatMapPeriodDate(end)} (${browserTimeZoneLabel()})`;
+        return;
+      }
+      const select = document.getElementById('mapRangeMinutes');
+      target.textContent = `Período aplicado: ${select?.selectedOptions?.[0]?.textContent || 'janela atual'} (${browserTimeZoneLabel()})`;
+    }
+
+    function isLongMapRange() {
+      const selected = document.getElementById('mapRangeMinutes')?.value || '30';
+      if (selected !== 'custom') return Number(selected) >= 10080;
+      const start = new Date(customRanges.map.start);
+      const end = new Date(customRanges.map.end);
+      return !Number.isNaN(start.getTime())
+        && !Number.isNaN(end.getTime())
+        && end.getTime() - start.getTime() >= 86400000;
+    }
+
     function openCustomRange(target) {
       activeCustomRangeTarget = target;
       const range = customRanges[target];
       const now = new Date();
       const start = new Date(now.getTime() - Number(range.previous || 60) * 60000);
-      setValue('customStartTime', range.start || localDateTimeForInput(start));
-      setValue('customEndTime', range.end || localDateTimeForInput(now));
-      document.getElementById('customRangeStatus').textContent = '';
+      setCustomRangeInputs(range.start || localDateTimeForInput(start), range.end || localDateTimeForInput(now));
+      document.getElementById('timeRangeModalTitle').textContent = target === 'map'
+        ? 'Período personalizado do Mapa Global'
+        : 'Período personalizado';
+      document.getElementById('customRangeStatus').textContent = target === 'map'
+        ? `Timezone: ${browserTimeZoneLabel()}. Intervalo máximo: ${MAP_MAX_CUSTOM_RANGE_DAYS} dias.`
+        : `Timezone: ${browserTimeZoneLabel()}.`;
+      document.getElementById('customRangeStatus').classList.remove('text-danger');
       openModal('timeRangeModal');
     }
 
     function cancelCustomRange() {
       const target = activeCustomRangeTarget;
       if (target) {
-        const selectId = target === 'dashboard' ? 'rangeMinutes' : target === 'top' ? 'topFlowRangeMinutes' : 'flowRangeMinutes';
+        const selectId = rangeSelectId(target);
         document.getElementById(selectId).value = customRanges[target].previous || '60';
       }
       activeCustomRangeTarget = null;
@@ -16405,17 +18114,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function applyCustomRange() {
       const target = activeCustomRangeTarget;
       if (!target) return;
-      const start = selectValue('customStartTime');
-      const end = selectValue('customEndTime');
+      const { start, end } = readCustomRangeInputs();
       const status = document.getElementById('customRangeStatus');
-      if (!start || !end) {
-        status.textContent = 'Informe data inicial e data final.';
+      const validationMessage = validateCustomRange(target, start, end);
+      if (validationMessage) {
+        status.textContent = validationMessage;
+        status.classList.add('text-danger');
         return;
       }
-      if (new Date(start) >= new Date(end)) {
-        status.textContent = 'Data inicial precisa ser menor que a data final.';
-        return;
-      }
+      status.classList.remove('text-danger');
       customRanges[target].start = start;
       customRanges[target].end = end;
       closeModal('timeRangeModal');
@@ -16424,13 +18131,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         refresh().catch(console.error);
       } else if (target === 'top') {
         loadTopFlow().catch(console.error);
+      } else if (target === 'map') {
+        updateMapAppliedPeriod();
+        loadGlobalMap({ force: true }).catch(console.error);
       } else {
         searchFlows().catch(console.error);
       }
     }
 
     function handleRangeSelectChange(target) {
-      const selectId = target === 'dashboard' ? 'rangeMinutes' : target === 'top' ? 'topFlowRangeMinutes' : 'flowRangeMinutes';
+      const selectId = rangeSelectId(target);
       const value = document.getElementById(selectId).value;
       if (value === 'custom') {
         openCustomRange(target);
@@ -16443,6 +18153,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         refresh().catch(console.error);
       } else if (target === 'top') {
         loadTopFlow().catch(console.error);
+      } else if (target === 'map') {
+        updateMapAppliedPeriod();
+        loadGlobalMap({ force: true }).catch(console.error);
       } else {
         searchFlows().catch(console.error);
       }
@@ -17151,7 +18864,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
     document.getElementById('mapSensor').addEventListener('change', () => loadMapInterfaces().then(() => debounceGlobalMapLoad()).catch(console.error));
     document.getElementById('mapInterface').addEventListener('change', () => debounceGlobalMapLoad());
-    ['mapRangeMinutes', 'mapMode', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN', 'mapZone', 'mapZoneDirection', 'mapSeverity', 'mapAnomalyStatus'].forEach(id => {
+    document.getElementById('mapRangeMinutes').addEventListener('change', () => handleRangeSelectChange('map'));
+    ['mapMode', 'mapDirection', 'mapProtocol', 'mapMetric', 'mapGroupBy', 'mapTopN', 'mapZone', 'mapZoneDirection', 'mapSeverity', 'mapAnomalyStatus'].forEach(id => {
       document.getElementById(id).addEventListener('change', () => debounceGlobalMapLoad());
     });
     ['mapSrcAsn', 'mapDstAsn', 'mapSrcCidr', 'mapDstCidr', 'mapVector'].forEach(id => {
@@ -17261,6 +18975,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
+    document.getElementById('appearanceTheme').addEventListener('change', event => {
+      setAppearanceTheme(event.target.value);
+    });
     document.getElementById('manageAiModelsButton').addEventListener('click', () => { showView('ai'); showAiTab('models'); });
     document.getElementById('configureMitigationAiButton').addEventListener('click', () => { pendingAiRouteFunction = 'mitigation_analysis'; showView('ai'); showAiTab('routing'); });
     document.getElementById('refreshAiButton').addEventListener('click', () => loadAiWorkspace().catch(error => setText('aiPageStatus', `Falha: ${error.message}`)));
@@ -17793,11 +19510,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     window.addEventListener('resize', () => {
       Object.values(charts).forEach(chart => chart.resize());
-      resizeLeafletMap();
+      resizeGeoFlowMaps();
     });
     document.addEventListener('visibilitychange', scheduleDashboardRefresh);
 
     mountDetectionTemplateSection();
+    initializeAppearanceTheme();
     applyDashboardLayout();
     updateMapFilterBadge();
     resetPeakHunterForm();
