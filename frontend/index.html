@@ -586,6 +586,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --success: #15803d;
       --warning: #b45309;
       --danger: #b91c1c;
+      --info: #1d4ed8;
       --violet: #6d28d9;
       --sidebar-background: #242830;
       --sidebar-active: #1d2229;
@@ -619,6 +620,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --success: #4ade80;
       --warning: #fbbf24;
       --danger: #f87171;
+      --info: #60a5fa;
       --violet: #a78bfa;
       --sidebar-background: #0b1220;
       --sidebar-active: #1e293b;
@@ -642,6 +644,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --success: #34d399;
       --warning: #fbbf24;
       --danger: #fb7185;
+      --info: #38bdf8;
       --violet: #a78bfa;
       --sidebar-background: #030914;
       --sidebar-active: #0b2238;
@@ -1284,8 +1287,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       justify-content: center;
       border-radius: 999px;
       padding: 0 .4rem;
-      background: #b91c1c;
-      color: #fff;
+      background: var(--info);
+      color: var(--surface);
       font-size: .72rem;
       font-weight: 800;
     }
@@ -1296,17 +1299,51 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .side-nav button.has-anomalies {
-      color: #fff;
-      background: #3a2024;
+      color: var(--text-primary);
+      background: color-mix(in srgb, var(--danger) 18%, var(--sidebar-active));
     }
 
     @keyframes anomalyPulse {
       0%, 100% {
-        box-shadow: 0 0 0 0 rgba(185, 28, 28, .55);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--info) 55%, transparent);
       }
       50% {
-        box-shadow: 0 0 0 6px rgba(185, 28, 28, 0);
+        box-shadow: 0 0 0 6px transparent;
       }
+    }
+
+    .nav-anomaly-severity {
+      display: none;
+      align-items: center;
+      gap: .25rem;
+      margin-left: .2rem;
+    }
+
+    .nav-anomaly-severity.active {
+      display: inline-flex;
+    }
+
+    .nav-severity-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 19px;
+      height: 19px;
+      padding: 0 .3rem;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      font-size: .66rem;
+      font-weight: 800;
+    }
+
+    .nav-severity-count.severity-warning {
+      color: var(--warning);
+      background: color-mix(in srgb, var(--warning) 14%, var(--sidebar-active));
+    }
+
+    .nav-severity-count.severity-critical {
+      color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 14%, var(--sidebar-active));
     }
 
     .attack-layout,
@@ -1844,6 +1881,18 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       color: var(--danger) !important;
     }
 
+    html[data-theme] .text-warning {
+      color: var(--warning) !important;
+    }
+
+    html[data-theme] .text-info {
+      color: var(--info) !important;
+    }
+
+    html[data-theme] .text-success {
+      color: var(--success) !important;
+    }
+
     html[data-theme] .alert,
     html[data-theme] .toast,
     html[data-theme] [role="alert"] {
@@ -1888,6 +1937,67 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     html[data-theme] .badge-soft.down {
       color: var(--danger);
       background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    }
+
+    html[data-theme] .badge-soft.severity-warning,
+    html[data-theme] .badge-soft.state-informational {
+      color: var(--warning);
+      background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+      border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+    }
+
+    html[data-theme] .badge-soft.severity-critical,
+    html[data-theme] .badge-soft.state-rejected,
+    html[data-theme] .badge-soft.state-not-applied {
+      color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+      border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+    }
+
+    html[data-theme] .badge-soft.severity-info,
+    html[data-theme] .badge-soft.state-candidate,
+    html[data-theme] .badge-soft.state-suggestion,
+    html[data-theme] .badge-soft.state-pending {
+      color: var(--info);
+      background: color-mix(in srgb, var(--info) 12%, var(--surface));
+      border-color: color-mix(in srgb, var(--info) 42%, var(--border));
+    }
+
+    html[data-theme] .badge-soft.status-active,
+    html[data-theme] .badge-soft.state-applied {
+      color: var(--success);
+      background: color-mix(in srgb, var(--success) 12%, var(--surface));
+      border-color: color-mix(in srgb, var(--success) 42%, var(--border));
+    }
+
+    html[data-theme] .badge-soft.status-ended {
+      color: var(--text-secondary);
+      background: var(--surface-secondary);
+      border-color: var(--border);
+    }
+
+    .metric-card.anomaly-active-metric {
+      border-inline-start: 3px solid var(--success);
+    }
+
+    .metric-card.anomaly-critical-metric {
+      border-inline-start: 3px solid var(--danger);
+    }
+
+    .metric-card.anomaly-warning-metric {
+      border-inline-start: 3px solid var(--warning);
+    }
+
+    .metric-card.anomaly-info-metric {
+      border-inline-start: 3px solid var(--info);
+    }
+
+    .metric-card.anomaly-critical-metric .metric-value {
+      color: var(--danger);
+    }
+
+    .metric-card.anomaly-warning-metric .metric-value {
+      color: var(--warning);
     }
 
     .appearance-options {
@@ -2086,6 +2196,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         </button>
         <button id="anomaliesNavButton" type="button" data-nav-view="anomalies">
           <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
+          <span id="anomalyNavSeverity" class="nav-anomaly-severity" aria-hidden="true">
+            <span id="anomalyNavWarningBadge" class="nav-severity-count severity-warning" title="Avisos ativos">0</span>
+            <span id="anomalyNavCriticalBadge" class="nav-severity-count severity-critical" title="Anomalias críticas ativas">0</span>
+          </span>
         </button>
         <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter">
           <i data-lucide="activity"></i><span>Peak Hunter</span>
@@ -4152,9 +4266,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </div>
             </div>
             <div class="database-metrics-grid mb-3 d-none">
-              <div class="metric-card"><div class="metric-label">Ativas</div><div id="securityAnomalyActiveCount" class="metric-value">0</div></div>
-              <div class="metric-card"><div class="metric-label">Criticas</div><div id="securityAnomalyCriticalCount" class="metric-value">0</div></div>
-              <div class="metric-card"><div class="metric-label">Avisos</div><div id="securityAnomalyWarningCount" class="metric-value">0</div></div>
+              <div class="metric-card anomaly-active-metric"><div class="metric-label">Ativas</div><div id="securityAnomalyActiveCount" class="metric-value">0</div></div>
+              <div class="metric-card anomaly-critical-metric"><div class="metric-label">Criticas</div><div id="securityAnomalyCriticalCount" class="metric-value">0</div></div>
+              <div class="metric-card anomaly-warning-metric"><div class="metric-label">Avisos</div><div id="securityAnomalyWarningCount" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Resposta</div><div class="metric-value">Info</div></div>
             </div>
             <div class="table-wrap mb-3">
@@ -4388,15 +4502,15 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="panel p-3">
             <div class="database-metrics-grid">
-              <div class="metric-card">
+              <div class="metric-card anomaly-active-metric">
                 <div class="metric-label">Incidentes ativos</div>
                 <div id="anomalyActiveCount" class="metric-value">0</div>
               </div>
-              <div class="metric-card">
+              <div class="metric-card anomaly-critical-metric">
                 <div class="metric-label">Criticas</div>
                 <div id="anomalyCriticalCount" class="metric-value">0</div>
               </div>
-              <div class="metric-card">
+              <div class="metric-card anomaly-warning-metric">
                 <div class="metric-label">Avisos</div>
                 <div id="anomalyWarningCount" class="metric-value">0</div>
               </div>
@@ -6142,16 +6256,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         <div id="anomalyDetailSummary" class="subtle mb-3">Carregando</div>
         <div id="anomalyScopeSummary" class="panel p-3 mb-3"></div>
         <div class="anomaly-detail-grid mb-3">
+          <div class="metric-card anomaly-info-metric">
+            <div class="metric-label">Severidade disparada</div>
+            <div class="metric-value"><span id="anomalyDetailSeverity" class="badge-soft severity-info">-</span></div>
+          </div>
           <div class="metric-card">
             <div class="metric-label">Status</div>
-            <div id="anomalyDetailStatus" class="metric-value">-</div>
+            <div class="metric-value"><span id="anomalyDetailStatus" class="badge-soft status-ended">-</span></div>
           </div>
           <div class="metric-card">
             <div class="metric-label">Pico</div>
             <div id="anomalyDetailPeak" class="metric-value">-</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">Threshold</div>
+            <div class="metric-label">Threshold do gatilho</div>
             <div id="anomalyDetailThreshold" class="metric-value">-</div>
           </div>
           <div class="metric-card">
@@ -10041,7 +10159,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td class="text-end">${formatNumber(item.unique_dst_ips)}</td>
           <td class="text-end">${formatNumber(item.unique_dst_ports)}</td>
           <td class="text-end">${formatNumber(item.unique_src_ports)}</td>
-          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(item.severity)}">${escapeHtml(item.severity || '-')}</span></td>
         </tr>
       `).join('') || '<tr><td colspan="16" class="text-muted">Sem candidatos no periodo</td></tr>';
       createIcons();
@@ -10182,7 +10300,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       tbody.innerHTML = items.map(item => `
         <tr>
           <td>${escapeHtml(item.vector || '-')}</td>
-          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(item.severity)}">${escapeHtml(item.severity || '-')}</span></td>
           <td>${escapeHtml(item.prefix_cidr || '-')}</td>
           <td>${ipLink(item.src_ip || item.internal_ip)}</td>
           <td>${ipLink(item.dst_ip)}</td>
@@ -10258,7 +10376,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         return `
         <tr>
           <td><span class="badge-soft ${item.status === 'active' ? 'ok' : 'off'}">${escapeHtml(item.status || '-')}</span></td>
-          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(item.severity)}">${escapeHtml(item.severity || '-')}</span></td>
           <td>${escapeHtml(item.zone_name || '-')}</td>
           <td>${escapeHtml(item.vector || '-')}</td>
           <td>${ipLink(item.src_ip)}</td>
@@ -10302,7 +10420,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td class="text-end">${formatBps(item.bits_s)}</td>
           <td class="text-end">${formatNumber(item.flows_s)}</td>
           <td class="text-end">${formatNumber(item.flows)}</td>
-          <td><span class="badge-soft ${item.severity === 'critical' ? '' : 'off'}">${escapeHtml(item.severity || '-')}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(item.severity)}">${escapeHtml(item.severity || '-')}</span></td>
           <td><span class="badge-soft ${item.status === 'active' ? 'ok' : 'off'}">${escapeHtml(item.status || '-')}</span></td>
           <td>${escapeHtml(detectionResponseLabel(item.response))}</td>
           <td>${escapeHtml(item.message || '-')}</td>
@@ -12794,6 +12912,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           && !Boolean(candidate.dst_prefix || candidate.dst_cidr);
         const dnsSrcProfile = ['FLOWSPEC_BLOCK_SRC_DNS'].includes(String(candidate.profile || candidate.response_profile_name || '').toUpperCase());
         const dnsWithoutDestination = dnsSourceOnly || dnsSrcProfile;
+        const candidateState = mitigationStateInfo(candidate.mitigation_state || candidate.candidate_state);
+        const informationalCandidate = String(candidate.mitigation_state || candidate.candidate_state || '') === 'informational_candidate';
+        const eligibleForAutomatic = candidate.eligible_for_automatic === true;
         const legacyCanApply = !(analysisOnly || candidate.not_recommended || candidate.candidate_role === 'not_recommended' || policy.decision === 'deny' || dnsWithoutDestination);
         const actionable = Object.prototype.hasOwnProperty.call(candidate, 'actionable') ? Boolean(candidate.actionable) : legacyCanApply;
         const selectedConnectorId = mitigationCandidateConnectorId(candidate);
@@ -12807,8 +12928,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         );
         const ineligibleMessage = candidate.rejection_persisted
           ? '<div class="text-danger fw-semibold mb-2">Rejeitado pelo operador.</div>'
-          : !actionable && !selectionPending && !equivalentAnnouncement
+          : !actionable && !informationalCandidate && !selectionPending && !equivalentAnnouncement
             ? `<div class="text-danger fw-semibold mb-2">Não elegível para mitigação${connectorResolutionReason ? `: ${escapeHtml(connectorResolutionReason)}` : ''}</div>`
+          : '';
+        const informationalMessage = informationalCandidate
+          ? `<div class="text-warning fw-semibold mb-2">Candidato informativo: ${escapeHtml(connectorResolutionReason || (candidate.deterministic_gate_reasons || []).join(' | ') || 'warning_manual_only')}</div>`
           : '';
         const selectionMessage = selectionPending
           ? '<div class="text-warning fw-semibold mb-2">Selecione um conector para recalcular a proposta.</div>'
@@ -12821,6 +12945,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 <div class="subtle">${escapeHtml(candidate.reason || '-')}</div>
               </div>
               <div class="d-flex flex-wrap gap-1">
+                <span class="badge-soft ${candidateState.badge}">${escapeHtml(candidateState.label)}</span>
+                ${eligibleForAutomatic ? '<span class="badge-soft status-active">Elegível para automático</span>' : ''}
                 ${mitigationDecisionBadge(policy.decision)}
                 ${candidate.connector_dry_run ? mitigationDecisionBadge('dry_run') : ''}
               </div>
@@ -12835,6 +12961,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ${readiness && Object.prototype.hasOwnProperty.call(readiness, 'ready') ? `<div class="subtle mb-2">Prontidão atual: ${readiness.ready === true ? 'ready' : readiness.ready === false ? `não pronto${readiness.reason ? ` (${escapeHtml(readiness.reason)})` : ''}` : 'ainda não verificada'}</div>` : ''}
             ${selectedConnectorId ? `<div class="subtle mb-2">connector_id selecionado: #${escapeHtml(selectedConnectorId)}</div>` : ''}
             ${connectorResolutionReason && !selectionPending ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
+            ${informationalMessage}
             ${ineligibleMessage}
             ${selectionMessage}
             ${renderEquivalentMitigationAnnouncement(equivalentAnnouncement)}
@@ -12873,19 +13000,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       const succeeded = analysis.status === 'success' && !analysis.error_message;
       const authorized = succeeded && analysis.apply_mitigation === true;
-      const decision = authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
+      const analysisMode = analysis.analysis_mode || analysis.request_payload?.analysis_mode || 'informational';
+      const decision = analysisMode === 'informational'
+        ? 'Análise informativa'
+        : authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
       const provider = analysis.provider_name || analysis.provider || '-';
       box.innerHTML = `
         <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
           <div class="panel-title">Análise IA</div>
           <button type="button" class="btn btn-sm btn-outline-secondary bgp-ai-reanalyze"><i data-lucide="refresh-cw"></i><span>Reanalisar</span></button>
         </div>
-        <div class="mb-2"><span class="badge-soft ${authorized ? 'ok' : 'warn'}">Decisão: ${escapeHtml(decision)}</span></div>
+        <div class="mb-2"><span class="badge-soft ${authorized ? 'status-active' : analysisMode === 'informational' ? 'state-informational' : 'severity-warning'}">Decisão: ${escapeHtml(decision)}</span></div>
         ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
         <div class="metric-readout mb-2"><span>Motivo:</span> ${escapeHtml(analysis.reason || analysis.error_message || '-')}</div>
         <div class="d-flex flex-wrap gap-2">
           <div class="metric-chip"><span>Provider:</span> ${escapeHtml(provider)}</div>
           <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')}</div>
+          <div class="metric-chip"><span>Modo:</span> ${escapeHtml(analysisMode)}</div>
           <div class="metric-chip"><span>Latência:</span> ${escapeHtml(`${Number(analysis.latency_ms || 0)} ms`)}</div>
           <div class="metric-chip"><span>Data/hora:</span> ${escapeHtml(formatDateTime(analysis.created_at))}</div>
         </div>`;
@@ -13108,6 +13239,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (unit === 'bits_s') return formatBps(value);
       if (unit === 'packets_s') return formatPps(value);
       return `${formatNumber(value)} flows/s`;
+    }
+
+    function formatOptionalMetricValue(value, unit) {
+      return value === null || value === undefined || value === ''
+        ? '-'
+        : formatMetricValue(value, unit);
     }
 
     function peakHunterMetricValue(value, metric) {
@@ -14242,7 +14379,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end">${formatNumber(vector.threshold_value)}</td>
           <td>${escapeHtml(unitLabel(vector.threshold_unit))}</td>
           <td>${escapeHtml(vector.decoder)}</td>
-          <td><span class="badge-soft ${vector.severity === 'critical' ? '' : vector.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(vector.severity)}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(vector.severity)}">${escapeHtml(vector.severity)}</span></td>
           <td>${escapeHtml(vector.response_action)}</td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
@@ -14682,16 +14819,68 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function severityBadgeClass(severity) {
+      const value = String(severity || '').trim().toLowerCase();
+      if (value === 'critical') return 'severity-critical';
+      if (value === 'warning') return 'severity-warning';
+      return 'severity-info';
+    }
+
+    function anomalyStatusBadgeClass(status) {
+      return String(status || '').trim().toLowerCase() === 'active'
+        ? 'status-active'
+        : 'status-ended';
+    }
+
+    function mitigationStateInfo(state) {
+      const value = String(state || '').trim().toLowerCase();
+      return {
+        candidate_generated: { label: 'Candidato gerado', badge: 'state-candidate' },
+        informational_candidate: { label: 'Candidato informativo', badge: 'state-informational' },
+        mitigation_suggestion_created: { label: 'Sugestao criada', badge: 'state-suggestion' },
+        announcement_pending: { label: 'Anuncio pendente', badge: 'state-pending' },
+        announcement_applied: { label: 'Anuncio aplicado', badge: 'state-applied' },
+        not_applied: { label: 'Nao aplicado', badge: 'state-not-applied' },
+        rejected: { label: 'Rejeitado', badge: 'state-rejected' },
+        ended: { label: 'Encerrado', badge: 'status-ended' }
+      }[value] || { label: state || 'Sem resposta', badge: 'status-ended' };
+    }
+
+    function semanticColor(token, fallback = '') {
+      const value = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+      return value || fallback;
+    }
+
+    function anomalySeverityColor(severity) {
+      const value = String(severity || '').trim().toLowerCase();
+      if (value === 'critical') return semanticColor('--danger');
+      if (value === 'warning') return semanticColor('--warning');
+      return semanticColor('--info');
+    }
+
     function renderAnomalyBadge(summary) {
-      const count = Number(summary.active_count || 0);
+      const count = Number(summary.active_total ?? summary.active_count ?? summary.active_anomalies ?? 0);
+      const warningCount = Number(summary.active_warning ?? summary.warning_count ?? 0);
+      const criticalCount = Number(summary.active_critical ?? summary.critical_count ?? 0);
       const badge = document.getElementById('anomalyNavBadge');
       const button = document.getElementById('anomaliesNavButton');
+      const severityGroup = document.getElementById('anomalyNavSeverity');
+      const warningBadge = document.getElementById('anomalyNavWarningBadge');
+      const criticalBadge = document.getElementById('anomalyNavCriticalBadge');
+      const tooltip = `${formatNumber(count)} anomalias ativas: ${formatNumber(warningCount)} avisos e ${formatNumber(criticalCount)} criticas`;
       badge.textContent = formatNumber(count);
       badge.classList.toggle('active', count > 0);
       button.classList.toggle('has-anomalies', count > 0);
+      button.title = tooltip;
+      button.setAttribute('aria-label', `Anomalias. ${tooltip}`);
+      warningBadge.textContent = formatNumber(warningCount);
+      criticalBadge.textContent = formatNumber(criticalCount);
+      warningBadge.hidden = warningCount <= 0;
+      criticalBadge.hidden = criticalCount <= 0;
+      severityGroup.classList.toggle('active', count > 0 && (warningCount > 0 || criticalCount > 0));
       setText('anomalyActiveCount', formatNumber(count));
-      setText('anomalyCriticalCount', formatNumber(summary.critical_count || 0));
-      setText('anomalyWarningCount', formatNumber(summary.warning_count || 0));
+      setText('anomalyCriticalCount', formatNumber(criticalCount));
+      setText('anomalyWarningCount', formatNumber(warningCount));
     }
 
     function renderMitigationBadge(summary) {
@@ -14710,9 +14899,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function renderOpsSummary(summary) {
       renderAnomalyBadge({
-        active_count: summary.active_anomalies ?? summary.active_count ?? 0,
-        critical_count: summary.critical_count || 0,
-        warning_count: summary.warning_count || 0
+        active_count: summary.active_anomalies ?? summary.active_count ?? summary.active_total ?? 0,
+        active_total: summary.active_total ?? summary.active_anomalies ?? summary.active_count ?? 0,
+        active_critical: summary.active_critical ?? summary.critical_count ?? 0,
+        active_warning: summary.active_warning ?? summary.warning_count ?? 0
       });
       renderMitigationBadge(summary);
     }
@@ -14749,8 +14939,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function updateAnomalySummary() {
       if (currentAuthUser?.role !== 'admin') return;
-      const summary = await apiRequest('/api/anomalies/summary');
-      renderAnomalyBadge(summary);
+      await refreshOpsSummary();
     }
 
     async function loadAnomalyDashboard() {
@@ -14894,6 +15083,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         badge: 'off',
         confirmation: 'Nenhuma resposta registrada para esta anomalia.'
       },
+      candidate_generated: {
+        label: 'Candidato gerado',
+        badge: 'state-candidate',
+        confirmation: 'Candidato técnico gerado; nenhum anúncio foi criado.'
+      },
+      informational_candidate: {
+        label: 'Candidato informativo',
+        badge: 'state-informational',
+        confirmation: 'Warning manual-only; nenhum anúncio executável ou pendente foi criado.'
+      },
+      mitigation_suggestion_created: {
+        label: 'Sugestão criada',
+        badge: 'state-suggestion',
+        confirmation: 'Sugestão registrada para decisão do operador.'
+      },
       pending_approval: {
         label: 'Aguardando aprovação',
         badge: 'warn',
@@ -14931,7 +15135,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       },
       not_applied: {
         label: 'Não aplicado',
-        badge: 'warn',
+        badge: 'state-not-applied',
         confirmation: 'A resposta não foi aplicada.'
       },
       rejected: {
@@ -14991,7 +15195,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       'auto_mitigation_status',
       'auto_mitigation_reason',
       'auto_mitigation_details',
-      'auto_mitigation_updated_at'
+      'auto_mitigation_updated_at',
+      'mitigation_state',
+      'severity',
+      'triggered_severity'
     ];
 
     const ANOMALY_RESPONSE_CONFIRMATION_LABELS = {
@@ -15323,9 +15530,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           : {};
       const outcomeConnector = anomalyResponseNamedId(outcomeDetails.connector_name, outcomeDetails.connector_id);
       const outcomeZone = anomalyResponseNamedId(outcomeDetails.zone_name || event.zone_name, outcomeDetails.zone_id || event.zone_id);
+      const mitigationState = mitigationStateInfo(event.mitigation_state || outcomeDetails.mitigation_state);
       const overviewFields = [
+        anomalyResponseDetailField('Severidade', event.triggered_severity || event.severity),
+        anomalyResponseDetailField('Estado da mitigação', mitigationState.label),
         anomalyResponseDetailField('Estado atual', info.label),
         anomalyResponseDetailField('Motivo', reason),
+        anomalyResponseDetailField('Gates determinísticos', outcomeDetails.deterministic_gate_reasons),
+        anomalyResponseDetailField('Modo da análise', outcomeDetails.analysis_mode),
+        anomalyResponseDetailField('Candidato seguro', outcomeDetails.safe_candidate_generated === true ? 'sim' : outcomeDetails.safe_candidate_generated === false ? 'não' : ''),
+        anomalyResponseDetailField('Anúncio criado', outcomeDetails.announcement_created === true ? 'sim' : outcomeDetails.announcement_created === false ? 'não' : ''),
+        anomalyResponseDetailField('Anúncio pendente', outcomeDetails.announcement_pending === true ? 'sim' : outcomeDetails.announcement_pending === false ? 'não' : ''),
+        anomalyResponseDetailField('FIFO escrito', outcomeDetails.fifo_written === true ? 'sim' : outcomeDetails.fifo_written === false ? 'não' : ''),
         anomalyResponseDetailField('Motivo técnico', outcomeDetails.technical_reason || bgpTechnicalReason({ response_reason: reason })),
         anomalyResponseDetailField('Evidência Host Agent', outcomeDetails.host_agent_evidence ? JSON.stringify(outcomeDetails.host_agent_evidence, null, 2) : ''),
         anomalyResponseDetailField('Atualizado em', anomalyResponseDateText(updatedAt)),
@@ -15352,7 +15568,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         <section class="panel p-3 mb-3">
           <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
             <div class="panel-title">Resposta selecionada</div>
-            <span class="badge-soft ${info.badge}">${escapeHtml(info.label)}</span>
+            <div class="d-flex flex-wrap gap-1">
+              <span class="badge-soft ${severityBadgeClass(event.triggered_severity || event.severity)}">${escapeHtml(event.triggered_severity || event.severity || 'info')}</span>
+              <span class="badge-soft ${mitigationState.badge}">${escapeHtml(mitigationState.label)}</span>
+              <span class="badge-soft ${info.badge}">${escapeHtml(info.label)}</span>
+            </div>
           </div>
           <div class="anomaly-response-detail-grid">${overviewFields}</div>
         </section>
@@ -15489,8 +15709,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const legacyDns = isLegacyDnsAnomaly(event);
         return `
         <tr data-anomaly-row-id="${actionId}">
-          <td><span class="badge-soft ${event.status === 'active' ? 'ok' : 'off'}">${escapeHtml(event.status)}</span></td>
-          <td><span class="badge-soft ${event.severity === 'critical' ? '' : event.severity === 'warning' ? 'off' : 'ok'}">${escapeHtml(event.severity)}</span></td>
+          <td><span class="badge-soft ${anomalyStatusBadgeClass(event.status)}">${escapeHtml(event.status)}</span></td>
+          <td><span class="badge-soft ${severityBadgeClass(event.severity)}">${escapeHtml(event.severity)}</span></td>
           <td>#${escapeHtml(event.id || '-')}</td>
           <td class="anomaly-type-cell">
             ${escapeHtml(anomalyTypeLabel(event))}
@@ -15552,10 +15772,35 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const valueKey = unit === 'packets_s' ? 'packets_s' : unit === 'flows_s' ? 'flows_s' : 'bits_s';
       const values = points.map(point => Number(point[valueKey] || 0));
       const finiteValues = values.filter(value => Number.isFinite(value));
-      const maxValue = Math.max(0, Number(event.peak_value || 0), Number(event.threshold_value || 0), ...finiteValues);
+      const thresholdDefinitions = [
+        { name: 'Warning', value: event.warning_threshold, color: semanticColor('--warning') },
+        { name: 'Critical', value: event.critical_threshold, color: semanticColor('--danger') },
+        { name: 'Automático', value: event.automatic_mitigation_threshold, color: semanticColor('--info') },
+        { name: 'Gatilho', value: event.trigger_threshold ?? event.threshold_value, color: anomalySeverityColor(event.triggered_severity || event.severity) }
+      ].filter(item => Number.isFinite(Number(item.value)) && Number(item.value) > 0);
+      const thresholdLines = [];
+      thresholdDefinitions.forEach(item => {
+        const existing = thresholdLines.find(line => Number(line.yAxis) === Number(item.value));
+        if (existing) {
+          existing.name = `${existing.name} / ${item.name}`;
+          return;
+        }
+        thresholdLines.push({
+          name: item.name,
+          yAxis: Number(item.value),
+          lineStyle: { color: item.color, type: 'dashed', width: 1.5 },
+          label: { color: item.color, formatter: `${item.name}: ${formatMetricValue(item.value, unit)}` }
+        });
+      });
+      const maxValue = Math.max(
+        0,
+        Number(event.peak_value || 0),
+        ...thresholdDefinitions.map(item => Number(item.value)),
+        ...finiteValues
+      );
       const axisMax = niceAnomalyAxisMax(maxValue * 1.2);
       return {
-        color: ['#b91c1c'],
+        color: [anomalySeverityColor(event.triggered_severity || event.severity)],
         tooltip: { trigger: 'axis', valueFormatter: value => formatMetricValue(value, unit) },
         grid: { left: 58, right: 18, top: 18, bottom: 42 },
         xAxis: { type: 'category', data: points.map(point => point.time) },
@@ -15571,7 +15816,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           smooth: true,
           areaStyle: { opacity: .12 },
           symbolSize: points.length <= 1 ? 9 : 5,
-          data: values
+          data: values,
+          markLine: {
+            silent: true,
+            symbol: 'none',
+            data: thresholdLines
+          }
         }]
       };
     }
@@ -15591,9 +15841,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? 'Mitigação por destino/porta agregados'
           : event.mitigation_basis || '-';
       const sourceDetails = event.source_details_json || event.source_details || {};
+      const detection = sourceDetails.detection && typeof sourceDetails.detection === 'object' ? sourceDetails.detection : {};
+      const temporalEvidence = event.temporal_evidence || detection.temporal_evidence || {};
+      const triggeredSeverity = event.triggered_severity || detection.triggered_severity || event.severity || '-';
+      const triggerValue = event.trigger_value ?? detection.trigger_value ?? event.observed_value;
+      const triggerThreshold = event.trigger_threshold ?? detection.trigger_threshold ?? event.threshold_value;
+      const warningThreshold = event.warning_threshold ?? detection.warning_threshold;
+      const criticalThreshold = event.critical_threshold ?? detection.critical_threshold;
+      const automaticThreshold = event.automatic_mitigation_threshold ?? detection.automatic_mitigation_threshold;
+      const triggerCondition = event.trigger_condition || detection.trigger_condition || {};
+      const passedConditions = event.conditions_passed || detection.conditions_passed || [];
+      const conditionsText = Array.isArray(passedConditions)
+        ? passedConditions.map(condition => {
+            const item = condition || {};
+            return `${item.condition || '-'}=${item.actual ?? '-'} (${item.passed === false ? 'falhou' : 'ok'})`;
+          }).join(' | ')
+        : '-';
       const autoMitigationDetails = event.auto_mitigation_details || {};
+      const mitigationState = mitigationStateInfo(event.mitigation_state || autoMitigationDetails.mitigation_state);
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
+        ['Severidade disparada', triggeredSeverity],
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],
@@ -15614,18 +15882,37 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
         ['Decoder', event.decoder || '-'],
         ['Protocolo', event.protocol || event.decoder || '-'],
-        ['Métrica', event.metric_unit ? unitLabel(event.metric_unit) : '-'],
-        ['Threshold', formatMetricValue(event.threshold_value, event.metric_unit)],
+        ['Métrica canônica', event.canonical_unit || detection.canonical_unit || (event.metric_unit ? unitLabel(event.metric_unit) : '-')],
+        ['Valor que disparou', formatOptionalMetricValue(triggerValue, event.metric_unit)],
+        ['Threshold warning', formatOptionalMetricValue(warningThreshold, event.metric_unit)],
+        ['Threshold critical', formatOptionalMetricValue(criticalThreshold, event.metric_unit)],
+        ['Threshold automático', formatOptionalMetricValue(automaticThreshold, event.metric_unit)],
+        ['Threshold do gatilho', formatOptionalMetricValue(triggerThreshold, event.metric_unit)],
+        ['Threshold efetivo na detecção', formatOptionalMetricValue(event.effective_threshold_at_detection ?? detection.effective_threshold_at_detection, event.metric_unit)],
+        ['Fonte threshold', event.threshold_source || detection.threshold_source || '-'],
+        ['Versão threshold', event.threshold_version || detection.threshold_version || '-'],
+        ['Disparado em', formatDateTime(event.triggered_at || detection.triggered_at)],
+        ['Condição do gatilho', triggerCondition.metric ? `${triggerCondition.metric} ${triggerCondition.comparison || 'over'} ${triggerCondition.threshold}` : '-'],
+        ['Condições adicionais', conditionsText || '-'],
         ['Flows', formatNumber(event.flow_count || 0)],
         ['Serie', detail.timeseries_scope === 'specific_conversation' ? 'conversa especifica' : detail.timeseries_scope === 'target_total' ? 'total do alvo' : detail.timeseries_source || '-'],
         ['Pontos serie', detail.timeseries_points ? `${detail.timeseries_points}${detail.timeseries_warning ? ` / ${detail.timeseries_warning}` : ''}` : '-'],
+        ['Evidência temporal', `${temporalEvidence.points_count ?? detail.timeseries_points ?? 0} ponto(s), ${temporalEvidence.duration_seconds ?? event.evidence_duration_seconds ?? 0}s${temporalEvidence.sufficient_for_automatic === false ? ' / insuficiente para automático' : temporalEvidence.sufficient_for_automatic === true ? ' / suficiente' : ''}`],
         ['Modo serie', detail.timeseries_query_mode || '-'],
         ['Base mitigação', mitigationBasis],
         ['Top flow', topFlowText],
         ['Resumo completo', event.summary || '-'],
         ['Motivo', event.mitigation_reason || '-'],
+        ['Estado da mitigação', mitigationState.label],
         ['Mitigacao automatica', event.auto_mitigation_status || '-'],
         ['Motivo nao aplicada', event.auto_mitigation_reason || '-'],
+        ['Gates determinísticos', Array.isArray(autoMitigationDetails.deterministic_gate_reasons) ? autoMitigationDetails.deterministic_gate_reasons.join(' | ') : '-'],
+        ['Modo da análise', autoMitigationDetails.analysis_mode || '-'],
+        ['Candidatos gerados', autoMitigationDetails.candidate_count ?? '-'],
+        ['Candidato seguro', autoMitigationDetails.safe_candidate_generated === true ? 'sim' : autoMitigationDetails.safe_candidate_generated === false ? 'não' : '-'],
+        ['Papéis rejeitados', Array.isArray(autoMitigationDetails.rejected_candidate_roles) ? autoMitigationDetails.rejected_candidate_roles.join(', ') : '-'],
+        ['Anúncio criado', autoMitigationDetails.announcement_created === true ? 'sim' : autoMitigationDetails.announcement_created === false ? 'não' : '-'],
+        ['Anúncio pendente', autoMitigationDetails.announcement_pending === true ? 'sim' : autoMitigationDetails.announcement_pending === false ? 'não' : '-'],
         ['Resolucao conector', autoMitigationDetails.resolution_source || autoMitigationDetails.connector_resolution_method || '-'],
         ['Erro resolucao', autoMitigationDetails.resolution_error || '-'],
         ['Conector resolvido', autoMitigationDetails.connector_name || (autoMitigationDetails.connector_id ? `#${autoMitigationDetails.connector_id}` : '-')],
@@ -15677,16 +15964,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       const succeeded = analysis.status === 'success' && !analysis.error_message;
       const authorized = succeeded && analysis.apply_mitigation === true;
-      const decision = authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
+      const analysisMode = analysis.analysis_mode || analysis.request_payload?.analysis_mode || 'informational';
+      const decision = analysisMode === 'informational'
+        ? 'Análise informativa'
+        : authorized ? 'Autoriza mitigação' : 'Não recomenda mitigação';
       const provider = analysis.provider_name || analysis.provider || '-';
       setText('anomalyAiStatus', `Decisão: ${decision}`);
       block.innerHTML = `
-        <div class="mb-2"><span class="badge-soft ${authorized ? 'ok' : 'warn'}">${escapeHtml(decision)}</span></div>
+        <div class="mb-2"><span class="badge-soft ${authorized ? 'status-active' : analysisMode === 'informational' ? 'state-informational' : 'severity-warning'}">${escapeHtml(decision)}</span></div>
         ${analysis.error_message ? `<div class="text-danger mb-2">${escapeHtml(analysis.error_message)}</div>` : ''}
         <div class="metric-readout mb-2"><span>Motivo:</span> ${escapeHtml(analysis.reason || analysis.error_message || '-')}</div>
         <div class="d-flex flex-wrap gap-2">
           <div class="metric-chip"><span>Provider:</span> ${escapeHtml(provider)}</div>
           <div class="metric-chip"><span>Modelo:</span> ${escapeHtml(analysis.model || '-')}</div>
+          <div class="metric-chip"><span>Modo:</span> ${escapeHtml(analysisMode)}</div>
           <div class="metric-chip"><span>Latência:</span> ${escapeHtml(`${Number(analysis.latency_ms || 0)} ms`)}</div>
           <div class="metric-chip"><span>Data/hora:</span> ${escapeHtml(formatDateTime(analysis.created_at))}</div>
         </div>`;
@@ -15742,9 +16033,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('anomalyDetailModalTitle').textContent = `#${event.id || anomalyId} ${anomalyTypeLabel(event)}`;
         document.getElementById('anomalyDetailSummary').textContent = `#${event.id || anomalyId} ${anomalyCompactSummary(event)}`;
         document.getElementById('anomalyScopeSummary').innerHTML = anomalyScopeHtml(event, detail);
-        setText('anomalyDetailStatus', event.status || '-');
+        const detailSeverity = document.getElementById('anomalyDetailSeverity');
+        detailSeverity.textContent = event.triggered_severity || event.severity || '-';
+        detailSeverity.className = `badge-soft ${severityBadgeClass(event.triggered_severity || event.severity)}`;
+        const detailSeverityCard = detailSeverity.closest('.metric-card');
+        if (detailSeverityCard) {
+          detailSeverityCard.className = `metric-card ${String(event.triggered_severity || event.severity).toLowerCase() === 'critical' ? 'anomaly-critical-metric' : String(event.triggered_severity || event.severity).toLowerCase() === 'warning' ? 'anomaly-warning-metric' : 'anomaly-info-metric'}`;
+        }
+        const detailStatus = document.getElementById('anomalyDetailStatus');
+        detailStatus.textContent = event.status || '-';
+        detailStatus.className = `badge-soft ${anomalyStatusBadgeClass(event.status)}`;
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
-        setText('anomalyDetailThreshold', formatMetricValue(event.threshold_value, event.metric_unit));
+        const legacyThresholdText = formatMetricValue(event.threshold_value, event.metric_unit);
+        setText(
+          'anomalyDetailThreshold',
+          event.trigger_threshold === null || event.trigger_threshold === undefined
+            ? legacyThresholdText
+            : formatOptionalMetricValue(event.trigger_threshold, event.metric_unit)
+        );
         setText('anomalyDetailTotal', formatBytes(event.estimated_bytes));
         const conversations = Array.isArray(detail.top_conversations) ? detail.top_conversations : [];
         document.getElementById('anomalyConversationTable').innerHTML = conversations.map(conversation => {
@@ -15797,7 +16103,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!anomalyId) return;
       await apiRequest(`/api/anomalies/${anomalyId}/ack`, { method: 'POST' });
       await loadAnomalies();
-      await refreshOpsSummary();
       if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
     }
 
@@ -15805,7 +16110,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!anomalyId) return;
       await apiRequest(`/api/anomalies/${anomalyId}/close`, { method: 'POST' });
       await loadAnomalies();
-      await refreshOpsSummary();
       if (currentAnomalyDetailId === Number(anomalyId)) closeModal('anomalyDetailModal');
     }
 
