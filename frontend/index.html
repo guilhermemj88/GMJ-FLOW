@@ -11165,10 +11165,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const topFlowText = topFlow.src_ip && topFlow.dst_ip
           ? `${topFlow.src_ip}:${topFlow.src_port || '-'} -> ${topFlow.dst_ip}:${topFlow.dst_port || '-'} udp`
           : '';
-        const connectorText = [candidate.mitigation_target_mode || '', candidate.connector_name || (candidate.connector_id ? `#${candidate.connector_id}` : ''), candidate.pipe_path || '']
+        const connectorText = [candidate.connector_name || (candidate.connector_id ? `#${candidate.connector_id}` : ''), candidate.pipe_path || '']
           .filter(Boolean)
           .join(' / ');
-        const connectorResolutionReason = candidate.automatic_not_applied_reason || candidate.connector_resolution_error || '';
+        const connectorResolutionReason = candidate.resolution_error || candidate.automatic_not_applied_reason || candidate.connector_resolution_error || '';
+        const resolutionSource = candidate.resolution_source || candidate.connector_resolution_method || '';
+        const readiness = candidate.current_readiness || candidate.readiness || {};
         const candidateRole = candidate.candidate_role === 'recommended'
           ? 'Recomendado: destination /32 + udp/53'
           : candidate.candidate_role === 'conservative'
@@ -11220,6 +11222,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ${renderMitigationConnectorChoice(candidate, index)}
             ${renderDnsMultiTargetBlock(candidate, index, canAnnounceNow)}
             ${connectorText ? `<div class="metric-readout mb-2">Conector: ${escapeHtml(connectorText)}</div>` : ''}
+            ${resolutionSource ? `<div class="subtle mb-2">Resolução: ${escapeHtml(resolutionSource)}</div>` : ''}
+            ${readiness && Object.prototype.hasOwnProperty.call(readiness, 'ready') ? `<div class="subtle mb-2">Prontidão atual: ${readiness.ready === true ? 'ready' : readiness.ready === false ? `não pronto${readiness.reason ? ` (${escapeHtml(readiness.reason)})` : ''}` : 'ainda não verificada'}</div>` : ''}
             ${selectedConnectorId ? `<div class="subtle mb-2">connector_id selecionado: #${escapeHtml(selectedConnectorId)}</div>` : ''}
             ${connectorResolutionReason && !selectionPending ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
             ${ineligibleMessage}
@@ -11346,10 +11350,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         currentAiMitigationAnalysis = { apply_mitigation: false, status: 'error', error_message: error.message, reason: error.message };
       }
       renderBgpAiDecision();
+      // Recarrega a proposta determinística e a resolução atual. Este endpoint
+      // é apenas de avaliação e nunca escreve no FIFO.
+      await runBgpAnomalyDryRun(currentBgpMitigationConnectorId, false);
     }
 
     function uniqueMitigationConnectorForRecalculation(candidates) {
       const connectorIds = (Array.isArray(candidates) ? candidates : [])
+        .filter(candidate => candidate.actionable !== false && !candidate.never_announce && !candidate.not_recommended)
         .filter(candidate => !Number(candidate.connector_id || 0))
         .map(candidate => mitigationEligibleConnectors(candidate))
         .filter(connectors => connectors.length === 1)
@@ -13714,6 +13722,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         anomalyResponseDetailField('Atualizado em', anomalyResponseDateText(updatedAt)),
         anomalyResponseDetailField('Tentativa prioritária', primary?.announcement_id || primary?.id ? `#${primary.announcement_id || primary.id}` : ''),
         anomalyResponseDetailField('Conector', primary ? '' : outcomeConnector),
+        anomalyResponseDetailField('Pipe/FIFO', primary ? '' : outcomeDetails.pipe_path),
+        anomalyResponseDetailField('Fonte da resolução', primary ? '' : outcomeDetails.resolution_source || outcomeDetails.connector_resolution_method),
+        anomalyResponseDetailField('Erro da resolução', primary ? '' : outcomeDetails.resolution_error),
+        anomalyResponseDetailField('Prontidão', primary ? '' : outcomeDetails.readiness ? JSON.stringify(outcomeDetails.readiness, null, 2) : ''),
+        anomalyResponseDetailField('Versão do candidato', primary ? '' : outcomeDetails.candidate_version),
+        anomalyResponseDetailField('Decisão IA', primary ? '' : outcomeDetails.ai_decision_status),
+        anomalyResponseDetailField('Motivo IA', primary ? '' : outcomeDetails.ai_decision_reason),
         anomalyResponseDetailField('Zona', primary ? '' : outcomeZone),
         anomalyResponseDetailField('Origem interna', primary ? '' : outcomeDetails.source_ip),
         anomalyResponseDetailField('Autor', primary ? '' : outcomeDetails.created_by),
@@ -14002,7 +14017,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Motivo', event.mitigation_reason || '-'],
         ['Mitigacao automatica', event.auto_mitigation_status || '-'],
         ['Motivo nao aplicada', event.auto_mitigation_reason || '-'],
-        ['Resolucao conector', autoMitigationDetails.connector_resolution_method || '-']
+        ['Resolucao conector', autoMitigationDetails.resolution_source || autoMitigationDetails.connector_resolution_method || '-'],
+        ['Erro resolucao', autoMitigationDetails.resolution_error || '-'],
+        ['Conector resolvido', autoMitigationDetails.connector_name || (autoMitigationDetails.connector_id ? `#${autoMitigationDetails.connector_id}` : '-')],
+        ['FIFO', autoMitigationDetails.pipe_path || '-'],
+        ['Prontidao', autoMitigationDetails.readiness?.ready === true ? 'ready' : autoMitigationDetails.readiness?.ready === false ? `nao pronto (${autoMitigationDetails.readiness.reason || '-'})` : '-'],
+        ['Versao candidato', autoMitigationDetails.candidate_version || '-'],
+        ['Decisao IA', autoMitigationDetails.ai_decision_status || '-'],
+        ['Motivo IA', autoMitigationDetails.ai_decision_reason || '-']
       ];
       if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
       const legacyDnsWarning = isLegacyDnsAnomaly(event)

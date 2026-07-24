@@ -1554,8 +1554,9 @@ class BgpMitigationTest(unittest.TestCase):
         end = source.find("def anomaly_detection_enabled")
         worker = source[start:end]
         self.assertIn("automatic_mitigation_execution_mode", worker)
-        self.assertIn("application_mode, \"worker\"", worker)
+        self.assertIn('candidate_for_application, "automatic", "worker"', worker)
         self.assertIn("run_automatic_mitigation_ai_analysis", worker)
+        self.assertIn("ai_candidate_versions", worker)
 
     def test_dns_outbound_related_flow_recommends_destination_candidate_first(self):
         with temporary_main_db():
@@ -1989,7 +1990,7 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertIn("top_dst_ip=103.100.169.200", log_text)
             self.assertIn("destination 103.100.169.200/32", log_text)
 
-    def test_dns_query_outbound_ai_veto_or_error_keeps_manual_proposal_without_pipe_write(self):
+    def test_dns_query_outbound_ai_veto_or_error_persists_operational_reason_without_pipe_write(self):
         decisions = (
             ("success", False, "IA nao recomenda a automacao.", ""),
             ("timeout", False, "Timeout do provider.", "timed out"),
@@ -2015,16 +2016,236 @@ class BgpMitigationTest(unittest.TestCase):
                     stats = main.process_anomaly_mitigation()
                 self.assertEqual(calls, [])
                 self.assertEqual(stats["advertised"], 0)
-                self.assertGreaterEqual(stats["pending_approval"], 1)
                 with main.sqlite_connection() as check:
-                    row = check.execute(
-                        "SELECT status, dst_prefix, protocol, dst_port, announce_command FROM bgp_announcements WHERE anomaly_id = 140 ORDER BY id LIMIT 1"
+                    total = check.execute(
+                        "SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = 140"
+                    ).fetchone()["total"]
+                    outcome = check.execute(
+                        "SELECT auto_mitigation_status, auto_mitigation_reason, auto_mitigation_details_json FROM anomaly_events WHERE id = 140"
                     ).fetchone()
-                self.assertEqual(row["status"], "pending_approval")
-                self.assertEqual(row["dst_prefix"], "103.100.169.200/32")
-                self.assertEqual(row["protocol"], "udp")
-                self.assertEqual(row["dst_port"], "53")
-                self.assertIn("destination 103.100.169.200/32; protocol =udp; destination-port =53", row["announce_command"])
+                self.assertEqual(total, 0)
+                self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+                self.assertEqual(
+                    outcome["auto_mitigation_reason"],
+                    "ai_denied" if status == "success" else "ai_error",
+                )
+                details = json.loads(outcome["auto_mitigation_details_json"])
+                self.assertEqual(details["ai_analysis_id"], 91)
+                self.assertEqual(details["ai_decision_status"], status)
+
+    def test_dns_safe_destination_is_the_only_candidate_sent_to_automatic_ai(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            now = main.utc_now_iso()
+            conn.execute(
+                """
+                INSERT INTO bgp_protected_prefixes (
+                    cidr, name, enabled, block_rtbh, block_flowspec, created_at, updated_at
+                )
+                VALUES ('170.238.47.0/24', 'Cliente producao 2071', 1, 1, 1, ?, ?)
+                """,
+                (now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO ip_zone_prefixes (zone_id, cidr, name, active, created_at, updated_at)
+                VALUES (1, '170.238.47.0/24', 'Cliente producao 2071', 1, ?, ?)
+                """,
+                (now, now),
+            )
+            conn.commit()
+            event_id = self._insert_dns_query_anomaly_event(
+                conn,
+                event_id=2071,
+                src_ip="170.238.47.238",
+                dst_ip="73.115.180.251",
+            )
+            context = main.fetch_anomaly_mitigation_context(conn, event_id)
+            generated = main.build_mitigation_candidates_from_anomaly(context)
+            conn.close()
+            self.assertTrue(any(item.get("candidate_role") == "not_recommended" for item in generated))
+
+            writes = []
+            with self.assertLogs(main.logger, level="INFO") as logs, patch.object(
+                main,
+                "exabgp_write_pipe",
+                side_effect=lambda item, command: writes.append((item["id"], command)),
+            ):
+                stats = main.process_anomaly_mitigation()
+
+            ai_candidates = self.automatic_ai_gate.call_args[0][2]
+            self.assertEqual(len(ai_candidates), 1)
+            candidate = ai_candidates[0]
+            self.assertEqual(candidate["candidate_index"], 0)
+            self.assertEqual(candidate["connector_id"], connector["id"])
+            self.assertEqual(candidate["connector_name"], "BGP-SENSOR-ORIGIN")
+            self.assertEqual(candidate["pipe_path"], "/run/exabgp/exabgp.in")
+            self.assertEqual(candidate["resolution_source"], "ip_zones.connector_id")
+            self.assertTrue(candidate["candidate_version"])
+            self.assertFalse(candidate.get("src_prefix"))
+            self.assertEqual(candidate["dst_prefix"], "73.115.180.251/32")
+            self.assertEqual(candidate["protocol"], "udp")
+            self.assertEqual(candidate["dst_port"], "53")
+            self.assertEqual(len(writes), 1)
+            self.assertNotIn("source ", writes[0][1])
+            self.assertEqual(stats["advertised"], 1)
+            log_text = "\n".join(logs.output)
+            self.assertIn("bgp_auto_mitigation anomaly_id=2071 candidate_index=0", log_text)
+            self.assertIn(f"connector_id={connector['id']}", log_text)
+            self.assertIn("connector_name=BGP-SENSOR-ORIGIN", log_text)
+            self.assertIn("pipe_path=/run/exabgp/exabgp.in", log_text)
+            self.assertIn("resolution_source=ip_zones.connector_id", log_text)
+            self.assertIn("policy_decision=allow_auto", log_text)
+            self.assertIn("ai_decision=True", log_text)
+            self.assertIn("final_action=applied", log_text)
+
+    def test_automatic_ai_absent_does_not_announce_and_persists_ai_not_evaluated(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=2071)
+            conn.close()
+            self.automatic_ai_gate.return_value = (None, {"allow_auto": True})
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_anomaly_mitigation()
+
+            write_pipe.assert_not_called()
+            self.assertEqual(stats["advertised"], 0)
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                total = check.execute(
+                    "SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?",
+                    (event_id,),
+                ).fetchone()["total"]
+            self.assertEqual(total, 0)
+            self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+            self.assertEqual(outcome["auto_mitigation_reason"], "ai_not_evaluated")
+
+    def test_reanalysis_persists_filtered_ai_decision_without_fifo_write(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=2071)
+            conn.close()
+            config = {
+                "enabled": True,
+                "provider": "ollama",
+                "provider_name": "local-test",
+                "provider_id": 7,
+                "base_url": "http://ollama.invalid",
+                "selected_model": "test-model",
+                "selected_profile": "safe",
+                "timeout_seconds": 5,
+                "max_context_chars": 20000,
+                "max_top_flows": 10,
+                "num_predict": 64,
+                "keep_alive": "30m",
+                "allow_auto": True,
+                "require_policy_validation": True,
+            }
+            execution = {
+                "ok": True,
+                "provider_id": 7,
+                "provider": "local-test",
+                "model": "test-model",
+                "content": '{"apply_mitigation":true,"reason":"candidato seguro"}',
+                "structured": {"apply_mitigation": True, "reason": "candidato seguro"},
+                "duration_ms": 12,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "status": "success",
+            }
+
+            with patch.object(main, "ai_effective_config", return_value=config), \
+                 patch.object(main, "call_routed_mitigation_ai", return_value=execution), \
+                 patch.object(main, "exabgp_write_pipe") as write_pipe:
+                analysis = main.create_anomaly_ai_analysis(self._admin_request(), event_id)
+
+            write_pipe.assert_not_called()
+            self.assertTrue(analysis["apply_mitigation"])
+            self.assertEqual(analysis["provider_name"], "local-test")
+            self.assertEqual(analysis["model"], "test-model")
+            self.assertEqual(analysis["latency_ms"], 12)
+            self.assertEqual(analysis["timestamp"], analysis["created_at"])
+            self.assertEqual(analysis["error"], analysis["error_message"])
+            self.assertEqual(analysis["sanitized_response"], analysis["raw_response"])
+            self.assertEqual(len(analysis["request_payload"]["candidates"]), 1)
+            self.assertEqual(
+                analysis["request_payload"]["candidates"][0]["dst_prefix"],
+                "103.100.169.200/32",
+            )
+            with main.sqlite_connection() as check:
+                self.assertEqual(
+                    check.execute("SELECT COUNT(*) AS total FROM bgp_announcements").fetchone()["total"],
+                    0,
+                )
+
+    def test_candidate_change_after_ai_is_blocked_by_pre_fifo_revalidation(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=2071)
+            conn.close()
+            candidate = dict(main.evaluated_mitigation_candidates(event_id)["candidates"][0])
+            approved_version = candidate["candidate_version"]
+            candidate.update(
+                {
+                    "duration_seconds": int(candidate["duration_seconds"]) + 1,
+                    "ai_analysis_id": 501,
+                    "ai_apply_mitigation": True,
+                    "ai_decision_status": "success",
+                    "ai_candidate_version": approved_version,
+                    "auto_allowed": True,
+                    "eligible": True,
+                }
+            )
+
+            with main.sqlite_connection() as apply_conn, patch.object(main, "exabgp_write_pipe") as write_pipe:
+                with self.assertRaises(HTTPException) as raised:
+                    main.apply_mitigation_candidate(apply_conn, candidate, "automatic", "worker")
+                apply_conn.commit()
+
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(raised.exception.detail, "ai_not_evaluated")
+            write_pipe.assert_not_called()
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                self.assertEqual(
+                    check.execute("SELECT COUNT(*) AS total FROM bgp_announcements").fetchone()["total"],
+                    0,
+                )
+            self.assertEqual(outcome["auto_mitigation_reason"], "ai_not_evaluated")
+
+    def test_readiness_is_revalidated_immediately_before_fifo_write(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, event_id=2071)
+            conn.close()
+            readiness_results = [
+                self._readiness_result(connector, ready=True),
+                self._readiness_result(connector, peer_state="down", ready=False, reason="exabgp_service_inactive"),
+            ]
+            self.bgp_readiness_guard.side_effect = lambda _conn, _connector: readiness_results.pop(0)
+
+            with patch.object(main, "exabgp_write_pipe") as write_pipe:
+                stats = main.process_anomaly_mitigation()
+
+            write_pipe.assert_not_called()
+            self.assertEqual(stats["advertised"], 0)
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+                announcement = check.execute(
+                    "SELECT status, confirmation_level FROM bgp_announcements WHERE anomaly_id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(outcome["auto_mitigation_reason"], "connector_not_ready")
+            self.assertEqual(announcement["status"], "peer_down")
 
     def test_dns_query_outbound_sensor_null_uses_single_active_flowspec_connector(self):
         with temporary_main_db():
@@ -2147,7 +2368,7 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertTrue(candidate["can_announce_now"])
             self.exabgp_pipe_guard.assert_not_called()
 
-    def test_persisted_zone_has_priority_over_sensor_connector(self):
+    def test_sensor_connector_has_priority_over_persisted_zone(self):
         with temporary_main_db():
             conn = main.sqlite_connection()
             zone_connector_id = self._insert_flowspec_connector(conn, "BGP-ZONE", "/tmp/test-zone.in")
@@ -2169,9 +2390,10 @@ class BgpMitigationTest(unittest.TestCase):
 
             candidate = main.evaluated_mitigation_candidates(event_id)["candidates"][0]
 
-            self.assertEqual(candidate["selected_connector_id"], zone_connector_id)
-            self.assertNotEqual(candidate["selected_connector_id"], sensor_connector_id)
-            self.assertEqual(candidate["connector_resolution_method"], "zone_id")
+            self.assertEqual(candidate["selected_connector_id"], sensor_connector_id)
+            self.assertNotEqual(candidate["selected_connector_id"], zone_connector_id)
+            self.assertEqual(candidate["connector_resolution_method"], "sensor")
+            self.assertEqual(candidate["resolution_source"], "sensor.connector_id")
             self.exabgp_pipe_guard.assert_not_called()
 
     def test_inbound_persisted_zone_does_not_validate_the_external_top_source_as_origin(self):
@@ -2769,12 +2991,12 @@ class BgpMitigationTest(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(total, 0)
             self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
-            self.assertEqual(outcome["auto_mitigation_reason"], "ambiguous_connector_resolution")
+            self.assertEqual(outcome["auto_mitigation_reason"], "connector_ambiguous")
             details = json.loads(outcome["auto_mitigation_details_json"])
             self.assertEqual(details["source_ip"], "179.189.83.212")
             self.assertEqual(details["candidate_connector_ids"], sorted([fibinet["id"], gm_id]))
             log_text = "\n".join(logs.output)
-            self.assertIn("reason=ambiguous_connector_resolution", log_text)
+            self.assertIn("reason=connector_ambiguous", log_text)
             self.assertIn("source_ip=179.189.83.212", log_text)
             self.assertIn("candidate_connector_ids=", log_text)
 
@@ -2862,18 +3084,18 @@ class BgpMitigationTest(unittest.TestCase):
                 connector_ids = [row["connector_id"] for row in check.execute("SELECT connector_id FROM bgp_announcements").fetchall()]
             self.assertEqual(sorted(connector_ids), sorted([fibinet["id"], gm_id]))
 
-    def test_selected_and_explicit_profile_connectors_keep_priority(self):
+    def test_profile_connector_precedes_selected_connector_ids(self):
         with temporary_main_db():
             conn, fibinet, profile = self._dns_multi_target_context(add_whitelist=False)
             gm_id = self._insert_flowspec_connector(conn, "BGP-GM-BORDA", "/run/exabgp/gm.in")
             self._insert_zone_connector_mapping(conn, "FIBINET", "179.189.83.0/24", fibinet["id"])
             candidate = {
                 "sensor_id": None,
-                "raw_payload": {"anomaly": {"top_src_ip": "179.189.83.212", "target_role": "src_ip"}},
+                "raw_payload": {"anomaly": {}},
             }
             selected_profile = {**profile, "selected_connector_ids": [gm_id], "connector_id": fibinet["id"]}
             selected = main.resolve_mitigation_target_connectors(conn, dict(candidate), selected_profile)
-            self.assertEqual([item["id"] for item in selected], [gm_id])
+            self.assertEqual([item["id"] for item in selected], [fibinet["id"]])
             explicit_profile = {**profile, "selected_connector_ids": [], "connector_id": gm_id}
             explicit = main.resolve_mitigation_target_connectors(conn, dict(candidate), explicit_profile)
             self.assertEqual([item["id"] for item in explicit], [gm_id])
@@ -2912,7 +3134,7 @@ class BgpMitigationTest(unittest.TestCase):
                 total = check.execute("SELECT COUNT(*) AS total FROM bgp_announcements WHERE anomaly_id = ?", (event_id,)).fetchone()["total"]
             self.assertEqual(total, 0)
             log_text = "\n".join(logs.output)
-            self.assertIn("reason=ambiguous_connector_resolution", log_text)
+            self.assertIn("reason=connector_ambiguous", log_text)
             self.assertIn("connector_resolution_error=ambiguous_connector_resolution", log_text)
 
     def test_dns_query_outbound_no_active_connector_does_not_announce(self):

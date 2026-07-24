@@ -46,16 +46,31 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("Protocolo e obrigatorio quando porta e informada.", HTML)
         self.assertIn("if ((srcPort || dstPort) && !protocol)", HTML)
 
-    def test_ai_recommendation_does_not_render_null_candidate_as_one(self):
-        self.assertIn("candidateText = Number.isInteger(Number(candidateIndex))", HTML)
-        self.assertIn(": 'sem candidato'", HTML)
-        self.assertIn("aiCandidateIndex !== null", HTML)
+    def test_ai_recommendation_is_decision_only_and_does_not_choose_candidate(self):
+        self.assertIn("analysis.apply_mitigation === true", HTML)
+        self.assertIn("Decisão:", HTML)
+        self.assertNotIn("candidateText = Number.isInteger(Number(candidateIndex))", HTML)
 
     def test_dns_source_only_candidate_is_not_actionable_in_ui(self):
         self.assertIn("dnsSourceOnly", HTML)
         self.assertIn("dnsWithoutDestination", HTML)
         self.assertIn("FLOWSPEC_BLOCK_SRC_DNS", HTML)
         self.assertIn("policy.decision === 'deny' || dnsWithoutDestination", HTML)
+
+    def test_resolved_connector_is_rendered_separately_from_sensor_origin_mode(self):
+        self.assertIn("candidate.connector_name || (candidate.connector_id", HTML)
+        self.assertIn("const resolutionSource = candidate.resolution_source", HTML)
+        self.assertIn("Prontidão atual:", HTML)
+        connector_line = next(line for line in HTML.splitlines() if "const connectorText =" in line)
+        self.assertNotIn("mitigation_target_mode", connector_line)
+
+    def test_ai_reanalysis_refreshes_deterministic_candidates_without_fifo_action(self):
+        start = HTML.index("async function runBgpAiReanalysis()")
+        end = HTML.index("function uniqueMitigationConnectorForRecalculation", start)
+        source = HTML[start:end]
+        self.assertIn("await runBgpAnomalyDryRun(currentBgpMitigationConnectorId, false)", source)
+        self.assertNotIn("exabgp", source.lower())
+        self.assertNotIn("/mitigation/apply", source)
 
     def test_traffic_learning_modal_and_tooltips_exist(self):
         self.assertIn("Aprender com o tráfego", HTML)
@@ -416,7 +431,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
     def test_zone_connector_mapping_and_not_applied_reason_are_visible(self):
         self.assertIn('id="ipZoneConnector"', HTML)
         self.assertIn("connector_id: connectorId ? Number(connectorId) : null", HTML)
-        self.assertIn("candidate.automatic_not_applied_reason || candidate.connector_resolution_error", HTML)
+        self.assertIn("candidate.resolution_error || candidate.automatic_not_applied_reason || candidate.connector_resolution_error", HTML)
         self.assertIn("event.auto_mitigation_reason || '-'", HTML)
 
     def test_manual_mitigation_modal_title_depends_on_resolved_connector_mode(self):

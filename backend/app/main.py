@@ -11149,17 +11149,17 @@ def active_connectors_by_ids(conn: sqlite3.Connection, connector_ids: Any) -> li
     return [connector for connector in (active_connector_by_id(conn, connector_id) for connector_id in unique_ids) if connector]
 
 
-def sensor_origin_bgp_connector(conn: sqlite3.Connection, sensor_id: Any) -> dict[str, Any] | None:
+def sensor_origin_bgp_connectors(conn: sqlite3.Connection, sensor_id: Any) -> list[dict[str, Any]]:
     try:
         value = int(sensor_id)
     except (TypeError, ValueError):
-        return None
+        return []
     if value <= 0:
-        return None
+        return []
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(bgp_connectors)").fetchall()}
     if "sensor_id" not in columns:
-        return None
-    row = conn.execute(
+        return []
+    rows = conn.execute(
         """
         SELECT *
         FROM bgp_connectors
@@ -11168,11 +11168,80 @@ def sensor_origin_bgp_connector(conn: sqlite3.Connection, sensor_id: Any) -> dic
           AND is_active = 1
           AND role = 'flowspec_mitigation'
         ORDER BY id
-        LIMIT 1
         """,
         (value,),
-    ).fetchone()
-    return bgp_connector_row_to_dict(row) if row is not None else None
+    ).fetchall()
+    return [bgp_connector_row_to_dict(row) for row in rows]
+
+
+def sensor_origin_bgp_connector(conn: sqlite3.Connection, sensor_id: Any) -> dict[str, Any] | None:
+    """Compatibility wrapper: return a sensor connector only when unambiguous."""
+    connectors = sensor_origin_bgp_connectors(conn, sensor_id)
+    return connectors[0] if len(connectors) == 1 else None
+
+
+def connector_persisted_readiness(connector: dict[str, Any]) -> dict[str, Any]:
+    snapshot = connector.get("status_snapshot")
+    if not isinstance(snapshot, dict) or not snapshot:
+        return {
+            "ready": None,
+            "state": "not_checked",
+            "checked_at": connector.get("last_checked_at") or "",
+            "checks": {},
+            "reason": "readiness_not_checked",
+        }
+    readiness = evaluate_bgp_connector_readiness(snapshot)
+    return {
+        "ready": bool(readiness.get("ready")),
+        "state": "ready" if readiness.get("ready") else "not_ready",
+        "checked_at": snapshot.get("last_checked_at") or connector.get("last_checked_at") or "",
+        "checks": dict(readiness.get("checks") or {}),
+        "reason": clean_text(readiness.get("reason")),
+        "reasons": list(readiness.get("reasons") or []),
+    }
+
+
+def set_mitigation_connector_resolution(
+    candidate: dict[str, Any],
+    connectors: list[dict[str, Any]],
+    source: str,
+    *,
+    ambiguous_error: str = "ambiguous_connector_resolution",
+) -> list[dict[str, Any]]:
+    unique = {
+        int(connector["id"]): connector
+        for connector in connectors
+        if connector.get("id") is not None
+    }
+    resolved = [unique[connector_id] for connector_id in sorted(unique)]
+    candidate["candidate_connector_ids"] = [int(connector["id"]) for connector in resolved]
+    resolution_sources = {
+        "sensor": "sensor.connector_id",
+        "zone_id": "ip_zones.connector_id",
+        "zone_prefix": "zone.prefix.connector_id",
+        "profile_connector_id": "response_profile.connector_id",
+        "candidate_connector_id": "candidate.connector_id",
+    }
+    candidate["connector_resolution_method"] = source
+    candidate["resolution_source"] = resolution_sources.get(source, source)
+    if len(resolved) == 1:
+        connector = resolved[0]
+        candidate["connector_id"] = int(connector["id"])
+        candidate["connector_name"] = connector.get("name") or ""
+        candidate["pipe_path"] = connector.get("exabgp_pipe_in") or ""
+        candidate["readiness"] = connector_persisted_readiness(connector)
+        candidate["current_readiness"] = candidate["readiness"]
+        candidate["resolution_error"] = ""
+        candidate.pop("connector_resolution_error", None)
+    elif len(resolved) > 1:
+        candidate["connector_id"] = None
+        candidate["connector_name"] = ""
+        candidate["pipe_path"] = ""
+        candidate["readiness"] = None
+        candidate["current_readiness"] = None
+        candidate["connector_resolution_error"] = ambiguous_error
+        candidate["resolution_error"] = "connector_ambiguous"
+    return resolved
 
 
 def mitigation_origin_ip(candidate: dict[str, Any]) -> str:
@@ -11270,6 +11339,7 @@ def resolve_mitigation_target_connectors(
     profile = profile or {}
     resolution_error = ""
     candidate.pop("connector_resolution_error", None)
+    candidate["resolution_error"] = ""
     operator_connector = active_connector_by_id(conn, candidate.get("operator_connector_id"))
     operator_resolution_error = ""
     if operator_connector and is_outbound_destination_mitigation(candidate):
@@ -11293,62 +11363,102 @@ def resolve_mitigation_target_connectors(
         connectors = []
         resolution_error = operator_resolution_error or "operator_connector_not_eligible"
     elif operator_connector:
-        connectors = [operator_connector]
-        candidate["connector_resolution_method"] = "operator_connector_id"
-        candidate["candidate_connector_ids"] = [int(operator_connector["id"])]
+        connectors = set_mitigation_connector_resolution(candidate, [operator_connector], "operator_connector_id")
     else:
-        explicit_connector = active_connector_by_id(conn, candidate.get("connector_id"))
-        selected = active_connectors_by_ids(conn, candidate.get("selected_connector_ids") or profile.get("selected_connector_ids"))
+        explicit_connector = active_connector_by_id(
+            conn,
+            candidate.get("configured_connector_id") or candidate.get("connector_id"),
+        )
         profile_connector = active_connector_by_id(conn, profile.get("connector_id"))
-        if explicit_connector:
-            connectors = [explicit_connector]
-            candidate["connector_resolution_method"] = "candidate_connector_id"
-            candidate["candidate_connector_ids"] = [int(explicit_connector["id"])]
-        elif selected:
-            connectors = selected
-            candidate["connector_resolution_method"] = "selected_connector_ids"
-            candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in selected)
-        elif profile_connector:
-            connectors = [profile_connector]
-            candidate["connector_resolution_method"] = "profile_connector_id"
-            candidate["candidate_connector_ids"] = [int(profile_connector["id"])]
+        selected = active_connectors_by_ids(
+            conn,
+            candidate.get("selected_connector_ids") or profile.get("selected_connector_ids"),
+        )
+        authorization = mitigation_origin_authorization(conn, candidate)
+        explicit_zone_id = int_or_none(candidate.get("zone_id") or mitigation_raw_anomaly(candidate).get("zone_id"))
+        if is_outbound_destination_mitigation(candidate) and not authorization.get("authorized"):
+            connectors = []
+            resolution_error = authorization.get("reason") or "origin_not_in_authorized_zone_or_prefix"
+        elif (
+            is_outbound_destination_mitigation(candidate)
+            and explicit_zone_id is not None
+            and explicit_zone_id not in set(authorization.get("zone_ids") or [])
+        ):
+            connectors = []
+            resolution_error = "origin_not_in_persisted_zone"
         else:
-            authorization = mitigation_origin_authorization(conn, candidate)
-            if is_outbound_destination_mitigation(candidate) and not authorization.get("authorized"):
-                connectors = []
-                resolution_error = authorization.get("reason") or "origin_not_in_authorized_zone_or_prefix"
-                candidate["connector_resolution_error"] = resolution_error
-                zone_connectors = []
+            sensor_connectors = sensor_origin_bgp_connectors(
+                conn,
+                candidate.get("sensor_id") or profile.get("sensor_id"),
+            )
+            if sensor_connectors:
+                connectors = set_mitigation_connector_resolution(
+                    candidate,
+                    sensor_connectors,
+                    "sensor",
+                )
             else:
                 zone_connectors = persisted_zone_bgp_connectors(conn, candidate, authorization)
-            if zone_connectors:
-                connectors = zone_connectors
-            elif candidate.get("connector_resolution_error"):
-                connectors = []
-                resolution_error = clean_text(candidate.get("connector_resolution_error"))
-            else:
-                sensor_connector = sensor_origin_bgp_connector(conn, candidate.get("sensor_id") or profile.get("sensor_id"))
-                if sensor_connector:
-                    connectors = [sensor_connector]
-                    candidate["connector_resolution_method"] = "sensor"
-                    candidate["candidate_connector_ids"] = [int(sensor_connector["id"])]
+                if zone_connectors:
+                    connectors = set_mitigation_connector_resolution(
+                        candidate,
+                        zone_connectors,
+                        "zone_id",
+                    )
                 else:
                     prefix_connectors = zone_prefix_bgp_connectors(conn, candidate, authorization)
                     if prefix_connectors:
-                        connectors = prefix_connectors
-                    elif candidate.get("connector_resolution_error"):
-                        connectors = []
-                        resolution_error = clean_text(candidate.get("connector_resolution_error"))
+                        connectors = set_mitigation_connector_resolution(
+                            candidate,
+                            prefix_connectors,
+                            "zone_prefix",
+                        )
+                    elif clean_text(candidate.get("connector_resolution_error")) == "ambiguous_connector_resolution":
+                        connectors = set_mitigation_connector_resolution(
+                            candidate,
+                            [
+                                connector
+                                for connector in (
+                                    active_connector_by_id(conn, connector_id)
+                                    for connector_id in candidate.get("candidate_connector_ids") or []
+                                )
+                                if connector
+                            ],
+                            "zone_prefix",
+                        )
+                    elif profile_connector:
+                        connectors = set_mitigation_connector_resolution(
+                            candidate,
+                            [profile_connector],
+                            "profile_connector_id",
+                        )
+                    elif selected:
+                        connectors = set_mitigation_connector_resolution(
+                            candidate,
+                            selected,
+                            "selected_connector_ids",
+                        )
+                    elif explicit_connector:
+                        connectors = set_mitigation_connector_resolution(
+                            candidate,
+                            [explicit_connector],
+                            "candidate_connector_id",
+                        )
                     else:
                         fallback_connectors = active_flowspec_connectors(conn)
                         if len(fallback_connectors) == 1:
-                            connectors = fallback_connectors
-                            candidate["connector_resolution_method"] = "single_active_connector"
-                            candidate["candidate_connector_ids"] = [int(fallback_connectors[0]["id"])]
+                            connectors = set_mitigation_connector_resolution(
+                                candidate,
+                                fallback_connectors,
+                                "single_active_connector",
+                            )
                         elif len(fallback_connectors) > 1:
-                            connectors = []
                             resolution_error = "ambiguous_connector_resolution"
-                            candidate["candidate_connector_ids"] = sorted(int(item["id"]) for item in fallback_connectors)
+                            connectors = set_mitigation_connector_resolution(
+                                candidate,
+                                fallback_connectors,
+                                "active_flowspec_connectors",
+                            )
                         else:
                             connectors = []
                             resolution_error = "no_active_flowspec_connectors"
@@ -11359,6 +11469,16 @@ def resolve_mitigation_target_connectors(
             unique[int(connector_id)] = connector
     if not unique and resolution_error:
         candidate["connector_resolution_error"] = resolution_error
+        candidate["resolution_error"] = (
+            "connector_ambiguous"
+            if resolution_error == "ambiguous_connector_resolution"
+            else "connector_not_resolved"
+        )
+        candidate["connector_id"] = None
+        candidate["connector_name"] = ""
+        candidate["pipe_path"] = ""
+        candidate["readiness"] = None
+        candidate["current_readiness"] = None
     return list(unique.values())
 
 
@@ -11551,7 +11671,10 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     if profile:
         candidate["mitigation_target_mode"] = profile.get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "sensor_origin"
         candidate["response_profile_name"] = profile.get("name") or candidate.get("response_profile_name") or candidate.get("profile") or ""
-    candidate["connector_id"] = connector["id"] if connector else None
+    candidate["configured_connector_id"] = connector["id"] if connector else None
+    # connector_id is the concrete, resolved delivery target. A profile or
+    # vector reference is only an input to the deterministic resolver.
+    candidate["connector_id"] = None
     mode = clean_text(vector.get("mitigation_mode")) if vector else clean_text(candidate.get("mitigation_mode"))
     if mode == "response_profile" and profile:
         profile_mode = clean_text(profile.get("approval_mode")).lower()
@@ -11858,10 +11981,14 @@ def dns_operational_log_fields(
 ) -> dict[str, Any]:
     return {
         "anomaly_id": candidate.get("anomaly_id"),
+        "candidate_index": candidate.get("candidate_index"),
+        "candidate_version": candidate.get("candidate_version") or "",
         "vector": candidate.get("attack_vector_name") or candidate.get("vector_name") or "",
         "sensor_id": candidate.get("sensor_id"),
         "connector_id": connector.get("id") if connector else candidate.get("connector_id"),
+        "connector_name": connector.get("name") if connector else candidate.get("connector_name") or "",
         "pipe_path": connector.get("exabgp_pipe_in") if connector else candidate.get("pipe_path") or "",
+        "resolution_source": candidate.get("resolution_source") or candidate.get("connector_resolution_method") or "",
         "top_src_ip": dns_candidate_top_src_ip(candidate),
         "top_dst_ip": dns_candidate_top_dst_ip(candidate),
         "dst_port": dns_candidate_dst_port(candidate),
@@ -11874,6 +12001,78 @@ def dns_operational_log_fields(
         "candidate_connector_ids": candidate.get("candidate_connector_ids") or [],
         "announce_command": command,
     }
+
+
+def mitigation_candidate_version(
+    candidate: dict[str, Any],
+    policy: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    command: str = "",
+) -> str:
+    policy = policy or (
+        candidate.get("policy_decision")
+        if isinstance(candidate.get("policy_decision"), dict)
+        else {}
+    )
+    validation = validation or (
+        candidate.get("validation")
+        if isinstance(candidate.get("validation"), dict)
+        else {}
+    )
+    payload = {
+        "anomaly_id": int_or_none(candidate.get("anomaly_id")),
+        "candidate_index": int_or_none(candidate.get("candidate_index")),
+        "vector": clean_text(candidate.get("attack_vector_name") or candidate.get("vector_name")),
+        "connector_id": int_or_none(candidate.get("connector_id")),
+        "profile_id": int_or_none(candidate.get("response_profile_id")),
+        "src_prefix": clean_text(candidate.get("src_prefix") or candidate.get("src_cidr")),
+        "dst_prefix": clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr")),
+        "protocol": clean_text(candidate.get("protocol")).lower(),
+        "src_port": clean_text(candidate.get("src_port")),
+        "dst_port": clean_text(candidate.get("dst_port")),
+        "action": clean_text(candidate.get("action") or candidate.get("then_action")).lower(),
+        "duration_seconds": int(candidate.get("duration_seconds") or 0),
+        "resolution_source": clean_text(candidate.get("resolution_source") or candidate.get("connector_resolution_method")),
+        "policy_decision": clean_text(policy.get("decision")),
+        "policy_reasons": sorted(normalize_string_list(policy.get("reasons"))),
+        "validation_errors": sorted(normalize_string_list(validation.get("errors") or candidate.get("validation_errors"))),
+        "command": clean_text(command or candidate.get("announce_command") or candidate.get("rendered_command")),
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def log_automatic_mitigation_decision(
+    candidate: dict[str, Any],
+    *,
+    connector: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+    validation: dict[str, Any] | None = None,
+    ai_analysis: dict[str, Any] | None = None,
+    final_action: str,
+    final_reason: str,
+) -> None:
+    fields = dns_operational_log_fields(candidate, connector)
+    logger.info(
+        "bgp_auto_mitigation anomaly_id=%s candidate_index=%s candidate_version=%s vector=%s "
+        "connector_id=%s connector_name=%s pipe_path=%s resolution_source=%s "
+        "policy_decision=%s validation_errors=%s ai_decision=%s ai_status=%s "
+        "final_action=%s final_reason=%s",
+        fields["anomaly_id"],
+        fields["candidate_index"],
+        fields["candidate_version"],
+        fields["vector"],
+        fields["connector_id"],
+        fields["connector_name"],
+        fields["pipe_path"],
+        fields["resolution_source"],
+        (policy or {}).get("decision") or "",
+        (validation or {}).get("errors") or [],
+        (ai_analysis or {}).get("apply_mitigation"),
+        (ai_analysis or {}).get("status") or "not_evaluated",
+        clean_text(final_action),
+        clean_text(final_reason),
+    )
 
 
 def record_auto_mitigation_outcome(
@@ -11909,8 +12108,14 @@ def record_auto_mitigation_outcome(
         "zone_ids": candidate.get("connector_resolution_zone_ids") or [],
         "candidate_connector_ids": candidate.get("candidate_connector_ids") or [],
         "connector_resolution_method": candidate.get("connector_resolution_method") or "",
+        "resolution_source": candidate.get("resolution_source") or candidate.get("connector_resolution_method") or "",
+        "resolution_error": candidate.get("resolution_error") or candidate.get("connector_resolution_error") or "",
         "connector_id": int_or_none(selected_connector_id),
         "connector_name": (announcement or {}).get("connector_name") or candidate.get("connector_name") or "",
+        "pipe_path": (announcement or {}).get("pipe_path") or candidate.get("pipe_path") or "",
+        "readiness": candidate.get("readiness") or candidate.get("current_readiness"),
+        "candidate_index": int_or_none(candidate.get("candidate_index")),
+        "candidate_version": clean_text(candidate.get("candidate_version")),
         "announcement_id": int_or_none((announcement or {}).get("id")),
         "created_by": clean_text(created_by),
         "origin": "automatic" if (
@@ -12003,7 +12208,13 @@ def log_dns_auto_mitigation_skipped(
     if not dns_auto_candidate_loggable(candidate, profile):
         return
     fields = dns_operational_log_fields(candidate, connector, profile, command)
-    if reason in {"no_connector_resolved", "ambiguous_connector_resolution", "no_active_flowspec_connectors"}:
+    if reason in {
+        "no_connector_resolved",
+        "connector_not_resolved",
+        "ambiguous_connector_resolution",
+        "connector_ambiguous",
+        "no_active_flowspec_connectors",
+    }:
         logger.info(
             "dns_auto_mitigation_not_applied reason=%s anomaly_id=%s profile_id=%s source_ip=%s zone_id=%s candidate_connector_ids=%s vector=%s sensor_id=%s selected_connector_ids=%s connector_id=%s connector_resolution_error=%s",
             reason,
@@ -12711,6 +12922,8 @@ def mitigation_connector_choice(connector: dict[str, Any]) -> dict[str, Any]:
         "name": connector.get("name") or f"Conector #{connector['id']}",
         "backend_type": connector.get("backend_type") or connector.get("backend") or "",
         "mode": connector.get("mode") or "",
+        "pipe_path": connector.get("exabgp_pipe_in") or "",
+        "readiness": connector_persisted_readiness(connector),
         "dry_run": connector_is_dry_run(connector),
     }
 
@@ -12755,7 +12968,8 @@ def evaluated_mitigation_candidates(
         }
     candidates = build_mitigation_candidates_from_anomaly(context)
     evaluated = []
-    for candidate in candidates:
+    for candidate_index, candidate in enumerate(candidates):
+        candidate["candidate_index"] = candidate_index
         preview_connector = None
         preview_profile = None
         eligible_connectors: list[dict[str, Any]] = []
@@ -12778,12 +12992,20 @@ def evaluated_mitigation_candidates(
             ]
             preview_connector = connectors[0] if len(connectors) == 1 else None
             if preview_connector:
-                candidate["connector_id"] = int(preview_connector["id"])
-                candidate["connector_name"] = preview_connector.get("name") or ""
-                candidate["pipe_path"] = preview_connector.get("exabgp_pipe_in") or ""
+                set_mitigation_connector_resolution(
+                    candidate,
+                    [preview_connector],
+                    candidate.get("connector_resolution_method") or candidate.get("resolution_source") or "resolved_connector",
+                )
                 candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
         policy = policy_for_candidate(candidate)
-        requires_connector_selection = bool(not operator_connector_id and len(eligible_connectors) > 1)
+        requires_connector_selection = bool(
+            not operator_connector_id
+            and (
+                len(eligible_connectors) > 1
+                or clean_text(candidate.get("resolution_error")) == "connector_ambiguous"
+            )
+        )
         connector_resolution_reason = clean_text(candidate.get("connector_resolution_error")) if not preview_connector else ""
         if requires_connector_selection:
             connector_resolution_reason = "ambiguous_connector_resolution"
@@ -12813,6 +13035,8 @@ def evaluated_mitigation_candidates(
             policy["decision"] = "deny"
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
+        candidate_version = mitigation_candidate_version(candidate, policy, validation, rendered)
+        candidate["candidate_version"] = candidate_version
         policy_allows_auto = policy.get("decision") == "allow_auto"
         auto_allowed = bool(
             policy_allows_auto
@@ -12841,6 +13065,17 @@ def evaluated_mitigation_candidates(
                 "connector_name": preview_connector.get("name") if preview_connector else candidate.get("connector_name") or "",
                 "pipe_path": preview_connector.get("exabgp_pipe_in") if preview_connector else candidate.get("pipe_path") or "",
                 "mitigation_target_mode": (preview_profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "",
+                "resolution_source": candidate.get("resolution_source") or candidate.get("connector_resolution_method") or "",
+                "resolution_error": (
+                    "connector_ambiguous"
+                    if requires_connector_selection
+                    else "connector_not_resolved"
+                    if connector_resolution_reason
+                    else ""
+                ),
+                "readiness": candidate.get("readiness") or candidate.get("current_readiness"),
+                "current_readiness": candidate.get("current_readiness") or candidate.get("readiness"),
+                "candidate_version": candidate_version,
                 "automatic_not_applied_reason": connector_resolution_reason,
                 "eligible_connectors": eligible_connectors,
                 "requires_connector_selection": requires_connector_selection,
@@ -14500,8 +14735,11 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "tokens": int(item.get("tokens") or 0),
         "status": item.get("status") or ("error" if item.get("error_message") else "success"),
         "raw_response": item.get("raw_response") or "",
+        "sanitized_response": item.get("raw_response") or "",
         "created_at": item.get("created_at") or "",
+        "timestamp": item.get("created_at") or "",
         "error_message": item.get("error_message") or "",
+        "error": item.get("error_message") or "",
     }
 
 
@@ -14580,6 +14818,12 @@ def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None 
     compacted["manual_approval_required"] = manual_required or never_announce
     for key in (
         "source",
+        "candidate_version",
+        "connector_id",
+        "connector_name",
+        "pipe_path",
+        "resolution_source",
+        "resolution_error",
         "mitigation_mode",
         "profile",
         "response_profile_name",
@@ -14834,12 +15078,41 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
     return compacted
 
 
+def mitigation_candidate_is_ai_eligible(candidate: dict[str, Any]) -> bool:
+    policy = candidate.get("policy_decision") if isinstance(candidate.get("policy_decision"), dict) else {}
+    validation = candidate.get("validation") if isinstance(candidate.get("validation"), dict) else {}
+    readiness = (
+        candidate.get("current_readiness")
+        if isinstance(candidate.get("current_readiness"), dict)
+        else candidate.get("readiness")
+    )
+    return bool(
+        candidate.get("auto_allowed") is True
+        and candidate.get("eligible") is True
+        and policy.get("decision") == "allow_auto"
+        and not (validation.get("errors") or candidate.get("validation_errors"))
+        and not (isinstance(readiness, dict) and readiness.get("ready") is False)
+        and int_or_none(candidate.get("connector_id")) is not None
+        and not candidate.get("requires_connector_selection")
+        and not candidate.get("equivalent_announcement")
+        and candidate.get("cooldown_allowed", True)
+        and not candidate.get("never_announce")
+        and clean_text(candidate.get("mitigation_mode")).lower() not in {"analysis_only", "disabled"}
+        and mitigation_candidate_can_create_pending(candidate)
+    )
+
+
 def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict[str, Any]:
     evaluated = evaluated_mitigation_candidates(anomaly_id)
     with sqlite_connection() as conn:
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
     deterministic = deterministic_anomaly_analysis(anomaly_id) if not evaluated["candidates"] else {}
-    candidates = evaluated["candidates"] or list(deterministic.get("fallback_analysis_candidates") or [])
+    all_candidates = list(evaluated["candidates"] or [])
+    candidates = [
+        candidate
+        for candidate in all_candidates
+        if isinstance(candidate, dict) and mitigation_candidate_is_ai_eligible(candidate)
+    ]
     flow_context = flow_context_from_analysis(deterministic) if deterministic else {}
     flows = list(context.get("flows") or [])[: int(config["max_top_flows"])]
     if not flows and deterministic:
@@ -14850,7 +15123,6 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
     if enriched_flows:
         flows = enriched_flows[: int(config["max_top_flows"])]
         flow_context = flow_evidence
-    candidates.extend(item for item in list(enrichment.get("mitigation_candidates") or []) if isinstance(item, dict))
     payload = {
         "anomaly": compact_anomaly_for_ai(dict(enrichment.get("event") or evaluated["anomaly"])),
         "deterministic_analysis": deterministic,
@@ -14862,6 +15134,9 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
         "security_rules": {
             "ai_never_announces": True,
             "choose_only_existing_candidate": True,
+            "only_valid_safe_eligible_candidates": True,
+            "evaluated_candidate_count": len(all_candidates),
+            "ai_candidate_count": len(candidates),
             "fallback_analysis_never_announces": True,
             "analysis_only_never_apply": True,
             "weak_fallback_must_choose_alert_only": True,
@@ -15145,6 +15420,8 @@ def compact_mitigation_ai_candidate(candidate: dict[str, Any], index: int) -> di
     validation = candidate.get("validation") if isinstance(candidate.get("validation"), dict) else {}
     return {
         "proposal_index": index,
+        "candidate_index": candidate.get("candidate_index", index),
+        "candidate_version": clean_text(candidate.get("candidate_version")),
         "proposal_kind": clean_text(candidate.get("candidate_role") or candidate.get("mitigation_basis") or "deterministic"),
         "evidence_reason": ai_compact_text(candidate.get("mitigation_reason") or candidate.get("reason"), 300),
         "confidence": candidate.get("confidence"),
@@ -17773,21 +18050,64 @@ def apply_mitigation_candidate(
     if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
         raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
     mode = normalize_choice(mode, {"manual_approval", "announce_now", "automatic"}, "mode")
-    if mode == "automatic" and not (
-        candidate.get("auto_allowed") is True
-        and candidate.get("eligible") is True
-        and candidate.get("ai_apply_mitigation") is True
-        and clean_text(candidate.get("ai_decision_status")) == "success"
-        and int_or_none(candidate.get("ai_analysis_id")) is not None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Automacao bloqueada: proposta, politica e decisao IA nao satisfazem todos os gates.",
-        )
+    if mode == "automatic":
+        ai_status = clean_text(candidate.get("ai_decision_status")).lower()
+        if int_or_none(candidate.get("ai_analysis_id")) is None:
+            reason = "ai_not_evaluated"
+        elif ai_status in {"", "disabled", "not_available", "not_evaluated", "unavailable"}:
+            reason = "ai_not_evaluated"
+        elif ai_status != "success":
+            reason = "ai_error"
+        elif candidate.get("ai_apply_mitigation") is not True:
+            reason = "ai_denied"
+        elif (
+            not clean_text(candidate.get("ai_candidate_version"))
+            or clean_text(candidate.get("ai_candidate_version")) != clean_text(candidate.get("candidate_version"))
+        ):
+            reason = "ai_not_evaluated"
+        elif candidate.get("auto_allowed") is not True or candidate.get("eligible") is not True:
+            reason = "validation_failed"
+        else:
+            reason = ""
+        if reason:
+            record_auto_mitigation_outcome(
+                conn,
+                candidate,
+                "not_applied",
+                reason,
+                created_by=created_by,
+                requested_mode=mode,
+            )
+            raise HTTPException(status_code=400, detail=reason)
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+    if mode == "automatic" and (
+        profile is None
+        or clean_text(profile.get("approval_mode")).lower() not in {"auto", "automatic"}
+        or clean_text(candidate.get("mitigation_mode")).lower() not in {"auto", "automatic"}
+    ):
+        record_auto_mitigation_outcome(
+            conn,
+            candidate,
+            "not_applied",
+            "profile_not_automatic",
+            profile,
+            created_by=created_by,
+            requested_mode=mode,
+        )
+        raise HTTPException(status_code=400, detail="profile_not_automatic")
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
+    if mode == "automatic" and len(connectors) != 1:
+        reason = (
+            "connector_ambiguous"
+            if len(connectors) > 1
+            or clean_text(candidate.get("resolution_error")) == "connector_ambiguous"
+            else "connector_not_resolved"
+        )
+        record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, profile, created_by=created_by, requested_mode=mode)
+        log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
+        raise HTTPException(status_code=400, detail=reason)
     if not connectors:
-        reason = clean_text(candidate.get("connector_resolution_error")) or "no_connector_resolved"
+        reason = clean_text(candidate.get("connector_resolution_error")) or "connector_not_resolved"
         record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, profile, created_by=created_by, requested_mode=mode)
         log_dns_auto_mitigation_skipped(candidate, reason, profile=profile)
         raise HTTPException(status_code=400, detail=f"Nenhum conector BGP ativo resolvido para esta mitigacao: {reason}.")
@@ -17802,6 +18122,7 @@ def apply_mitigation_candidate(
             **candidate,
             "connector_id": connector["id"],
             "connector_name": connector.get("name") or "",
+            "pipe_path": connector.get("exabgp_pipe_in") or "",
             "requested_mode": mode,
         }
         connector_candidate["mitigation_key"] = mitigation_key_for_candidate(connector_candidate)
@@ -17815,8 +18136,8 @@ def apply_mitigation_candidate(
             connector_candidate["mitigation_key"],
             int(connector_candidate.get("cooldown_seconds") or 0),
         ):
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "mitigation_cooldown", profile, created_by=created_by, requested_mode=mode)
-            log_dns_auto_mitigation_skipped(connector_candidate, "mitigation_cooldown", connector, profile)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "cooldown_active", profile, created_by=created_by, requested_mode=mode)
+            log_dns_auto_mitigation_skipped(connector_candidate, "cooldown_active", connector, profile)
             raise HTTPException(status_code=409, detail="Mitigacao equivalente ainda esta em cooldown.")
         connector_candidate["retry_of_announcement_id"] = latest_retryable_bgp_announcement_id(
             conn,
@@ -17833,24 +18154,42 @@ def apply_mitigation_candidate(
             "default_duration_seconds": 900,
             "approval_mode": "manual_approval",
         })
+        revalidated_version = mitigation_candidate_version(connector_candidate, policy, validation, command)
+        if mode == "automatic" and revalidated_version != clean_text(connector_candidate.get("ai_candidate_version")):
+            connector_candidate["candidate_version"] = revalidated_version
+            record_auto_mitigation_outcome(
+                conn,
+                connector_candidate,
+                "not_applied",
+                "ai_not_evaluated",
+                profile,
+                created_by=created_by,
+                requested_mode=mode,
+                extra_details={
+                    "ai_candidate_version": clean_text(candidate.get("ai_candidate_version")),
+                    "revalidated_candidate_version": revalidated_version,
+                },
+            )
+            raise HTTPException(status_code=409, detail="ai_not_evaluated")
+        connector_candidate["candidate_version"] = revalidated_version
         if any(clean_text(error).startswith("Duracao excede o maximo permitido") for error in validation["errors"]):
-            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "duration_exceeds_maximum", profile, created_by=created_by, requested_mode=mode)
+            record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", "validation_failed", profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, "duracao excede maximo", connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Duracao excede o maximo permitido. Nenhum anuncio foi enviado.")
         if policy["decision"] == "deny":
-            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny")
+            outcome_reason = "validation_failed" if mode == "automatic" else dns_policy_skip_reason(connector_candidate, policy, validation, profile, "policy deny")
             announcement = insert_bgp_mitigation_announcement(conn, connector_candidate, connector, profile, policy, validation, "rejected_by_policy", command, created_by)
             record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, announcement, created_by, mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             results.append(announcement)
             continue
         if validation["errors"]:
-            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error")
+            outcome_reason = "validation_failed" if mode == "automatic" else dns_policy_skip_reason(connector_candidate, policy, validation, profile, "validation error")
             record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
         if mode == "automatic" and policy["decision"] != "allow_auto":
-            outcome_reason = dns_policy_skip_reason(connector_candidate, policy, validation, profile, "politica nao permitiu automatico")
+            outcome_reason = "validation_failed"
             record_auto_mitigation_outcome(conn, connector_candidate, "not_applied", outcome_reason, profile, created_by=created_by, requested_mode=mode)
             log_dns_auto_mitigation_skipped(connector_candidate, outcome_reason, connector, profile, policy, validation, command)
             raise HTTPException(status_code=400, detail="Politica nao permite automatico; aprovacao manual exigida.")
@@ -17899,14 +18238,28 @@ def apply_mitigation_candidate(
         if final_status == "advertised":
             log_dns_auto_mitigation_applied(connector_candidate, connector, profile, command)
             outcome_status = "applied"
+            operational_reason = ""
         else:
             outcome_status = final_status or "failed"
+            confirmation_level = clean_text(announcement.get("confirmation_level"))
+            if mode != "automatic":
+                operational_reason = final_reason
+            elif confirmation_level in {"peer_unavailable", "peer_down", "peer_not_verified"} or final_status == "peer_down":
+                operational_reason = "connector_not_ready"
+            elif final_status == "failed" and (
+                "pipe" in final_reason.lower()
+                or "fifo" in final_reason.lower()
+                or "writer" in final_reason.lower()
+            ):
+                operational_reason = "fifo_write_failed"
+            else:
+                operational_reason = "exabgp_confirmation_failed"
             log_dns_auto_mitigation_skipped(connector_candidate, final_reason or outcome_status, connector, profile, policy, validation, command)
         record_auto_mitigation_outcome(
             conn,
             connector_candidate,
             outcome_status,
-            final_reason,
+            operational_reason,
             profile,
             announcement,
             created_by,
@@ -17914,8 +18267,22 @@ def apply_mitigation_candidate(
             {
                 "peer_state": announcement.get("peer_state") or "",
                 "confirmation_level": announcement.get("confirmation_level") or "registered",
+                "technical_reason": final_reason,
             },
         )
+        if mode == "automatic":
+            log_automatic_mitigation_decision(
+                connector_candidate,
+                connector=connector,
+                policy=policy,
+                validation=validation,
+                ai_analysis={
+                    "apply_mitigation": connector_candidate.get("ai_apply_mitigation"),
+                    "status": connector_candidate.get("ai_decision_status"),
+                },
+                final_action="applied" if final_status == "advertised" else "not_applied",
+                final_reason=operational_reason,
+            )
         results.append(announcement)
     if len(results) == 1:
         return results[0]
@@ -18297,42 +18664,109 @@ def anomaly_auto_mitigation_status(conn: sqlite3.Connection, anomaly_id: Any) ->
 def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, Any]:
     """Evaluate automation without consulting or merging any AI output."""
     if clean_text(candidate.get("mitigation_mode")).lower() not in {"auto", "automatic"}:
-        return {"auto_allowed": False, "eligible": False, "reason": "automatic_policy_disabled"}
+        return {"auto_allowed": False, "eligible": False, "reason": "profile_not_automatic"}
     if candidate.get("never_announce") or clean_text(candidate.get("candidate_role")) == "analysis_only":
-        return {"auto_allowed": False, "eligible": False, "reason": "proposal_never_announce"}
+        return {"auto_allowed": False, "eligible": False, "reason": "validation_failed"}
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
+    if profile is None or clean_text(profile.get("approval_mode")).lower() not in {"auto", "automatic"}:
+        return {"auto_allowed": False, "eligible": False, "reason": "profile_not_automatic"}
     connectors = resolve_mitigation_target_connectors(conn, candidate, profile)
+    if len(connectors) != 1:
+        ambiguous = (
+            len(connectors) > 1
+            or clean_text(candidate.get("resolution_error")) == "connector_ambiguous"
+            or clean_text(candidate.get("connector_resolution_error")) == "ambiguous_connector_resolution"
+        )
+        reason = "connector_ambiguous" if ambiguous else "connector_not_resolved"
+        return {
+            "auto_allowed": False,
+            "eligible": False,
+            "connector_available": False,
+            "connector_ids": [int(connector["id"]) for connector in connectors],
+            "reason": reason,
+        }
+    connector = connectors[0]
+    set_mitigation_connector_resolution(
+        candidate,
+        [connector],
+        candidate.get("connector_resolution_method") or candidate.get("resolution_source") or "resolved_connector",
+    )
+    candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
     policy = policy_for_candidate(candidate, "automatic")
     policy_reasons = normalize_string_list(policy.get("reasons"))
     auto_marker_present = any("AUTO_ALLOWED" in reason.upper() for reason in policy_reasons)
     auto_allowed = policy.get("decision") == "allow_auto" and auto_marker_present
-    validation_errors: list[str] = []
-    connector_available = bool(connectors)
-    for connector in connectors:
-        validation = validate_mitigation_candidate(candidate, connector, profile or {
-            "enabled": False,
-            "response_type": "flowspec",
-            "require_protocol_or_port": True,
-            "allow_wide_prefix": False,
-            "max_duration_seconds": BGP_DEFAULT_MAX_DURATION_SECONDS,
-            "default_duration_seconds": 900,
-            "approval_mode": "manual_approval",
-        })
-        validation_errors.extend(clean_text(error) for error in validation.get("errors") or [] if clean_text(error))
-        if connector_is_dry_run(connector):
-            validation_errors.append("connector_dry_run")
-    divergence = clean_text(candidate.get("connector_resolution_error") or candidate.get("automatic_not_applied_reason"))
-    if candidate.get("requires_connector_selection"):
-        divergence = divergence or "connector_selection_required"
-    eligible = bool(auto_allowed and connector_available and not validation_errors and not divergence)
+    validation = validate_mitigation_candidate(candidate, connector, profile)
+    validation_errors = [
+        clean_text(error)
+        for error in validation.get("errors") or []
+        if clean_text(error)
+    ]
+    if connector_is_dry_run(connector):
+        validation_errors.append("connector_dry_run")
+    try:
+        command = render_exabgp_flowspec_command("announce", candidate)
+    except HTTPException as exc:
+        command = ""
+        validation_errors.append(clean_text(exc.detail) or "invalid_flowspec_command")
+    equivalent = equivalent_mitigation_announcement(conn, candidate["mitigation_key"])
+    cooldown_allowed = cooldown_allows_mitigation(
+        conn,
+        candidate["mitigation_key"],
+        int(candidate.get("cooldown_seconds") or 0),
+    )
+    deterministic_reason = ""
+    if validation_errors or not auto_allowed:
+        deterministic_reason = "validation_failed"
+    elif equivalent:
+        deterministic_reason = "equivalent_active_announcement"
+    elif not cooldown_allowed:
+        deterministic_reason = "cooldown_active"
+    readiness: dict[str, Any] | None = None
+    if not deterministic_reason:
+        try:
+            readiness = check_bgp_connector_readiness(conn, connector)
+        except Exception as exc:
+            readiness = {
+                "ready": False,
+                "reasons": ["status_check_failed"],
+                "status": {
+                    "connector_id": connector.get("id"),
+                    "name": connector.get("name") or "",
+                    "errors": [clean_text(exc) or exc.__class__.__name__],
+                },
+            }
+        candidate["readiness"] = readiness
+        candidate["current_readiness"] = readiness
+        if not readiness.get("ready"):
+            deterministic_reason = "connector_not_ready"
+    candidate["policy_decision"] = policy
+    candidate["validation"] = validation
+    candidate["validation_errors"] = sorted(set(validation_errors))
+    candidate["validation_warnings"] = list(validation.get("warnings") or [])
+    candidate["announce_command"] = command
+    candidate["rendered_command"] = command
+    candidate["equivalent_announcement"] = equivalent
+    candidate["cooldown_allowed"] = cooldown_allowed
+    candidate["candidate_version"] = mitigation_candidate_version(candidate, policy, validation, command)
+    eligible = not deterministic_reason
+    candidate["auto_allowed"] = bool(auto_allowed)
+    candidate["eligible"] = eligible
     return {
         "auto_allowed": bool(auto_allowed),
         "eligible": eligible,
         "policy": policy,
         "validation_errors": sorted(set(validation_errors)),
-        "connector_available": connector_available,
-        "connector_ids": [int(connector["id"]) for connector in connectors],
-        "reason": divergence or (validation_errors[0] if validation_errors else ""),
+        "validation": validation,
+        "connector_available": True,
+        "connector_ids": [int(connector["id"])],
+        "connector": connector,
+        "readiness": readiness,
+        "equivalent_announcement": equivalent,
+        "cooldown_allowed": cooldown_allowed,
+        "command": command,
+        "candidate_version": candidate["candidate_version"],
+        "reason": deterministic_reason,
     }
 
 
@@ -18390,12 +18824,18 @@ def run_automatic_mitigation_ai_analysis(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     with sqlite_connection() as config_conn:
         config = ai_effective_config(config_conn)
+    eligible_candidates = [
+        dict(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict) and mitigation_candidate_is_ai_eligible(candidate)
+    ]
     request_payload = {
         "anomaly": dict(context.get("event") or {}),
-        "candidates": [dict(candidate) for candidate in candidates],
+        "candidates": eligible_candidates,
         "security_rules": {
             "ai_decision_only": True,
             "deterministic_rule_immutable": True,
+            "only_valid_safe_eligible_candidates": True,
         },
     }
     if not config.get("enabled"):
@@ -18455,21 +18895,39 @@ def process_anomaly_mitigation() -> dict[str, int]:
             candidates = build_mitigation_candidates_from_anomaly(context)
             proposal_states: dict[int, dict[str, Any]] = {}
             eligible_automatic_candidates: list[dict[str, Any]] = []
-            for candidate in candidates:
+            for candidate_index, candidate in enumerate(candidates):
+                candidate["candidate_index"] = candidate_index
                 state = deterministic_automatic_proposal_state(conn, candidate)
                 proposal_states[id(candidate)] = state
                 candidate["auto_allowed"] = state["auto_allowed"]
                 candidate["eligible"] = state["eligible"]
                 if state["auto_allowed"] and state["eligible"]:
                     eligible_automatic_candidates.append(candidate)
+            # Fresh readiness snapshots are persisted before the AI uses a
+            # separate connection. No FIFO write occurs in this phase.
+            conn.commit()
             ai_analysis: dict[str, Any] | None = None
             ai_config: dict[str, Any] = {"allow_auto": False}
             if eligible_automatic_candidates:
                 ai_analysis, ai_config = run_automatic_mitigation_ai_analysis(
                     int(event["id"]),
                     context,
-                    candidates,
+                    eligible_automatic_candidates,
                 )
+            ai_candidate_versions = {
+                clean_text(item.get("candidate_version"))
+                for item in ((ai_analysis or {}).get("request_payload") or {}).get("candidates") or []
+                if isinstance(item, dict) and clean_text(item.get("candidate_version"))
+            }
+            if (
+                not ai_candidate_versions
+                and len(eligible_automatic_candidates) == 1
+                and int_or_none((ai_analysis or {}).get("id")) is not None
+            ):
+                # Compatibility with older adapters/tests that return only the
+                # decision metadata. Persisted production analyses carry the
+                # exact candidate version in request_payload.
+                ai_candidate_versions.add(clean_text(eligible_automatic_candidates[0].get("candidate_version")))
             conn.execute("BEGIN IMMEDIATE")
             if anomaly_auto_mitigation_status(conn, event.get("id")):
                 conn.rollback()
@@ -18503,16 +18961,80 @@ def process_anomaly_mitigation() -> dict[str, int]:
                     proposal_state = proposal_states.get(id(candidate)) or {}
                     deterministic_block_reason = clean_text(proposal_state.get("reason"))
                     if not proposal_state.get("auto_allowed") or not proposal_state.get("eligible"):
-                        if deterministic_block_reason == "connector_dry_run":
-                            application_mode = "announce_now"
-                        else:
-                            reason = deterministic_block_reason or "deterministic_proposal_not_eligible"
-                            record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, created_by="worker", requested_mode="automatic")
-                            log_dns_auto_mitigation_skipped(candidate, reason)
-                            stats["skipped"] += 1
+                        if set(proposal_state.get("validation_errors") or []) == {"connector_dry_run"}:
+                            try:
+                                item = apply_mitigation_candidate(conn, candidate, "announce_now", "worker")
+                            except HTTPException as exc:
+                                stats["failed"] += 1
+                                record_auto_mitigation_outcome(
+                                    conn,
+                                    candidate,
+                                    "not_applied",
+                                    "validation_failed",
+                                    created_by="worker",
+                                    requested_mode="automatic",
+                                )
+                                log_dns_auto_mitigation_skipped(candidate, clean_text(exc.detail) or "dry_run_failed")
+                                continue
+                            status = clean_text(item.get("status"))
+                            if status in stats:
+                                stats[status] += 1
                             continue
+                        reason = deterministic_block_reason or "validation_failed"
+                        record_auto_mitigation_outcome(conn, candidate, "not_applied", reason, created_by="worker", requested_mode="automatic")
+                        log_dns_auto_mitigation_skipped(candidate, reason)
+                        log_automatic_mitigation_decision(
+                            candidate,
+                            connector=proposal_state.get("connector"),
+                            policy=proposal_state.get("policy"),
+                            validation=proposal_state.get("validation"),
+                            final_action="not_applied",
+                            final_reason=reason,
+                        )
+                        stats["skipped"] += 1
+                        continue
+                    application_mode = automatic_mitigation_execution_mode(proposal_state, ai_config, ai_analysis)
+                    ai_status = clean_text((ai_analysis or {}).get("status")).lower()
+                    if ai_analysis is None:
+                        ai_block_reason = "ai_not_evaluated"
+                    elif ai_status in {"", "disabled", "not_available", "not_evaluated", "unavailable"}:
+                        ai_block_reason = "ai_not_evaluated"
+                    elif ai_status != "success" or clean_text(ai_analysis.get("error_message")):
+                        ai_block_reason = "ai_error"
+                    elif ai_analysis.get("apply_mitigation") is not True or application_mode != "automatic":
+                        ai_block_reason = "ai_denied"
+                    elif clean_text(candidate.get("candidate_version")) not in ai_candidate_versions:
+                        ai_block_reason = "ai_not_evaluated"
                     else:
-                        application_mode = automatic_mitigation_execution_mode(proposal_state, ai_config, ai_analysis)
+                        ai_block_reason = ""
+                    if ai_block_reason:
+                        candidate.update(
+                            {
+                                "ai_analysis_id": (ai_analysis or {}).get("id"),
+                                "ai_apply_mitigation": (ai_analysis or {}).get("apply_mitigation") is True,
+                                "ai_decision_status": clean_text((ai_analysis or {}).get("status") or "not_evaluated"),
+                                "ai_decision_reason": clean_text((ai_analysis or {}).get("reason") or (ai_analysis or {}).get("error_message")),
+                            }
+                        )
+                        record_auto_mitigation_outcome(
+                            conn,
+                            candidate,
+                            "not_applied",
+                            ai_block_reason,
+                            created_by="worker",
+                            requested_mode="automatic",
+                        )
+                        log_automatic_mitigation_decision(
+                            candidate,
+                            connector=proposal_state.get("connector"),
+                            policy=proposal_state.get("policy"),
+                            validation=proposal_state.get("validation"),
+                            ai_analysis=ai_analysis,
+                            final_action="not_applied",
+                            final_reason=ai_block_reason,
+                        )
+                        stats["skipped"] += 1
+                        continue
                     candidate_for_application = {
                         **candidate,
                         "ai_analysis_id": (ai_analysis or {}).get("id"),
@@ -18523,9 +19045,10 @@ def process_anomaly_mitigation() -> dict[str, int]:
                             or proposal_state.get("reason")
                             or ("politica_automatica_desabilitada" if not ai_config.get("allow_auto") else "analise_ia_ausente")
                         ),
+                        "ai_candidate_version": clean_text(candidate.get("candidate_version")),
                     }
                     try:
-                        item = apply_mitigation_candidate(conn, candidate_for_application, application_mode, "worker")
+                        item = apply_mitigation_candidate(conn, candidate_for_application, "automatic", "worker")
                     except HTTPException as exc:
                         if exc.status_code == 409:
                             stats["skipped"] += 1
@@ -18535,6 +19058,15 @@ def process_anomaly_mitigation() -> dict[str, int]:
                             status = "failed" if exc.status_code >= 500 else "not_applied"
                             record_auto_mitigation_outcome(conn, candidate_for_application, status, clean_text(exc.detail) or "automatic_mitigation_failed")
                         log_dns_auto_mitigation_skipped(candidate_for_application, clean_text(exc.detail) or "automatico nao aplicado")
+                        log_automatic_mitigation_decision(
+                            candidate_for_application,
+                            connector=proposal_state.get("connector"),
+                            policy=proposal_state.get("policy"),
+                            validation=proposal_state.get("validation"),
+                            ai_analysis=ai_analysis,
+                            final_action="failed" if exc.status_code >= 500 else "not_applied",
+                            final_reason=clean_text(exc.detail) or "automatic_mitigation_failed",
+                        )
                         continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
                     handled = True
