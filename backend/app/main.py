@@ -32921,55 +32921,6 @@ def geo_flows(
     top_order_expr = {"bits_s": "total_bytes", "packets_s": "total_packets", "flows": "total_flows"}[metric]
     row_bytes_expr = corrected_value_expr("bytes", factor_expr)
     row_packets_expr = corrected_value_expr("packets", factor_expr)
-    has_strong_filter = any(
-        [
-            src_filter,
-            dst_filter,
-            asn_src or src_asn,
-            asn_dst or dst_asn,
-            zone_id,
-            interface_id,
-            if_index is not None,
-            src_port is not None,
-            dst_port is not None,
-            clean_text(proto or protocol or decoder),
-            clean_text(direction).lower() in {"download", "upload"},
-        ]
-    )
-    if range_seconds(start_dt, end_dt) > 360 * 60 and not has_strong_filter:
-        warning = "Consulta muito ampla. Reduza o periodo, aplique filtros ou aumente o Top."
-        return dashboard_cache_set(
-            cache_key,
-            {
-                "start": iso(start_dt),
-                "end": iso(end_dt),
-                "source": "flows",
-                "metric": metric,
-                "group_by": group_by,
-                "requested_top_n": requested_top_n,
-                "summary": {
-                    "total_bits_s": 0.0,
-                    "total_packets_s": 0.0,
-                    "total_flows_s": 0.0,
-                    "total_anomalies": 0,
-                    "countries_active": 0,
-                    "routes_active": 0,
-                    "routes_located": 0,
-                    "missing_geo": 0,
-                },
-                "total_routes": 0,
-                "complete_route_count": 0,
-                "incomplete_route_count": 0,
-                "localized_routes": 0,
-                "unlocalized_routes": 0,
-                "active_countries": 0,
-                "nodes": [],
-                "edges": [],
-                "items": [],
-                "geoip_source": "maxmind" if GEOIP_MMDB_PATH and Path(GEOIP_MMDB_PATH).exists() else "local-cache",
-                "warning": warning,
-            },
-        )
     try:
         result = query_clickhouse(
             f"""

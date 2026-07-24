@@ -141,14 +141,15 @@ class FrontendNavigationMapTest(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
     def test_map_is_initialized_and_requested_only_while_active(self):
-        init_source = function_source("ensureLeafletMap", "clearLeafletMap")
+        init_source = function_source("ensureGeoFlowMap", "clearGeoFlowMap")
         load_source = function_source("loadGlobalMap", "dashboardLayout")
         view_source = function_source("loadGlobalMapView", "debounceGlobalMapLoad")
         self.assertIn("if (activeView !== 'global-map') return false", init_source)
+        self.assertIn("new GeoFlowMap", init_source)
         self.assertIn("if (activeView !== 'global-map') return", load_source)
         self.assertIn("if (controller.signal.aborted || activeView !== 'global-map') return", load_source)
         self.assertIn("await loadGlobalMap({ force: true })", view_source)
-        self.assertNotIn("ensureLeafletMap", view_source)
+        self.assertNotIn("ensureGeoFlowMap", view_source)
         self.assertEqual(1, HTML.count("'/api/geo/flows'"))
         self.assertEqual(1, HTML.count("'/api/geo/anomalies'"))
 
