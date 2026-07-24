@@ -11553,26 +11553,55 @@ def mitigation_vector_config(conn: sqlite3.Connection, attack_vector_name: str, 
     return attack_vector_row_to_dict(row) if row is not None else None
 
 
-def detection_rule_mitigation_config(conn: sqlite3.Connection, attack_vector_name: str) -> dict[str, Any] | None:
+def detection_rule_mitigation_config(
+    conn: sqlite3.Connection,
+    attack_vector_name: str,
+    event: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     name = clean_text(attack_vector_name)
     if not name or not sqlite_table_exists(conn, "detection_template_rules"):
         return None
-    row = conn.execute(
-        """
-        SELECT *
-        FROM detection_template_rules
-        WHERE vector = ?
-          AND enabled = 1
-        ORDER BY mitigation_enabled DESC, id
-        LIMIT 1
-        """,
-        (name,),
-    ).fetchone()
+    has_event_context = bool(event)
+    event = event or {}
+    rule_id = int_or_none(event.get("detection_template_rule_id"))
+    if rule_id is None:
+        source_details = event_source_details(event)
+        rule_id = int_or_none(source_details.get("rule_id"))
+    if rule_id is not None:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM detection_template_rules
+            WHERE id = ?
+              AND enabled = 1
+            LIMIT 1
+            """,
+            (rule_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM detection_template_rules
+            WHERE vector = ?
+              AND enabled = 1
+            ORDER BY mitigation_enabled DESC, id
+            LIMIT 1
+            """,
+            (name,),
+        ).fetchone()
     if row is None:
         return None
     item = detection_rule_row_to_dict(row)
-    profile_id = item.get("critical_response_profile_id") or item.get("warning_response_profile_id") or item.get("fallback_response_profile_id")
-    if not item.get("mitigation_enabled") or item.get("mitigation_mode") != "response_profile" or profile_id is None:
+    profile_id = int_or_none(event.get("response_profile_id"))
+    if profile_id is None:
+        profile_id = detection_response_profile_id(
+            {
+                **item,
+                "severity": event.get("severity") or ("warning" if has_event_context else "critical"),
+            }
+        )
+    if not item.get("mitigation_enabled") or item.get("mitigation_mode") != "response_profile":
         return None
     return {
         "id": item.get("id"),
@@ -11600,13 +11629,16 @@ def anomaly_mitigation_config(conn: sqlite3.Connection, event: dict[str, Any], a
     if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"}:
         names.extend(["DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"])
     seen: set[str] = set()
+    detection_template_event = clean_text(event.get("anomaly_source")).lower() == "detection_template_rule"
     for name in names:
         name = clean_text(name)
         if not name or name in seen:
             continue
         seen.add(name)
         vector_config = mitigation_vector_config(conn, name, event.get("attack_vector_id"))
-        rule_config = detection_rule_mitigation_config(conn, name)
+        rule_config = detection_rule_mitigation_config(conn, name, event)
+        if detection_template_event and rule_config is not None:
+            return rule_config
         if vector_config is not None and vector_config.get("response_profile_id"):
             return vector_config
         if rule_config is not None:
@@ -11717,6 +11749,8 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
 
 
 def base_mitigation_candidate(event: dict[str, Any], attack_vector_name: str, reason: str, confidence: float) -> dict[str, Any]:
+    source_details = event_source_details(event)
+    detection_fields = detection_fields_from_source_details(source_details)
     return {
         "attack_vector_name": attack_vector_name,
         "connector_id": None,
@@ -11743,6 +11777,7 @@ def base_mitigation_candidate(event: dict[str, Any], attack_vector_name: str, re
         "anomaly_id": event.get("id"),
         "anomaly_source": event.get("source") or "anomaly_events",
         "raw_payload": {"anomaly": event},
+        **detection_fields,
     }
 
 
@@ -12128,6 +12163,17 @@ def record_auto_mitigation_outcome(
         "ai_apply_mitigation": candidate.get("ai_apply_mitigation") if isinstance(candidate.get("ai_apply_mitigation"), bool) else None,
         "ai_decision_status": clean_text(candidate.get("ai_decision_status")),
         "ai_decision_reason": clean_text(candidate.get("ai_decision_reason"))[:1000],
+        "mitigation_state": clean_text(candidate.get("mitigation_state"))
+        or mitigation_state_from_status(status),
+        "candidate_state": clean_text(candidate.get("candidate_state"))
+        or "candidate_generated",
+        "analysis_mode": clean_text(candidate.get("analysis_mode"))
+        or ("automatic_authorization" if clean_text(requested_mode) == "automatic" else "informational"),
+        "deterministic_gate_reasons": normalize_string_list(
+            (candidate.get("automatic_gate") or {}).get("reasons")
+            if isinstance(candidate.get("automatic_gate"), dict)
+            else candidate.get("deterministic_gate_reasons")
+        ),
     }
     details.update(extra_details or {})
     candidate["auto_mitigation_status"] = clean_text(status)
@@ -12999,6 +13045,13 @@ def evaluated_mitigation_candidates(
                 )
                 candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
         policy = policy_for_candidate(candidate)
+        automatic_gate = detection_automatic_policy_gate(candidate)
+        if automatic_gate.get("applies") and not automatic_gate.get("allowed"):
+            policy["decision"] = "require_manual_approval"
+            policy["severity"] = "caution"
+            policy["reasons"] = sorted(
+                set([*(policy.get("reasons") or []), *(automatic_gate.get("reasons") or [])])
+            )
         requires_connector_selection = bool(
             not operator_connector_id
             and (
@@ -13040,6 +13093,7 @@ def evaluated_mitigation_candidates(
         policy_allows_auto = policy.get("decision") == "allow_auto"
         auto_allowed = bool(
             policy_allows_auto
+            and automatic_gate.get("allowed", True)
             and any("AUTO_ALLOWED" in clean_text(reason).upper() for reason in policy.get("reasons") or [])
         )
         analysis_only = bool(candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only")
@@ -13051,6 +13105,22 @@ def evaluated_mitigation_candidates(
             and not analysis_only
             and not equivalent_announcement
         )
+        readiness = candidate.get("current_readiness") or candidate.get("readiness")
+        readiness_allows_auto = bool(isinstance(readiness, dict) and readiness.get("ready") is True)
+        eligible_for_automatic = bool(
+            actionable
+            and auto_allowed
+            and readiness_allows_auto
+            and cooldown_allowed
+            and not equivalent_announcement
+        )
+        gate_blocked = bool(automatic_gate.get("applies") and not automatic_gate.get("allowed"))
+        candidate_state = (
+            automatic_gate.get("mitigation_state")
+            if gate_blocked
+            else "candidate_generated"
+        )
+        informational_candidate = candidate_state == "informational_candidate"
         evaluated.append(
             {
                 **candidate,
@@ -13073,10 +13143,15 @@ def evaluated_mitigation_candidates(
                     if connector_resolution_reason
                     else ""
                 ),
-                "readiness": candidate.get("readiness") or candidate.get("current_readiness"),
-                "current_readiness": candidate.get("current_readiness") or candidate.get("readiness"),
+                "readiness": readiness,
+                "current_readiness": readiness,
                 "candidate_version": candidate_version,
-                "automatic_not_applied_reason": connector_resolution_reason,
+                "automatic_not_applied_reason": automatic_gate.get("reason") or connector_resolution_reason,
+                "automatic_gate": automatic_gate,
+                "deterministic_gate_reasons": automatic_gate.get("reasons") or [],
+                "analysis_mode": automatic_gate.get("analysis_mode") or "automatic_authorization",
+                "mitigation_state": candidate_state,
+                "candidate_state": candidate_state,
                 "eligible_connectors": eligible_connectors,
                 "requires_connector_selection": requires_connector_selection,
                 "selected_connector_id": int(preview_connector["id"]) if preview_connector else None,
@@ -13085,12 +13160,13 @@ def evaluated_mitigation_candidates(
                 "actionable": actionable,
                 "eligible": actionable,
                 "can_submit_approval": actionable,
-                "can_announce_now": actionable and not connector_is_dry_run(preview_connector),
+                "can_announce_now": actionable and not informational_candidate and not connector_is_dry_run(preview_connector),
                 "connector_dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "apply_enabled": actionable,
                 "manual_approval_required": not auto_allowed,
                 "allow_auto": auto_allowed,
                 "auto_allowed": auto_allowed,
+                "eligible_for_automatic": eligible_for_automatic,
                 "evaluation_only": True,
                 "dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "dry_run_message": "Selecione um conector para recalcular a proposta." if requires_connector_selection else f"Nao elegivel para mitigacao: {connector_resolution_reason}." if connector_resolution_reason else "Avaliacao concluida; nenhum comando foi enviado.",
@@ -14710,6 +14786,7 @@ def ai_analysis_row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[st
         "model": item.get("model") or "",
         "profile": item.get("profile") or "",
         "request_payload": request_payload,
+        "analysis_mode": clean_text(request_payload.get("analysis_mode")) or "informational",
         "response": response,
         "recommended_candidate_index": item.get("recommended_candidate_index"),
         "confidence": item.get("confidence"),
@@ -14841,6 +14918,17 @@ def compact_ai_candidate(candidate: dict[str, Any], candidate_index: int | None 
         "dst_port",
         "action",
         "confidence",
+        "mitigation_state",
+        "candidate_state",
+        "eligible_for_automatic",
+        "analysis_mode",
+        "trigger_value",
+        "trigger_threshold",
+        "warning_threshold",
+        "critical_threshold",
+        "automatic_mitigation_threshold",
+        "timeseries_points",
+        "evidence_duration_seconds",
     ):
         value = candidate.get(key)
         if ai_keep_value(value):
@@ -14972,6 +15060,24 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "id",
         "attack_vector_name",
         "vector_name",
+        "severity",
+        "triggered_severity",
+        "trigger_value",
+        "trigger_threshold",
+        "warning_threshold",
+        "critical_threshold",
+        "automatic_mitigation_threshold",
+        "effective_threshold_at_detection",
+        "threshold_source",
+        "threshold_version",
+        "canonical_unit",
+        "triggered_at",
+        "trigger_condition",
+        "conditions_passed",
+        "temporal_evidence",
+        "timeseries_points",
+        "evidence_duration_seconds",
+        "last_value",
         "target_ip",
         "target_cidr",
         "target_role",
@@ -14993,7 +15099,11 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "status",
         "summary",
     )
-    compacted = {key: event.get(key) for key in keys if event.get(key) not in {None, ""}}
+    compacted = {
+        key: event.get(key)
+        for key in keys
+        if ai_keep_value(event.get(key))
+    }
     if compacted.get("summary"):
         compacted["summary"] = ai_compact_text(compacted["summary"], 320)
     return compacted
@@ -15011,6 +15121,7 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
     if not top_conversation_source and isinstance(flow_evidence_source.get("top_conversations"), list):
         top_conversation_source = list(flow_evidence_source.get("top_conversations") or [])
     compacted: dict[str, Any] = {
+        "analysis_mode": clean_text(payload.get("analysis_mode")) or "informational",
         "anomaly": compact_anomaly_for_ai(dict(payload.get("anomaly") or {})),
         "deterministic_analysis": compact_deterministic_analysis_for_ai(dict(payload.get("deterministic_analysis") or {})),
         "flow_context": compact_flow_context_for_ai(dict(payload.get("flow_context") or {})),
@@ -15024,6 +15135,11 @@ def compact_ai_payload_for_model(payload: dict[str, Any], max_context_chars: int
             if isinstance(candidate, dict)
         ],
         "security_rules": {
+            **(
+                payload.get("security_rules")
+                if isinstance(payload.get("security_rules"), dict)
+                else {}
+            ),
             "choose_only_existing_candidate": True,
             "ai_never_announces": True,
             "fallback_analysis_never_announces": True,
@@ -15108,7 +15224,7 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
     deterministic = deterministic_anomaly_analysis(anomaly_id) if not evaluated["candidates"] else {}
     all_candidates = list(evaluated["candidates"] or [])
-    candidates = [
+    automatic_candidates = [
         candidate
         for candidate in all_candidates
         if isinstance(candidate, dict) and mitigation_candidate_is_ai_eligible(candidate)
@@ -15123,8 +15239,26 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
     if enriched_flows:
         flows = enriched_flows[: int(config["max_top_flows"])]
         flow_context = flow_evidence
+    anomaly_for_ai = dict(enrichment.get("event") or evaluated["anomaly"])
+    automatic_gate = detection_automatic_policy_gate(anomaly_for_ai)
+    analysis_mode = (
+        "automatic_authorization"
+        if automatic_candidates and automatic_gate.get("allowed", True)
+        else "informational"
+    )
+    candidates = (
+        automatic_candidates
+        if analysis_mode == "automatic_authorization"
+        else [
+            candidate
+            for candidate in all_candidates
+            if isinstance(candidate, dict)
+            and mitigation_candidate_can_create_pending(candidate)
+        ]
+    )
     payload = {
-        "anomaly": compact_anomaly_for_ai(dict(enrichment.get("event") or evaluated["anomaly"])),
+        "analysis_mode": analysis_mode,
+        "anomaly": compact_anomaly_for_ai(anomaly_for_ai),
         "deterministic_analysis": deterministic,
         "flow_evidence": flow_evidence,
         "flow_context": flow_context,
@@ -15140,6 +15274,8 @@ def build_ai_mitigation_payload(anomaly_id: int, config: dict[str, Any]) -> dict
             "fallback_analysis_never_announces": True,
             "analysis_only_never_apply": True,
             "weak_fallback_must_choose_alert_only": True,
+            "analysis_mode": analysis_mode,
+            "deterministic_gate_reasons": automatic_gate.get("reasons") or [],
         },
     }
     return compact_ai_payload_for_model(payload, int(config["max_context_chars"]))
@@ -15451,6 +15587,7 @@ def build_mitigation_ai_prompt(request_payload: dict[str, Any]) -> str:
         if isinstance(candidate, dict)
     ]
     prompt_payload = {
+        "analysis_mode": clean_text(request_payload.get("analysis_mode")) or "informational",
         "anomaly": anomaly,
         "playbook": mitigation_ai_playbook(anomaly, candidates),
         "candidates": candidates,
@@ -15544,6 +15681,11 @@ def normalize_mitigation_ai_response(value: dict[str, Any] | str, request_payloa
     reason = ai_compact_text(parsed.get("reason"), 1000)
     if not reason:
         raise ValueError("reason deve ser uma string nao vazia.")
+    if clean_text(request_payload.get("analysis_mode")) == "informational":
+        return {
+            "apply_mitigation": False,
+            "reason": f"Analise informativa; sem autorizacao automatica. {reason}"[:1000],
+        }
     return {"apply_mitigation": parsed["apply_mitigation"], "reason": reason}
 
 
@@ -18667,6 +18809,25 @@ def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: 
         return {"auto_allowed": False, "eligible": False, "reason": "profile_not_automatic"}
     if candidate.get("never_announce") or clean_text(candidate.get("candidate_role")) == "analysis_only":
         return {"auto_allowed": False, "eligible": False, "reason": "validation_failed"}
+    automatic_gate = detection_automatic_policy_gate(candidate)
+    if automatic_gate.get("applies") and not automatic_gate.get("allowed"):
+        candidate["auto_allowed"] = False
+        candidate["eligible"] = False
+        candidate["eligible_for_automatic"] = False
+        candidate["automatic_gate"] = automatic_gate
+        candidate["automatic_not_applied_reason"] = automatic_gate.get("reason")
+        candidate["analysis_mode"] = "informational"
+        candidate["mitigation_state"] = automatic_gate.get("mitigation_state") or "not_applied"
+        return {
+            "auto_allowed": False,
+            "eligible": False,
+            "eligible_for_automatic": False,
+            "reason": automatic_gate.get("reason"),
+            "reasons": automatic_gate.get("reasons") or [],
+            "automatic_gate": automatic_gate,
+            "analysis_mode": "informational",
+            "mitigation_state": automatic_gate.get("mitigation_state") or "not_applied",
+        }
     profile = fetch_bgp_profile(conn, int(candidate["response_profile_id"])) if candidate.get("response_profile_id") else None
     if profile is None or clean_text(profile.get("approval_mode")).lower() not in {"auto", "automatic"}:
         return {"auto_allowed": False, "eligible": False, "reason": "profile_not_automatic"}
@@ -18752,9 +18913,13 @@ def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: 
     eligible = not deterministic_reason
     candidate["auto_allowed"] = bool(auto_allowed)
     candidate["eligible"] = eligible
+    candidate["eligible_for_automatic"] = eligible
+    candidate["analysis_mode"] = "automatic_authorization"
+    candidate["mitigation_state"] = "candidate_generated"
     return {
         "auto_allowed": bool(auto_allowed),
         "eligible": eligible,
+        "eligible_for_automatic": eligible,
         "policy": policy,
         "validation_errors": sorted(set(validation_errors)),
         "validation": validation,
@@ -18767,6 +18932,8 @@ def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: 
         "command": command,
         "candidate_version": candidate["candidate_version"],
         "reason": deterministic_reason,
+        "analysis_mode": "automatic_authorization",
+        "mitigation_state": "candidate_generated",
     }
 
 
@@ -18830,12 +18997,14 @@ def run_automatic_mitigation_ai_analysis(
         if isinstance(candidate, dict) and mitigation_candidate_is_ai_eligible(candidate)
     ]
     request_payload = {
+        "analysis_mode": "automatic_authorization",
         "anomaly": dict(context.get("event") or {}),
         "candidates": eligible_candidates,
         "security_rules": {
             "ai_decision_only": True,
             "deterministic_rule_immutable": True,
             "only_valid_safe_eligible_candidates": True,
+            "analysis_mode": "automatic_authorization",
         },
     }
     if not config.get("enabled"):
@@ -18893,6 +19062,72 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 continue
             context = fetch_anomaly_mitigation_context(conn, int(event["id"]))
             candidates = build_mitigation_candidates_from_anomaly(context)
+            event_automatic_gate = detection_automatic_policy_gate(event)
+            if event_automatic_gate.get("applies") and not event_automatic_gate.get("allowed"):
+                outcome_candidate = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if not candidate.get("never_announce")
+                        and clean_text(candidate.get("mitigation_mode")) != "analysis_only"
+                    ),
+                    {
+                        "anomaly_id": event.get("id"),
+                        "response_profile_id": event.get("response_profile_id"),
+                        "sensor_id": event.get("sensor_id"),
+                        "zone_id": event.get("zone_id"),
+                        "top_src_ip": event.get("top_src_ip"),
+                        "top_dst_ip": event.get("top_dst_ip"),
+                        "raw_payload": {"anomaly": event},
+                    },
+                )
+                outcome_candidate.update(
+                    {
+                        "analysis_mode": "informational",
+                        "automatic_gate": event_automatic_gate,
+                        "automatic_not_applied_reason": event_automatic_gate.get("reason"),
+                        "mitigation_state": event_automatic_gate.get("mitigation_state") or "informational_candidate",
+                    }
+                )
+                outcome_status = (
+                    "informational_candidate"
+                    if clean_text(event_automatic_gate.get("severity")) == "warning"
+                    else "not_applied"
+                )
+                record_auto_mitigation_outcome(
+                    conn,
+                    outcome_candidate,
+                    outcome_status,
+                    clean_text(event_automatic_gate.get("reason")),
+                    created_by="worker",
+                    requested_mode="automatic",
+                    extra_details={
+                        "mitigation_state": event_automatic_gate.get("mitigation_state") or "informational_candidate",
+                        "candidate_state": "candidate_generated" if candidates else "not_applied",
+                        "candidate_count": len(candidates),
+                        "safe_candidate_generated": any(
+                            clean_text(item.get("dst_port")) == "53"
+                            and bool(clean_text(item.get("dst_cidr") or item.get("dst_prefix")))
+                            and not item.get("never_announce")
+                            for item in candidates
+                        ),
+                        "rejected_candidate_roles": [
+                            clean_text(item.get("candidate_role"))
+                            for item in candidates
+                            if item.get("never_announce") or item.get("not_recommended")
+                        ],
+                        "deterministic_gate_reasons": event_automatic_gate.get("reasons") or [],
+                        "analysis_mode": "informational",
+                        "ai_called": False,
+                        "fifo_written": False,
+                        "announcement_created": False,
+                        "announcement_pending": False,
+                    },
+                )
+                stats["checked"] += max(1, len(candidates))
+                stats["skipped"] += 1
+                conn.commit()
+                continue
             proposal_states: dict[int, dict[str, Any]] = {}
             eligible_automatic_candidates: list[dict[str, Any]] = []
             for candidate_index, candidate in enumerate(candidates):
@@ -19941,10 +20176,16 @@ def active_anomalies_summary(conn: sqlite3.Connection) -> dict[str, int]:
         """
     ).fetchone()
     consolidated = [group["event"] for group in consolidated_security_anomaly_groups("active")]
+    active_total = int(row["active_count"] or 0) + len(consolidated)
+    active_critical = int(row["critical_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "critical")
+    active_warning = int(row["warning_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "warning")
     return {
-        "active_count": int(row["active_count"] or 0) + len(consolidated),
-        "critical_count": int(row["critical_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "critical"),
-        "warning_count": int(row["warning_count"] or 0) + sum(1 for item in consolidated if item.get("severity") == "warning"),
+        "active_count": active_total,
+        "critical_count": active_critical,
+        "warning_count": active_warning,
+        "active_total": active_total,
+        "active_critical": active_critical,
+        "active_warning": active_warning,
         "security_consolidated_count": len(consolidated),
     }
 
@@ -19966,6 +20207,9 @@ def bgp_summary_payload(conn: sqlite3.Connection) -> dict[str, int]:
     anomaly_summary = active_anomalies_summary(conn)
     return {
         "active_anomalies": anomaly_summary["active_count"],
+        "active_total": anomaly_summary["active_total"],
+        "active_critical": anomaly_summary["active_critical"],
+        "active_warning": anomaly_summary["active_warning"],
         "critical_count": anomaly_summary["critical_count"],
         "warning_count": anomaly_summary["warning_count"],
         "active_bgp_announcements": int(row["active_bgp_announcements"] or 0) if row else 0,
@@ -21726,7 +21970,7 @@ def apply_detection_whitelist(items: list[dict[str, Any]], whitelist: list[dict[
     for item in items:
         if any(candidate_matches_whitelist(item, entry) for entry in whitelist):
             continue
-        filtered.append(item)
+        filtered.append({**item, "whitelist_status": "no_match"})
     return filtered
 
 
@@ -21786,6 +22030,379 @@ def event_source_details(event: dict[str, Any]) -> dict[str, Any]:
     if isinstance(details, str):
         details = bgp_json_loads(details, {})
     return details if isinstance(details, dict) else {}
+
+
+DETECTION_THRESHOLD_SNAPSHOT_SCHEMA = "detection-thresholds/v1"
+DETECTION_AUTOMATIC_BLOCK_REASONS = {
+    "warning_manual_only",
+    "below_automatic_mitigation_threshold",
+    "insufficient_time_series_evidence",
+}
+
+
+def detection_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def canonical_detection_unit(metric: Any) -> str:
+    normalized = clean_text(metric).lower()
+    return {
+        "packets_s": "packets_per_second",
+        "pps": "packets_per_second",
+        "bits_s": "bits_per_second",
+        "bps": "bits_per_second",
+        "flows_s": "flows_per_second",
+        "fps": "flows_per_second",
+    }.get(normalized, normalized or "packets_per_second")
+
+
+def detection_threshold_version(
+    candidate: dict[str, Any],
+    warning_threshold: float | None,
+    critical_threshold: float | None,
+    automatic_threshold: float | None,
+) -> str:
+    payload = {
+        "schema": DETECTION_THRESHOLD_SNAPSHOT_SCHEMA,
+        "template_id": int_or_none(candidate.get("template_id")),
+        "rule_id": int_or_none(candidate.get("rule_id")),
+        "warning_threshold": warning_threshold,
+        "critical_threshold": critical_threshold,
+        "automatic_mitigation_threshold": automatic_threshold,
+        "canonical_unit": canonical_detection_unit(candidate.get("metric")),
+        "comparison": clean_text(candidate.get("comparison") or "over").lower(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def detection_additional_conditions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    rule_config = candidate.get("rule_config") if isinstance(candidate.get("rule_config"), dict) else {}
+    conditions = [
+        {
+            "condition": "zone_prefix_membership",
+            "expected": clean_text(candidate.get("prefix_cidr")),
+            "actual": clean_text(candidate.get("internal_ip") or candidate.get("src_ip") or candidate.get("target_ip")),
+            "passed": True,
+        },
+        {
+            "condition": "direction",
+            "expected": clean_text(rule_config.get("direction") or candidate.get("direction")),
+            "actual": clean_text(candidate.get("direction")),
+            "passed": True,
+        },
+        {
+            "condition": "protocol",
+            "expected": clean_text(rule_config.get("protocol") or candidate.get("protocol")),
+            "actual": clean_text(candidate.get("protocol")),
+            "passed": True,
+        },
+    ]
+    configured_dst_port = clean_text(rule_config.get("dst_port"))
+    if configured_dst_port:
+        conditions.append(
+            {
+                "condition": "destination_port",
+                "expected": configured_dst_port,
+                "actual": int(candidate.get("top_dst_port") or candidate.get("target_port") or 0),
+                "passed": True,
+            }
+        )
+    conditions.append(
+        {
+            "condition": "global_whitelist",
+            "expected": "no_match",
+            "actual": clean_text(candidate.get("whitelist_status") or "no_match"),
+            "passed": clean_text(candidate.get("whitelist_status") or "no_match") == "no_match",
+        }
+    )
+    return conditions
+
+
+def build_detection_threshold_state(
+    candidate: dict[str, Any],
+    previous_source_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    previous = previous_source_details if isinstance(previous_source_details, dict) else {}
+    previous_detection = previous.get("detection") if isinstance(previous.get("detection"), dict) else {}
+    previous_current = previous_detection.get("current") if isinstance(previous_detection.get("current"), dict) else {}
+    previous_evidence = previous_detection.get("temporal_evidence") if isinstance(previous_detection.get("temporal_evidence"), dict) else {}
+    rule_config = candidate.get("rule_config") if isinstance(candidate.get("rule_config"), dict) else {}
+
+    warning_threshold = detection_number(candidate.get("threshold_warning"))
+    critical_threshold = detection_number(candidate.get("threshold_critical"))
+    explicit_automatic_threshold = (
+        candidate.get("automatic_mitigation_threshold")
+        if candidate.get("automatic_mitigation_threshold") not in (None, "")
+        else rule_config.get("automatic_mitigation_threshold")
+    )
+    automatic_threshold = detection_number(explicit_automatic_threshold)
+    if automatic_threshold is None:
+        automatic_threshold = critical_threshold if critical_threshold is not None else warning_threshold
+
+    trigger_value = detection_number(candidate.get("metric_value"))
+    if trigger_value is None:
+        trigger_value = detection_number(candidate.get(clean_text(candidate.get("metric"))))
+    if trigger_value is None:
+        trigger_value = detection_number(candidate.get("packets_s")) or 0.0
+    triggered_severity = clean_text(candidate.get("severity") or "warning").lower()
+    trigger_threshold = critical_threshold if triggered_severity == "critical" and critical_threshold is not None else warning_threshold
+    canonical_unit = canonical_detection_unit(candidate.get("metric"))
+    comparison = clean_text(candidate.get("comparison") or "over").lower()
+    triggered_at = clean_text(candidate.get("first_seen") or candidate.get("last_seen") or utc_now_iso())
+    threshold_source = "detection_template_rules.warning_value/critical_value"
+    threshold_version = detection_threshold_version(
+        candidate,
+        warning_threshold,
+        critical_threshold,
+        automatic_threshold,
+    )
+    configuration = {
+        "warning_threshold": warning_threshold,
+        "critical_threshold": critical_threshold,
+        "automatic_mitigation_threshold": automatic_threshold,
+        "canonical_unit": canonical_unit,
+        "comparison": comparison,
+        "threshold_source": threshold_source,
+        "threshold_version": threshold_version,
+        "schema": DETECTION_THRESHOLD_SNAPSHOT_SCHEMA,
+    }
+    immutable_trigger = {
+        "triggered_severity": triggered_severity,
+        "trigger_value": trigger_value,
+        "trigger_threshold": trigger_threshold,
+        "effective_threshold_at_detection": trigger_threshold,
+        "warning_threshold": warning_threshold,
+        "critical_threshold": critical_threshold,
+        "automatic_mitigation_threshold": automatic_threshold,
+        "threshold_source": threshold_source,
+        "threshold_version": threshold_version,
+        "threshold_snapshot": configuration,
+        "canonical_unit": canonical_unit,
+        "triggered_at": triggered_at,
+        "trigger_condition": {
+            "metric": canonical_unit,
+            "comparison": comparison,
+            "observed_value": trigger_value,
+            "threshold": trigger_threshold,
+            "passed": bool(
+                trigger_threshold is not None
+                and comparison_matches(float(trigger_value), float(trigger_threshold), comparison)
+            ),
+        },
+        "conditions_passed": detection_additional_conditions(candidate),
+    }
+    if previous_detection:
+        immutable_trigger = {
+            key: previous_detection.get(key, value)
+            for key, value in immutable_trigger.items()
+        }
+
+    last_seen = clean_text(candidate.get("last_seen") or triggered_at)
+    previous_last_seen = clean_text(previous_current.get("last_seen"))
+    previous_points = int(previous_evidence.get("points_count") or 0)
+    points_count = previous_points + (0 if previous_last_seen and previous_last_seen == last_seen else 1)
+    points_count = max(1, points_count)
+    first_time = parse_datetime_text(immutable_trigger.get("triggered_at"))
+    last_time = parse_datetime_text(last_seen)
+    duration_seconds = max(0, int((last_time - first_time).total_seconds())) if first_time and last_time else 0
+    required_points = max(2, int(rule_config.get("consecutive_windows") or 1))
+    instant_critical_allowed = sqlite_bool(
+        rule_config.get("allow_instant_critical_auto")
+        or rule_config.get("instant_critical_auto")
+    )
+    temporal_evidence = {
+        "points_count": points_count,
+        "duration_seconds": duration_seconds,
+        "required_points": required_points,
+        "only_one_point": points_count <= 1,
+        "instant_critical_allowed": instant_critical_allowed,
+        "sufficient_for_automatic": bool(
+            points_count >= required_points
+            or (triggered_severity == "critical" and instant_critical_allowed)
+        ),
+    }
+    previous_peak = detection_number(previous_current.get("peak_value")) or detection_number(immutable_trigger.get("trigger_value")) or 0.0
+    current = {
+        **configuration,
+        "last_value": trigger_value,
+        "peak_value": max(previous_peak, float(trigger_value)),
+        "severity": triggered_severity,
+        "last_seen": last_seen,
+    }
+    threshold_history = [
+        item
+        for item in previous_detection.get("threshold_history") or []
+        if isinstance(item, dict)
+    ]
+    known_versions = {clean_text(item.get("threshold_version")) for item in threshold_history}
+    previous_version = clean_text((previous_detection.get("current") or {}).get("threshold_version"))
+    if previous_version and previous_version not in known_versions:
+        previous_configuration = {
+            key: previous_current.get(key)
+            for key in configuration
+            if previous_current.get(key) not in (None, "")
+        }
+        if previous_configuration:
+            threshold_history.append(previous_configuration)
+            known_versions.add(previous_version)
+    if threshold_version not in known_versions:
+        threshold_history.append(configuration)
+
+    return {
+        **immutable_trigger,
+        "current": current,
+        "temporal_evidence": temporal_evidence,
+        "threshold_history": threshold_history[-20:],
+    }
+
+
+def detection_fields_from_source_details(source_details: dict[str, Any]) -> dict[str, Any]:
+    detection = source_details.get("detection") if isinstance(source_details.get("detection"), dict) else {}
+    if not detection:
+        return {}
+    current = detection.get("current") if isinstance(detection.get("current"), dict) else {}
+    temporal_evidence = detection.get("temporal_evidence") if isinstance(detection.get("temporal_evidence"), dict) else {}
+    return {
+        "triggered_severity": detection.get("triggered_severity"),
+        "trigger_value": detection_number(detection.get("trigger_value")),
+        "trigger_threshold": detection_number(detection.get("trigger_threshold")),
+        "warning_threshold": detection_number(detection.get("warning_threshold")),
+        "critical_threshold": detection_number(detection.get("critical_threshold")),
+        "automatic_mitigation_threshold": detection_number(detection.get("automatic_mitigation_threshold")),
+        "effective_threshold_at_detection": detection_number(detection.get("effective_threshold_at_detection")),
+        "threshold_source": clean_text(detection.get("threshold_source")),
+        "threshold_version": clean_text(detection.get("threshold_version")),
+        "threshold_snapshot": detection.get("threshold_snapshot") or {},
+        "threshold_history": detection.get("threshold_history") or [],
+        "canonical_unit": clean_text(detection.get("canonical_unit")),
+        "triggered_at": clean_text(detection.get("triggered_at")),
+        "trigger_condition": detection.get("trigger_condition") or {},
+        "conditions_passed": detection.get("conditions_passed") or [],
+        "temporal_evidence": temporal_evidence,
+        "timeseries_points": int(temporal_evidence.get("points_count") or 0),
+        "evidence_duration_seconds": int(temporal_evidence.get("duration_seconds") or 0),
+        "last_value": detection_number(current.get("last_value")),
+        "configured_thresholds_current": {
+            "warning_threshold": detection_number(current.get("warning_threshold")),
+            "critical_threshold": detection_number(current.get("critical_threshold")),
+            "automatic_mitigation_threshold": detection_number(current.get("automatic_mitigation_threshold")),
+            "threshold_version": clean_text(current.get("threshold_version")),
+        },
+    }
+
+
+def detection_response_profile_id(candidate: dict[str, Any]) -> int | None:
+    severity = clean_text(candidate.get("severity") or "warning").lower()
+    if severity == "critical":
+        return int_or_none(
+            candidate.get("critical_response_profile_id")
+            or candidate.get("fallback_response_profile_id")
+            or candidate.get("warning_response_profile_id")
+        )
+    return int_or_none(
+        candidate.get("warning_response_profile_id")
+        or candidate.get("fallback_response_profile_id")
+    )
+
+
+def mitigation_state_from_status(
+    mitigation_status: Any,
+    anomaly_status: Any = "",
+    details: dict[str, Any] | None = None,
+) -> str:
+    details = details if isinstance(details, dict) else {}
+    explicit = clean_text(details.get("mitigation_state"))
+    if explicit:
+        return explicit
+    if clean_text(anomaly_status).lower() in {"ended", "closed"}:
+        return "ended"
+    status = clean_text(mitigation_status).lower()
+    if status in {"informational_candidate"}:
+        return "informational_candidate"
+    if status in {"suggested", "mitigation_suggestion_created"}:
+        return "mitigation_suggestion_created"
+    if status in {"pending_approval", "queued", "sent", "announcement_pending"}:
+        return "announcement_pending"
+    if status in {"advertised", "active", "announced", "applied", "announcement_applied"}:
+        return "announcement_applied"
+    if status in {"rejected", "rejected_by_policy"}:
+        return "rejected"
+    if status in {"not_applied", "failed", "dry_run", "deduplicated"}:
+        return "not_applied"
+    return "candidate_generated" if not status else status
+
+
+def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[str, Any]:
+    anomaly = mitigation_raw_anomaly(candidate_or_event)
+    if not anomaly:
+        anomaly = candidate_or_event
+    source_details = event_source_details(anomaly)
+    detection = source_details.get("detection") if isinstance(source_details.get("detection"), dict) else {}
+    if not detection:
+        return {
+            "applies": False,
+            "allowed": True,
+            "reason": "",
+            "reasons": [],
+            "analysis_mode": "automatic_authorization",
+            "mitigation_state": "candidate_generated",
+        }
+    current = detection.get("current") if isinstance(detection.get("current"), dict) else {}
+    evidence = detection.get("temporal_evidence") if isinstance(detection.get("temporal_evidence"), dict) else {}
+    rule_config = source_details.get("rule_config") if isinstance(source_details.get("rule_config"), dict) else {}
+    severity = clean_text(anomaly.get("severity") or current.get("severity") or detection.get("triggered_severity")).lower()
+    observed = detection_number(current.get("last_value"))
+    if observed is None:
+        observed = detection_number(anomaly.get("observed_value"))
+    if observed is None:
+        observed = detection_number(detection.get("trigger_value")) or 0.0
+    automatic_threshold = detection_number(current.get("automatic_mitigation_threshold"))
+    if automatic_threshold is None:
+        automatic_threshold = detection_number(detection.get("automatic_mitigation_threshold"))
+    comparison = clean_text(current.get("comparison") or detection.get("trigger_condition", {}).get("comparison") or "over")
+    allow_warning_auto = sqlite_bool(
+        rule_config.get("allow_warning_auto")
+        or source_details.get("allow_warning_auto")
+    )
+    reasons: list[str] = []
+    if severity == "warning" and not allow_warning_auto:
+        reasons.append("warning_manual_only")
+    if automatic_threshold is not None and not comparison_matches(float(observed), float(automatic_threshold), comparison):
+        reasons.append("below_automatic_mitigation_threshold")
+    if evidence and not sqlite_bool(evidence.get("sufficient_for_automatic")):
+        reasons.append("insufficient_time_series_evidence")
+    priority = (
+        "warning_manual_only",
+        "below_automatic_mitigation_threshold",
+        "insufficient_time_series_evidence",
+    )
+    reason = next((item for item in priority if item in reasons), "")
+    mitigation_state = (
+        "candidate_generated"
+        if not reasons
+        else "informational_candidate"
+        if severity == "warning"
+        else "not_applied"
+    )
+    return {
+        "applies": True,
+        "allowed": not bool(reasons),
+        "reason": reason,
+        "reasons": reasons,
+        "analysis_mode": "automatic_authorization" if not reasons else "informational",
+        "mitigation_state": mitigation_state,
+        "severity": severity,
+        "observed_value": observed,
+        "automatic_mitigation_threshold": automatic_threshold,
+        "temporal_evidence": evidence,
+        "warning_auto_explicitly_enabled": allow_warning_auto,
+    }
 
 
 def outbound_dst_port_scope(event: dict[str, Any]) -> dict[str, Any]:
@@ -22044,6 +22661,9 @@ def query_detection_rule_candidates(
                     "protocol",
                     "metric",
                     "comparison",
+                    "warning_value",
+                    "critical_value",
+                    "automatic_mitigation_threshold",
                     "window_seconds",
                     "consecutive_windows",
                     "cooldown_seconds",
@@ -22091,6 +22711,9 @@ def query_detection_rule_candidates(
             "last_seen": iso(last_seen) if isinstance(last_seen, datetime) else clean_text(last_seen),
             "threshold_warning": float(warning_threshold),
             "threshold_critical": float(critical) if critical is not None else None,
+            "automatic_mitigation_threshold": detection_number(
+                rule.get("automatic_mitigation_threshold")
+            ) or (float(critical) if critical is not None else float(warning_threshold)),
             "warning_response_profile_id": rule.get("warning_response_profile_id"),
             "critical_response_profile_id": rule.get("critical_response_profile_id"),
             "fallback_response_profile_id": rule.get("fallback_response_profile_id"),
@@ -22201,7 +22824,10 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
     message = security_anomaly_message(candidate)
     recommended_action = "Verificar origem, cliente e destino. Nenhum bloqueio automatico foi aplicado."
     candidate_display_name = effective_vector_display_name(candidate.get("display_name"), candidate.get("rule_name") or candidate.get("vector"))
+    previous_source_details = bgp_json_loads(existing["source_details_json"], {}) if existing is not None else {}
+    detection_state = build_detection_threshold_state(candidate, previous_source_details)
     source_details = {
+        **previous_source_details,
         "template_id": candidate.get("template_id"),
         "template_name": candidate.get("template_name") or "",
         "rule_id": candidate.get("rule_id"),
@@ -22235,7 +22861,9 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "target_port": candidate.get("target_port") or candidate.get("top_dst_port") or None,
         "mitigation_basis": candidate.get("mitigation_basis") or "",
         "mitigation_reason": candidate.get("mitigation_reason") or "",
+        "detection": detection_state,
     }
+    source_details.update(detection_fields_from_source_details(source_details))
     values = (
         candidate["vector"],
         candidate["severity"],
@@ -22453,6 +23081,12 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
     }
+    result.update(detection_fields_from_source_details(source_details))
+    result["mitigation_state"] = mitigation_state_from_status(
+        result.get("auto_mitigation_status"),
+        result.get("status"),
+        result.get("auto_mitigation_details"),
+    )
     result["display_name"] = vector_display_name_from_metadata(
         source_details.get("display_name"),
         result.get("source_name"),
@@ -22580,8 +23214,10 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         peak_value = peak_flows
         observed_value = sum(float(item.get("flows_s") or item.get("flows") or 0) for item in items)
     threshold_details = source_details.get("threshold") if isinstance(source_details.get("threshold"), dict) else {}
+    detection_fields = detection_fields_from_source_details(source_details)
     threshold_value = (
-        threshold_details.get("warning")
+        detection_fields.get("trigger_threshold")
+        or threshold_details.get("warning")
         or source_details.get("threshold_warning")
         or source_details.get("threshold_value")
         or 0.0
@@ -22666,6 +23302,12 @@ def security_anomaly_event_from_items(items: list[dict[str, Any]], preferred_id:
         "detail_count": len(items),
         "unique_src_ips": len(src_ips),
         "unique_dst_ips": len(dst_ips),
+        **detection_fields,
+        "mitigation_state": mitigation_state_from_status(
+            mitigation.get("auto_mitigation_status"),
+            status,
+            mitigation.get("auto_mitigation_details"),
+        ),
     }
 
 
@@ -22943,10 +23585,16 @@ def security_anomalies_summary():
             WHERE status = 'active'
             """
         ).fetchone()
+    active_total = int(row["active_count"] or 0) if row else 0
+    active_critical = int(row["critical_count"] or 0) if row else 0
+    active_warning = int(row["warning_count"] or 0) if row else 0
     return {
-        "active_count": int(row["active_count"] or 0) if row else 0,
-        "critical_count": int(row["critical_count"] or 0) if row else 0,
-        "warning_count": int(row["warning_count"] or 0) if row else 0,
+        "active_count": active_total,
+        "critical_count": active_critical,
+        "warning_count": active_warning,
+        "active_total": active_total,
+        "active_critical": active_critical,
+        "active_warning": active_warning,
     }
 
 
@@ -23463,6 +24111,12 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     }
     result.update(source)
     source_details = result.get("source_details_json") or result.get("source_details") or {}
+    result.update(detection_fields_from_source_details(source_details))
+    result["mitigation_state"] = mitigation_state_from_status(
+        result.get("auto_mitigation_status"),
+        result.get("status"),
+        result.get("auto_mitigation_details"),
+    )
     result["display_name"] = vector_display_name_from_metadata(
         item.get("attack_vector_display_name") or source_details.get("display_name"),
         result.get("source_name"),
@@ -26017,11 +26671,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
     now = clean_text(candidate.get("last_seen")) or utc_now_iso()
     first_seen = clean_text(candidate.get("first_seen")) or now
     vector_name = clean_text(candidate.get("vector") or candidate.get("rule_name"))
-    response_profile_id = (
-        candidate.get("critical_response_profile_id")
-        or candidate.get("warning_response_profile_id")
-        or candidate.get("fallback_response_profile_id")
-    )
+    response_profile_id = detection_response_profile_id(candidate)
     src_ip = clean_ip(candidate.get("top_src_ip") or candidate.get("src_ip") or candidate.get("internal_ip") or candidate.get("target_ip"))
     dst_ip = clean_ip(candidate.get("top_dst_ip") or candidate.get("dst_ip"))
     src_port = int(candidate.get("top_src_port") or 0)
@@ -26030,7 +26680,21 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
     top_bytes = int(candidate.get("top_bytes") or candidate.get("bytes") or 0)
     target_cidr = host_cidr_for_ip(src_ip)
     dedupe_key = detection_template_dns_anomaly_dedupe_key(candidate)
+    row = conn.execute(
+        """
+        SELECT *
+        FROM anomaly_events
+        WHERE dedupe_key = ?
+          AND status = 'active'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    previous_source_details = bgp_json_loads(row["source_details_json"], {}) if row is not None else {}
+    detection_state = build_detection_threshold_state(candidate, previous_source_details)
     source_details = {
+        **previous_source_details,
         "template_id": candidate.get("template_id"),
         "template_name": candidate.get("template_name") or "",
         "rule_id": candidate.get("rule_id"),
@@ -26043,7 +26707,15 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "target_port": dst_port,
         "mitigation_basis": "dns_outbound_destination",
         "mitigation_reason": dns_outbound_reason(),
+        "threshold_warning": candidate.get("threshold_warning"),
+        "threshold_critical": candidate.get("threshold_critical"),
+        "automatic_mitigation_threshold": candidate.get("automatic_mitigation_threshold"),
+        "observed_metric": candidate.get("metric_value"),
+        "metric": candidate.get("metric"),
+        "detection": detection_state,
     }
+    source_details.update(detection_fields_from_source_details(source_details))
+    trigger_threshold = detection_number(detection_state.get("trigger_threshold")) or 0.0
     common = {
         "attack_vector_id": None,
         "sensor_id": candidate.get("sensor_id"),
@@ -26073,7 +26745,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "decoder": "DNS",
         "severity": clean_text(candidate.get("severity")) or "warning",
         "metric_unit": clean_text(candidate.get("metric")) or "packets_s",
-        "threshold_value": float(candidate.get("threshold_critical") or candidate.get("threshold_warning") or 0),
+        "threshold_value": trigger_threshold,
         "observed_value": float(candidate.get("metric_value") or candidate.get("packets_s") or 0),
         "estimated_bytes": int(candidate.get("bytes") or 0),
         "estimated_packets": int(candidate.get("packets") or 0),
@@ -26091,17 +26763,6 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "source_details_json": json.dumps(source_details, sort_keys=True, default=str),
         "updated_at": now,
     }
-    row = conn.execute(
-        """
-        SELECT *
-        FROM anomaly_events
-        WHERE dedupe_key = ?
-          AND status = 'active'
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (dedupe_key,),
-    ).fetchone()
     if row is None:
         cursor = sqlite_insert_dict(
             conn,
@@ -26152,6 +26813,30 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
                 common["source_details_json"], now, event_id,
             ),
         )
+        current_gate = detection_automatic_policy_gate(
+            {
+                "severity": common["severity"],
+                "observed_value": common["observed_value"],
+                "source_details_json": source_details,
+            }
+        )
+        previous_auto_reason = clean_text(row["auto_mitigation_reason"])
+        previous_auto_status = clean_text(row["auto_mitigation_status"])
+        if current_gate.get("allowed") and (
+            previous_auto_reason in DETECTION_AUTOMATIC_BLOCK_REASONS
+            or previous_auto_status == "informational_candidate"
+        ):
+            conn.execute(
+                """
+                UPDATE anomaly_events
+                SET auto_mitigation_status = '',
+                    auto_mitigation_reason = '',
+                    auto_mitigation_details_json = '{}',
+                    auto_mitigation_updated_at = ''
+                WHERE id = ?
+                """,
+                (event_id,),
+            )
         action = "updated"
     if src_ip and dst_ip and dst_port == 53:
         conn.execute(
@@ -26286,6 +26971,7 @@ def evaluate_detection_template_rule(
                 skip_reasons.append(reason)
                 logger.info("rule skipped: global_whitelist %s", reason)
                 continue
+            item["whitelist_status"] = "no_match"
             if security_anomaly_in_cooldown(conn, item, int(rule.get("cooldown_seconds") or 0), end_dt):
                 skip_reasons.append("cooldown")
                 logger.info("rule skipped: cooldown")
