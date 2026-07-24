@@ -4100,11 +4100,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                       <option value="src_ip,dst_ip">src_ip,dst_ip</option>
                       <option value="dst_ip,dst_port,protocol">dst_ip,dst_port,protocol</option>
                       <option value="src_ip,dst_ip,dst_port,protocol">src_ip,dst_ip,dst_port,protocol</option>
+                      <option value="src_ip,src_port,dst_ip,dst_port,protocol">Conversa completa</option>
                       <option value="src_subnet">src_subnet</option>
                       <option value="dst_subnet">dst_subnet</option>
                       <option value="asn">asn</option>
                       <option value="interface">interface</option>
                     </select>
+                    <div class="subtle">IP origem + porta origem + IP destino + porta destino + protocolo</div>
                   </div>
                   <div class="field">
                     <label for="detectionRuleInputIf">input_if</label>
@@ -4159,7 +4161,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 </div>
                 <div class="table-wrap">
                   <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
-                    <thead><tr><th>Vetor</th><th>Domínio</th><th>Direção</th><th>Protocolo</th><th>Métrica</th><th>Resposta de alerta</th><th>Resposta crítica</th><th>Mitigação</th><th>Lista permitida</th><th>Última checagem</th><th>Seguro</th><th>Ações</th></tr></thead>
+                    <thead><tr><th>Vetor</th><th>Domínio</th><th>Direção</th><th>Protocolo</th><th>Métrica</th><th>Agrupamento</th><th>Resposta de alerta</th><th>Resposta crítica</th><th>Mitigação</th><th>Lista permitida</th><th>Última checagem</th><th>Seguro</th><th>Ações</th></tr></thead>
                     <tbody id="detectionRuleTable"></tbody>
                   </table>
                 </div>
@@ -9794,7 +9796,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         detectionRuleTcpFlags: 'Flags TCP usadas para vetores como SYN flood.',
         detectionRuleIcmpType: 'Tipo ICMP usado quando o protocolo é ICMP.',
         detectionRuleIcmpCode: 'Código ICMP usado quando o protocolo é ICMP.',
-        detectionRuleGroupBy: 'Define como o tráfego será agrupado antes de aplicar a regra. Exemplo: src_ip,dst_ip,dst_port,protocol detecta uma conversa específica.',
+        detectionRuleGroupBy: 'Define como o tráfego será agrupado antes de aplicar a regra. Conversa completa usa IP origem + porta origem + IP destino + porta destino + protocolo.',
         detectionRuleInputIf: 'Interface de entrada usada como filtro adicional.',
         detectionRuleOutputIf: 'Interface de saída usada como filtro adicional.',
         detectionRuleWarningProfile: 'Perfil de resposta usado ao atingir warning. Deve ser válido e normalmente exige aprovação manual.',
@@ -9940,6 +9942,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td>${escapeHtml(detectionDirectionLabel(rule.direction))}</td>
           <td>${escapeHtml(rule.protocol || 'ALL')}</td>
           <td>${escapeHtml(DETECTION_METRIC_LABELS[rule.metric] || rule.metric)}</td>
+          <td title="${escapeHtml(rule.group_by || rule.detection_key || 'default')}">${escapeHtml((rule.group_by || rule.detection_key) === 'src_ip,src_port,dst_ip,dst_port,protocol' ? 'Conversa completa' : (rule.group_by || rule.detection_key || 'default'))}</td>
           <td>${escapeHtml(rule.warning_response_profile_name || rule.warning_response_profile_id || 'ALERT_ONLY')}</td>
           <td>${escapeHtml(rule.critical_response_profile_name || rule.critical_response_profile_id || 'ALERT_ONLY')}</td>
           <td><span class="badge-soft ${rule.mitigation_enabled ? 'warn' : 'off'}">${escapeHtml(rule.mitigation_enabled ? rule.mitigation_mode : 'detection_only')}</span></td>
@@ -9954,7 +9957,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </td>
         </tr>
-      `).join('') || '<tr><td colspan="12" class="text-muted">Sem regras</td></tr>';
+      `).join('') || '<tr><td colspan="13" class="text-muted">Sem regras</td></tr>';
       createIcons();
     }
 
@@ -15001,6 +15004,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     const VECTOR_DISPLAY_NAME_FALLBACKS = {
+      DNS_SINGLE_FLOW_OUTBOUND: 'Ataque DNS por fluxo único',
       DNS_INTERNAL_IP_HIGH_BITS: 'DNS alto em bits',
       DNS_INTERNAL_IP_HIGH_PPS: 'DNS alto por IP',
       DNS_INTERNAL_IP_TO_DST_HIGH_PPS: 'DNS alto por destino',
@@ -15057,6 +15061,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function anomalyTypeLabel(event) {
       return vectorDisplayName(event, event.vector_name || event.attack_vector_name || event.vector || event.source_name || event.decoder);
+    }
+
+    function isDnsSingleFlowOutbound(event = {}) {
+      return String(event.vector_name || event.attack_vector_name || event.vector || event.source_name || '').toUpperCase() === 'DNS_SINGLE_FLOW_OUTBOUND';
     }
 
     function anomalyTargetText(event) {
@@ -15773,7 +15781,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const values = points.map(point => Number(point[valueKey] || 0));
       const finiteValues = values.filter(value => Number.isFinite(value));
       const thresholdDefinitions = [
-        { name: 'Warning', value: event.warning_threshold, color: semanticColor('--warning') },
+        ...(!isDnsSingleFlowOutbound(event) ? [{ name: 'Warning', value: event.warning_threshold, color: semanticColor('--warning') }] : []),
         { name: 'Critical', value: event.critical_threshold, color: semanticColor('--danger') },
         { name: 'Automático', value: event.automatic_mitigation_threshold, color: semanticColor('--info') },
         { name: 'Gatilho', value: event.trigger_threshold ?? event.threshold_value, color: anomalySeverityColor(event.triggered_severity || event.severity) }
@@ -15859,9 +15867,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         : '-';
       const autoMitigationDetails = event.auto_mitigation_details || {};
       const mitigationState = mitigationStateInfo(event.mitigation_state || autoMitigationDetails.mitigation_state);
+      const dnsSingleFlowFields = isDnsSingleFlowOutbound(event) ? [
+        ['IP de origem', topFlow.src_ip || event.top_src_ip || event.target_ip || '-'],
+        ['Porta de origem', topFlow.src_port || event.top_src_port || '-'],
+        ['IP DNS de destino', topFlow.dst_ip || event.top_dst_ip || '-'],
+        ['Porta de destino', topFlow.dst_port || event.top_dst_port || event.target_port || 53],
+        ['PPS observado', formatPps(event.observed_value || event.last_value || 0)],
+        ['Pico de PPS', formatPps(event.peak_value || 0)],
+        ['Pacotes', formatNumber(event.estimated_packets || 0)],
+        ['Bytes', formatBytes(event.estimated_bytes || 0)],
+        ['Duração', anomalyDuration(event)],
+        ['Quantidade de pontos', temporalEvidence.points_count ?? detail.timeseries_points ?? 0],
+        ['Classificação', event.classification || 'attack'],
+        ['Confiança determinística', event.confidence_label || 'high']
+      ] : [];
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
         ['Severidade disparada', triggeredSeverity],
+        ...dnsSingleFlowFields,
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],

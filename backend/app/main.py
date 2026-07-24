@@ -600,6 +600,7 @@ DETECTION_GROUP_BY_OPTIONS = {
     "src_ip,dst_ip",
     "dst_ip,dst_port,protocol",
     "src_ip,dst_ip,dst_port,protocol",
+    "src_ip,src_port,dst_ip,dst_port,protocol",
     "src_subnet",
     "dst_subnet",
     "asn",
@@ -647,13 +648,20 @@ BGP_MITIGATION_MODES = {"disabled", "suggest_only", "manual_approval", "automati
 BGP_POLICY_DECISIONS = {"allow_auto", "require_manual_approval", "deny"}
 BGP_POLICY_SEVERITIES = {"safe", "caution", "danger"}
 LEGACY_DNS_MITIGATION_DISABLED_MESSAGE = "legacy DNS detection: mitigation disabled; use detection template"
-DNS_OUTBOUND_TEMPLATE_VECTORS = {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT", "DNS_ABUSE_OUTBOUND"}
+DNS_SINGLE_FLOW_OUTBOUND_VECTOR = "DNS_SINGLE_FLOW_OUTBOUND"
+DNS_OUTBOUND_TEMPLATE_VECTORS = {
+    "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
+    "DNS_QUERY_OUTBOUND_CLIENT",
+    "DNS_ABUSE_OUTBOUND",
+    DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+}
 UDP_UPLOAD_SINGLE_CLIENT_VECTOR = "UDP_UPLOAD_SINGLE_CLIENT_HIGH_PPS"
 UDP_UPLOAD_MANY_CLIENTS_VECTOR = "UDP_UPLOAD_MANY_CLIENTS_SAME_DST_PORT"
 UDP_DOWNLOAD_REFLECTION_VECTOR = "UDP_DOWNLOAD_REFLECTION_TO_CLIENT"
 UDP_DOWNLOAD_SAME_DST_PORT_VECTOR = "UDP_DOWNLOAD_SAME_DST_PORT_TO_CLIENT"
 UDP_MANY_INTERNAL_VECTOR = "UDP_MANY_INTERNAL_TO_SAME_DST_PORT"
 OUTBOUND_DST_PORT_VECTORS = {"UDP_INTERNAL_IP_DST_HIGH_PPS", "TCP_INTERNAL_IP_DST_HIGH_PPS"}
+STRICT_DST_CONVERSATION_VECTORS = {*OUTBOUND_DST_PORT_VECTORS, DNS_SINGLE_FLOW_OUTBOUND_VECTOR}
 UDP_UPLOAD_MANY_CLIENTS_ALIASES = {UDP_UPLOAD_MANY_CLIENTS_VECTOR, UDP_MANY_INTERNAL_VECTOR}
 UDP_SPECIAL_VECTORS = {
     UDP_UPLOAD_SINGLE_CLIENT_VECTOR,
@@ -2713,15 +2721,13 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
 
 
 def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: int | None = None) -> None:
-    if not sqlite_table_exists(conn, "bgp_response_profiles"):
-        return
-    profile = conn.execute(
-        "SELECT id FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS' ORDER BY id LIMIT 1"
-    ).fetchone()
-    if profile is None:
-        return
+    profile = None
+    if sqlite_table_exists(conn, "bgp_response_profiles"):
+        profile = conn.execute(
+            "SELECT id FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS' ORDER BY id LIMIT 1"
+        ).fetchone()
     now = utc_now_iso()
-    profile_id = int(profile["id"])
+    profile_id = int(profile["id"]) if profile is not None else None
     if template_id is None:
         row = conn.execute(
             "SELECT id FROM detection_templates WHERE name = ? ORDER BY id LIMIT 1",
@@ -2741,11 +2747,67 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
         else:
             template_id = int(row["id"])
     defaults = [
-        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS alto por destino", 5_000, 15_000),
-        ("DNS_QUERY_OUTBOUND_CLIENT", "DNS outbound por cliente", 5_000, 15_000),
-        ("dns_abuse_outbound", "Abuso DNS outbound", 5_000, 15_000),
+        {
+            "vector": "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
+            "display_name": "DNS alto por destino",
+            "warning": 5_000,
+            "critical": 15_000,
+            "protocol": "DNS",
+            "group_by": "src_ip,dst_ip,dst_port,proto",
+            "detection_key": "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
+            "response": "DETECTION_ONLY",
+            "mitigation_mode": "response_profile",
+            "mitigation_enabled": 1,
+            "profile_id": profile_id,
+            "notes": "Regra oficial DNS outbound: somente destination /32 udp/53 via FLOWSPEC_AUTO_BLOCK_DST_DNS.",
+        },
+        {
+            "vector": "DNS_QUERY_OUTBOUND_CLIENT",
+            "display_name": "DNS outbound por cliente",
+            "warning": 5_000,
+            "critical": 15_000,
+            "protocol": "DNS",
+            "group_by": "src_ip,dst_ip,dst_port,proto",
+            "detection_key": "DNS_QUERY_OUTBOUND_CLIENT",
+            "response": "DETECTION_ONLY",
+            "mitigation_mode": "response_profile",
+            "mitigation_enabled": 1,
+            "profile_id": profile_id,
+            "notes": "Regra oficial DNS outbound: somente destination /32 udp/53 via FLOWSPEC_AUTO_BLOCK_DST_DNS.",
+        },
+        {
+            "vector": "dns_abuse_outbound",
+            "display_name": "Abuso DNS outbound",
+            "warning": 5_000,
+            "critical": 15_000,
+            "protocol": "DNS",
+            "group_by": "src_ip,dst_ip,dst_port,proto",
+            "detection_key": "dns_abuse_outbound",
+            "response": "DETECTION_ONLY",
+            "mitigation_mode": "response_profile",
+            "mitigation_enabled": 1,
+            "profile_id": profile_id,
+            "notes": "Regra oficial DNS outbound: somente destination /32 udp/53 via FLOWSPEC_AUTO_BLOCK_DST_DNS.",
+        },
+        {
+            "vector": DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+            "display_name": "Ataque DNS por fluxo único",
+            "warning": 5_000,
+            "critical": 5_000,
+            "protocol": "UDP",
+            "group_by": "src_ip,src_port,dst_ip,dst_port,protocol",
+            "detection_key": "src_ip,src_port,dst_ip,dst_port,protocol",
+            "response": "DETECTION_ONLY",
+            "mitigation_mode": "detection_only",
+            "mitigation_enabled": 0,
+            "profile_id": None,
+            "notes": "Deteccao deterministica por conversa completa UDP/53; PPS >= 5000 e sempre critical. Mitigacao automatica permanece sujeita a todos os gates de seguranca.",
+        },
     ]
-    for vector, display_name, warning, critical in defaults:
+    if profile_id is None:
+        defaults = [default for default in defaults if default["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR]
+    for default in defaults:
+        vector = default["vector"]
         row = conn.execute(
             """
             SELECT id
@@ -2758,27 +2820,27 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
             (template_id, vector),
         ).fetchone()
         values = (
-            display_name,
+            default["display_name"],
             "internal_ip",
             "transmits",
-            "DNS",
+            default["protocol"],
             "packets_s",
             "over",
-            warning,
-            critical,
+            default["warning"],
+            default["critical"],
             60,
             1,
             5,
             1,
-            "DETECTION_ONLY",
+            default["response"],
             "53",
-            vector,
-            "src_ip,dst_ip,dst_port,proto",
-            profile_id,
-            profile_id,
-            profile_id,
-            "response_profile",
-            1,
+            default["detection_key"],
+            default["group_by"],
+            default["profile_id"],
+            default["profile_id"],
+            default["profile_id"],
+            default["mitigation_mode"],
+            default["mitigation_enabled"],
             1,
             32,
             128,
@@ -2787,7 +2849,7 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
             10,
             0.75,
             1,
-            "Regra oficial DNS outbound: somente destination /32 udp/53 via FLOWSPEC_AUTO_BLOCK_DST_DNS.",
+            default["notes"],
             now,
         )
         if row is None:
@@ -6976,6 +7038,7 @@ def normalize_detection_vector(value: Any) -> str:
 
 
 DEFAULT_VECTOR_DISPLAY_NAMES = {
+    DNS_SINGLE_FLOW_OUTBOUND_VECTOR: "Ataque DNS por fluxo único",
     "DNS_INTERNAL_IP_HIGH_BITS": "DNS alto em bits",
     "DNS_INTERNAL_IP_HIGH_PPS": "DNS alto por IP",
     "DNS_INTERNAL_IP_TO_DST_HIGH_PPS": "DNS alto por destino",
@@ -11626,8 +11689,8 @@ def detection_rule_mitigation_config(
 
 def anomaly_mitigation_config(conn: sqlite3.Connection, event: dict[str, Any], attack_vector_name: str) -> dict[str, Any] | None:
     names = [attack_vector_name]
-    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"}:
-        names.extend(["DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"])
+    if attack_vector_name in {*DNS_OUTBOUND_TEMPLATE_VECTORS, "dns_abuse_outbound"}:
+        names.extend([DNS_SINGLE_FLOW_OUTBOUND_VECTOR, "DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"])
     seen: set[str] = set()
     detection_template_event = clean_text(event.get("anomaly_source")).lower() == "detection_template_rule"
     for name in names:
@@ -11678,7 +11741,7 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
         return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == UDP_DOWNLOAD_REFLECTION_VECTOR:
         return ["FLOWSPEC_BLOCK_DST_UDP_SRC_PORT"]
-    if attack_vector_name in {"DNS_QUERY_OUTBOUND_CLIENT", "DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "dns_abuse_outbound"}:
+    if attack_vector_name in {*DNS_OUTBOUND_TEMPLATE_VECTORS, "dns_abuse_outbound"}:
         return ["FLOWSPEC_AUTO_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_BLOCK_DST_UDP_PORT", "FLOWSPEC_BLOCK_SRC_TO_DST_UDP"]
     if attack_vector_name == "DNS_REFLECTION_INBOUND":
         return ["FLOWSPEC_BLOCK_SRC_DNS_RESPONSE", "FLOWSPEC_BLOCK_DST_DNS"]
@@ -11934,7 +11997,7 @@ def is_legacy_dns_event(event: dict[str, Any] | None) -> bool:
 
 def dns_outbound_attack_vector_name(event: dict[str, Any]) -> str:
     event_vector = clean_text(event.get("attack_vector_name") or event.get("vector") or event.get("vector_name"))
-    if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT"}:
+    if event_vector in {"DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "DNS_QUERY_OUTBOUND_CLIENT", DNS_SINGLE_FLOW_OUTBOUND_VECTOR}:
         return event_vector
     if event_vector == "dns_abuse_outbound":
         return "DNS_QUERY_OUTBOUND_CLIENT"
@@ -12651,6 +12714,89 @@ def dns_outbound_candidates(
     return result
 
 
+def dns_single_flow_manual_candidate(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    confidence: float,
+) -> dict[str, Any] | None:
+    top_flow = top_udp_flow_for_mitigation(event, flows)
+    src_ip = clean_ip(top_flow.get("src_ip") or event.get("top_src_ip") or event.get("target_ip"))
+    dst_ip = clean_ip(top_flow.get("dst_ip") or event.get("top_dst_ip"))
+    src_port = int(top_flow.get("src_port") or event.get("top_src_port") or 0)
+    dst_port = int(top_flow.get("dst_port") or event.get("top_dst_port") or event.get("target_port") or 0)
+    if not src_ip or not dst_ip or dst_port != 53:
+        return None
+    candidate = base_mitigation_candidate(
+        event,
+        DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+        "Candidato manual especifico para a conversa DNS deterministica observada.",
+        max(confidence, 0.9),
+    )
+    candidate.update(
+        {
+            "src_cidr": cidr_from_ip_or_cidr(src_ip),
+            "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "protocol": "udp",
+            "dst_port": "53",
+            "target_scope": cidr_from_ip_or_cidr(dst_ip),
+            "target_ip": dst_ip,
+            "target_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "candidate_role": "conservative",
+            "manual_approval_required": True,
+            "allow_auto": False,
+            "mitigation_basis": "dns_outbound_conversation",
+            "mitigation_reason": "Source /32 + destination /32 + UDP destination-port 53; source-port preservada apenas como evidencia.",
+            "top_flow": {
+                "src_ip": src_ip,
+                "src_port": src_port,
+                "dst_ip": dst_ip,
+                "dst_port": 53,
+                "packets": int(top_flow.get("packets") or event.get("top_packets") or 0),
+                "bytes": int(top_flow.get("bytes") or event.get("top_bytes") or 0),
+                "protocol": "udp",
+            },
+        }
+    )
+    vector = anomaly_mitigation_config(conn, event, DNS_SINGLE_FLOW_OUTBOUND_VECTOR) or {}
+    manual_profile = default_bgp_profile(
+        conn,
+        ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP"],
+        allow_generic_fallback=False,
+    )
+    if manual_profile is not None:
+        vector = {
+            **vector,
+            "response_profile_id": manual_profile["id"],
+            "mitigation_enabled": True,
+            "mitigation_mode": "manual_approval",
+        }
+    attached = attach_mitigation_config(conn, candidate, vector)
+    attached.update(
+        {
+            "src_cidr": cidr_from_ip_or_cidr(src_ip),
+            "dst_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "src_prefix": cidr_from_ip_or_cidr(src_ip),
+            "dst_prefix": cidr_from_ip_or_cidr(dst_ip),
+            "target_prefix": cidr_from_ip_or_cidr(dst_ip),
+            "src_port": "",
+            "dst_port": "53",
+            "protocol": "udp",
+            "target_scope": cidr_from_ip_or_cidr(dst_ip),
+            "target_ip": dst_ip,
+            "target_cidr": cidr_from_ip_or_cidr(dst_ip),
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "manual_approval_required": True,
+            "allow_auto": False,
+        }
+    )
+    attached["mitigation_key"] = mitigation_key_for_candidate(attached)
+    return attached
+
+
 def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
     if anomaly_id < 0:
         group = find_consolidated_security_anomaly_group(anomaly_id)
@@ -12716,6 +12862,10 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
             event_target_port = int(event.get("target_port") or 0)
         except (TypeError, ValueError):
             event_target_port = 0
+        if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+            candidate = dns_single_flow_manual_candidate(conn, event, flows, confidence)
+            return [candidate] if candidate else []
+
         if event_vector in OUTBOUND_DST_PORT_VECTORS:
             candidate = outbound_dst_port_candidate(event, confidence)
             if not candidate:
@@ -13317,6 +13467,7 @@ def anomaly_vector_text(event: dict[str, Any]) -> str:
 
 
 ANOMALY_TYPE_LABELS = {
+    DNS_SINGLE_FLOW_OUTBOUND_VECTOR: "Ataque DNS por fluxo único",
     "PREFIX_INTERNAL_IP_HIGH_UDP_PPS_ATTACK": "UDP flood por IP",
     "PREFIX_INTERNAL_IP_HIGH_UDP_PPS": "UDP alto por IP",
     "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS": "UDP alto por destino",
@@ -13899,9 +14050,10 @@ def enrich_anomaly_with_flows(
         filters.append("proto = 6")
     outbound_scope = outbound_dst_port_scope(event)
     exact_top_src_ip = outbound_scope["src_ip"]
+    exact_top_src_port = int(outbound_scope["src_port"] or 0)
     exact_top_dst_ip = outbound_scope["dst_ip"]
     exact_top_dst_port = int(outbound_scope["dst_port"] or 0)
-    if outbound_scope["vector"] in OUTBOUND_DST_PORT_VECTORS:
+    if outbound_scope["vector"] in STRICT_DST_CONVERSATION_VECTORS:
         if exact_top_src_ip:
             params["top_src_ip"] = clickhouse_ip_string_param(exact_top_src_ip, "top_src_ip")
             params["top_src_ip_plain"] = exact_top_src_ip
@@ -13910,6 +14062,9 @@ def enrich_anomaly_with_flows(
             params["top_dst_ip"] = clickhouse_ip_string_param(exact_top_dst_ip, "top_dst_ip")
             params["top_dst_ip_plain"] = exact_top_dst_ip
             filters.append(clickhouse_ip_matches_expr("dst_ip", "top_dst_ip"))
+        if outbound_scope["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and exact_top_src_port > 0:
+            params["top_src_port"] = exact_top_src_port
+            filters.append("src_port = {top_src_port:UInt16}")
         if exact_top_dst_port > 0:
             params["top_dst_port"] = exact_top_dst_port
             filters.append("dst_port = {top_dst_port:UInt16}")
@@ -13971,11 +14126,13 @@ def enrich_anomaly_with_flows(
         proto_filter = dynamic_protocol_filter_for_decoder(decoder, dns_like, schema)
         if proto_filter:
             dynamic_filters.append(proto_filter)
-        if outbound_scope["vector"] in OUTBOUND_DST_PORT_VECTORS:
+        if outbound_scope["vector"] in STRICT_DST_CONVERSATION_VECTORS:
             if exact_top_src_ip and mapping["src_ip"]:
                 dynamic_filters.append(dynamic_clickhouse_ip_matches_expr(mapping["src_ip"], "top_src_ip", schema))
             if exact_top_dst_ip and mapping["dst_ip"]:
                 dynamic_filters.append(dynamic_clickhouse_ip_matches_expr(mapping["dst_ip"], "top_dst_ip", schema))
+            if outbound_scope["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and exact_top_src_port > 0 and mapping["src_port"]:
+                dynamic_filters.append(f"{mapping['src_port']} = {{top_src_port:UInt16}}")
             if exact_top_dst_port > 0 and mapping["dst_port"]:
                 dynamic_filters.append(f"{mapping['dst_port']} = {{top_dst_port:UInt16}}")
             if mapping["dst_port"]:
@@ -14337,6 +14494,7 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     with sqlite_connection() as conn:
         context = fetch_anomaly_mitigation_context(conn, anomaly_id)
     event = context["event"]
+    deterministic_single_flow = outbound_dst_port_event_vector(event) == DNS_SINGLE_FLOW_OUTBOUND_VECTOR
     warnings: list[str] = []
     saved_flows = analysis_flows_from_context(context)
     clickhouse_flows: list[dict[str, Any]] = []
@@ -14453,7 +14611,7 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
     for index, candidate in enumerate(candidates):
         candidate["candidate_index"] = index
         enrich_deterministic_candidate(candidate, top_flow_by_packets, total_packets, total_bytes)
-    evidence_status = "weak" if candidates else "insufficient" if fallback_candidate_block_reason else "weak"
+    evidence_status = "confirmed" if deterministic_single_flow else "weak" if candidates else "insufficient" if fallback_candidate_block_reason else "weak"
     mitigation_allowed = False
     recommended_action = "fallback_analysis" if candidates else "alert_only"
     return {
@@ -14463,8 +14621,12 @@ def deterministic_anomaly_analysis(anomaly_id: int) -> dict[str, Any]:
         "mitigation_allowed": mitigation_allowed,
         "recommended_action": recommended_action,
         "recommended_candidate": "fallback_analysis" if candidates else "alert_only",
-        "classification": "unknown" if candidates else "insufficient_flow_evidence",
-        "reason": "" if candidates else "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
+        "classification": "attack" if deterministic_single_flow else "unknown" if candidates else "insufficient_flow_evidence",
+        "confidence": 0.99 if deterministic_single_flow else None,
+        "confidence_label": "high" if deterministic_single_flow else "",
+        "severity": "critical" if deterministic_single_flow else clean_text(event.get("severity")),
+        "deterministic_severity_immutable": deterministic_single_flow,
+        "reason": "Conversa completa UDP/53 atingiu o threshold deterministico de 5 Kpps." if deterministic_single_flow else "" if candidates else "Anomalia detectada por serie temporal, mas flows relacionados nao contem volume suficiente para identificar vetor dominante.",
         "clickhouse_rows_considered": clickhouse_rows_considered,
         "rows_considered": len(rows),
         "prioritized_rows_considered": len(prioritized_rows),
@@ -15026,6 +15188,12 @@ def compact_deterministic_analysis_for_ai(deterministic: dict[str, Any]) -> dict
         return {}
     keys = (
         "source",
+        "classification",
+        "confidence",
+        "confidence_label",
+        "severity",
+        "deterministic_severity_immutable",
+        "reason",
         "clickhouse_rows_considered",
         "rows_considered",
         "prioritized_rows_considered",
@@ -15061,6 +15229,9 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "attack_vector_name",
         "vector_name",
         "severity",
+        "classification",
+        "confidence",
+        "confidence_label",
         "triggered_severity",
         "trigger_value",
         "trigger_threshold",
@@ -15355,6 +15526,7 @@ def mitigation_candidate_can_create_pending(candidate: dict[str, Any]) -> bool:
 
 
 DNS_OUTBOUND_POLICY_TOKENS = {
+    "dns_single_flow_outbound",
     "dns_internal_ip_high_pps",
     "dns_internal_ip_high_bits",
     "dns_abuse_outbound",
@@ -15575,6 +15747,7 @@ def mitigation_ai_playbook(anomaly: dict[str, Any], candidates: list[dict[str, A
         "decision_only": True,
         "never_create_new_rule": True,
         "never_change_deterministic_proposal": True,
+        "never_change_deterministic_severity_or_classification": True,
         "allowed_response_fields": ["apply_mitigation", "reason"],
     }
 
@@ -22049,6 +22222,24 @@ def detection_number(value: Any) -> float | None:
         return None
 
 
+def detection_threshold_matches(
+    rule_or_event: dict[str, Any],
+    observed: float,
+    threshold: float,
+    comparison: str,
+) -> bool:
+    vector = clean_text(
+        rule_or_event.get("vector")
+        or rule_or_event.get("rule_name")
+        or rule_or_event.get("vector_name")
+        or rule_or_event.get("attack_vector_name")
+        or rule_or_event.get("source_name")
+    ).upper()
+    if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and clean_text(comparison).lower() == "over":
+        return observed >= threshold
+    return comparison_matches(observed, threshold, comparison)
+
+
 def canonical_detection_unit(metric: Any) -> str:
     normalized = clean_text(metric).lower()
     return {
@@ -22192,7 +22383,7 @@ def build_detection_threshold_state(
             "threshold": trigger_threshold,
             "passed": bool(
                 trigger_threshold is not None
-                and comparison_matches(float(trigger_value), float(trigger_threshold), comparison)
+                and detection_threshold_matches(candidate, float(trigger_value), float(trigger_threshold), comparison)
             ),
         },
         "conditions_passed": detection_additional_conditions(candidate),
@@ -22373,7 +22564,12 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
     reasons: list[str] = []
     if severity == "warning" and not allow_warning_auto:
         reasons.append("warning_manual_only")
-    if automatic_threshold is not None and not comparison_matches(float(observed), float(automatic_threshold), comparison):
+    if automatic_threshold is not None and not detection_threshold_matches(
+        {**rule_config, **source_details, **anomaly},
+        float(observed),
+        float(automatic_threshold),
+        comparison,
+    ):
         reasons.append("below_automatic_mitigation_threshold")
     if evidence and not sqlite_bool(evidence.get("sufficient_for_automatic")):
         reasons.append("insufficient_time_series_evidence")
@@ -22412,11 +22608,16 @@ def outbound_dst_port_scope(event: dict[str, Any]) -> dict[str, Any]:
         dst_port = int(event.get("top_dst_port") or event.get("target_port") or details.get("top_dst_port") or details.get("target_port") or 0)
     except (TypeError, ValueError):
         dst_port = 0
+    try:
+        src_port = int(event.get("top_src_port") or details.get("top_src_port") or 0)
+    except (TypeError, ValueError):
+        src_port = 0
     protocol = outbound_dst_port_protocol({**details, **event})
     return {
         "vector": outbound_dst_port_event_vector(event),
         "src_ip": clean_ip(event.get("top_src_ip") or details.get("top_src_ip") or event.get("src_ip") or event.get("target_ip")),
         "dst_ip": clean_ip(event.get("top_dst_ip") or details.get("top_dst_ip") or event.get("dst_ip")),
+        "src_port": src_port,
         "dst_port": dst_port,
         "protocol": protocol,
         "rule_dst_port": clean_text(rule_config.get("dst_port")),
@@ -22453,7 +22654,7 @@ def detection_excluded_ports(value: Any) -> set[int]:
 
 def flow_matches_outbound_dst_port_scope(flow: dict[str, Any], event: dict[str, Any]) -> bool:
     scope = outbound_dst_port_scope(event)
-    if scope["vector"] not in OUTBOUND_DST_PORT_VECTORS:
+    if scope["vector"] not in STRICT_DST_CONVERSATION_VECTORS:
         return True
     try:
         flow_dst_port = int(flow.get("dst_port") or 0)
@@ -22465,6 +22666,8 @@ def flow_matches_outbound_dst_port_scope(flow: dict[str, Any], event: dict[str, 
         if scope["src_ip"] and clean_ip(flow.get("src_ip")) != scope["src_ip"]:
             return False
         if clean_ip(flow.get("dst_ip")) != scope["dst_ip"]:
+            return False
+        if scope["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and int(flow.get("src_port") or 0) != int(scope["src_port"] or 0):
             return False
         if flow_dst_port != int(scope["dst_port"] or 0):
             return False
@@ -22499,8 +22702,13 @@ def query_detection_rule_candidates(
     grouping = detection_rule_grouping(rule)
     outbound_dst_port = detection_rule_is_outbound_dst_port(rule)
     dns_outbound_rule = is_dns_outbound_template_vector(rule.get("vector"))
-    group_by_text = clean_text(rule.get("group_by") or rule.get("detection_key")).lower()
-    group_by_fields = {field.strip() for field in group_by_text.split(",") if field.strip()}
+    group_by_fields = {
+        field.strip()
+        for value in (rule.get("group_by"), rule.get("detection_key"))
+        for field in clean_text(value).lower().split(",")
+        if field.strip()
+    }
+    group_by_src_port = "src_port" in group_by_fields
     group_by_dst_port = "dst_port" in group_by_fields or outbound_dst_port or dns_outbound_rule
     dst_port_expr = "toUInt16(0)"
     if grouping == "subnet":
@@ -22531,6 +22739,8 @@ def query_detection_rule_candidates(
     ]
     if dns_outbound_rule:
         filters.append("proto = 17")
+    if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+        filters.append("dst_port = 53")
     src_port_filter = detection_port_filter_condition("src_port", rule.get("src_port"), "src_port")
     dst_port_filter = detection_port_filter_condition("dst_port", rule.get("dst_port"), "dst_port")
     filters.extend(filter(None, [src_port_filter, dst_port_filter]))
@@ -22543,10 +22753,28 @@ def query_detection_rule_candidates(
     rule_mitigation_mode = normalize_detection_mitigation_mode(rule.get("mitigation_mode"))
     rule_mitigation_enabled = sqlite_bool(rule.get("mitigation_enabled"))
     rule_response = "RESPONSE_PROFILE" if rule_mitigation_enabled and rule_mitigation_mode == "response_profile" else (rule.get("response") or "DETECTION_ONLY")
-    group_column_names = ["bucket", "src_ip", "dst_ip", "internal_ip", "protocol"]
-    if group_by_dst_port:
-        group_column_names.append("dst_port")
+    if group_by_src_port:
+        group_column_names = ["bucket", "src_ip", "src_port", "dst_ip"]
+        if group_by_dst_port:
+            group_column_names.append("dst_port")
+        group_column_names.append("protocol")
+    else:
+        group_column_names = ["bucket", "src_ip", "dst_ip", "internal_ip", "protocol"]
+        if group_by_dst_port:
+            group_column_names.append("dst_port")
     group_columns = ", ".join(group_column_names)
+    grouped_internal_ip_expr = (
+        ("src_ip AS internal_ip" if clean_text(rule.get("direction")).lower() == "transmits" else "dst_ip AS internal_ip")
+        if group_by_src_port
+        else "internal_ip"
+    )
+    grouped_src_port_expr = "src_port," if group_by_src_port else ""
+    grouped_top_src_port_expr = (
+        "src_port AS top_src_port"
+        if group_by_src_port
+        else "argMax(src_port, packet_value * multiplier) AS top_src_port"
+    )
+    final_src_port_expr = "src_port," if group_by_src_port else ""
     grouped_dst_port_expr = "dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS dst_port"
     grouped_top_dst_port_expr = "dst_port AS top_dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS top_dst_port"
     result = query_clickhouse(
@@ -22559,7 +22787,7 @@ def query_detection_rule_candidates(
                 {internal_expr} AS internal_ip,
                 {protocol_expr} AS protocol,
                 {dst_port_expr} AS dst_port,
-                toUInt16(src_port) AS src_port_value,
+                toUInt16(src_port) AS src_port,
                 toFloat64(bytes) AS byte_value,
                 toFloat64(packets) AS packet_value,
                 toFloat64(flow_count) AS flow_value,
@@ -22575,12 +22803,13 @@ def query_detection_rule_candidates(
             SELECT
                 bucket,
                 src_ip,
+                {grouped_src_port_expr}
                 dst_ip,
-                internal_ip,
+                {grouped_internal_ip_expr},
                 protocol,
                 {grouped_dst_port_expr},
                 {grouped_top_dst_port_expr},
-                argMax(src_port_value, packet_value * multiplier) AS top_src_port,
+                {grouped_top_src_port_expr},
                 sum(byte_value * multiplier) AS bytes,
                 sum(packet_value * multiplier) AS packets,
                 sum(flow_value) AS flows,
@@ -22594,6 +22823,7 @@ def query_detection_rule_candidates(
         )
         SELECT
             src_ip,
+            {final_src_port_expr}
             dst_ip,
             internal_ip,
             protocol,
@@ -22620,11 +22850,21 @@ def query_detection_rule_candidates(
     )
     items = []
     for row in rows_as_dicts(result):
+        if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+            if int(row.get("dst_port") or row.get("top_dst_port") or 0) != 53:
+                continue
+            if clean_text(row.get("protocol")).lower() not in {"udp", "17"}:
+                continue
         metric_value = float(row.get("metric_value") or 0)
-        matched = comparison_matches(metric_value, warning_threshold, rule.get("comparison") or "over")
+        matched = detection_threshold_matches(rule, metric_value, warning_threshold, rule.get("comparison") or "over")
         if not matched and not include_unmatched:
             continue
-        severity = "critical" if critical is not None and comparison_matches(metric_value, float(critical), rule.get("comparison") or "over") else "warning"
+        severity = "critical" if critical is not None and detection_threshold_matches(
+            rule,
+            metric_value,
+            float(critical),
+            rule.get("comparison") or "over",
+        ) else "warning"
         first_seen = row.get("first_seen")
         last_seen = row.get("last_seen")
         src_ip = clean_ip(row.get("src_ip"))
@@ -22633,6 +22873,7 @@ def query_detection_rule_candidates(
         dst_port = int(row.get("dst_port") or 0)
         top_dst_port = int(row.get("top_dst_port") or dst_port or 0)
         top_src_port = int(row.get("top_src_port") or 0)
+        src_port = int(row.get("src_port") or top_src_port or 0) if group_by_src_port else None
         if grouping == "subnet":
             scope = {
                 "target_ip": "",
@@ -22667,6 +22908,8 @@ def query_detection_rule_candidates(
                     "window_seconds",
                     "consecutive_windows",
                     "cooldown_seconds",
+                    "detection_key",
+                    "group_by",
                     "dst_port",
                     "src_port",
                     "response",
@@ -22689,6 +22932,7 @@ def query_detection_rule_candidates(
             "scope_type": scope["scope_type"],
             "invalid_scope": scope["invalid_scope"],
             "protocol": "udp" if dns_outbound_rule else clean_text(row.get("protocol")) or normalize_detection_protocol(rule.get("protocol")),
+            "src_port": src_port,
             "target_port": top_dst_port if outbound_dst_port or dns_outbound_rule else None,
             "top_src_ip": src_ip if outbound_dst_port or dns_outbound_rule else "",
             "top_dst_ip": dst_ip if outbound_dst_port or dns_outbound_rule else "",
@@ -22696,8 +22940,8 @@ def query_detection_rule_candidates(
             "top_dst_port": top_dst_port if outbound_dst_port or dns_outbound_rule else None,
             "top_packets": int(float(row.get("packets") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
             "top_bytes": int(float(row.get("bytes") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
-            "mitigation_basis": "dns_outbound_destination" if dns_outbound_rule else "dst_ip,dst_port,protocol" if outbound_dst_port else "",
-            "mitigation_reason": dns_outbound_reason() if dns_outbound_rule else "Alto PPS para destino/porta/protocolo especifico." if outbound_dst_port else "",
+            "mitigation_basis": "dns_outbound_conversation" if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "dns_outbound_destination" if dns_outbound_rule else "dst_ip,dst_port,protocol" if outbound_dst_port else "",
+            "mitigation_reason": "Conversa UDP/53 unica acima de 5 Kpps; classificacao deterministica critical." if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else dns_outbound_reason() if dns_outbound_rule else "Alto PPS para destino/porta/protocolo especifico." if outbound_dst_port else "",
             "packets_s": round(float(row.get("packets_s") or 0), 2),
             "bits_s": round(float(row.get("bits_s") or 0), 2),
             "flows": int(row.get("flows") or 0),
@@ -22735,7 +22979,30 @@ def security_candidate_is_outbound_dst_port(candidate: dict[str, Any]) -> bool:
 
 
 def security_anomaly_dedupe_key(candidate: dict[str, Any]) -> str:
-    if security_candidate_is_outbound_dst_port(candidate):
+    vector = clean_text(candidate.get("vector") or candidate.get("rule_name") or candidate.get("source_name")).upper()
+    if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+        target = ">".join(
+            [
+                f"{clean_ip(candidate.get('src_ip') or candidate.get('internal_ip'))}:{int(candidate.get('top_src_port') or candidate.get('src_port') or 0)}",
+                f"{clean_ip(candidate.get('dst_ip') or candidate.get('top_dst_ip'))}:{int(candidate.get('top_dst_port') or candidate.get('target_port') or 53)}",
+            ]
+        )
+        return "|".join(
+            [
+                clean_text(candidate.get("vector")),
+                str(candidate.get("zone_id") or ""),
+                str(candidate.get("prefix_id") or ""),
+                clean_text(candidate.get("prefix_cidr")),
+                str(candidate.get("template_id") or ""),
+                str(candidate.get("rule_id") or ""),
+                str(candidate.get("sensor_id") or ""),
+                str(candidate.get("input_if") or ""),
+                str(candidate.get("output_if") or ""),
+                target,
+                clean_text(candidate.get("protocol")).lower(),
+            ]
+        )
+    elif security_candidate_is_outbound_dst_port(candidate):
         target = f"{clean_ip(candidate.get('src_ip') or candidate.get('internal_ip'))}>{clean_ip(candidate.get('dst_ip') or candidate.get('top_dst_ip'))}:{int(candidate.get('top_dst_port') or candidate.get('target_port') or 0)}"
     elif candidate.get("domain") == "subnet":
         target = str(candidate.get("prefix_id") or "")
@@ -24112,6 +24379,14 @@ def anomaly_event_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     result.update(source)
     source_details = result.get("source_details_json") or result.get("source_details") or {}
     result.update(detection_fields_from_source_details(source_details))
+    result["classification"] = clean_text(source_details.get("classification"))
+    result["confidence"] = detection_number(source_details.get("deterministic_confidence"))
+    result["confidence_label"] = clean_text(source_details.get("deterministic_confidence_label"))
+    if outbound_dst_port_event_vector(result) == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+        result["severity"] = "critical"
+        result["triggered_severity"] = "critical"
+        result["critical_threshold"] = 5_000.0
+        result["trigger_threshold"] = 5_000.0
     result["mitigation_state"] = mitigation_state_from_status(
         result.get("auto_mitigation_status"),
         result.get("status"),
@@ -26032,12 +26307,14 @@ def flow_matches_anomaly_target(flow: dict[str, Any], event: dict[str, Any]) -> 
 
 
 def security_item_matches_event_target(item: dict[str, Any], event: dict[str, Any]) -> bool:
-    if outbound_dst_port_event_vector(event) in OUTBOUND_DST_PORT_VECTORS:
+    if outbound_dst_port_event_vector(event) in STRICT_DST_CONVERSATION_VECTORS:
         scope = outbound_dst_port_scope(event)
         if scope["strict"]:
             if scope["src_ip"] and clean_ip(item.get("src_ip") or item.get("target_ip")) != scope["src_ip"]:
                 return False
             if clean_ip(item.get("dst_ip")) != scope["dst_ip"]:
+                return False
+            if scope["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and int(item.get("top_src_port") or item.get("src_port") or 0) != int(scope["src_port"] or 0):
                 return False
             if int(item.get("top_dst_port") or item.get("target_port") or 0) != int(scope["dst_port"] or 0):
                 return False
@@ -26655,6 +26932,26 @@ def find_security_anomaly_id_for_candidate(conn: sqlite3.Connection, candidate: 
 
 
 def detection_template_dns_anomaly_dedupe_key(candidate: dict[str, Any]) -> str:
+    vector = clean_text(candidate.get("vector") or candidate.get("rule_name")).upper()
+    if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+        return "|".join(
+            [
+                vector,
+                clean_ip(candidate.get("top_src_ip") or candidate.get("src_ip") or candidate.get("internal_ip")),
+                str(int(candidate.get("top_src_port") or candidate.get("src_port") or 0)),
+                clean_ip(candidate.get("top_dst_ip") or candidate.get("dst_ip")),
+                str(int(candidate.get("top_dst_port") or candidate.get("target_port") or 53)),
+                clean_text(candidate.get("protocol") or "udp").lower(),
+                str(candidate.get("sensor_id") or candidate.get("sensor") or candidate.get("exporter_ip") or ""),
+                str(candidate.get("prefix_id") or ""),
+                clean_text(candidate.get("prefix_cidr")),
+                str(candidate.get("zone_id") or ""),
+                str(candidate.get("template_id") or ""),
+                str(candidate.get("rule_id") or ""),
+                str(candidate.get("input_if") or ""),
+                str(candidate.get("output_if") or ""),
+            ]
+        )
     return "|".join(
         [
             clean_text(candidate.get("vector")),
@@ -26702,11 +26999,15 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "display_name": candidate.get("display_name") or automatic_vector_display_name(vector_name),
         "rule_config": candidate.get("rule_config") or {},
         "top_src_ip": src_ip,
+        "top_src_port": src_port,
         "top_dst_ip": dst_ip,
         "top_dst_port": dst_port,
         "target_port": dst_port,
-        "mitigation_basis": "dns_outbound_destination",
-        "mitigation_reason": dns_outbound_reason(),
+        "mitigation_basis": candidate.get("mitigation_basis") or "dns_outbound_destination",
+        "mitigation_reason": candidate.get("mitigation_reason") or dns_outbound_reason(),
+        "classification": "attack" if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "",
+        "deterministic_confidence": 0.99 if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else None,
+        "deterministic_confidence_label": "high" if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "",
         "threshold_warning": candidate.get("threshold_warning"),
         "threshold_critical": candidate.get("threshold_critical"),
         "automatic_mitigation_threshold": candidate.get("automatic_mitigation_threshold"),
@@ -26733,8 +27034,8 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "unique_src_ips": 1,
         "unique_dst_ips": int(candidate.get("unique_dst_ips") or 1),
         "unique_dst_ports": int(candidate.get("unique_dst_ports") or 1),
-        "mitigation_basis": "dns_outbound_destination",
-        "mitigation_reason": dns_outbound_reason(),
+        "mitigation_basis": candidate.get("mitigation_basis") or "dns_outbound_destination",
+        "mitigation_reason": candidate.get("mitigation_reason") or dns_outbound_reason(),
         "top_src_ip": src_ip,
         "top_dst_ip": dst_ip,
         "top_src_port": src_port,
@@ -28475,7 +28776,7 @@ def anomaly_timeseries_window(event: dict[str, Any]) -> tuple[datetime, datetime
 
 def anomaly_timeseries_specific_scope(event: dict[str, Any]) -> bool:
     vector = clean_text(event.get("vector") or event.get("vector_name") or event.get("attack_vector_name") or event.get("source_name")).upper()
-    if vector in OUTBOUND_DST_PORT_VECTORS:
+    if vector in STRICT_DST_CONVERSATION_VECTORS:
         return True
     if "TO_DST" in vector or "_DST_" in vector or vector.endswith("_DST_HIGH_PPS"):
         return True
@@ -28541,13 +28842,18 @@ def anomaly_timeseries_flow_raw(
         filters.append(protocol_filter)
     specific_scope = query_mode == "auto" and anomaly_timeseries_specific_scope(event)
     if specific_scope:
+        vector = outbound_dst_port_event_vector(event)
         top_dst_ip = clean_ip(event.get("top_dst_ip") or event.get("dominant_dst_ip"))
+        top_src_port = int(event.get("top_src_port") or 0)
         top_dst_port = int(event.get("top_dst_port") or event.get("target_port") or event.get("dominant_dst_port") or 0)
         if top_dst_ip and mapping["dst_ip"]:
             params["top_dst_ip"] = top_dst_ip
             params["top_dst_ip_canonical"] = clickhouse_ip_string_param(top_dst_ip, "top_dst_ip")
             dst_expr = clickhouse_ip_expr(mapping["dst_ip"], schema)
             filters.append(f"({dst_expr} = {{top_dst_ip:String}} OR {dst_expr} = {{top_dst_ip_canonical:String}} OR endsWith({dst_expr}, {{top_dst_ip:String}}))")
+        if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and top_src_port > 0 and mapping["src_port"]:
+            params["top_src_port"] = top_src_port
+            filters.append(f"{mapping['src_port']} = {{top_src_port:UInt16}}")
         if top_dst_port > 0 and mapping["dst_port"]:
             params["top_dst_port"] = top_dst_port
             filters.append(f"{mapping['dst_port']} = {{top_dst_port:UInt16}}")
