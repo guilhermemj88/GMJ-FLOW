@@ -2225,8 +2225,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas">
           <i data-lucide="bell"></i><span>Alertas</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Configurações">
-          <i data-lucide="settings"></i><span>Configurações</span>
+        <button id="cgnatNavButton" type="button" data-nav-view="cgnat">
+          <i data-lucide="settings"></i><span>Configurações / CGNAT</span>
         </button>
         <button id="logoutButton" type="button">
           <i data-lucide="log-out"></i><span>Sair</span>
@@ -5802,6 +5802,102 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
         </section>
 
+        <section id="view-cgnat" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">CGNAT / Mapeamentos</h1>
+              <div class="subtle">Arquivo → IA local → validação determinística → prévia → aprovação → ativação</div>
+            </div>
+            <div class="toolbar">
+              <button id="refreshCgnatButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+            </div>
+          </div>
+          <div id="cgnatStatus" class="subtle mb-3">Carregando configuração CGNAT...</div>
+
+          <section class="panel p-3 mb-3">
+            <div class="panel-title mb-2">Importar arquivo</div>
+            <div id="cgnatDropZone" class="border rounded p-4 text-center mb-3" tabindex="0" role="button" aria-label="Solte um arquivo de mapeamento CGNAT">
+              <i data-lucide="upload-cloud"></i>
+              <div><strong>Arraste e solte o arquivo aqui</strong></div>
+              <div class="subtle">ou clique para selecionar um arquivo textual seguro</div>
+              <input id="cgnatFileInput" type="file" class="d-none" accept=".txt,.log,.csv,.cfg,.conf,.dump,.export,text/plain">
+            </div>
+            <div id="cgnatFileMeta" class="metric-readout mb-3">Nenhum arquivo selecionado.</div>
+            <div class="flow-search-grid mb-3">
+              <div class="field"><label for="cgnatSourceType">Fabricante/formato</label><select id="cgnatSourceType" class="form-select form-select-sm"><option value="">Detectar pela IA</option><option value="a10">A10</option><option value="mikrotik">MikroTik</option><option value="other">Outro</option></select></div>
+              <div class="field"><label for="cgnatDeviceName">Equipamento</label><input id="cgnatDeviceName" class="form-control form-control-sm" placeholder="A10-CGNAT-01"></div>
+              <div class="field"><label for="cgnatPoolName">Pool</label><input id="cgnatPoolName" class="form-control form-control-sm" placeholder="POOL-OUTSIDE"></div>
+              <div class="field"><label for="cgnatConnector">Conector</label><select id="cgnatConnector" class="form-select form-select-sm"><option value="">Sem vínculo</option></select></div>
+              <div class="field"><label for="cgnatValidFrom">Válido desde</label><input id="cgnatValidFrom" type="datetime-local" class="form-control form-control-sm"></div>
+              <div class="field"><label for="cgnatValidUntil">Válido até</label><input id="cgnatValidUntil" type="datetime-local" class="form-control form-control-sm"></div>
+            </div>
+            <div class="toolbar">
+              <button id="processCgnatFileButton" type="button" class="btn btn-sm btn-success"><i data-lucide="brain-circuit"></i><span>Interpretar com IA local</span></button>
+              <button id="clearCgnatFileButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="x"></i><span>Limpar</span></button>
+            </div>
+            <div id="cgnatProgress" class="subtle mt-2">Aguardando arquivo.</div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div class="panel-title">Prévia do lote</div>
+              <div id="cgnatBatchBadge" class="badge-soft off">Nenhum lote</div>
+            </div>
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card"><div class="metric-label">Interpretados</div><div id="cgnatTotalRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Válidos</div><div id="cgnatValidRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Inválidos</div><div id="cgnatInvalidRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Duplicados</div><div id="cgnatDuplicateRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Sobreposições</div><div id="cgnatOverlapRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Ignorados</div><div id="cgnatIgnoredRows" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Fabricante</div><div id="cgnatDetectedSource" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Confiança</div><div id="cgnatConfidence" class="metric-value">-</div></div>
+            </div>
+            <div id="cgnatParserNotes" class="metric-readout mb-3">Sem notas do parser.</div>
+            <div class="toolbar mb-2">
+              <input id="cgnatPreviewSearch" class="form-control form-control-sm" placeholder="Pesquisar IP, pool, erro ou linha">
+              <select id="cgnatPreviewFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="valid">Válidos</option><option value="invalid">Inválidos</option><option value="duplicate">Duplicados</option><option value="overlap">Sobreposições</option></select>
+              <button id="filterCgnatPreviewButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="search"></i><span>Filtrar</span></button>
+              <button id="downloadCgnatErrorsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="download"></i><span>Relatório de erros</span></button>
+            </div>
+            <div class="table-wrap mb-3">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>Linha</th><th>IP público</th><th>IP privado</th><th>Protocolo</th><th>Faixa</th><th>Pool</th><th>Confiança</th><th>Status/erro</th></tr></thead>
+                <tbody id="cgnatPreviewTable"><tr><td colspan="8" class="text-muted">Nenhuma prévia.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="toolbar">
+              <button id="approveCgnatBatchButton" type="button" class="btn btn-sm btn-success"><i data-lucide="check"></i><span>Confirmar importação</span></button>
+              <button id="approveActivateCgnatBatchButton" type="button" class="btn btn-sm btn-outline-success"><i data-lucide="power"></i><span>Confirmar e ativar</span></button>
+              <button id="replaceActivateCgnatBatchButton" type="button" class="btn btn-sm btn-outline-warning"><i data-lucide="replace"></i><span>Substituir lote ativo</span></button>
+              <button id="rejectCgnatBatchButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="ban"></i><span>Rejeitar</span></button>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="panel-title mb-2">Histórico de lotes</div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>ID</th><th>Arquivo</th><th>Origem</th><th>Modelo</th><th>Linhas</th><th>Status</th><th>Criado/aprovado</th><th>Ações</th></tr></thead>
+                <tbody id="cgnatHistoryTable"><tr><td colspan="8" class="text-muted">Nenhum lote.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div class="panel-title">Mapeamentos ativos</div>
+              <input id="cgnatMappingSearch" class="form-control form-control-sm" style="max-width:320px" placeholder="Pesquisar IP, cliente, pool ou equipamento">
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>IP público</th><th>Faixa</th><th>Protocolo</th><th>Cliente privado</th><th>Equipamento/pool</th><th>Subscriber</th><th>Lote</th><th>Confiança</th></tr></thead>
+                <tbody id="cgnatMappingsTable"><tr><td colspan="8" class="text-muted">Nenhum mapeamento ativo.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -7475,6 +7571,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let currentBgpMitigationEvaluation = null;
     let currentBgpMitigationConnectorId = null;
     let currentAiMitigationAnalysis = null;
+    let currentCgnatBatchId = null;
+    let currentCgnatBatchStatus = '';
+    let selectedCgnatFile = null;
+    let cgnatConfigState = null;
     let aiOverviewState = null;
     let aiProviders = [];
     let aiModels = [];
@@ -7754,6 +7854,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('bgpNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.getElementById('mitigationNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
+      document.getElementById('cgnatNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       document.querySelectorAll('.ai-admin-control').forEach(element => {
         element.classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
       });
@@ -15881,10 +15982,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Classificação', event.classification || 'attack'],
         ['Confiança determinística', event.confidence_label || 'high']
       ] : [];
+      const cgnatBadge = event.cgnat_ambiguous
+        ? '<span class="badge-soft warn">Mapeamento CGNAT ambíguo</span>'
+        : event.cgnat_matched
+          ? '<span class="badge-soft ok">Cliente CGNAT identificado</span>'
+          : '<span class="badge-soft off">Cliente CGNAT não identificado</span>';
+      const cgnatFields = event.cgnat_lookup_performed ? [
+        ['IP público CGNAT', event.public_ip || '-'],
+        ['Porta pública observada', event.public_port ?? '-'],
+        ['Cliente CGNAT/private_ip', event.private_ip || '-'],
+        ['Faixa atribuída', event.mapped_port_start !== null && event.mapped_port_start !== undefined ? `${event.mapped_port_start}-${event.mapped_port_end}` : '-'],
+        ['Equipamento CGNAT', event.cgnat_device_name || '-'],
+        ['Pool CGNAT', event.cgnat_pool_name || '-'],
+        ['Fabricante CGNAT', event.cgnat_source_type || '-'],
+        ['Fonte do mapeamento', event.cgnat_mapping_source || '-'],
+        ['Confiança CGNAT', event.cgnat_confidence !== null && event.cgnat_confidence !== undefined ? `${(Number(event.cgnat_confidence) * 100).toFixed(1)}%` : '-'],
+        ['Lote CGNAT', event.cgnat_batch_id ? `#${event.cgnat_batch_id}` : '-'],
+        ['Mapeamento ativo', event.cgnat_mapping_active === true ? 'sim' : event.cgnat_mapping_active === false ? 'não' : '-'],
+        ['Ambiguidade CGNAT', event.cgnat_ambiguous ? 'sim' : 'não'],
+        ['Subscriber', [event.subscriber_id, event.subscriber_name].filter(Boolean).join(' / ') || '-'],
+        ['Participação da conversa', event.cgnat_conversation_share !== null && event.cgnat_conversation_share !== undefined ? `${(Number(event.cgnat_conversation_share) * 100).toFixed(1)}%` : '-'],
+        ['Gate CGNAT', event.cgnat_mitigation_block_reason || '-']
+      ] : [];
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
         ['Severidade disparada', triggeredSeverity],
         ...dnsSingleFlowFields,
+        ...cgnatFields,
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],
@@ -15949,7 +16073,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const legacyDnsWarning = isLegacyDnsAnomaly(event)
         ? '<div class="text-warning mb-2">Detector legacy: mitigação automática desativada. Use templates de detecção.</div>'
         : '';
-      return `${legacyDnsWarning}<div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
+      return `${legacyDnsWarning}<div class="mb-2">${cgnatBadge}</div><div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
         <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
       `).join('')}</div>`;
     }
@@ -18945,6 +19069,238 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
+    function cgnatStatusBadge(status) {
+      const normalized = String(status || '').toLowerCase();
+      const css = normalized === 'active' ? 'ok'
+        : ['awaiting_approval', 'approved', 'processing', 'parsed'].includes(normalized) ? 'warn'
+          : ['failed', 'validation_failed', 'rejected'].includes(normalized) ? 'severity-critical'
+            : 'off';
+      return `<span class="badge-soft ${css}">${escapeHtml(normalized || '-')}</span>`;
+    }
+
+    function cgnatDateValue(id) {
+      const value = document.getElementById(id)?.value;
+      if (!value) return null;
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+    }
+
+    function selectCgnatFile(file) {
+      selectedCgnatFile = file || null;
+      if (!selectedCgnatFile) {
+        setText('cgnatFileMeta', 'Nenhum arquivo selecionado.');
+        setText('cgnatProgress', 'Aguardando arquivo.');
+        document.getElementById('cgnatFileInput').value = '';
+        return;
+      }
+      setText('cgnatFileMeta', `${selectedCgnatFile.name} — ${formatBytes(selectedCgnatFile.size)}`);
+      const maxBytes = Number(cgnatConfigState?.limits?.max_file_bytes || 0);
+      setText(
+        'cgnatProgress',
+        maxBytes && selectedCgnatFile.size > maxBytes
+          ? `Arquivo excede o limite de ${formatBytes(maxBytes)}.`
+          : 'Arquivo pronto para interpretação.'
+      );
+    }
+
+    function renderCgnatBatch(batch) {
+      currentCgnatBatchId = batch?.id ? Number(batch.id) : null;
+      currentCgnatBatchStatus = String(batch?.status || '');
+      setText('cgnatTotalRows', formatNumber(batch?.total_rows || 0));
+      setText('cgnatValidRows', formatNumber(batch?.valid_rows || 0));
+      setText('cgnatInvalidRows', formatNumber(batch?.invalid_rows || 0));
+      setText('cgnatDuplicateRows', formatNumber(batch?.duplicate_rows || 0));
+      setText('cgnatOverlapRows', formatNumber(batch?.overlapping_rows || 0));
+      setText('cgnatIgnoredRows', formatNumber(batch?.ignored_rows || 0));
+      setText('cgnatDetectedSource', batch?.source_type_confirmed || batch?.source_type_detected || '-');
+      setText('cgnatConfidence', batch?.confidence !== undefined ? `${(Number(batch.confidence || 0) * 100).toFixed(1)}%` : '-');
+      document.getElementById('cgnatBatchBadge').outerHTML = `<span id="cgnatBatchBadge" class="badge-soft ${batch?.status === 'active' ? 'ok' : batch?.status === 'awaiting_approval' ? 'warn' : 'off'}">Lote ${batch?.id ? `#${batch.id}` : '-'} / ${escapeHtml(batch?.status || 'nenhum')}</span>`;
+      setText('cgnatParserNotes', (batch?.parser_notes || []).join('\n') || 'Sem notas do parser.');
+      const rows = Array.isArray(batch?.rows) ? batch.rows : [];
+      document.getElementById('cgnatPreviewTable').innerHTML = rows.map(row => {
+        const status = row.validation_status || 'pending';
+        const statusCss = status === 'valid' ? 'ok' : status === 'overlap' ? 'warn' : 'severity-critical';
+        return `
+          <tr>
+            <td>${escapeHtml(row.line_number ?? '-')}</td>
+            <td>${escapeHtml(row.public_ip || '-')}</td>
+            <td>${escapeHtml(row.private_ip || '-')}</td>
+            <td>${escapeHtml(row.protocol || 'any')}</td>
+            <td>${escapeHtml(row.port_start !== null && row.port_start !== undefined ? `${row.port_start}-${row.port_end}` : '-')}</td>
+            <td>${escapeHtml(row.pool_name || '-')}</td>
+            <td>${escapeHtml(`${(Number(row.confidence || 0) * 100).toFixed(1)}%`)}</td>
+            <td><span class="badge-soft ${statusCss}">${escapeHtml(status)}</span>${row.validation_error ? `<div class="small text-danger">${escapeHtml(row.validation_error)}</div>` : ''}</td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="8" class="text-muted">Nenhum registro para o filtro.</td></tr>';
+      createIcons();
+    }
+
+    function renderCgnatHistory(items) {
+      document.getElementById('cgnatHistoryTable').innerHTML = (items || []).map(batch => {
+        const status = String(batch.status || '');
+        const actions = [
+          `<button type="button" class="btn btn-sm btn-outline-secondary cgnat-batch-action" data-action="view" data-id="${batch.id}">Prévia</button>`,
+          ['uploaded', 'failed', 'validation_failed'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-secondary cgnat-batch-action" data-action="reparse" data-id="${batch.id}">Reprocessar</button>` : '',
+          status === 'approved' ? `<button type="button" class="btn btn-sm btn-outline-success cgnat-batch-action" data-action="activate" data-id="${batch.id}">Ativar</button>` : '',
+          status === 'active' ? `<button type="button" class="btn btn-sm btn-outline-warning cgnat-batch-action" data-action="deactivate" data-id="${batch.id}">Desativar</button>` : '',
+          ['uploaded', 'failed', 'validation_failed', 'awaiting_approval'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-danger cgnat-batch-action" data-action="reject" data-id="${batch.id}">Rejeitar</button>` : ''
+        ].filter(Boolean).join('');
+        return `
+          <tr>
+            <td>#${batch.id}</td>
+            <td>${escapeHtml(batch.original_filename || batch.filename || '-')}<div class="small text-muted">${escapeHtml(batch.file_hash || '')}</div></td>
+            <td>${escapeHtml(batch.source_type_confirmed || batch.source_type_detected || '-')}</td>
+            <td>${escapeHtml([batch.model_provider, batch.model_name].filter(Boolean).join(' / ') || '-')}</td>
+            <td>${formatNumber(batch.valid_rows || 0)} válidos / ${formatNumber(batch.invalid_rows || 0)} inválidos</td>
+            <td>${cgnatStatusBadge(status)}</td>
+            <td>${escapeHtml(formatDateTime(batch.created_at) || '-')}${batch.approved_at ? `<div class="small">Aprovado ${escapeHtml(formatDateTime(batch.approved_at))}</div>` : ''}</td>
+            <td><div class="toolbar">${actions}</div></td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="8" class="text-muted">Nenhum lote importado.</td></tr>';
+      createIcons();
+    }
+
+    function renderCgnatMappings(items) {
+      document.getElementById('cgnatMappingsTable').innerHTML = (items || []).map(item => `
+        <tr>
+          <td>${escapeHtml(item.public_ip || '-')}</td>
+          <td>${escapeHtml(`${item.port_start}-${item.port_end}`)}</td>
+          <td>${escapeHtml(item.protocol || 'any')}</td>
+          <td>${escapeHtml(item.private_ip || '-')}</td>
+          <td>${escapeHtml([item.device_name, item.pool_name].filter(Boolean).join(' / ') || '-')}</td>
+          <td>${escapeHtml([item.subscriber_id, item.subscriber_name].filter(Boolean).join(' / ') || '-')}</td>
+          <td>#${escapeHtml(item.batch_id || '-')}</td>
+          <td>${escapeHtml(`${(Number(item.confidence || 0) * 100).toFixed(1)}%`)}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="8" class="text-muted">Nenhum mapeamento ativo.</td></tr>';
+    }
+
+    async function loadCgnatBatch(batchId = currentCgnatBatchId) {
+      if (!batchId) return;
+      const query = new URLSearchParams();
+      const filter = selectValue('cgnatPreviewFilter');
+      const search = selectValue('cgnatPreviewSearch').trim();
+      if (filter) query.set('validation_status', filter);
+      if (search) query.set('search', search);
+      query.set('limit', '5000');
+      const batch = await apiRequest(`/api/cgnat/imports/${batchId}?${query.toString()}`);
+      renderCgnatBatch(batch);
+    }
+
+    async function loadCgnatMappings() {
+      const query = new URLSearchParams({ limit: '5000' });
+      const search = selectValue('cgnatMappingSearch').trim();
+      if (search) query.set('search', search);
+      const result = await apiRequest(`/api/cgnat/mappings?${query.toString()}`);
+      renderCgnatMappings(result.items || []);
+    }
+
+    async function loadCgnatWorkspace() {
+      setText('cgnatStatus', 'Carregando configuração, lotes e mapeamentos...');
+      const [config, history, connectors] = await Promise.all([
+        apiRequest('/api/cgnat/config'),
+        apiRequest('/api/cgnat/imports?limit=500'),
+        apiRequest('/api/bgp/connectors')
+      ]);
+      cgnatConfigState = config;
+      const connectorItems = connectors.items || [];
+      document.getElementById('cgnatConnector').innerHTML = '<option value="">Sem vínculo</option>' + connectorItems.map(item => `<option value="${item.id}">${escapeHtml(item.name || `#${item.id}`)}</option>`).join('');
+      renderCgnatHistory(history.items || []);
+      await loadCgnatMappings();
+      const ai = config.ai || {};
+      setText(
+        'cgnatStatus',
+        ai.enabled && ai.local
+          ? `IA local pronta: ${ai.provider || 'Ollama'} / ${ai.model || '-'} / prompt ${config.prompt_version}`
+          : `Rota cgnat_import local não habilitada; formatos A10/MikroTik podem usar fallback determinístico seguro. Limite ${formatBytes(config.limits?.max_file_bytes || 0)}.`
+      );
+      if (currentCgnatBatchId) await loadCgnatBatch(currentCgnatBatchId);
+      createIcons();
+    }
+
+    async function processCgnatFile() {
+      if (!selectedCgnatFile) throw new Error('Selecione um arquivo CGNAT.');
+      const maxBytes = Number(cgnatConfigState?.limits?.max_file_bytes || 0);
+      if (maxBytes && selectedCgnatFile.size > maxBytes) throw new Error(`Arquivo excede ${formatBytes(maxBytes)}.`);
+      setText('cgnatProgress', 'Lendo arquivo como texto não confiável...');
+      const content = await selectedCgnatFile.text();
+      const uploadPayload = {
+        filename: selectedCgnatFile.name,
+        content,
+        source_type: selectValue('cgnatSourceType') || null,
+        device_name: selectValue('cgnatDeviceName').trim() || null,
+        pool_name: selectValue('cgnatPoolName').trim() || null,
+        connector_id: Number(selectValue('cgnatConnector')) || null,
+        valid_from: cgnatDateValue('cgnatValidFrom'),
+        valid_until: cgnatDateValue('cgnatValidUntil')
+      };
+      setText('cgnatProgress', 'Arquivo recebido; verificando hash...');
+      const uploaded = await apiRequest('/api/cgnat/imports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(uploadPayload)
+      });
+      currentCgnatBatchId = Number(uploaded.id || uploaded.existing_batch_id || 0) || null;
+      const retryDuplicate = uploaded.duplicate_file && ['uploaded', 'failed', 'validation_failed'].includes(String(uploaded.status || ''));
+      if (uploaded.duplicate_file && !retryDuplicate) {
+        setText('cgnatProgress', `Arquivo duplicado: já existe no lote #${uploaded.existing_batch_id}. Nenhum registro foi republicado.`);
+        await loadCgnatBatch(currentCgnatBatchId);
+        await loadCgnatWorkspace();
+        return;
+      }
+      if (retryDuplicate) {
+        setText('cgnatProgress', `Arquivo duplicado encontrado no lote #${uploaded.existing_batch_id}; reprocessamento seguro iniciado.`);
+      }
+      await parseCurrentCgnatBatch(uploadPayload.source_type);
+    }
+
+    async function parseCurrentCgnatBatch(sourceType = null) {
+      if (!currentCgnatBatchId) throw new Error('Abra um lote primeiro.');
+      setText('cgnatProgress', 'IA local interpretando chunks; o backend validará cada registro...');
+      const parsed = await apiRequest(`/api/cgnat/imports/${currentCgnatBatchId}/parse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_type: sourceType, allow_deterministic_fallback: true })
+      });
+      renderCgnatBatch(parsed);
+      setText('cgnatProgress', `Prévia pronta: ${parsed.valid_rows || 0} válido(s), ${parsed.invalid_rows || 0} inválido(s). Nada foi ativado.`);
+      await loadCgnatWorkspace();
+    }
+
+    async function cgnatLifecycle(action, options = {}) {
+      if (!currentCgnatBatchId) throw new Error('Abra um lote primeiro.');
+      const payload = { replace_existing: Boolean(options.replace_existing), activate: Boolean(options.activate), reason: options.reason || '' };
+      const result = await apiRequest(`/api/cgnat/imports/${currentCgnatBatchId}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      renderCgnatBatch(result);
+      setText('cgnatProgress', `Lote #${currentCgnatBatchId}: ${result.status}.`);
+      await loadCgnatWorkspace();
+    }
+
+    async function handleCgnatHistoryAction(button) {
+      const batchId = Number(button.dataset.id);
+      const action = button.dataset.action;
+      currentCgnatBatchId = batchId;
+      if (action === 'view') {
+        await loadCgnatBatch(batchId);
+        return;
+      }
+      if (action === 'reparse') {
+        await parseCurrentCgnatBatch();
+      } else if (action === 'activate') {
+        await cgnatLifecycle('activate');
+      } else if (action === 'deactivate') {
+        await cgnatLifecycle('deactivate');
+      } else if (action === 'reject') {
+        await cgnatLifecycle('reject', { reason: 'rejeitado no histórico' });
+      }
+    }
+
     function canonicalNavigationView(view) {
       const value = String(view || '').replace(/^#/, '').trim();
       if (value === 'bgp' || value === 'bgp-mitigation') return 'mitigation';
@@ -19052,6 +19408,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-ai').classList.add('active');
         document.querySelector('[data-nav-view="ai"]').classList.add('active');
         loadAiWorkspace().catch(error => setText('aiPageStatus', `Falha: ${error.message}`));
+      } else if (view === 'cgnat') {
+        document.getElementById('view-cgnat').classList.add('active');
+        document.querySelector('[data-nav-view="cgnat"]').classList.add('active');
+        loadCgnatWorkspace().catch(error => setText('cgnatStatus', `Falha: ${error.message}`));
       } else if (view === 'system') {
         document.getElementById('view-system').classList.add('active');
         document.querySelector('[data-nav-view="system"]').classList.add('active');
@@ -19302,6 +19662,58 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
+    document.getElementById('refreshCgnatButton').addEventListener('click', () => loadCgnatWorkspace().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));
+    document.getElementById('cgnatDropZone').addEventListener('click', () => document.getElementById('cgnatFileInput').click());
+    document.getElementById('cgnatDropZone').addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        document.getElementById('cgnatFileInput').click();
+      }
+    });
+    ['dragenter', 'dragover'].forEach(type => {
+      document.getElementById('cgnatDropZone').addEventListener(type, event => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+        event.currentTarget.classList.add('border-success');
+      });
+    });
+    ['dragleave', 'drop'].forEach(type => {
+      document.getElementById('cgnatDropZone').addEventListener(type, event => {
+        event.preventDefault();
+        event.currentTarget.classList.remove('border-success');
+      });
+    });
+    document.getElementById('cgnatDropZone').addEventListener('drop', event => selectCgnatFile(event.dataTransfer?.files?.[0] || null));
+    document.getElementById('cgnatFileInput').addEventListener('change', event => selectCgnatFile(event.target.files?.[0] || null));
+    document.getElementById('processCgnatFileButton').addEventListener('click', () => processCgnatFile().catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('clearCgnatFileButton').addEventListener('click', () => selectCgnatFile(null));
+    document.getElementById('filterCgnatPreviewButton').addEventListener('click', () => loadCgnatBatch().catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('cgnatPreviewFilter').addEventListener('change', () => loadCgnatBatch().catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('cgnatPreviewSearch').addEventListener('keydown', event => {
+      if (event.key === 'Enter') loadCgnatBatch().catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
+    });
+    document.getElementById('downloadCgnatErrorsButton').addEventListener('click', () => {
+      if (!currentCgnatBatchId) {
+        setText('cgnatProgress', 'Abra um lote primeiro.');
+        return;
+      }
+      downloadAuthFile(
+        apiUrl(`/api/cgnat/imports/${currentCgnatBatchId}/errors.csv`),
+        `cgnat-batch-${currentCgnatBatchId}-errors.csv`
+      ).catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
+    });
+    document.getElementById('approveCgnatBatchButton').addEventListener('click', () => cgnatLifecycle('approve').catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('approveActivateCgnatBatchButton').addEventListener('click', () => cgnatLifecycle('approve', { activate: true }).catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('replaceActivateCgnatBatchButton').addEventListener('click', () => {
+      const action = currentCgnatBatchStatus === 'approved' ? 'activate' : 'approve';
+      cgnatLifecycle(action, { activate: action === 'approve', replace_existing: true }).catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
+    });
+    document.getElementById('rejectCgnatBatchButton').addEventListener('click', () => cgnatLifecycle('reject', { reason: 'rejeitado pelo operador' }).catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
+    document.getElementById('cgnatHistoryTable').addEventListener('click', event => {
+      const button = event.target.closest('.cgnat-batch-action');
+      if (button) handleCgnatHistoryAction(button).catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
+    });
+    document.getElementById('cgnatMappingSearch').addEventListener('input', () => loadCgnatMappings().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));
     document.getElementById('appearanceTheme').addEventListener('change', event => {
       setAppearanceTheme(event.target.value);
     });

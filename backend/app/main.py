@@ -41,6 +41,29 @@ from app.services.humanize import format_bits_per_second, format_bytes, format_f
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
+from app.services.cgnat_mapping import (
+    CGNAT_AI_PROMPT_VERSION,
+    CGNAT_AI_SCHEMA,
+    CGNAT_AI_SYSTEM_PROMPT,
+    CGNAT_SOURCE_TYPES,
+    activate_cgnat_batch,
+    approve_cgnat_batch,
+    build_cgnat_ai_prompt,
+    cgnat_upload_limits,
+    consolidate_cgnat_chunks,
+    create_cgnat_import_batch,
+    deactivate_cgnat_batch,
+    ensure_cgnat_schema,
+    get_cgnat_batch,
+    list_active_cgnat_mappings,
+    list_cgnat_batches,
+    list_cgnat_import_errors,
+    parse_known_cgnat_text,
+    reject_cgnat_batch,
+    resolve_cgnat_subscriber,
+    split_cgnat_content,
+    store_cgnat_preview,
+)
 from app.services.ai_integration import (
     AI_FUNCTIONS,
     AI_PROVIDER_TYPES,
@@ -1110,6 +1133,28 @@ class DetectionWhitelistPayload(BaseModel):
     protocol: str | None = None
     vector: str | None = None
     zone_id: int | None = Field(None, ge=1)
+
+
+class CgnatImportUploadPayload(BaseModel):
+    filename: str
+    content: str
+    source_type: str | None = None
+    device_name: str | None = None
+    pool_name: str | None = None
+    connector_id: int | None = Field(None, ge=1)
+    valid_from: str | None = None
+    valid_until: str | None = None
+
+
+class CgnatImportParsePayload(BaseModel):
+    source_type: str | None = None
+    allow_deterministic_fallback: bool = True
+
+
+class CgnatImportLifecyclePayload(BaseModel):
+    replace_existing: bool = False
+    activate: bool = False
+    reason: str = ""
 
 
 class BgpConnectorPayload(BaseModel):
@@ -3665,6 +3710,7 @@ def ensure_sensor_db() -> None:
         ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
+        ensure_cgnat_schema(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
@@ -4085,6 +4131,369 @@ def require_admin(request: Request) -> None:
     user = getattr(request.state, "user", None)
     if not user or user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin required")
+
+
+def cgnat_actor(request: Request) -> str:
+    user = getattr(request.state, "user", None) or {}
+    return clean_text(user.get("username") or user.get("id") or "operator")
+
+
+def cgnat_http_error(exc: ValueError) -> HTTPException:
+    detail = clean_text(exc) or "cgnat_operation_failed"
+    if detail == "batch_not_found":
+        return HTTPException(status_code=404, detail=detail)
+    if detail in {
+        "active_mapping_overlap_requires_replace",
+        "batch_not_awaiting_approval",
+        "batch_not_approved",
+        "batch_not_active",
+        "active_or_historical_batch_cannot_be_rejected",
+    }:
+        return HTTPException(status_code=409, detail=detail)
+    return HTTPException(status_code=400, detail=detail)
+
+
+def local_cgnat_ai_config(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    config = central_ai_effective_config(conn, "cgnat_import")
+    if config is None or not config.get("enabled"):
+        return None
+    if clean_text(config.get("provider")).lower() != "ollama":
+        raise ValueError("cgnat_import_requires_local_ollama")
+    route = config.get("route") if isinstance(config.get("route"), dict) else {}
+    fallback_provider_id = int_or_none(route.get("fallback_provider_id"))
+    if fallback_provider_id is not None:
+        fallback = get_ai_provider(conn, fallback_provider_id, runtime=True)
+        if fallback is not None and clean_text(fallback.get("provider_type")).lower() != "ollama":
+            raise ValueError("cgnat_import_external_fallback_not_allowed")
+    return config
+
+
+def cgnat_prompt_injection_detected(content: str) -> bool:
+    lowered = content.casefold()
+    markers = (
+        "ignore previous",
+        "ignore all previous",
+        "system prompt",
+        "jailbreak",
+        "execute command",
+        "you are now",
+        "developer message",
+        "assistant:",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def interpret_cgnat_import_batch(
+    conn: sqlite3.Connection,
+    batch_id: int,
+    *,
+    source_type: Any = None,
+    allow_deterministic_fallback: bool = True,
+) -> dict[str, Any]:
+    ensure_cgnat_schema(conn)
+    batch = conn.execute("SELECT * FROM cgnat_import_batches WHERE id = ?", (int(batch_id),)).fetchone()
+    if batch is None:
+        raise ValueError("batch_not_found")
+    if clean_text(batch["status"]) in {"approved", "active", "superseded", "rejected"}:
+        raise ValueError("batch_cannot_be_reparsed")
+    source_hint = clean_text(source_type or batch["source_type_confirmed"])
+    if source_hint and source_hint not in CGNAT_SOURCE_TYPES:
+        raise ValueError("source_type_invalid")
+    content = str(batch["original_content"] or "")
+    conn.execute("UPDATE cgnat_import_batches SET status = 'processing' WHERE id = ?", (int(batch_id),))
+    parser_notes: list[str] = []
+    if cgnat_prompt_injection_detected(content):
+        parser_notes.append("Possivel prompt injection encontrada no arquivo e tratada somente como dado bruto.")
+    config = local_cgnat_ai_config(conn)
+    payload = None
+    model_provider = ""
+    model_name = ""
+    if config is not None:
+        interpreted_chunks: list[dict[str, Any]] = []
+        try:
+            for chunk in split_cgnat_content(content):
+                result = execute_ai_route(
+                    conn,
+                    "cgnat_import",
+                    build_cgnat_ai_prompt(chunk, source_hint),
+                    system_prompt=CGNAT_AI_SYSTEM_PROMPT,
+                    schema=CGNAT_AI_SCHEMA,
+                )
+                if not result.get("ok"):
+                    raise ValueError(clean_text(result.get("error_type") or result.get("error_message")) or "cgnat_ai_failed")
+                if clean_text(result.get("provider_type")).lower() != "ollama":
+                    raise ValueError("cgnat_import_external_provider_blocked")
+                raw_ai_content = clean_text(result.get("content"))
+                if raw_ai_content.startswith("```") or raw_ai_content.endswith("```"):
+                    raise ValueError("invalid_ai_json")
+                interpreted_chunks.append(
+                    result.get("structured")
+                    if isinstance(result.get("structured"), dict)
+                    else json.loads(clean_text(result.get("content")))
+                )
+                model_provider = clean_text(result.get("provider") or result.get("provider_type"))
+                model_name = clean_text(result.get("model") or config.get("selected_model"))
+            payload = consolidate_cgnat_chunks(interpreted_chunks)
+            parser_notes.append("Arquivo interpretado pela IA local; todos os registros foram revalidados pelo backend.")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            if not allow_deterministic_fallback:
+                raise ValueError(f"cgnat_ai_parse_failed:{clean_text(exc)}") from exc
+            parser_notes.append(f"IA local indisponivel ou invalida; fallback deterministico aplicado: {clean_text(exc)}")
+    if payload is None:
+        if not allow_deterministic_fallback:
+            raise ValueError("cgnat_ai_not_configured")
+        payload = parse_known_cgnat_text(content, source_hint)
+        if not payload.get("records"):
+            raise ValueError("cgnat_ai_not_configured_and_format_not_recognized")
+        model_provider = "deterministic_fallback"
+        model_name = f"builtin:{payload.get('source_type') or 'other'}"
+        parser_notes.append(
+            "Fallback deterministico usado para formato conhecido. Configure e habilite a rota IA cgnat_import para formatos livres."
+        )
+    return store_cgnat_preview(
+        conn,
+        int(batch_id),
+        payload,
+        model_provider=model_provider,
+        model_name=model_name,
+        prompt_version=CGNAT_AI_PROMPT_VERSION,
+        parser_notes=parser_notes,
+    )
+
+
+@app.get("/api/cgnat/config")
+def cgnat_config(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        config = central_ai_effective_config(conn, "cgnat_import")
+    return {
+        "limits": cgnat_upload_limits(),
+        "source_types": sorted(CGNAT_SOURCE_TYPES),
+        "prompt_version": CGNAT_AI_PROMPT_VERSION,
+        "ai": {
+            "configured": config is not None,
+            "enabled": bool((config or {}).get("enabled")),
+            "local": clean_text((config or {}).get("provider")).lower() == "ollama",
+            "provider": clean_text((config or {}).get("provider_name") or (config or {}).get("provider")),
+            "model": clean_text((config or {}).get("selected_model")),
+        },
+    }
+
+
+@app.post("/api/cgnat/imports")
+def cgnat_import_upload(request: Request, payload: CgnatImportUploadPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = create_cgnat_import_batch(
+                conn,
+                filename=payload.filename,
+                content=payload.content,
+                source_type_confirmed=payload.source_type,
+                device_name=payload.device_name,
+                pool_name=payload.pool_name,
+                connector_id=payload.connector_id,
+                valid_from=payload.valid_from,
+                valid_until=payload.valid_until,
+                actor=cgnat_actor(request),
+            )
+            conn.commit()
+        return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.get("/api/cgnat/imports")
+def cgnat_import_history(request: Request, limit: int = Query(200, ge=1, le=1000)):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_cgnat_batches(conn, int(limit)), "limits": cgnat_upload_limits()}
+
+
+@app.get("/api/cgnat/imports/{batch_id}")
+def cgnat_import_detail(
+    request: Request,
+    batch_id: int,
+    validation_status: str = "",
+    search: str = "",
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            return get_cgnat_batch(
+                conn,
+                batch_id,
+                validation_status=validation_status,
+                search=search,
+                limit=int(limit),
+                offset=int(offset),
+            )
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.post("/api/cgnat/imports/{batch_id}/parse")
+def cgnat_import_parse(request: Request, batch_id: int, payload: CgnatImportParsePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            try:
+                result = interpret_cgnat_import_batch(
+                    conn,
+                    batch_id,
+                    source_type=payload.source_type,
+                    allow_deterministic_fallback=bool(payload.allow_deterministic_fallback),
+                )
+                conn.commit()
+                return result
+            except ValueError as exc:
+                conn.execute(
+                    "UPDATE cgnat_import_batches SET status = 'failed', parser_notes = ? WHERE id = ?",
+                    (json.dumps([clean_text(exc)], ensure_ascii=False), int(batch_id)),
+                )
+                conn.commit()
+                raise
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.post("/api/cgnat/imports/{batch_id}/approve")
+def cgnat_import_approve(request: Request, batch_id: int, payload: CgnatImportLifecyclePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = approve_cgnat_batch(conn, batch_id, cgnat_actor(request))
+            if payload.activate:
+                result = activate_cgnat_batch(conn, batch_id, replace_existing=bool(payload.replace_existing))
+            conn.commit()
+            return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.post("/api/cgnat/imports/{batch_id}/activate")
+def cgnat_import_activate(request: Request, batch_id: int, payload: CgnatImportLifecyclePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = activate_cgnat_batch(conn, batch_id, replace_existing=bool(payload.replace_existing))
+            conn.commit()
+            return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.post("/api/cgnat/imports/{batch_id}/deactivate")
+def cgnat_import_deactivate(request: Request, batch_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = deactivate_cgnat_batch(conn, batch_id)
+            conn.commit()
+            return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.post("/api/cgnat/imports/{batch_id}/reject")
+def cgnat_import_reject(request: Request, batch_id: int, payload: CgnatImportLifecyclePayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            result = reject_cgnat_batch(conn, batch_id, cgnat_actor(request))
+            conn.commit()
+            return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.get("/api/cgnat/imports/{batch_id}/errors.csv")
+def cgnat_import_error_report(request: Request, batch_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            rows = list_cgnat_import_errors(conn, batch_id)
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["line_number", "status", "error", "public_ip", "private_ip", "port_start", "port_end", "raw_line"])
+    def csv_cell(value: Any) -> Any:
+        text = "" if value is None else str(value)
+        return f"'{text}" if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
+
+    for row in rows:
+        writer.writerow(
+            [
+                row.get("line_number"),
+                csv_cell(row.get("validation_status")),
+                csv_cell(row.get("validation_error")),
+                csv_cell(row.get("public_ip")),
+                csv_cell(row.get("private_ip")),
+                row.get("port_start"),
+                row.get("port_end"),
+                csv_cell(row.get("raw_line")),
+            ]
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="cgnat-batch-{batch_id}-errors.csv"'},
+    )
+
+
+@app.get("/api/cgnat/mappings")
+def cgnat_mapping_list(
+    request: Request,
+    search: str = "",
+    connector_id: int | None = None,
+    limit: int = Query(1000, ge=1, le=5000),
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {
+            "items": list_active_cgnat_mappings(
+                conn,
+                search=search,
+                connector_id=connector_id,
+                limit=int(limit),
+            )
+        }
+
+
+@app.get("/api/cgnat/mappings/resolve")
+def cgnat_mapping_resolve(
+    request: Request,
+    public_ip: str,
+    public_port: int = Query(..., ge=0, le=65535),
+    protocol: str = "any",
+    timestamp: str | None = None,
+    connector_id: int | None = None,
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return resolve_cgnat_subscriber(
+            conn,
+            public_ip,
+            public_port,
+            protocol,
+            timestamp=timestamp,
+            connector_id=connector_id,
+        )
 
 
 def collectors_dir() -> Path:
@@ -11750,6 +12159,53 @@ def preferred_profile_names(attack_vector_name: str) -> list[str]:
     return ["FLOWSPEC_BLOCK_SRC_TO_DST_UDP", "FLOWSPEC_BLOCK_DST_IP_ALL"]
 
 
+def apply_cgnat_candidate_policy(candidate: dict[str, Any]) -> dict[str, Any]:
+    raw_payload = candidate.get("raw_payload") if isinstance(candidate.get("raw_payload"), dict) else {}
+    anomaly = raw_payload.get("anomaly") if isinstance(raw_payload.get("anomaly"), dict) else {}
+    if not anomaly:
+        anomaly = candidate
+    for key in (
+        "cgnat_matched",
+        "cgnat_ambiguous",
+        "cgnat_shared_public_ip",
+        "public_ip",
+        "public_port",
+        "private_ip",
+        "mapped_port_start",
+        "mapped_port_end",
+        "cgnat_pool_name",
+        "cgnat_device_name",
+        "cgnat_source_type",
+        "cgnat_batch_id",
+        "cgnat_confidence",
+        "subscriber_id",
+        "subscriber_name",
+    ):
+        if anomaly.get(key) not in (None, ""):
+            candidate[key] = anomaly.get(key)
+    reason = ""
+    if anomaly.get("cgnat_ambiguous"):
+        reason = "cgnat_mapping_ambiguous"
+    elif anomaly.get("cgnat_shared_public_ip") and not anomaly.get("cgnat_matched"):
+        reason = "cgnat_subscriber_not_resolved"
+    elif anomaly.get("cgnat_matched") and anomaly.get("cgnat_shared_public_ip"):
+        reason = "cgnat_shared_public_ip_manual_scope_required"
+    if reason:
+        candidate.update(
+            {
+                "cgnat_auto_block_reason": reason,
+                "mitigation_mode": "manual_approval",
+                "requested_mode": "manual_approval",
+                "manual_approval_required": True,
+                "allow_auto": False,
+                "auto_allowed": False,
+                "eligible_for_automatic": False,
+                "cgnat_public_src_block_forbidden": True,
+            }
+        )
+    return candidate
+
+
 def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any], vector: dict[str, Any] | None) -> dict[str, Any]:
     explicit_profile = bool(vector and vector.get("response_profile_id"))
     profile = fetch_bgp_profile(conn, int(vector["response_profile_id"])) if explicit_profile else default_bgp_profile(
@@ -11807,6 +12263,7 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
     candidate["response_type"] = "flowspec"
     candidate["tcp_flags"] = candidate.get("tcp_flags") or ""
     candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
+    candidate = apply_cgnat_candidate_policy(candidate)
     candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
     return candidate
 
@@ -12797,12 +13254,181 @@ def dns_single_flow_manual_candidate(
     return attached
 
 
+def cgnat_event_lookup_coordinates(event: dict[str, Any]) -> dict[str, Any]:
+    vector = clean_text(
+        event.get("vector_name")
+        or event.get("attack_vector_name")
+        or event.get("vector")
+        or event.get("source_name")
+    ).upper()
+    direction = clean_text(event.get("direction")).lower()
+    outbound = (
+        vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+        or direction in {"transmits", "sends", "outbound", "upload", "saindo"}
+        or clean_text(event.get("target_role")).lower() == "src_ip"
+    )
+    if outbound:
+        public_ip = clean_ip(
+            event.get("top_src_ip")
+            or event.get("src_ip")
+            or event.get("target_ip")
+        )
+        raw_public_port = event.get("top_src_port")
+        if raw_public_port in (None, ""):
+            raw_public_port = event.get("src_port")
+        port_present = raw_public_port not in (None, "")
+        try:
+            public_port = int(raw_public_port) if port_present else None
+        except (TypeError, ValueError):
+            public_port = None
+        return {
+            "lookup_supported": bool(public_ip and public_port is not None and 0 <= public_port <= 65535),
+            "lookup_direction": "outbound_src_ip_src_port",
+            "public_ip": public_ip,
+            "public_port": public_port,
+        }
+    explicit_public_ip = clean_ip(event.get("cgnat_public_ip"))
+    raw_explicit_port = event.get("cgnat_public_port")
+    explicit_port_present = raw_explicit_port not in (None, "")
+    try:
+        explicit_public_port = int(raw_explicit_port) if explicit_port_present else None
+    except (TypeError, ValueError):
+        explicit_public_port = None
+    return {
+        "lookup_supported": bool(
+            explicit_public_ip
+            and explicit_public_port is not None
+            and 0 <= explicit_public_port <= 65535
+        ),
+        "lookup_direction": (
+            "inbound_explicit_post_nat_fields"
+            if explicit_public_ip
+            else "inbound_not_resolved_without_post_nat_fields"
+        ),
+        "public_ip": explicit_public_ip,
+        "public_port": explicit_public_port,
+    }
+
+
+def event_cgnat_shared_hint(conn: sqlite3.Connection, event: dict[str, Any]) -> bool:
+    details = event_source_details(event)
+    prefix_id = int_or_none(event.get("prefix_id") or details.get("prefix_id"))
+    if prefix_id is None or not sqlite_table_exists(conn, "ip_zone_prefixes"):
+        return bool(event.get("cgnat_shared_public_ip"))
+    row = conn.execute(
+        "SELECT prefix_type FROM ip_zone_prefixes WHERE id = ? LIMIT 1",
+        (prefix_id,),
+    ).fetchone()
+    return bool(
+        event.get("cgnat_shared_public_ip")
+        or (row is not None and clean_text(row["prefix_type"]).lower() == "public_cgnat")
+    )
+
+
+def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(event)
+    coordinates = cgnat_event_lookup_coordinates(enriched)
+    enriched["cgnat_lookup_direction"] = coordinates["lookup_direction"]
+    enriched["cgnat_lookup_performed"] = bool(coordinates["lookup_supported"])
+    if not coordinates["lookup_supported"]:
+        shared_public_ip = event_cgnat_shared_hint(conn, enriched)
+        enriched.update(
+            {
+                "cgnat_matched": False,
+                "cgnat_ambiguous": False,
+                "cgnat_shared_public_ip": shared_public_ip,
+                "cgnat_mapping_status": "not_looked_up",
+                "cgnat_mapping_message": (
+                    "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
+                    if coordinates["lookup_direction"].startswith("inbound_")
+                    else "Cliente CGNAT nao identificado."
+                ),
+            }
+        )
+        if shared_public_ip:
+            enriched["cgnat_mitigation_block_reason"] = "cgnat_subscriber_not_resolved"
+        return enriched
+    protocol = protocol_from_flow_or_event({}, enriched)
+    connector_id = int_or_none(enriched.get("connector_id") or event_source_details(enriched).get("connector_id"))
+    lookup = resolve_cgnat_subscriber(
+        conn,
+        coordinates["public_ip"],
+        coordinates["public_port"],
+        protocol,
+        timestamp=(
+            enriched.get("last_seen_at")
+            or enriched.get("last_seen")
+            or enriched.get("started_at")
+            or enriched.get("created_at")
+        ),
+        connector_id=connector_id,
+    )
+    shared_public_ip = bool(
+        lookup.get("shared_public_ip")
+        or event_cgnat_shared_hint(conn, enriched)
+    )
+    matched = bool(lookup.get("matched"))
+    ambiguous = bool(lookup.get("ambiguous"))
+    status = "ambiguous" if ambiguous else "matched" if matched else "not_found"
+    message = (
+        "Mapeamento CGNAT ambiguo."
+        if ambiguous
+        else "Cliente CGNAT identificado."
+        if matched
+        else "Cliente CGNAT nao identificado."
+    )
+    try:
+        conversation_share = min(
+            1.0,
+            max(
+                0.0,
+                float(enriched.get("top_packets") or 0)
+                / max(float(enriched.get("estimated_packets") or enriched.get("top_packets") or 1), 1.0),
+            ),
+        )
+    except (TypeError, ValueError, ZeroDivisionError):
+        conversation_share = 0.0
+    enriched.update(
+        {
+            "cgnat_matched": matched and not ambiguous,
+            "cgnat_ambiguous": ambiguous,
+            "cgnat_shared_public_ip": shared_public_ip,
+            "cgnat_mapping_status": status,
+            "cgnat_mapping_message": message,
+            "public_ip": coordinates["public_ip"],
+            "public_port": coordinates["public_port"],
+            "private_ip": lookup.get("private_ip") if not ambiguous else None,
+            "mapped_port_start": lookup.get("port_start"),
+            "mapped_port_end": lookup.get("port_end"),
+            "cgnat_pool_name": lookup.get("pool_name"),
+            "cgnat_device_name": lookup.get("device_name"),
+            "cgnat_source_type": lookup.get("source_type"),
+            "cgnat_mapping_source": lookup.get("source_filename"),
+            "cgnat_batch_id": lookup.get("batch_id"),
+            "cgnat_confidence": lookup.get("confidence"),
+            "cgnat_mapping_active": lookup.get("active"),
+            "cgnat_match_count": lookup.get("match_count", 0),
+            "cgnat_candidates": lookup.get("candidates") or [],
+            "subscriber_id": lookup.get("subscriber_id") if not ambiguous else None,
+            "subscriber_name": lookup.get("subscriber_name") if not ambiguous else None,
+            "cgnat_conversation_share": round(conversation_share, 4),
+        }
+    )
+    if ambiguous:
+        enriched["cgnat_mitigation_block_reason"] = "cgnat_mapping_ambiguous"
+    elif shared_public_ip and not enriched["cgnat_matched"]:
+        enriched["cgnat_mitigation_block_reason"] = "cgnat_subscriber_not_resolved"
+    elif shared_public_ip and enriched["cgnat_matched"]:
+        enriched["cgnat_mitigation_block_reason"] = "cgnat_shared_public_ip_manual_scope_required"
+    return enriched
+
+
 def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) -> dict[str, Any]:
     if anomaly_id < 0:
         group = find_consolidated_security_anomaly_group(anomaly_id)
         if group is None:
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-        event = group["event"]
+        event = enrich_anomaly_event_with_cgnat(conn, group["event"])
         details = [item for item in group["items"] if security_item_matches_event_target(item, event)]
         return {"event": event, "flows": details, "security_anomalies": details}
     row = conn.execute(
@@ -12831,10 +13457,12 @@ def fetch_anomaly_mitigation_context(conn: sqlite3.Connection, anomaly_id: int) 
             }
             if flow_matches_anomaly_target(item, event):
                 flows.append(item)
-        return {"event": enrich_anomaly_event_from_flows(event, flows), "flows": flows}
+        event = enrich_anomaly_event_from_flows(event, flows)
+        return {"event": enrich_anomaly_event_with_cgnat(conn, event), "flows": flows}
     security_item = resolve_security_anomaly_identifier(conn, anomaly_id, raise_not_found=False)
     if security_item is not None:
         event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+        event = enrich_anomaly_event_with_cgnat(conn, event)
         return {"event": event, "flows": [security_item], "security_anomalies": [security_item]}
     raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
 
@@ -15252,6 +15880,14 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "target_ip",
         "target_cidr",
         "target_role",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "top_src_ip",
+        "top_src_port",
+        "top_dst_ip",
+        "top_dst_port",
         "sensor_name",
         "interface_if_index",
         "direction",
@@ -15261,6 +15897,13 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "observed_value",
         "peak_value",
         "threshold_value",
+        "bits_s",
+        "packets_s",
+        "flows_s",
+        "pps",
+        "packets",
+        "bytes",
+        "duration_seconds",
         "estimated_bytes",
         "estimated_packets",
         "flow_count",
@@ -15269,6 +15912,27 @@ def compact_anomaly_for_ai(event: dict[str, Any]) -> dict[str, Any]:
         "ended_at",
         "status",
         "summary",
+        "cgnat_matched",
+        "cgnat_ambiguous",
+        "cgnat_shared_public_ip",
+        "cgnat_mapping_status",
+        "cgnat_mapping_message",
+        "cgnat_lookup_direction",
+        "public_ip",
+        "public_port",
+        "private_ip",
+        "mapped_port_start",
+        "mapped_port_end",
+        "cgnat_pool_name",
+        "cgnat_device_name",
+        "cgnat_source_type",
+        "cgnat_mapping_source",
+        "cgnat_batch_id",
+        "cgnat_confidence",
+        "subscriber_id",
+        "subscriber_name",
+        "cgnat_conversation_share",
+        "cgnat_mitigation_block_reason",
     )
     compacted = {
         key: event.get(key)
@@ -18978,6 +19642,31 @@ def anomaly_auto_mitigation_status(conn: sqlite3.Connection, anomaly_id: Any) ->
 
 def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, Any]:
     """Evaluate automation without consulting or merging any AI output."""
+    cgnat_reason = clean_text(candidate.get("cgnat_auto_block_reason"))
+    if cgnat_reason:
+        detection_gate = detection_automatic_policy_gate(candidate)
+        reasons = [cgnat_reason]
+        if detection_gate.get("applies") and not detection_gate.get("allowed"):
+            reasons.extend(
+                item
+                for item in detection_gate.get("reasons") or []
+                if clean_text(item) and clean_text(item) not in reasons
+            )
+        candidate["auto_allowed"] = False
+        candidate["eligible"] = False
+        candidate["eligible_for_automatic"] = False
+        candidate["automatic_not_applied_reason"] = cgnat_reason
+        candidate["automatic_gate"] = detection_gate
+        candidate["mitigation_state"] = "informational_candidate"
+        return {
+            "auto_allowed": False,
+            "eligible": False,
+            "eligible_for_automatic": False,
+            "reason": cgnat_reason,
+            "reasons": reasons,
+            "automatic_gate": detection_gate,
+            "mitigation_state": "informational_candidate",
+        }
     if clean_text(candidate.get("mitigation_mode")).lower() not in {"auto", "automatic"}:
         return {"auto_allowed": False, "eligible": False, "reason": "profile_not_automatic"}
     if candidate.get("never_announce") or clean_text(candidate.get("candidate_role")) == "analysis_only":
@@ -28690,6 +29379,11 @@ def anomaly_detail_payload(
     **extra: Any,
 ) -> dict[str, Any]:
     event = enrich_anomaly_event_from_flows(event, flows)
+    try:
+        with sqlite_connection() as cgnat_conn:
+            event = enrich_anomaly_event_with_cgnat(cgnat_conn, event)
+    except sqlite3.Error as exc:
+        logger.warning("Falha ao enriquecer anomalia com CGNAT: %s", exc)
     flow_evidence = extra.pop("flow_evidence", None)
     timeseries_info = extra.pop("timeseries_info", None)
     if flow_evidence is None:

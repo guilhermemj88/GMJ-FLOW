@@ -113,7 +113,11 @@ class CentralAiMigrationTest(unittest.TestCase):
         self.assertEqual(15000, selected["max_context_chars"])
         self.assertEqual(41, selected["max_top_flows"])
         self.assertEqual("qwen-current", selected["primary_model"])
-        self.assertEqual(11, conn.execute("SELECT COUNT(*) FROM ai_routes").fetchone()[0])
+        self.assertEqual(len(ai.AI_FUNCTIONS), conn.execute("SELECT COUNT(*) FROM ai_routes").fetchone()[0])
+        cgnat_route = conn.execute(
+            "SELECT sensitive_data_policy FROM ai_routes WHERE function_key = 'cgnat_import'"
+        ).fetchone()
+        self.assertEqual("full_local_only", cgnat_route["sensitive_data_policy"])
 
     def test_central_disable_is_not_reverted_by_legacy_migration(self):
         legacy = {"ai_mitigation_enabled": "true", "ai_provider": "ollama"}
