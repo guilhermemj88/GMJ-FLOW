@@ -19229,6 +19229,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const uploadPayload = {
         filename: selectedCgnatFile.name,
         content,
+        mime_type: selectedCgnatFile.type || null,
         source_type: selectValue('cgnatSourceType') || null,
         device_name: selectValue('cgnatDeviceName').trim() || null,
         pool_name: selectValue('cgnatPoolName').trim() || null,

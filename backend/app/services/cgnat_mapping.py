@@ -26,6 +26,29 @@ CGNAT_IMPORT_STATUSES = {
 CGNAT_SOURCE_TYPES = {"a10", "mikrotik", "other", "unknown"}
 CGNAT_PROTOCOLS = {"any", "tcp", "udp", "icmp", "icmpv6"}
 CGNAT_TEXT_EXTENSIONS = {".txt", ".log", ".csv", ".cfg", ".conf", ".dump", ".export"}
+CGNAT_EXTENSIONLESS_MIME_TYPES = {"", "text/plain", "application/octet-stream"}
+CGNAT_BINARY_PREFIXES = (
+    b"#!",
+    b"MZ",
+    b"\x7fELF",
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"\x1f\x8b",
+    b"Rar!\x1a\x07",
+    b"7z\xbc\xaf\x27\x1c",
+    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+    b"\xca\xfe\xba\xbe",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+)
 CGNAT_AI_PROMPT_VERSION = "cgnat-import/v1"
 CGNAT_DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
 CGNAT_DEFAULT_MAX_LINES = 100_000
@@ -375,7 +398,11 @@ def source_contains_ip(content: str, value: Any) -> bool:
 
 def raw_line_contains_port_range(raw_line: Any, port_start: int, port_end: int) -> bool:
     text = str(raw_line or "")
-    range_pattern = rf"(?<!\d){re.escape(str(port_start))}\s*[-:]\s*{re.escape(str(port_end))}(?!\d)"
+    range_pattern = (
+        rf"(?<!\d){re.escape(str(port_start))}"
+        rf"(?:\s+(?i:to)\s+|\s*[-:]\s*)"
+        rf"{re.escape(str(port_end))}(?!\d)"
+    )
     if re.search(range_pattern, text):
         return True
     start_key = re.search(rf"(?i)\bport[-_ ]?start\s*=\s*{re.escape(str(port_start))}(?!\d)", text)
@@ -405,38 +432,102 @@ def safe_original_filename(filename: Any) -> tuple[str, str]:
     original = Path(supplied).name
     if not original or original in {".", ".."}:
         raise ValueError("filename_invalid")
+    try:
+        original_bytes = original.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("filename_invalid") from exc
+    if len(original_bytes) > 255 or any(ord(character) < 32 or ord(character) == 127 for character in original):
+        raise ValueError("filename_invalid")
     extension = Path(original).suffix.lower()
-    if extension not in CGNAT_TEXT_EXTENSIONS:
+    if extension and extension not in CGNAT_TEXT_EXTENSIONS:
         raise ValueError("unsupported_file_type")
     return original, extension
 
 
-def validate_upload_content(filename: Any, content: Any) -> dict[str, Any]:
+def normalized_mime_type(mime_type: Any) -> str:
+    return clean_text(mime_type).split(";", 1)[0].strip().lower()
+
+
+def decoded_upload_content(content: Any) -> tuple[str, bytes]:
+    if isinstance(content, str):
+        try:
+            return content, content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("file_content_must_be_text") from exc
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        encoded = bytes(content)
+        try:
+            return encoded.decode("utf-8"), encoded
+        except UnicodeDecodeError as exc:
+            raise ValueError("binary_file_not_allowed") from exc
+    raise ValueError("file_content_must_be_text")
+
+
+def content_looks_binary(content: str, encoded: bytes) -> bool:
+    inspected = encoded[3:] if encoded.startswith(b"\xef\xbb\xbf") else encoded
+    if any(inspected.startswith(prefix) for prefix in CGNAT_BINARY_PREFIXES):
+        return True
+    if "\x00" in content or "\ufffd" in content:
+        return True
+    allowed_controls = {"\t", "\n", "\r", "\f"}
+    for index, character in enumerate(content):
+        if character in allowed_controls or (index == 0 and character == "\ufeff"):
+            continue
+        if not character.isprintable():
+            return True
+    return False
+
+
+def inspect_safe_text_upload(filename: Any, content: Any, mime_type: Any = None) -> dict[str, Any]:
     original, extension = safe_original_filename(filename)
-    if not isinstance(content, str):
-        raise ValueError("file_content_must_be_text")
-    if "\x00" in content:
-        raise ValueError("binary_file_not_allowed")
-    encoded = content.encode("utf-8")
+    mime = normalized_mime_type(mime_type)
+    if not extension and mime not in CGNAT_EXTENSIONLESS_MIME_TYPES:
+        raise ValueError("unsupported_mime_type")
+    decoded, encoded = decoded_upload_content(content)
     limits = cgnat_upload_limits()
     if not encoded:
         raise ValueError("empty_file")
     if len(encoded) > limits["max_file_bytes"]:
         raise ValueError("file_too_large")
-    lines = content.splitlines()
+    if content_looks_binary(decoded, encoded):
+        raise ValueError("binary_file_not_allowed")
+    lines = decoded.splitlines()
     line_count = len(lines)
     if line_count > limits["max_lines"]:
         raise ValueError("too_many_lines")
     if any(len(line) > limits["chunk_chars"] for line in lines):
         raise ValueError("line_too_long")
+    return {
+        "original_filename": original,
+        "extension": extension,
+        "content": decoded,
+        "encoded": encoded,
+        "line_count": line_count,
+        "mime_type": mime,
+    }
+
+
+def is_safe_text_upload(filename: Any, content: Any, mime_type: Any = None) -> bool:
+    """Return whether an upload passes the deterministic CGNAT text safety checks."""
+    try:
+        inspect_safe_text_upload(filename, content, mime_type)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_upload_content(filename: Any, content: Any, mime_type: Any = None) -> dict[str, Any]:
+    inspected = inspect_safe_text_upload(filename, content, mime_type)
+    extension = inspected["extension"] or ".txt"
+    encoded = inspected["encoded"]
     digest = hashlib.sha256(encoded).hexdigest()
     internal_name = f"cgnat-{digest[:16]}{extension}"
     return {
-        "original_filename": original,
+        "original_filename": inspected["original_filename"],
         "filename": internal_name,
-        "content": content,
+        "content": inspected["content"],
         "file_size": len(encoded),
-        "line_count": line_count,
+        "line_count": inspected["line_count"],
         "file_hash": digest,
     }
 
@@ -446,6 +537,7 @@ def create_cgnat_import_batch(
     *,
     filename: str,
     content: str,
+    mime_type: str | None = None,
     source_type_confirmed: Any = None,
     device_name: Any = None,
     pool_name: Any = None,
@@ -455,7 +547,7 @@ def create_cgnat_import_batch(
     actor: str = "",
 ) -> dict[str, Any]:
     ensure_cgnat_schema(conn)
-    upload = validate_upload_content(filename, content)
+    upload = validate_upload_content(filename, content, mime_type)
     duplicate = conn.execute(
         "SELECT * FROM cgnat_import_batches WHERE file_hash = ? ORDER BY id DESC LIMIT 1",
         (upload["file_hash"],),
@@ -717,12 +809,46 @@ def consolidate_cgnat_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def a10_command_pool_name(line: Any) -> str | None:
+    match = re.search(
+        r"(?i)\bcgnv6\s+fixed-nat\s+inside\s+ip-list\s+[^\s,;]+"
+        r"\s+nat\s+ip-list\s+([^\s,;]+)",
+        str(line or ""),
+    )
+    if not match:
+        return None
+    return clean_text(match.group(1)) or None
+
+
+def is_a10_context_line(line: Any) -> bool:
+    stripped = clean_text(line)
+    if not stripped:
+        return False
+    if re.match(r"(?i)^Fixed\s+NAT\s+Configuration\s+was\s+created\s+at\b", stripped):
+        return True
+    if a10_command_pool_name(stripped):
+        return True
+    if re.match(r"(?i)^NAT\s+Address\s*:\s*(?:\d{1,3}\.){3}\d{1,3}\s*$", stripped):
+        return True
+    if re.match(r"(?i)^Inside\s+User\s+Port\s+Range\s*$", stripped):
+        return True
+    if re.match(r"(?i)^(?:pool(?:\s+name)?|name)\s*:\s*\S", stripped) and "address" not in stripped.casefold():
+        return True
+    if re.match(r"(?i)^(?:device|hostname)\s*:\s*\S", stripped):
+        return True
+    return False
+
+
 def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, Any]:
     lines = content.splitlines()
     source = safe_source_type(source_hint)
     lowered = content.casefold()
     if source == "unknown":
-        if "nat address" in lowered:
+        if (
+            "nat address" in lowered
+            or "fixed nat configuration was created at" in lowered
+            or "cgnv6 fixed-nat inside ip-list" in lowered
+        ):
             source = "a10"
         elif "private-address=" in lowered and "public-address=" in lowered:
             source = "mikrotik"
@@ -738,9 +864,18 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
         current_pool = None
         for line_number, line in enumerate(lines, start=1):
             stripped = line.strip()
-            public_match = re.search(r"(?i)\bNAT\s+Address\s*:\s*([0-9a-f:.]+)", stripped)
+            if re.match(r"(?i)^Fixed\s+NAT\s+Configuration\s+was\s+created\s+at\b", stripped):
+                continue
+            command_pool = a10_command_pool_name(stripped)
+            if command_pool:
+                current_pool = command_pool
+                pool_name = pool_name or command_pool
+                continue
+            public_match = re.search(r"(?i)^NAT\s+Address\s*:\s*((?:\d{1,3}\.){3}\d{1,3})\s*$", stripped)
             if public_match:
                 public_ip = public_match.group(1)
+                continue
+            if re.match(r"(?i)^Inside\s+User\s+Port\s+Range\s*$", stripped):
                 continue
             pool_match = re.search(r"(?i)\b(?:pool(?:\s+name)?|name)\s*:\s*(\S.+)$", stripped)
             if pool_match and "address" not in stripped.casefold():
@@ -752,7 +887,9 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
                 device_name = device_match.group(1).strip()
                 continue
             mapping = re.match(
-                r"^\s*([0-9a-f:.]+)\s+(\d+)\s*[-:]\s*(\d+)(?:\s+(tcp|udp|any))?\s*$",
+                r"^\s*([0-9a-f:.]+)\s+(\d+)"
+                r"(?:\s+to\s+|\s*[-:]\s*|\s+)"
+                r"(\d+)(?:\s+(tcp|udp|any))?\s*$",
                 line,
                 re.IGNORECASE,
             )
@@ -763,7 +900,7 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
                         "raw_line": line,
                         "public_ip": public_ip or None,
                         "private_ip": mapping.group(1),
-                        "protocol": (mapping.group(4) or "any").lower(),
+                        "protocol": "any",
                         "port_start": int(mapping.group(2)),
                         "port_end": int(mapping.group(3)),
                         "subscriber_id": None,
@@ -1036,7 +1173,11 @@ def validate_cgnat_records(content: str, payload: dict[str, Any]) -> dict[str, A
         for index, row in enumerate(rows)
         if row["validation_status"] != "valid"
     ]
-    nonempty_lines = {index for index, line in enumerate(lines, start=1) if clean_text(line)}
+    nonempty_lines = {
+        index
+        for index, line in enumerate(lines, start=1)
+        if clean_text(line) and not (parsed["source_type"] == "a10" and is_a10_context_line(line))
+    }
     ignored_rows = len(nonempty_lines - covered_lines)
     confidence = (
         sum(float(row.get("confidence") or 0) for row in valid_rows) / len(valid_rows)
@@ -1075,6 +1216,10 @@ def store_cgnat_preview(
     if batch is None:
         raise ValueError("batch_not_found")
     validation = validate_cgnat_records(clean_text(batch["original_content"]), payload)
+    trusted_pool_name = clean_text(batch["pool_name"]) or None
+    if trusted_pool_name:
+        for row in validation["rows"]:
+            row["pool_name"] = row.get("pool_name") or trusted_pool_name
     conn.execute("DELETE FROM cgnat_import_rows WHERE batch_id = ?", (int(batch_id),))
     now = utc_now_iso()
     for row in validation["rows"]:

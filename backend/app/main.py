@@ -1138,6 +1138,7 @@ class DetectionWhitelistPayload(BaseModel):
 class CgnatImportUploadPayload(BaseModel):
     filename: str
     content: str
+    mime_type: str | None = None
     source_type: str | None = None
     device_name: str | None = None
     pool_name: str | None = None
@@ -4204,11 +4205,20 @@ def interpret_cgnat_import_batch(
     parser_notes: list[str] = []
     if cgnat_prompt_injection_detected(content):
         parser_notes.append("Possivel prompt injection encontrada no arquivo e tratada somente como dado bruto.")
-    config = local_cgnat_ai_config(conn)
     payload = None
     model_provider = ""
     model_name = ""
-    if config is not None:
+    if source_hint == "a10":
+        deterministic_payload = parse_known_cgnat_text(content, source_hint)
+        if deterministic_payload.get("records"):
+            payload = deterministic_payload
+            model_provider = "deterministic_fallback"
+            model_name = "builtin:a10"
+            parser_notes.append(
+                "Formato A10 conhecido interpretado pelo parser deterministico; Ollama nao foi necessario."
+            )
+    config = local_cgnat_ai_config(conn) if payload is None else None
+    if payload is None and config is not None:
         interpreted_chunks: list[dict[str, Any]] = []
         try:
             for chunk in split_cgnat_content(content):
@@ -4291,6 +4301,7 @@ def cgnat_import_upload(request: Request, payload: CgnatImportUploadPayload):
                 conn,
                 filename=payload.filename,
                 content=payload.content,
+                mime_type=payload.mime_type,
                 source_type_confirmed=payload.source_type,
                 device_name=payload.device_name,
                 pool_name=payload.pool_name,
