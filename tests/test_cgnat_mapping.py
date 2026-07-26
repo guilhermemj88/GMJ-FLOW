@@ -8,6 +8,7 @@ from tests.test_collector_apply_static import backend_main
 
 from app.services.cgnat_mapping import (
     CGNAT_AI_SYSTEM_PROMPT,
+    CGNAT_TEXT_EXTENSIONS,
     activate_cgnat_batch,
     approve_cgnat_batch,
     build_cgnat_ai_prompt,
@@ -15,6 +16,7 @@ from app.services.cgnat_mapping import (
     deactivate_cgnat_batch,
     ensure_cgnat_schema,
     get_cgnat_batch,
+    is_safe_text_upload,
     list_active_cgnat_mappings,
     list_cgnat_batches,
     parse_cgnat_ai_json,
@@ -23,6 +25,7 @@ from app.services.cgnat_mapping import (
     resolve_cgnat_subscriber,
     split_cgnat_content,
     store_cgnat_preview,
+    validate_upload_content,
     validate_cgnat_records,
 )
 
@@ -36,6 +39,17 @@ NAT Address: 168.232.197.32
 100.97.0.0   1024-2031
 100.97.0.1   2032-3039
 100.97.0.2   3040-4047
+"""
+
+A10_NATIVE_CONTENT = """Fixed NAT Configuration was created at 2025 Nov 17 22:08:17
+cgnv6 fixed-nat inside ip-list POOL-INSIDE nat ip-list POOL-OUTSIDE
+NAT Address: 168.232.197.32
+Inside User         Port Range
+100.97.0.0          1024 to 2031
+100.97.0.1          2032 to 3039
+NAT Address: 168.232.197.33
+Inside User         Port Range
+100.97.0.64         1024 to 2031
 """
 
 MIKROTIK_CONTENT = """private-address=100.64.8.238
@@ -108,6 +122,138 @@ def activate_preview(conn, content, filename="mapping.txt", source_type=None, co
     approve_cgnat_batch(conn, preview["id"], "test-admin")
     activate_cgnat_batch(conn, preview["id"], replace_existing=replace)
     return preview["id"]
+
+
+class CgnatA10NativeFormatTest(unittest.TestCase):
+    def test_native_a10_context_and_to_ranges_are_parsed_without_ignored_mappings(self):
+        parsed = parse_known_cgnat_text(A10_NATIVE_CONTENT)
+        checked = validate_cgnat_records(A10_NATIVE_CONTENT, parsed)
+        self.assertEqual(parsed["source_type"], "a10")
+        self.assertEqual(parsed["pool_name"], "POOL-OUTSIDE")
+        self.assertEqual(
+            [
+                (
+                    row["line_number"],
+                    row["raw_line"],
+                    row["public_ip"],
+                    row["private_ip"],
+                    row["port_start"],
+                    row["port_end"],
+                    row["protocol"],
+                    row["pool_name"],
+                )
+                for row in parsed["records"]
+            ],
+            [
+                (5, "100.97.0.0          1024 to 2031", "168.232.197.32", "100.97.0.0", 1024, 2031, "any", "POOL-OUTSIDE"),
+                (6, "100.97.0.1          2032 to 3039", "168.232.197.32", "100.97.0.1", 2032, 3039, "any", "POOL-OUTSIDE"),
+                (9, "100.97.0.64         1024 to 2031", "168.232.197.33", "100.97.0.64", 1024, 2031, "any", "POOL-OUTSIDE"),
+            ],
+        )
+        self.assertEqual(checked["total_rows"], 3)
+        self.assertEqual(checked["valid_rows"], 3)
+        self.assertEqual(checked["invalid_rows"], 0)
+        self.assertEqual(checked["ignored_rows"], 0)
+
+    def test_a10_to_is_case_insensitive_and_compatible_range_separators_remain_supported(self):
+        content = """NAT Address: 203.0.113.10
+Inside User         Port Range
+100.64.0.1          1024 TO 2031
+100.64.0.2          2032-3039
+100.64.0.3          3040 - 4047
+100.64.0.4          4048 5055
+"""
+        parsed = parse_known_cgnat_text(content, "a10")
+        self.assertEqual(len(parsed["records"]), 4)
+        self.assertEqual(
+            [(row["port_start"], row["port_end"]) for row in parsed["records"]],
+            [(1024, 2031), (2032, 3039), (3040, 4047), (4048, 5055)],
+        )
+        self.assertTrue(all(row["protocol"] == "any" for row in parsed["records"]))
+
+    def test_native_a10_port_bounds_are_inclusive_and_public_ips_are_not_mixed(self):
+        conn = memory_db()
+        activate_preview(conn, A10_NATIVE_CONTENT, filename="native-a10", source_type="a10")
+        expected = (
+            ("168.232.197.32", 1024, "100.97.0.0"),
+            ("168.232.197.32", 2031, "100.97.0.0"),
+            ("168.232.197.32", 2032, "100.97.0.1"),
+            ("168.232.197.32", 3039, "100.97.0.1"),
+            ("168.232.197.33", 1024, "100.97.0.64"),
+            ("168.232.197.33", 2031, "100.97.0.64"),
+        )
+        for public_ip, port, private_ip in expected:
+            with self.subTest(public_ip=public_ip, port=port):
+                result = resolve_cgnat_subscriber(conn, public_ip, port, "udp")
+                self.assertTrue(result["matched"])
+                self.assertEqual(result["private_ip"], private_ip)
+        self.assertFalse(resolve_cgnat_subscriber(conn, "168.232.197.33", 2032, "udp")["matched"])
+        conn.close()
+
+    def test_explicit_a10_source_uses_deterministic_parser_without_ai(self):
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="fixed_nat_ip_list_POOL-OUTSIDE-02_2025_11_17_220817",
+            content=A10_NATIVE_CONTENT,
+            mime_type="application/octet-stream",
+            source_type_confirmed="a10",
+        )
+        with mock.patch.object(
+            backend_main,
+            "local_cgnat_ai_config",
+            side_effect=AssertionError("AI configuration should not be consulted"),
+        ), mock.patch.object(
+            backend_main,
+            "execute_ai_route",
+            side_effect=AssertionError("Ollama should not be called"),
+        ):
+            preview = backend_main.interpret_cgnat_import_batch(
+                conn,
+                batch["id"],
+                source_type="a10",
+                allow_deterministic_fallback=False,
+            )
+        self.assertEqual(preview["status"], "awaiting_approval")
+        self.assertEqual(preview["source_type_detected"], "a10")
+        self.assertEqual(preview["model_provider"], "deterministic_fallback")
+        self.assertEqual(preview["model_name"], "builtin:a10")
+        self.assertEqual(preview["valid_rows"], 3)
+        self.assertEqual(len(preview["rows"]), 3)
+        conn.close()
+
+    def test_pool_name_supplied_by_interface_is_applied_to_each_a10_record(self):
+        content = """NAT Address: 203.0.113.10
+Inside User         Port Range
+100.64.0.1          1024 to 2031
+"""
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="a10-interface-pool",
+            content=content,
+            source_type_confirmed="a10",
+            pool_name="POOL-FROM-INTERFACE",
+        )
+        preview = backend_main.interpret_cgnat_import_batch(conn, batch["id"], source_type="a10")
+        self.assertEqual(preview["valid_rows"], 1)
+        self.assertEqual(preview["rows"][0]["pool_name"], "POOL-FROM-INTERFACE")
+        conn.close()
+
+    def test_a10_parser_has_no_fixed_user_count_or_port_block_size(self):
+        lines = [
+            "Fixed NAT Configuration was created at 2025 Nov 17 22:08:17",
+            "NAT Address: 203.0.113.10",
+            "Inside User         Port Range",
+        ]
+        lines.extend(
+            f"100.64.{index // 256}.{index % 256}          {index * 32} to {index * 32 + 31}"
+            for index in range(2000)
+        )
+        parsed = parse_known_cgnat_text("\n".join(lines), "a10")
+        self.assertEqual(len(parsed["records"]), 2000)
+        self.assertEqual((parsed["records"][0]["port_start"], parsed["records"][0]["port_end"]), (0, 31))
+        self.assertEqual((parsed["records"][-1]["port_start"], parsed["records"][-1]["port_end"]), (63968, 63999))
 
 
 class CgnatMappingRequiredScenariosTest(unittest.TestCase):
@@ -509,6 +655,73 @@ NAT Address: 168.232.197.33
         self.assertTrue(duplicate["duplicate_file"])
         self.assertEqual(duplicate["existing_batch_id"], first["id"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM cgnat_import_batches").fetchone()[0], 1)
+
+
+class CgnatUploadSafetyTest(unittest.TestCase):
+    def test_extensionless_a10_file_is_accepted_and_reaches_preview(self):
+        conn = memory_db()
+        original = "fixed_nat_ip_list_POOL-OUTSIDE-02_2025_11_17_220817"
+        preview = create_preview(conn, A10_CONTENT, filename=original)
+        self.assertEqual(preview["original_filename"], original)
+        self.assertTrue(preview["filename"].endswith(".txt"))
+        self.assertEqual(preview["source_type_detected"], "a10")
+        self.assertEqual(preview["status"], "awaiting_approval")
+        self.assertEqual(preview["valid_rows"], 3)
+        conn.close()
+
+    def test_extensionless_mikrotik_file_is_accepted_and_reaches_preview(self):
+        conn = memory_db()
+        preview = create_preview(conn, MIKROTIK_CONTENT, filename="mikrotik_cgnat_export")
+        self.assertEqual(preview["original_filename"], "mikrotik_cgnat_export")
+        self.assertTrue(preview["filename"].endswith(".txt"))
+        self.assertEqual(preview["source_type_detected"], "mikrotik")
+        self.assertEqual(preview["valid_rows"], 1)
+        conn.close()
+
+    def test_extensionless_file_accepts_only_declared_neutral_text_mimes(self):
+        for mime_type in (None, "", "text/plain", "text/plain; charset=utf-8", "application/octet-stream"):
+            with self.subTest(mime_type=mime_type):
+                self.assertTrue(is_safe_text_upload("cgnat_export", A10_CONTENT, mime_type))
+        self.assertFalse(is_safe_text_upload("cgnat_export", A10_CONTENT, "application/pdf"))
+
+    def test_nul_byte_is_rejected_even_with_text_mime(self):
+        content = "NAT Address: 203.0.113.10\x00100.64.0.1 1024-2031"
+        self.assertFalse(is_safe_text_upload("cgnat_export", content, "text/plain"))
+        with self.assertRaisesRegex(ValueError, "binary_file_not_allowed"):
+            validate_upload_content("cgnat_export", content, "text/plain")
+
+    def test_binary_content_is_rejected_even_with_text_mime(self):
+        content = b"GIF89a\x01\x02\x03\x04printable fragment"
+        self.assertFalse(is_safe_text_upload("cgnat_export", content, "text/plain"))
+        with self.assertRaisesRegex(ValueError, "binary_file_not_allowed"):
+            validate_upload_content("cgnat_export", content, "text/plain")
+
+    def test_extensionless_executable_signature_is_rejected(self):
+        content = "MZThis payload contains readable text but has an executable signature."
+        self.assertFalse(is_safe_text_upload("cgnat_export", content, "text/plain"))
+
+    def test_exe_extension_is_rejected_even_when_content_is_text(self):
+        self.assertFalse(is_safe_text_upload("mapping.exe", A10_CONTENT, "text/plain"))
+        with self.assertRaisesRegex(ValueError, "unsupported_file_type"):
+            validate_upload_content("mapping.exe", A10_CONTENT, "text/plain")
+
+    def test_allowed_text_extensions_continue_to_work(self):
+        for extension in sorted(CGNAT_TEXT_EXTENSIONS):
+            with self.subTest(extension=extension):
+                upload = validate_upload_content(f"mapping{extension}", A10_CONTENT, "application/x-unknown")
+                self.assertTrue(upload["filename"].endswith(extension))
+
+    def test_empty_file_is_rejected(self):
+        self.assertFalse(is_safe_text_upload("empty_export", "", "text/plain"))
+        with self.assertRaisesRegex(ValueError, "empty_file"):
+            validate_upload_content("empty_export", "", "text/plain")
+
+    def test_file_over_configured_limit_is_rejected(self):
+        with mock.patch.dict("os.environ", {"GMJFLOW_CGNAT_MAX_FILE_BYTES": "1024"}):
+            content = "A" * 1025
+            self.assertFalse(is_safe_text_upload("large_export", content, "application/octet-stream"))
+            with self.assertRaisesRegex(ValueError, "file_too_large"):
+                validate_upload_content("large_export", content, "application/octet-stream")
 
 
 class CgnatMappingSchemaAndSafetyTest(unittest.TestCase):
