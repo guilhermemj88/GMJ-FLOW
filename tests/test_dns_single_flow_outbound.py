@@ -37,8 +37,8 @@ def dns_single_flow_rule():
         "src_port": "any",
         "dst_port": "53",
         "response": "DETECTION_ONLY",
-        "mitigation_mode": "detection_only",
-        "mitigation_enabled": False,
+        "mitigation_mode": "response_profile",
+        "mitigation_enabled": True,
         "enabled": True,
         "detection_key": "src_ip,src_port,dst_ip,dst_port,protocol",
         "group_by": "src_ip,src_port,dst_ip,dst_port,protocol",
@@ -281,9 +281,11 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertEqual(rule["group_by"], "src_ip,src_port,dst_ip,dst_port,protocol")
                     self.assertEqual(rule["src_port"], "any")
                     self.assertEqual(rule["dst_port"], "53")
-                    self.assertEqual(rule["response"], "DETECTION_ONLY")
-                    self.assertEqual(rule["mitigation_mode"], "detection_only")
-                    self.assertEqual(rule["mitigation_enabled"], 0)
+                    self.assertEqual(rule["response"], "FLOWSPEC_AUTO_BLOCK_DST_DNS")
+                    self.assertEqual(rule["mitigation_mode"], "response_profile")
+                    self.assertEqual(rule["mitigation_enabled"], 1)
+                    self.assertEqual(rule["duration_seconds"], 900)
+                    self.assertIsNotNone(rule["critical_response_profile_id"])
 
                     first = persisted_candidate(first_at, 5_000, 2811)
                     first.update(
@@ -307,8 +309,9 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertEqual(event["timeseries_points"], 1)
                     self.assertEqual(event["critical_threshold"], 5_000)
                     gate = backend_main.detection_automatic_policy_gate(event)
-                    self.assertFalse(gate["allowed"])
-                    self.assertEqual(gate["reason"], "insufficient_time_series_evidence")
+                    self.assertTrue(gate["allowed"])
+                    self.assertNotIn("insufficient_time_series_evidence", gate["reasons"])
+                    self.assertFalse(gate["temporal_evidence_required"])
 
                     conn.commit()
                 with mock.patch.object(backend_main, "exabgp_write_pipe") as fifo_write:
@@ -317,7 +320,7 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                 with backend_main.sqlite_connection() as conn:
                     one_point = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
                     self.assertEqual(one_point["auto_mitigation_status"], "not_applied")
-                    self.assertEqual(one_point["auto_mitigation_reason"], "insufficient_time_series_evidence")
+                    self.assertEqual(one_point["auto_mitigation_reason"], "cgnat_subscriber_not_resolved")
                     self.assertEqual(
                         conn.execute(
                             "SELECT COUNT(*) AS count FROM bgp_announcements WHERE anomaly_id = ?",
@@ -344,6 +347,8 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                         1,
                     )
                     updated = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+                    self.assertEqual(updated["auto_mitigation_status"], "")
+                    self.assertEqual(updated["auto_mitigation_reason"], "")
                     event = backend_main.anomaly_event_row_to_dict(updated)
                     self.assertEqual(event["observed_value"], 11_000)
                     self.assertEqual(event["peak_value"], 11_000)
@@ -363,7 +368,7 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertEqual(candidate["dst_cidr"], "195.136.19.76/32")
                     self.assertEqual(candidate["protocol"], "udp")
                     self.assertEqual(candidate["dst_port"], "53")
-                    self.assertEqual(candidate["src_port"], "")
+                    self.assertEqual(candidate["src_port"], "2811")
                     self.assertEqual(candidate["top_flow"]["src_port"], 2811)
                     proposal = backend_main.deterministic_automatic_proposal_state(conn, candidate)
                     self.assertFalse(proposal["eligible"])
@@ -400,6 +405,261 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertEqual(ended["peak_value"], 11_000)
                     self.assertEqual(ended["top_flow"]["src_port"], 2811)
                     conn.commit()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_real_cgnat_case_authorizes_only_destination_udp53(self):
+        tmpdir = tempfile.mkdtemp()
+        db_path = str(Path(tmpdir) / "gmjflow.db")
+        try:
+            with mock.patch.dict(os.environ, {"GMJFLOW_DB_PATH": db_path}, clear=False), mock.patch.object(
+                backend_main, "SENSOR_DB_READY", False
+            ), mock.patch.object(backend_main, "hash_password", return_value="test-hash"):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    rule = conn.execute(
+                        "SELECT * FROM detection_template_rules WHERE upper(vector) = ? ORDER BY id LIMIT 1",
+                        (backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,),
+                    ).fetchone()
+                    profile = conn.execute(
+                        "SELECT * FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'"
+                    ).fetchone()
+                    self.assertEqual(profile["default_duration_seconds"], 900)
+                    event = {
+                        "id": 2446,
+                        "anomaly_source": "detection_template_rule",
+                        "source": "anomaly_events",
+                        "vector_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+                        "attack_vector_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+                        "detection_template_rule_id": int(rule["id"]),
+                        "response_profile_id": int(profile["id"]),
+                        "direction": "transmits",
+                        "severity": "critical",
+                        "classification": "attack",
+                        "confidence_label": "high",
+                        "protocol": "udp",
+                        "top_src_ip": "45.5.248.196",
+                        "top_src_port": 2258,
+                        "top_dst_ip": "83.29.96.194",
+                        "top_dst_port": 53,
+                        "target_port": 53,
+                        "observed_value": 5_800.0,
+                        "public_ip": "45.5.248.196",
+                        "public_port": 2258,
+                        "private_ip": "100.64.0.4",
+                        "mapped_port_start": 1024,
+                        "mapped_port_end": 3039,
+                        "cgnat_matched": True,
+                        "cgnat_ambiguous": False,
+                        "cgnat_shared_public_ip": True,
+                        "unique_private_subscribers": 1,
+                        "unique_destinations": 1,
+                        "unique_dst_ips": 1,
+                        "unique_conversations": 1,
+                        "source_details": {
+                            "rule_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+                            "classification": "attack",
+                            "deterministic_confidence_label": "high",
+                            "unique_private_subscribers": 1,
+                            "unique_destinations": 1,
+                            "unique_conversations": 1,
+                            "detection": {
+                                "triggered_severity": "critical",
+                                "automatic_mitigation_threshold": 5_000.0,
+                                "current": {
+                                    "last_value": 5_800.0,
+                                    "automatic_mitigation_threshold": 5_000.0,
+                                    "comparison": "over",
+                                },
+                                "temporal_evidence": {
+                                    "points_count": 1,
+                                    "sufficient_for_automatic": False,
+                                },
+                            },
+                        },
+                    }
+                    flows = [
+                        {
+                            "src_ip": "45.5.248.196",
+                            "src_port": 2258,
+                            "dst_ip": "83.29.96.194",
+                            "dst_port": 53,
+                            "proto": 17,
+                            "proto_name": "udp",
+                            "packets": 348_000,
+                            "bytes": 27_840_000,
+                        }
+                    ]
+                    with mock.patch.object(
+                        backend_main,
+                        "exabgp_write_pipe",
+                        side_effect=AssertionError("FIFO real nao pode ser escrito"),
+                    ) as fifo_write, mock.patch.object(
+                        backend_main,
+                        "create_bgp_announcement",
+                        side_effect=AssertionError("anuncio real nao pode ser criado"),
+                    ) as create_announcement:
+                        candidates = backend_main.build_mitigation_candidates_from_anomaly(
+                            {"event": event, "flows": flows}
+                        )
+                    fifo_write.assert_not_called()
+                    create_announcement.assert_not_called()
+                    self.assertEqual(len(candidates), 2)
+                    automatic, manual = candidates
+                    expected = (
+                        "announce flow route { match { destination 83.29.96.194/32; "
+                        "protocol =udp; destination-port =53; } then { discard; } }"
+                    )
+                    command = backend_main.render_exabgp_flowspec_command("announce", automatic)
+                    self.assertEqual(command, expected)
+                    self.assertNotIn("source ", command)
+                    self.assertNotIn("source-port", command)
+                    self.assertEqual(automatic["mitigation_scope"], "destination_dns_udp53")
+                    self.assertEqual(automatic["duration_seconds"], 900)
+                    self.assertEqual(automatic["mitigation_mode"], "automatic")
+                    self.assertNotEqual(
+                        automatic.get("cgnat_auto_block_reason"),
+                        "cgnat_shared_public_ip_manual_scope_required",
+                    )
+
+                    manual_command = backend_main.render_exabgp_flowspec_command("announce", manual)
+                    self.assertIn("source 45.5.248.196/32;", manual_command)
+                    self.assertIn("source-port =2258;", manual_command)
+                    self.assertIn("destination 83.29.96.194/32;", manual_command)
+                    self.assertNotIn("1024-3039", manual_command)
+
+                    first_point_gate = backend_main.detection_automatic_policy_gate(automatic)
+                    self.assertTrue(first_point_gate["allowed"])
+                    self.assertNotIn("insufficient_time_series_evidence", first_point_gate["reasons"])
+                    strict_gate = backend_main.dns_single_flow_automatic_policy_gate(
+                        automatic,
+                        whitelist_hits=[],
+                        whitelist_consulted=True,
+                    )
+                    self.assertTrue(strict_gate["allowed"], strict_gate["reasons"])
+                    self.assertEqual(strict_gate["destination_ip"], "83.29.96.194")
+                    automatic.update(
+                        {
+                            "dns_whitelist_consulted": True,
+                            "dns_whitelist_result": "no_match",
+                            "dns_whitelist_hits": [],
+                            "deterministic_authorization_reason": strict_gate["authorization_reason"],
+                            "deterministic_authorization_conditions": strict_gate["conditions"],
+                        }
+                    )
+                    backend_main.record_auto_mitigation_outcome(
+                        conn,
+                        automatic,
+                        "not_applied",
+                        "test_only",
+                        created_by="test",
+                        requested_mode="automatic",
+                    )
+                    details = automatic["auto_mitigation_details"]
+                    self.assertTrue(details["whitelist_consulted"])
+                    self.assertEqual(details["whitelist_result"], "no_match")
+                    self.assertEqual(details["mitigation_scope"], "destination_dns_udp53")
+                    self.assertEqual(details["blocked_destination_ip"], "83.29.96.194")
+                    self.assertEqual(details["ttl_seconds"], 900)
+                    self.assertEqual(details["public_ip"], "45.5.248.196")
+                    self.assertEqual(details["public_port"], 2258)
+                    self.assertEqual(details["private_ip"], "100.64.0.4")
+                    self.assertEqual(
+                        (details["fixed_nat_port_start"], details["fixed_nat_port_end"]),
+                        (1024, 3039),
+                    )
+
+                    shape_only = dict(automatic)
+                    for key in ("profile", "response_profile_name", "response_profile"):
+                        shape_only.pop(key, None)
+                    ok, reason = backend_main.validate_dns_outbound_pending_candidate(
+                        shape_only,
+                        event,
+                    )
+                    self.assertTrue(ok, reason)
+
+                    conn.execute(
+                        """
+                        INSERT INTO detection_whitelist (
+                            name, description, active, type, dst_cidr, protocol, created_at, updated_at
+                        )
+                        VALUES ('DNS aprovado', 'Resolvedor administrativo', 1, 'destination',
+                                '83.29.96.0/24', 'udp', ?, ?)
+                        """,
+                        ("2026-07-26T12:00:00Z", "2026-07-26T12:00:00Z"),
+                    )
+                    conn.commit()
+                    whitelist_hits = backend_main.mitigation_candidate_whitelist_hits(automatic)
+                    self.assertEqual(whitelist_hits[0]["name"], "DNS aprovado")
+                    self.assertEqual(whitelist_hits[0]["description"], "Resolvedor administrativo")
+                    blocked = backend_main.dns_single_flow_automatic_policy_gate(
+                        automatic,
+                        whitelist_hits=whitelist_hits,
+                        whitelist_consulted=True,
+                    )
+                    self.assertFalse(blocked["allowed"])
+                    self.assertEqual(blocked["reason"], "dns_destination_whitelisted")
+                    whitelist_policy = backend_main.policy_for_candidate(automatic, "automatic")
+                    self.assertEqual(whitelist_policy["decision"], "deny")
+
+                    ambiguous = {
+                        **automatic,
+                        "cgnat_ambiguous": True,
+                        "raw_payload": {
+                            "anomaly": {
+                                **automatic["raw_payload"]["anomaly"],
+                                "cgnat_ambiguous": True,
+                            }
+                        },
+                    }
+                    ambiguous_gate = backend_main.dns_single_flow_automatic_policy_gate(
+                        ambiguous,
+                        whitelist_hits=[],
+                        whitelist_consulted=True,
+                    )
+                    self.assertFalse(ambiguous_gate["allowed"])
+                    self.assertEqual(ambiguous_gate["reason"], "cgnat_mapping_ambiguous")
+
+                    outside_range = {
+                        **automatic,
+                        "public_port": 3040,
+                        "raw_payload": {
+                            "anomaly": {
+                                **automatic["raw_payload"]["anomaly"],
+                                "public_port": 3040,
+                            }
+                        },
+                    }
+                    port_gate = backend_main.dns_single_flow_automatic_policy_gate(
+                        outside_range,
+                        whitelist_hits=[],
+                        whitelist_consulted=True,
+                    )
+                    self.assertFalse(port_gate["allowed"])
+                    self.assertEqual(port_gate["reason"], "cgnat_public_port_outside_mapped_range")
+
+                    for mutation in (
+                        {"protocol": "tcp"},
+                        {"dst_port": "54"},
+                    ):
+                        invalid = {**shape_only, **mutation}
+                        ok, reason = backend_main.validate_dns_outbound_pending_candidate(invalid, event)
+                        self.assertFalse(ok)
+                        self.assertEqual(reason, "dns_outbound_requires_flowspec_block_dst_dns")
+
+                    conn.execute(
+                        "UPDATE detection_template_rules SET duration_seconds = 1200 WHERE id = ?",
+                        (int(rule["id"]),),
+                    )
+                    backend_main.ensure_official_dns_detection_rules(
+                        conn,
+                        int(rule["template_id"]),
+                    )
+                    conn.commit()
+                    configured = backend_main.build_mitigation_candidates_from_anomaly(
+                        {"event": event, "flows": flows}
+                    )[0]
+                    self.assertEqual(configured["duration_seconds"], 1200)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -443,6 +703,12 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
         self.assertIn("['Porta de origem'", FRONTEND)
         self.assertIn("['PPS observado'", FRONTEND)
         self.assertIn("['Estado da mitigação'", FRONTEND)
+        self.assertIn("Bloqueio automático do DNS de destino", FRONTEND)
+        self.assertIn("Somente UDP/53", FRONTEND)
+        self.assertIn("IP público CGNAT não será bloqueado", FRONTEND)
+        self.assertIn("Destino fora da whitelist", FRONTEND)
+        self.assertIn("Cliente privado responsável", FRONTEND)
+        self.assertIn("TTL da mitigação", FRONTEND)
 
 
 if __name__ == "__main__":
