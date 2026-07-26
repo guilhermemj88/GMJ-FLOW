@@ -927,8 +927,10 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
                 self.assertIn("destination-port =53;", item["rendered_command_preview"])
                 self.assertNotIn("source ", item["rendered_command_preview"])
                 self.assertNotIn("source-port", item["rendered_command_preview"])
-                self.assertEqual(item["used_by_rules_count"], 1)
-                self.assertEqual(item["used_by_rules"][0]["vector"], "DNS_INTERNAL_IP_TO_DST_HIGH_PPS")
+                self.assertGreaterEqual(item["used_by_rules_count"], 2)
+                used_vectors = {entry["vector"] for entry in item["used_by_rules"]}
+                self.assertIn("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", used_vectors)
+                self.assertIn(backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR, used_vectors)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

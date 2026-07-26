@@ -542,6 +542,10 @@ NAT Address: 168.232.197.33
         self.assertEqual(enriched["private_ip"], "100.97.0.1")
         self.assertEqual((enriched["mapped_port_start"], enriched["mapped_port_end"]), (2032, 3039))
         self.assertEqual(enriched["cgnat_lookup_direction"], "outbound_src_ip_src_port")
+        self.assertEqual(enriched["unique_private_subscribers"], 1)
+        self.assertEqual(enriched["unique_destinations"], 1)
+        self.assertEqual(enriched["unique_conversations"], 1)
+        self.assertEqual(enriched["cgnat_conversation_share"], 1.0)
 
     def test_28_missing_mapping_does_not_downgrade_anomaly(self):
         event = {

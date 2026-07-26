@@ -672,6 +672,8 @@ BGP_POLICY_DECISIONS = {"allow_auto", "require_manual_approval", "deny"}
 BGP_POLICY_SEVERITIES = {"safe", "caution", "danger"}
 LEGACY_DNS_MITIGATION_DISABLED_MESSAGE = "legacy DNS detection: mitigation disabled; use detection template"
 DNS_SINGLE_FLOW_OUTBOUND_VECTOR = "DNS_SINGLE_FLOW_OUTBOUND"
+DNS_SINGLE_FLOW_DEFAULT_TTL_SECONDS = 15 * 60
+DNS_SINGLE_FLOW_MITIGATION_SCOPE = "destination_dns_udp53"
 DNS_OUTBOUND_TEMPLATE_VECTORS = {
     "DNS_INTERNAL_IP_TO_DST_HIGH_PPS",
     "DNS_QUERY_OUTBOUND_CLIENT",
@@ -2843,15 +2845,15 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
             "protocol": "UDP",
             "group_by": "src_ip,src_port,dst_ip,dst_port,protocol",
             "detection_key": "src_ip,src_port,dst_ip,dst_port,protocol",
-            "response": "DETECTION_ONLY",
-            "mitigation_mode": "detection_only",
-            "mitigation_enabled": 0,
-            "profile_id": None,
-            "notes": "Deteccao deterministica por conversa completa UDP/53; PPS >= 5000 e sempre critical. Mitigacao automatica permanece sujeita a todos os gates de seguranca.",
+            "response": "FLOWSPEC_AUTO_BLOCK_DST_DNS",
+            "mitigation_mode": "response_profile",
+            "mitigation_enabled": 1,
+            "profile_id": profile_id,
+            "notes": "Deteccao deterministica por conversa completa UDP/53; PPS >= 5000 e sempre critical. Automatico bloqueia somente destination /32 em UDP/53, sem source CGNAT.",
         },
     ]
     if profile_id is None:
-        defaults = [default for default in defaults if default["vector"] == DNS_SINGLE_FLOW_OUTBOUND_VECTOR]
+        defaults = [default for default in defaults if default["profile_id"] is None]
     for default in defaults:
         vector = default["vector"]
         row = conn.execute(
@@ -2891,7 +2893,7 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
             32,
             128,
             300,
-            600,
+            DNS_SINGLE_FLOW_DEFAULT_TTL_SECONDS if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else 600,
             10,
             0.75,
             1,
@@ -2943,7 +2945,12 @@ def ensure_official_dns_detection_rules(conn: sqlite3.Connection, template_id: i
                     max_auto_prefixlen_v4 = ?,
                     max_auto_prefixlen_v6 = ?,
                     cooldown_seconds = ?,
-                    duration_seconds = ?,
+                    duration_seconds = CASE
+                        WHEN upper(vector) = 'DNS_SINGLE_FLOW_OUTBOUND'
+                          AND COALESCE(duration_seconds, 0) NOT IN (0, 600)
+                        THEN duration_seconds
+                        ELSE ?
+                    END,
                     max_active_announcements = ?,
                     min_confidence_for_auto = ?,
                     use_global_whitelist = ?,
@@ -3052,7 +3059,7 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "dst_port_selector": "fixed",
             "dst_port_value": "53",
             "require_protocol_or_port": 1,
-            "default_duration_seconds": 600,
+            "default_duration_seconds": DNS_SINGLE_FLOW_DEFAULT_TTL_SECONDS,
             "max_duration_seconds": 1800,
             "enable_multi_target_dns": 1,
             "max_targets_per_anomaly": 10,
@@ -3559,7 +3566,12 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             dst_port_selector = 'fixed',
             dst_port_value = '53',
             max_targets_per_anomaly = CASE WHEN COALESCE(max_targets_per_anomaly, 0) <= 0 THEN 10 ELSE max_targets_per_anomaly END,
-            default_duration_seconds = CASE WHEN COALESCE(default_duration_seconds, 0) <= 0 OR default_duration_seconds = 1800 THEN 600 ELSE default_duration_seconds END,
+            default_duration_seconds = CASE
+                WHEN COALESCE(default_duration_seconds, 0) <= 0
+                  OR default_duration_seconds IN (600, 1800)
+                THEN 900
+                ELSE default_duration_seconds
+            END,
             max_duration_seconds = CASE WHEN COALESCE(max_duration_seconds, 0) <= 0 THEN 1800 ELSE max_duration_seconds END
         WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
         """
@@ -9204,12 +9216,15 @@ def exabgp_pipe_mount_error(pipe_path: str) -> str:
 def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
     pipe_in = clean_text(connector.get("exabgp_pipe_in"))
     pipe_out = clean_text(connector.get("exabgp_pipe_out"))
-    mount_error = exabgp_pipe_mount_error(pipe_in) or exabgp_pipe_mount_error(pipe_out)
+    pipe_mount_error = (
+        exabgp_pipe_mount_error(pipe_in)
+        or exabgp_pipe_mount_error(pipe_out)
+        or "Pipe ExaBGP indisponivel ou sem permissao de escrita."
+    )
     input_exists = bool(pipe_in and Path(pipe_in).exists())
     output_exists = bool(pipe_out and Path(pipe_out).exists())
     input_writable = bool(input_exists and os.access(pipe_in, os.W_OK))
     pipes_ok = input_exists and input_writable and (output_exists or not pipe_out)
-    message = "" if pipes_ok else mount_error or "Pipe ExaBGP indisponivel ou sem permissao de escrita."
     return {
         "input_path": pipe_in,
         "input_exists": input_exists,
@@ -9219,7 +9234,7 @@ def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
         "ok": pipes_ok,
         "status": "ok" if pipes_ok else "down",
         "severity": "ok" if pipes_ok else "down",
-        "message": message,
+        "message": "" if pipes_ok else pipe_mount_error,
     }
 
 
@@ -12094,7 +12109,7 @@ def detection_rule_mitigation_config(
         "connector_id": None,
         "mitigation_mode": item.get("mitigation_mode") or "response_profile",
         "mitigation_enabled": item.get("mitigation_enabled", True),
-        "duration_seconds": None,
+        "duration_seconds": item.get("duration_seconds"),
         "require_protected_prefix": item.get("require_protected_prefix", True),
         "max_auto_prefixlen_v4": item.get("max_auto_prefixlen_v4"),
         "max_auto_prefixlen_v6": item.get("max_auto_prefixlen_v6"),
@@ -12199,8 +12214,14 @@ def apply_cgnat_candidate_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         reason = "cgnat_mapping_ambiguous"
     elif anomaly.get("cgnat_shared_public_ip") and not anomaly.get("cgnat_matched"):
         reason = "cgnat_subscriber_not_resolved"
-    elif anomaly.get("cgnat_matched") and anomaly.get("cgnat_shared_public_ip"):
+    elif (
+        anomaly.get("cgnat_matched")
+        and anomaly.get("cgnat_shared_public_ip")
+        and not is_dns_outbound_destination_only_candidate(candidate)
+    ):
         reason = "cgnat_shared_public_ip_manual_scope_required"
+    if anomaly.get("cgnat_shared_public_ip"):
+        candidate["cgnat_public_src_block_forbidden"] = True
     if reason:
         candidate.update(
             {
@@ -12705,6 +12726,26 @@ def record_auto_mitigation_outcome(
             if isinstance(candidate.get("automatic_gate"), dict)
             else candidate.get("deterministic_gate_reasons")
         ),
+        "deterministic_authorization_reason": clean_text(candidate.get("deterministic_authorization_reason")),
+        "deterministic_authorization_conditions": candidate.get("deterministic_authorization_conditions") or [],
+        "whitelist_consulted": bool(candidate.get("dns_whitelist_consulted")),
+        "whitelist_result": clean_text(candidate.get("dns_whitelist_result") or "not_consulted"),
+        "whitelist_hits": candidate.get("dns_whitelist_hits") or [],
+        "mitigation_scope": clean_text(candidate.get("mitigation_scope")),
+        "blocked_destination_ip": clean_ip(
+            candidate.get("blocked_destination_ip")
+            or candidate.get("dst_ip")
+            or (candidate.get("top_flow") or {}).get("dst_ip")
+        ),
+        "ttl_seconds": int(candidate.get("duration_seconds") or 0),
+        "ttl_minutes": round(float(candidate.get("duration_seconds") or 0) / 60.0, 2),
+        "public_ip": clean_ip(candidate.get("public_ip")),
+        "public_port": int_or_none(candidate.get("public_port")),
+        "private_ip": clean_ip(candidate.get("private_ip")),
+        "fixed_nat_port_start": int_or_none(candidate.get("mapped_port_start")),
+        "fixed_nat_port_end": int_or_none(candidate.get("mapped_port_end")),
+        "cgnat_pool_name": clean_text(candidate.get("cgnat_pool_name")),
+        "cgnat_device_name": clean_text(candidate.get("cgnat_device_name")),
     }
     details.update(extra_details or {})
     candidate["auto_mitigation_status"] = clean_text(status)
@@ -13249,7 +13290,7 @@ def dns_single_flow_manual_candidate(
             "src_prefix": cidr_from_ip_or_cidr(src_ip),
             "dst_prefix": cidr_from_ip_or_cidr(dst_ip),
             "target_prefix": cidr_from_ip_or_cidr(dst_ip),
-            "src_port": "",
+            "src_port": str(src_port),
             "dst_port": "53",
             "protocol": "udp",
             "target_scope": cidr_from_ip_or_cidr(dst_ip),
@@ -13259,6 +13300,117 @@ def dns_single_flow_manual_candidate(
             "target_role": "dst_ip",
             "manual_approval_required": True,
             "allow_auto": False,
+            "candidate_role": "manual_session_scoped",
+            "mitigation_scope": "session_dns_udp53",
+            "mitigation_reason": "Alternativa manual: source public /32 + source-port publica exata + destination /32 + UDP destination-port 53.",
+        }
+    )
+    attached["mitigation_key"] = mitigation_key_for_candidate(attached)
+    return attached
+
+
+def dns_single_flow_destination_candidate(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    flows: list[dict[str, Any]],
+    confidence: float,
+) -> dict[str, Any] | None:
+    top_flow = top_udp_flow_for_mitigation(event, flows)
+    public_ip = clean_ip(
+        event.get("public_ip")
+        or top_flow.get("src_ip")
+        or event.get("top_src_ip")
+        or event.get("target_ip")
+    )
+    destination_ip = clean_ip(
+        top_flow.get("dst_ip")
+        or event.get("top_dst_ip")
+        or event.get("dst_ip")
+    )
+    public_port = int(
+        event.get("public_port")
+        or top_flow.get("src_port")
+        or event.get("top_src_port")
+        or 0
+    )
+    destination_port = int(
+        top_flow.get("dst_port")
+        or event.get("top_dst_port")
+        or event.get("target_port")
+        or 0
+    )
+    if not public_ip or not destination_ip or destination_port != 53:
+        return None
+    destination_cidr = host_cidr_for_ip(destination_ip)
+    if not is_ipv4_32_cidr(destination_cidr):
+        return None
+    candidate = base_mitigation_candidate(
+        event,
+        DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+        "Bloqueio automatico do DNS de destino fora da whitelist, somente em UDP/53.",
+        max(confidence, 0.99),
+    )
+    candidate.update(
+        {
+            "source": "detection_template_rule",
+            "profile": "FLOWSPEC_AUTO_BLOCK_DST_DNS",
+            "response_profile_name": "FLOWSPEC_AUTO_BLOCK_DST_DNS",
+            "src_cidr": "",
+            "src_prefix": "",
+            "src_port": "",
+            "dst_cidr": destination_cidr,
+            "dst_prefix": destination_cidr,
+            "protocol": "udp",
+            "dst_port": "53",
+            "target_scope": destination_cidr,
+            "target_prefix": destination_cidr,
+            "target_ip": destination_ip,
+            "target_cidr": destination_cidr,
+            "target_port": 53,
+            "target_role": "dst_ip",
+            "candidate_role": "automatic_destination_dns",
+            "mitigation_scope": DNS_SINGLE_FLOW_MITIGATION_SCOPE,
+            "mitigation_basis": "dns_outbound_destination",
+            "mitigation_reason": "Destino /32 somente em UDP/53; o IP publico CGNAT nao faz parte da regra automatica.",
+            "blocked_destination_ip": destination_ip,
+            "public_ip": public_ip,
+            "public_port": public_port,
+            "private_ip": event.get("private_ip"),
+            "mapped_port_start": event.get("mapped_port_start"),
+            "mapped_port_end": event.get("mapped_port_end"),
+            "top_flow": {
+                "src_ip": public_ip,
+                "src_port": public_port,
+                "dst_ip": destination_ip,
+                "dst_port": 53,
+                "packets": int(top_flow.get("packets") or event.get("top_packets") or 0),
+                "bytes": int(top_flow.get("bytes") or event.get("top_bytes") or 0),
+                "packets_s": float(
+                    top_flow.get("packets_s")
+                    or event.get("observed_value")
+                    or event.get("last_value")
+                    or 0
+                ),
+                "protocol": "udp",
+            },
+        }
+    )
+    vector = anomaly_mitigation_config(conn, event, DNS_SINGLE_FLOW_OUTBOUND_VECTOR) or {}
+    attached = attach_mitigation_config(conn, candidate, vector)
+    attached.update(
+        {
+            "src_cidr": "",
+            "src_prefix": "",
+            "src_port": "",
+            "dst_cidr": destination_cidr,
+            "dst_prefix": destination_cidr,
+            "target_scope": destination_cidr,
+            "target_prefix": destination_cidr,
+            "protocol": "udp",
+            "dst_port": "53",
+            "candidate_role": "automatic_destination_dns",
+            "mitigation_scope": DNS_SINGLE_FLOW_MITIGATION_SCOPE,
+            "blocked_destination_ip": destination_ip,
         }
     )
     attached["mitigation_key"] = mitigation_key_for_candidate(attached)
@@ -13338,6 +13490,22 @@ def event_cgnat_shared_hint(conn: sqlite3.Connection, event: dict[str, Any]) -> 
 
 def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(event)
+    event_vector = outbound_dst_port_event_vector(enriched)
+    source_details = event_source_details(enriched)
+    unique_destinations = int(
+        enriched.get("unique_destinations")
+        or enriched.get("unique_dst_ips")
+        or source_details.get("unique_destinations")
+        or source_details.get("unique_dst_ips")
+        or (1 if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else 0)
+    )
+    unique_conversations = int(
+        enriched.get("unique_conversations")
+        or source_details.get("unique_conversations")
+        or (1 if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else 0)
+    )
+    enriched["unique_destinations"] = unique_destinations
+    enriched["unique_conversations"] = unique_conversations
     coordinates = cgnat_event_lookup_coordinates(enriched)
     enriched["cgnat_lookup_direction"] = coordinates["lookup_direction"]
     enriched["cgnat_lookup_performed"] = bool(coordinates["lookup_supported"])
@@ -13349,6 +13517,7 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
                 "cgnat_ambiguous": False,
                 "cgnat_shared_public_ip": shared_public_ip,
                 "cgnat_mapping_status": "not_looked_up",
+                "unique_private_subscribers": 0,
                 "cgnat_mapping_message": (
                     "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
                     if coordinates["lookup_direction"].startswith("inbound_")
@@ -13388,17 +13557,20 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
         if matched
         else "Cliente CGNAT nao identificado."
     )
-    try:
-        conversation_share = min(
-            1.0,
-            max(
-                0.0,
-                float(enriched.get("top_packets") or 0)
-                / max(float(enriched.get("estimated_packets") or enriched.get("top_packets") or 1), 1.0),
-            ),
-        )
-    except (TypeError, ValueError, ZeroDivisionError):
-        conversation_share = 0.0
+    if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and unique_conversations == 1:
+        conversation_share = 1.0
+    else:
+        try:
+            conversation_share = min(
+                1.0,
+                max(
+                    0.0,
+                    float(enriched.get("top_packets") or 0)
+                    / max(float(enriched.get("estimated_packets") or enriched.get("top_packets") or 1), 1.0),
+                ),
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            conversation_share = 0.0
     enriched.update(
         {
             "cgnat_matched": matched and not ambiguous,
@@ -13420,6 +13592,9 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
             "cgnat_mapping_active": lookup.get("active"),
             "cgnat_match_count": lookup.get("match_count", 0),
             "cgnat_candidates": lookup.get("candidates") or [],
+            "unique_private_subscribers": 1 if matched and not ambiguous and lookup.get("private_ip") else 0,
+            "unique_destinations": unique_destinations,
+            "unique_conversations": unique_conversations,
             "subscriber_id": lookup.get("subscriber_id") if not ambiguous else None,
             "subscriber_name": lookup.get("subscriber_name") if not ambiguous else None,
             "cgnat_conversation_share": round(conversation_share, 4),
@@ -13430,7 +13605,7 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     elif shared_public_ip and not enriched["cgnat_matched"]:
         enriched["cgnat_mitigation_block_reason"] = "cgnat_subscriber_not_resolved"
     elif shared_public_ip and enriched["cgnat_matched"]:
-        enriched["cgnat_mitigation_block_reason"] = "cgnat_shared_public_ip_manual_scope_required"
+        enriched.pop("cgnat_mitigation_block_reason", None)
     return enriched
 
 
@@ -13502,8 +13677,9 @@ def build_mitigation_candidates_from_anomaly(anomaly: dict[str, Any]) -> list[di
         except (TypeError, ValueError):
             event_target_port = 0
         if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
-            candidate = dns_single_flow_manual_candidate(conn, event, flows, confidence)
-            return [candidate] if candidate else []
+            automatic = dns_single_flow_destination_candidate(conn, event, flows, confidence)
+            manual = dns_single_flow_manual_candidate(conn, event, flows, confidence)
+            return [candidate for candidate in (automatic, manual) if candidate is not None]
 
         if event_vector in OUTBOUND_DST_PORT_VECTORS:
             candidate = outbound_dst_port_candidate(event, confidence)
@@ -13680,11 +13856,27 @@ def policy_for_candidate(candidate: dict[str, Any], requested_mode: str | None =
         policy["severity"] = "caution"
         policy["reasons"] = sorted(set([*(policy.get("reasons") or []), f"Confianca {candidate.get('confidence')} abaixo do minimo automatico {min_confidence}."]))
     whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
+    candidate["dns_whitelist_consulted"] = True
+    candidate["dns_whitelist_result"] = "match" if whitelist_hits else "no_match"
+    candidate["dns_whitelist_hits"] = whitelist_hits
     if whitelist_hits:
-        policy["decision"] = "require_manual_approval"
-        policy["severity"] = "caution" if policy.get("severity") != "danger" else "danger"
+        vector = clean_text(
+            candidate.get("attack_vector_name")
+            or mitigation_raw_anomaly(candidate).get("vector_name")
+        ).upper()
+        if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+            policy["decision"] = "deny"
+            policy["severity"] = "danger"
+        else:
+            policy["decision"] = "require_manual_approval"
+            policy["severity"] = "caution" if policy.get("severity") != "danger" else "danger"
         policy["warnings"] = sorted(set([*(policy.get("warnings") or []), "whitelist_match"]))
-        policy["reasons"] = sorted(set([*(policy.get("reasons") or []), "Candidate cruza whitelist; acao automatica bloqueada e aprovacao manual exigida."]))
+        whitelist_reason = (
+            "Destino DNS em whitelist; anuncio FlowSpec proibido para DNS_SINGLE_FLOW_OUTBOUND."
+            if vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+            else "Candidate cruza whitelist; acao automatica bloqueada e aprovacao manual exigida."
+        )
+        policy["reasons"] = sorted(set([*(policy.get("reasons") or []), whitelist_reason]))
         policy["whitelist_hits"] = whitelist_hits
     return policy
 
@@ -13747,7 +13939,19 @@ def mitigation_candidate_whitelist_hits(candidate: dict[str, Any]) -> list[dict[
             continue
         if wl_type == "source_destination" and not (src_match and dst_match):
             continue
-        hits.append({"id": item["id"], "name": item.get("name") or "", "type": wl_type, "src_cidr": wl_src, "dst_cidr": wl_dst, "protocol": wl_protocol, "src_port": src_port, "dst_port": dst_port})
+        hits.append(
+            {
+                "id": item["id"],
+                "name": item.get("name") or "",
+                "description": item.get("description") or "",
+                "type": wl_type,
+                "src_cidr": wl_src,
+                "dst_cidr": wl_dst,
+                "protocol": wl_protocol,
+                "src_port": src_port,
+                "dst_port": dst_port,
+            }
+        )
     return hits[:10]
 
 
@@ -16258,8 +16462,54 @@ def profile_names_for_candidate(candidate: dict[str, Any], profile: dict[str, An
 FLOWSPEC_DST_DNS_PROFILE_NAMES = {"FLOWSPEC_BLOCK_DST_DNS", "FLOWSPEC_BLOCK_DST_DNS_QUERY", "FLOWSPEC_AUTO_BLOCK_DST_DNS"}
 
 
+def dns_candidate_destination_host(candidate: dict[str, Any]) -> tuple[str, str]:
+    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    if not dst_prefix and clean_text(candidate.get("target_role")).lower() != "src_ip":
+        dst_prefix = clean_text(candidate.get("target_prefix") or candidate.get("target_scope"))
+    try:
+        network = ip_network(dst_prefix, strict=False)
+    except ValueError:
+        return "", ""
+    if network.version != 4 or network.prefixlen != 32:
+        return "", ""
+    return str(network.network_address), str(network)
+
+
+def dns_destination_udp53_shape(candidate: dict[str, Any]) -> bool:
+    destination_ip, _destination_prefix = dns_candidate_destination_host(candidate)
+    return bool(
+        destination_ip
+        and clean_text(candidate.get("protocol")).lower() == "udp"
+        and clean_text(candidate.get("dst_port")) == "53"
+        and not clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
+        and not clean_text(candidate.get("src_port"))
+    )
+
+
+def dns_manual_session_udp53_shape(candidate: dict[str, Any]) -> bool:
+    destination_ip, _destination_prefix = dns_candidate_destination_host(candidate)
+    src_prefix = clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
+    try:
+        src_network = ip_network(src_prefix, strict=False)
+    except ValueError:
+        return False
+    src_port = clean_text(candidate.get("src_port"))
+    return bool(
+        destination_ip
+        and src_network.version == 4
+        and src_network.prefixlen == 32
+        and src_port.isdigit()
+        and 1 <= int(src_port) <= 65535
+        and clean_text(candidate.get("protocol")).lower() == "udp"
+        and clean_text(candidate.get("dst_port")) == "53"
+    )
+
+
 def is_flowspec_block_dst_dns_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
-    return bool(profile_names_for_candidate(candidate, profile) & FLOWSPEC_DST_DNS_PROFILE_NAMES)
+    return bool(
+        profile_names_for_candidate(candidate, profile) & FLOWSPEC_DST_DNS_PROFILE_NAMES
+        or dns_destination_udp53_shape(candidate)
+    )
 
 
 def dns_outbound_client_cidr_for_candidate(candidate: dict[str, Any], anomaly: dict[str, Any] | None = None) -> str:
@@ -16292,22 +16542,7 @@ def dns_outbound_client_cidr_for_candidate(candidate: dict[str, Any], anomaly: d
 def is_dns_outbound_destination_only_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
     if not is_dns_outbound_mitigation_context(candidate, None, None):
         return False
-    if not is_flowspec_block_dst_dns_candidate(candidate, profile):
-        return False
-    if clean_text(candidate.get("protocol")).lower() != "udp" or clean_text(candidate.get("dst_port")) != "53":
-        return False
-    if clean_text(candidate.get("src_prefix") or candidate.get("src_cidr") or candidate.get("src_port")):
-        return False
-    dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
-    if not dst_prefix and clean_text(candidate.get("target_role")) != "src_ip":
-        dst_prefix = clean_text(candidate.get("target_prefix") or candidate.get("target_scope"))
-    if not dst_prefix:
-        return False
-    try:
-        network = ip_network(dst_prefix, strict=False)
-    except ValueError:
-        return False
-    return network.prefixlen == network.max_prefixlen and not is_internal_ip_text(str(network.network_address))
+    return dns_destination_udp53_shape(candidate)
 
 
 def is_destination_port_flowspec_candidate(candidate: dict[str, Any], profile: dict[str, Any] | None = None) -> bool:
@@ -16354,14 +16589,34 @@ def validate_dns_outbound_pending_candidate(
 ) -> tuple[bool, str]:
     if not is_dns_outbound_mitigation_context(candidate, anomaly, response_json):
         return True, ""
-    if clean_text(candidate.get("protocol")).lower() != "udp" or clean_text(candidate.get("dst_port")) != "53":
+    candidate_vector = clean_text(
+        candidate.get("attack_vector_name")
+        or (anomaly or {}).get("vector_name")
+        or (anomaly or {}).get("attack_vector_name")
+    ).upper()
+    candidate_is_udp53 = (
+        clean_text(candidate.get("protocol")).lower() == "udp"
+        and clean_text(candidate.get("dst_port")) == "53"
+    )
+    if not candidate_is_udp53:
+        if candidate_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+            return False, "dns_outbound_requires_flowspec_block_dst_dns"
         return True, ""
     profile_names = profile_names_for_candidate(candidate, profile)
     if "FLOWSPEC_BLOCK_SRC_DNS" in profile_names:
         return False, "dns_outbound_cannot_use_flowspec_block_src_dns"
-    if not profile_names & FLOWSPEC_DST_DNS_PROFILE_NAMES:
-        return False, "dns_outbound_requires_flowspec_block_dst_dns"
-    candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
+    destination_only = dns_destination_udp53_shape(candidate)
+    manual_session = dns_manual_session_udp53_shape(candidate)
+    if not destination_only and not manual_session:
+        if (
+            profile_names & FLOWSPEC_DST_DNS_PROFILE_NAMES
+            and not dns_candidate_destination_host(candidate)[0]
+        ):
+            candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
+        else:
+            return False, "dns_outbound_requires_flowspec_block_dst_dns"
+    if destination_only:
+        candidate = sanitize_flowspec_block_dst_dns_candidate(candidate, profile)
     dst_prefix = clean_text(candidate.get("dst_prefix") or candidate.get("dst_cidr"))
     src_prefix = clean_text(candidate.get("src_prefix") or candidate.get("src_cidr"))
     if not dst_prefix:
@@ -16370,8 +16625,6 @@ def validate_dns_outbound_pending_candidate(
         dst_network = ip_network(dst_prefix, strict=False)
         if dst_network.prefixlen != dst_network.max_prefixlen:
             return False, "dns_outbound_dst_prefix_must_be_host"
-        if is_internal_ip_text(str(dst_network.network_address)):
-            return False, "dns_outbound_dst_prefix_must_be_external"
     except ValueError:
         return False, "dns_outbound_dst_prefix_invalid"
     if src_prefix and not dst_prefix:
@@ -16388,6 +16641,203 @@ def validate_dns_outbound_pending_candidate(
     if "source " in command and "destination-port =53" in command and "destination " not in command:
         return False, "dns_outbound_source_dns_without_destination_forbidden"
     return True, ""
+
+
+def dns_single_flow_automatic_policy_gate(
+    candidate: dict[str, Any],
+    *,
+    whitelist_hits: list[dict[str, Any]] | None = None,
+    whitelist_consulted: bool | None = None,
+) -> dict[str, Any]:
+    anomaly = mitigation_raw_anomaly(candidate) or candidate
+    source_details = event_source_details(anomaly)
+    detection = source_details.get("detection") if isinstance(source_details.get("detection"), dict) else {}
+    current = detection.get("current") if isinstance(detection.get("current"), dict) else {}
+    top_flow = candidate.get("top_flow") if isinstance(candidate.get("top_flow"), dict) else {}
+    vector = clean_text(
+        candidate.get("attack_vector_name")
+        or anomaly.get("vector_name")
+        or anomaly.get("attack_vector_name")
+        or anomaly.get("vector")
+        or source_details.get("rule_name")
+    ).upper()
+    if vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
+        return {"applies": False, "allowed": True, "reason": "", "reasons": [], "conditions": []}
+    if clean_text(candidate.get("candidate_role")) == "manual_session_scoped":
+        return {"applies": False, "allowed": True, "reason": "", "reasons": [], "conditions": []}
+
+    def first_value(*values: Any) -> Any:
+        return next((value for value in values if value not in (None, "")), None)
+
+    def integer_value(*values: Any) -> int:
+        try:
+            return int(first_value(*values) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    severity = clean_text(first_value(candidate.get("severity"), anomaly.get("severity"), detection.get("triggered_severity"))).lower()
+    classification = clean_text(
+        first_value(candidate.get("classification"), anomaly.get("classification"), source_details.get("classification"))
+    ).lower()
+    confidence_label = clean_text(
+        first_value(
+            candidate.get("deterministic_confidence_label"),
+            candidate.get("confidence_label"),
+            anomaly.get("deterministic_confidence_label"),
+            anomaly.get("confidence_label"),
+            source_details.get("deterministic_confidence_label"),
+        )
+    ).lower()
+    protocol = clean_text(
+        first_value(candidate.get("protocol"), top_flow.get("protocol"), anomaly.get("protocol"))
+    ).lower()
+    destination_port = integer_value(candidate.get("dst_port"), top_flow.get("dst_port"), anomaly.get("top_dst_port"), anomaly.get("target_port"))
+    destination_ip, destination_prefix = dns_candidate_destination_host(candidate)
+    if not destination_ip:
+        destination_ip = clean_ip(
+            first_value(
+                top_flow.get("dst_ip"),
+                anomaly.get("top_dst_ip"),
+                anomaly.get("dst_ip"),
+                source_details.get("top_dst_ip"),
+            )
+        )
+        destination_prefix = host_cidr_for_ip(destination_ip)
+    public_port = integer_value(
+        candidate.get("public_port"),
+        anomaly.get("public_port"),
+        top_flow.get("src_port"),
+        anomaly.get("top_src_port"),
+        source_details.get("top_src_port"),
+    )
+    mapped_port_start = integer_value(candidate.get("mapped_port_start"), anomaly.get("mapped_port_start"))
+    mapped_port_end = integer_value(candidate.get("mapped_port_end"), anomaly.get("mapped_port_end"))
+    private_ip = clean_ip(first_value(candidate.get("private_ip"), anomaly.get("private_ip")))
+    unique_private_subscribers = integer_value(
+        candidate.get("unique_private_subscribers"),
+        anomaly.get("unique_private_subscribers"),
+        source_details.get("unique_private_subscribers"),
+    )
+    unique_destinations = integer_value(
+        candidate.get("unique_destinations"),
+        anomaly.get("unique_destinations"),
+        anomaly.get("unique_dst_ips"),
+        source_details.get("unique_destinations"),
+        source_details.get("unique_dst_ips"),
+    )
+    unique_conversations = integer_value(
+        candidate.get("unique_conversations"),
+        anomaly.get("unique_conversations"),
+        source_details.get("unique_conversations"),
+    )
+    observed_pps = detection_number(
+        first_value(
+            candidate.get("packets_per_second"),
+            candidate.get("packets_s"),
+            top_flow.get("packets_s"),
+            anomaly.get("observed_value"),
+            anomaly.get("last_value"),
+            source_details.get("observed_metric"),
+            current.get("last_value"),
+            detection.get("trigger_value"),
+        )
+    ) or 0.0
+    automatic_threshold = detection_number(
+        first_value(
+            candidate.get("automatic_mitigation_threshold"),
+            anomaly.get("automatic_mitigation_threshold"),
+            source_details.get("automatic_mitigation_threshold"),
+            current.get("automatic_mitigation_threshold"),
+            detection.get("automatic_mitigation_threshold"),
+        )
+    )
+    consulted = (
+        bool(whitelist_consulted)
+        if whitelist_consulted is not None
+        else sqlite_bool(candidate.get("dns_whitelist_consulted"))
+    )
+    hits = whitelist_hits if whitelist_hits is not None else (
+        candidate.get("dns_whitelist_hits")
+        if isinstance(candidate.get("dns_whitelist_hits"), list)
+        else []
+    )
+    conditions = [
+        {"condition": "vector", "expected": DNS_SINGLE_FLOW_OUTBOUND_VECTOR, "actual": vector, "passed": vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR},
+        {"condition": "severity", "expected": "critical", "actual": severity, "passed": severity == "critical"},
+        {"condition": "classification", "expected": "attack", "actual": classification, "passed": classification == "attack"},
+        {"condition": "deterministic_confidence", "expected": "high", "actual": confidence_label, "passed": confidence_label == "high"},
+        {"condition": "protocol", "expected": "udp", "actual": protocol, "passed": protocol == "udp"},
+        {"condition": "destination_port", "expected": 53, "actual": destination_port, "passed": destination_port == 53},
+        {
+            "condition": "destination_ipv4_host",
+            "expected": "valid IPv4 /32",
+            "actual": destination_prefix,
+            "passed": is_ipv4_32_cidr(destination_prefix),
+        },
+        {
+            "condition": "dns_whitelist",
+            "expected": "consulted:no_match",
+            "actual": "match" if hits else "no_match" if consulted else "not_consulted",
+            "passed": consulted and not bool(hits),
+        },
+        {"condition": "cgnat_matched", "expected": True, "actual": sqlite_bool(first_value(candidate.get("cgnat_matched"), anomaly.get("cgnat_matched"))), "passed": sqlite_bool(first_value(candidate.get("cgnat_matched"), anomaly.get("cgnat_matched")))},
+        {"condition": "cgnat_ambiguous", "expected": False, "actual": sqlite_bool(first_value(candidate.get("cgnat_ambiguous"), anomaly.get("cgnat_ambiguous"))), "passed": not sqlite_bool(first_value(candidate.get("cgnat_ambiguous"), anomaly.get("cgnat_ambiguous")))},
+        {"condition": "private_ip", "expected": "identified", "actual": private_ip, "passed": bool(private_ip)},
+        {
+            "condition": "public_port_in_fixed_nat_range",
+            "expected": f"{mapped_port_start}-{mapped_port_end}",
+            "actual": public_port,
+            "passed": bool(mapped_port_start <= public_port <= mapped_port_end and public_port > 0),
+        },
+        {"condition": "unique_private_subscribers", "expected": 1, "actual": unique_private_subscribers, "passed": unique_private_subscribers == 1},
+        {"condition": "unique_destinations", "expected": 1, "actual": unique_destinations, "passed": unique_destinations == 1},
+        {"condition": "unique_conversations", "expected": 1, "actual": unique_conversations, "passed": unique_conversations == 1},
+        {
+            "condition": "automatic_threshold",
+            "expected": automatic_threshold,
+            "actual": observed_pps,
+            "passed": automatic_threshold is not None and observed_pps >= automatic_threshold,
+        },
+        {
+            "condition": "automatic_candidate_scope",
+            "expected": DNS_SINGLE_FLOW_MITIGATION_SCOPE,
+            "actual": clean_text(candidate.get("mitigation_scope")),
+            "passed": dns_destination_udp53_shape(candidate),
+        },
+    ]
+    failed = [clean_text(item["condition"]) for item in conditions if not item["passed"]]
+    reason_priority = (
+        ("dns_whitelist", "dns_destination_whitelisted" if hits else "dns_whitelist_not_consulted"),
+        ("cgnat_ambiguous", "cgnat_mapping_ambiguous"),
+        ("cgnat_matched", "cgnat_subscriber_not_resolved"),
+        ("private_ip", "cgnat_private_ip_not_identified"),
+        ("public_port_in_fixed_nat_range", "cgnat_public_port_outside_mapped_range"),
+        ("automatic_threshold", "below_automatic_mitigation_threshold"),
+        ("automatic_candidate_scope", "dns_outbound_requires_flowspec_block_dst_dns"),
+    )
+    reason = next((value for condition, value in reason_priority if condition in failed), "")
+    if failed and not reason:
+        reason = "dns_single_flow_deterministic_conditions_not_met"
+    authorization_reason = (
+        "DNS_SINGLE_FLOW_OUTBOUND autorizado deterministicamente: um cliente CGNAT, um destino fora da whitelist, "
+        "uma conversa UDP/53 e PPS no threshold; bloqueio destination /32 sem source publico."
+    )
+    return {
+        "applies": True,
+        "allowed": not bool(failed),
+        "reason": reason,
+        "reasons": failed,
+        "conditions": conditions,
+        "authorization_reason": authorization_reason if not failed else "",
+        "mitigation_scope": DNS_SINGLE_FLOW_MITIGATION_SCOPE,
+        "destination_ip": destination_ip,
+        "observed_packets_per_second": observed_pps,
+        "automatic_threshold": automatic_threshold,
+        "whitelist_consulted": consulted,
+        "whitelist_result": "match" if hits else "no_match" if consulted else "not_consulted",
+        "whitelist_hits": hits,
+        "temporal_evidence_required": False,
+    }
 
 
 def first_safe_mitigation_candidate_index(candidates: list[dict[str, Any]]) -> int | None:
@@ -19653,6 +20103,43 @@ def anomaly_auto_mitigation_status(conn: sqlite3.Connection, anomaly_id: Any) ->
 
 def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, Any]:
     """Evaluate automation without consulting or merging any AI output."""
+    dns_gate_probe = dns_single_flow_automatic_policy_gate(
+        candidate,
+        whitelist_hits=[],
+        whitelist_consulted=False,
+    )
+    if dns_gate_probe.get("applies"):
+        whitelist_hits = mitigation_candidate_whitelist_hits(candidate)
+        candidate["dns_whitelist_consulted"] = True
+        candidate["dns_whitelist_result"] = "match" if whitelist_hits else "no_match"
+        candidate["dns_whitelist_hits"] = whitelist_hits
+        dns_gate = dns_single_flow_automatic_policy_gate(
+            candidate,
+            whitelist_hits=whitelist_hits,
+            whitelist_consulted=True,
+        )
+        candidate["automatic_gate"] = dns_gate
+        candidate["deterministic_authorization_conditions"] = dns_gate.get("conditions") or []
+        candidate["deterministic_gate_reasons"] = dns_gate.get("reasons") or []
+        candidate["deterministic_authorization_reason"] = dns_gate.get("authorization_reason") or ""
+        if not dns_gate.get("allowed"):
+            reason = clean_text(dns_gate.get("reason")) or "dns_single_flow_deterministic_conditions_not_met"
+            candidate["auto_allowed"] = False
+            candidate["eligible"] = False
+            candidate["eligible_for_automatic"] = False
+            candidate["automatic_not_applied_reason"] = reason
+            candidate["mitigation_state"] = "not_applied"
+            return {
+                "auto_allowed": False,
+                "eligible": False,
+                "eligible_for_automatic": False,
+                "reason": reason,
+                "reasons": dns_gate.get("reasons") or [],
+                "automatic_gate": dns_gate,
+                "mitigation_state": "not_applied",
+            }
+        candidate["deterministic_auto_authorized"] = True
+        candidate["mitigation_scope"] = DNS_SINGLE_FLOW_MITIGATION_SCOPE
     cgnat_reason = clean_text(candidate.get("cgnat_auto_block_reason"))
     if cgnat_reason:
         detection_gate = detection_automatic_policy_gate(candidate)
@@ -19793,6 +20280,9 @@ def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: 
         "auto_allowed": bool(auto_allowed),
         "eligible": eligible,
         "eligible_for_automatic": eligible,
+        "deterministic_auto_authorized": bool(candidate.get("deterministic_auto_authorized")),
+        "deterministic_authorization_reason": clean_text(candidate.get("deterministic_authorization_reason")),
+        "automatic_gate": candidate.get("automatic_gate") or automatic_gate,
         "policy": policy,
         "validation_errors": sorted(set(validation_errors)),
         "validation": validation,
@@ -19935,7 +20425,7 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 continue
             context = fetch_anomaly_mitigation_context(conn, int(event["id"]))
             candidates = build_mitigation_candidates_from_anomaly(context)
-            event_automatic_gate = detection_automatic_policy_gate(event)
+            event_automatic_gate = detection_automatic_policy_gate(context["event"])
             if event_automatic_gate.get("applies") and not event_automatic_gate.get("allowed"):
                 outcome_candidate = next(
                     (
@@ -20017,11 +20507,37 @@ def process_anomaly_mitigation() -> dict[str, int]:
             ai_analysis: dict[str, Any] | None = None
             ai_config: dict[str, Any] = {"allow_auto": False}
             if eligible_automatic_candidates:
-                ai_analysis, ai_config = run_automatic_mitigation_ai_analysis(
-                    int(event["id"]),
-                    context,
-                    eligible_automatic_candidates,
+                deterministic_dns_authorization = all(
+                    candidate.get("deterministic_auto_authorized") is True
+                    and clean_text(candidate.get("mitigation_scope")) == DNS_SINGLE_FLOW_MITIGATION_SCOPE
+                    for candidate in eligible_automatic_candidates
                 )
+                if deterministic_dns_authorization:
+                    ai_analysis = {
+                        "status": "success",
+                        "apply_mitigation": True,
+                        "reason": "Autorizacao deterministica DNS_SINGLE_FLOW_OUTBOUND; IA nao consultada.",
+                        "decision_source": "deterministic_policy",
+                        "analysis_mode": "automatic_authorization",
+                        "request_payload": {
+                            "analysis_mode": "automatic_authorization",
+                            "decision_source": "deterministic_policy",
+                            "candidates": [
+                                {
+                                    "candidate_index": candidate.get("candidate_index"),
+                                    "candidate_version": candidate.get("candidate_version"),
+                                }
+                                for candidate in eligible_automatic_candidates
+                            ],
+                        },
+                    }
+                    ai_config = {"allow_auto": True, "decision_source": "deterministic_policy"}
+                else:
+                    ai_analysis, ai_config = run_automatic_mitigation_ai_analysis(
+                        int(event["id"]),
+                        context,
+                        eligible_automatic_candidates,
+                    )
             ai_candidate_versions = {
                 clean_text(item.get("candidate_version"))
                 for item in ((ai_analysis or {}).get("request_payload") or {}).get("candidates") or []
@@ -20057,6 +20573,11 @@ def process_anomaly_mitigation() -> dict[str, int]:
                 if not conn.in_transaction:
                     conn.execute("BEGIN IMMEDIATE")
                 stats["checked"] += 1
+                if clean_text(candidate.get("candidate_role")) == "manual_session_scoped":
+                    # This is an operator alternative shown in the proposal.
+                    # The automatic worker must never enqueue or announce it.
+                    stats["skipped"] += 1
+                    continue
                 mode = clean_text(candidate.get("mitigation_mode")) or "disabled"
                 if mode in {"disabled", "analysis_only"} or candidate.get("never_announce"):
                     stats["skipped"] += 1
@@ -23261,6 +23782,13 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         rule_config.get("allow_warning_auto")
         or source_details.get("allow_warning_auto")
     )
+    vector = clean_text(
+        candidate_or_event.get("attack_vector_name")
+        or anomaly.get("vector_name")
+        or anomaly.get("attack_vector_name")
+        or anomaly.get("vector")
+        or source_details.get("rule_name")
+    ).upper()
     reasons: list[str] = []
     if severity == "warning" and not allow_warning_auto:
         reasons.append("warning_manual_only")
@@ -23271,7 +23799,11 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         comparison,
     ):
         reasons.append("below_automatic_mitigation_threshold")
-    if evidence and not sqlite_bool(evidence.get("sufficient_for_automatic")):
+    if (
+        evidence
+        and vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+        and not sqlite_bool(evidence.get("sufficient_for_automatic"))
+    ):
         reasons.append("insufficient_time_series_evidence")
     priority = (
         "warning_manual_only",
@@ -23298,6 +23830,7 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         "automatic_mitigation_threshold": automatic_threshold,
         "temporal_evidence": evidence,
         "warning_auto_explicitly_enabled": allow_warning_auto,
+        "temporal_evidence_required": vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
     }
 
 
@@ -27664,6 +28197,24 @@ def detection_template_dns_anomaly_dedupe_key(candidate: dict[str, Any]) -> str:
     )
 
 
+def anomaly_has_reserved_flowspec(conn: sqlite3.Connection, anomaly_id: int) -> bool:
+    if not sqlite_table_exists(conn, "bgp_announcements"):
+        return False
+    row = conn.execute(
+        f"""
+        SELECT id
+        FROM bgp_announcements
+        WHERE anomaly_id = ?
+          AND response_type = 'flowspec'
+          AND {bgp_reserving_announcement_clause()}
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (anomaly_id,),
+    ).fetchone()
+    return row is not None
+
+
 def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candidate: dict[str, Any]) -> str:
     now = clean_text(candidate.get("last_seen")) or utc_now_iso()
     first_seen = clean_text(candidate.get("first_seen")) or now
@@ -27708,6 +28259,9 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "classification": "attack" if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "",
         "deterministic_confidence": 0.99 if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else None,
         "deterministic_confidence_label": "high" if vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "",
+        "unique_private_subscribers": int(candidate.get("unique_private_subscribers") or 0),
+        "unique_destinations": int(candidate.get("unique_destinations") or candidate.get("unique_dst_ips") or 1),
+        "unique_conversations": int(candidate.get("unique_conversations") or 1),
         "threshold_warning": candidate.get("threshold_warning"),
         "threshold_critical": candidate.get("threshold_critical"),
         "automatic_mitigation_threshold": candidate.get("automatic_mitigation_threshold"),
@@ -27823,9 +28377,15 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         )
         previous_auto_reason = clean_text(row["auto_mitigation_reason"])
         previous_auto_status = clean_text(row["auto_mitigation_status"])
+        persistent_dns_retry = bool(
+            vector_name.upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+            and previous_auto_status
+            and not anomaly_has_reserved_flowspec(conn, event_id)
+        )
         if current_gate.get("allowed") and (
             previous_auto_reason in DETECTION_AUTOMATIC_BLOCK_REASONS
             or previous_auto_status == "informational_candidate"
+            or persistent_dns_retry
         ):
             conn.execute(
                 """
