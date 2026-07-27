@@ -5789,6 +5789,14 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
 
           <section class="panel p-3 mt-3">
+            <div class="panel-title mb-1">Execuções automáticas</div>
+            <div class="subtle mb-2">Fonte de verdade do orquestrador: avaliação, aplicação, TTL, retirada e falhas.</div>
+            <div class="table-wrap mb-3">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>ID</th><th>Anomalia</th><th>Vetor / perfil</th><th>Status</th><th>Conector</th><th>Regra</th><th>Aplicado</th><th>Expira</th><th>Resultado / erro</th></tr></thead>
+                <tbody id="automaticMitigationExecutionsTable"><tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr></tbody>
+              </table>
+            </div>
             <div class="panel-title mb-2">Sugestões aguardando aprovação</div>
             <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Conector</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
             <div class="panel-title mb-2">Em processamento / sem confirmação</div>
@@ -7595,6 +7603,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let bgpProfileFilter = 'all';
     let bgpProtectedPrefixes = [];
     let bgpAnnouncements = [];
+    let automaticMitigationExecutions = [];
     let bgpPortPolicies = [];
     let bgpConnectorStatuses = [];
     let bgpStatusesRefreshInFlight = null;
@@ -11513,6 +11522,47 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `<button type="button" class="btn btn-link btn-sm p-0 mitigation-connector-link" data-connector-id="${connectorId}" title="Abrir em BGP / Conectores">${escapeHtml(label)}</button>`;
     }
 
+    function automaticMitigationStatusBadge(item = {}) {
+      const status = String(item.status || '').toLowerCase();
+      const tone = status === 'active'
+        ? 'status-active'
+        : ['failed', 'blocked'].includes(status)
+          ? 'off'
+          : ['queued', 'applying', 'withdraw_pending'].includes(status)
+            ? 'warn'
+            : '';
+      return `<span class="badge-soft ${tone}">${escapeHtml(status || '-')}</span>`;
+    }
+
+    function renderAutomaticMitigationExecutions() {
+      const table = document.getElementById('automaticMitigationExecutionsTable');
+      if (!table) return;
+      table.innerHTML = automaticMitigationExecutions.map(item => {
+        const match = item.normalized_match && typeof item.normalized_match === 'object'
+          ? Object.entries(item.normalized_match)
+            .filter(([, value]) => value !== null && value !== undefined && String(value) !== '')
+            .map(([key, value]) => `${key}=${value}`)
+            .join(' · ')
+          : '-';
+        const result = item.error_message
+          || item.apply_result?.announcement?.last_error
+          || (item.status === 'active' ? 'Aplicado automaticamente' : item.policy_reason)
+          || '-';
+        return `
+          <tr>
+            <td>#${escapeHtml(item.id)}</td>
+            <td>#${escapeHtml(item.anomaly_id)}</td>
+            <td>${escapeHtml(item.vector || '-')}<br><span class="subtle">${escapeHtml(item.profile || '-')}</span></td>
+            <td>${automaticMitigationStatusBadge(item)}<br><span class="subtle">${item.automatic ? 'Automática' : 'Manual'}</span></td>
+            <td>${mitigationConnectorLink(item)}</td>
+            <td><span class="subtle">${escapeHtml(match)}</span><details><summary>Comando</summary><pre class="mb-0">${escapeHtml(item.command || '-')}</pre></details></td>
+            <td>${formatDateTime(item.applied_at)}</td>
+            <td>${formatDateTime(item.expires_at)}</td>
+            <td>${escapeHtml(result)}</td>
+          </tr>`;
+      }).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr>';
+    }
+
     function renderBgpAnnouncements() {
       const failureCodes = new Set(['failed', 'failed_withdraw', 'peer_down']);
       const pending = bgpAnnouncements.filter(item => bgpAnnouncementStatusCode(item) === 'pending_approval');
@@ -11645,6 +11695,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderBgpProtected();
       renderBgpPolicies();
       renderBgpAnnouncements();
+      renderAutomaticMitigationExecutions();
       updateBgpDryRateLimitUi();
       createIcons();
     }
@@ -11812,23 +11863,25 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadMitigationView() {
       setText('bgpStatus', 'Carregando Mitigação...');
-      const [connectors, profiles, protectedPrefixes, policies, announcements, summary] = await Promise.all([
+      const [connectors, profiles, protectedPrefixes, policies, announcements, summary, automaticExecutions] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
         apiRequest('/api/bgp/port-policies?include_disabled=true'),
         apiRequest('/api/bgp/announcements?limit=200'),
-        apiRequest('/api/bgp/summary')
+        apiRequest('/api/bgp/summary'),
+        apiRequest('/api/mitigation/executions?limit=200')
       ]);
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
       bgpProfiles = bgpResponseProfilesFromPayload(profiles);
       bgpProtectedPrefixes = Array.isArray(protectedPrefixes.items) ? protectedPrefixes.items : [];
       bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
+      automaticMitigationExecutions = Array.isArray(automaticExecutions.items) ? automaticExecutions.items : [];
       renderOpsSummary(summary);
       renderMitigationWorkspace();
       await loadMitigationAiSummary().catch(error => setText('mitigationAiState', `Falha IA: ${error.message}`));
-      setText('bgpStatus', `Perfis: ${bgpProfiles.length} / Registros de mitigação: ${bgpAnnouncements.length}`);
+      setText('bgpStatus', `Perfis: ${bgpProfiles.length} / Execuções automáticas: ${automaticMitigationExecutions.length} / Registros BGP: ${bgpAnnouncements.length}`);
     }
 
     async function loadBgpView() {
@@ -13042,12 +13095,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const selectedConnectorId = mitigationCandidateConnectorId(candidate);
         const selectionPending = Boolean(candidate.requires_connector_selection) && !Number(candidate.connector_id || currentBgpMitigationConnectorId || 0);
         const equivalentAnnouncement = candidate.equivalent_announcement || null;
-        const canSubmitApproval = actionable && !selectionPending && !equivalentAnnouncement && (
+        const automaticExecution = candidate.automatic_execution && typeof candidate.automatic_execution === 'object'
+          ? candidate.automatic_execution
+          : null;
+        const automaticExecutionStatus = String(automaticExecution?.status || '').toLowerCase();
+        const automaticAlreadyHandled = ['generated', 'queued', 'applying', 'active', 'withdraw_pending'].includes(automaticExecutionStatus);
+        const canSubmitApproval = actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
           Object.prototype.hasOwnProperty.call(candidate, 'can_submit_approval') ? Boolean(candidate.can_submit_approval) : legacyCanApply
         );
-        const canAnnounceNow = actionable && !selectionPending && !equivalentAnnouncement && (
+        const canAnnounceNow = actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
           Object.prototype.hasOwnProperty.call(candidate, 'can_announce_now') ? Boolean(candidate.can_announce_now) : legacyCanApply
         );
+        const automaticExecutionPanel = automaticExecution ? `
+          <div class="panel p-2 mb-2">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-1">
+              <div class="panel-title">Aplicado automaticamente</div>
+              ${automaticMitigationStatusBadge(automaticExecution)}
+            </div>
+            <div class="metric-readout">Execução #${escapeHtml(automaticExecution.id)} · Conector ${escapeHtml(automaticExecution.connector_id || '-')} · TTL ${escapeHtml(automaticExecution.ttl_seconds || 0)}s</div>
+            <div class="subtle">Aplicado: ${formatDateTime(automaticExecution.applied_at)} · Expira: ${formatDateTime(automaticExecution.expires_at)}</div>
+            ${automaticExecution.error_message ? `<div class="text-danger">${escapeHtml(automaticExecution.error_message)}</div>` : ''}
+          </div>` : '';
         const ineligibleMessage = candidate.rejection_persisted
           ? '<div class="text-danger fw-semibold mb-2">Rejeitado pelo operador.</div>'
           : !actionable && !informationalCandidate && !selectionPending && !equivalentAnnouncement
@@ -13074,6 +13142,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               </div>
             </div>
             <div class="metric-readout mb-2">${escapeHtml(candidateRole || basis)}${topFlowText ? `: ${escapeHtml(topFlowText)}` : ''}</div>
+            ${automaticExecutionPanel}
             ${dnsDestinationPanel}
             ${candidate.mitigation_reason ? `<div class="subtle mb-2">${escapeHtml(candidate.mitigation_reason)}</div>` : ''}
             ${candidate.not_recommended || candidate.candidate_role === 'not_recommended' || dnsWithoutDestination ? '<div class="text-danger mb-2">Source-only DNS outbound pode bloquear DNS legitimo do cliente. Prefira destination /32 + udp/53 ou src+dst+udp/53.</div>' : ''}

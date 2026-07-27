@@ -98,6 +98,19 @@ from app.services.ai_integration import (
     toggle_ai_provider,
     update_global_ai_settings,
 )
+from app.services.automatic_mitigation import (
+    AUDIT_DEDUPLICATED,
+    AUTOMATIC_PRIMARY,
+    INFORMATIONAL,
+    MANUAL_ALTERNATIVE,
+    AutomaticMitigationOrchestrator,
+    CallbackMitigationExecutor,
+    ExecutorResult,
+    MitigationCandidate,
+    ensure_automatic_mitigation_schema,
+    execution_row_to_dict,
+    normalized_match_from_candidate,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -422,6 +435,8 @@ DETECTION_SCHEDULER_STATUS: dict[str, Any] = {
 }
 BGP_EXPIRATION_STOP = threading.Event()
 BGP_EXPIRATION_THREAD: threading.Thread | None = None
+AUTOMATIC_MITIGATION_STOP = threading.Event()
+AUTOMATIC_MITIGATION_THREAD: threading.Thread | None = None
 BGP_STATUS_CHECK_STOP = threading.Event()
 BGP_STATUS_CHECK_THREAD: threading.Thread | None = None
 BGP_STATUS_CHECK_CYCLE_LOCK = threading.Lock()
@@ -3723,6 +3738,7 @@ def ensure_sensor_db() -> None:
         ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
+        ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
@@ -3762,6 +3778,7 @@ def startup() -> None:
     start_bgp_expiration_thread()
     start_bgp_status_check_executor()
     start_bgp_status_check_thread()
+    start_automatic_mitigation_thread()
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
     start_peak_hunter_runner_thread()
@@ -3772,6 +3789,7 @@ def shutdown() -> None:
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
     BGP_EXPIRATION_STOP.set()
+    stop_automatic_mitigation_thread()
     stop_bgp_status_check_thread()
     shutdown_bgp_status_check_executor()
     ANOMALY_DETECTION_STOP.set()
@@ -14006,6 +14024,18 @@ def evaluated_mitigation_candidates(
             "message": LEGACY_DNS_MITIGATION_DISABLED_MESSAGE,
         }
     candidates = build_mitigation_candidates_from_anomaly(context)
+    try:
+        automatic_executions = automatic_mitigation_orchestrator().list_executions(
+            anomaly_id=anomaly_id,
+            limit=100,
+        )
+    except (sqlite3.Error, RuntimeError):
+        automatic_executions = []
+    executions_by_key = {
+        clean_text(item.get("idempotency_key")): item
+        for item in automatic_executions
+        if clean_text(item.get("idempotency_key"))
+    }
     evaluated = []
     for candidate_index, candidate in enumerate(candidates):
         candidate["candidate_index"] = candidate_index
@@ -14083,6 +14113,31 @@ def evaluated_mitigation_candidates(
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), clean_text(exc.detail)]))
         candidate_version = mitigation_candidate_version(candidate, policy, validation, rendered)
         candidate["candidate_version"] = candidate_version
+        idempotency_key = clean_text(candidate.get("mitigation_key"))
+        automatic_execution = executions_by_key.get(idempotency_key)
+        if automatic_execution is None and idempotency_key:
+            with sqlite_connection() as execution_conn:
+                row = execution_conn.execute(
+                    """
+                    SELECT *
+                    FROM mitigation_executions
+                    WHERE idempotency_key = ?
+                      AND status IN ('generated', 'queued', 'applying', 'active', 'withdraw_pending')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
+            if row is not None:
+                automatic_execution = execution_row_to_dict(row)
+        execution_status = clean_text((automatic_execution or {}).get("status")).lower()
+        execution_blocks_manual = execution_status in {
+            "generated",
+            "queued",
+            "applying",
+            "active",
+            "withdraw_pending",
+        }
         policy_allows_auto = policy.get("decision") == "allow_auto"
         auto_allowed = bool(
             policy_allows_auto
@@ -14152,14 +14207,48 @@ def evaluated_mitigation_candidates(
                 "cooldown_allowed": cooldown_allowed,
                 "actionable": actionable,
                 "eligible": actionable,
-                "can_submit_approval": actionable,
-                "can_announce_now": actionable and not informational_candidate and not connector_is_dry_run(preview_connector),
+                "can_submit_approval": actionable and not execution_blocks_manual,
+                "can_announce_now": (
+                    actionable
+                    and not execution_blocks_manual
+                    and not informational_candidate
+                    and not connector_is_dry_run(preview_connector)
+                ),
                 "connector_dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "apply_enabled": actionable,
                 "manual_approval_required": not auto_allowed,
                 "allow_auto": auto_allowed,
                 "auto_allowed": auto_allowed,
                 "eligible_for_automatic": eligible_for_automatic,
+                "automatic_eligible": eligible_for_automatic,
+                "candidate_kind": automatic_mitigation_candidate_kind(candidate),
+                "priority": int(candidate.get("priority") or 0),
+                "connector_type": clean_text((preview_connector or {}).get("backend_type")),
+                "command": rendered,
+                "normalized_match": normalized_match_from_candidate(candidate),
+                "ttl_seconds": int(candidate.get("duration_seconds") or 0),
+                "idempotency_key": idempotency_key,
+                "gates": {
+                    "automatic_gate": automatic_gate,
+                    "validation": validation,
+                    "blocking": bool(gate_blocked or validation.get("errors")),
+                },
+                "policy_reason": clean_text(
+                    automatic_gate.get("reason")
+                    or candidate.get("deterministic_authorization_reason")
+                ),
+                "metadata": {
+                    "candidate_version": candidate_version,
+                    "resolution_source": candidate.get("resolution_source")
+                    or candidate.get("connector_resolution_method")
+                    or "",
+                },
+                "automatic_execution": automatic_execution,
+                "automatically_applied": bool(
+                    automatic_execution
+                    and automatic_execution.get("automatic") is True
+                    and execution_status in {"active", "withdraw_pending", "withdrawn", "expired"}
+                ),
                 "evaluation_only": True,
                 "dry_run": connector_is_dry_run(preview_connector) if preview_connector else False,
                 "dry_run_message": "Selecione um conector para recalcular a proposta." if requires_connector_selection else f"Nao elegivel para mitigacao: {connector_resolution_reason}." if connector_resolution_reason else "Avaliacao concluida; nenhum comando foi enviado.",
@@ -19490,7 +19579,8 @@ def apply_mitigation_candidate(
     if candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only":
         raise HTTPException(status_code=400, detail="Candidate analysis_only nao pode ser aplicado nem anunciado.")
     mode = normalize_choice(mode, {"manual_approval", "announce_now", "automatic"}, "mode")
-    if mode == "automatic":
+    trusted_orchestrator = bool(candidate.get("_automatic_orchestrator"))
+    if mode == "automatic" and not trusted_orchestrator:
         ai_status = clean_text(candidate.get("ai_decision_status")).lower()
         if int_or_none(candidate.get("ai_analysis_id")) is None:
             reason = "ai_not_evaluated"
@@ -19566,6 +19656,36 @@ def apply_mitigation_candidate(
             "requested_mode": mode,
         }
         connector_candidate["mitigation_key"] = mitigation_key_for_candidate(connector_candidate)
+        if not trusted_orchestrator and sqlite_table_exists(conn, "mitigation_executions"):
+            automatic_reservation = conn.execute(
+                """
+                SELECT id, status
+                FROM mitigation_executions
+                WHERE idempotency_key = ?
+                  AND status IN ('generated', 'queued', 'applying', 'active', 'withdraw_pending')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (connector_candidate["mitigation_key"],),
+            ).fetchone()
+            if automatic_reservation is not None:
+                record_auto_mitigation_outcome(
+                    conn,
+                    connector_candidate,
+                    "deduplicated",
+                    "equivalent_automatic_execution",
+                    profile,
+                    created_by=created_by,
+                    requested_mode=mode,
+                    extra_details={
+                        "mitigation_execution_id": int(automatic_reservation["id"]),
+                        "mitigation_execution_status": clean_text(automatic_reservation["status"]),
+                    },
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Resposta equivalente ja reservada pela execucao automatica #{automatic_reservation['id']}.",
+                )
         equivalent = equivalent_mitigation_announcement(conn, connector_candidate["mitigation_key"])
         if equivalent:
             record_auto_mitigation_outcome(conn, connector_candidate, "deduplicated", "equivalent_active_announcement", profile, equivalent, created_by, mode)
@@ -19595,7 +19715,11 @@ def apply_mitigation_candidate(
             "approval_mode": "manual_approval",
         })
         revalidated_version = mitigation_candidate_version(connector_candidate, policy, validation, command)
-        if mode == "automatic" and revalidated_version != clean_text(connector_candidate.get("ai_candidate_version")):
+        if (
+            mode == "automatic"
+            and not trusted_orchestrator
+            and revalidated_version != clean_text(connector_candidate.get("ai_candidate_version"))
+        ):
             connector_candidate["candidate_version"] = revalidated_version
             record_auto_mitigation_outcome(
                 conn,
@@ -20723,6 +20847,612 @@ def process_anomaly_mitigation() -> dict[str, int]:
             conn.commit()
         conn.commit()
     return stats
+
+
+def automatic_mitigation_context(anomaly_id: int) -> dict[str, Any]:
+    with sqlite_connection() as conn:
+        return fetch_anomaly_mitigation_context(conn, int(anomaly_id))
+
+
+def automatic_mitigation_candidate_kind(candidate: dict[str, Any]) -> str:
+    role = clean_text(candidate.get("candidate_role")).lower()
+    mode = clean_text(candidate.get("mitigation_mode")).lower()
+    if role in {"manual_session_scoped", "manual_alternative", "not_recommended"}:
+        return MANUAL_ALTERNATIVE
+    if candidate.get("never_announce") or mode == "analysis_only":
+        return INFORMATIONAL
+    if mode in {"auto", "automatic"}:
+        return AUTOMATIC_PRIMARY
+    return MANUAL_ALTERNATIVE
+
+
+def automatic_mitigation_candidates(
+    anomaly_id: int,
+    supplied_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the generic executor contract without consulting AI or the frontend."""
+    context = dict(supplied_context or {})
+    if not isinstance(context.get("event"), dict):
+        context = automatic_mitigation_context(anomaly_id)
+    event = dict(context.get("event") or {})
+    if is_legacy_dns_event(event):
+        return []
+    raw_candidates = build_mitigation_candidates_from_anomaly(context)
+    contracted: list[dict[str, Any]] = []
+    with sqlite_connection() as conn:
+        for index, raw_candidate in enumerate(raw_candidates):
+            candidate = dict(raw_candidate)
+            candidate["candidate_index"] = index
+            kind = automatic_mitigation_candidate_kind(candidate)
+            state = deterministic_automatic_proposal_state(conn, candidate)
+            connector = state.get("connector") if isinstance(state.get("connector"), dict) else None
+            profile = (
+                fetch_bgp_profile(conn, int(candidate["response_profile_id"]))
+                if candidate.get("response_profile_id")
+                else None
+            )
+            if connector:
+                candidate["connector_id"] = int(connector["id"])
+                candidate["connector_name"] = connector.get("name") or ""
+                candidate["connector_type"] = connector.get("backend_type") or connector.get("backend") or ""
+                candidate["connector_mode"] = connector.get("mode") or ""
+                candidate["pipe_path"] = connector.get("exabgp_pipe_in") or ""
+                candidate["mitigation_key"] = mitigation_key_for_candidate(candidate)
+            command = clean_text(state.get("command") or candidate.get("announce_command"))
+            if not command:
+                try:
+                    command = render_exabgp_flowspec_command("announce", candidate)
+                except HTTPException:
+                    command = ""
+            withdraw_command = ""
+            if command:
+                try:
+                    withdraw_command = render_exabgp_flowspec_command("withdraw", candidate)
+                except HTTPException:
+                    withdraw_command = ""
+            reason = clean_text(state.get("reason"))
+            equivalent = state.get("equivalent_announcement")
+            equivalent_reason = isinstance(equivalent, dict)
+            automatic_eligible = bool(
+                kind == AUTOMATIC_PRIMARY
+                and state.get("auto_allowed") is True
+                and (state.get("eligible") is True or equivalent_reason)
+            )
+            blocking_reasons = []
+            if reason and not equivalent_reason:
+                blocking_reasons.append(reason)
+            blocking_reasons.extend(
+                clean_text(item)
+                for item in state.get("validation_errors") or []
+                if clean_text(item)
+                and not (
+                    equivalent_reason
+                    and clean_text(item).lower().startswith("ja existe mitigacao equivalente ativa")
+                )
+            )
+            automatic_gate = state.get("automatic_gate") if isinstance(state.get("automatic_gate"), dict) else {}
+            if automatic_gate.get("applies") and not automatic_gate.get("allowed"):
+                blocking_reasons.extend(
+                    clean_text(item)
+                    for item in automatic_gate.get("reasons") or []
+                    if clean_text(item)
+                )
+            normalized_match = normalized_match_from_candidate(candidate)
+            contracted.append(
+                {
+                    "anomaly_id": int(anomaly_id),
+                    "vector": clean_text(
+                        candidate.get("attack_vector_name")
+                        or candidate.get("vector_name")
+                        or event.get("vector_name")
+                    ),
+                    "profile_id": int_or_none(candidate.get("response_profile_id")),
+                    "profile_name": clean_text((profile or {}).get("name") or candidate.get("profile")),
+                    "candidate_kind": kind,
+                    "automatic_eligible": automatic_eligible,
+                    "auto_allowed": state.get("auto_allowed") is True,
+                    "priority": int(candidate.get("priority") or (100 if kind == AUTOMATIC_PRIMARY else 10)),
+                    "connector_id": int_or_none(candidate.get("connector_id")),
+                    "connector_type": clean_text(
+                        (connector or {}).get("backend_type")
+                        or candidate.get("connector_type")
+                        or candidate.get("backend_type")
+                    ),
+                    "connector_mode": clean_text((connector or {}).get("mode") or candidate.get("connector_mode")),
+                    "profile_mode": clean_text(
+                        candidate.get("mitigation_mode")
+                        or (profile or {}).get("approval_mode")
+                    ),
+                    "command": command,
+                    "withdraw_command": withdraw_command,
+                    "normalized_match": normalized_match,
+                    "action": clean_text(candidate.get("action") or candidate.get("then_action") or "discard"),
+                    "ttl_seconds": int(
+                        candidate.get("duration_seconds")
+                        or (profile or {}).get("default_duration_seconds")
+                        or 0
+                    ),
+                    "idempotency_key": clean_text(
+                        candidate.get("mitigation_key")
+                        or mitigation_key_for_candidate(candidate)
+                    ),
+                    "gates": {
+                        "blocking": bool(blocking_reasons),
+                        "blocking_reasons": sorted(set(blocking_reasons)),
+                        "automatic_gate": automatic_gate,
+                        "validation": state.get("validation") or {},
+                        "readiness": state.get("readiness") or {},
+                    },
+                    "policy_reason": reason or clean_text(candidate.get("deterministic_authorization_reason")),
+                    "policy_authorized": state.get("auto_allowed") is True,
+                    "anomaly_status": clean_text(event.get("status") or "active"),
+                    "metadata": {
+                        "legacy_candidate": candidate,
+                        "proposal_state": {
+                            key: value
+                            for key, value in state.items()
+                            if key not in {"connector"}
+                        },
+                        "equivalent_announcement_id": int_or_none((equivalent or {}).get("id")),
+                    },
+                }
+            )
+    return contracted
+
+
+def automatic_exabgp_candidate(candidate: MitigationCandidate) -> dict[str, Any]:
+    legacy = candidate.metadata.get("legacy_candidate")
+    item = dict(legacy) if isinstance(legacy, dict) else {}
+    item.update(
+        {
+            "anomaly_id": candidate.anomaly_id,
+            "response_profile_id": candidate.profile_id,
+            "connector_id": candidate.connector_id,
+            "connector_type": candidate.connector_type,
+            "connector_mode": candidate.connector_mode,
+            "mitigation_mode": candidate.profile_mode,
+            "duration_seconds": candidate.ttl_seconds,
+            "action": candidate.action,
+            "announce_command": candidate.command,
+            "rendered_command": candidate.command,
+            "withdraw_command": candidate.withdraw_command,
+            "mitigation_key": candidate.idempotency_key,
+            "candidate_kind": candidate.candidate_kind,
+            "auto_allowed": candidate.auto_allowed,
+            "eligible": candidate.automatic_eligible,
+            "eligible_for_automatic": candidate.automatic_eligible,
+            "_automatic_orchestrator": True,
+        }
+    )
+    return item
+
+
+def automatic_exabgp_validate(candidate: MitigationCandidate) -> ExecutorResult:
+    if candidate.connector_id is None:
+        return ExecutorResult(False, error_code="connector_not_resolved", error_message="connector_not_resolved")
+    with sqlite_connection() as conn:
+        connector = active_connector_by_id(conn, candidate.connector_id)
+        profile = fetch_bgp_profile(conn, candidate.profile_id) if candidate.profile_id else None
+        if connector is None:
+            return ExecutorResult(False, error_code="connector_not_ready", error_message="connector_not_ready")
+        if clean_text(connector.get("mode")).lower() not in {"auto", "automatic"}:
+            return ExecutorResult(False, error_code="connector_not_automatic", error_message="connector_not_automatic")
+        legacy = automatic_exabgp_candidate(candidate)
+        validation = validate_mitigation_candidate(legacy, connector, profile or {})
+        if validation.get("errors"):
+            return ExecutorResult(
+                False,
+                result=validation,
+                error_code="validation_failed",
+                error_message="; ".join(clean_text(item) for item in validation["errors"]),
+            )
+        try:
+            rendered = render_exabgp_flowspec_command("announce", legacy)
+        except HTTPException as exc:
+            return ExecutorResult(False, error_code="validation_failed", error_message=clean_text(exc.detail))
+        if clean_text(rendered) != clean_text(candidate.command):
+            return ExecutorResult(
+                False,
+                result={"rendered_command": rendered},
+                error_code="validation_failed",
+                error_message="command_changed_during_validation",
+            )
+        return ExecutorResult(True, result={"validation": validation, "rendered_command": rendered})
+
+
+def automatic_exabgp_readiness(candidate: MitigationCandidate) -> ExecutorResult:
+    if candidate.connector_id is None:
+        return ExecutorResult(False, error_code="connector_not_resolved", error_message="connector_not_resolved")
+    with sqlite_connection() as conn:
+        connector = active_connector_by_id(conn, candidate.connector_id)
+        if connector is None:
+            return ExecutorResult(False, error_code="connector_not_ready", error_message="connector_not_ready")
+        if clean_text(connector.get("mode")).lower() not in {"auto", "automatic"}:
+            return ExecutorResult(False, error_code="connector_not_automatic", error_message="connector_not_automatic")
+        try:
+            readiness = check_bgp_connector_readiness(conn, connector)
+        except Exception as exc:
+            return ExecutorResult(
+                False,
+                error_code="connector_not_ready",
+                error_message=clean_text(exc) or exc.__class__.__name__,
+                transient=True,
+            )
+        if not readiness.get("ready"):
+            return ExecutorResult(
+                False,
+                result=readiness,
+                error_code="connector_not_ready",
+                error_message=clean_text(readiness.get("reason") or "connector_not_ready"),
+                transient=True,
+            )
+        return ExecutorResult(True, result=readiness)
+
+
+def automatic_exabgp_apply(
+    candidate: MitigationCandidate,
+    execution: dict[str, Any],
+) -> ExecutorResult:
+    legacy = automatic_exabgp_candidate(candidate)
+    legacy["source"] = "automatic_orchestrator"
+    legacy["source_id"] = str(execution.get("id") or "")
+    with sqlite_connection() as existing_conn:
+        existing = equivalent_mitigation_announcement(existing_conn, candidate.idempotency_key)
+    if existing:
+        existing_status = clean_text(existing.get("status"))
+        if existing_status in {"advertised", "active", "announced", "sent"}:
+            return ExecutorResult(
+                True,
+                result={
+                    "announcement_id": existing.get("id"),
+                    "announcement": existing,
+                    "status": "active",
+                    "deduplicated": True,
+                    "applied_at": existing.get("advertised_at")
+                    or existing.get("announced_at")
+                    or existing.get("sent_at"),
+                    "expires_at": existing.get("expires_at"),
+                },
+            )
+        return ExecutorResult(
+            False,
+            result={"announcement_id": existing.get("id"), "announcement": existing},
+            error_code="equivalent_rule_reserved",
+            error_message=f"equivalent_rule_reserved:{existing_status}",
+        )
+    try:
+        with sqlite_connection() as conn:
+            item = apply_mitigation_candidate(conn, legacy, "automatic", "automatic-orchestrator")
+            conn.commit()
+    except HTTPException as exc:
+        with sqlite_connection() as conn:
+            equivalent = equivalent_mitigation_announcement(conn, candidate.idempotency_key)
+        if exc.status_code == 409 and equivalent:
+            equivalent_status = clean_text(equivalent.get("status"))
+            if equivalent_status in {"advertised", "active", "announced", "sent"}:
+                logger.info(
+                    "%s anomaly_id=%s mitigation_id=%s announcement_id=%s idempotency_key=%s",
+                    AUDIT_DEDUPLICATED,
+                    candidate.anomaly_id,
+                    execution.get("id"),
+                    equivalent.get("id"),
+                    candidate.idempotency_key,
+                )
+                return ExecutorResult(
+                    True,
+                    result={
+                        "announcement_id": equivalent.get("id"),
+                        "announcement": equivalent,
+                        "status": "active",
+                        "deduplicated": True,
+                        "applied_at": equivalent.get("advertised_at")
+                        or equivalent.get("announced_at")
+                        or equivalent.get("sent_at"),
+                        "expires_at": equivalent.get("expires_at"),
+                    },
+                )
+        detail = clean_text(exc.detail)
+        transient = exc.status_code >= 500 or detail in {"connector_not_ready", "database is locked"}
+        return ExecutorResult(
+            False,
+            error_code="apply_failed",
+            error_message=detail or "apply_failed",
+            transient=transient,
+        )
+    if isinstance(item, dict) and item.get("multi_connector"):
+        return ExecutorResult(False, result=item, error_code="apply_failed", error_message="multiple_connectors_not_allowed")
+    status = clean_text((item or {}).get("status"))
+    if status != "advertised":
+        reason = clean_text((item or {}).get("last_error") or status or "apply_failed")
+        return ExecutorResult(
+            False,
+            result=dict(item or {}),
+            error_code="connector_not_ready" if status == "peer_down" else "apply_failed",
+            error_message=reason,
+            transient=status in {"peer_down", "failed"},
+        )
+    return ExecutorResult(
+        True,
+        result={"announcement_id": int(item["id"]), "announcement": item, "status": "active"},
+    )
+
+
+def automatic_execution_announcement_id(execution: dict[str, Any]) -> int | None:
+    apply_result = execution.get("apply_result")
+    if not isinstance(apply_result, dict):
+        apply_result = {}
+    announcement_id = int_or_none(
+        apply_result.get("announcement_id")
+        or (apply_result.get("announcement") or {}).get("id")
+    )
+    if announcement_id is not None:
+        return announcement_id
+    execution_id = int_or_none(execution.get("id"))
+    idempotency_key = clean_text(execution.get("idempotency_key"))
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM bgp_announcements
+            WHERE (source = 'automatic_orchestrator' AND source_id = ?)
+               OR (? <> '' AND mitigation_key = ?)
+            ORDER BY
+                CASE status
+                    WHEN 'advertised' THEN 0
+                    WHEN 'sent' THEN 1
+                    WHEN 'queued' THEN 2
+                    WHEN 'failed_withdraw' THEN 3
+                    WHEN 'expired' THEN 4
+                    WHEN 'withdrawn' THEN 5
+                    ELSE 6
+                END,
+                id DESC
+            LIMIT 1
+            """,
+            (str(execution_id or ""), idempotency_key, idempotency_key),
+        ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def automatic_exabgp_withdraw(
+    candidate: MitigationCandidate,
+    execution: dict[str, Any],
+) -> ExecutorResult:
+    announcement_id = automatic_execution_announcement_id(execution)
+    if announcement_id is None:
+        return ExecutorResult(False, error_code="withdraw_failed", error_message="announcement_not_linked")
+    with sqlite_connection() as conn:
+        try:
+            announcement = fetch_bgp_announcement(conn, announcement_id, include_events=False)
+        except HTTPException as exc:
+            return ExecutorResult(False, error_code="withdraw_failed", error_message=clean_text(exc.detail))
+        if clean_text(announcement.get("status")) in {"withdrawn", "expired"}:
+            return ExecutorResult(
+                True,
+                result={"announcement_id": announcement_id, "status": announcement.get("status"), "deduplicated": True},
+            )
+        connector = (
+            fetch_bgp_connector(conn, int(announcement["connector_id"]))
+            if announcement.get("connector_id") is not None
+            else None
+        )
+        if connector is None or connector.get("backend_type") != "exabgp" or connector_is_dry_run(connector):
+            return ExecutorResult(
+                False,
+                error_code="withdraw_failed",
+                error_message="connector_not_ready",
+                transient=True,
+            )
+        current_status = clean_text(announcement.get("status"))
+        claim = persist_bgp_withdraw_intent(
+            conn,
+            announcement_id,
+            "automatic-orchestrator",
+            "TTL expirado; retirada automatica persistida antes da escrita externa.",
+            {"mitigation_execution_id": execution.get("id")},
+            allow_retry=True,
+            expected_statuses={current_status},
+        )
+        if claim is None:
+            refreshed = fetch_bgp_announcement(conn, announcement_id, include_events=False)
+            if clean_text(refreshed.get("status")) in {"withdrawn", "expired"}:
+                return ExecutorResult(
+                    True,
+                    result={"announcement_id": announcement_id, "status": refreshed.get("status"), "deduplicated": True},
+                )
+            return ExecutorResult(
+                False,
+                result={"announcement_id": announcement_id, "status": refreshed.get("status")},
+                error_code="withdraw_in_progress",
+                error_message="withdraw_already_pending",
+                transient=True,
+            )
+        command = render_bgp_withdraw_command(announcement)
+        try:
+            begin_immediate_if_idle(conn)
+            exabgp_write_pipe(connector, command)
+        except HTTPException as exc:
+            reason = clean_text(exc.detail) or "withdraw_failed"
+            try:
+                transition_bgp_announcement(
+                    conn,
+                    announcement_id,
+                    "failed_withdraw",
+                    "withdraw_failed",
+                    reason,
+                    "automatic-orchestrator",
+                    confirmation_level="withdraw_failed",
+                    last_error=reason,
+                    command=command,
+                    expected_statuses={current_status},
+                    expected_confirmation_level="withdraw_requested",
+                )
+                conn.commit()
+            except HTTPException:
+                conn.rollback()
+            return ExecutorResult(
+                False,
+                result={"announcement_id": announcement_id},
+                error_code="withdraw_failed",
+                error_message=reason,
+                transient=True,
+            )
+        item = transition_bgp_announcement(
+            conn,
+            announcement_id,
+            "expired",
+            "auto_withdraw",
+            "Withdraw entregue automaticamente apos o TTL.",
+            "automatic-orchestrator",
+            confirmation_level="withdrawn",
+            command=command,
+            expected_statuses={current_status},
+            expected_confirmation_level="withdraw_requested",
+        )
+        profile = fetch_bgp_profile(conn, int(item["response_profile_id"])) if item.get("response_profile_id") else None
+        record_auto_mitigation_outcome(
+            conn,
+            item,
+            "expired",
+            "",
+            profile,
+            item,
+            "automatic-orchestrator",
+            "automatic",
+        )
+        conn.commit()
+        return ExecutorResult(
+            True,
+            result={"announcement_id": announcement_id, "announcement": item, "status": "withdrawn"},
+        )
+
+
+def automatic_exabgp_status(
+    candidate: MitigationCandidate,
+    execution: dict[str, Any],
+) -> ExecutorResult:
+    announcement_id = automatic_execution_announcement_id(execution)
+    if announcement_id is None:
+        return ExecutorResult(False, error_code="status_unknown", error_message="announcement_not_linked", transient=True)
+    with sqlite_connection() as conn:
+        try:
+            announcement = fetch_bgp_announcement(conn, announcement_id, include_events=False)
+        except HTTPException as exc:
+            return ExecutorResult(False, error_code="status_unknown", error_message=clean_text(exc.detail), transient=True)
+    status = clean_text(announcement.get("status"))
+    normalized = {
+        "advertised": "active",
+        "active": "active",
+        "announced": "active",
+        "withdrawn": "withdrawn",
+        "expired": "expired",
+    }.get(status, status or "unknown")
+    success = normalized in {"active", "withdrawn", "expired"}
+    return ExecutorResult(
+        success,
+        result={"announcement_id": announcement_id, "announcement": announcement, "status": normalized},
+        error_code="" if success else "status_unknown",
+        error_message="" if success else f"announcement_status:{status or 'unknown'}",
+        transient=not success,
+    )
+
+
+def automatic_mitigation_orchestrator() -> AutomaticMitigationOrchestrator:
+    return AutomaticMitigationOrchestrator(
+        sqlite_connection,
+        automatic_mitigation_candidates,
+        {
+            "exabgp": CallbackMitigationExecutor(
+                "exabgp",
+                validator=automatic_exabgp_validate,
+                readiness_probe=automatic_exabgp_readiness,
+                apply_callback=automatic_exabgp_apply,
+                withdraw_callback=automatic_exabgp_withdraw,
+                status_callback=automatic_exabgp_status,
+            )
+        },
+        anomaly_loader=automatic_mitigation_context,
+        logger=logger,
+        max_apply_retries=int(os.getenv("GMJFLOW_AUTO_MITIGATION_MAX_RETRIES", "0")),
+        max_withdraw_retries=int(os.getenv("GMJFLOW_AUTO_MITIGATION_WITHDRAW_MAX_RETRIES", "2")),
+    )
+
+
+def enqueue_active_automatic_mitigations(limit: int = 500) -> int:
+    """Persist lightweight jobs after detection; connector I/O stays off the detector thread."""
+    orchestrator = automatic_mitigation_orchestrator()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT e.id, e.updated_at
+            FROM anomaly_events e
+            WHERE e.status = 'active'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM automatic_mitigation_jobs j
+                    WHERE j.anomaly_id = e.id
+                      AND j.requested_at >= e.updated_at
+              )
+            ORDER BY e.updated_at, e.id
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    for row in rows:
+        orchestrator.enqueue(
+            int(row["id"]),
+            {"event_updated_at": clean_text(row["updated_at"])},
+        )
+    return len(rows)
+
+
+def automatic_mitigation_worker_enabled() -> bool:
+    return clean_text(os.getenv("GMJFLOW_AUTO_MITIGATION_ENABLED", "true")).lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def automatic_mitigation_worker_loop() -> None:
+    orchestrator = automatic_mitigation_orchestrator()
+    orchestrator.ensure_schema()
+    orchestrator.recover_jobs()
+    interval = max(1, int(os.getenv("GMJFLOW_AUTO_MITIGATION_INTERVAL_SECONDS", "5")))
+    while not AUTOMATIC_MITIGATION_STOP.is_set():
+        try:
+            orchestrator.process_jobs()
+            orchestrator.reconcile()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            logger.warning("Falha no orquestrador automatico de mitigacao: %s", exc)
+        if AUTOMATIC_MITIGATION_STOP.wait(interval):
+            break
+
+
+def start_automatic_mitigation_thread() -> None:
+    global AUTOMATIC_MITIGATION_THREAD
+    if not automatic_mitigation_worker_enabled():
+        return
+    if AUTOMATIC_MITIGATION_THREAD is not None and AUTOMATIC_MITIGATION_THREAD.is_alive():
+        return
+    AUTOMATIC_MITIGATION_STOP.clear()
+    AUTOMATIC_MITIGATION_THREAD = threading.Thread(
+        target=automatic_mitigation_worker_loop,
+        name="gmj-flow-automatic-mitigation",
+        daemon=True,
+    )
+    AUTOMATIC_MITIGATION_THREAD.start()
+
+
+def stop_automatic_mitigation_thread(timeout: float = 15.0) -> None:
+    global AUTOMATIC_MITIGATION_THREAD
+    AUTOMATIC_MITIGATION_STOP.set()
+    thread = AUTOMATIC_MITIGATION_THREAD
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=max(0.1, timeout))
+    if thread is None or not thread.is_alive():
+        AUTOMATIC_MITIGATION_THREAD = None
 
 
 MANUAL_FLOWSPEC_ANNOUNCEMENT_COLUMNS = (
@@ -28686,13 +29416,24 @@ def detect_anomalies_once() -> dict[str, Any]:
                     )
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
-    mitigation = {"checked": 0, "active": 0, "announced": 0, "pending_approval": 0, "rejected_by_policy": 0, "expired": 0, "withdrawn": 0, "failed": 0, "skipped": 0}
+    mitigation = {
+        "enqueued": 0,
+        "checked": 0,
+        "active": 0,
+        "announced": 0,
+        "pending_approval": 0,
+        "rejected_by_policy": 0,
+        "expired": 0,
+        "withdrawn": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     try:
-        mitigation = process_anomaly_mitigation()
+        mitigation["enqueued"] = enqueue_active_automatic_mitigations()
     except Exception as exc:
-        message = f"mitigacao: {exc}"
+        message = f"mitigacao_enqueue: {exc}"
         errors.append(message)
-        logger.warning("Falha ao processar mitigacao de anomalias: %s", exc)
+        logger.warning("Falha ao enfileirar mitigacao automatica de anomalias: %s", exc)
     return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "template_detection": template_detection, "mitigation": mitigation, "errors": errors}
 
 
@@ -30784,6 +31525,10 @@ def evaluate_anomaly_mitigation(
     evidence_status = "complete" if evaluation["candidates"] else "insufficient"
     automatic_candidates = [candidate for candidate in evaluation["candidates"] if candidate.get("allow_auto")]
     actionable_candidates = [candidate for candidate in evaluation["candidates"] if candidate.get("actionable")]
+    executions = automatic_mitigation_orchestrator().list_executions(
+        anomaly_id=event_id,
+        limit=100,
+    )
     return {
         "anomaly": evaluation["anomaly"],
         "evidence_status": evidence_status,
@@ -30795,7 +31540,40 @@ def evaluate_anomaly_mitigation(
         "message": evaluation.get("message") or "Avaliacao concluida; nenhum comando foi enviado.",
         "legacy_dns_mitigation_disabled": bool(evaluation.get("legacy_dns_mitigation_disabled")),
         "candidates": evaluation["candidates"],
+        "automatic_executions": executions,
+        "automatic_execution": executions[0] if executions else None,
     }
+
+
+@app.get("/api/mitigation/executions")
+def list_automatic_mitigation_executions(
+    request: Request,
+    anomaly_id: int | None = None,
+    status: str = "",
+    limit: int = Query(200, ge=1, le=1000),
+):
+    require_admin(request)
+    items = automatic_mitigation_orchestrator().list_executions(
+        anomaly_id=anomaly_id,
+        status=status,
+        limit=limit,
+    )
+    summary = {
+        key: sum(1 for item in items if clean_text(item.get("status")) == key)
+        for key in (
+            "generated",
+            "queued",
+            "applying",
+            "active",
+            "failed",
+            "withdraw_pending",
+            "withdrawn",
+            "expired",
+            "blocked",
+            "cancelled",
+        )
+    }
+    return {"items": items, "count": len(items), "summary": summary}
 
 
 @app.post("/api/anomalies/{event_id}/mitigation/apply", status_code=201)
