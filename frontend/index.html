@@ -2123,6 +2123,180 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
     }
+
+    #view-dashboard:not(.dashboard-engine-active) #configurableDashboardGrid {
+      display: none;
+    }
+
+    #view-dashboard.dashboard-engine-active > section:not(#configurableDashboardGrid) {
+      display: none !important;
+    }
+
+    .configurable-dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      grid-auto-rows: 72px;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .configurable-dashboard-widget {
+      min-width: 0;
+      overflow: hidden;
+      transition: opacity .15s ease, box-shadow .15s ease;
+    }
+
+    .configurable-dashboard-widget.widget-loading {
+      opacity: .72;
+    }
+
+    .configurable-dashboard-widget.dragging {
+      opacity: .45;
+    }
+
+    .configurable-dashboard-widget.is-hidden {
+      opacity: .58;
+      outline: 1px dashed var(--border);
+    }
+
+    .configurable-dashboard-widget .panel {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .configurable-dashboard-widget-body {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+    }
+
+    .configurable-dashboard-widget-chart {
+      width: 100%;
+      height: 100%;
+      min-height: 180px;
+    }
+
+    .configurable-dashboard-widget.collapsed {
+      grid-row-end: span 1 !important;
+    }
+
+    .configurable-dashboard-widget.collapsed .configurable-dashboard-widget-body {
+      display: none;
+    }
+
+    .configurable-dashboard-widget.fullscreen-widget {
+      position: fixed;
+      inset: 18px;
+      z-index: 45;
+      grid-column: auto !important;
+      grid-row: auto !important;
+    }
+
+    .configurable-dashboard-widget .widget-actions {
+      display: inline-flex;
+    }
+
+    .configurable-dashboard-empty,
+    .configurable-dashboard-error {
+      grid-column: 1 / -1;
+      min-height: 160px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+    }
+
+    .widget-kpi-value {
+      min-height: 130px;
+      display: grid;
+      place-items: center;
+      font-size: clamp(2rem, 5vw, 4.5rem);
+      font-weight: 750;
+      color: var(--accent);
+    }
+
+    .widget-status-active {
+      color: #16a34a;
+    }
+
+    .widget-status-inactive,
+    .widget-query-error {
+      color: #dc2626;
+    }
+
+    .dashboard-config-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .dashboard-config-tab-panel {
+      display: none;
+    }
+
+    .dashboard-config-tab-panel.active {
+      display: block;
+    }
+
+    .widget-catalog-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .widget-catalog-card {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      text-align: left;
+      color: inherit;
+    }
+
+    .configurable-drilldown-menu {
+      position: fixed;
+      z-index: 60;
+      display: none;
+      min-width: 190px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      box-shadow: 0 18px 48px rgba(15, 23, 42, .25);
+    }
+
+    .configurable-drilldown-menu.open {
+      display: grid;
+    }
+
+    .configurable-drilldown-menu button {
+      padding: 7px 9px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+    }
+
+    .configurable-drilldown-menu button:hover {
+      background: rgba(15, 118, 110, .12);
+    }
+
+    @media (max-width: 991.98px) {
+      .configurable-dashboard-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+      }
+
+      .configurable-dashboard-widget {
+        grid-column: 1 / -1 !important;
+      }
+
+      .widget-catalog-grid {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -2243,6 +2417,18 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="subtle">NetFlow/IPFIX/sFlow em tempo quase real</div>
             </div>
             <div class="dashboard-controls">
+              <select id="dashboardSelector" class="form-select form-select-sm" aria-label="Dashboard ativo">
+                <option value="">Carregando dashboards...</option>
+              </select>
+              <button id="newDashboardButton" type="button" class="btn btn-sm btn-outline-secondary" title="Criar dashboard">
+                <i data-lucide="plus-square"></i><span>Novo</span>
+              </button>
+              <button id="dashboardManagerButton" type="button" class="btn btn-sm btn-outline-secondary" title="Gerenciar dashboard">
+                <i data-lucide="settings-2"></i><span>Gerenciar</span>
+              </button>
+              <button id="addDashboardWidgetButton" type="button" class="btn btn-sm btn-success" title="Adicionar widget">
+                <i data-lucide="plus"></i><span>Widget</span>
+              </button>
               <select id="rangeMinutes" class="form-select form-select-sm" aria-label="Janela">
                 <option value="5">Ultimos 5 minutos</option>
                 <option value="10" selected>Ultimos 10 minutos</option>
@@ -2314,6 +2500,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </button>
             </div>
           </div>
+
+          <section id="configurableDashboardGrid" class="configurable-dashboard-grid" aria-live="polite">
+            <div class="configurable-dashboard-empty panel p-4">
+              Carregando motor de widgets...
+            </div>
+          </section>
 
           <section class="row g-3">
             <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="bps-chart" data-widget-width="medium" data-widget-height="low">
@@ -6807,6 +6999,252 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     </div>
   </div>
 
+  <div id="dashboardWidgetModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="dashboardWidgetModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <div>
+          <h2 id="dashboardWidgetModalTitle" class="view-title">Adicionar widget</h2>
+          <div id="dashboardWidgetModalStatus" class="subtle">Configuração declarativa; SQL livre não é aceito.</div>
+        </div>
+        <button type="button" class="icon-button" data-close-modal="dashboardWidgetModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="widgetCatalogSection" class="mb-3">
+          <div class="panel-title mb-2">Catálogo de widgets</div>
+          <div id="widgetCatalogCards" class="widget-catalog-grid"></div>
+        </div>
+        <div class="dashboard-config-tabs" role="tablist">
+          <button type="button" class="btn btn-sm btn-success dashboard-config-tab" data-widget-tab="data">Dados</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="filters">Filtros</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="visual">Visualização</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="appearance">Título e tamanho</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="interval">Atualização</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="preview">Preview</button>
+        </div>
+        <div class="dashboard-config-tab-panel active" data-widget-tab-panel="data">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigTitle">Título</label>
+              <input id="widgetConfigTitle" class="form-control form-control-sm" maxlength="160">
+            </div>
+            <div class="field">
+              <label for="widgetConfigType">Tipo</label>
+              <select id="widgetConfigType" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigCategory">Categoria</label>
+              <select id="widgetConfigCategory" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigDimension">Dimensão (Top N)</label>
+              <select id="widgetConfigDimension" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigMetric">Métrica</label>
+              <select id="widgetConfigMetric" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigDirection">Direção</label>
+              <select id="widgetConfigDirection" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigGroupBy">Agrupar série por</label>
+              <select id="widgetConfigGroupBy" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigAggregation">Agregação</label>
+              <select id="widgetConfigAggregation" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigSource">Fonte operacional/eventos</label>
+              <select id="widgetConfigSource" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigResolution">Resolução</label>
+              <select id="widgetConfigResolution" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigLimit">Limite</label>
+              <input id="widgetConfigLimit" type="number" min="1" max="100" value="10" class="form-control form-control-sm">
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="filters">
+          <div class="subtle mb-2">Um filtro por linha em JSON: <code>{"field":"protocol","operator":"eq","value":"tcp"}</code></div>
+          <textarea id="widgetConfigFilters" class="form-control" rows="9">[]</textarea>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="visual">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigVisualization">Visualização</label>
+              <select id="widgetConfigVisualization" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigLegend">Legenda</label>
+              <select id="widgetConfigLegend" class="form-select form-select-sm">
+                <option value="true">Mostrar</option>
+                <option value="false">Ocultar</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="appearance">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigWidth">Largura (1–12)</label>
+              <input id="widgetConfigWidth" type="number" min="1" max="12" value="4" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigHeight">Altura (2–12)</label>
+              <input id="widgetConfigHeight" type="number" min="2" max="12" value="4" class="form-control form-control-sm">
+            </div>
+            <div class="field grid-span-2">
+              <label for="widgetConfigDescription">Descrição</label>
+              <input id="widgetConfigDescription" class="form-control form-control-sm" maxlength="500">
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="interval">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigRefresh">Atualização</label>
+              <select id="widgetConfigRefresh" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigGlobalRange">Período</label>
+              <select id="widgetConfigGlobalRange" class="form-select form-select-sm">
+                <option value="true">Usar período global</option>
+                <option value="false">Intervalo próprio</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigCustomRangeMinutes">Período próprio (minutos)</label>
+              <input id="widgetConfigCustomRangeMinutes" type="number" min="1" max="10080" value="10" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigGlobalFilters">Filtros globais</label>
+              <select id="widgetConfigGlobalFilters" class="form-select form-select-sm">
+                <option value="true">Herdar filtros globais</option>
+                <option value="false">Usar somente filtros do widget</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigComparison">Comparação</label>
+              <select id="widgetConfigComparison" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigSensorMode">Sensor</label>
+              <select id="widgetConfigSensorMode" class="form-select form-select-sm">
+                <option value="inherit">Herdar sensor global</option>
+                <option value="custom">Usar sensor por ID</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigSensorValue">ID do sensor próprio</label>
+              <input id="widgetConfigSensorValue" type="number" min="1" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigInterfaceMode">Interface</label>
+              <select id="widgetConfigInterfaceMode" class="form-select form-select-sm">
+                <option value="inherit">Herdar interface global</option>
+                <option value="custom">Usar interface por ID</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigInterfaceValue">ID da interface própria</label>
+              <input id="widgetConfigInterfaceValue" type="number" min="1" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigZoneMode">Zona</label>
+              <select id="widgetConfigZoneMode" class="form-select form-select-sm">
+                <option value="inherit">Herdar zona global</option>
+                <option value="custom">Usar zona por ID</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigZoneValue">ID da zona própria</label>
+              <input id="widgetConfigZoneValue" type="number" min="1" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigDirectionMode">Direção</label>
+              <select id="widgetConfigDirectionMode" class="form-select form-select-sm">
+                <option value="inherit">Herdar direção global</option>
+                <option value="custom">Usar direção da aba Dados</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="preview">
+          <button id="previewDashboardWidgetButton" type="button" class="btn btn-sm btn-outline-secondary mb-3">
+            <i data-lucide="play"></i><span>Executar preview</span>
+          </button>
+          <pre id="dashboardWidgetPreview" class="panel p-3">Configure o widget e execute o preview.</pre>
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="dashboardWidgetModal">Cancelar</button>
+        <button id="saveDashboardWidgetButton" type="button" class="btn btn-sm btn-success">
+          <i data-lucide="save"></i><span>Salvar widget</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dashboardManagerModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="dashboardManagerModalTitle">
+    <div class="gmj-dialog small">
+      <div class="gmj-dialog-header">
+        <h2 id="dashboardManagerModalTitle" class="view-title">Gerenciar dashboard</h2>
+        <button type="button" class="icon-button" data-close-modal="dashboardManagerModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="sensor-form-grid">
+          <div class="field grid-span-2">
+            <label for="dashboardManagerName">Nome</label>
+            <input id="dashboardManagerName" class="form-control form-control-sm" maxlength="120">
+          </div>
+          <div class="field grid-span-2">
+            <label for="dashboardManagerDescription">Descrição</label>
+            <input id="dashboardManagerDescription" class="form-control form-control-sm" maxlength="500">
+          </div>
+          <div class="field">
+            <label for="dashboardManagerShared">Compartilhamento</label>
+            <select id="dashboardManagerShared" class="form-select form-select-sm">
+              <option value="false">Privado</option>
+              <option value="true">Compartilhado</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="dashboardManagerDefault">Padrão</label>
+            <select id="dashboardManagerDefault" class="form-select form-select-sm">
+              <option value="false">Não</option>
+              <option value="true">Sim</option>
+            </select>
+          </div>
+        </div>
+        <div id="dashboardManagerStatus" class="subtle mt-3"></div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="importDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Importar</button>
+        <button id="exportDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Exportar</button>
+        <button id="duplicateDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Duplicar</button>
+        <button id="deleteDashboardButton" type="button" class="btn btn-sm btn-outline-danger">Excluir</button>
+        <button id="saveDashboardButton" type="button" class="btn btn-sm btn-success">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="configurableDrilldownMenu" class="configurable-drilldown-menu" role="menu">
+    <button type="button" data-drilldown-action="flows">Abrir em Flows</button>
+    <button type="button" data-drilldown-action="filter">Filtrar este widget</button>
+    <button type="button" data-drilldown-action="create">Criar widget filtrado</button>
+    <button type="button" data-drilldown-action="details">Ver IP / ASN</button>
+    <button type="button" data-drilldown-action="conversations">Ver conversas</button>
+    <button type="button" data-drilldown-action="anomalies">Ver anomalias</button>
+    <button type="button" data-drilldown-action="cgnat">Ver CGNAT</button>
+  </div>
+
   <script id="geo-flow-map-component">
 /* GeoFlowMap component:start */
 (function (root, factory) {
@@ -7652,6 +8090,17 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let dashboardEditing = false;
     let dashboardAbortController = null;
     let dashboardRequestSequence = 0;
+    let configurableDashboardActive = false;
+    let configurableDashboardList = [];
+    let configurableDashboard = null;
+    let configurableWidgetCatalog = null;
+    let editingConfigurableWidgetId = null;
+    let configurableDashboardObserver = null;
+    let configurableDrilldownContext = null;
+    const configurableWidgetControllers = new Map();
+    const configurableWidgetCharts = new Map();
+    const configurableWidgetTimers = new Map();
+    const configurableVisibleWidgets = new Set();
     let flowSearchAbortController = null;
     let mapAbortController = null;
     let mapDebounceTimer = null;
@@ -7907,6 +8356,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       } else {
         Object.values(charts).forEach(chart => chart.resize());
         Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
+          .then(() => initializeConfigurableDashboards())
           .then(() => refresh())
           .catch(console.error);
       }
@@ -17774,6 +18224,904 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function configurableDashboardContext() {
+      const rangeValue = document.getElementById('rangeMinutes')?.value || '10';
+      const context = {
+        range_minutes: Number(rangeValue === 'custom' ? customRanges.dashboard.previous || 10 : rangeValue) || 10,
+        sensor_id: selectedDashboardSensorId(),
+        interface_id: selectedDashboardInterfaceId(),
+        zone_id: selectedDashboardZoneId(),
+        zone_direction: document.getElementById('dashboardZoneDirection')?.value || 'both',
+        series_limit: document.getElementById('dashboardSeriesLimit')?.value === 'all'
+          ? 50
+          : Number(document.getElementById('dashboardSeriesLimit')?.value || 8)
+      };
+      if (rangeValue === 'custom' && customRanges.dashboard.start && customRanges.dashboard.end) {
+        context.start = customRanges.dashboard.start;
+        context.end = customRanges.dashboard.end;
+      }
+      return context;
+    }
+
+    function configurableWidgetCacheKey(widget) {
+      const context = configurableDashboardContext();
+      return `gmjflow_widget_data_${configurableDashboard?.id || 0}_${widget.id}_${encodeURIComponent(JSON.stringify(context))}`;
+    }
+
+    function readConfigurableWidgetCache(widget) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(configurableWidgetCacheKey(widget)) || 'null');
+        if (!cached || Date.now() - Number(cached.saved_at || 0) > 300000) return null;
+        return cached.payload || null;
+      } catch {
+        return null;
+      }
+    }
+
+    function writeConfigurableWidgetCache(widget, payload) {
+      try {
+        localStorage.setItem(configurableWidgetCacheKey(widget), JSON.stringify({
+          saved_at: Date.now(),
+          payload
+        }));
+      } catch (error) {
+        console.debug('Cache local do widget indisponível.', error);
+      }
+    }
+
+    function configurableMetricValue(value, metric) {
+      if (metric === 'bps') return formatBps(value);
+      if (metric === 'pps') return formatPps(value);
+      if (metric === 'bytes') return formatBytes(value);
+      if (metric === 'percentage') return `${Number(value || 0).toFixed(2)}%`;
+      return formatNumber(value);
+    }
+
+    function disposeConfigurableWidgetCharts() {
+      configurableWidgetCharts.forEach(chart => chart.dispose());
+      configurableWidgetCharts.clear();
+    }
+
+    function configurableWidgetDefinitionFromForm() {
+      const type = document.getElementById('widgetConfigType').value;
+      const metric = document.getElementById('widgetConfigMetric').value || 'bps';
+      const config = {
+        metric,
+        direction: document.getElementById('widgetConfigDirection').value || 'both',
+        visualization: document.getElementById('widgetConfigVisualization').value || 'table',
+        comparison_mode: document.getElementById('widgetConfigComparison').value || 'none'
+      };
+      if (type === 'top_n') {
+        config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
+        config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
+      } else if (type === 'timeseries') {
+        config.group_by = document.getElementById('widgetConfigGroupBy').value || 'total';
+        config.aggregation = document.getElementById('widgetConfigAggregation').value || 'sum';
+        config.resolution_seconds = Number(document.getElementById('widgetConfigResolution').value || 0);
+      } else if (type === 'recent_events') {
+        config.source = document.getElementById('widgetConfigSource').value || 'anomalies';
+        config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
+      } else if (type === 'status_list') {
+        config.source = document.getElementById('widgetConfigSource').value || 'sensors';
+        config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
+      }
+      let filters;
+      try {
+        filters = JSON.parse(document.getElementById('widgetConfigFilters').value || '[]');
+      } catch {
+        throw new Error('Filtros precisam ser um JSON válido.');
+      }
+      if (!Array.isArray(filters)) throw new Error('Filtros precisam ser uma lista JSON.');
+      filters.forEach(filter => {
+        if (!(configurableWidgetCatalog?.filter_fields || []).includes(filter.field)) {
+          throw new Error(`Campo de filtro não permitido: ${filter.field || '-'}`);
+        }
+        if (!(configurableWidgetCatalog?.filter_operators || []).includes(filter.operator || 'eq')) {
+          throw new Error(`Operador de filtro não permitido: ${filter.operator || '-'}`);
+        }
+      });
+      const title = document.getElementById('widgetConfigTitle').value.trim();
+      if (!title) throw new Error('O título do widget é obrigatório.');
+      const inheritance = {
+        range: {
+          mode: document.getElementById('widgetConfigGlobalRange').value === 'true' ? 'inherit' : 'custom',
+          value: null
+        },
+        direction: {
+          mode: document.getElementById('widgetConfigDirectionMode').value,
+          value: null
+        }
+      };
+      for (const [field, modeId, valueId] of [
+        ['sensor', 'widgetConfigSensorMode', 'widgetConfigSensorValue'],
+        ['interface', 'widgetConfigInterfaceMode', 'widgetConfigInterfaceValue'],
+        ['zone', 'widgetConfigZoneMode', 'widgetConfigZoneValue']
+      ]) {
+        const mode = document.getElementById(modeId).value;
+        const value = Number(document.getElementById(valueId).value || 0);
+        if (mode === 'custom' && value < 1) {
+          throw new Error(`Informe um ID válido para ${field}.`);
+        }
+        inheritance[field] = { mode, value: mode === 'custom' ? value : null };
+      }
+      const useGlobalTimeRange = document.getElementById('widgetConfigGlobalRange').value === 'true';
+      const customRangeMinutes = Number(document.getElementById('widgetConfigCustomRangeMinutes').value || 10);
+      if (!useGlobalTimeRange && (customRangeMinutes < 1 || customRangeMinutes > 10080)) {
+        throw new Error('O período próprio deve ficar entre 1 e 10080 minutos.');
+      }
+      return {
+        title,
+        description: document.getElementById('widgetConfigDescription').value.trim(),
+        type,
+        category: document.getElementById('widgetConfigCategory').value || 'traffic',
+        config,
+        filters,
+        visualization: {
+          type: document.getElementById('widgetConfigVisualization').value || 'table',
+          show_legend: document.getElementById('widgetConfigLegend').value === 'true'
+        },
+        grid: {
+          x: 0,
+          y: Math.max(0, ...(configurableDashboard?.widgets || []).map(widget => Number(widget.grid?.y || 0) + Number(widget.grid?.h || 4))),
+          w: Number(document.getElementById('widgetConfigWidth').value || 4),
+          h: Number(document.getElementById('widgetConfigHeight').value || 4)
+        },
+        refresh_interval_seconds: Number(document.getElementById('widgetConfigRefresh').value || 30),
+        use_global_filters: document.getElementById('widgetConfigGlobalFilters').value === 'true',
+        use_global_time_range: useGlobalTimeRange,
+        inheritance,
+        custom_time_range: {
+          mode: 'relative',
+          minutes: customRangeMinutes
+        }
+      };
+    }
+
+    function fillConfigurableSelect(id, items, selected) {
+      const select = document.getElementById(id);
+      select.innerHTML = (items || []).map(item => {
+        const value = typeof item === 'string' ? item : item.id;
+        const label = typeof item === 'string' ? item : item.label;
+        return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+      }).join('');
+      if (selected !== undefined && selected !== null) select.value = String(selected);
+    }
+
+    function syncConfigurableWidgetTypeFields() {
+      const type = document.getElementById('widgetConfigType').value;
+      const visibility = {
+        widgetConfigDimension: type === 'top_n',
+        widgetConfigMetric: ['top_n', 'timeseries', 'kpi'].includes(type),
+        widgetConfigDirection: ['top_n', 'timeseries', 'kpi'].includes(type),
+        widgetConfigGroupBy: type === 'timeseries',
+        widgetConfigAggregation: type === 'timeseries',
+        widgetConfigSource: ['recent_events', 'status_list'].includes(type),
+        widgetConfigResolution: type === 'timeseries',
+        widgetConfigLimit: ['top_n', 'recent_events', 'status_list'].includes(type)
+      };
+      Object.entries(visibility).forEach(([id, visible]) => {
+        document.getElementById(id)?.closest('.field')?.classList.toggle('auth-hidden', !visible);
+      });
+    }
+
+    function populateConfigurableWidgetForm(widget = null) {
+      const catalog = configurableWidgetCatalog || {};
+      const catalogSection = document.getElementById('widgetCatalogSection');
+      const catalogCards = document.getElementById('widgetCatalogCards');
+      catalogSection.classList.toggle('auth-hidden', Boolean(widget));
+      catalogCards.innerHTML = (catalog.presets || []).map(preset => `
+        <button type="button" class="widget-catalog-card" data-widget-preset="${escapeHtml(preset.id)}">
+          <strong>${escapeHtml(preset.label)}</strong><br>
+          <span class="subtle">${escapeHtml(preset.category)}</span>
+        </button>
+      `).join('');
+      const item = widget || {
+        title: 'Novo widget',
+        type: 'top_n',
+        category: 'traffic',
+        config: { dimension: 'src_ip', metric: 'bps', direction: 'both', group_by: 'total', aggregation: 'sum', limit: 10 },
+        filters: [],
+        visualization: { type: 'table', show_legend: true },
+        grid: { w: 4, h: 4 },
+        refresh_interval_seconds: 30,
+        use_global_filters: true,
+        use_global_time_range: true
+      };
+      fillConfigurableSelect('widgetConfigType', catalog.types || [], item.type);
+      fillConfigurableSelect('widgetConfigCategory', catalog.categories || [], item.category);
+      fillConfigurableSelect('widgetConfigDimension', catalog.dimensions || [], item.config?.dimension || 'src_ip');
+      fillConfigurableSelect('widgetConfigMetric', catalog.metrics || [], item.config?.metric || 'bps');
+      fillConfigurableSelect('widgetConfigDirection', catalog.directions || [], item.config?.direction || 'both');
+      fillConfigurableSelect('widgetConfigGroupBy', catalog.group_by || [], item.config?.group_by || 'total');
+      fillConfigurableSelect('widgetConfigAggregation', catalog.aggregations || [], item.config?.aggregation || 'sum');
+      fillConfigurableSelect(
+        'widgetConfigSource',
+        catalog.status_sources || ['anomalies', 'sensors'],
+        item.config?.source || (item.type === 'recent_events' ? 'anomalies' : 'sensors')
+      );
+      fillConfigurableSelect(
+        'widgetConfigResolution',
+        (catalog.resolutions || [0, 30, 60, 300]).map(value => ({
+          id: value,
+          label: value ? `${value}s` : 'Automática'
+        })),
+        item.config?.resolution_seconds || 0
+      );
+      fillConfigurableSelect('widgetConfigVisualization', catalog.visualizations || [], item.visualization?.type || item.config?.visualization || 'table');
+      fillConfigurableSelect(
+        'widgetConfigRefresh',
+        (catalog.refresh_intervals || [0, 10, 30, 60, 300]).map(value => ({ id: value, label: value ? `${value}s` : 'Manual' })),
+        item.refresh_interval_seconds ?? 30
+      );
+      fillConfigurableSelect(
+        'widgetConfigComparison',
+        catalog.comparison_modes || ['none'],
+        item.config?.comparison_mode || 'none'
+      );
+      document.getElementById('widgetConfigTitle').value = item.title || '';
+      document.getElementById('widgetConfigDescription').value = item.description || '';
+      document.getElementById('widgetConfigLimit').value = item.config?.limit || 10;
+      document.getElementById('widgetConfigFilters').value = JSON.stringify(item.filters || [], null, 2);
+      document.getElementById('widgetConfigLegend').value = String(item.visualization?.show_legend !== false);
+      document.getElementById('widgetConfigWidth').value = item.grid?.w || 4;
+      document.getElementById('widgetConfigHeight').value = item.grid?.h || 4;
+      document.getElementById('widgetConfigGlobalRange').value = String(item.use_global_time_range !== false);
+      document.getElementById('widgetConfigGlobalFilters').value = String(item.use_global_filters !== false);
+      document.getElementById('widgetConfigCustomRangeMinutes').value = Number(item.custom_time_range?.minutes || 10);
+      for (const [field, modeId, valueId] of [
+        ['sensor', 'widgetConfigSensorMode', 'widgetConfigSensorValue'],
+        ['interface', 'widgetConfigInterfaceMode', 'widgetConfigInterfaceValue'],
+        ['zone', 'widgetConfigZoneMode', 'widgetConfigZoneValue']
+      ]) {
+        const setting = item.inheritance?.[field] || { mode: 'inherit', value: null };
+        document.getElementById(modeId).value = setting.mode === 'custom' ? 'custom' : 'inherit';
+        document.getElementById(valueId).value = setting.value || '';
+      }
+      document.getElementById('widgetConfigDirectionMode').value =
+        item.inheritance?.direction?.mode === 'custom' ? 'custom' : 'inherit';
+      document.getElementById('dashboardWidgetPreview').textContent = 'Configure o widget e execute o preview.';
+      document.getElementById('dashboardWidgetModalTitle').textContent = widget ? 'Configurar widget' : 'Adicionar widget';
+      document.getElementById('dashboardWidgetModalStatus').textContent = 'Configuração declarativa; SQL livre não é aceito.';
+      syncConfigurableWidgetTypeFields();
+      document.querySelector('[data-widget-tab="data"]')?.click();
+      if (!catalogCards.dataset.eventsInstalled) {
+        catalogCards.dataset.eventsInstalled = 'true';
+        catalogCards.addEventListener('click', event => {
+          const button = event.target.closest('[data-widget-preset]');
+          const preset = (configurableWidgetCatalog?.presets || []).find(item => item.id === button?.dataset.widgetPreset);
+          if (!preset) return;
+          populateConfigurableWidgetForm({
+            title: preset.label,
+            description: '',
+            type: preset.type,
+            category: preset.category,
+            config: preset.config,
+            filters: preset.filters || [],
+            visualization: {
+              type: preset.config?.visualization || 'table',
+              show_legend: true
+            },
+            grid: { w: preset.type === 'timeseries' ? 6 : 4, h: 4 },
+            refresh_interval_seconds: 30,
+            use_global_filters: true,
+            use_global_time_range: true
+          });
+          document.getElementById('widgetCatalogSection').classList.add('auth-hidden');
+        });
+      }
+    }
+
+    function openConfigurableWidgetModal(widget = null) {
+      if (!configurableDashboard?.permissions?.can_edit) return;
+      editingConfigurableWidgetId = widget?.id || null;
+      populateConfigurableWidgetForm(widget);
+      openModal('dashboardWidgetModal');
+    }
+
+    async function previewConfigurableWidget() {
+      const target = document.getElementById('dashboardWidgetPreview');
+      try {
+        target.textContent = 'Executando preview...';
+        const widget = configurableWidgetDefinitionFromForm();
+        const payload = await apiRequest('/api/dashboard-widgets/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ widget, ...configurableDashboardContext() })
+        });
+        target.textContent = JSON.stringify(payload, null, 2).slice(0, 12000);
+      } catch (error) {
+        target.textContent = `Falha no preview: ${error.message}`;
+      }
+    }
+
+    async function saveConfigurableWidget() {
+      try {
+        const widget = configurableWidgetDefinitionFromForm();
+        const endpoint = editingConfigurableWidgetId
+          ? `/api/dashboards/${configurableDashboard.id}/widgets/${editingConfigurableWidgetId}`
+          : `/api/dashboards/${configurableDashboard.id}/widgets`;
+        await apiRequest(endpoint, {
+          method: editingConfigurableWidgetId ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(widget)
+        });
+        closeModal('dashboardWidgetModal');
+        await loadConfigurableDashboard(configurableDashboard.id);
+      } catch (error) {
+        document.getElementById('dashboardWidgetModalStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    function configurableWidgetTable(widget, payload) {
+      const metric = widget.config?.metric || 'flows';
+      const rows = Array.isArray(payload.items) ? payload.items : [];
+      return `
+        <div class="table-wrap">
+          <table class="table table-sm align-middle mb-0">
+            <thead><tr><th>#</th><th>Item</th><th class="text-end">${escapeHtml(metric)}</th><th class="text-end">%</th><th></th></tr></thead>
+            <tbody>
+              ${rows.map((item, index) => `
+                <tr>
+                  <td>${Number(item.rank || index + 1)}</td>
+                  <td title="${escapeHtml(item.description || item.key || '-')}">${escapeHtml(item.key || item.name || '-')}</td>
+                  <td class="text-end">${configurableMetricValue(item.value ?? item[metric] ?? 0, metric)}</td>
+                  <td class="text-end">${Number(item.percentage ?? item.percent ?? 0).toFixed(2)}%</td>
+                  <td><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Drilldown"><i data-lucide="search"></i></button></td>
+                </tr>
+              `).join('') || '<tr><td colspan="5" class="text-muted">Sem dados para os filtros atuais</td></tr>'}
+            </tbody>
+          </table>
+        </div>`;
+    }
+
+    function renderConfigurableWidget(widget, payload) {
+      const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
+      if (!element) return;
+      const body = element.querySelector('.configurable-dashboard-widget-body');
+      const status = element.querySelector('.configurable-dashboard-widget-status');
+      element.classList.remove('widget-loading');
+      status.textContent = payload.cached ? 'cache' : (payload.source || 'atualizado');
+      const existingChart = configurableWidgetCharts.get(widget.id);
+      if (existingChart) {
+        existingChart.dispose();
+        configurableWidgetCharts.delete(widget.id);
+      }
+      if (payload.kind === 'kpi') {
+        body.innerHTML = `
+          <div class="widget-kpi-value">${configurableMetricValue(payload.value, widget.config?.metric)}</div>
+          ${payload.comparison_value === null || payload.comparison_value === undefined ? '' : `
+            <div class="subtle text-center">
+              Comparação: ${configurableMetricValue(payload.comparison_value, widget.config?.metric)}
+              · Δ ${configurableMetricValue(payload.delta, widget.config?.metric)}
+              ${payload.delta_percent === null ? '' : `(${Number(payload.delta_percent).toFixed(2)}%)`}
+            </div>
+          `}`;
+      } else if (payload.kind === 'status_list') {
+        body.innerHTML = `<div class="table-wrap"><table class="table table-sm mb-0"><tbody>${(payload.items || []).map(item => `
+          <tr><td>${escapeHtml(item.key || '-')}</td><td class="text-end widget-status-${escapeHtml(item.status || 'inactive')}">${escapeHtml(item.status || '-')}</td></tr>
+        `).join('') || '<tr><td class="text-muted">Sem status</td></tr>'}</tbody></table></div>`;
+      } else if (payload.kind === 'recent_events') {
+        body.innerHTML = configurableWidgetTable(widget, payload);
+      } else if (payload.kind === 'top_n' && (widget.visualization?.type || widget.config?.visualization) === 'table') {
+        body.innerHTML = configurableWidgetTable(widget, payload);
+      } else {
+        body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
+        const chart = echarts.init(body.firstElementChild);
+        configurableWidgetCharts.set(widget.id, chart);
+        if (payload.kind === 'timeseries') {
+          const series = (payload.series || []).map(item => ({
+            name: item.name || item.label,
+            type: 'line',
+            smooth: true,
+            showSymbol: false,
+            areaStyle: ['area', 'stacked_area'].includes(widget.visualization?.type) ? { opacity: .16 } : undefined,
+            stack: widget.visualization?.type === 'stacked_area' ? 'total' : undefined,
+            data: (item.points || []).map(point => [point.ts, point.value])
+          }));
+          chart.setOption({
+            tooltip: { trigger: 'axis' },
+            legend: {
+              show: widget.visualization?.show_legend !== false,
+              textStyle: {
+                color: getComputedStyle(document.documentElement)
+                  .getPropertyValue('--text-primary')
+                  .trim()
+              }
+            },
+            grid: { left: 54, right: 18, top: 34, bottom: 38 },
+            xAxis: { type: 'time' },
+            yAxis: { type: 'value' },
+            series
+          });
+        } else {
+          const items = payload.items || [];
+          const visualization = widget.visualization?.type || widget.config?.visualization || 'bar';
+          if (visualization === 'donut') {
+            chart.setOption({
+              tooltip: { trigger: 'item' },
+              legend: { show: widget.visualization?.show_legend !== false },
+              series: [{ type: 'pie', radius: ['42%', '72%'], data: items.map(item => ({ name: item.key, value: item.value })) }]
+            });
+          } else {
+            chart.setOption({
+              tooltip: { trigger: 'axis' },
+              grid: { left: visualization === 'horizontal_bar' ? 110 : 54, right: 18, top: 18, bottom: 58 },
+              xAxis: visualization === 'horizontal_bar'
+                ? { type: 'value' }
+                : { type: 'category', data: items.map(item => item.key), axisLabel: { rotate: 28 } },
+              yAxis: visualization === 'horizontal_bar'
+                ? { type: 'category', data: items.map(item => item.key) }
+                : { type: 'value' },
+              series: [{
+                type: 'bar',
+                data: items.map(item => item.value),
+                itemStyle: { color: '#0f766e', borderRadius: 3 }
+              }]
+            });
+          }
+        }
+      }
+      createIcons();
+    }
+
+    function renderConfigurableWidgetError(widget, error) {
+      const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
+      if (!element) return;
+      element.classList.remove('widget-loading');
+      element.querySelector('.configurable-dashboard-widget-status').textContent = 'erro isolado';
+      element.querySelector('.configurable-dashboard-widget-body').innerHTML = `
+        <div class="configurable-dashboard-error widget-query-error">
+          <div><strong>Falha ao carregar este widget</strong><br>${escapeHtml(error.message || 'Erro desconhecido')}<br>
+          <button type="button" class="btn btn-sm btn-outline-secondary mt-2 configurable-widget-retry">Tentar novamente</button></div>
+        </div>`;
+    }
+
+    async function queryConfigurableWidget(widget, { force = false } = {}) {
+      if (!configurableDashboardActive || widget.hidden || widget.collapsed) return null;
+      if (!force && !configurableVisibleWidgets.has(widget.id)) return null;
+      configurableWidgetControllers.get(widget.id)?.abort();
+      const controller = new AbortController();
+      configurableWidgetControllers.set(widget.id, controller);
+      const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
+      element?.classList.add('widget-loading');
+      try {
+        const payload = await apiRequest('/api/dashboard-widgets/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dashboard_id: configurableDashboard.id,
+            widget_id: widget.id,
+            ...configurableDashboardContext()
+          }),
+          signal: controller.signal
+        });
+        if (controller.signal.aborted) return null;
+        writeConfigurableWidgetCache(widget, payload);
+        renderConfigurableWidget(widget, payload);
+        return payload;
+      } catch (error) {
+        if (error.name === 'AbortError') return null;
+        renderConfigurableWidgetError(widget, error);
+        throw error;
+      } finally {
+        if (configurableWidgetControllers.get(widget.id) === controller) {
+          configurableWidgetControllers.delete(widget.id);
+        }
+      }
+    }
+
+    function clearConfigurableWidgetRuntime() {
+      configurableDashboardObserver?.disconnect();
+      configurableDashboardObserver = null;
+      configurableWidgetControllers.forEach(controller => controller.abort());
+      configurableWidgetControllers.clear();
+      configurableWidgetTimers.forEach(timer => clearTimeout(timer));
+      configurableWidgetTimers.clear();
+      configurableVisibleWidgets.clear();
+      disposeConfigurableWidgetCharts();
+    }
+
+    function scheduleConfigurableWidgetRefresh(widget) {
+      const intervalSeconds = Number(widget?.refresh_interval_seconds || 0);
+      if (intervalSeconds <= 0 || configurableWidgetTimers.has(widget.id)) return;
+      const timer = setTimeout(async () => {
+        configurableWidgetTimers.delete(widget.id);
+        if (document.visibilityState === 'visible' && activeView === 'dashboard' && configurableVisibleWidgets.has(widget.id)) {
+          await queryConfigurableWidget(widget, { force: true }).catch(console.error);
+        }
+        if (configurableDashboard?.widgets?.some(item => item.id === widget.id)) {
+          scheduleConfigurableWidgetRefresh(widget);
+        }
+      }, intervalSeconds * 1000);
+      configurableWidgetTimers.set(widget.id, timer);
+    }
+
+    function observeConfigurableWidgets() {
+      const widgetsById = new Map((configurableDashboard?.widgets || []).map(widget => [widget.id, widget]));
+      const onVisible = entries => {
+        entries.forEach(entry => {
+          const id = Number(entry.target.dataset.widgetId);
+          const widget = widgetsById.get(id);
+          if (!widget) return;
+          if (entry.isIntersecting) {
+            configurableVisibleWidgets.add(id);
+            queryConfigurableWidget(widget).catch(console.error);
+            scheduleConfigurableWidgetRefresh(widget);
+          } else {
+            configurableVisibleWidgets.delete(id);
+            configurableWidgetControllers.get(id)?.abort();
+          }
+        });
+      };
+      if ('IntersectionObserver' in window) {
+        configurableDashboardObserver = new IntersectionObserver(onVisible, { rootMargin: '120px 0px', threshold: .01 });
+        document.querySelectorAll('.configurable-dashboard-widget').forEach(element => configurableDashboardObserver.observe(element));
+      } else {
+        document.querySelectorAll('.configurable-dashboard-widget').forEach(element => onVisible([{ target: element, isIntersecting: true }]));
+      }
+    }
+
+    function renderConfigurableDashboard() {
+      const grid = document.getElementById('configurableDashboardGrid');
+      clearConfigurableWidgetRuntime();
+      const widgets = (configurableDashboard?.widgets || []).filter(
+        widget => !widget.hidden || dashboardEditing
+      );
+      grid.innerHTML = widgets.map(widget => {
+        const cached = widget.hidden ? null : readConfigurableWidgetCache(widget);
+        const actionsDisabled = configurableDashboard.permissions?.can_edit ? '' : 'disabled';
+        return `
+          <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="${dashboardEditing && configurableDashboard.permissions?.can_edit ? 'true' : 'false'}"
+            data-widget-id="${widget.id}" style="grid-column:${Number(widget.grid?.x || 0) + 1} / span ${Number(widget.grid?.w || 4)};grid-row:${Number(widget.grid?.y || 0) + 1} / span ${Number(widget.grid?.h || 4)}">
+            <div class="panel p-3">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <div><div class="panel-title">${escapeHtml(widget.title)}</div><div class="configurable-dashboard-widget-status subtle">${cached ? 'cache local' : 'aguardando visibilidade'}</div></div>
+                <div class="widget-actions">
+                  <button class="icon-button configurable-widget-edit" ${actionsDisabled} title="Configurar"><i data-lucide="settings"></i></button>
+                  <button class="icon-button configurable-widget-duplicate" ${actionsDisabled} title="Duplicar"><i data-lucide="copy"></i></button>
+                  <button class="icon-button configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
+                  <button class="icon-button configurable-widget-wider" ${actionsDisabled} title="Redimensionar"><i data-lucide="chevrons-right"></i></button>
+                  <button class="icon-button configurable-widget-collapse" ${actionsDisabled} title="Recolher"><i data-lucide="chevron-up"></i></button>
+                  <button class="icon-button configurable-widget-fullscreen" title="Tela cheia"><i data-lucide="maximize-2"></i></button>
+                  <button class="icon-button configurable-widget-hide" ${actionsDisabled} title="${widget.hidden ? 'Exibir' : 'Ocultar'}"><i data-lucide="${widget.hidden ? 'eye' : 'eye-off'}"></i></button>
+                  <button class="icon-button configurable-widget-delete" ${actionsDisabled} title="Excluir"><i data-lucide="trash-2"></i></button>
+                </div>
+              </div>
+              <div class="configurable-dashboard-widget-body">${widget.hidden
+                ? '<div class="subtle">Widget oculto. Use o botão de olho para exibi-lo novamente.</div>'
+                : cached ? '' : '<div class="subtle">Os dados serão carregados quando o widget estiver visível.</div>'}</div>
+            </div>
+          </article>`;
+      }).join('') || '<div class="configurable-dashboard-empty panel p-4">Este dashboard ainda não tem widgets. Use “Widget” para adicionar o primeiro.</div>';
+      widgets.forEach(widget => {
+        if (widget.hidden) return;
+        const cached = readConfigurableWidgetCache(widget);
+        if (cached) renderConfigurableWidget(widget, cached);
+      });
+      observeConfigurableWidgets();
+      createIcons();
+    }
+
+    function syncConfigurableDashboardSelector(selectedId) {
+      const selector = document.getElementById('dashboardSelector');
+      selector.innerHTML = configurableDashboardList.map(item => `
+        <option value="${item.id}">${item.is_system ? 'Modelo · ' : ''}${escapeHtml(item.name)}</option>
+      `).join('');
+      if (selectedId) selector.value = String(selectedId);
+    }
+
+    async function loadConfigurableDashboard(dashboardId) {
+      let dashboard = await apiRequest(`/api/dashboards/${dashboardId}`);
+      if (
+        !dashboard.legacy_layout_migrated
+        && dashboard.permissions?.can_edit
+        && dashboard.owner_user_id === currentAuthUser?.id
+      ) {
+        let legacyLayout = {};
+        try {
+          if (localStorage.getItem(DASHBOARD_LAYOUT_KEY)) {
+            legacyLayout = dashboardLayout();
+          }
+        } catch {
+          legacyLayout = {};
+        }
+        dashboard = await apiRequest(`/api/dashboards/${dashboard.id}/migrate-legacy-layout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(legacyLayout)
+        });
+      }
+      configurableDashboard = dashboard;
+      configurableDashboardActive = true;
+      document.getElementById('view-dashboard').classList.add('dashboard-engine-active');
+      document.getElementById('addDashboardWidgetButton').disabled = !dashboard.permissions?.can_edit;
+      document.getElementById('editDashboardButton').disabled = !dashboard.permissions?.can_edit;
+      syncConfigurableDashboardSelector(dashboard.id);
+      renderConfigurableDashboard();
+      return dashboard;
+    }
+
+    async function initializeConfigurableDashboards() {
+      try {
+        const [listPayload, catalog] = await Promise.all([
+          apiRequest('/api/dashboards'),
+          apiRequest('/api/dashboards/widget-catalog')
+        ]);
+        configurableDashboardList = Array.isArray(listPayload.items) ? listPayload.items : [];
+        configurableWidgetCatalog = catalog;
+        const selected = Number(document.getElementById('dashboardSelector')?.value || 0);
+        const dashboardId = configurableDashboardList.some(item => item.id === selected)
+          ? selected
+          : listPayload.default_dashboard_id || configurableDashboardList[0]?.id;
+        if (!dashboardId) throw new Error('Nenhum dashboard disponível');
+        syncConfigurableDashboardSelector(dashboardId);
+        await loadConfigurableDashboard(dashboardId);
+      } catch (error) {
+        configurableDashboardActive = false;
+        document.getElementById('view-dashboard').classList.remove('dashboard-engine-active');
+        console.error('Motor de dashboards configuráveis indisponível; usando layout legado.', error);
+      }
+    }
+
+    async function refreshConfigurableDashboard() {
+      if (!configurableDashboardActive || document.visibilityState !== 'visible' || activeView !== 'dashboard') return;
+      const visible = (configurableDashboard?.widgets || []).filter(widget =>
+        !widget.hidden && !widget.collapsed && configurableVisibleWidgets.has(widget.id)
+      );
+      await Promise.allSettled(visible.map(widget => queryConfigurableWidget(widget, { force: true })));
+    }
+
+    async function patchConfigurableWidget(widget, patch) {
+      await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      await loadConfigurableDashboard(configurableDashboard.id);
+    }
+
+    function openDashboardManager() {
+      if (!configurableDashboard) return;
+      document.getElementById('dashboardManagerName').value = configurableDashboard.name || '';
+      document.getElementById('dashboardManagerDescription').value = configurableDashboard.description || '';
+      document.getElementById('dashboardManagerShared').value = String(Boolean(configurableDashboard.is_shared));
+      document.getElementById('dashboardManagerDefault').value = String(Boolean(configurableDashboard.is_default));
+      document.getElementById('dashboardManagerStatus').textContent = configurableDashboard.is_system
+        ? 'Template de sistema: duplique para personalizar.'
+        : '';
+      document.getElementById('saveDashboardButton').disabled = !configurableDashboard.permissions?.can_edit;
+      document.getElementById('deleteDashboardButton').disabled = !configurableDashboard.permissions?.can_delete;
+      openModal('dashboardManagerModal');
+    }
+
+    async function createConfigurableDashboardFromPrompt() {
+      const name = window.prompt('Nome do novo dashboard:', 'Novo dashboard');
+      if (!name?.trim()) return;
+      const created = await apiRequest('/api/dashboards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), is_default: false, is_shared: false, refresh_interval_seconds: 30 })
+      });
+      await initializeConfigurableDashboards();
+      await loadConfigurableDashboard(created.id);
+    }
+
+    async function saveConfigurableDashboardManager() {
+      if (!configurableDashboard?.permissions?.can_edit) return;
+      await apiRequest(`/api/dashboards/${configurableDashboard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: document.getElementById('dashboardManagerName').value.trim(),
+          description: document.getElementById('dashboardManagerDescription').value.trim(),
+          is_shared: document.getElementById('dashboardManagerShared').value === 'true',
+          is_default: document.getElementById('dashboardManagerDefault').value === 'true'
+        })
+      });
+      closeModal('dashboardManagerModal');
+      await initializeConfigurableDashboards();
+    }
+
+    async function duplicateConfigurableDashboard() {
+      const created = await apiRequest(`/api/dashboards/${configurableDashboard.id}/duplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      closeModal('dashboardManagerModal');
+      await initializeConfigurableDashboards();
+      await loadConfigurableDashboard(created.id);
+    }
+
+    async function exportConfigurableDashboard() {
+      const payload = await apiRequest(`/api/dashboards/${configurableDashboard.id}/export`);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${String(configurableDashboard.name || 'dashboard').replace(/[^a-z0-9_-]+/gi, '-')}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    function importConfigurableDashboard() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.addEventListener('change', async () => {
+        try {
+          const payload = JSON.parse(await input.files[0].text());
+          const created = await apiRequest('/api/dashboards/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          closeModal('dashboardManagerModal');
+          await initializeConfigurableDashboards();
+          await loadConfigurableDashboard(created.id);
+        } catch (error) {
+          document.getElementById('dashboardManagerStatus').textContent = `Falha na importação: ${error.message}`;
+        }
+      });
+      input.click();
+    }
+
+    function configurableDrilldownFilter(widget, rawValue) {
+      const dimension = widget.config?.dimension || '';
+      const field = {
+        input_if: 'input_interface',
+        output_if: 'output_interface'
+      }[dimension] || dimension;
+      let value = rawValue;
+      if (['src_asn', 'dst_asn'].includes(field)) {
+        value = Number(String(rawValue).replace(/^AS/i, '').replace(/\D.*$/, ''));
+      } else if (['src_port', 'dst_port'].includes(field)) {
+        value = Number(String(rawValue).split('/').pop());
+      } else if (field === 'conversation') {
+        value = String(rawValue).split(/\s*->\s*/)[0].split(':')[0];
+        return { field: 'ip', operator: 'eq', value };
+      }
+      return { field, operator: 'eq', value };
+    }
+
+    function openConfigurableDrilldownMenu(event, widget, key) {
+      configurableDrilldownContext = { widget, key };
+      const menu = document.getElementById('configurableDrilldownMenu');
+      menu.style.left = `${Math.min(window.innerWidth - 210, event.clientX + 4)}px`;
+      menu.style.top = `${Math.min(window.innerHeight - 270, event.clientY + 4)}px`;
+      menu.classList.add('open');
+    }
+
+    async function runConfigurableDrilldown(action) {
+      const context = configurableDrilldownContext;
+      document.getElementById('configurableDrilldownMenu').classList.remove('open');
+      if (!context) return;
+      const { widget, key } = context;
+      const filter = configurableDrilldownFilter(widget, key);
+      const dimension = widget.config?.dimension || '';
+      if (action === 'filter') {
+        await patchConfigurableWidget(widget, {
+          filters: [...(widget.filters || []), filter]
+        });
+      } else if (action === 'create') {
+        await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...widget,
+            title: `${widget.title} · ${key}`,
+            filters: [...(widget.filters || []), filter],
+            grid: { ...widget.grid, y: widget.grid.y + widget.grid.h }
+          })
+        });
+        await loadConfigurableDashboard(configurableDashboard.id);
+      } else if (action === 'details') {
+        if (['src_ip', 'dst_ip', 'src_prefix', 'dst_prefix', 'conversation'].includes(dimension)) {
+          await openIpDetails(String(filter.value).split('/')[0]);
+        }
+      } else if (action === 'anomalies') {
+        showView('anomalies');
+      } else if (action === 'cgnat') {
+        showView('cgnat');
+      } else {
+        showView('flows');
+        if (['src_ip', 'src_prefix'].includes(dimension)) {
+          document.getElementById('flowSrcIp').value = key;
+        } else if (['dst_ip', 'dst_prefix'].includes(dimension)) {
+          document.getElementById('flowDstIp').value = key;
+        } else if (dimension === 'src_port') {
+          document.getElementById('flowSrcPort').value = filter.value;
+        } else if (dimension === 'dst_port') {
+          document.getElementById('flowDstPort').value = filter.value;
+        }
+        if (action === 'conversations') showFlowTab('top');
+        else await searchFlows();
+      }
+    }
+
+    function installConfigurableDashboardEvents() {
+      const grid = document.getElementById('configurableDashboardGrid');
+      if (grid.dataset.eventsInstalled) return;
+      grid.dataset.eventsInstalled = 'true';
+      document.getElementById('configurableDrilldownMenu').addEventListener('click', event => {
+        const action = event.target.closest('[data-drilldown-action]')?.dataset.drilldownAction;
+        if (action) runConfigurableDrilldown(action).catch(console.error);
+      });
+      document.addEventListener('click', event => {
+        if (
+          !event.target.closest('#configurableDrilldownMenu')
+          && !event.target.closest('.configurable-drilldown')
+        ) {
+          document.getElementById('configurableDrilldownMenu').classList.remove('open');
+        }
+      });
+      grid.addEventListener('click', async event => {
+        const target = event.target instanceof Element ? event.target : event.target.parentElement;
+        const element = target?.closest('.configurable-dashboard-widget');
+        const widget = (configurableDashboard?.widgets || []).find(item => item.id === Number(element?.dataset.widgetId));
+        if (!widget) return;
+        try {
+          if (target.closest('.configurable-widget-edit')) openConfigurableWidgetModal(widget);
+          else if (target.closest('.configurable-widget-duplicate')) {
+            await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...widget, title: `${widget.title} (cópia)`, widget_key: undefined, grid: { ...widget.grid, y: widget.grid.y + widget.grid.h } })
+            });
+            await loadConfigurableDashboard(configurableDashboard.id);
+          } else if (target.closest('.configurable-widget-left')) {
+            await patchConfigurableWidget(widget, { grid: { ...widget.grid, x: Math.max(0, widget.grid.x - 1) } });
+          } else if (target.closest('.configurable-widget-wider')) {
+            await patchConfigurableWidget(widget, { grid: { ...widget.grid, w: widget.grid.w >= 12 ? 4 : Math.min(12, widget.grid.w + 1) } });
+          } else if (target.closest('.configurable-widget-collapse')) {
+            await patchConfigurableWidget(widget, { collapsed: !widget.collapsed });
+          } else if (target.closest('.configurable-widget-fullscreen')) {
+            element.classList.toggle('fullscreen-widget');
+            setTimeout(() => configurableWidgetCharts.get(widget.id)?.resize(), 50);
+          } else if (target.closest('.configurable-widget-hide')) {
+            await patchConfigurableWidget(widget, { hidden: !widget.hidden });
+          } else if (target.closest('.configurable-widget-delete')) {
+            if (window.confirm(`Excluir o widget “${widget.title}”?`)) {
+              await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, { method: 'DELETE' });
+              await loadConfigurableDashboard(configurableDashboard.id);
+            }
+          } else if (target.closest('.configurable-widget-retry')) {
+            configurableVisibleWidgets.add(widget.id);
+            await queryConfigurableWidget(widget, { force: true });
+          } else if (target.closest('.configurable-drilldown')) {
+            const key = target.closest('.configurable-drilldown').dataset.key;
+            openConfigurableDrilldownMenu(event, widget, key);
+          }
+        } catch (error) {
+          renderConfigurableWidgetError(widget, error);
+        }
+      });
+      grid.addEventListener('dragstart', event => {
+        const widget = event.target.closest('.configurable-dashboard-widget');
+        if (!widget) return;
+        widget.classList.add('dragging');
+        event.dataTransfer.setData('text/widget-id', widget.dataset.widgetId);
+      });
+      grid.addEventListener('dragend', event => event.target.closest('.configurable-dashboard-widget')?.classList.remove('dragging'));
+      grid.addEventListener('dragover', event => event.preventDefault());
+      grid.addEventListener('drop', async event => {
+        event.preventDefault();
+        const sourceId = Number(event.dataTransfer.getData('text/widget-id'));
+        const targetId = Number(event.target.closest('.configurable-dashboard-widget')?.dataset.widgetId);
+        if (!sourceId || !targetId || sourceId === targetId) return;
+        const source = configurableDashboard.widgets.find(item => item.id === sourceId);
+        const target = configurableDashboard.widgets.find(item => item.id === targetId);
+        await Promise.all([
+          apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${source.id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grid: { ...source.grid, x: target.grid.x, y: target.grid.y } })
+          }),
+          apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${target.id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grid: { ...target.grid, x: source.grid.x, y: source.grid.y } })
+          })
+        ]);
+        await loadConfigurableDashboard(configurableDashboard.id);
+      });
+    }
+
     function dashboardLayout() {
       try {
         const stored = JSON.parse(localStorage.getItem(DASHBOARD_LAYOUT_KEY) || '{}') || {};
@@ -17863,10 +19211,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       dashboardEditing = !dashboardEditing;
       document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditing);
       document.getElementById('editDashboardButton').classList.toggle('btn-success', dashboardEditing);
+      if (configurableDashboardActive) renderConfigurableDashboard();
       createIcons();
     }
 
     function resetDashboardLayout() {
+      if (configurableDashboardActive) {
+        loadConfigurableDashboard(configurableDashboard.id).catch(console.error);
+        return;
+      }
       localStorage.removeItem(DASHBOARD_LAYOUT_KEY);
       const grid = document.getElementById('dashboardWidgetGrid');
       const byId = Object.fromEntries(dashboardGridWidgets().map(widget => [widget.dataset.widgetId, widget]));
@@ -18096,6 +19449,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!authToken()) return;
       if (document.visibilityState !== 'visible') return;
       if (activeView !== 'dashboard') return;
+      if (configurableDashboardActive) {
+        return refreshConfigurableDashboard();
+      }
       if (dashboardRefreshInFlight) abortDashboardRequest();
       dashboardRefreshInFlight = true;
       abortDashboardRequest();
@@ -18190,6 +19546,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         clearTimeout(dashboardRefreshTimer);
         dashboardRefreshTimer = null;
       }
+      if (configurableDashboardActive) return;
       const interval = selectedDashboardRefreshMs();
       if (!interval || !authToken() || activeView !== 'dashboard' || document.visibilityState !== 'visible' || dashboardRefreshFailures >= 3) return;
       dashboardRefreshTimer = setTimeout(async () => {
@@ -19607,7 +20964,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-dashboard').classList.add('active');
         document.querySelector('[data-nav-view="dashboard"]').classList.add('active');
         Object.values(charts).forEach(chart => chart.resize());
-        Promise.all([loadDashboardSensors(), loadIpZoneFilters()]).then(() => refresh()).catch(console.error);
+        Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
+          .then(() => configurableDashboardActive
+            ? refreshConfigurableDashboard()
+            : initializeConfigurableDashboards().then(() => refresh()))
+          .catch(console.error);
       } else if (view === 'flows') {
         document.getElementById('view-flows').classList.add('active');
         document.querySelector('[data-nav-view="flows"]').classList.add('active');
@@ -19799,6 +21160,47 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
     document.getElementById('editDashboardButton').addEventListener('click', toggleDashboardEdit);
     document.getElementById('resetDashboardButton').addEventListener('click', resetDashboardLayout);
+    document.getElementById('dashboardSelector').addEventListener('change', event => {
+      const dashboardId = Number(event.target.value);
+      if (dashboardId) loadConfigurableDashboard(dashboardId).catch(console.error);
+    });
+    document.getElementById('newDashboardButton').addEventListener('click', () => createConfigurableDashboardFromPrompt().catch(console.error));
+    document.getElementById('dashboardManagerButton').addEventListener('click', openDashboardManager);
+    document.getElementById('addDashboardWidgetButton').addEventListener('click', () => openConfigurableWidgetModal());
+    document.getElementById('saveDashboardWidgetButton').addEventListener('click', () => saveConfigurableWidget().catch(console.error));
+    document.getElementById('previewDashboardWidgetButton').addEventListener('click', () => previewConfigurableWidget().catch(console.error));
+    document.getElementById('widgetConfigType').addEventListener('change', syncConfigurableWidgetTypeFields);
+    document.querySelectorAll('.dashboard-config-tab').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.dashboard-config-tab').forEach(item => {
+          item.classList.toggle('btn-success', item === button);
+          item.classList.toggle('btn-outline-secondary', item !== button);
+        });
+        document.querySelectorAll('.dashboard-config-tab-panel').forEach(panel => {
+          panel.classList.toggle('active', panel.dataset.widgetTabPanel === button.dataset.widgetTab);
+        });
+      });
+    });
+    document.getElementById('saveDashboardButton').addEventListener('click', () => saveConfigurableDashboardManager().catch(error => {
+      setText('dashboardManagerStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('duplicateDashboardButton').addEventListener('click', () => duplicateConfigurableDashboard().catch(error => {
+      setText('dashboardManagerStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('exportDashboardButton').addEventListener('click', () => exportConfigurableDashboard().catch(error => {
+      setText('dashboardManagerStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('importDashboardButton').addEventListener('click', importConfigurableDashboard);
+    document.getElementById('deleteDashboardButton').addEventListener('click', async () => {
+      if (!configurableDashboard?.permissions?.can_delete || !window.confirm(`Excluir o dashboard “${configurableDashboard.name}”?`)) return;
+      try {
+        await apiRequest(`/api/dashboards/${configurableDashboard.id}`, { method: 'DELETE' });
+        closeModal('dashboardManagerModal');
+        await initializeConfigurableDashboards();
+      } catch (error) {
+        setText('dashboardManagerStatus', `Falha: ${error.message}`);
+      }
+    });
     document.getElementById('dashboardRefreshInterval').addEventListener('change', scheduleDashboardRefresh);
     document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
@@ -20519,6 +21921,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     mountDetectionTemplateSection();
     initializeAppearanceTheme();
     applyDashboardLayout();
+    installConfigurableDashboardEvents();
     updateMapFilterBadge();
     resetPeakHunterForm();
     installHelpTooltips();
