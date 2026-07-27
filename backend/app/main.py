@@ -135,7 +135,7 @@ from app.services.dashboard_widgets import (
     get_dashboard as get_configurable_dashboard,
     insert_widget as insert_configurable_dashboard_widget,
     normalize_dashboard_payload,
-    resolve_grid_collision,
+    repair_dashboard_widgets,
     validate_widget_definition,
     widget_catalog,
     widget_data_signature,
@@ -33301,9 +33301,30 @@ def migrate_legacy_dashboard_layout_endpoint(
             """,
             (utc_now_iso(), dashboard_id),
         )
-        conn.commit()
         migrated = get_configurable_dashboard(conn, dashboard_id) or dashboard
+        conn.commit()
     return dashboard_with_permissions(migrated, user)
+
+
+@app.post("/api/dashboards/{dashboard_id}/repair-layout")
+def repair_configurable_dashboard_layout_endpoint(
+    dashboard_id: int,
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        current = dashboard_or_404(conn, dashboard_id, user, edit=True)
+        layout_repaired = bool(current.get("layout_repaired"))
+        layout_repaired = (
+            repair_dashboard_widgets(conn, dashboard_id)
+            or layout_repaired
+        )
+        conn.commit()
+        repaired = get_configurable_dashboard(conn, dashboard_id)
+    result = dashboard_with_permissions(repaired, user)
+    result["layout_repaired"] = layout_repaired
+    return result
 
 
 @app.get("/api/dashboards/{dashboard_id}/export")
@@ -33351,24 +33372,34 @@ def create_configurable_dashboard_widget(
         )
         if count >= MAX_DASHBOARD_WIDGETS:
             raise HTTPException(status_code=400, detail="Limite de widgets atingido")
-        occupied = [
-            widget_row_to_dict(row)["grid"]
-            for row in conn.execute(
-                "SELECT * FROM dashboard_widgets WHERE dashboard_id = ?",
+        if not isinstance(payload.get("grid"), dict) or "y" not in payload["grid"]:
+            last_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(grid_y + grid_h), 0) AS next_y
+                FROM dashboard_widgets
+                WHERE dashboard_id = ? AND hidden = 0
+                """,
                 (dashboard_id,),
-            ).fetchall()
-        ]
-        normalized["grid"] = resolve_grid_collision(normalized["grid"], occupied)
+            ).fetchone()
+            normalized["grid"]["y"] = int(last_row["next_y"] or 0)
         normalized["widget_key"] = clean_text(payload.get("widget_key")) or "widget-%s" % uuid.uuid4().hex[:12]
         widget_id = insert_configurable_dashboard_widget(
             conn,
             dashboard_id,
             normalized,
         )
+        layout_repaired = repair_dashboard_widgets(
+            conn,
+            dashboard_id,
+            widget_id,
+        )
         conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
         conn.commit()
         row = conn.execute("SELECT * FROM dashboard_widgets WHERE id = ?", (widget_id,)).fetchone()
-    return widget_row_to_dict(row)
+    return {
+        **widget_row_to_dict(row),
+        "layout_repaired": layout_repaired,
+    }
 
 
 @app.api_route(
@@ -33401,26 +33432,38 @@ def update_configurable_dashboard_widget(
                 **(payload.get("visualization") or {}),
             },
         }
+        expanded_grid_h = current.get("expanded_grid_h")
+        collapsed_grid_h = int(
+            current.get("collapsed_grid_h") or 2
+        )
+        requested_collapsed = bool(
+            payload.get("collapsed", current.get("collapsed"))
+        )
+        if requested_collapsed and not current.get("collapsed"):
+            expanded_grid_h = int(current["grid"]["h"])
+            merged["grid"] = {
+                **merged["grid"],
+                "h": collapsed_grid_h,
+            }
+        elif not requested_collapsed and current.get("collapsed"):
+            merged["grid"] = {
+                **merged["grid"],
+                "h": int(expanded_grid_h or current["grid"]["h"] or 4),
+            }
+            expanded_grid_h = None
         try:
             normalized = validate_widget_definition(merged)
         except ValueError as exc:
             raise dashboard_validation_error(exc)
-        occupied = [
-            widget_row_to_dict(other)["grid"]
-            for other in conn.execute(
-                "SELECT * FROM dashboard_widgets WHERE dashboard_id = ? AND id <> ?",
-                (dashboard_id, widget_id),
-            ).fetchall()
-        ]
-        if "grid" in payload:
-            normalized["grid"] = resolve_grid_collision(normalized["grid"], occupied)
         conn.execute(
             """
             UPDATE dashboard_widgets
             SET type = ?, title = ?, description = ?, category = ?,
                 config_json = ?, filters_json = ?, visualization_json = ?,
                 grid_x = ?, grid_y = ?, grid_w = ?, grid_h = ?,
-                collapsed = ?, hidden = ?, refresh_interval_seconds = ?,
+                expanded_grid_h = ?, collapsed_grid_h = ?,
+                collapsed = ?, hidden = ?, height_mode = ?,
+                refresh_interval_seconds = ?,
                 use_global_filters = ?, use_global_time_range = ?,
                 inheritance_json = ?, custom_time_range_json = ?, updated_at = ?
             WHERE id = ? AND dashboard_id = ?
@@ -33437,8 +33480,11 @@ def update_configurable_dashboard_widget(
                 normalized["grid"]["y"],
                 normalized["grid"]["w"],
                 normalized["grid"]["h"],
+                expanded_grid_h,
+                collapsed_grid_h,
                 int(normalized["collapsed"]),
                 int(normalized["hidden"]),
+                normalized["height_mode"],
                 normalized["refresh_interval_seconds"],
                 int(normalized["use_global_filters"]),
                 int(normalized["use_global_time_range"]),
@@ -33453,10 +33499,23 @@ def update_configurable_dashboard_widget(
                 dashboard_id,
             ),
         )
+        repair_priority = (
+            None
+            if normalized["hidden"]
+            else widget_id
+        )
+        layout_repaired = repair_dashboard_widgets(
+            conn,
+            dashboard_id,
+            repair_priority,
+        )
         conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
         conn.commit()
         updated = conn.execute("SELECT * FROM dashboard_widgets WHERE id = ?", (widget_id,)).fetchone()
-    return widget_row_to_dict(updated)
+    return {
+        **widget_row_to_dict(updated),
+        "layout_repaired": layout_repaired,
+    }
 
 
 @app.delete("/api/dashboards/{dashboard_id}/widgets/{widget_id}")
@@ -33475,9 +33534,14 @@ def delete_configurable_dashboard_widget(
         )
         if cursor.rowcount <= 0:
             raise HTTPException(status_code=404, detail="Widget não encontrado")
+        layout_repaired = repair_dashboard_widgets(conn, dashboard_id)
         conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
         conn.commit()
-    return {"ok": True, "deleted_id": widget_id}
+    return {
+        "ok": True,
+        "deleted_id": widget_id,
+        "layout_repaired": layout_repaired,
+    }
 
 
 @app.get("/api/system/dashboard-cache")
