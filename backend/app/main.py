@@ -121,6 +121,26 @@ from app.services.dashboard_aggregates import (
     dashboard_sample_rate_join_sql,
     sample_rate_config_rows,
 )
+from app.services.dashboard_widgets import (
+    DASHBOARD_EXPORT_VERSION,
+    DASHBOARD_SCHEMA_VERSION,
+    DASHBOARD_WIDGET_METRICS,
+    MAX_DASHBOARD_WIDGETS,
+    build_widget_query_plan,
+    create_dashboard as create_configurable_dashboard,
+    dashboard_row_to_dict,
+    duplicate_dashboard as duplicate_configurable_dashboard,
+    ensure_dashboard_schema,
+    ensure_user_default_dashboard,
+    get_dashboard as get_configurable_dashboard,
+    insert_widget as insert_configurable_dashboard_widget,
+    normalize_dashboard_payload,
+    resolve_grid_collision,
+    validate_widget_definition,
+    widget_catalog,
+    widget_data_signature,
+    widget_row_to_dict,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -196,6 +216,7 @@ TOP_FLOW_TYPES = {
     "input_if",
     "output_if",
     "interfaces",
+    "sensor",
     "asn_src",
     "asn_dst",
     "src_asn",
@@ -3896,6 +3917,13 @@ def ensure_sensor_db() -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 ("admin", hash_password("admin"), "admin", 1, 1, now, now),
+            )
+        try:
+            ensure_dashboard_schema(conn)
+        except Exception as exc:
+            logger.exception(
+                "Falha ao migrar dashboards configuráveis; dashboard legado permanecerá disponível: %s",
+                exc,
             )
         conn.commit()
         SENSOR_DB_READY = True
@@ -32877,17 +32905,600 @@ def unavailable_metric(reason: str = "") -> dict[str, Any]:
     return {"available": False, "status": "indisponivel", "reason": reason}
 
 
+def dashboard_request_user(request: Request) -> dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def dashboard_can_view(dashboard: dict[str, Any], user: dict[str, Any]) -> bool:
+    return bool(
+        user.get("role") == "admin"
+        or dashboard.get("owner_user_id") == int(user["id"])
+        or dashboard.get("is_shared")
+        or dashboard.get("is_system")
+    )
+
+
+def dashboard_can_edit(dashboard: dict[str, Any], user: dict[str, Any]) -> bool:
+    if user.get("role") == "admin":
+        return True
+    return bool(
+        not dashboard.get("is_system")
+        and dashboard.get("owner_user_id") == int(user["id"])
+    )
+
+
+def dashboard_with_permissions(dashboard: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **dashboard,
+        "permissions": {
+            "can_view": dashboard_can_view(dashboard, user),
+            "can_edit": dashboard_can_edit(dashboard, user),
+            "can_delete": dashboard_can_edit(dashboard, user),
+            "can_duplicate": dashboard_can_view(dashboard, user),
+            "can_share": dashboard_can_edit(dashboard, user),
+        },
+    }
+
+
+def dashboard_or_404(
+    conn: sqlite3.Connection,
+    dashboard_id: int,
+    user: dict[str, Any],
+    *,
+    edit: bool = False,
+) -> dict[str, Any]:
+    dashboard = get_configurable_dashboard(conn, dashboard_id)
+    if dashboard is None or not dashboard_can_view(dashboard, user):
+        raise HTTPException(status_code=404, detail="Dashboard não encontrado")
+    if edit and not dashboard_can_edit(dashboard, user):
+        raise HTTPException(status_code=403, detail="Sem permissão para editar este dashboard")
+    return dashboard
+
+
+def dashboard_validation_error(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=400, detail=clean_text(exc) or "Configuração inválida")
+
+
+@app.get("/api/dashboards/widget-catalog")
+def configurable_dashboard_widget_catalog():
+    return widget_catalog()
+
+
+@app.post("/api/dashboards/widgets/preview")
+def preview_configurable_dashboard_widget_route(
+    payload: dict[str, Any],
+    request: Request,
+):
+    dashboard_request_user(request)
+    source = payload.get("widget") if isinstance(payload.get("widget"), dict) else payload
+    try:
+        widget = validate_widget_definition(source)
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    context = dashboard_widget_query_context(payload)
+    return dashboard_widget_cached_query(widget, context, preview=True)
+
+
+@app.post("/api/dashboards/import")
+def import_configurable_dashboard(payload: dict[str, Any], request: Request):
+    user = dashboard_request_user(request)
+    if int(payload.get("export_version") or 0) != DASHBOARD_EXPORT_VERSION:
+        raise HTTPException(status_code=400, detail="Versão de exportação não suportada")
+    source = payload.get("dashboard")
+    if not isinstance(source, dict):
+        raise HTTPException(status_code=400, detail="Arquivo de dashboard inválido")
+    widgets = source.get("widgets") or []
+    if not isinstance(widgets, list) or len(widgets) > MAX_DASHBOARD_WIDGETS:
+        raise HTTPException(status_code=400, detail="Quantidade de widgets inválida")
+    try:
+        normalized_widgets = [validate_widget_definition(widget) for widget in widgets]
+        dashboard_payload = normalize_dashboard_payload(
+            {
+                "name": clean_text(source.get("name")) or "Dashboard importado",
+                "description": source.get("description", ""),
+                "is_default": False,
+                "is_shared": False,
+                "global_filters": source.get("global_filters", []),
+                "time_range": source.get("time_range", {}),
+                "refresh_interval_seconds": source.get("refresh_interval_seconds", 30),
+            }
+        )
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        created = create_configurable_dashboard(
+            conn,
+            dashboard_payload,
+            int(user["id"]),
+            widgets=normalized_widgets,
+        )
+        conn.commit()
+    return dashboard_with_permissions(created, user)
+
+
+@app.get("/api/dashboards")
+def list_configurable_dashboards(request: Request):
+    user = dashboard_request_user(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        ensure_user_default_dashboard(conn, int(user["id"]))
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM dashboards
+            WHERE owner_user_id = ? OR is_shared = 1 OR is_system = 1 OR ? = 'admin'
+            ORDER BY
+                CASE WHEN owner_user_id = ? AND is_default = 1 THEN 0
+                     WHEN owner_user_id = ? THEN 1
+                     WHEN is_system = 1 THEN 2
+                     ELSE 3 END,
+                name
+            """,
+            (int(user["id"]), user.get("role"), int(user["id"]), int(user["id"])),
+        ).fetchall()
+        items = [dashboard_with_permissions(dashboard_row_to_dict(row), user) for row in rows]
+        conn.commit()
+    default_item = next(
+        (
+            item
+            for item in items
+            if item["owner_user_id"] == int(user["id"]) and item["is_default"]
+        ),
+        items[0] if items else None,
+    )
+    return {
+        "items": items,
+        "default_dashboard_id": default_item["id"] if default_item else None,
+        "schema_version": DASHBOARD_SCHEMA_VERSION,
+    }
+
+
+@app.post("/api/dashboards")
+def create_configurable_dashboard_endpoint(payload: dict[str, Any], request: Request):
+    user = dashboard_request_user(request)
+    try:
+        normalized = normalize_dashboard_payload(payload)
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        created = create_configurable_dashboard(conn, normalized, int(user["id"]))
+        conn.commit()
+    return dashboard_with_permissions(created, user)
+
+
+@app.get("/api/dashboards/{dashboard_id}")
+def get_configurable_dashboard_endpoint(dashboard_id: int, request: Request):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = dashboard_or_404(conn, dashboard_id, user)
+    return dashboard_with_permissions(dashboard, user)
+
+
+@app.api_route("/api/dashboards/{dashboard_id}", methods=["PATCH"])
+def update_configurable_dashboard_endpoint(
+    dashboard_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        current = dashboard_or_404(conn, dashboard_id, user, edit=True)
+        merged = {
+            "name": payload.get("name", current["name"]),
+            "description": payload.get("description", current["description"]),
+            "is_default": payload.get("is_default", current["is_default"]),
+            "is_shared": payload.get("is_shared", current["is_shared"]),
+            "global_filters": payload.get("global_filters", current["global_filters"]),
+            "time_range": payload.get("time_range", current["time_range"]),
+            "refresh_interval_seconds": payload.get(
+                "refresh_interval_seconds",
+                current["refresh_interval_seconds"],
+            ),
+        }
+        try:
+            normalized = normalize_dashboard_payload(merged)
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+        if normalized["is_default"]:
+            conn.execute(
+                "UPDATE dashboards SET is_default = 0 WHERE owner_user_id IS ? AND id <> ?",
+                (current["owner_user_id"], dashboard_id),
+            )
+        conn.execute(
+            """
+            UPDATE dashboards
+            SET name = ?, description = ?, is_default = ?, is_shared = ?,
+                global_filters_json = ?, time_range_json = ?,
+                refresh_interval_seconds = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                normalized["name"],
+                normalized["description"],
+                int(normalized["is_default"]),
+                int(normalized["is_shared"]),
+                json.dumps(normalized["global_filters"], sort_keys=True, separators=(",", ":")),
+                json.dumps(normalized["time_range"], sort_keys=True, separators=(",", ":")),
+                normalized["refresh_interval_seconds"],
+                utc_now_iso(),
+                dashboard_id,
+            ),
+        )
+        conn.commit()
+        updated = get_configurable_dashboard(conn, dashboard_id) or current
+    return dashboard_with_permissions(updated, user)
+
+
+@app.delete("/api/dashboards/{dashboard_id}")
+def delete_configurable_dashboard_endpoint(dashboard_id: int, request: Request):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        current = dashboard_or_404(conn, dashboard_id, user, edit=True)
+        conn.execute("DELETE FROM dashboards WHERE id = ?", (dashboard_id,))
+        if current.get("owner_user_id") is not None and current.get("is_default"):
+            replacement = conn.execute(
+                "SELECT id FROM dashboards WHERE owner_user_id = ? ORDER BY id LIMIT 1",
+                (current["owner_user_id"],),
+            ).fetchone()
+            if replacement is not None:
+                conn.execute(
+                    "UPDATE dashboards SET is_default = 1 WHERE id = ?",
+                    (int(replacement["id"]),),
+                )
+        conn.commit()
+    return {"ok": True, "deleted_id": dashboard_id}
+
+
+@app.post("/api/dashboards/{dashboard_id}/duplicate")
+def duplicate_configurable_dashboard_endpoint(
+    dashboard_id: int,
+    request: Request,
+    payload: dict[str, Any] | None = None,
+):
+    user = dashboard_request_user(request)
+    payload = payload or {}
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        source = dashboard_or_404(conn, dashboard_id, user)
+        try:
+            duplicate = duplicate_configurable_dashboard(
+                conn,
+                source,
+                int(user["id"]),
+                clean_text(payload.get("name")) or None,
+            )
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+        conn.commit()
+    return dashboard_with_permissions(duplicate, user)
+
+
+@app.post("/api/dashboards/{dashboard_id}/set-default")
+def set_default_configurable_dashboard_endpoint(
+    dashboard_id: int,
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        current = dashboard_or_404(conn, dashboard_id, user, edit=True)
+        owner_user_id = current.get("owner_user_id")
+        conn.execute(
+            "UPDATE dashboards SET is_default = 0 WHERE owner_user_id IS ?",
+            (owner_user_id,),
+        )
+        conn.execute(
+            "UPDATE dashboards SET is_default = 1, updated_at = ? WHERE id = ?",
+            (utc_now_iso(), dashboard_id),
+        )
+        conn.commit()
+        updated = get_configurable_dashboard(conn, dashboard_id) or current
+    return dashboard_with_permissions(updated, user)
+
+
+@app.post("/api/dashboards/{dashboard_id}/migrate-legacy-layout")
+def migrate_legacy_dashboard_layout_endpoint(
+    dashboard_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    legacy_to_widget = {
+        "bps-chart": "traffic-bps",
+        "pps-chart": "traffic-pps",
+        "top-conversations": "top-conversations",
+        "syn-src": "top-syn-src",
+        "syn-dst": "top-syn-dst",
+    }
+    width_map = {"small": 3, "medium": 6, "large": 9, "full": 12}
+    height_map = {"low": 4, "medium": 6, "high": 8}
+    order = payload.get("order") if isinstance(payload.get("order"), list) else []
+    hidden = {
+        clean_text(value)
+        for value in (
+            payload.get("hidden")
+            if isinstance(payload.get("hidden"), list)
+            else []
+        )
+    }
+    sizes = payload.get("sizes") if isinstance(payload.get("sizes"), dict) else {}
+    has_legacy_layout = bool(
+        order
+        or sizes
+        or hidden
+        or payload.get("version")
+    )
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = dashboard_or_404(conn, dashboard_id, user, edit=True)
+        if dashboard.get("legacy_layout_migrated"):
+            return dashboard_with_permissions(dashboard, user)
+        x_position = 0
+        y_position = 0
+        row_height = 0
+        ordered_legacy_ids = []
+        for legacy_id in ["bps-chart", "pps-chart", *order, *legacy_to_widget]:
+            if (
+                legacy_id in legacy_to_widget
+                and legacy_id not in ordered_legacy_ids
+            ):
+                ordered_legacy_ids.append(legacy_id)
+        for legacy_id in (ordered_legacy_ids if has_legacy_layout else []):
+            widget_key = legacy_to_widget[legacy_id]
+            size = sizes.get(legacy_id) if isinstance(sizes.get(legacy_id), dict) else {}
+            width = width_map.get(clean_text(size.get("width")).lower())
+            height = height_map.get(clean_text(size.get("height")).lower())
+            row = conn.execute(
+                """
+                SELECT grid_w, grid_h
+                FROM dashboard_widgets
+                WHERE dashboard_id = ? AND widget_key = ?
+                """,
+                (dashboard_id, widget_key),
+            ).fetchone()
+            if row is None:
+                continue
+            resolved_width = width or int(row["grid_w"])
+            resolved_height = height or int(row["grid_h"])
+            if x_position + resolved_width > 12:
+                x_position = 0
+                y_position += row_height
+                row_height = 0
+            conn.execute(
+                """
+                UPDATE dashboard_widgets
+                SET grid_x = ?, grid_y = ?, grid_w = ?, grid_h = ?,
+                    hidden = ?, updated_at = ?
+                WHERE dashboard_id = ? AND widget_key = ?
+                """,
+                (
+                    x_position,
+                    y_position,
+                    resolved_width,
+                    resolved_height,
+                    int(legacy_id in hidden),
+                    utc_now_iso(),
+                    dashboard_id,
+                    widget_key,
+                ),
+            )
+            x_position += resolved_width
+            row_height = max(row_height, resolved_height)
+        conn.execute(
+            """
+            UPDATE dashboards
+            SET legacy_layout_migrated = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (utc_now_iso(), dashboard_id),
+        )
+        conn.commit()
+        migrated = get_configurable_dashboard(conn, dashboard_id) or dashboard
+    return dashboard_with_permissions(migrated, user)
+
+
+@app.get("/api/dashboards/{dashboard_id}/export")
+def export_configurable_dashboard_endpoint(dashboard_id: int, request: Request):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = dashboard_or_404(conn, dashboard_id, user)
+    exported = {
+        key: value
+        for key, value in dashboard.items()
+        if key not in {"id", "owner_user_id", "is_system", "template_key", "created_at", "updated_at"}
+    }
+    for widget in exported.get("widgets", []):
+        for key in ("id", "dashboard_id", "created_at", "updated_at"):
+            widget.pop(key, None)
+    return {
+        "format": "gmj-flow-dashboard",
+        "export_version": DASHBOARD_EXPORT_VERSION,
+        "schema_version": DASHBOARD_SCHEMA_VERSION,
+        "exported_at": utc_now_iso(),
+        "dashboard": exported,
+    }
+
+
+@app.post("/api/dashboards/{dashboard_id}/widgets")
+def create_configurable_dashboard_widget(
+    dashboard_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    try:
+        normalized = validate_widget_definition(payload)
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard_or_404(conn, dashboard_id, user, edit=True)
+        count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM dashboard_widgets WHERE dashboard_id = ?",
+                (dashboard_id,),
+            ).fetchone()[0]
+        )
+        if count >= MAX_DASHBOARD_WIDGETS:
+            raise HTTPException(status_code=400, detail="Limite de widgets atingido")
+        occupied = [
+            widget_row_to_dict(row)["grid"]
+            for row in conn.execute(
+                "SELECT * FROM dashboard_widgets WHERE dashboard_id = ?",
+                (dashboard_id,),
+            ).fetchall()
+        ]
+        normalized["grid"] = resolve_grid_collision(normalized["grid"], occupied)
+        normalized["widget_key"] = clean_text(payload.get("widget_key")) or "widget-%s" % uuid.uuid4().hex[:12]
+        widget_id = insert_configurable_dashboard_widget(
+            conn,
+            dashboard_id,
+            normalized,
+        )
+        conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
+        conn.commit()
+        row = conn.execute("SELECT * FROM dashboard_widgets WHERE id = ?", (widget_id,)).fetchone()
+    return widget_row_to_dict(row)
+
+
+@app.api_route(
+    "/api/dashboards/{dashboard_id}/widgets/{widget_id}",
+    methods=["PATCH"],
+)
+def update_configurable_dashboard_widget(
+    dashboard_id: int,
+    widget_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard_or_404(conn, dashboard_id, user, edit=True)
+        row = conn.execute(
+            "SELECT * FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?",
+            (widget_id, dashboard_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Widget não encontrado")
+        current = widget_row_to_dict(row)
+        merged = {
+            **current,
+            **payload,
+            "config": {**current["config"], **(payload.get("config") or {})},
+            "visualization": {
+                **current["visualization"],
+                **(payload.get("visualization") or {}),
+            },
+        }
+        try:
+            normalized = validate_widget_definition(merged)
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+        occupied = [
+            widget_row_to_dict(other)["grid"]
+            for other in conn.execute(
+                "SELECT * FROM dashboard_widgets WHERE dashboard_id = ? AND id <> ?",
+                (dashboard_id, widget_id),
+            ).fetchall()
+        ]
+        if "grid" in payload:
+            normalized["grid"] = resolve_grid_collision(normalized["grid"], occupied)
+        conn.execute(
+            """
+            UPDATE dashboard_widgets
+            SET type = ?, title = ?, description = ?, category = ?,
+                config_json = ?, filters_json = ?, visualization_json = ?,
+                grid_x = ?, grid_y = ?, grid_w = ?, grid_h = ?,
+                collapsed = ?, hidden = ?, refresh_interval_seconds = ?,
+                use_global_filters = ?, use_global_time_range = ?,
+                inheritance_json = ?, custom_time_range_json = ?, updated_at = ?
+            WHERE id = ? AND dashboard_id = ?
+            """,
+            (
+                normalized["type"],
+                normalized["title"],
+                normalized["description"],
+                normalized["category"],
+                json.dumps(normalized["config"], sort_keys=True, separators=(",", ":")),
+                json.dumps(normalized["filters"], sort_keys=True, separators=(",", ":")),
+                json.dumps(normalized["visualization"], sort_keys=True, separators=(",", ":")),
+                normalized["grid"]["x"],
+                normalized["grid"]["y"],
+                normalized["grid"]["w"],
+                normalized["grid"]["h"],
+                int(normalized["collapsed"]),
+                int(normalized["hidden"]),
+                normalized["refresh_interval_seconds"],
+                int(normalized["use_global_filters"]),
+                int(normalized["use_global_time_range"]),
+                json.dumps(
+                    normalized["inheritance"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                json.dumps(normalized["custom_time_range"], sort_keys=True, separators=(",", ":")),
+                utc_now_iso(),
+                widget_id,
+                dashboard_id,
+            ),
+        )
+        conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
+        conn.commit()
+        updated = conn.execute("SELECT * FROM dashboard_widgets WHERE id = ?", (widget_id,)).fetchone()
+    return widget_row_to_dict(updated)
+
+
+@app.delete("/api/dashboards/{dashboard_id}/widgets/{widget_id}")
+def delete_configurable_dashboard_widget(
+    dashboard_id: int,
+    widget_id: int,
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard_or_404(conn, dashboard_id, user, edit=True)
+        cursor = conn.execute(
+            "DELETE FROM dashboard_widgets WHERE id = ? AND dashboard_id = ?",
+            (widget_id, dashboard_id),
+        )
+        if cursor.rowcount <= 0:
+            raise HTTPException(status_code=404, detail="Widget não encontrado")
+        conn.execute("UPDATE dashboards SET updated_at = ? WHERE id = ?", (utc_now_iso(), dashboard_id))
+        conn.commit()
+    return {"ok": True, "deleted_id": widget_id}
+
+
 @app.get("/api/system/dashboard-cache")
 def dashboard_cache_status(request: Request):
     require_admin(request)
-    return DASHBOARD_CACHE.status()
+    return {
+        **DASHBOARD_CACHE.status(),
+        "widget_engine": DASHBOARD_WIDGET_METRICS.snapshot(),
+    }
 
 
 @app.delete("/api/system/dashboard-cache")
 def clear_dashboard_cache(request: Request):
     require_admin(request)
     removed = DASHBOARD_CACHE.clear()
-    return {"ok": True, "removed_entries": removed, **DASHBOARD_CACHE.status()}
+    return {
+        "ok": True,
+        "removed_entries": removed,
+        **DASHBOARD_CACHE.status(),
+        "widget_engine": DASHBOARD_WIDGET_METRICS.snapshot(),
+    }
 
 
 @app.get("/api/system/resources")
@@ -35769,6 +36380,7 @@ def dashboard_series_payload(
         context["where"],
         ["proto", "tcp_flags", "src_ip", "dst_ip"],
     )
+    query_source = "raw"
     source_table = "rated_source"
     input_factor = "dashboard_input_sample_rate"
     output_factor = "dashboard_output_sample_rate"
@@ -35788,6 +36400,7 @@ def dashboard_series_payload(
             ["proto", "tcp_flags"],
         )
         source_table = "rated_source"
+        query_source = "aggregate_hybrid"
         input_factor = "dashboard_input_sample_rate"
         output_factor = "dashboard_output_sample_rate"
     resolved_if_index = context["resolved_if_index"]
@@ -35963,6 +36576,7 @@ def dashboard_series_payload(
         "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
         "series": list(series_by_key.values()),
         "items": list(series_by_key.values()),
+        "query_source": query_source,
     }
     return dashboard_cache_set(cache_key, payload)
 
@@ -37588,6 +38202,7 @@ def top_dimension(
         where,
         [*dimension_columns, "src_ip", "dst_ip"],
     )
+    query_source = "raw"
     source_table = "rated_source"
     aggregate_key = "protocol" if dimension == "proto" else dimension
     aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
@@ -37608,6 +38223,7 @@ def top_dimension(
         )
         source_table = "rated_source"
         factor_expr = "dashboard_auto_sample_rate"
+        query_source = "aggregate_hybrid"
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
 
@@ -37710,6 +38326,7 @@ def top_dimension(
         cache_key,
         {
             "items": items,
+            "query_source": query_source,
             "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
         },
     )
@@ -39198,6 +39815,10 @@ def top_flows(
             raw_sql = raw_select("output_if AS if_index, toString(output_if) AS key")
             select_expr = "if_index, key"
             group_by = "if_index, key"
+        elif top_type == "sensor":
+            raw_sql = raw_select("sensor AS key")
+            select_expr = "key"
+            group_by = "key"
         else:
             raw_sql = f"""
                 {raw_select("concat('Download if ', toString(input_if)) AS key", clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"]), f"{context['where']} AND input_if > 0")}
@@ -39218,3 +39839,1346 @@ def top_flows(
         "order_dir": direction_sql.lower(),
         "items": items,
     }
+
+
+def dashboard_widget_filter_arguments(filters: list[dict[str, Any]]) -> dict[str, Any]:
+    """Translate validated declarative filters to the existing parameterized planner."""
+    arguments: dict[str, Any] = {
+        "sensor": None,
+        "ip": None,
+        "src_ip": None,
+        "dst_ip": None,
+        "port": None,
+        "src_port": None,
+        "dst_port": None,
+        "proto": None,
+        "tcp_flags": None,
+        "if_index": None,
+        "zone_id": None,
+    }
+    field_map = {
+        "sensor": "sensor",
+        "ip": "ip",
+        "prefix": "ip",
+        "src_ip": "src_ip",
+        "src_prefix": "src_ip",
+        "dst_ip": "dst_ip",
+        "dst_prefix": "dst_ip",
+        "port": "port",
+        "src_port": "src_port",
+        "dst_port": "dst_port",
+        "protocol": "proto",
+        "tcp_flags": "tcp_flags",
+        "interface": "if_index",
+        "input_if": "if_index",
+        "output_if": "if_index",
+        "zone": "zone_id",
+    }
+    for item in filters:
+        if item.get("operator") != "eq":
+            continue
+        target = field_map.get(clean_text(item.get("field")).lower())
+        if not target:
+            continue
+        value = item.get("value")
+        if target in {"if_index", "zone_id"}:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+        arguments[target] = value
+    return arguments
+
+
+def dashboard_widget_item_value(item: dict[str, Any], metric: str) -> float:
+    field = {
+        "bps": "bits_s",
+        "bytes": "bytes",
+        "pps": "packets_s",
+        "packets": "packets",
+        "fps": "flows_s",
+        "flows": "flows",
+        "duration": "duration_seconds",
+        "percentage": "percent",
+    }.get(metric, metric)
+    if field == "bits_s" and item.get(field) is None:
+        field = "bps"
+    if field == "flows_s" and item.get(field) is None:
+        field = "flows"
+    try:
+        return float(item.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def dashboard_widget_normalize_top_items(
+    items: list[dict[str, Any]],
+    dimension: str,
+    metric: str,
+) -> list[dict[str, Any]]:
+    normalized = []
+    for rank, source in enumerate(items, start=1):
+        item = dict(source)
+        if dimension in {"src_ip", "dst_ip", "src_prefix", "dst_prefix", "country", "zone"}:
+            key = clean_text(item.get("key") or item.get("ip"))
+        elif dimension in {"src_port", "dst_port"}:
+            key = clean_text(item.get("key")) or "%s/%s" % (
+                clean_text(item.get("proto") or item.get("protocol")),
+                item.get("port", ""),
+            )
+        elif dimension == "protocol":
+            key = clean_text(item.get("key") or item.get("proto") or item.get("protocol"))
+        elif dimension == "tcp_flags":
+            key = clean_text(item.get("key") or item.get("flags"))
+        elif dimension in {"src_asn", "dst_asn"}:
+            key = clean_text(item.get("key") or item.get("asn") or item.get("asn_number"))
+        else:
+            key = clean_text(item.get("key"))
+        value = dashboard_widget_item_value(item, metric)
+        item.update({"rank": rank, "key": key or "N/D", "value": value, "metric": metric})
+        if "bits_s" not in item and "bps" in item:
+            item["bits_s"] = item["bps"]
+        normalized.append(item)
+    return normalized
+
+
+def dashboard_widget_fold_prefixes(
+    items: list[dict[str, Any]],
+    metric: str,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        try:
+            address = ip_address(clean_text(item.get("key") or item.get("ip")))
+        except ValueError:
+            continue
+        prefix = str(
+            ip_network(
+                "%s/%s" % (address, 24 if address.version == 4 else 64),
+                strict=False,
+            )
+        )
+        target = grouped.setdefault(
+            prefix,
+            {
+                "key": prefix,
+                "bytes": 0,
+                "packets": 0,
+                "flows": 0,
+                "bits_s": 0.0,
+                "packets_s": 0.0,
+            },
+        )
+        for field in ("bytes", "packets", "flows"):
+            target[field] += int(float(item.get(field) or 0))
+        target["bits_s"] += float(item.get("bits_s") or item.get("bps") or 0)
+        target["packets_s"] += float(item.get("packets_s") or 0)
+    values = list(grouped.values())
+    values.sort(key=lambda item: dashboard_widget_item_value(item, metric), reverse=True)
+    return dashboard_widget_normalize_top_items(values, "src_prefix", metric)
+
+
+def dashboard_widget_group_enriched_items(
+    items: list[dict[str, Any]],
+    metric: str,
+    key_resolver,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        keys = key_resolver(item)
+        if isinstance(keys, str):
+            keys = [keys]
+        for key in keys or ["N/D"]:
+            label = clean_text(key) or "N/D"
+            target = grouped.setdefault(
+                label,
+                {
+                    "key": label,
+                    "bytes": 0,
+                    "packets": 0,
+                    "flows": 0,
+                    "bits_s": 0.0,
+                    "packets_s": 0.0,
+                },
+            )
+            for field in ("bytes", "packets", "flows"):
+                target[field] += int(float(item.get(field) or 0))
+            target["bits_s"] += float(item.get("bits_s") or item.get("bps") or 0)
+            target["packets_s"] += float(item.get("packets_s") or 0)
+    values = list(grouped.values())
+    values.sort(key=lambda item: dashboard_widget_item_value(item, metric), reverse=True)
+    return dashboard_widget_normalize_top_items(values, "country", metric)
+
+
+def dashboard_widget_fold_countries(
+    items: list[dict[str, Any]],
+    metric: str,
+) -> list[dict[str, Any]]:
+    def country(item: dict[str, Any]) -> str:
+        address = clean_ip(item.get("key") or item.get("ip"))
+        if not address:
+            return "N/D"
+        geo = geo_lookup_ip(address)
+        return clean_text(
+            geo.get("country_code")
+            or geo.get("country_name")
+            or "N/D"
+        ).upper()
+
+    return dashboard_widget_group_enriched_items(items, metric, country)
+
+
+def dashboard_widget_fold_zones(
+    items: list[dict[str, Any]],
+    metric: str,
+) -> list[dict[str, Any]]:
+    with sqlite_connection() as conn:
+        ensure_ip_zone_detection_db(conn)
+        rows = conn.execute(
+            """
+            SELECT z.name, p.cidr
+            FROM ip_zones z
+            JOIN ip_zone_prefixes p ON p.zone_id = z.id
+            WHERE z.active = 1 AND p.active = 1
+            """
+        ).fetchall()
+    networks = []
+    for row in rows:
+        try:
+            networks.append((row["name"], ip_network(row["cidr"], strict=False)))
+        except ValueError:
+            continue
+
+    def zones(item: dict[str, Any]) -> list[str]:
+        try:
+            address = ip_address(clean_text(item.get("key") or item.get("ip")))
+        except ValueError:
+            return ["Sem zona"]
+        matches = [
+            name
+            for name, network in networks
+            if address.version == network.version and address in network
+        ]
+        return matches or ["Sem zona"]
+
+    return dashboard_widget_group_enriched_items(items, metric, zones)
+
+
+def dashboard_widget_fold_subscribers(
+    items: list[dict[str, Any]],
+    metric: str,
+) -> list[dict[str, Any]]:
+    with sqlite_connection() as conn:
+        ensure_cgnat_schema(conn)
+
+        def subscriber(item: dict[str, Any]) -> str:
+            candidates = (
+                (item.get("src_ip"), item.get("src_port")),
+                (item.get("dst_ip"), item.get("dst_port")),
+            )
+            for public_ip, public_port in candidates:
+                lookup = resolve_cgnat_subscriber(
+                    conn,
+                    public_ip,
+                    public_port,
+                    item.get("protocol") or item.get("proto"),
+                    item.get("last_seen") or item.get("first_seen"),
+                )
+                if lookup.get("matched") and not lookup.get("ambiguous"):
+                    return clean_text(
+                        lookup.get("subscriber_name")
+                        or lookup.get("subscriber_id")
+                        or lookup.get("private_ip")
+                    ) or "CGNAT resolvido"
+                if lookup.get("ambiguous"):
+                    return "Mapeamento ambíguo"
+            return "Não resolvido"
+
+        return dashboard_widget_group_enriched_items(items, metric, subscriber)
+
+
+def dashboard_widget_match_filter(item: dict[str, Any], rule: dict[str, Any]) -> bool:
+    field = clean_text(rule.get("field")).lower()
+    operator = clean_text(rule.get("operator")).lower()
+    value = rule.get("value")
+    candidate = {
+        "protocol": item.get("protocol") or item.get("proto"),
+        "src_port": item.get("src_port"),
+        "dst_port": item.get("dst_port") or item.get("port"),
+        "port": item.get("port") or item.get("dst_port") or item.get("src_port"),
+        "src_ip": item.get("src_ip") or item.get("ip") or item.get("key"),
+        "dst_ip": item.get("dst_ip") or item.get("ip") or item.get("key"),
+        "ip": item.get("ip") or item.get("key"),
+        "src_asn": item.get("src_asn") or item.get("asn_number") or item.get("asn"),
+        "dst_asn": item.get("dst_asn") or item.get("asn_number") or item.get("asn"),
+        "asn": item.get("asn_number") or item.get("asn"),
+        "country": item.get("country"),
+        "tcp_flags": item.get("flags") or item.get("tcp_flags"),
+        "sensor": item.get("sensor"),
+        "interface": item.get("if_index"),
+        "input_if": item.get("input_if") or item.get("if_index"),
+        "output_if": item.get("output_if") or item.get("if_index"),
+        "zone": item.get("zone") or item.get("key"),
+        "subscriber": item.get("subscriber") or item.get("key"),
+    }.get(field)
+    if field == "ip_version":
+        try:
+            observed = ip_address(
+                clean_text(
+                    item.get("ip")
+                    or item.get("src_ip")
+                    or item.get("dst_ip")
+                    or item.get("key")
+                ).split("/", 1)[0]
+            ).version
+        except ValueError:
+            return False
+        return observed == int(value)
+    if field == "addressing_mode":
+        resolved_cgnat = clean_text(item.get("key")) not in {
+            "Não resolvido",
+            "N/D",
+            "",
+        }
+        expected_mode = clean_text(value).lower()
+        return (
+            expected_mode == "both"
+            or (expected_mode == "cgnat" and resolved_cgnat)
+            or (expected_mode == "direct" and not resolved_cgnat)
+        )
+    if field == "exclude_internal":
+        if not bool(value):
+            return True
+        try:
+            return not ip_address(
+                clean_text(
+                    item.get("ip")
+                    or item.get("src_ip")
+                    or item.get("dst_ip")
+                    or item.get("key")
+                ).split("/", 1)[0]
+            ).is_private
+        except ValueError:
+            return True
+    if field == "exclude_whitelist":
+        return True
+    if operator == "exists":
+        return candidate not in (None, "")
+    if operator == "not_exists":
+        return candidate in (None, "")
+    values = value if isinstance(value, list) else [value]
+    if field in {"src_ip", "dst_ip", "ip", "src_prefix", "dst_prefix", "prefix"}:
+        try:
+            address = ip_address(clean_text(candidate).split("/", 1)[0])
+            equality = any(
+                address in ip_network(clean_text(expected), strict=False)
+                for expected in values
+            )
+        except ValueError:
+            equality = False
+    else:
+        equality = clean_text(candidate).lower() in {
+            clean_text(expected).lower() for expected in values
+        }
+    if operator in {"eq", "in"}:
+        return equality
+    if operator in {"neq", "not_in"}:
+        return not equality
+    if operator == "contains":
+        return clean_text(value).lower() in clean_text(candidate).lower()
+    if operator == "not_contains":
+        return clean_text(value).lower() not in clean_text(candidate).lower()
+    if operator in {"prefix_contains", "prefix_not_contains"}:
+        try:
+            candidate_network = ip_network(clean_text(candidate), strict=False)
+            expected_network = ip_network(clean_text(value), strict=False)
+            contains = expected_network.subnet_of(candidate_network)
+        except ValueError:
+            contains = False
+        return contains if operator == "prefix_contains" else not contains
+    if operator == "between":
+        try:
+            lower, upper = [float(current) for current in value]
+            return lower <= float(candidate) <= upper
+        except (TypeError, ValueError):
+            return False
+    try:
+        left, right = float(candidate), float(value)
+    except (TypeError, ValueError):
+        return False
+    return {
+        "gt": left > right,
+        "gte": left >= right,
+        "lt": left < right,
+        "lte": left <= right,
+    }.get(operator, True)
+
+
+def dashboard_widget_top_payload(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    dimension = plan["dimension"]
+    metric = plan["metric"]
+    filters = plan["filters"] + list(context.get("global_filters") or [])
+    arguments = dashboard_widget_filter_arguments(filters)
+    range_minutes = int(context["range_minutes"])
+    limit = int(plan["limit"])
+    query_limit = min(100, max(limit, limit * 4 if filters else limit))
+    start, end = context.get("start"), context.get("end")
+    sensor_id, interface_id = context.get("sensor_id"), context.get("interface_id")
+    if_index = context.get("if_index") if context.get("if_index") is not None else arguments["if_index"]
+    zone_id = context.get("zone_id") if context.get("zone_id") is not None else arguments["zone_id"]
+    zone_direction = context.get("zone_direction") or "both"
+    source = "raw"
+    aggregate_dimensions = {"src_ip", "dst_ip", "dst_port", "protocol", "tcp_flags"}
+    if dimension in aggregate_dimensions and metric == "bps" and not filters:
+        aggregate_dimension = {"protocol": "proto"}.get(dimension, dimension)
+        payload = top_dimension(
+            aggregate_dimension,
+            range_minutes,
+            arguments["sensor"],
+            sensor_id,
+            query_limit,
+            start,
+            end,
+            None,
+            None,
+            interface_id,
+            if_index,
+            zone_id,
+            zone_direction,
+        )
+        items = dashboard_widget_normalize_top_items(
+            payload.get("items", []),
+            dimension,
+            metric,
+        )
+        source = payload.get("query_source") or "aggregate_first"
+    elif dimension in {"src_asn", "dst_asn"} and metric == "bps" and not filters:
+        payload = top_asn_dimension(
+            "src" if dimension == "src_asn" else "dst",
+            range_minutes,
+            arguments["sensor"],
+            sensor_id,
+            query_limit,
+            start,
+            end,
+            None,
+            None,
+            interface_id,
+            if_index,
+            zone_id,
+            zone_direction,
+        )
+        items = dashboard_widget_normalize_top_items(
+            payload.get("items", []),
+            dimension,
+            metric,
+        )
+        source = payload.get("query_source") or "aggregate_first"
+    elif (
+        dimension == "conversation"
+        and not filters
+        and metric in {"bps", "pps", "fps", "flows", "packets"}
+    ):
+        payload = top_conversations_payload(
+            range_minutes,
+            sensor_id,
+            interface_id,
+            if_index,
+            "both",
+            None,
+            query_limit,
+            {"bps": "bits_s", "pps": "packets_s", "fps": "flows"}.get(metric, metric),
+            start,
+            end,
+            None,
+            None,
+            zone_id,
+            zone_direction,
+        )
+        items = dashboard_widget_normalize_top_items(
+            payload.get("items", []),
+            dimension,
+            metric,
+        )
+        source = payload.get("query_source") or "aggregate_first"
+    else:
+        top_type = {
+            "protocol": "proto",
+            "src_asn": "asn_src",
+            "dst_asn": "asn_dst",
+            "src_prefix": "src_ip",
+            "dst_prefix": "dst_ip",
+            "country": "src_ip",
+            "zone": "src_ip",
+            "subscriber": "conversation",
+            "sensor": "sensor",
+        }.get(dimension, dimension)
+        payload = top_flows(
+            top_type,
+            "upload" if plan["direction"] in {"upload", "transmits", "output"} else "download" if plan["direction"] in {"download", "receives", "input"} else "both",
+            range_minutes,
+            start,
+            end,
+            None,
+            None,
+            arguments["sensor"],
+            sensor_id,
+            interface_id,
+            if_index,
+            arguments["ip"],
+            arguments["src_ip"],
+            arguments["dst_ip"],
+            arguments["port"],
+            arguments["src_port"],
+            arguments["dst_port"],
+            arguments["proto"],
+            arguments["tcp_flags"],
+            None,
+            query_limit,
+            {
+                "bps": "bits_s",
+                "pps": "packets_s",
+                "percentage": "percent",
+                "fps": "flows",
+            }.get(metric, metric),
+            "desc",
+        )
+        items = dashboard_widget_normalize_top_items(
+            payload.get("items", []),
+            dimension,
+            metric,
+        )
+        if dimension in {"src_prefix", "dst_prefix"}:
+            items = dashboard_widget_fold_prefixes(items, metric)
+        elif dimension == "country":
+            items = dashboard_widget_fold_countries(items, metric)
+        elif dimension == "zone":
+            items = dashboard_widget_fold_zones(items, metric)
+        elif dimension == "subscriber":
+            items = dashboard_widget_fold_subscribers(items, metric)
+    if metric == "fps":
+        payload_start = parse_datetime_text(payload.get("start"))
+        payload_end = parse_datetime_text(payload.get("end"))
+        seconds = (
+            range_seconds(payload_start, payload_end)
+            if payload_start is not None and payload_end is not None
+            else max(1, range_minutes * 60)
+        )
+        for item in items:
+            item["flows_s"] = round(float(item.get("flows") or 0) / seconds, 4)
+            item["value"] = item["flows_s"]
+    items.sort(key=lambda item: dashboard_widget_item_value(item, metric), reverse=True)
+    pushed_filter_fields = {
+        "sensor",
+        "ip",
+        "prefix",
+        "src_ip",
+        "src_prefix",
+        "dst_ip",
+        "dst_prefix",
+        "port",
+        "src_port",
+        "dst_port",
+        "protocol",
+        "tcp_flags",
+        "interface",
+        "input_if",
+        "output_if",
+        "zone",
+    }
+    post_filters = [
+        rule
+        for rule in filters
+        if not (
+            rule.get("operator") == "eq"
+            and clean_text(rule.get("field")).lower() in pushed_filter_fields
+        )
+    ]
+    items = [
+        item
+        for item in items
+        if all(dashboard_widget_match_filter(item, rule) for rule in post_filters)
+    ][:limit]
+    total = sum(dashboard_widget_item_value(item, metric) for item in items)
+    for index, item in enumerate(items, start=1):
+        item["rank"] = index
+        item["percentage"] = round(item["value"] / total * 100, 2) if total else 0.0
+    return {
+        "kind": "top_n",
+        "dimension": dimension,
+        "metric": metric,
+        "source": source,
+        "items": items,
+        "start": iso(start) if isinstance(start, datetime) else start,
+        "end": iso(end) if isinstance(end, datetime) else end,
+    }
+
+
+def dashboard_widget_zone_group_expression(
+    params: dict[str, Any],
+) -> str:
+    with sqlite_connection() as conn:
+        ensure_ip_zone_detection_db(conn)
+        rows = conn.execute(
+            """
+            SELECT id, name
+            FROM ip_zones
+            WHERE active = 1
+            ORDER BY id
+            LIMIT 50
+            """
+        ).fetchall()
+    branches = []
+    for index, row in enumerate(rows):
+        src_filter, dst_filter = ip_zone_clickhouse_membership_filters(
+            int(row["id"]),
+            params,
+            "widget_group_zone_%s" % index,
+        )
+        label_key = "widget_group_zone_label_%s" % index
+        params[label_key] = row["name"]
+        branches.extend(
+            [
+                "(%s OR %s)" % (src_filter, dst_filter),
+                "{%s:String}" % label_key,
+            ]
+        )
+    return (
+        "multiIf(%s, 'Sem zona')" % ", ".join(branches)
+        if branches
+        else "'Sem zona'"
+    )
+
+
+def dashboard_widget_series_payload(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    metric = plan["metric"]
+    direction = plan["direction"]
+    filters = plan["filters"] + list(context.get("global_filters") or [])
+    arguments = dashboard_widget_filter_arguments(filters)
+    range_minutes = int(context["range_minutes"])
+    supported_group = {
+        "total": "total",
+        "protocol": "protocol",
+        "interface": "interface",
+    }.get(plan.get("group_by", "total"))
+    if (
+        metric in {"bps", "pps"}
+        and supported_group
+        and not filters
+        and not int(plan.get("resolution_seconds") or 0)
+    ):
+        payload = dashboard_series_payload(
+            range_minutes,
+            context.get("sensor_id"),
+            context.get("interface_id"),
+            context.get("if_index"),
+            "download" if direction in {"download", "receives", "input"} else "upload" if direction in {"upload", "transmits", "output"} else "both",
+            supported_group,
+            "bits_s" if metric == "bps" else "packets_s",
+            context.get("start"),
+            context.get("end"),
+            None,
+            None,
+            int(context.get("series_limit") or 12),
+            context.get("zone_id"),
+            context.get("zone_direction") or "both",
+        )
+        return {
+            **payload,
+            "kind": "timeseries",
+            "metric": metric,
+            "source": payload.get("query_source") or "aggregate_first",
+        }
+
+    query_context = flow_query_context(
+        range_minutes,
+        context.get("start"),
+        context.get("end"),
+        None,
+        None,
+        arguments["sensor"],
+        context.get("sensor_id"),
+        context.get("interface_id"),
+        context.get("if_index") if context.get("if_index") is not None else arguments["if_index"],
+        arguments["ip"],
+        arguments["src_ip"],
+        arguments["dst_ip"],
+        arguments["port"],
+        arguments["src_port"],
+        arguments["dst_port"],
+        arguments["proto"],
+        arguments["tcp_flags"],
+        None,
+        "download" if direction in {"download", "receives", "input"} else "upload" if direction in {"upload", "transmits", "output"} else "both",
+    )
+    requested_resolution = int(plan.get("resolution_seconds") or 0)
+    minimum_resolution = max(1, int((range_minutes * 60 + 1999) / 2000))
+    bucket_seconds = (
+        max(requested_resolution, minimum_resolution)
+        if requested_resolution
+        else dashboard_bucket_seconds(range_minutes)
+    )
+    params = dict(query_context["params"])
+    group_by = plan.get("group_by", "total")
+    group_expression = {
+        "total": "'Total'",
+        "protocol": decoder_label_expr(),
+        "sensor": "sensor",
+        "interface": "concat('in:', toString(input_if), '/out:', toString(output_if))",
+        "asn": "toString(if(src_asn > 0, src_asn, dst_asn))",
+        "src_asn": "toString(src_asn)",
+        "dst_asn": "toString(dst_asn)",
+    }.get(group_by, "'Total'")
+    if group_by == "zone":
+        group_expression = dashboard_widget_zone_group_expression(params)
+    query_prefix = dashboard_raw_rated_source_cte(
+        query_context["where"],
+        ["proto", "src_asn", "dst_asn", "src_ip", "dst_ip"],
+    )
+    factor = {
+        "input": "dashboard_input_sample_rate",
+        "output": "dashboard_output_sample_rate",
+    }.get(query_context["rate_direction"], "dashboard_auto_sample_rate")
+    value_field = (
+        "bytes"
+        if metric in {"bps", "bytes"}
+        else "packets"
+        if metric in {"pps", "packets"}
+        else "flow_count"
+    )
+    corrected = corrected_value_expr(value_field, factor)
+    aggregation = {
+        "sum": "sum(%s)" % corrected,
+        "avg": "avg(%s)" % corrected,
+        "max": "max(%s)" % corrected,
+        "min": "min(%s)" % corrected,
+        "p95": "quantile(0.95)(%s)" % corrected,
+    }[plan.get("aggregation", "sum")]
+    if metric == "bps":
+        value_expression = "%s * 8 / %s" % (aggregation, bucket_seconds)
+    elif metric in {"pps", "fps"}:
+        value_expression = "%s / %s" % (aggregation, bucket_seconds)
+    else:
+        value_expression = aggregation
+    rows = rows_as_dicts(
+        query_clickhouse(
+            f"""
+            {query_prefix}
+            SELECT
+                toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
+                {group_expression} AS group_key,
+                {value_expression} AS value
+            FROM rated_source
+            WHERE {query_context["where"]}
+            GROUP BY ts, group_key
+            ORDER BY ts, value DESC
+            """,
+            params,
+        )
+    )
+    series: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = clean_text(row.get("group_key")) or "Total"
+        target = series.setdefault(
+            key,
+            {
+                "name": key,
+                "group": key,
+                "label": key,
+                "color": DASHBOARD_PALETTE[len(series) % len(DASHBOARD_PALETTE)],
+                "points": [],
+            },
+        )
+        target["points"].append(
+            {
+                "ts": iso(row["ts"]),
+                "value": round(float(row.get("value") or 0), 2),
+            }
+        )
+    return {
+        "kind": "timeseries",
+        "metric": metric,
+        "group_by": group_by,
+        "bucket_seconds": bucket_seconds,
+        "source": "raw",
+        "start": iso(query_context["start"]),
+        "end": iso(query_context["end"]),
+        "series": list(series.values()),
+        "items": list(series.values()),
+    }
+
+
+def dashboard_widget_status_payload(source: str, limit: int) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    if source == "clickhouse":
+        try:
+            rows = rows_as_dicts(
+                query_clickhouse(
+                    "SELECT version() AS version, uptime() AS uptime",
+                    {},
+                )
+            )
+            row = rows[0] if rows else {}
+            items.append(
+                {
+                    "key": "ClickHouse",
+                    "status": "active",
+                    "detail": "v%s · uptime %ss" % (
+                        row.get("version", "?"),
+                        row.get("uptime", 0),
+                    ),
+                }
+            )
+        except Exception as exc:
+            items.append(
+                {
+                    "key": "ClickHouse",
+                    "status": "inactive",
+                    "detail": clean_text(exc)[:160],
+                }
+            )
+    elif source == "resources":
+        memory = system_memory_gb()
+        disk = shutil.disk_usage(sqlite_path().parent)
+        items.extend(
+            [
+                {
+                    "key": "Memória",
+                    "status": "active" if memory.get("available") else "unknown",
+                    "detail": "%s%% em uso" % memory.get("used_percent", 0),
+                },
+                {
+                    "key": "Disco",
+                    "status": "active" if disk.free > disk.total * 0.05 else "warning",
+                    "detail": format_bytes(disk.free) + " livres",
+                },
+            ]
+        )
+    else:
+        with sqlite_connection() as conn:
+            if source in {"sensors", "collectors"}:
+                where = "WHERE flow_collector_enabled = 1" if source == "collectors" else ""
+                rows = conn.execute(
+                    f"""
+                    SELECT id, name, exporter_ip, listener_port, active
+                    FROM sensors
+                    {where}
+                    ORDER BY active DESC, name
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                items = [
+                    {
+                        "id": int(row["id"]),
+                        "key": row["name"],
+                        "status": "active" if bool(row["active"]) else "inactive",
+                        "detail": "%s:%s" % (
+                            row["exporter_ip"],
+                            int(row["listener_port"]),
+                        ),
+                    }
+                    for row in rows
+                ]
+            elif source == "interfaces":
+                rows = conn.execute(
+                    """
+                    SELECT sensor_id, if_index, if_name, if_oper_status,
+                           monitor_enabled
+                    FROM sensor_interfaces
+                    ORDER BY monitor_enabled DESC, sensor_id, if_index
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                items = [
+                    {
+                        "key": row["if_name"] or "ifIndex %s" % row["if_index"],
+                        "status": clean_text(row["if_oper_status"]).lower()
+                        or ("active" if bool(row["monitor_enabled"]) else "inactive"),
+                        "detail": "sensor %s · ifIndex %s"
+                        % (row["sensor_id"], row["if_index"]),
+                    }
+                    for row in rows
+                ]
+            elif source in {"bgp", "exabgp"}:
+                rows = conn.execute(
+                    """
+                    SELECT id, name, backend_type, bgp_state, pipe_state,
+                           status_message, enabled
+                    FROM bgp_connectors
+                    WHERE enabled = 1
+                    ORDER BY name
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                for row in rows:
+                    if source == "exabgp" and "exabgp" not in clean_text(
+                        row["backend_type"]
+                    ).lower():
+                        continue
+                    state = (
+                        row["pipe_state"]
+                        if source == "exabgp"
+                        else row["bgp_state"]
+                    )
+                    items.append(
+                        {
+                            "id": int(row["id"]),
+                            "key": row["name"],
+                            "status": clean_text(state).lower() or "unknown",
+                            "detail": clean_text(row["status_message"]),
+                        }
+                    )
+            elif source == "mitigations":
+                rows = conn.execute(
+                    """
+                    SELECT id, vector, candidate_kind, status, connector_type
+                    FROM mitigation_executions
+                    WHERE status IN ('generated', 'queued', 'applying', 'active')
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                items = [
+                    {
+                        "id": int(row["id"]),
+                        "key": row["vector"] or row["candidate_kind"],
+                        "status": row["status"],
+                        "detail": row["connector_type"],
+                    }
+                    for row in rows
+                ]
+    return {
+        "kind": "status_list",
+        "source": "sqlite" if source != "clickhouse" else "clickhouse",
+        "status_source": source,
+        "items": items[:limit],
+    }
+
+
+def dashboard_widget_execute(
+    widget: dict[str, Any],
+    query_context: dict[str, Any],
+    *,
+    preview: bool = False,
+) -> dict[str, Any]:
+    plan = build_widget_query_plan(widget)
+    started = time.monotonic()
+    source = "raw"
+    try:
+        if plan["kind"] == "top_n":
+            payload = dashboard_widget_top_payload(plan, query_context)
+        elif plan["kind"] in {"timeseries", "kpi"}:
+            payload = dashboard_widget_series_payload(plan, query_context)
+            if plan["kind"] == "kpi":
+                last_values = [
+                    float(point.get("value") or 0)
+                    for series in payload.get("series", [])
+                    for point in series.get("points", [])[-1:]
+                ]
+                value = round(sum(last_values), 2)
+                comparison_value = None
+                comparison_mode = plan.get("comparison_mode", "none")
+                if comparison_mode != "none":
+                    current_start = parse_datetime_text(payload.get("start"))
+                    current_end = parse_datetime_text(payload.get("end"))
+                    if current_start is not None and current_end is not None:
+                        if comparison_mode == "previous_period":
+                            shift = current_end - current_start
+                        elif comparison_mode == "yesterday_same_time":
+                            shift = timedelta(days=1)
+                        else:
+                            shift = timedelta(days=7)
+                        comparison_context = {
+                            **query_context,
+                            "start": current_start - shift,
+                            "end": current_end - shift,
+                        }
+                        comparison_payload = dashboard_widget_series_payload(
+                            {**plan, "comparison_mode": "none"},
+                            comparison_context,
+                        )
+                        comparison_value = round(
+                            sum(
+                                float(point.get("value") or 0)
+                                for series in comparison_payload.get("series", [])
+                                for point in series.get("points", [])[-1:]
+                            ),
+                            2,
+                        )
+                delta = (
+                    round(value - comparison_value, 2)
+                    if comparison_value is not None
+                    else None
+                )
+                payload = {
+                    **payload,
+                    "kind": "kpi",
+                    "value": value,
+                    "current_value": value,
+                    "comparison_mode": comparison_mode,
+                    "comparison_value": comparison_value,
+                    "delta": delta,
+                    "delta_percent": (
+                        round(delta / comparison_value * 100, 2)
+                        if comparison_value not in (None, 0)
+                        else None
+                    ),
+                    "items": [{"key": widget.get("title") or plan["metric"], "value": value}],
+                }
+        elif plan["kind"] == "recent_events":
+            arguments = dashboard_widget_filter_arguments(
+                plan["filters"] + list(query_context.get("global_filters") or [])
+            )
+            if plan["source"] in {"anomalies", "alerts"}:
+                payload = dashboard_anomaly_summary_payload(
+                    int(query_context["range_minutes"]),
+                    query_context.get("start"),
+                    query_context.get("end"),
+                    None,
+                    None,
+                    arguments["sensor"],
+                    query_context.get("sensor_id"),
+                    query_context.get("interface_id"),
+                    query_context.get("if_index"),
+                    query_context.get("zone_id"),
+                    "",
+                    clean_text(arguments["proto"]),
+                    "",
+                    False,
+                    plan["limit"],
+                )
+                recent_items = []
+                for index, item in enumerate(
+                    payload.get("recent") or payload.get("items") or [],
+                    start=1,
+                ):
+                    current = dict(item)
+                    current.update(
+                        {
+                            "rank": index,
+                            "key": clean_text(
+                                item.get("vector")
+                                or item.get("classification")
+                                or item.get("protocol")
+                                or "Anomalia"
+                            ),
+                            "value": float(item.get("peak_value") or 0),
+                            "percentage": 0.0,
+                        }
+                    )
+                    recent_items.append(current)
+                payload = {
+                    **payload,
+                    "kind": "recent_events",
+                    "source": "sqlite",
+                    "event_source": plan["source"],
+                    "items": recent_items,
+                }
+            elif plan["source"] == "mitigations":
+                payload = {
+                    **dashboard_widget_status_payload(
+                        "mitigations",
+                        plan["limit"],
+                    ),
+                    "kind": "recent_events",
+                }
+            else:
+                payload = {
+                    "kind": "recent_events",
+                    "source": "sqlite",
+                    "items": [],
+                }
+        else:
+            payload = dashboard_widget_status_payload(
+                plan["source"],
+                plan["limit"],
+            )
+        source = clean_text(payload.get("source")) or "raw"
+    except Exception:
+        DASHBOARD_WIDGET_METRICS.record(
+            duration_seconds=time.monotonic() - started,
+            source=source,
+            widget_type=plan["kind"],
+            preview=preview,
+            error=True,
+        )
+        raise
+    returned_items = payload.get("items") or payload.get("series") or []
+    response_bytes = len(
+        json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")
+    )
+    DASHBOARD_WIDGET_METRICS.record(
+        duration_seconds=time.monotonic() - started,
+        source="aggregate" if "aggregate" in source else "raw",
+        widget_type=plan["kind"],
+        rows=len(returned_items) if isinstance(returned_items, list) else 0,
+        response_bytes=response_bytes,
+        preview=preview,
+    )
+    return {
+        **payload,
+        "request_id": HTTP_REQUEST_ID.get(),
+        "widget_schema_version": DASHBOARD_SCHEMA_VERSION,
+    }
+
+
+def dashboard_widget_query_context(
+    payload: dict[str, Any],
+    dashboard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    requested_time = (
+        payload.get("time_range")
+        if isinstance(payload.get("time_range"), dict)
+        else {}
+    )
+    dashboard_time = dashboard.get("time_range", {}) if dashboard else {}
+    time_range = {**dashboard_time, **requested_time}
+    try:
+        range_minutes = int(
+            payload.get("range_minutes")
+            or time_range.get("minutes")
+            or 10
+        )
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="range_minutes inválido")
+    range_minutes = max(1, min(MAX_RANGE_MINUTES, range_minutes))
+    start_value = payload.get("start") or time_range.get("start")
+    end_value = payload.get("end") or time_range.get("end")
+    start = parse_datetime_text(start_value)
+    end = parse_datetime_text(end_value)
+    if start_value not in (None, "") and start is None:
+        raise HTTPException(status_code=400, detail="start invÃ¡lido")
+    if end_value not in (None, "") and end is None:
+        raise HTTPException(status_code=400, detail="end invÃ¡lido")
+    if (start is None) != (end is None):
+        raise HTTPException(
+            status_code=400,
+            detail="start e end devem ser informados juntos",
+        )
+
+    def optional_int(name: str) -> int | None:
+        if payload.get(name) in (None, ""):
+            return None
+        try:
+            return int(payload[name])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="%s inválido" % name)
+
+    try:
+        series_limit = int(payload.get("series_limit") or 12)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="series_limit invÃ¡lido")
+
+    return {
+        "range_minutes": range_minutes,
+        "time_range": time_range,
+        "start": start,
+        "end": end,
+        "sensor_id": optional_int("sensor_id"),
+        "interface_id": optional_int("interface_id"),
+        "if_index": optional_int("if_index"),
+        "zone_id": optional_int("zone_id"),
+        "zone_direction": clean_text(payload.get("zone_direction")) or "both",
+        "series_limit": max(1, min(50, series_limit)),
+        "global_filters": dashboard.get("global_filters", []) if dashboard else [],
+    }
+
+
+def dashboard_widget_cached_query(
+    widget: dict[str, Any],
+    query_context: dict[str, Any],
+    *,
+    preview: bool = False,
+) -> dict[str, Any]:
+    signature = widget_data_signature(widget, query_context)
+    ttl = 2 if preview else dashboard_cache_ttl(query_context["range_minutes"])
+    key = dashboard_cache_key(
+        "configurable-widget",
+        {
+            "signature": signature,
+            "range_minutes": query_context["range_minutes"],
+            "ttl_seconds": ttl,
+        },
+    )
+    cached = dashboard_cache_get(key, ttl)
+    if cached is not None:
+        DASHBOARD_WIDGET_METRICS.cache_event(True)
+        logger.info(
+            "DASHBOARD_WIDGET_CACHE_HIT dashboard_id=%s widget_id=%s widget_type=%s request_id=%s",
+            widget.get("dashboard_id"),
+            widget.get("id"),
+            widget.get("type"),
+            HTTP_REQUEST_ID.get(),
+        )
+        return {**cached, "data_signature": signature}
+    DASHBOARD_WIDGET_METRICS.cache_event(False)
+    logger.info(
+        "DASHBOARD_WIDGET_QUERY dashboard_id=%s widget_id=%s widget_type=%s cache=miss request_id=%s",
+        widget.get("dashboard_id"),
+        widget.get("id"),
+        widget.get("type"),
+        HTTP_REQUEST_ID.get(),
+    )
+    try:
+        result = dashboard_widget_execute(
+            widget,
+            query_context,
+            preview=preview,
+        )
+        result["data_signature"] = signature
+        return dashboard_cache_set(key, result)
+    except Exception as exc:
+        DASHBOARD_CACHE.fail_flight(key, exc)
+        raise
+
+
+def preview_configurable_dashboard_widget(
+    payload: dict[str, Any],
+    request: Request,
+):
+    dashboard_request_user(request)
+    source = payload.get("widget") if isinstance(payload.get("widget"), dict) else payload
+    try:
+        widget = validate_widget_definition(source)
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    context = dashboard_widget_query_context(payload)
+    return dashboard_widget_cached_query(widget, context, preview=True)
+
+
+@app.post("/api/dashboards/{dashboard_id}/widgets/{widget_id}/query")
+def query_configurable_dashboard_widget(
+    dashboard_id: int,
+    widget_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = dashboard_or_404(conn, dashboard_id, user)
+        row = conn.execute(
+            """
+            SELECT *
+            FROM dashboard_widgets
+            WHERE id = ? AND dashboard_id = ?
+            """,
+            (widget_id, dashboard_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Widget não encontrado")
+        widget = widget_row_to_dict(row)
+    if widget.get("hidden") or widget.get("collapsed"):
+        DASHBOARD_WIDGET_METRICS.lazy_skip()
+        return {
+            "kind": widget["type"],
+            "items": [],
+            "skipped": True,
+            "reason": "widget_hidden" if widget.get("hidden") else "widget_collapsed",
+            "request_id": HTTP_REQUEST_ID.get(),
+        }
+    context_payload = dict(payload)
+    if not widget.get("use_global_time_range", True):
+        context_payload["time_range"] = widget.get("custom_time_range") or {
+            "mode": "relative",
+            "minutes": 10,
+        }
+        context_payload.pop("start", None)
+        context_payload.pop("end", None)
+        context_payload.pop("range_minutes", None)
+    context = dashboard_widget_query_context(context_payload, dashboard)
+    if not widget.get("use_global_filters", True):
+        context["global_filters"] = []
+    inheritance = (
+        widget.get("inheritance")
+        if isinstance(widget.get("inheritance"), dict)
+        else {}
+    )
+    for field, context_key in (
+        ("sensor", "sensor_id"),
+        ("interface", "interface_id"),
+        ("zone", "zone_id"),
+    ):
+        setting = inheritance.get(field)
+        if (
+            isinstance(setting, dict)
+            and setting.get("mode") == "custom"
+            and setting.get("value") is not None
+        ):
+            context[context_key] = int(setting["value"])
+    effective_widget = widget
+    direction_setting = inheritance.get("direction")
+    if not isinstance(direction_setting, dict) or direction_setting.get("mode") != "custom":
+        inherited_direction = clean_text(
+            payload.get("direction") or context.get("zone_direction")
+        ).lower()
+        inherited_direction = {
+            "ingress": "download",
+            "egress": "upload",
+            "involving_zone": "both",
+            "originated_from_zone": "transmits",
+            "destined_to_zone": "receives",
+        }.get(inherited_direction, inherited_direction)
+        if inherited_direction in {
+            "both",
+            "input",
+            "output",
+            "upload",
+            "download",
+            "source",
+            "destination",
+            "transmits",
+            "receives",
+        }:
+            effective_widget = {
+                **widget,
+                "config": {
+                    **(widget.get("config") or {}),
+                    "direction": inherited_direction,
+                },
+            }
+    return dashboard_widget_cached_query(effective_widget, context)
+
+
+@app.post("/api/dashboard-widgets/preview")
+def preview_dashboard_widget_api(
+    payload: dict[str, Any],
+    request: Request,
+):
+    return preview_configurable_dashboard_widget(payload, request)
+
+
+@app.post("/api/dashboard-widgets/query")
+def query_dashboard_widget_api(
+    payload: dict[str, Any],
+    request: Request,
+):
+    try:
+        dashboard_id = int(payload.get("dashboard_id"))
+        widget_id = int(payload.get("widget_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="dashboard_id e widget_id são obrigatórios",
+        )
+    query_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"dashboard_id", "widget_id"}
+    }
+    return query_configurable_dashboard_widget(
+        dashboard_id,
+        widget_id,
+        query_payload,
+        request,
+    )
