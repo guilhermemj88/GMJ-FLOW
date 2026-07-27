@@ -18,6 +18,7 @@ from app.services.automatic_mitigation import (  # noqa: E402
     ExecutorResult,
     ensure_automatic_mitigation_schema,
 )
+from app import main as backend_main  # noqa: E402
 
 
 class FakeExecutor:
@@ -374,6 +375,139 @@ class AutomaticMitigationOrchestratorTest(unittest.TestCase):
         self.assertEqual(len(self.executor.apply_calls), 1)
         applied = self.executor.apply_calls[0][0]
         self.assertIn("destination 83.29.96.194/32", applied.command)
+        self.assertIn("protocol =udp", applied.command)
+        self.assertIn("destination-port =53", applied.command)
+        self.assertNotIn("source ", applied.command)
+        self.assertNotIn("source-port", applied.command)
+
+    def test_real_direct_public_dns_case_is_authorized_and_applied_once(self):
+        resolution = {
+            "configured_mode": "direct_public",
+            "effective_mode": "direct_public",
+            "source_ip": "179.189.83.212",
+            "source_port": 32297,
+            "belongs_to_cgnat_pool": False,
+            "cgnat_lookup_required": False,
+            "cgnat_lookup_performed": False,
+            "cgnat_matched": False,
+            "direct_public_authorized": True,
+            "ambiguity": False,
+            "reason": "zone_configured_direct_public",
+            "evidence": [{"type": "zone", "source_in_zone": True}],
+            "source_in_protected_zone": True,
+            "cgnat_gate": "not_applicable",
+        }
+        anomaly = {
+            "vector_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+            "severity": "critical",
+            "classification": "attack",
+            "confidence_label": "high",
+            "protocol": "udp",
+            "top_src_ip": "179.189.83.212",
+            "top_src_port": 32297,
+            "top_dst_ip": "73.73.73.74",
+            "top_dst_port": 53,
+            "observed_value": 9_400.0,
+            "unique_sources": 1,
+            "unique_destinations": 1,
+            "unique_conversations": 1,
+            "subscriber_addressing_resolution": resolution,
+            "effective_subscriber_addressing_mode": "direct_public",
+            "cgnat_gate": "not_applicable",
+            "source_details": {
+                "classification": "attack",
+                "deterministic_confidence_label": "high",
+                "automatic_mitigation_threshold": 5_000.0,
+                "detection": {
+                    "triggered_severity": "critical",
+                    "automatic_mitigation_threshold": 5_000.0,
+                    "current": {
+                        "last_value": 9_400.0,
+                        "automatic_mitigation_threshold": 5_000.0,
+                    },
+                },
+            },
+        }
+        legacy_candidate = {
+            "attack_vector_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+            "candidate_role": "automatic_destination_dns",
+            "severity": "critical",
+            "classification": "attack",
+            "confidence_label": "high",
+            "protocol": "udp",
+            "dst_port": "53",
+            "dst_cidr": "73.73.73.74/32",
+            "dst_prefix": "73.73.73.74/32",
+            "target_prefix": "73.73.73.74/32",
+            "mitigation_scope": backend_main.DNS_SINGLE_FLOW_MITIGATION_SCOPE,
+            "public_ip": "179.189.83.212",
+            "public_port": 32297,
+            "private_ip": "",
+            "unique_private_subscribers": 0,
+            "unique_sources": 1,
+            "unique_destinations": 1,
+            "unique_conversations": 1,
+            "subscriber_addressing_resolution": resolution,
+            "effective_subscriber_addressing_mode": "direct_public",
+            "cgnat_gate": "not_applicable",
+            "top_flow": {
+                "src_ip": "179.189.83.212",
+                "src_port": 32297,
+                "dst_ip": "73.73.73.74",
+                "dst_port": 53,
+                "packets_s": 9_400.0,
+                "protocol": "udp",
+            },
+            "raw_payload": {"anomaly": anomaly},
+        }
+        gate = backend_main.dns_single_flow_automatic_policy_gate(
+            legacy_candidate,
+            whitelist_hits=[],
+            whitelist_consulted=True,
+        )
+        self.assertTrue(gate["allowed"])
+        self.assertEqual(gate["cgnat_gate"], "not_applicable")
+        self.assertIn("cgnat_matched", gate["gates_not_applicable"])
+        dns_command = (
+            "announce flow route { match { destination 73.73.73.74/32; "
+            "protocol =udp; destination-port =53; } then { discard; } }"
+        )
+        self.candidates = [
+            self.candidate(
+                anomaly_id=2521,
+                vector=backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+                command=dns_command,
+                withdraw_command=dns_command.replace("announce ", "withdraw ", 1),
+                ttl_seconds=900,
+                automatic_eligible=gate["allowed"],
+                auto_allowed=gate["allowed"],
+                gates={
+                    "blocking": not gate["allowed"],
+                    "automatic_gate": gate,
+                    "subscriber_addressing_resolution": resolution,
+                    "cgnat_gate": gate["cgnat_gate"],
+                    "gates_applied": gate["gates_applied"],
+                    "gates_not_applicable": gate["gates_not_applicable"],
+                },
+                metadata={"subscriber_addressing_resolution": resolution},
+                normalized_match={
+                    "address_family": "ipv4",
+                    "source": "",
+                    "destination": "73.73.73.74/32",
+                    "protocol": "udp",
+                    "source_port": "",
+                    "destination_port": "53",
+                },
+            )
+        ]
+        result = self.orchestrator.process_anomaly(2521, {"event": anomaly})
+        self.assertEqual(result[0]["status"], "active")
+        self.assertTrue(result[0]["candidate"]["automatic_eligible"])
+        self.assertTrue(result[0]["candidate"]["auto_allowed"])
+        self.assertEqual(result[0]["ttl_seconds"], 900)
+        self.assertEqual(len(self.executor.apply_calls), 1)
+        applied = self.executor.apply_calls[0][0]
+        self.assertIn("destination 73.73.73.74/32", applied.command)
         self.assertIn("protocol =udp", applied.command)
         self.assertIn("destination-port =53", applied.command)
         self.assertNotIn("source ", applied.command)
