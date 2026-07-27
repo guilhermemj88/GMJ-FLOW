@@ -3683,6 +3683,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                     </select>
                     <div class="subtle">Associacao persistida usada para anomalias sem sensor_id.</div>
                   </div>
+                  <div class="field">
+                    <label for="ipZoneSubscriberAddressingMode">Enderecamento dos assinantes</label>
+                    <select id="ipZoneSubscriberAddressingMode" class="form-select form-select-sm">
+                      <option value="cgnat">CGNAT (resolucao obrigatoria)</option>
+                      <option value="direct_public">IPv4 publico direto</option>
+                      <option value="mixed">Misto (pool CGNAT explicito)</option>
+                      <option value="auto">Automatico conservador</option>
+                    </select>
+                    <div class="subtle">Define se lote, private_ip e faixa Fixed NAT sao gates aplicaveis.</div>
+                  </div>
                   <div class="field grid-span-3">
                     <label for="ipZoneDescription">Descricao</label>
                     <input id="ipZoneDescription" class="form-control form-control-sm" placeholder="Observações da zona">
@@ -5493,6 +5503,27 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <div class="panel-title mb-2">Collectors</div>
                 <div id="systemCollectorList" class="d-grid gap-2"></div>
               </div>
+            </div>
+          </section>
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <div class="panel-title">Cache do Dashboard</div>
+                <div id="dashboardCacheStatus" class="subtle">Cache derivado local por worker</div>
+              </div>
+              <button id="clearDashboardCacheButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="trash-2"></i><span>Limpar cache</span>
+              </button>
+            </div>
+            <div class="database-metrics-grid mb-0">
+              <div class="metric-card"><div class="metric-label">Estado</div><div id="dashboardCacheEnabled" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Modo</div><div id="dashboardCacheMode" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Uso atual</div><div id="dashboardCacheUsage" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Limite / worker</div><div id="dashboardCacheLimit" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Taxa de acerto</div><div id="dashboardCacheHitRatio" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Expulsões</div><div id="dashboardCacheEvictions" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Pressão de memória</div><div id="dashboardCachePressure" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Entradas</div><div id="dashboardCacheEntries" class="metric-value">-</div></div>
             </div>
           </section>
           <section class="row g-3 mt-1">
@@ -7620,6 +7651,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let dashboardRefreshFailures = 0;
     let dashboardEditing = false;
     let dashboardAbortController = null;
+    let dashboardRequestSequence = 0;
+    let flowSearchAbortController = null;
     let mapAbortController = null;
     let mapDebounceTimer = null;
     let mapResizeTimer = null;
@@ -9217,6 +9250,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       setValue('ipZoneDescription', zone?.description || '');
       setBoolSelect('ipZoneActive', zone?.active ?? true);
       setValue('ipZoneTemplate', zone?.detection_template_id || '');
+      setValue('ipZoneSubscriberAddressingMode', zone?.subscriber_addressing_mode || 'cgnat');
       renderIpZoneConnectorSelect(zone?.connector_id || '');
       renderIpZoneTemplateSummary();
       renderIpZoneList();
@@ -9234,7 +9268,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         description: selectValue('ipZoneDescription').trim(),
         active: boolSelectValue('ipZoneActive'),
         detection_template_id: templateId ? Number(templateId) : null,
-        connector_id: connectorId ? Number(connectorId) : null
+        connector_id: connectorId ? Number(connectorId) : null,
+        subscriber_addressing_mode: selectValue('ipZoneSubscriberAddressingMode', 'cgnat')
       };
     }
 
@@ -9259,7 +9294,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         <tr data-zone-id="${zone.id}" class="${Number(zone.id) === Number(currentIpZoneId) ? 'active' : ''}">
           <td>
             <div class="fw-semibold">${escapeHtml(zone.name)}</div>
-            <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')} / ${escapeHtml(zone.connector_name || 'Sem conector FlowSpec')}</div>
+            <div class="subtle">${escapeHtml(zone.detection_template_name || 'Sem template')} / ${escapeHtml(zone.connector_name || 'Sem conector FlowSpec')} / ${escapeHtml(zone.subscriber_addressing_mode || 'cgnat')}</div>
           </td>
           <td class="text-end">${formatNumber(zone.active_prefix_count ?? zone.prefix_count ?? 0)} / ${formatNumber(zone.total_prefix_count ?? zone.prefix_count ?? (zone.prefixes || []).length)}</td>
           <td><span class="badge-soft ${zone.active ? 'ok' : 'off'}">${zone.active ? 'Ativa' : 'Desativada'}</span></td>
@@ -11548,6 +11583,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           || item.apply_result?.announcement?.last_error
           || (item.status === 'active' ? 'Aplicado automaticamente' : item.policy_reason)
           || '-';
+        const addressing = item.gates?.subscriber_addressing_resolution
+          || item.metadata?.subscriber_addressing_resolution
+          || {};
+        const identity = item.metadata?.subscriber_identity || {};
+        const cgnatApplicable = addressing.cgnat_lookup_required === true
+          ? 'sim'
+          : addressing.effective_mode === 'direct_public'
+            ? 'não'
+            : '-';
+        const identityText = addressing.effective_mode === 'direct_public'
+          ? `IPv4 público ${addressing.source_ip || '-'}`
+          : [identity.private_ip, identity.subscriber_id, identity.subscriber_name].filter(Boolean).join(' / ') || '-';
+        const addressingAudit = addressing.configured_mode ? `
+          <details>
+            <summary>Endereçamento do assinante</summary>
+            <div class="subtle">
+              Configurado: ${escapeHtml(addressing.configured_mode || '-')} ·
+              Efetivo: ${escapeHtml(addressing.effective_mode || '-')} ·
+              CGNAT aplicável: ${escapeHtml(cgnatApplicable)}
+            </div>
+            <div class="subtle">Classificação: ${escapeHtml(addressing.reason || '-')} · Cliente: ${escapeHtml(identityText)}</div>
+            <div class="subtle">Gates aplicados: ${escapeHtml((item.gates?.gates_applied || []).join(', ') || '-')}</div>
+            <div class="subtle">Não aplicáveis: ${escapeHtml((item.gates?.gates_not_applicable || []).join(', ') || '-')}</div>
+          </details>` : '';
         return `
           <tr>
             <td>#${escapeHtml(item.id)}</td>
@@ -11558,7 +11617,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td><span class="subtle">${escapeHtml(match)}</span><details><summary>Comando</summary><pre class="mb-0">${escapeHtml(item.command || '-')}</pre></details></td>
             <td>${formatDateTime(item.applied_at)}</td>
             <td>${formatDateTime(item.expires_at)}</td>
-            <td>${escapeHtml(result)}</td>
+            <td>${escapeHtml(result)}${addressingAudit}</td>
           </tr>`;
       }).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr>';
     }
@@ -13068,14 +13127,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               : '';
         const dnsDestinationAutomatic = candidate.mitigation_scope === 'destination_dns_udp53'
           || candidate.candidate_role === 'automatic_destination_dns';
+        const candidateAddressing = candidate.subscriber_addressing_resolution || {};
+        const directPublicCandidate = candidateAddressing.effective_mode === 'direct_public';
         const dnsDestinationPanel = dnsDestinationAutomatic ? `
           <div class="panel p-2 mb-2">
             <div class="panel-title mb-1">Bloqueio automático do DNS de destino</div>
             <div class="d-flex flex-wrap gap-2">
               <div class="metric-chip"><span>Escopo:</span> Somente UDP/53</div>
-              <div class="metric-chip"><span>Proteção CGNAT:</span> IP público CGNAT não será bloqueado</div>
+              <div class="metric-chip"><span>Modo da origem:</span> ${escapeHtml(candidateAddressing.effective_mode || '-')}</div>
+              <div class="metric-chip"><span>Gate CGNAT:</span> ${escapeHtml(candidate.cgnat_gate || (directPublicCandidate ? 'not_applicable' : 'required'))}</div>
+              <div class="metric-chip"><span>Proteção da regra:</span> IP público CGNAT não será bloqueado</div>
               <div class="metric-chip"><span>Whitelist:</span> Destino fora da whitelist</div>
-              <div class="metric-chip"><span>Cliente privado responsável:</span> ${escapeHtml(candidate.private_ip || '-')}</div>
+              <div class="metric-chip"><span>Cliente responsável:</span> ${escapeHtml(directPublicCandidate ? `IPv4 público ${candidateAddressing.source_ip || candidate.public_ip || '-'}` : candidate.private_ip || '-')}</div>
               <div class="metric-chip"><span>TTL da mitigação:</span> ${escapeHtml(`${Math.round(Number(candidate.duration_seconds || 0) / 60)} min`)}</div>
             </div>
           </div>
@@ -16055,6 +16118,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           }).join(' | ')
         : '-';
       const autoMitigationDetails = event.auto_mitigation_details || {};
+      const subscriberAddressing = event.subscriber_addressing_resolution
+        || autoMitigationDetails.subscriber_addressing_resolution
+        || {};
+      const configuredAddressingMode = subscriberAddressing.configured_mode
+        || autoMitigationDetails.configured_subscriber_addressing_mode
+        || event.subscriber_addressing_mode
+        || '-';
+      const effectiveAddressingMode = subscriberAddressing.effective_mode
+        || autoMitigationDetails.effective_subscriber_addressing_mode
+        || event.effective_subscriber_addressing_mode
+        || '-';
+      const deterministicConditions = Array.isArray(autoMitigationDetails.deterministic_authorization_conditions)
+        ? autoMitigationDetails.deterministic_authorization_conditions
+        : [];
+      const appliedAddressingGates = deterministicConditions
+        .filter(item => item?.applicable !== false)
+        .map(item => item?.condition)
+        .filter(Boolean);
+      const nonApplicableAddressingGates = deterministicConditions
+        .filter(item => item?.applicable === false)
+        .map(item => item?.condition)
+        .filter(Boolean);
       const mitigationState = mitigationStateInfo(event.mitigation_state || autoMitigationDetails.mitigation_state);
       const dnsSingleFlowFields = isDnsSingleFlowOutbound(event) ? [
         ['IP de origem', topFlow.src_ip || event.top_src_ip || event.target_ip || '-'],
@@ -16070,11 +16155,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Classificação', event.classification || 'attack'],
         ['Confiança determinística', event.confidence_label || 'high']
       ] : [];
-      const cgnatBadge = event.cgnat_ambiguous
+      const cgnatBadge = effectiveAddressingMode === 'direct_public'
+        ? '<span class="badge-soft ok">Cliente com IPv4 público direto</span>'
+        : event.cgnat_ambiguous || subscriberAddressing.ambiguity
         ? '<span class="badge-soft warn">Mapeamento CGNAT ambíguo</span>'
         : event.cgnat_matched
           ? '<span class="badge-soft ok">Cliente CGNAT identificado</span>'
           : '<span class="badge-soft off">Cliente CGNAT não identificado</span>';
+      const subscriberAddressingFields = [
+        ['Modo configurado da zona', configuredAddressingMode],
+        ['Modo efetivo da origem', effectiveAddressingMode],
+        ['CGNAT aplicável', subscriberAddressing.cgnat_lookup_required === true ? 'sim' : effectiveAddressingMode === 'direct_public' ? 'não' : '-'],
+        ['Motivo da classificação', subscriberAddressing.reason || '-'],
+        ['Origem dentro da zona', subscriberAddressing.source_in_protected_zone === true ? 'sim' : subscriberAddressing.source_in_protected_zone === false ? 'não' : '-'],
+        ['Identidade do cliente', effectiveAddressingMode === 'direct_public'
+          ? `IPv4 público ${subscriberAddressing.source_ip || event.public_ip || '-'}`
+          : [event.private_ip, event.subscriber_id, event.subscriber_name].filter(Boolean).join(' / ') || '-'],
+        ['Gate CGNAT', event.cgnat_gate || autoMitigationDetails.cgnat_gate || subscriberAddressing.cgnat_gate || '-'],
+        ['Gates aplicados', appliedAddressingGates.join(', ') || '-'],
+        ['Gates não aplicáveis', nonApplicableAddressingGates.join(', ') || (effectiveAddressingMode === 'direct_public' ? 'cgnat_matched, private_ip, fixed_nat, unique_private_subscribers' : '-')]
+      ];
       const cgnatFields = event.cgnat_lookup_performed ? [
         ['IP público CGNAT', event.public_ip || '-'],
         ['Porta pública observada', event.public_port ?? '-'],
@@ -16090,12 +16190,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Ambiguidade CGNAT', event.cgnat_ambiguous ? 'sim' : 'não'],
         ['Subscriber', [event.subscriber_id, event.subscriber_name].filter(Boolean).join(' / ') || '-'],
         ['Participação da conversa', event.cgnat_conversation_share !== null && event.cgnat_conversation_share !== undefined ? `${(Number(event.cgnat_conversation_share) * 100).toFixed(1)}%` : '-'],
-        ['Gate CGNAT', event.cgnat_mitigation_block_reason || '-']
+        ['Bloqueio CGNAT', event.cgnat_mitigation_block_reason || '-']
       ] : [];
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
         ['Severidade disparada', triggeredSeverity],
         ...dnsSingleFlowFields,
+        ...subscriberAddressingFields,
         ...cgnatFields,
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
@@ -17038,13 +17139,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function searchFlows() {
+      const panel = document.getElementById('flowRecordsPanel');
+      if (activeView !== 'flows' || !panel?.classList.contains('active')) return;
+      flowSearchAbortController?.abort();
+      const controller = new AbortController();
+      flowSearchAbortController = controller;
       const status = document.getElementById('flowSearchStatus');
       const tbody = document.getElementById('flowSearchTable');
       status.textContent = 'Buscando flows';
       updateSortIndicators('[data-flow-sort]', flowSort);
       const endpoint = `${API_BASE}/api/flows/search?${flowSearchParams()}`;
       try {
-        const response = await authFetch(endpoint);
+        const response = await authFetch(endpoint, { signal: controller.signal });
         if (!response.ok) {
           console.error('Falha na chamada da API', endpoint, response.status);
           throw new Error(await responseErrorMessage(response, endpoint));
@@ -17081,9 +17187,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         `).join('') || `<tr><td colspan="17" class="text-muted">Sem flows no intervalo</td></tr>`;
         status.textContent = `${formatNumber(items.length)} flows com contadores corrigidos`;
       } catch (error) {
+        if (error.name === 'AbortError') return;
         tbody.innerHTML = `<tr><td colspan="17" class="text-danger">${escapeHtml(error.message || 'Falha ao buscar flows')}</td></tr>`;
         status.textContent = error.message || 'Falha na busca';
         console.error('Falha na chamada da API', endpoint, error);
+      } finally {
+        if (flowSearchAbortController === controller) flowSearchAbortController = null;
       }
     }
 
@@ -17308,6 +17417,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (target === 'records') {
         searchFlows().catch(console.error);
       } else {
+        flowSearchAbortController?.abort();
+        flowSearchAbortController = null;
         loadTopFlow().catch(console.error);
         setTimeout(() => charts.topFlow.resize(), 50);
       }
@@ -17881,13 +17992,115 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return payload?.__error ? 'Erro ao carregar widget' : '';
     }
 
+    function renderDashboardSettledEntry(name, payload) {
+      if (payload?.__aborted || activeView !== 'dashboard') return;
+      const failed = Boolean(payload?.__error);
+      if (name === 'bps') {
+        if (failed) {
+          renderChartError(charts.bps);
+          setText('bpsReadout', 'Erro ao carregar widget');
+          return;
+        }
+        const allItems = payloadSeries(payload);
+        const items = limitDashboardSeries(allItems);
+        updateDashboardWidgetTitles(payload);
+        charts.bps.clear();
+        charts.bps.setOption(stackedTrafficOption(items, 'bits_s'), true);
+        const hiddenCount = Math.max(0, allItems.length - items.length);
+        setText('bpsReadout', `${stackedReadout(items, 'bits_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
+        return;
+      }
+      if (name === 'pps') {
+        if (failed) {
+          renderChartError(charts.pps);
+          setText('ppsReadout', 'Erro ao carregar widget');
+          return;
+        }
+        const allItems = payloadSeries(payload);
+        const items = limitDashboardSeries(allItems);
+        charts.pps.clear();
+        charts.pps.setOption(stackedTrafficOption(items, 'packets_s'), true);
+        const hiddenCount = Math.max(0, allItems.length - items.length);
+        setText('ppsReadout', `${stackedReadout(items, 'packets_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
+        return;
+      }
+      const topWidgets = {
+        srcIp: [charts.srcIp, 'srcIpTable', 'ip', 'flows', barOption],
+        dstIp: [charts.dstIp, 'dstIpTable', 'ip', 'flows', barOption],
+        ports: [charts.ports, 'portsTable', 'port', 'packets', barOption],
+        protocols: [charts.protocols, 'protocolsTable', 'proto', 'packets', pieOption],
+        tcpFlags: [charts.tcpFlags, 'tcpFlagsTable', 'flags', 'flows', barOption]
+      };
+      if (topWidgets[name]) {
+        const [chart, tableId, key, secondary, optionBuilder] = topWidgets[name];
+        if (failed) {
+          renderChartError(chart);
+          renderTableMessage(tableId, 3, widgetErrorMessage(payload), true);
+          return;
+        }
+        const items = payloadItems(payload);
+        chart.setOption(optionBuilder(items, key), true);
+        fillTable(tableId, items, key, secondary);
+        return;
+      }
+      if (name === 'anomaliesSummary') {
+        if (failed) {
+          setText('dashboardAnomaliesStatus', 'Erro ao carregar histórico de anomalias');
+          renderChartError(charts.dashboardAnomalyTimeline);
+          renderChartError(charts.dashboardAnomalyClassification);
+          renderChartError(charts.dashboardAnomalyProtocol);
+          renderTableMessage('dashboardAnomaliesTable', 10, widgetErrorMessage(payload), true);
+        } else {
+          renderDashboardAnomalies(payload);
+        }
+        return;
+      }
+      if (name === 'asnSrc' || name === 'asnDst') {
+        const source = name === 'asnSrc';
+        const chart = source ? charts.asnSrc : charts.asnDst;
+        const tableId = source ? 'asnSrcTable' : 'asnDstTable';
+        const statusId = source ? 'asnSrcStatus' : 'asnDstStatus';
+        if (failed) {
+          renderChartError(chart);
+          renderTableMessage(tableId, 7, widgetErrorMessage(payload), true);
+          setText(statusId, 'Erro ao carregar widget');
+        } else {
+          renderAsnWidget(chart, tableId, statusId, payload);
+        }
+        return;
+      }
+      if (name === 'conversations') {
+        failed
+          ? renderTableMessage('topConversationsTable', 7, widgetErrorMessage(payload), true)
+          : renderTopConversations(payloadItems(payload));
+        return;
+      }
+      if (name === 'synSrc' || name === 'synDst') {
+        const tableId = name === 'synSrc' ? 'topSynSrcTable' : 'topSynDstTable';
+        failed
+          ? renderTableMessage(tableId, 3, widgetErrorMessage(payload), true)
+          : renderSynTable(tableId, payloadItems(payload));
+        return;
+      }
+      if (name === 'geo') {
+        if (failed) {
+          ensureDashboardGeoFlowMap()?.setError('Erro ao atualizar o tráfego geográfico.');
+          setText('globalSummaryStatus', 'Erro ao carregar mapa');
+        } else {
+          renderGlobalSummary(payload || {});
+        }
+      }
+    }
+
     async function refresh() {
       if (!authToken()) return;
-      if (dashboardRefreshInFlight || document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible') return;
       if (activeView !== 'dashboard') return;
+      if (dashboardRefreshInFlight) abortDashboardRequest();
       dashboardRefreshInFlight = true;
       abortDashboardRequest();
       const controller = new AbortController();
+      const requestSequence = ++dashboardRequestSequence;
       dashboardAbortController = controller;
       try {
         updateDashboardZoneLabels();
@@ -17895,15 +18108,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         setText('ppsReadout', 'Carregando...');
         setText('dashboardAnomaliesStatus', 'Carregando histórico...');
         renderTableMessage('dashboardAnomaliesTable', 10, 'Carregando...');
-        await checkHealth().catch(error => console.error('Falha no health do dashboard', error));
+        checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
         const bpsSeriesQuery = dashboardSeriesParams('bits_s');
         const ppsSeriesQuery = dashboardSeriesParams('packets_s');
         const topQuery = dashboardParams({ includeSensorId: true, includeInterfaceId: true });
         const requestOptions = { signal: controller.signal };
         const entries = [
-          ['bps', fetchJSON('/api/dashboard/series', bpsSeriesQuery, requestOptions)],
-          ['pps', fetchJSON('/api/dashboard/series', ppsSeriesQuery, requestOptions)],
           ['srcIp', fetchJSON('/api/tops/src-ip', topQuery, requestOptions)],
           ['dstIp', fetchJSON('/api/tops/dst-ip', topQuery, requestOptions)],
           ['ports', fetchJSON('/api/tops/ports', topQuery, requestOptions)],
@@ -17913,6 +18124,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ['asnSrc', fetchJSON('/api/tops/asn-src', topQuery, requestOptions)],
           ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)]
         ];
+        if (isDashboardWidgetVisible('bps-chart')) {
+          entries.unshift(['bps', fetchJSON('/api/dashboard/series', bpsSeriesQuery, requestOptions)]);
+        }
+        if (isDashboardWidgetVisible('pps-chart')) {
+          entries.splice(isDashboardWidgetVisible('bps-chart') ? 1 : 0, 0, ['pps', fetchJSON('/api/dashboard/series', ppsSeriesQuery, requestOptions)]);
+        }
         if (isDashboardWidgetVisible('top-conversations')) {
           entries.push(['conversations', fetchJSON('/api/dashboard/top-conversations', `${topQuery}&limit=${selectedTopConversationLimit()}&sort_by=${encodeURIComponent(selectedTopConversationSort())}`, requestOptions)]);
         }
@@ -17927,130 +18144,36 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           if (geoMap) geoMap.setLoading('Atualizando tráfego geográfico...');
           entries.push(['geo', fetchJSON(GEO_FLOW_ENDPOINT, dashboardGeoParams(), requestOptions)]);
         }
-        const settled = await Promise.allSettled(entries.map(entry => entry[1]));
-        if (controller.signal.aborted || activeView !== 'dashboard') return;
-        const payloads = Object.fromEntries(entries.map((entry, index) => [entry[0], settledDashboardPayload(entry[0], settled[index])]));
-
-        const bpsAllItems = payloadSeries(payloads.bps);
-        const ppsAllItems = payloadSeries(payloads.pps);
-        const bpsItems = limitDashboardSeries(bpsAllItems);
-        const ppsItems = limitDashboardSeries(ppsAllItems);
-        updateDashboardWidgetTitles(payloads.bps?.__error ? payloads.srcIp : payloads.bps);
-        if (payloads.bps.__error) {
-          renderChartError(charts.bps);
-          document.getElementById('bpsReadout').textContent = 'Erro ao carregar widget';
-        } else {
-          charts.bps.clear();
-          charts.bps.setOption(stackedTrafficOption(bpsItems, 'bits_s'), true);
-          const hiddenCount = Math.max(0, bpsAllItems.length - bpsItems.length);
-          document.getElementById('bpsReadout').textContent = `${stackedReadout(bpsItems, 'bits_s')}${hiddenCount ? ` - Top ${bpsItems.length} de ${bpsAllItems.length} series por pico.` : ''}${bpsAllItems.length > 10 ? ' Use largura total ou filtre interfaces.' : ''}`;
-        }
-        if (payloads.pps.__error) {
-          renderChartError(charts.pps);
-          document.getElementById('ppsReadout').textContent = 'Erro ao carregar widget';
-        } else {
-          charts.pps.clear();
-          charts.pps.setOption(stackedTrafficOption(ppsItems, 'packets_s'), true);
-          const hiddenCount = Math.max(0, ppsAllItems.length - ppsItems.length);
-          document.getElementById('ppsReadout').textContent = `${stackedReadout(ppsItems, 'packets_s')}${hiddenCount ? ` - Top ${ppsItems.length} de ${ppsAllItems.length} series por pico.` : ''}${ppsAllItems.length > 10 ? ' Use largura total ou filtre interfaces.' : ''}`;
-        }
-
-        const srcIpItems = payloadItems(payloads.srcIp);
-        const dstIpItems = payloadItems(payloads.dstIp);
-        const portItems = payloadItems(payloads.ports);
-        const protocolItems = payloadItems(payloads.protocols);
-        const tcpFlagItems = payloadItems(payloads.tcpFlags);
-
-        if (payloads.srcIp.__error) {
-          renderChartError(charts.srcIp);
-          renderTableMessage('srcIpTable', 3, widgetErrorMessage(payloads.srcIp), true);
-        } else {
-          charts.srcIp.setOption(barOption(srcIpItems, 'ip'), true);
-          fillTable('srcIpTable', srcIpItems, 'ip');
-        }
-        if (payloads.dstIp.__error) {
-          renderChartError(charts.dstIp);
-          renderTableMessage('dstIpTable', 3, widgetErrorMessage(payloads.dstIp), true);
-        } else {
-          charts.dstIp.setOption(barOption(dstIpItems, 'ip'), true);
-          fillTable('dstIpTable', dstIpItems, 'ip');
-        }
-        if (payloads.ports.__error) {
-          renderChartError(charts.ports);
-          renderTableMessage('portsTable', 3, widgetErrorMessage(payloads.ports), true);
-        } else {
-          charts.ports.setOption(barOption(portItems, 'port'), true);
-          fillTable('portsTable', portItems, 'port', 'packets');
-        }
-        if (payloads.protocols.__error) {
-          renderChartError(charts.protocols);
-          renderTableMessage('protocolsTable', 3, widgetErrorMessage(payloads.protocols), true);
-        } else {
-          charts.protocols.setOption(pieOption(protocolItems, 'proto'), true);
-          fillTable('protocolsTable', protocolItems, 'proto', 'packets');
-        }
-        if (payloads.tcpFlags.__error) {
-          renderChartError(charts.tcpFlags);
-          renderTableMessage('tcpFlagsTable', 3, widgetErrorMessage(payloads.tcpFlags), true);
-        } else {
-          charts.tcpFlags.setOption(barOption(tcpFlagItems, 'flags'), true);
-          fillTable('tcpFlagsTable', tcpFlagItems, 'flags');
-        }
-        if (payloads.anomaliesSummary.__error) {
-          setText('dashboardAnomaliesStatus', 'Erro ao carregar histórico de anomalias');
-          renderChartError(charts.dashboardAnomalyTimeline);
-          renderChartError(charts.dashboardAnomalyClassification);
-          renderChartError(charts.dashboardAnomalyProtocol);
-          renderTableMessage('dashboardAnomaliesTable', 10, widgetErrorMessage(payloads.anomaliesSummary), true);
-        } else {
-          renderDashboardAnomalies(payloads.anomaliesSummary);
-        }
-        if (payloads.asnSrc.__error) {
-          renderChartError(charts.asnSrc);
-          renderTableMessage('asnSrcTable', 7, widgetErrorMessage(payloads.asnSrc), true);
-          document.getElementById('asnSrcStatus').textContent = 'Erro ao carregar widget';
-        } else {
-          renderAsnWidget(charts.asnSrc, 'asnSrcTable', 'asnSrcStatus', payloads.asnSrc);
-        }
-        if (payloads.asnDst.__error) {
-          renderChartError(charts.asnDst);
-          renderTableMessage('asnDstTable', 7, widgetErrorMessage(payloads.asnDst), true);
-          document.getElementById('asnDstStatus').textContent = 'Erro ao carregar widget';
-        } else {
-          renderAsnWidget(charts.asnDst, 'asnDstTable', 'asnDstStatus', payloads.asnDst);
-        }
-
-        if (isDashboardWidgetVisible('top-conversations')) {
-          payloads.conversations?.__error
-            ? renderTableMessage('topConversationsTable', 7, widgetErrorMessage(payloads.conversations), true)
-            : renderTopConversations(payloadItems(payloads.conversations));
-        }
-        if (isDashboardWidgetVisible('syn-src')) {
-          payloads.synSrc?.__error
-            ? renderTableMessage('topSynSrcTable', 3, widgetErrorMessage(payloads.synSrc), true)
-            : renderSynTable('topSynSrcTable', payloadItems(payloads.synSrc));
-        }
-        if (isDashboardWidgetVisible('syn-dst')) {
-          payloads.synDst?.__error
-            ? renderTableMessage('topSynDstTable', 3, widgetErrorMessage(payloads.synDst), true)
-            : renderSynTable('topSynDstTable', payloadItems(payloads.synDst));
-        }
-        if (isDashboardWidgetVisible('global-summary')) {
-          if (payloads.geo?.__error) {
-            ensureDashboardGeoFlowMap()?.setError('Erro ao atualizar o tráfego geográfico.');
-            setText('globalSummaryStatus', 'Erro ao carregar mapa');
-          } else {
-            renderGlobalSummary(payloads.geo || {});
-          }
-        }
+        const progressiveEntries = entries.map(([name, promise]) => [
+          name,
+          promise.then(
+            payload => {
+              if (!controller.signal.aborted && requestSequence === dashboardRequestSequence) {
+                renderDashboardSettledEntry(name, payload || {});
+              }
+              return payload;
+            },
+            error => {
+              const payload = settledDashboardPayload(name, { status: 'rejected', reason: error });
+              if (!controller.signal.aborted && requestSequence === dashboardRequestSequence) {
+                renderDashboardSettledEntry(name, payload);
+              }
+              throw error;
+            }
+          )
+        ]);
+        await Promise.allSettled(progressiveEntries.map(entry => entry[1]));
+        if (controller.signal.aborted || requestSequence !== dashboardRequestSequence || activeView !== 'dashboard') return;
         dashboardRefreshFailures = 0;
       } catch (error) {
         if (error.name === 'AbortError') return;
         dashboardRefreshFailures += 1;
         throw error;
       } finally {
-        dashboardRefreshInFlight = false;
-        if (dashboardAbortController === controller) dashboardAbortController = null;
+        if (requestSequence === dashboardRequestSequence) {
+          dashboardRefreshInFlight = false;
+          if (dashboardAbortController === controller) dashboardAbortController = null;
+        }
       }
     }
 
@@ -19133,11 +19256,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadSystemView() {
       setText('systemStatus', 'Atualizando recursos...');
-      const [resources, containers, collectors, setup] = await Promise.all([
+      const [resources, containers, collectors, setup, dashboardCache] = await Promise.all([
         apiRequest('/api/system/resources'),
         apiRequest('/api/system/containers'),
         apiRequest('/api/collectors/health'),
-        apiRequest('/api/system/setup/status')
+        apiRequest('/api/system/setup/status'),
+        apiRequest('/api/system/dashboard-cache').catch(error => ({ __error: error }))
       ]);
       const memory = resources.memory || {};
       const disk = resources.disk || {};
@@ -19162,8 +19286,44 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         </div>
       `).join('') || '<div class="subtle">Collectors indisponiveis.</div>';
       renderSetupStatus(setup);
+      renderDashboardCacheStatus(dashboardCache);
       setText('systemStatus', 'Recursos atualizados');
       createIcons();
+    }
+
+    function renderDashboardCacheStatus(cache) {
+      if (cache?.__error) {
+        setText('dashboardCacheStatus', `Indisponível: ${cache.__error.message || 'falha ao consultar'}`);
+        return;
+      }
+      const hitRatio = Number(cache.hit_ratio || 0) * 100;
+      setText('dashboardCacheEnabled', cache.enabled ? 'Ativado' : 'Desativado');
+      setText('dashboardCacheMode', cache.mode || '-');
+      setText('dashboardCacheUsage', formatBytes(cache.current_bytes || 0));
+      setText('dashboardCacheLimit', formatBytes(cache.effective_max_bytes || 0));
+      setText('dashboardCacheHitRatio', `${hitRatio.toFixed(1)}%`);
+      setText('dashboardCacheEvictions', formatNumber(cache.evictions || 0));
+      setText('dashboardCachePressure', cache.memory_pressure ? 'Sim' : 'Não');
+      setText('dashboardCacheEntries', `${formatNumber(cache.entries || 0)} / ${formatNumber(cache.max_entries || 0)}`);
+      setText(
+        'dashboardCacheStatus',
+        `Worker local ${formatNumber(cache.workers || 1)} configurado(s); RAM disponível ${formatBytes(cache.available_memory || 0)}; compartilhamentos single-flight ${formatNumber(cache.singleflight_shared_requests || 0)}.`
+      );
+    }
+
+    async function clearDashboardCache() {
+      const button = document.getElementById('clearDashboardCacheButton');
+      button.disabled = true;
+      setText('dashboardCacheStatus', 'Limpando somente resultados derivados...');
+      try {
+        const cache = await apiRequest('/api/system/dashboard-cache', { method: 'DELETE' });
+        renderDashboardCacheStatus(cache);
+        setText('dashboardCacheStatus', `${formatNumber(cache.removed_entries || 0)} entrada(s) derivada(s) removida(s).`);
+      } catch (error) {
+        setText('dashboardCacheStatus', `Falha ao limpar cache: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function cgnatStatusBadge(status) {
@@ -19413,6 +19573,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function showView(view, placeholderTitle = '') {
       view = canonicalNavigationView(view);
+      if (view !== 'flows') {
+        flowSearchAbortController?.abort();
+        flowSearchAbortController = null;
+      }
       if (view !== 'dashboard') {
         if (dashboardRefreshTimer) {
           clearTimeout(dashboardRefreshTimer);
@@ -19760,6 +19924,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
     document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
+    document.getElementById('clearDashboardCacheButton').addEventListener('click', () => clearDashboardCache().catch(console.error));
     document.getElementById('refreshCgnatButton').addEventListener('click', () => loadCgnatWorkspace().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));
     document.getElementById('cgnatDropZone').addEventListener('click', () => document.getElementById('cgnatFileInput').click());
     document.getElementById('cgnatDropZone').addEventListener('keydown', event => {

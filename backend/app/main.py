@@ -20,6 +20,7 @@ import urllib.request
 import uuid
 import zlib
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
@@ -111,10 +112,21 @@ from app.services.automatic_mitigation import (
     execution_row_to_dict,
     normalized_match_from_candidate,
 )
+from app.services.dashboard_cache import DashboardCacheConfig, MemoryDashboardCache
+from app.services.dashboard_aggregates import (
+    DASHBOARD_AGGREGATE_TABLES,
+    aggregate_boundaries,
+    dashboard_aggregate_schema_statements,
+    dashboard_effective_sample_rate_expr,
+    dashboard_sample_rate_join_sql,
+    sample_rate_config_rows,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
 logger = logging.getLogger("gmj-flow")
+HTTP_REQUEST_ID: ContextVar[str] = ContextVar("gmjflow_http_request_id", default="")
+CLICKHOUSE_QUERY_SEQUENCE: ContextVar[int] = ContextVar("gmjflow_clickhouse_query_sequence", default=0)
 
 
 async def sqlite_operational_error_handler(request: Request, exc: sqlite3.OperationalError):
@@ -231,8 +243,11 @@ PEAK_HUNTER_RUNNER_THREAD: threading.Thread | None = None
 SQLITE_MIGRATION_LOCK = threading.RLock()
 SENSOR_DB_READY = False
 SYSTEM_SETTINGS_READY_KEYS: set[str] = set()
-DASHBOARD_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
-DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
+DASHBOARD_CACHE = MemoryDashboardCache(
+    DashboardCacheConfig.from_env(log=logger),
+    log=logger,
+)
+DASHBOARD_SAMPLE_RATE_SYNC_LOCK = threading.Lock()
 AI_MODEL_PULL_JOBS: dict[str, dict[str, Any]] = {}
 AI_MODEL_PULL_LOCK = threading.Lock()
 GEOIP_MMDB_PATH = os.getenv("GMJFLOW_GEOIP_MMDB_PATH", "/app/data/GeoLite2-City.mmdb").strip()
@@ -611,6 +626,8 @@ LEARN_DECODER_UNITS = (
 )
 
 IP_ZONE_PREFIX_TYPES = {"client", "public_cgnat", "infrastructure", "server", "cache", "transit", "other"}
+SUBSCRIBER_ADDRESSING_MODES = {"direct_public", "cgnat", "mixed", "auto"}
+DEFAULT_SUBSCRIBER_ADDRESSING_MODE = "cgnat"
 DETECTION_DOMAINS = {"internal_ip", "internal_ip_to_dst", "subnet", "interface", "sensor", "destination", "asn"}
 DETECTION_DIRECTION_ALIASES = {"sends": "transmits", "outbound": "transmits", "inbound": "receives"}
 DETECTION_DIRECTIONS = {"transmits", "receives", "sends", "outbound", "inbound", "both"}
@@ -1055,6 +1072,7 @@ class IpZonePayload(BaseModel):
     active: bool = True
     detection_template_id: int | None = Field(None, ge=1)
     connector_id: int | None = Field(None, ge=1)
+    subscriber_addressing_mode: str | None = None
 
 
 class IpZonePrefixPayload(BaseModel):
@@ -1374,15 +1392,51 @@ def close_client(client: Any) -> None:
             return
 
 
+def clickhouse_request_query_id() -> tuple[str, str]:
+    request_id = HTTP_REQUEST_ID.get() or str(uuid.uuid4())
+    sequence = CLICKHOUSE_QUERY_SEQUENCE.get() + 1
+    CLICKHOUSE_QUERY_SEQUENCE.set(sequence)
+    query_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"gmj-flow:{request_id}:{sequence}"))
+    return request_id, query_id
+
+
 def query_clickhouse(query: str, parameters: dict[str, Any] | None = None, admin: bool = False) -> Any:
     client = get_client(send_receive_timeout=clickhouse_admin_timeout_seconds() if admin else None)
     started = time.monotonic()
+    request_id, query_id = clickhouse_request_query_id()
     try:
-        return client.query(query, parameters=parameters or {})
+        try:
+            result = client.query(
+                query,
+                parameters=parameters or {},
+                settings={
+                    "query_id": query_id,
+                    "log_comment": f"gmj-flow request_id={request_id}",
+                },
+            )
+        except TypeError as exc:
+            # Keep small test/legacy clients compatible; clickhouse-connect
+            # 0.8.14 supports the settings transport used in production.
+            if "settings" not in str(exc):
+                raise
+            result = client.query(query, parameters=parameters or {})
+        return result
+    except BaseException as exc:
+        DASHBOARD_CACHE.fail_thread_flights(exc)
+        raise
     finally:
         elapsed = time.monotonic() - started
+        log_payload = {
+            "event": "clickhouse_query",
+            "request_id": request_id,
+            "query_id": query_id,
+            "duration_ms": round(elapsed * 1000, 2),
+            "slow": elapsed > 2,
+        }
         if elapsed > 2:
-            logger.warning("Query ClickHouse lenta %.2fs: %s", elapsed, " ".join(query.split())[:500])
+            logger.warning("%s", json.dumps(log_payload, separators=(",", ":"), sort_keys=True))
+        else:
+            logger.info("%s", json.dumps(log_payload, separators=(",", ":"), sort_keys=True))
         close_client(client)
 
 
@@ -1395,24 +1449,85 @@ def command_clickhouse(command: str, parameters: dict[str, Any] | None = None, a
 
 
 CLICKHOUSE_SCHEMA_READY = False
+CLICKHOUSE_SCHEMA_LOCK = threading.Lock()
 
 
 def ensure_clickhouse_schema() -> None:
     global CLICKHOUSE_SCHEMA_READY
     if CLICKHOUSE_SCHEMA_READY:
         return
-    commands = (
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_as_name String DEFAULT ''",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_as_name String DEFAULT ''",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_start Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_end Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
-        "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS duration_ms UInt64 DEFAULT 0",
-    )
-    for command in commands:
-        command_clickhouse(command)
-    CLICKHOUSE_SCHEMA_READY = True
+    with CLICKHOUSE_SCHEMA_LOCK:
+        if CLICKHOUSE_SCHEMA_READY:
+            return
+        commands = (
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_asn UInt32 DEFAULT 0",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_asn UInt32 DEFAULT 0",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS src_as_name String DEFAULT ''",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS dst_as_name String DEFAULT ''",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_start Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS flow_end Nullable(DateTime64(3, 'UTC')) DEFAULT NULL",
+            "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS duration_ms UInt64 DEFAULT 0",
+        )
+        for command in commands:
+            command_clickhouse(command)
+        for command in dashboard_aggregate_schema_statements():
+            command_clickhouse(command)
+        sync_clickhouse_dashboard_sample_rates()
+        CLICKHOUSE_SCHEMA_READY = True
+
+
+def sync_clickhouse_dashboard_sample_rates() -> None:
+    if not DASHBOARD_SAMPLE_RATE_SYNC_LOCK.acquire(blocking=False):
+        return
+    try:
+        rows = sample_rate_config_rows(sensor_sample_rate_configs())
+        current_rows = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT exporter_ip, if_index, direction, sample_rate
+                FROM dashboard_sample_rate_current
+                """
+            )
+        )
+        desired_keys = {(row[0], int(row[1]), int(row[2])) for row in rows}
+        for current in current_rows:
+            key = (
+                clean_text(current.get("exporter_ip")),
+                int(current.get("if_index") or 0),
+                int(current.get("direction") or 0),
+            )
+            if key not in desired_keys:
+                rows.append(
+                    (
+                        key[0],
+                        key[1],
+                        key[2],
+                        max(1, int(current.get("sample_rate") or 1)),
+                        0,
+                    )
+                )
+        if not rows:
+            return
+        updated_at = datetime.now(timezone.utc)
+        values = [(*row, updated_at) for row in rows]
+        client = get_client()
+        try:
+            client.insert(
+                "dashboard_sample_rate_config",
+                values,
+                column_names=[
+                    "exporter_ip",
+                    "if_index",
+                    "direction",
+                    "sample_rate",
+                    "active",
+                    "updated_at",
+                ],
+            )
+        finally:
+            close_client(client)
+    finally:
+        DASHBOARD_SAMPLE_RATE_SYNC_LOCK.release()
 
 
 def ping_clickhouse() -> bool:
@@ -2542,11 +2657,18 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             active INTEGER NOT NULL DEFAULT 1,
             detection_template_id INTEGER,
             connector_id INTEGER,
+            subscriber_addressing_mode TEXT NOT NULL DEFAULT 'cgnat',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(detection_template_id) REFERENCES detection_templates(id) ON DELETE SET NULL
         )
         """
+    )
+    ensure_sqlite_column(
+        conn,
+        "ip_zones",
+        "subscriber_addressing_mode",
+        "subscriber_addressing_mode TEXT NOT NULL DEFAULT 'cgnat'",
     )
     conn.execute(
         """
@@ -3666,6 +3788,19 @@ def ensure_sensor_db() -> None:
         ensure_sqlite_column(conn, "sensors", "sample_rate_mode", "sample_rate_mode TEXT NOT NULL DEFAULT 'sensor_default'")
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS sensor_runtime_status (
+                sensor_id INTEGER PRIMARY KEY,
+                sensor TEXT NOT NULL,
+                exporter_ip TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'unknown',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sensor_interfaces (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sensor_id INTEGER NOT NULL,
@@ -3769,6 +3904,7 @@ def ensure_sensor_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     ensure_sensor_db()
+    DASHBOARD_CACHE.start_monitor()
     try:
         ensure_clickhouse_schema()
     except Exception as exc:
@@ -3782,10 +3918,12 @@ def startup() -> None:
     start_anomaly_detection_thread()
     start_asn_resolver_thread()
     start_peak_hunter_runner_thread()
+    start_dashboard_cache_prewarm()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    DASHBOARD_CACHE.stop_monitor()
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
     BGP_EXPIRATION_STOP.set()
@@ -3796,6 +3934,30 @@ def shutdown() -> None:
     ASN_RESOLVER_STOP.set()
     PEAK_HUNTER_RUNNER_STOP.set()
     mark_peak_hunter_scheduler_stopped()
+
+
+def start_dashboard_cache_prewarm() -> None:
+    if not DASHBOARD_CACHE.config.prewarm or not DASHBOARD_CACHE.enabled:
+        return
+
+    def prewarm() -> None:
+        # Deterministic per-process jitter prevents all workers from warming at
+        # the same instant while keeping tests independent from random state.
+        jitter_seconds = (os.getpid() % 1000) / 100.0
+        time.sleep(jitter_seconds)
+        if DASHBOARD_CACHE.status()["memory_pressure"]:
+            return
+        try:
+            list_dashboard_sensors()
+            ensure_sensor_db()
+            key = dashboard_cache_key("ops-summary", {})
+            if dashboard_cache_get(key, 5) is None:
+                with sqlite_connection() as conn:
+                    dashboard_cache_set(key, bgp_summary_payload(conn))
+        except Exception as exc:
+            logger.warning("DASHBOARD_CACHE_PREWARM_FAILED error=%s", exc)
+
+    threading.Thread(target=prewarm, name="dashboard-cache-prewarm", daemon=True).start()
 
 
 def peak_hunter_runner_enabled() -> bool:
@@ -4137,6 +4299,44 @@ def token_user_from_request(request: Request) -> sqlite3.Row | None:
     return user
 
 
+def dashboard_cache_invalidate_for_http_mutation(path: str) -> int:
+    affected_prefixes = (
+        "/api/sensors",
+        "/api/ip-zones",
+        "/api/detection/",
+        "/api/detection-templates",
+        "/api/detection-rules",
+        "/api/detection-whitelist",
+        "/api/attack-vectors",
+        "/api/attack-vector-templates",
+        "/api/attack-vector-suggestions",
+        "/api/system/settings",
+    )
+    if not path.startswith(affected_prefixes):
+        return 0
+    sensor_match = re.match(r"^/api/sensors/(\d+)", path)
+    if sensor_match:
+        sensor_id = int(sensor_match.group(1))
+
+        def matches_sensor(key: str) -> bool:
+            try:
+                decoded = json.loads(key)
+                normalized = decoded[-1] if isinstance(decoded, list) else []
+                name = decoded[-2] if isinstance(decoded, list) and len(decoded) >= 2 else ""
+                values = dict(normalized or [])
+                if name in {"dashboard-sensors", "ops-summary"}:
+                    return True
+                cached_sensor_id = values.get("sensor_id")
+                if cached_sensor_id in (None, ""):
+                    return True
+                return int(cached_sensor_id) == sensor_id
+            except (TypeError, ValueError):
+                return False
+
+        return DASHBOARD_CACHE.invalidate(matches_sensor)
+    return DASHBOARD_CACHE.clear()
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
@@ -4156,6 +4356,66 @@ async def auth_middleware(request: Request, call_next):
         return JSONResponse({"detail": "Password change required"}, status_code=403)
 
     return await call_next(request)
+
+
+@app.middleware("http")
+async def http_observability_middleware(request: Request, call_next):
+    supplied_id = request.headers.get("X-Request-ID", "").strip()
+    request_id = supplied_id if re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", supplied_id) else str(uuid.uuid4())
+    request_token = HTTP_REQUEST_ID.set(request_id)
+    sequence_token = CLICKHOUSE_QUERY_SEQUENCE.set(0)
+    started = time.monotonic()
+    status_code = 500
+    response_bytes = 0
+    response = None
+    try:
+        response = await call_next(request)
+        status_code = int(response.status_code)
+        content_length = response.headers.get("content-length")
+        if content_length and content_length.isdigit():
+            response_bytes = int(content_length)
+        elif isinstance(getattr(response, "body", None), (bytes, bytearray)):
+            response_bytes = len(response.body)
+        response.headers["X-Request-ID"] = request_id
+        if (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and status_code < 400
+        ):
+            invalidated = dashboard_cache_invalidate_for_http_mutation(request.url.path)
+            if invalidated:
+                logger.info(
+                    "DASHBOARD_CACHE_INVALIDATED path=%s entries=%s request_id=%s",
+                    request.url.path,
+                    invalidated,
+                    request_id,
+                )
+            if request.url.path.startswith("/api/sensors") and CLICKHOUSE_SCHEMA_READY:
+                threading.Thread(
+                    target=sync_clickhouse_dashboard_sample_rates,
+                    name="dashboard-sample-rate-sync",
+                    daemon=True,
+                ).start()
+        return response
+    finally:
+        duration_ms = round((time.monotonic() - started) * 1000, 2)
+        logger.info(
+            "%s",
+            json.dumps(
+                {
+                    "event": "http_request",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "duration_ms": duration_ms,
+                    "response_bytes": response_bytes,
+                    "request_id": request_id,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        CLICKHOUSE_QUERY_SEQUENCE.reset(sequence_token)
+        HTTP_REQUEST_ID.reset(request_token)
 
 
 def require_admin(request: Request) -> None:
@@ -7725,6 +7985,11 @@ def ip_zone_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "detection_template_name": item.get("detection_template_name") or item.get("template_name") or "",
         "connector_id": int(item["connector_id"]) if item.get("connector_id") is not None else None,
         "connector_name": item.get("connector_name") or "",
+        "subscriber_addressing_mode": (
+            clean_text(item.get("subscriber_addressing_mode")).lower()
+            if clean_text(item.get("subscriber_addressing_mode")).lower() in SUBSCRIBER_ADDRESSING_MODES
+            else DEFAULT_SUBSCRIBER_ADDRESSING_MODE
+        ),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
         "prefix_count": prefix_count,
@@ -7770,7 +8035,11 @@ def detection_whitelist_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[s
     }
 
 
-def normalize_ip_zone_payload(conn: sqlite3.Connection, payload: IpZonePayload) -> dict[str, Any]:
+def normalize_ip_zone_payload(
+    conn: sqlite3.Connection,
+    payload: IpZonePayload,
+    current_subscriber_addressing_mode: str | None = None,
+) -> dict[str, Any]:
     data = dump_model(payload)
     name = clean_text(data.get("name"))
     if not name:
@@ -7783,12 +8052,20 @@ def normalize_ip_zone_payload(conn: sqlite3.Connection, payload: IpZonePayload) 
         connector = active_connector_by_id(conn, int(connector_id))
         if connector is None:
             raise HTTPException(status_code=400, detail="connector_id deve apontar para um conector FlowSpec ativo")
+    subscriber_addressing_mode = clean_text(
+        data.get("subscriber_addressing_mode")
+        or current_subscriber_addressing_mode
+        or DEFAULT_SUBSCRIBER_ADDRESSING_MODE
+    ).lower()
+    if subscriber_addressing_mode not in SUBSCRIBER_ADDRESSING_MODES:
+        raise HTTPException(status_code=400, detail="subscriber_addressing_mode invalido")
     return {
         "name": name,
         "description": clean_text(data.get("description")),
         "active": 1 if data.get("active") else 0,
         "detection_template_id": int(template_id) if template_id is not None else None,
         "connector_id": int(connector_id) if connector_id is not None else None,
+        "subscriber_addressing_mode": subscriber_addressing_mode,
     }
 
 
@@ -12222,24 +12499,56 @@ def apply_cgnat_candidate_policy(candidate: dict[str, Any]) -> dict[str, Any]:
         "cgnat_source_type",
         "cgnat_batch_id",
         "cgnat_confidence",
+        "cgnat_mapping_active",
         "subscriber_id",
         "subscriber_name",
+        "subscriber_addressing_mode",
+        "effective_subscriber_addressing_mode",
+        "subscriber_addressing_resolution",
+        "subscriber_identity",
+        "cgnat_gate",
+        "unique_sources",
+        "unique_private_subscribers",
     ):
         if anomaly.get(key) not in (None, ""):
             candidate[key] = anomaly.get(key)
+    addressing = (
+        anomaly.get("subscriber_addressing_resolution")
+        if isinstance(anomaly.get("subscriber_addressing_resolution"), dict)
+        else {}
+    )
+    effective_mode = clean_text(
+        addressing.get("effective_mode")
+        or anomaly.get("effective_subscriber_addressing_mode")
+    ).lower()
+    if not effective_mode and anomaly.get("cgnat_shared_public_ip"):
+        effective_mode = "cgnat"
+    if clean_text(candidate.get("candidate_role")).lower() in {"manual_session_scoped", "conservative"}:
+        candidate.pop("cgnat_auto_block_reason", None)
+        candidate["cgnat_public_src_block_forbidden"] = False
+        return candidate
     reason = ""
-    if anomaly.get("cgnat_ambiguous"):
+    if effective_mode == "direct_public":
+        candidate["cgnat_gate"] = "not_applicable"
+        candidate["cgnat_public_src_block_forbidden"] = False
+        if not addressing.get("direct_public_authorized"):
+            reason = "direct_public_source_outside_protected_zone"
+    elif effective_mode == "unresolved" or addressing.get("ambiguity"):
+        reason = clean_text(addressing.get("reason")) or "subscriber_addressing_ambiguous"
+    elif anomaly.get("cgnat_ambiguous"):
         reason = "cgnat_mapping_ambiguous"
-    elif anomaly.get("cgnat_shared_public_ip") and not anomaly.get("cgnat_matched"):
+    elif effective_mode == "cgnat" and not anomaly.get("cgnat_matched"):
         reason = "cgnat_subscriber_not_resolved"
     elif (
         anomaly.get("cgnat_matched")
-        and anomaly.get("cgnat_shared_public_ip")
+        and effective_mode == "cgnat"
         and not is_dns_outbound_destination_only_candidate(candidate)
     ):
         reason = "cgnat_shared_public_ip_manual_scope_required"
-    if anomaly.get("cgnat_shared_public_ip"):
+    if effective_mode == "cgnat":
         candidate["cgnat_public_src_block_forbidden"] = True
+    if not reason:
+        candidate.pop("cgnat_auto_block_reason", None)
     if reason:
         candidate.update(
             {
@@ -12764,6 +13073,34 @@ def record_auto_mitigation_outcome(
         "fixed_nat_port_end": int_or_none(candidate.get("mapped_port_end")),
         "cgnat_pool_name": clean_text(candidate.get("cgnat_pool_name")),
         "cgnat_device_name": clean_text(candidate.get("cgnat_device_name")),
+        "subscriber_addressing_resolution": (
+            candidate.get("subscriber_addressing_resolution")
+            if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+            else {}
+        ),
+        "subscriber_identity": (
+            candidate.get("subscriber_identity")
+            if isinstance(candidate.get("subscriber_identity"), dict)
+            else {}
+        ),
+        "configured_subscriber_addressing_mode": clean_text(
+            (candidate.get("subscriber_addressing_resolution") or {}).get("configured_mode")
+            if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+            else candidate.get("subscriber_addressing_mode")
+        ),
+        "effective_subscriber_addressing_mode": clean_text(
+            (candidate.get("subscriber_addressing_resolution") or {}).get("effective_mode")
+            if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+            else candidate.get("effective_subscriber_addressing_mode")
+        ),
+        "cgnat_gate": clean_text(
+            candidate.get("cgnat_gate")
+            or (
+                (candidate.get("automatic_gate") or {}).get("cgnat_gate")
+                if isinstance(candidate.get("automatic_gate"), dict)
+                else ""
+            )
+        ),
     }
     details.update(extra_details or {})
     candidate["auto_mitigation_status"] = clean_text(status)
@@ -13491,6 +13828,265 @@ def cgnat_event_lookup_coordinates(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def anomaly_event_zone_id(conn: sqlite3.Connection, event: dict[str, Any]) -> int | None:
+    details = event_source_details(event)
+    zone_id = int_or_none(event.get("zone_id") or details.get("zone_id"))
+    if zone_id is not None:
+        return zone_id
+    prefix_id = int_or_none(event.get("prefix_id") or details.get("prefix_id"))
+    if prefix_id is None or not sqlite_table_exists(conn, "ip_zone_prefixes"):
+        return None
+    row = conn.execute(
+        "SELECT zone_id FROM ip_zone_prefixes WHERE id = ? LIMIT 1",
+        (prefix_id,),
+    ).fetchone()
+    return int_or_none(row["zone_id"] if row else None)
+
+
+def subscriber_addressing_zone_evidence(
+    conn: sqlite3.Connection,
+    zone_id: int | None,
+    source_ip: str,
+) -> dict[str, Any]:
+    result = {
+        "source_in_zone": False,
+        "matched_prefixes": [],
+        "cgnat_prefixes_configured": 0,
+        "matched_cgnat_prefixes": [],
+        "matched_direct_prefixes": [],
+        "most_specific_prefix_types": [],
+        "prefix_classification_ambiguous": False,
+    }
+    if zone_id is None or not source_ip or not sqlite_table_exists(conn, "ip_zone_prefixes"):
+        return result
+    try:
+        address = ip_address(source_ip)
+    except ValueError:
+        return result
+    rows = conn.execute(
+        """
+        SELECT id, cidr, name, prefix_type
+        FROM ip_zone_prefixes
+        WHERE zone_id = ? AND active = 1
+        ORDER BY id
+        """,
+        (zone_id,),
+    ).fetchall()
+    matches: list[dict[str, Any]] = []
+    cgnat_configured = 0
+    for row in rows:
+        prefix_type = clean_text(row["prefix_type"]).lower() or "client"
+        if prefix_type == "public_cgnat":
+            cgnat_configured += 1
+        try:
+            network = ip_network(clean_text(row["cidr"]), strict=False)
+        except ValueError:
+            continue
+        if address.version != network.version or address not in network:
+            continue
+        matches.append(
+            {
+                "prefix_id": int(row["id"]),
+                "cidr": str(network),
+                "name": clean_text(row["name"]),
+                "prefix_type": prefix_type,
+                "prefix_length": int(network.prefixlen),
+            }
+        )
+    matches.sort(key=lambda item: (-int(item["prefix_length"]), int(item["prefix_id"])))
+    most_specific_length = int(matches[0]["prefix_length"]) if matches else -1
+    most_specific = [item for item in matches if int(item["prefix_length"]) == most_specific_length]
+    most_specific_types = {clean_text(item["prefix_type"]) for item in most_specific}
+    result.update(
+        {
+            "source_in_zone": bool(matches),
+            "matched_prefixes": matches,
+            "cgnat_prefixes_configured": cgnat_configured,
+            "matched_cgnat_prefixes": [
+                item for item in matches if clean_text(item["prefix_type"]) == "public_cgnat"
+            ],
+            "matched_direct_prefixes": [
+                item for item in matches if clean_text(item["prefix_type"]) != "public_cgnat"
+            ],
+            "most_specific_prefix_types": sorted(most_specific_types),
+            "prefix_classification_ambiguous": (
+                "public_cgnat" in most_specific_types and len(most_specific_types) > 1
+            ),
+        }
+    )
+    return result
+
+
+def active_cgnat_source_evidence(
+    conn: sqlite3.Connection,
+    source_ip: str,
+    timestamp: str,
+) -> list[dict[str, Any]]:
+    if (
+        not source_ip
+        or not sqlite_table_exists(conn, "cgnat_port_mappings")
+        or not sqlite_table_exists(conn, "cgnat_import_batches")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        SELECT
+            m.public_ip,
+            m.pool_name,
+            m.device_name,
+            m.source_type,
+            m.batch_id,
+            MIN(m.port_start) AS port_start,
+            MAX(m.port_end) AS port_end,
+            COUNT(*) AS mapping_count
+        FROM cgnat_port_mappings m
+        JOIN cgnat_import_batches b ON b.id = m.batch_id
+        WHERE m.public_ip = ?
+          AND m.active = 1
+          AND b.status = 'active'
+          AND (m.valid_from IS NULL OR m.valid_from = '' OR m.valid_from <= ?)
+          AND (m.valid_until IS NULL OR m.valid_until = '' OR m.valid_until >= ?)
+        GROUP BY m.public_ip, m.pool_name, m.device_name, m.source_type, m.batch_id
+        ORDER BY m.batch_id DESC, m.pool_name, m.device_name
+        """,
+        (source_ip, timestamp, timestamp),
+    ).fetchall()
+    return [
+        {
+            "public_ip": clean_text(row["public_ip"]),
+            "pool_name": clean_text(row["pool_name"]),
+            "device_name": clean_text(row["device_name"]),
+            "source_type": clean_text(row["source_type"]),
+            "batch_id": int(row["batch_id"]),
+            "port_start": int(row["port_start"] or 0),
+            "port_end": int(row["port_end"] or 0),
+            "mapping_count": int(row["mapping_count"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def resolve_subscriber_addressing(
+    conn: sqlite3.Connection,
+    event: dict[str, Any],
+    coordinates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    coordinates = coordinates or cgnat_event_lookup_coordinates(event)
+    source_ip = clean_ip(coordinates.get("public_ip"))
+    source_port = int_or_none(coordinates.get("public_port"))
+    zone_id = anomaly_event_zone_id(conn, event)
+    zone = None
+    if zone_id is not None and sqlite_table_exists(conn, "ip_zones"):
+        zone = conn.execute(
+            "SELECT id, name, active, subscriber_addressing_mode FROM ip_zones WHERE id = ? LIMIT 1",
+            (zone_id,),
+        ).fetchone()
+    configured_mode = clean_text(
+        (zone["subscriber_addressing_mode"] if zone else None)
+        or event.get("subscriber_addressing_mode")
+        or DEFAULT_SUBSCRIBER_ADDRESSING_MODE
+    ).lower()
+    if configured_mode not in SUBSCRIBER_ADDRESSING_MODES:
+        configured_mode = DEFAULT_SUBSCRIBER_ADDRESSING_MODE
+    timestamp = clean_text(
+        event.get("last_seen_at")
+        or event.get("last_seen")
+        or event.get("started_at")
+        or event.get("created_at")
+    ) or utc_now_iso()
+    zone_evidence = subscriber_addressing_zone_evidence(conn, zone_id, source_ip)
+    active_mapping_evidence = active_cgnat_source_evidence(conn, source_ip, timestamp)
+    matched_direct_prefixes = zone_evidence["matched_direct_prefixes"]
+    belongs_to_cgnat_pool = bool(
+        "public_cgnat" in zone_evidence["most_specific_prefix_types"]
+        or active_mapping_evidence
+    )
+    conflicting_evidence = bool(zone_evidence["prefix_classification_ambiguous"])
+    evidence = [
+        {
+            "type": "zone",
+            "zone_id": zone_id,
+            "zone_name": clean_text(zone["name"]) if zone else "",
+            "zone_active": sqlite_bool(zone["active"]) if zone else False,
+            "source_in_zone": bool(zone_evidence["source_in_zone"]),
+        },
+        {
+            "type": "zone_prefixes",
+            "matched": zone_evidence["matched_prefixes"],
+            "configured_cgnat_prefix_count": int(zone_evidence["cgnat_prefixes_configured"]),
+        },
+        {
+            "type": "active_cgnat_configuration",
+            "matched": active_mapping_evidence,
+        },
+    ]
+    effective_mode = ""
+    ambiguity = False
+    reason = ""
+    if configured_mode == "direct_public":
+        effective_mode = "direct_public"
+        reason = (
+            "zone_configured_direct_public"
+            if zone_evidence["source_in_zone"]
+            else "direct_public_source_outside_protected_zone"
+        )
+    elif configured_mode == "cgnat":
+        effective_mode = "cgnat"
+        reason = "zone_configured_cgnat"
+    elif conflicting_evidence:
+        ambiguity = True
+        reason = "subscriber_addressing_configuration_conflict"
+    elif configured_mode == "mixed":
+        if belongs_to_cgnat_pool:
+            effective_mode = "cgnat"
+            reason = "mixed_source_in_configured_cgnat_pool"
+        elif zone_evidence["source_in_zone"]:
+            effective_mode = "direct_public"
+            reason = "mixed_source_outside_configured_cgnat_pool"
+        else:
+            ambiguity = True
+            reason = "mixed_source_outside_protected_zone"
+    elif configured_mode == "auto":
+        if belongs_to_cgnat_pool:
+            effective_mode = "cgnat"
+            reason = (
+                "auto_active_cgnat_mapping"
+                if active_mapping_evidence
+                else "auto_public_cgnat_prefix"
+            )
+        elif zone_evidence["source_in_zone"] and matched_direct_prefixes:
+            effective_mode = "direct_public"
+            reason = "auto_direct_zone_prefix"
+        else:
+            ambiguity = True
+            reason = "auto_subscriber_addressing_not_determined"
+    direct_public_authorized = bool(
+        effective_mode == "direct_public"
+        and zone is not None
+        and sqlite_bool(zone["active"])
+        and zone_evidence["source_in_zone"]
+    )
+    cgnat_lookup_required = effective_mode == "cgnat"
+    return {
+        "configured_mode": configured_mode,
+        "effective_mode": effective_mode or "unresolved",
+        "source_ip": source_ip,
+        "source_port": source_port,
+        "belongs_to_cgnat_pool": belongs_to_cgnat_pool,
+        "cgnat_lookup_required": cgnat_lookup_required,
+        "cgnat_lookup_performed": False,
+        "cgnat_matched": False,
+        "direct_public_authorized": direct_public_authorized,
+        "ambiguity": ambiguity,
+        "reason": reason,
+        "evidence": evidence,
+        "source_in_protected_zone": bool(zone_evidence["source_in_zone"]),
+        "zone_id": zone_id,
+        "zone_name": clean_text(zone["name"]) if zone else "",
+        "cgnat_gate": "required" if cgnat_lookup_required else "not_applicable" if effective_mode == "direct_public" else "blocked",
+    }
+
+
 def event_cgnat_shared_hint(conn: sqlite3.Connection, event: dict[str, Any]) -> bool:
     details = event_source_details(event)
     prefix_id = int_or_none(event.get("prefix_id") or details.get("prefix_id"))
@@ -13510,6 +14106,13 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     enriched = dict(event)
     event_vector = outbound_dst_port_event_vector(enriched)
     source_details = event_source_details(enriched)
+    unique_sources = int(
+        enriched.get("unique_sources")
+        or enriched.get("unique_src_ips")
+        or source_details.get("unique_sources")
+        or source_details.get("unique_src_ips")
+        or (1 if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else 0)
+    )
     unique_destinations = int(
         enriched.get("unique_destinations")
         or enriched.get("unique_dst_ips")
@@ -13522,18 +14125,63 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
         or source_details.get("unique_conversations")
         or (1 if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else 0)
     )
+    enriched["unique_sources"] = unique_sources
     enriched["unique_destinations"] = unique_destinations
     enriched["unique_conversations"] = unique_conversations
     coordinates = cgnat_event_lookup_coordinates(enriched)
+    addressing = resolve_subscriber_addressing(conn, enriched, coordinates)
     enriched["cgnat_lookup_direction"] = coordinates["lookup_direction"]
-    enriched["cgnat_lookup_performed"] = bool(coordinates["lookup_supported"])
-    if not coordinates["lookup_supported"]:
-        shared_public_ip = event_cgnat_shared_hint(conn, enriched)
+    enriched["subscriber_addressing_resolution"] = addressing
+    enriched["subscriber_addressing_mode"] = addressing["configured_mode"]
+    enriched["effective_subscriber_addressing_mode"] = addressing["effective_mode"]
+    enriched["cgnat_gate"] = addressing["cgnat_gate"]
+    enriched["cgnat_lookup_performed"] = False
+    enriched["public_ip"] = coordinates.get("public_ip")
+    enriched["public_port"] = coordinates.get("public_port")
+    if addressing["effective_mode"] == "direct_public":
         enriched.update(
             {
                 "cgnat_matched": False,
                 "cgnat_ambiguous": False,
-                "cgnat_shared_public_ip": shared_public_ip,
+                "cgnat_shared_public_ip": False,
+                "cgnat_mapping_status": "not_applicable",
+                "unique_private_subscribers": 0,
+                "cgnat_mapping_message": (
+                    "Cliente com IPv4 publico direto."
+                    if addressing["direct_public_authorized"]
+                    else "CGNAT nao aplicavel; origem fora da zona protegida."
+                ),
+                "subscriber_identity": {
+                    "type": "direct_public",
+                    "ip": addressing["source_ip"],
+                    "authorized": addressing["direct_public_authorized"],
+                },
+            }
+        )
+        if addressing["direct_public_authorized"]:
+            enriched.pop("cgnat_mitigation_block_reason", None)
+        else:
+            enriched["cgnat_mitigation_block_reason"] = "direct_public_source_outside_protected_zone"
+        return enriched
+    if addressing["ambiguity"] or addressing["effective_mode"] == "unresolved":
+        enriched.update(
+            {
+                "cgnat_matched": False,
+                "cgnat_ambiguous": True,
+                "cgnat_shared_public_ip": bool(addressing["belongs_to_cgnat_pool"]),
+                "cgnat_mapping_status": "addressing_unresolved",
+                "unique_private_subscribers": 0,
+                "cgnat_mapping_message": "Modo de enderecamento da origem nao determinado sem ambiguidade.",
+                "cgnat_mitigation_block_reason": addressing["reason"] or "subscriber_addressing_ambiguous",
+            }
+        )
+        return enriched
+    if not coordinates["lookup_supported"]:
+        enriched.update(
+            {
+                "cgnat_matched": False,
+                "cgnat_ambiguous": False,
+                "cgnat_shared_public_ip": True,
                 "cgnat_mapping_status": "not_looked_up",
                 "unique_private_subscribers": 0,
                 "cgnat_mapping_message": (
@@ -13541,10 +14189,9 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
                     if coordinates["lookup_direction"].startswith("inbound_")
                     else "Cliente CGNAT nao identificado."
                 ),
+                "cgnat_mitigation_block_reason": "cgnat_subscriber_not_resolved",
             }
         )
-        if shared_public_ip:
-            enriched["cgnat_mitigation_block_reason"] = "cgnat_subscriber_not_resolved"
         return enriched
     protocol = protocol_from_flow_or_event({}, enriched)
     connector_id = int_or_none(enriched.get("connector_id") or event_source_details(enriched).get("connector_id"))
@@ -13561,12 +14208,25 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
         ),
         connector_id=connector_id,
     )
-    shared_public_ip = bool(
-        lookup.get("shared_public_ip")
-        or event_cgnat_shared_hint(conn, enriched)
-    )
+    shared_public_ip = True
     matched = bool(lookup.get("matched"))
     ambiguous = bool(lookup.get("ambiguous"))
+    addressing.update(
+        {
+            "cgnat_lookup_performed": True,
+            "cgnat_matched": matched and not ambiguous,
+            "ambiguity": ambiguous,
+            "reason": (
+                "cgnat_mapping_ambiguous"
+                if ambiguous
+                else "cgnat_subscriber_resolved"
+                if matched
+                else "cgnat_subscriber_not_resolved"
+            ),
+        }
+    )
+    enriched["subscriber_addressing_resolution"] = addressing
+    enriched["cgnat_lookup_performed"] = True
     status = "ambiguous" if ambiguous else "matched" if matched else "not_found"
     message = (
         "Mapeamento CGNAT ambiguo."
@@ -13615,14 +14275,21 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
             "unique_conversations": unique_conversations,
             "subscriber_id": lookup.get("subscriber_id") if not ambiguous else None,
             "subscriber_name": lookup.get("subscriber_name") if not ambiguous else None,
+            "subscriber_identity": {
+                "type": "cgnat",
+                "private_ip": lookup.get("private_ip") if not ambiguous else None,
+                "subscriber_id": lookup.get("subscriber_id") if not ambiguous else None,
+                "subscriber_name": lookup.get("subscriber_name") if not ambiguous else None,
+                "authorized": bool(matched and not ambiguous and lookup.get("private_ip")),
+            },
             "cgnat_conversation_share": round(conversation_share, 4),
         }
     )
     if ambiguous:
         enriched["cgnat_mitigation_block_reason"] = "cgnat_mapping_ambiguous"
-    elif shared_public_ip and not enriched["cgnat_matched"]:
+    elif not enriched["cgnat_matched"]:
         enriched["cgnat_mitigation_block_reason"] = "cgnat_subscriber_not_resolved"
-    elif shared_public_ip and enriched["cgnat_matched"]:
+    else:
         enriched.pop("cgnat_mitigation_block_reason", None)
     return enriched
 
@@ -16802,6 +17469,10 @@ def dns_single_flow_automatic_policy_gate(
     mapped_port_start = integer_value(candidate.get("mapped_port_start"), anomaly.get("mapped_port_start"))
     mapped_port_end = integer_value(candidate.get("mapped_port_end"), anomaly.get("mapped_port_end"))
     private_ip = clean_ip(first_value(candidate.get("private_ip"), anomaly.get("private_ip")))
+    cgnat_batch_id = integer_value(candidate.get("cgnat_batch_id"), anomaly.get("cgnat_batch_id"))
+    cgnat_mapping_active = sqlite_bool(
+        first_value(candidate.get("cgnat_mapping_active"), anomaly.get("cgnat_mapping_active"))
+    )
     unique_private_subscribers = integer_value(
         candidate.get("unique_private_subscribers"),
         anomaly.get("unique_private_subscribers"),
@@ -16818,6 +17489,39 @@ def dns_single_flow_automatic_policy_gate(
         candidate.get("unique_conversations"),
         anomaly.get("unique_conversations"),
         source_details.get("unique_conversations"),
+    )
+    addressing = (
+        candidate.get("subscriber_addressing_resolution")
+        if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+        else anomaly.get("subscriber_addressing_resolution")
+        if isinstance(anomaly.get("subscriber_addressing_resolution"), dict)
+        else {}
+    )
+    effective_addressing_mode = clean_text(
+        addressing.get("effective_mode")
+        or candidate.get("effective_subscriber_addressing_mode")
+        or anomaly.get("effective_subscriber_addressing_mode")
+    ).lower()
+    if not effective_addressing_mode:
+        effective_addressing_mode = "cgnat"
+    source_ip = clean_ip(
+        first_value(
+            addressing.get("source_ip"),
+            candidate.get("public_ip"),
+            anomaly.get("public_ip"),
+            top_flow.get("src_ip"),
+            anomaly.get("top_src_ip"),
+            anomaly.get("src_ip"),
+        )
+    )
+    unique_sources = integer_value(
+        candidate.get("unique_sources"),
+        candidate.get("unique_src_ips"),
+        anomaly.get("unique_sources"),
+        anomaly.get("unique_src_ips"),
+        source_details.get("unique_sources"),
+        source_details.get("unique_src_ips"),
+        1 if source_ip else 0,
     )
     observed_pps = detection_number(
         first_value(
@@ -16869,16 +17573,13 @@ def dns_single_flow_automatic_policy_gate(
             "actual": "match" if hits else "no_match" if consulted else "not_consulted",
             "passed": consulted and not bool(hits),
         },
-        {"condition": "cgnat_matched", "expected": True, "actual": sqlite_bool(first_value(candidate.get("cgnat_matched"), anomaly.get("cgnat_matched"))), "passed": sqlite_bool(first_value(candidate.get("cgnat_matched"), anomaly.get("cgnat_matched")))},
-        {"condition": "cgnat_ambiguous", "expected": False, "actual": sqlite_bool(first_value(candidate.get("cgnat_ambiguous"), anomaly.get("cgnat_ambiguous"))), "passed": not sqlite_bool(first_value(candidate.get("cgnat_ambiguous"), anomaly.get("cgnat_ambiguous")))},
-        {"condition": "private_ip", "expected": "identified", "actual": private_ip, "passed": bool(private_ip)},
         {
-            "condition": "public_port_in_fixed_nat_range",
-            "expected": f"{mapped_port_start}-{mapped_port_end}",
-            "actual": public_port,
-            "passed": bool(mapped_port_start <= public_port <= mapped_port_end and public_port > 0),
+            "condition": "subscriber_addressing_resolved",
+            "expected": "direct_public|cgnat",
+            "actual": effective_addressing_mode,
+            "passed": effective_addressing_mode in {"direct_public", "cgnat"} and not bool(addressing.get("ambiguity")),
         },
-        {"condition": "unique_private_subscribers", "expected": 1, "actual": unique_private_subscribers, "passed": unique_private_subscribers == 1},
+        {"condition": "unique_sources", "expected": 1, "actual": unique_sources, "passed": unique_sources == 1},
         {"condition": "unique_destinations", "expected": 1, "actual": unique_destinations, "passed": unique_destinations == 1},
         {"condition": "unique_conversations", "expected": 1, "actual": unique_conversations, "passed": unique_conversations == 1},
         {
@@ -16894,13 +17595,107 @@ def dns_single_flow_automatic_policy_gate(
             "passed": dns_destination_udp53_shape(candidate),
         },
     ]
+    if effective_addressing_mode == "direct_public":
+        direct_authorized = bool(addressing.get("direct_public_authorized"))
+        if not addressing:
+            direct_authorized = False
+        conditions.extend(
+            [
+                {
+                    "condition": "source_in_protected_zone",
+                    "expected": True,
+                    "actual": bool(addressing.get("source_in_protected_zone")),
+                    "passed": direct_authorized and bool(addressing.get("source_in_protected_zone")),
+                    "applicable": True,
+                },
+                {
+                    "condition": "cgnat_matched",
+                    "expected": "not_applicable",
+                    "actual": "not_applicable",
+                    "passed": True,
+                    "applicable": False,
+                },
+                {
+                    "condition": "active_cgnat_batch",
+                    "expected": "not_applicable",
+                    "actual": "not_applicable",
+                    "passed": True,
+                    "applicable": False,
+                },
+                {
+                    "condition": "private_ip",
+                    "expected": "not_applicable",
+                    "actual": "not_applicable",
+                    "passed": True,
+                    "applicable": False,
+                },
+                {
+                    "condition": "public_port_in_fixed_nat_range",
+                    "expected": "not_applicable",
+                    "actual": "not_applicable",
+                    "passed": True,
+                    "applicable": False,
+                },
+                {
+                    "condition": "unique_private_subscribers",
+                    "expected": "not_applicable",
+                    "actual": "not_applicable",
+                    "passed": True,
+                    "applicable": False,
+                },
+            ]
+        )
+    elif effective_addressing_mode == "cgnat":
+        cgnat_matched = sqlite_bool(first_value(candidate.get("cgnat_matched"), anomaly.get("cgnat_matched")))
+        cgnat_ambiguous = sqlite_bool(first_value(candidate.get("cgnat_ambiguous"), anomaly.get("cgnat_ambiguous")))
+        structured_addressing = bool(addressing.get("configured_mode"))
+        conditions.extend(
+            [
+                {
+                    "condition": "active_cgnat_batch",
+                    "expected": True,
+                    "actual": bool(cgnat_batch_id and cgnat_mapping_active),
+                    "passed": (
+                        bool(cgnat_batch_id and cgnat_mapping_active)
+                        if structured_addressing
+                        else True
+                    ),
+                    "applicable": True,
+                },
+                {"condition": "cgnat_matched", "expected": True, "actual": cgnat_matched, "passed": cgnat_matched, "applicable": True},
+                {"condition": "cgnat_ambiguous", "expected": False, "actual": cgnat_ambiguous, "passed": not cgnat_ambiguous, "applicable": True},
+                {"condition": "private_ip", "expected": "identified", "actual": private_ip, "passed": bool(private_ip), "applicable": True},
+                {
+                    "condition": "public_port_in_fixed_nat_range",
+                    "expected": f"{mapped_port_start}-{mapped_port_end}",
+                    "actual": public_port,
+                    "passed": bool(mapped_port_start <= public_port <= mapped_port_end and public_port > 0),
+                    "applicable": True,
+                },
+                {
+                    "condition": "unique_private_subscribers",
+                    "expected": 1,
+                    "actual": unique_private_subscribers,
+                    "passed": unique_private_subscribers == 1,
+                    "applicable": True,
+                },
+            ]
+        )
     failed = [clean_text(item["condition"]) for item in conditions if not item["passed"]]
     reason_priority = (
         ("dns_whitelist", "dns_destination_whitelisted" if hits else "dns_whitelist_not_consulted"),
+        (
+            "subscriber_addressing_resolved",
+            clean_text(addressing.get("reason")) or "subscriber_addressing_ambiguous",
+        ),
+        ("source_in_protected_zone", "direct_public_source_outside_protected_zone"),
+        ("unique_sources", "dns_single_flow_requires_unique_source"),
         ("cgnat_ambiguous", "cgnat_mapping_ambiguous"),
         ("cgnat_matched", "cgnat_subscriber_not_resolved"),
+        ("active_cgnat_batch", "cgnat_active_batch_required"),
         ("private_ip", "cgnat_private_ip_not_identified"),
         ("public_port_in_fixed_nat_range", "cgnat_public_port_outside_mapped_range"),
+        ("unique_private_subscribers", "cgnat_subscriber_not_unique"),
         ("automatic_threshold", "below_automatic_mitigation_threshold"),
         ("automatic_candidate_scope", "dns_outbound_requires_flowspec_block_dst_dns"),
     )
@@ -16908,9 +17703,23 @@ def dns_single_flow_automatic_policy_gate(
     if failed and not reason:
         reason = "dns_single_flow_deterministic_conditions_not_met"
     authorization_reason = (
-        "DNS_SINGLE_FLOW_OUTBOUND autorizado deterministicamente: um cliente CGNAT, um destino fora da whitelist, "
-        "uma conversa UDP/53 e PPS no threshold; bloqueio destination /32 sem source publico."
+        "DNS_SINGLE_FLOW_OUTBOUND autorizado deterministicamente: cliente com IPv4 publico direto dentro da zona, "
+        "um destino fora da whitelist, uma conversa UDP/53 e PPS no threshold; CGNAT nao aplicavel e bloqueio "
+        "destination /32 sem source/source-port."
+        if effective_addressing_mode == "direct_public"
+        else "DNS_SINGLE_FLOW_OUTBOUND autorizado deterministicamente: um cliente CGNAT resolvido sem ambiguidade, "
+        "um destino fora da whitelist, uma conversa UDP/53 e PPS no threshold; bloqueio destination /32 sem source publico."
     )
+    non_applicable_gates = [
+        clean_text(item["condition"])
+        for item in conditions
+        if item.get("applicable") is False
+    ]
+    applied_gates = [
+        clean_text(item["condition"])
+        for item in conditions
+        if item.get("applicable") is not False
+    ]
     return {
         "applies": True,
         "allowed": not bool(failed),
@@ -16926,6 +17735,12 @@ def dns_single_flow_automatic_policy_gate(
         "whitelist_result": "match" if hits else "no_match" if consulted else "not_consulted",
         "whitelist_hits": hits,
         "temporal_evidence_required": False,
+        "subscriber_addressing_resolution": addressing,
+        "configured_subscriber_addressing_mode": clean_text(addressing.get("configured_mode")) or effective_addressing_mode,
+        "effective_subscriber_addressing_mode": effective_addressing_mode,
+        "cgnat_gate": "not_applicable" if effective_addressing_mode == "direct_public" else "required",
+        "gates_applied": applied_gates,
+        "gates_not_applicable": non_applicable_gates,
     }
 
 
@@ -20823,6 +21638,18 @@ def process_anomaly_mitigation() -> dict[str, int]:
                         continue
                 elif mode in {"manual_approval", "suggest_only", "manual_review", "response_profile"}:
                     handled = True
+                    addressing_block_reason = clean_text(candidate.get("cgnat_auto_block_reason"))
+                    if addressing_block_reason:
+                        record_auto_mitigation_outcome(
+                            conn,
+                            candidate,
+                            "not_applied",
+                            addressing_block_reason,
+                            created_by="worker",
+                            requested_mode="automatic",
+                        )
+                        stats["skipped"] += 1
+                        continue
                     try:
                         item = apply_mitigation_candidate(conn, candidate, "manual_approval", "worker")
                     except HTTPException as exc:
@@ -20982,6 +21809,17 @@ def automatic_mitigation_candidates(
                         "automatic_gate": automatic_gate,
                         "validation": state.get("validation") or {},
                         "readiness": state.get("readiness") or {},
+                        "subscriber_addressing_resolution": (
+                            candidate.get("subscriber_addressing_resolution")
+                            if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+                            else {}
+                        ),
+                        "cgnat_gate": clean_text(
+                            candidate.get("cgnat_gate")
+                            or automatic_gate.get("cgnat_gate")
+                        ),
+                        "gates_applied": automatic_gate.get("gates_applied") or [],
+                        "gates_not_applicable": automatic_gate.get("gates_not_applicable") or [],
                     },
                     "policy_reason": reason or clean_text(candidate.get("deterministic_authorization_reason")),
                     "policy_authorized": state.get("auto_allowed") is True,
@@ -20993,6 +21831,16 @@ def automatic_mitigation_candidates(
                             for key, value in state.items()
                             if key not in {"connector"}
                         },
+                        "subscriber_addressing_resolution": (
+                            candidate.get("subscriber_addressing_resolution")
+                            if isinstance(candidate.get("subscriber_addressing_resolution"), dict)
+                            else {}
+                        ),
+                        "subscriber_identity": (
+                            candidate.get("subscriber_identity")
+                            if isinstance(candidate.get("subscriber_identity"), dict)
+                            else {}
+                        ),
                         "equivalent_announcement_id": int_or_none((equivalent or {}).get("id")),
                     },
                 }
@@ -22355,9 +23203,13 @@ def bgp_summary(request: Request):
 @app.get("/api/ops/summary")
 def ops_summary(request: Request):
     require_admin(request)
+    cache_key = dashboard_cache_key("ops-summary", {})
+    cached = dashboard_cache_get(cache_key, 5)
+    if cached:
+        return cached
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        return bgp_summary_payload(conn)
+        return dashboard_cache_set(cache_key, bgp_summary_payload(conn))
 
 
 @app.get("/api/bgp/report.pdf")
@@ -22704,10 +23556,22 @@ def create_ip_zone(payload: IpZonePayload):
         now = utc_now_iso()
         cursor = conn.execute(
             """
-            INSERT INTO ip_zones (name, description, active, detection_template_id, connector_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ip_zones (
+                name, description, active, detection_template_id, connector_id,
+                subscriber_addressing_mode, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (data["name"], data["description"], data["active"], data["detection_template_id"], data["connector_id"], now, now),
+            (
+                data["name"],
+                data["description"],
+                data["active"],
+                data["detection_template_id"],
+                data["connector_id"],
+                data["subscriber_addressing_mode"],
+                now,
+                now,
+            ),
         )
         conn.commit()
         return fetch_ip_zone(conn, int(cursor.lastrowid), include_prefixes=True)
@@ -22724,8 +23588,12 @@ def get_ip_zone(zone_id: int, include_inactive: bool = False):
 def update_ip_zone(zone_id: int, payload: IpZonePayload):
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        _ = fetch_ip_zone_row(conn, zone_id)
-        data = normalize_ip_zone_payload(conn, payload)
+        current = fetch_ip_zone_row(conn, zone_id)
+        data = normalize_ip_zone_payload(
+            conn,
+            payload,
+            clean_text(current["subscriber_addressing_mode"]),
+        )
         now = utc_now_iso()
         conn.execute(
             """
@@ -22735,10 +23603,20 @@ def update_ip_zone(zone_id: int, payload: IpZonePayload):
                 active = ?,
                 detection_template_id = ?,
                 connector_id = ?,
+                subscriber_addressing_mode = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (data["name"], data["description"], data["active"], data["detection_template_id"], data["connector_id"], now, zone_id),
+            (
+                data["name"],
+                data["description"],
+                data["active"],
+                data["detection_template_id"],
+                data["connector_id"],
+                data["subscriber_addressing_mode"],
+                now,
+                zone_id,
+            ),
         )
         conn.commit()
         return fetch_ip_zone(conn, zone_id, include_prefixes=True)
@@ -31999,6 +32877,19 @@ def unavailable_metric(reason: str = "") -> dict[str, Any]:
     return {"available": False, "status": "indisponivel", "reason": reason}
 
 
+@app.get("/api/system/dashboard-cache")
+def dashboard_cache_status(request: Request):
+    require_admin(request)
+    return DASHBOARD_CACHE.status()
+
+
+@app.delete("/api/system/dashboard-cache")
+def clear_dashboard_cache(request: Request):
+    require_admin(request)
+    removed = DASHBOARD_CACHE.clear()
+    return {"ok": True, "removed_entries": removed, **DASHBOARD_CACHE.status()}
+
+
 @app.get("/api/system/resources")
 def system_resources(request: Request):
     require_admin(request)
@@ -33011,16 +33902,96 @@ def list_sensors():
         return {"items": [sensor_row_to_dict(conn, row) for row in rows]}
 
 
-@app.get("/api/dashboard/sensors")
-def list_dashboard_sensors():
+def refresh_sensor_runtime_status() -> None:
+    """Refresh the small runtime table from collector status files.
+
+    This deliberately reads only one small JSON status file per configured
+    sensor and never discovers sensors by scanning the large fact table.
+    """
     ensure_sensor_db()
+    now = datetime.now(timezone.utc)
+    updates: list[tuple[Any, ...]] = []
     with sqlite_connection() as conn:
         rows = conn.execute(
             """
-            SELECT id, name, exporter_ip
+            SELECT id, name, exporter_ip, listener_port
             FROM sensors
             WHERE active = 1
-            ORDER BY name, id
+            ORDER BY id
+            """
+        ).fetchall()
+    for row in rows:
+        output_file = f"/var/spool/pmacct/sensor-{int(row['id'])}-{int(row['listener_port'])}.csv"
+        status_payload = pmacct_status_for_file(output_file)
+        last_seen = clean_text(
+            status_payload.get("last_flow_time")
+            or status_payload.get("last_insert_at")
+            or status_payload.get("updated_at")
+        )
+        parsed_seen = parse_datetime_text(last_seen)
+        if parsed_seen is None:
+            runtime_status = "unknown"
+        elif (now - parsed_seen).total_seconds() <= 180:
+            runtime_status = "online"
+        else:
+            runtime_status = "stale"
+        updates.append(
+            (
+                int(row["id"]),
+                clean_text(row["name"]),
+                clean_text(row["exporter_ip"]),
+                last_seen,
+                runtime_status,
+                utc_now_iso(),
+            )
+        )
+    if not updates:
+        return
+    with sqlite_connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO sensor_runtime_status (
+                sensor_id, sensor, exporter_ip, last_seen, status, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sensor_id) DO UPDATE SET
+                sensor = excluded.sensor,
+                exporter_ip = excluded.exporter_ip,
+                last_seen = excluded.last_seen,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            updates,
+        )
+        conn.commit()
+
+
+@app.get("/api/dashboard/sensors")
+def list_dashboard_sensors():
+    cache_key = dashboard_cache_key("dashboard-sensors", {"ttl_seconds": 60})
+    cached = dashboard_cache_get(cache_key, 60)
+    if cached:
+        return cached
+    ensure_sensor_db()
+    try:
+        refresh_sensor_runtime_status()
+    except Exception as exc:
+        logger.warning("Falha ao atualizar sensor_runtime_status: %s", exc)
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                sensors.id,
+                sensors.name,
+                sensors.exporter_ip,
+                COALESCE(sensor_runtime_status.last_seen, '') AS last_seen,
+                COALESCE(sensor_runtime_status.status, 'unknown') AS status,
+                COALESCE(sensor_runtime_status.updated_at, sensors.updated_at) AS updated_at
+            FROM sensors
+            LEFT JOIN sensor_runtime_status
+                ON sensor_runtime_status.sensor_id = sensors.id
+            WHERE sensors.active = 1
+            ORDER BY sensors.name, sensors.id
             """
         ).fetchall()
         items = []
@@ -33028,7 +33999,7 @@ def list_dashboard_sensors():
             item = dict(row)
             item["color"] = deterministic_color(item["id"])
             items.append(item)
-        return {"items": items}
+        return dashboard_cache_set(cache_key, {"items": items})
 
 
 @app.post("/api/sensors", status_code=201)
@@ -34544,6 +35515,182 @@ def interface_label_map(sensor_id: int | None) -> dict[int, dict[str, Any]]:
     return mapping
 
 
+def dashboard_aggregate_range_covered(
+    table: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    sensor_id: int | None = None,
+    sensor: str | None = None,
+) -> bool:
+    if table not in DASHBOARD_AGGREGATE_TABLES.values():
+        return False
+    interior_start, interior_end = aggregate_boundaries(start_dt, end_dt)
+    if interior_start >= interior_end:
+        return False
+    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else ""
+    cache_key = dashboard_cache_key(
+        "aggregate-coverage",
+        {
+            "table": table,
+            "interior_start": interior_start,
+            "interior_end": interior_end,
+            "sensor_id": sensor_id,
+            "sensor": sensor or "",
+        },
+    )
+
+    def check() -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "start": interior_start,
+            "end": interior_end,
+        }
+        filters = [
+            "minute >= {start:DateTime}",
+            "minute < {end:DateTime}",
+        ]
+        if exporter_ip:
+            params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
+            filters.append("exporter_ip = {exporter_ip:String}")
+        elif sensor:
+            params["sensor"] = sensor
+            filters.append("sensor = {sensor:String}")
+        try:
+            rows = rows_as_dicts(
+                query_clickhouse(
+                    f"""
+                    SELECT min(minute) AS first_minute, max(minute) AS last_minute
+                    FROM {table}
+                    WHERE {' AND '.join(filters)}
+                    """,
+                    params,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Dashboard aggregate indisponivel table=%s error=%s", table, exc)
+            return {"covered": False}
+        row = rows[0] if rows else {}
+        first_minute = clickhouse_datetime(row.get("first_minute"))
+        last_minute = clickhouse_datetime(row.get("last_minute"))
+        expected_last = interior_end - timedelta(minutes=1)
+        return {
+            "covered": bool(
+                first_minute is not None
+                and last_minute is not None
+                and first_minute <= interior_start
+                and last_minute >= expected_last
+            )
+        }
+
+    return bool(DASHBOARD_CACHE.get_or_compute(cache_key, 30, check).get("covered"))
+
+
+def dashboard_raw_rated_source_cte(raw_where: str, columns: list[str]) -> str:
+    selected_columns = [
+        "flow_time",
+        "sensor",
+        "exporter_ip",
+        "input_if",
+        "output_if",
+        "sample_rate",
+        "bytes",
+        "packets",
+        "flow_count",
+    ]
+    selected_columns.extend(column for column in columns if column not in selected_columns)
+    source_columns = ",\n                    ".join(f"source.{column}" for column in selected_columns)
+    return f"""
+    WITH
+        rated_source AS (
+            SELECT
+                {source_columns},
+                {dashboard_effective_sample_rate_expr("input", "source")} AS dashboard_input_sample_rate,
+                {dashboard_effective_sample_rate_expr("output", "source")} AS dashboard_output_sample_rate,
+                {dashboard_effective_sample_rate_expr("auto", "source")} AS dashboard_auto_sample_rate
+            FROM (
+                SELECT *
+                FROM flow_raw
+                WHERE {raw_where}
+            ) AS source
+            {dashboard_sample_rate_join_sql("source")}
+        )
+    """
+
+
+def dashboard_hybrid_source_cte(
+    table: str,
+    raw_where: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    params: dict[str, Any],
+    dimensions: list[str],
+    include_time_bounds: bool = False,
+) -> str:
+    interior_start, interior_end = aggregate_boundaries(start_dt, end_dt)
+    params["aggregate_start"] = interior_start
+    params["aggregate_end"] = interior_end
+    raw_dimensions = ", ".join(dimensions)
+    aggregate_dimensions = ", ".join(dimensions)
+    if raw_dimensions:
+        raw_dimensions = f", {raw_dimensions}"
+        aggregate_dimensions = f", {aggregate_dimensions}"
+    raw_time_bounds = ", flow_time AS first_seen, flow_time AS last_seen" if include_time_bounds else ""
+    aggregate_time_bounds = ", first_seen, last_seen" if include_time_bounds else ""
+    aggregate_where = raw_where.replace(
+        "flow_time >= {start:DateTime}",
+        "minute >= {aggregate_start:DateTime}",
+    ).replace(
+        "flow_time <= {end:DateTime}",
+        "minute < {aggregate_end:DateTime}",
+    )
+    return f"""
+    WITH
+        raw_aggregate_source AS (
+            SELECT
+                flow_time,
+                sensor,
+                toString(exporter_ip) AS exporter_ip,
+                input_if,
+                output_if,
+                sample_rate,
+                bytes,
+                packets,
+                flow_count
+                {raw_dimensions}
+                {raw_time_bounds}
+            FROM flow_raw
+            WHERE {raw_where}
+              AND (
+                    flow_time < {{aggregate_start:DateTime}}
+                 OR flow_time >= {{aggregate_end:DateTime}}
+              )
+            UNION ALL
+            SELECT
+                minute AS flow_time,
+                sensor,
+                exporter_ip,
+                input_if,
+                output_if,
+                sample_rate,
+                bytes,
+                packets,
+                flows AS flow_count
+                {aggregate_dimensions}
+                {aggregate_time_bounds}
+            FROM {table}
+            WHERE {aggregate_where}
+        ),
+        rated_source AS (
+            SELECT
+                source.*,
+                {dashboard_effective_sample_rate_expr("input", "source")} AS dashboard_input_sample_rate,
+                {dashboard_effective_sample_rate_expr("output", "source")} AS dashboard_output_sample_rate,
+                {dashboard_effective_sample_rate_expr("auto", "source")} AS dashboard_auto_sample_rate
+            FROM raw_aggregate_source AS source
+            {dashboard_sample_rate_join_sql("source")}
+        )
+    """
+
+
 def dashboard_series_payload(
     range_minutes: int,
     sensor_id: int | None,
@@ -34617,9 +35764,32 @@ def dashboard_series_payload(
     bucket_seconds = dashboard_bucket_seconds(range_minutes)
     value_field = "bytes" if metric == "bits_s" else "packets"
     multiplier = "8" if metric == "bits_s" else "1"
-    input_factor = clickhouse_sample_rate_expr(sensor_id, "input", context["resolved_if_index"])
-    output_factor = clickhouse_sample_rate_expr(sensor_id, "output", context["resolved_if_index"])
     params = dict(context["params"])
+    query_prefix = dashboard_raw_rated_source_cte(
+        context["where"],
+        ["proto", "tcp_flags", "src_ip", "dst_ip"],
+    )
+    source_table = "rated_source"
+    input_factor = "dashboard_input_sample_rate"
+    output_factor = "dashboard_output_sample_rate"
+    aggregate_table = DASHBOARD_AGGREGATE_TABLES["series"]
+    if zone_id is None and dashboard_aggregate_range_covered(
+        aggregate_table,
+        start_dt,
+        end_dt,
+        sensor_id,
+    ):
+        query_prefix = dashboard_hybrid_source_cte(
+            aggregate_table,
+            context["where"],
+            start_dt,
+            end_dt,
+            params,
+            ["proto", "tcp_flags"],
+        )
+        source_table = "rated_source"
+        input_factor = "dashboard_input_sample_rate"
+        output_factor = "dashboard_output_sample_rate"
     resolved_if_index = context["resolved_if_index"]
     input_condition = "input_if > 0"
     output_condition = "output_if > 0"
@@ -34657,7 +35827,7 @@ def dashboard_series_payload(
                     {zone_input_group} AS group_key,
                     'download' AS flow_direction,
                     sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
-                FROM flow_raw
+                FROM {source_table}
                 WHERE {base_where} AND {zone_download_filter} AND {input_condition}
                 GROUP BY ts, group_key
                 """
@@ -34670,7 +35840,7 @@ def dashboard_series_payload(
                     {zone_output_group} AS group_key,
                     'upload' AS flow_direction,
                     sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
-                FROM flow_raw
+                FROM {source_table}
                 WHERE {base_where} AND {zone_upload_filter} AND {output_condition}
                 GROUP BY ts, group_key
                 """
@@ -34684,7 +35854,7 @@ def dashboard_series_payload(
                     {input_group} AS group_key,
                     'download' AS flow_direction,
                     sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
-                FROM flow_raw
+                FROM {source_table}
                 WHERE {base_where} AND {input_condition}
                 GROUP BY ts, group_key
                 """
@@ -34697,7 +35867,7 @@ def dashboard_series_payload(
                     {output_group} AS group_key,
                     'upload' AS flow_direction,
                     sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
-                FROM flow_raw
+                FROM {source_table}
                 WHERE {base_where} AND {output_condition}
                 GROUP BY ts, group_key
                 """
@@ -34717,7 +35887,7 @@ def dashboard_series_payload(
                 "items": [],
             },
         )
-    result = query_clickhouse(" UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
+    result = query_clickhouse(query_prefix + " UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
     rows = rows_as_dicts(result)
     totals: dict[str, float] = {}
     for row in rows:
@@ -35163,17 +36333,93 @@ def top_conversations_payload(
     )
     start_dt = context["start"]
     end_dt = context["end"]
+    cache_key = dashboard_cache_key(
+        "dashboard-top-conversations",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "direction": direction,
+            "proto": proto or "",
+            "sort_by": sort_by,
+            "limit": limit,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "conversation_zone")
     where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    factor_expr = {
+        "input": "dashboard_input_sample_rate",
+        "output": "dashboard_output_sample_rate",
+    }.get(context["rate_direction"], "dashboard_auto_sample_rate")
+    query_prefix = dashboard_raw_rated_source_cte(
+        where,
+        [
+            "src_ip",
+            "dst_ip",
+            "src_port",
+            "dst_port",
+            "proto",
+            "src_asn",
+            "dst_asn",
+            "src_as_name",
+            "dst_as_name",
+        ],
+    ) + ","
+    source_table = "rated_source"
+    first_seen_column = "flow_time"
+    last_seen_column = "flow_time"
+    aggregate_table = DASHBOARD_AGGREGATE_TABLES["conversations"]
+    if dashboard_aggregate_range_covered(
+        aggregate_table,
+        start_dt,
+        end_dt,
+        sensor_id,
+    ):
+        query_prefix = (
+            dashboard_hybrid_source_cte(
+                aggregate_table,
+                where,
+                start_dt,
+                end_dt,
+                params,
+                [
+                    "src_ip",
+                    "dst_ip",
+                    "src_port",
+                    "dst_port",
+                    "proto",
+                    "src_asn",
+                    "dst_asn",
+                    "src_as_name",
+                    "dst_as_name",
+                ],
+                include_time_bounds=True,
+            )
+            + ","
+        )
+        source_table = "rated_source"
+        factor_expr = {
+            "input": "dashboard_input_sample_rate",
+            "output": "dashboard_output_sample_rate",
+        }.get(context["rate_direction"], "dashboard_auto_sample_rate")
+        first_seen_column = "first_seen"
+        last_seen_column = "last_seen"
     bytes_value = corrected_value_expr("bytes", factor_expr)
     packets_value = corrected_value_expr("packets", factor_expr)
     result = query_clickhouse(
         f"""
-        WITH
+        {query_prefix}
             base AS (
                 SELECT
                     toString(src_ip) AS src_ip,
@@ -35188,9 +36434,9 @@ def top_conversations_payload(
                     sum({bytes_value}) AS bytes,
                     sum({packets_value}) AS packets,
                     sum(flow_count) AS flows,
-                    min(flow_time) AS first_seen,
-                    max(flow_time) AS last_seen
-                FROM flow_raw
+                    min({first_seen_column}) AS first_seen,
+                    max({last_seen_column}) AS last_seen
+                FROM {source_table}
                 WHERE {where}
                 GROUP BY src_ip, dst_ip, src_port, dst_port, proto
             ),
@@ -35249,7 +36495,10 @@ def top_conversations_payload(
                 "dst_as_name": clean_text(row.get("dst_as_name")) or clean_text((dst_info or {}).get("as_name")),
             }
         )
-    return {"start": iso(start_dt), "end": iso(end_dt), "sort_by": sort_by, "items": items}
+    return dashboard_cache_set(
+        cache_key,
+        {"start": iso(start_dt), "end": iso(end_dt), "sort_by": sort_by, "items": items},
+    )
 
 
 @app.get("/api/dashboard/top-conversations")
@@ -35331,12 +36580,79 @@ def dashboard_top_syn(
     )
     start_dt = context["start"]
     end_dt = context["end"]
+    cache_key = dashboard_cache_key(
+        f"dashboard-top-syn:{mode}",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "direction": direction,
+            "limit": limit,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
     seconds = range_seconds(start_dt, end_dt)
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "syn_zone")
     where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    factor_expr = {
+        "input": "dashboard_input_sample_rate",
+        "output": "dashboard_output_sample_rate",
+    }.get(context["rate_direction"], "dashboard_auto_sample_rate")
+    query_prefix = dashboard_raw_rated_source_cte(
+        where,
+        [
+            "src_ip",
+            "dst_ip",
+            "proto",
+            "src_asn",
+            "dst_asn",
+            "src_as_name",
+            "dst_as_name",
+            "tcp_flags",
+        ],
+    ) + ","
+    source_table = "rated_source"
+    aggregate_table = DASHBOARD_AGGREGATE_TABLES["syn"]
+    if dashboard_aggregate_range_covered(
+        aggregate_table,
+        start_dt,
+        end_dt,
+        sensor_id,
+    ):
+        query_prefix = (
+            dashboard_hybrid_source_cte(
+                aggregate_table,
+                where,
+                start_dt,
+                end_dt,
+                params,
+                [
+                    "src_ip",
+                    "dst_ip",
+                    "proto",
+                    "src_asn",
+                    "dst_asn",
+                    "src_as_name",
+                    "dst_as_name",
+                    "tcp_flags",
+                ],
+            )
+            + ","
+        )
+        source_table = "rated_source"
+        factor_expr = {
+            "input": "dashboard_input_sample_rate",
+            "output": "dashboard_output_sample_rate",
+        }.get(context["rate_direction"], "dashboard_auto_sample_rate")
     ip_col = "src_ip" if mode == "src" else "dst_ip"
     asn_col = "src_asn" if mode == "src" else "dst_asn"
     as_name_col = "src_as_name" if mode == "src" else "dst_as_name"
@@ -35344,7 +36660,7 @@ def dashboard_top_syn(
     packets_value = corrected_value_expr("packets", factor_expr)
     result = query_clickhouse(
         f"""
-        WITH
+        {query_prefix}
             base AS (
                 SELECT
                     toString({ip_col}) AS ip,
@@ -35353,7 +36669,7 @@ def dashboard_top_syn(
                     sum({bytes_value}) AS bytes,
                     sum({packets_value}) AS packets,
                     sum(flow_count) AS flows
-                FROM flow_raw
+                FROM {source_table}
                 WHERE {where}
                   AND bitAnd(tcp_flags, 2) != 0
                   AND bitAnd(tcp_flags, 16) = 0
@@ -35395,7 +36711,10 @@ def dashboard_top_syn(
                 "percent": round(float(row.get("percent_total") or 0), 2),
             }
         )
-    return {"start": iso(start_dt), "end": iso(end_dt), "mode": mode, "items": items}
+    return dashboard_cache_set(
+        cache_key,
+        {"start": iso(start_dt), "end": iso(end_dt), "mode": mode, "items": items},
+    )
 
 
 def add_geo_filters(
@@ -35951,14 +37270,32 @@ def geo_flows(
     if zone_filter:
         filters.append(zone_filter)
     where = " AND ".join(f"({item})" for item in filters if item)
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, context["rate_direction"], context["resolved_if_index"])
+    factor_expr = {
+        "input": "dashboard_input_sample_rate",
+        "output": "dashboard_output_sample_rate",
+    }.get(context["rate_direction"], "dashboard_auto_sample_rate")
+    query_prefix = dashboard_raw_rated_source_cte(
+        where,
+        [
+            "src_ip",
+            "dst_ip",
+            "src_port",
+            "dst_port",
+            "proto",
+            "tcp_flags",
+            "src_asn",
+            "dst_asn",
+            "src_as_name",
+            "dst_as_name",
+        ],
+    )
     order_expr = {"bits_s": "bits_s", "packets_s": "packets_s", "flows": "flows"}[metric]
     top_order_expr = {"bits_s": "total_bytes", "packets_s": "total_packets", "flows": "total_flows"}[metric]
     row_bytes_expr = corrected_value_expr("bytes", factor_expr)
     row_packets_expr = corrected_value_expr("packets", factor_expr)
     try:
         result = query_clickhouse(
-            f"""
+            query_prefix + f"""
             SELECT
                 src_ip,
                 dst_ip,
@@ -35984,7 +37321,7 @@ def geo_flows(
                     sum(flow_count) AS total_flows,
                     any(src_as_name) AS src_as_name,
                     any(dst_as_name) AS dst_as_name
-                FROM flow_raw
+                FROM rated_source
                 WHERE {where}
                 GROUP BY src_ip, dst_ip, src_asn, dst_asn, top_protocol
                 ORDER BY {top_order_expr} DESC
@@ -36210,6 +37547,8 @@ def top_dimension(
     zone_id: int | None = None,
     zone_direction: str = "both",
 ):
+    if dimension not in {"src_ip", "dst_ip", "dst_port", "proto", "tcp_flags"}:
+        raise HTTPException(status_code=400, detail="dimensao invalida")
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
         f"top:{dimension}",
@@ -36237,7 +37576,38 @@ def top_dimension(
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, "auto", resolved_if_index)
+    dimension_columns = {
+        "src_ip": ["src_ip"],
+        "dst_ip": ["dst_ip"],
+        "dst_port": ["dst_port", "proto"],
+        "proto": ["proto"],
+        "tcp_flags": ["tcp_flags"],
+    }[dimension]
+    factor_expr = "dashboard_auto_sample_rate"
+    query_prefix = dashboard_raw_rated_source_cte(
+        where,
+        [*dimension_columns, "src_ip", "dst_ip"],
+    )
+    source_table = "rated_source"
+    aggregate_key = "protocol" if dimension == "proto" else dimension
+    aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
+    if zone_id is None and dashboard_aggregate_range_covered(
+        aggregate_table,
+        start_dt,
+        end_dt,
+        sensor_id,
+        sensor,
+    ):
+        query_prefix = dashboard_hybrid_source_cte(
+            aggregate_table,
+            where,
+            start_dt,
+            end_dt,
+            params,
+            dimension_columns,
+        )
+        source_table = "rated_source"
+        factor_expr = "dashboard_auto_sample_rate"
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
 
@@ -36248,7 +37618,7 @@ def top_dimension(
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         GROUP BY ip
         ORDER BY bps DESC
@@ -36261,7 +37631,7 @@ def top_dimension(
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         GROUP BY ip
         ORDER BY bps DESC
@@ -36275,7 +37645,7 @@ def top_dimension(
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         GROUP BY port, proto
         ORDER BY bps DESC
@@ -36288,7 +37658,7 @@ def top_dimension(
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         GROUP BY proto
         ORDER BY bps DESC
@@ -36301,7 +37671,7 @@ def top_dimension(
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         GROUP BY tcp_flags
         ORDER BY bps DESC
@@ -36310,7 +37680,7 @@ def top_dimension(
     else:
         raise HTTPException(status_code=400, detail="dimensao invalida")
 
-    result = query_clickhouse(query, params)
+    result = query_clickhouse(query_prefix + query, params)
     items = []
     for row in rows_as_dicts(result):
         bps = round(float(row["bps"] or 0), 2)
@@ -36452,6 +37822,24 @@ def top_asn_dimension(
 ):
     ensure_clickhouse_schema()
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
+    cache_key = dashboard_cache_key(
+        f"top:asn-{dimension}",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor": sensor,
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "limit": limit,
+            "zone_id": zone_id,
+            "zone_direction": zone_direction,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    if cached:
+        return cached
     seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"seconds": seconds, "limit": limit}
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
@@ -36496,18 +37884,56 @@ def top_asn_dimension(
         as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
         ip_col = "src_ip" if dimension == "src" else "dst_ip"
 
-    factor_expr = clickhouse_sample_rate_expr(sensor_id, rate_direction, resolved_if_index)
+    factor_expr = {
+        "input": "dashboard_input_sample_rate",
+        "output": "dashboard_output_sample_rate",
+    }.get(rate_direction, "dashboard_auto_sample_rate")
+    query_prefix = dashboard_raw_rated_source_cte(
+        where,
+        [
+            "src_ip",
+            "dst_ip",
+            "src_asn",
+            "dst_asn",
+            "src_as_name",
+            "dst_as_name",
+        ],
+    )
+    source_table = "rated_source"
+    if zone_id is None:
+        aggregate_key = "asn_src" if dimension == "src" else "asn_dst"
+        aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
+        if dashboard_aggregate_range_covered(
+            aggregate_table,
+            start_dt,
+            end_dt,
+            sensor_id,
+            sensor,
+        ):
+            query_prefix = dashboard_hybrid_source_cte(
+                aggregate_table,
+                where,
+                start_dt,
+                end_dt,
+                params,
+                [asn_col, as_name_col, ip_col],
+            )
+            source_table = "rated_source"
+            factor_expr = {
+                "input": "dashboard_input_sample_rate",
+                "output": "dashboard_output_sample_rate",
+            }.get(rate_direction, "dashboard_auto_sample_rate")
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
     result = query_clickhouse(
-        f"""
+        query_prefix + f"""
         SELECT
             toUInt32({asn_col}) AS asn,
             any({as_name_col}) AS as_name,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where} AND {asn_col} > 0
         GROUP BY asn
         ORDER BY bps DESC
@@ -36547,13 +37973,13 @@ def top_asn_dimension(
         )
 
     ip_result = query_clickhouse(
-        f"""
+        query_prefix + f"""
         SELECT
             toString({ip_col}) AS ip,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
             sum(flow_count) AS flows
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where} AND {asn_col} = 0
         GROUP BY ip
         ORDER BY bps DESC
@@ -36599,13 +38025,13 @@ def top_asn_dimension(
 
     if not items:
         ip_result = query_clickhouse(
-            f"""
+            query_prefix + f"""
             SELECT
                 toString({ip_col}) AS ip,
                 {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
                 {packets_sum} AS packets,
                 sum(flow_count) AS flows
-            FROM flow_raw
+            FROM {source_table}
             WHERE {where}
             GROUP BY ip
             ORDER BY bps DESC
@@ -36657,9 +38083,9 @@ def top_asn_dimension(
             item["bps"] = round(float(item["bps"] or 0), 2)
 
     total_result = query_clickhouse(
-        f"""
+        query_prefix + f"""
         SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bps
-        FROM flow_raw
+        FROM {source_table}
         WHERE {where}
         """,
         params,
@@ -36670,17 +38096,23 @@ def top_asn_dimension(
         item["percent"] = round(float(item["bps"] or 0) * 100 / total_bps, 2) if total_bps > 0 else 0.0
 
     if items:
-        return {
-            "start": iso(start_dt),
-            "end": iso(end_dt),
-            "asn_available": True,
-            "message": "ASN resolvido pelo flow/IPFIX ou pela base ASN local.",
-            "items": items[:limit],
-        }
+        return dashboard_cache_set(
+            cache_key,
+            {
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "asn_available": True,
+                "message": "ASN resolvido pelo flow/IPFIX ou pela base ASN local.",
+                "items": items[:limit],
+            },
+        )
 
     bps = round(total_bps, 2)
     if bps <= 0:
-        return {"start": iso(start_dt), "end": iso(end_dt), "asn_available": False, "items": []}
+        return dashboard_cache_set(
+            cache_key,
+            {"start": iso(start_dt), "end": iso(end_dt), "asn_available": False, "items": []},
+        )
     item = {
         "rank": 1,
         "asn": "ASN indisponivel",
@@ -36691,13 +38123,16 @@ def top_asn_dimension(
         "flows": 0,
         "percent": 100.0,
     }
-    return {
-        "start": iso(start_dt),
-        "end": iso(end_dt),
-        "asn_available": False,
-        "message": "ASN ausente no flow/IPFIX e nao encontrado na base local. Use Resolver ASNs pendentes ou importe uma base de prefixos.",
-        "items": [item][:limit],
-    }
+    return dashboard_cache_set(
+        cache_key,
+        {
+            "start": iso(start_dt),
+            "end": iso(end_dt),
+            "asn_available": False,
+            "message": "ASN ausente no flow/IPFIX e nao encontrado na base local. Use Resolver ASNs pendentes ou importe uma base de prefixos.",
+            "items": [item][:limit],
+        },
+    )
 
 
 @app.get("/api/tops/asn-src")
@@ -36868,33 +38303,44 @@ def sort_direction(value: str | None) -> str:
 
 
 def dashboard_cache_ttl(range_minutes: int) -> int:
-    if range_minutes <= 15:
-        return 10
+    if range_minutes <= 10:
+        return 5
     if range_minutes <= 60:
-        return 20
-    if range_minutes <= 360:
-        return 30
+        return 15
     if range_minutes <= 1440:
         return 60
     return 300
 
 
 def dashboard_cache_key(name: str, values: dict[str, Any]) -> str:
+    cache_values = dict(values)
+    cache_values.setdefault("timezone", "UTC")
     normalized = []
-    for key in sorted(values):
-        value = values[key]
+    for key in sorted(cache_values):
+        value = cache_values[key]
         if isinstance(value, datetime):
             value = iso(value)
         normalized.append((key, value))
-    return json.dumps([name, normalized], sort_keys=True, default=str)
+    return json.dumps(
+        [DASHBOARD_CACHE.config.schema_version, name, normalized],
+        sort_keys=True,
+        default=str,
+    )
 
 
 def dashboard_cache_ttl_from_key(key: str) -> int:
     try:
-        _name, normalized = json.loads(key)
+        decoded = json.loads(key)
+        normalized = decoded[-1]
     except (ValueError, TypeError):
         return 0
     values = dict(normalized or [])
+    try:
+        explicit_ttl = int(values.get("ttl_seconds") or 0)
+    except (TypeError, ValueError):
+        explicit_ttl = 0
+    if explicit_ttl > 0:
+        return explicit_ttl
     try:
         return dashboard_cache_ttl(int(values.get("range_minutes") or 0))
     except (TypeError, ValueError):
@@ -36902,21 +38348,14 @@ def dashboard_cache_ttl_from_key(key: str) -> int:
 
 
 def dashboard_cache_get(key: str, ttl: int) -> dict[str, Any] | None:
-    now = time.monotonic()
-    with DASHBOARD_RESPONSE_CACHE_LOCK:
-        item = DASHBOARD_RESPONSE_CACHE.get(key)
-        if not item:
-            return None
-        created, payload = item
-        age = now - created
-        if age > ttl:
-            DASHBOARD_RESPONSE_CACHE.pop(key, None)
-            return None
+    payload, _owner = DASHBOARD_CACHE.lookup_or_reserve(key)
+    if payload is None:
+        return None
     cached_payload = dict(payload)
     cached_payload["cached"] = True
     cached_payload["cache_status"] = "hit"
     cached_payload["cache_ttl_seconds"] = int(ttl)
-    cached_payload["cache_age_seconds"] = round(age, 2)
+    cached_payload["cache_age_seconds"] = 0
     return cached_payload
 
 
@@ -36926,12 +38365,7 @@ def dashboard_cache_set(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     stored["cache_status"] = "miss"
     stored["cache_ttl_seconds"] = dashboard_cache_ttl_from_key(key)
     stored["cache_age_seconds"] = 0
-    with DASHBOARD_RESPONSE_CACHE_LOCK:
-        DASHBOARD_RESPONSE_CACHE[key] = (time.monotonic(), stored)
-        if len(DASHBOARD_RESPONSE_CACHE) > 256:
-            oldest = sorted(DASHBOARD_RESPONSE_CACHE, key=lambda cache_key: DASHBOARD_RESPONSE_CACHE[cache_key][0])[:64]
-            for cache_key in oldest:
-                DASHBOARD_RESPONSE_CACHE.pop(cache_key, None)
+    DASHBOARD_CACHE.publish(key, stored, stored["cache_ttl_seconds"])
     return dict(stored)
 
 
