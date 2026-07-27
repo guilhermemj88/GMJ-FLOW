@@ -18,7 +18,6 @@ from backend.app.services.dashboard_widgets import (
     ensure_user_default_dashboard,
     get_dashboard,
     normalize_grid,
-    resolve_grid_collision,
     validate_filters,
     validate_inheritance,
     validate_widget_definition,
@@ -219,16 +218,11 @@ class DashboardWidgetValidationTest(unittest.TestCase):
                 }
             )
 
-    def test_grid_is_normalized_and_collision_free(self):
+    def test_grid_is_normalized(self):
         self.assertEqual(
             normalize_grid({"x": 11, "y": -2, "w": 9, "h": 99}),
             {"x": 3, "y": 0, "w": 9, "h": 12},
         )
-        moved = resolve_grid_collision(
-            {"x": 0, "y": 0, "w": 6, "h": 4},
-            [{"x": 0, "y": 0, "w": 6, "h": 4}],
-        )
-        self.assertGreaterEqual(moved["y"], 4)
 
     def test_individual_context_inheritance_is_typed(self):
         inheritance = validate_inheritance(
@@ -316,6 +310,7 @@ class DashboardWidgetContractTest(unittest.TestCase):
             '"/api/dashboards/{dashboard_id}"',
             '"/api/dashboards/{dashboard_id}/duplicate"',
             '"/api/dashboards/{dashboard_id}/set-default"',
+            '"/api/dashboards/{dashboard_id}/repair-layout"',
             '"/api/dashboards/{dashboard_id}/export"',
             '"/api/dashboards/import"',
             '"/api/dashboards/{dashboard_id}/widgets"',
@@ -366,7 +361,7 @@ class DashboardWidgetContractTest(unittest.TestCase):
 
     def test_versioned_export_constants_exist(self):
         self.assertEqual(DASHBOARD_EXPORT_VERSION, 1)
-        self.assertEqual(DASHBOARD_SCHEMA_VERSION, 1)
+        self.assertEqual(DASHBOARD_SCHEMA_VERSION, 2)
 
 
 if __name__ == "__main__":

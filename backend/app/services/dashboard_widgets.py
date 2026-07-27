@@ -3,16 +3,25 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from ipaddress import ip_network
 from typing import Any
 
+from .dashboard_layout import (
+    layout_signature,
+    normalize_grid_item,
+    repair_dashboard_layout,
+    validate_layout,
+)
 
-DASHBOARD_SCHEMA_VERSION = 1
+
+DASHBOARD_SCHEMA_VERSION = 2
 DASHBOARD_EXPORT_VERSION = 1
 DASHBOARD_GRID_COLUMNS = 12
+COLLAPSED_GRID_HEIGHT = 2
 MAX_WIDGET_LIMIT = 100
 MAX_DASHBOARD_WIDGETS = 80
 ALLOWED_REFRESH_INTERVALS = {0, 5, 10, 15, 30, 60, 120, 300}
@@ -170,6 +179,7 @@ VISUALIZATION_ALIASES = {
     "vertical_bar": "bar",
 }
 INHERITANCE_FIELDS = {"range", "sensor", "interface", "zone", "direction"}
+logger = logging.getLogger("gmj-flow.dashboard-layout")
 
 DIMENSION_PLANS = {
     "src_ip": {"expression": "toString(src_ip)", "columns": ["src_ip"], "aggregate": "src_ip"},
@@ -281,6 +291,7 @@ def _default_widget(
         "grid": {"x": x, "y": y, "w": width, "h": height},
         "collapsed": False,
         "hidden": False,
+        "height_mode": "fixed",
         "refresh_interval_seconds": 30,
         "use_global_filters": True,
         "use_global_time_range": True,
@@ -298,7 +309,7 @@ GENERAL_WIDGETS = [
         0,
         0,
         6,
-        4,
+        8,
     ),
     _default_widget(
         "traffic-pps",
@@ -309,7 +320,7 @@ GENERAL_WIDGETS = [
         6,
         0,
         6,
-        4,
+        8,
     ),
     _default_widget(
         "top-src-ip",
@@ -318,9 +329,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "src_ip", "metric": "bps", "direction": "source", "limit": 10, "visualization": "horizontal_bar"},
         0,
+        8,
         4,
-        4,
-        4,
+        6,
     ),
     _default_widget(
         "top-dst-ip",
@@ -329,9 +340,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "dst_ip", "metric": "bps", "direction": "destination", "limit": 10, "visualization": "horizontal_bar"},
         4,
+        8,
         4,
-        4,
-        4,
+        6,
     ),
     _default_widget(
         "top-ports",
@@ -340,9 +351,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "dst_port", "metric": "bps", "direction": "both", "limit": 10, "visualization": "bar"},
         8,
+        8,
         4,
-        4,
-        4,
+        6,
     ),
     _default_widget(
         "top-protocols",
@@ -351,9 +362,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "protocol", "metric": "bps", "direction": "both", "limit": 10, "visualization": "donut"},
         0,
-        8,
+        14,
         4,
-        4,
+        6,
     ),
     _default_widget(
         "top-flags",
@@ -362,9 +373,9 @@ GENERAL_WIDGETS = [
         "security",
         {"dimension": "tcp_flags", "metric": "flows", "direction": "both", "limit": 10, "visualization": "bar"},
         4,
-        8,
+        14,
         4,
-        4,
+        6,
     ),
     dict(
         _default_widget(
@@ -374,9 +385,9 @@ GENERAL_WIDGETS = [
             "security",
             {"dimension": "src_ip", "metric": "pps", "direction": "both", "limit": 10, "visualization": "table"},
             0,
-            16,
+            35,
             4,
-            4,
+            7,
         ),
         filters=[
             {"field": "protocol", "operator": "eq", "value": "tcp"},
@@ -391,9 +402,9 @@ GENERAL_WIDGETS = [
             "security",
             {"dimension": "dst_ip", "metric": "pps", "direction": "both", "limit": 10, "visualization": "table"},
             4,
-            16,
+            35,
             4,
-            4,
+            7,
         ),
         filters=[
             {"field": "protocol", "operator": "eq", "value": "tcp"},
@@ -406,10 +417,10 @@ GENERAL_WIDGETS = [
         "top_n",
         "traffic",
         {"dimension": "conversation", "metric": "bps", "direction": "both", "limit": 10, "visualization": "table"},
+        0,
+        20,
+        6,
         8,
-        8,
-        4,
-        4,
     ),
     _default_widget(
         "top-asn-src",
@@ -418,9 +429,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "src_asn", "metric": "bps", "direction": "upload", "limit": 10, "visualization": "table"},
         0,
-        12,
+        28,
         4,
-        4,
+        7,
     ),
     _default_widget(
         "top-asn-dst",
@@ -429,9 +440,9 @@ GENERAL_WIDGETS = [
         "traffic",
         {"dimension": "dst_asn", "metric": "bps", "direction": "download", "limit": 10, "visualization": "table"},
         4,
-        12,
+        28,
         4,
-        4,
+        7,
     ),
     _default_widget(
         "recent-anomalies",
@@ -439,10 +450,10 @@ GENERAL_WIDGETS = [
         "recent_events",
         "security",
         {"source": "anomalies", "limit": 10, "visualization": "table"},
-        8,
+        0,
+        42,
         12,
-        4,
-        4,
+        7,
     ),
 ]
 
@@ -639,31 +650,94 @@ def validate_filters(filters: Any) -> list[dict[str, Any]]:
 
 def normalize_grid(grid: Any) -> dict[str, int]:
     value = grid if isinstance(grid, dict) else {}
-    width = max(1, min(DASHBOARD_GRID_COLUMNS, int(value.get("w", value.get("width", 4)) or 4)))
-    height = max(2, min(12, int(value.get("h", value.get("height", 4)) or 4)))
-    x = max(0, min(DASHBOARD_GRID_COLUMNS - width, int(value.get("x", 0) or 0)))
-    y = max(0, min(10000, int(value.get("y", 0) or 0)))
-    return {"x": x, "y": y, "w": width, "h": height}
+    normalized = normalize_grid_item(
+        {
+            "x": value.get("x", 0),
+            "y": value.get("y", 0),
+            "w": value.get("w", value.get("width", 4)),
+            "h": value.get("h", value.get("height", 4)),
+        },
+        {"columns": DASHBOARD_GRID_COLUMNS, "min_h": 2, "max_h": 12},
+    )
+    return {
+        "x": normalized["x"],
+        "y": normalized["y"],
+        "w": normalized["w"],
+        "h": normalized["h"],
+    }
 
 
-def resolve_grid_collision(grid: dict[str, int], occupied: list[dict[str, int]]) -> dict[str, int]:
-    resolved = normalize_grid(grid)
+def widget_layout_constraints(widget: dict[str, Any]) -> dict[str, int]:
+    widget_type = str(widget.get("type") or "top_n")
+    config = widget.get("config") if isinstance(widget.get("config"), dict) else {}
+    visualization = (
+        widget.get("visualization")
+        if isinstance(widget.get("visualization"), dict)
+        else {}
+    )
+    visualization_type = str(
+        visualization.get("type")
+        or config.get("visualization")
+        or "table"
+    ).lower()
+    if widget_type == "timeseries":
+        default_width, default_height, min_width, min_height = 6, 8, 5, 6
+    elif widget_type == "top_n" and config.get("dimension") == "conversation":
+        default_width, default_height, min_width, min_height = 6, 8, 5, 6
+    elif widget_type == "top_n" and visualization_type in {
+        "pie",
+        "donut",
+        "horizontal_bar",
+        "bar",
+    }:
+        default_width, default_height, min_width, min_height = 4, 6, 3, 5
+    elif widget_type == "top_n":
+        default_width, default_height, min_width, min_height = 4, 7, 3, 5
+    elif widget_type == "recent_events":
+        default_width, default_height, min_width, min_height = 12, 7, 6, 5
+    elif widget_type == "status_list":
+        default_width, default_height, min_width, min_height = 4, 5, 3, 4
+    elif widget_type == "kpi":
+        default_width, default_height, min_width, min_height = 3, 3, 2, 2
+    else:
+        default_width, default_height, min_width, min_height = 4, 5, 3, 4
+    if bool(widget.get("collapsed")):
+        default_height = COLLAPSED_GRID_HEIGHT
+        min_height = COLLAPSED_GRID_HEIGHT
+        max_height = COLLAPSED_GRID_HEIGHT
+    else:
+        max_height = 12
+    return {
+        "columns": DASHBOARD_GRID_COLUMNS,
+        "default_w": default_width,
+        "default_h": default_height,
+        "min_w": min_width,
+        "min_h": min_height,
+        "max_w": DASHBOARD_GRID_COLUMNS,
+        "max_h": max_height,
+    }
 
-    def overlaps(left: dict[str, int], right: dict[str, int]) -> bool:
-        return not (
-            left["x"] + left["w"] <= right["x"]
-            or right["x"] + right["w"] <= left["x"]
-            or left["y"] + left["h"] <= right["y"]
-            or right["y"] + right["h"] <= left["y"]
-        )
 
-    attempts = 0
-    while any(overlaps(resolved, normalize_grid(item)) for item in occupied):
-        resolved["y"] += 1
-        attempts += 1
-        if attempts > 10000:
-            raise ValueError("não foi possível posicionar o widget")
-    return resolved
+def normalize_widget_grid(
+    widget: dict[str, Any],
+    grid: Any | None = None,
+) -> dict[str, int]:
+    source = grid if isinstance(grid, dict) else {}
+    normalized = normalize_grid_item(
+        {
+            "x": source.get("x", 0),
+            "y": source.get("y", 0),
+            "w": source.get("w"),
+            "h": source.get("h"),
+        },
+        widget_layout_constraints(widget),
+    )
+    return {
+        "x": normalized["x"],
+        "y": normalized["y"],
+        "w": normalized["w"],
+        "h": normalized["h"],
+    }
 
 
 def validate_inheritance(value: Any) -> dict[str, dict[str, Any]]:
@@ -797,18 +871,23 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
     refresh = int(payload.get("refresh_interval_seconds", 30) or 0)
     if refresh not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("intervalo de atualização inválido")
-    grid = normalize_grid(payload.get("grid"))
-    minimums = {
-        "timeseries": (4, 3),
-        "top_n": (3, 3),
-        "recent_events": (4, 3),
-        "status_list": (3, 3),
-        "kpi": (2, 2),
-    }
-    minimum_width, minimum_height = minimums.get(widget_type, (2, 2))
-    grid["w"] = max(minimum_width, grid["w"])
-    grid["x"] = min(grid["x"], DASHBOARD_GRID_COLUMNS - grid["w"])
-    grid["h"] = max(minimum_height, grid["h"])
+    collapsed = _bool(payload.get("collapsed"))
+    height_mode = str(payload.get("height_mode") or "fixed").strip().lower()
+    if height_mode not in {"fixed", "auto"}:
+        raise ValueError("height_mode inválido")
+    normalized_visualization = dict(
+        visualization,
+        type=visualization_type,
+    )
+    grid = normalize_widget_grid(
+        {
+            "type": widget_type,
+            "config": config,
+            "visualization": normalized_visualization,
+            "collapsed": collapsed,
+        },
+        payload.get("grid"),
+    )
     normalized.update(
         {
             "title": title,
@@ -817,10 +896,11 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
             "category": category,
             "config": config,
             "filters": validate_filters(payload.get("filters")),
-            "visualization": dict(visualization, type=visualization_type),
+            "visualization": normalized_visualization,
             "grid": grid,
-            "collapsed": _bool(payload.get("collapsed")),
+            "collapsed": collapsed,
             "hidden": _bool(payload.get("hidden")),
+            "height_mode": height_mode,
             "refresh_interval_seconds": refresh,
             "use_global_filters": _bool(payload.get("use_global_filters", True)),
             "use_global_time_range": _bool(payload.get("use_global_time_range", True)),
@@ -896,8 +976,11 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
             grid_y INTEGER NOT NULL DEFAULT 0,
             grid_w INTEGER NOT NULL DEFAULT 4,
             grid_h INTEGER NOT NULL DEFAULT 4,
+            expanded_grid_h INTEGER,
+            collapsed_grid_h INTEGER NOT NULL DEFAULT 2,
             collapsed INTEGER NOT NULL DEFAULT 0,
             hidden INTEGER NOT NULL DEFAULT 0,
+            height_mode TEXT NOT NULL DEFAULT 'fixed',
             refresh_interval_seconds INTEGER NOT NULL DEFAULT 30,
             use_global_filters INTEGER NOT NULL DEFAULT 1,
             use_global_time_range INTEGER NOT NULL DEFAULT 1,
@@ -930,6 +1013,24 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
         "inheritance_json",
         "inheritance_json TEXT NOT NULL DEFAULT '{}'",
     )
+    _ensure_column(
+        conn,
+        "dashboard_widgets",
+        "expanded_grid_h",
+        "expanded_grid_h INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "dashboard_widgets",
+        "collapsed_grid_h",
+        "collapsed_grid_h INTEGER NOT NULL DEFAULT 2",
+    )
+    _ensure_column(
+        conn,
+        "dashboard_widgets",
+        "height_mode",
+        "height_mode TEXT NOT NULL DEFAULT 'fixed'",
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboards_owner ON dashboards(owner_user_id, is_default)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboards_visible ON dashboards(is_system, is_shared)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_dashboards_updated ON dashboards(updated_at)")
@@ -950,10 +1051,11 @@ def insert_widget(conn: sqlite3.Connection, dashboard_id: int, widget: dict[str,
         INSERT INTO dashboard_widgets (
             dashboard_id, widget_key, type, title, description, category,
             config_json, filters_json, visualization_json,
-            grid_x, grid_y, grid_w, grid_h, collapsed, hidden,
+            grid_x, grid_y, grid_w, grid_h,
+            expanded_grid_h, collapsed_grid_h, collapsed, hidden, height_mode,
             refresh_interval_seconds, use_global_filters, use_global_time_range,
             inheritance_json, custom_time_range_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             dashboard_id,
@@ -969,8 +1071,11 @@ def insert_widget(conn: sqlite3.Connection, dashboard_id: int, widget: dict[str,
             normalized["grid"]["y"],
             normalized["grid"]["w"],
             normalized["grid"]["h"],
+            None,
+            COLLAPSED_GRID_HEIGHT,
             int(normalized["collapsed"]),
             int(normalized["hidden"]),
+            normalized["height_mode"],
             normalized["refresh_interval_seconds"],
             int(normalized["use_global_filters"]),
             int(normalized["use_global_time_range"]),
@@ -1026,8 +1131,15 @@ def widget_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "filters": _json_loads(row["filters_json"], []),
         "visualization": _json_loads(row["visualization_json"], {}),
         "grid": {"x": int(row["grid_x"]), "y": int(row["grid_y"]), "w": int(row["grid_w"]), "h": int(row["grid_h"])},
+        "expanded_grid_h": (
+            int(row["expanded_grid_h"])
+            if row["expanded_grid_h"] is not None
+            else None
+        ),
+        "collapsed_grid_h": int(row["collapsed_grid_h"] or COLLAPSED_GRID_HEIGHT),
         "collapsed": _bool(row["collapsed"]),
         "hidden": _bool(row["hidden"]),
+        "height_mode": str(row["height_mode"] or "fixed"),
         "refresh_interval_seconds": int(row["refresh_interval_seconds"]),
         "use_global_filters": _bool(row["use_global_filters"]),
         "use_global_time_range": _bool(row["use_global_time_range"]),
@@ -1064,10 +1176,154 @@ def dashboard_row_to_dict(
     return result
 
 
-def get_dashboard(conn: sqlite3.Connection, dashboard_id: int) -> dict[str, Any] | None:
+def repair_dashboard_widgets(
+    conn: sqlite3.Connection,
+    dashboard_id: int,
+    priority_widget_id: int | None = None,
+) -> bool:
+    dashboard_row = conn.execute(
+        "SELECT layout_version FROM dashboards WHERE id = ?",
+        (dashboard_id,),
+    ).fetchone()
+    schema_outdated = bool(
+        dashboard_row is not None
+        and int(dashboard_row["layout_version"] or 0)
+        < DASHBOARD_SCHEMA_VERSION
+    )
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM dashboard_widgets
+        WHERE dashboard_id = ?
+        ORDER BY grid_y, grid_x, id
+        """,
+        (dashboard_id,),
+    ).fetchall()
+    if not rows:
+        if schema_outdated:
+            conn.execute(
+                """
+                UPDATE dashboards
+                SET layout_version = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (DASHBOARD_SCHEMA_VERSION, _utc_now(), dashboard_id),
+            )
+        return schema_outdated
+    widgets = [widget_row_to_dict(row) for row in rows]
+    items = []
+    expanded_heights: dict[int, int | None] = {}
+    for widget in widgets:
+        constraints = widget_layout_constraints(widget)
+        expanded_height = widget.get("expanded_grid_h")
+        grid = dict(widget["grid"])
+        if widget.get("collapsed"):
+            if expanded_height is None:
+                expanded_height = max(
+                    int(grid["h"]),
+                    int(
+                        widget_layout_constraints(
+                            {**widget, "collapsed": False}
+                        )["default_h"]
+                    ),
+                )
+            grid["h"] = int(
+                widget.get("collapsed_grid_h")
+                or COLLAPSED_GRID_HEIGHT
+            )
+        expanded_heights[int(widget["id"])] = expanded_height
+        items.append(
+            {
+                "id": int(widget["id"]),
+                **grid,
+                "hidden": bool(widget.get("hidden")),
+                "min_w": constraints["min_w"],
+                "min_h": constraints["min_h"],
+                "max_w": constraints["max_w"],
+                "max_h": constraints["max_h"],
+            }
+        )
+    before = layout_signature(items)
+    repaired = repair_dashboard_layout(items, priority_widget_id)
+    validation = validate_layout(repaired)
+    if not validation["valid"]:
+        raise ValueError("; ".join(validation["errors"]))
+    repaired_by_id = {int(item["id"]): item for item in repaired}
+    changed = before != layout_signature(repaired) or schema_outdated
+    now = _utc_now()
+    for widget in widgets:
+        widget_id = int(widget["id"])
+        grid = repaired_by_id[widget_id]
+        expanded_height = expanded_heights[widget_id]
+        if (
+            widget["grid"] != {
+                "x": int(grid["x"]),
+                "y": int(grid["y"]),
+                "w": int(grid["w"]),
+                "h": int(grid["h"]),
+            }
+            or widget.get("expanded_grid_h") != expanded_height
+        ):
+            changed = True
+            conn.execute(
+                """
+                UPDATE dashboard_widgets
+                SET grid_x = ?, grid_y = ?, grid_w = ?, grid_h = ?,
+                    expanded_grid_h = ?, collapsed_grid_h = ?,
+                    updated_at = ?
+                WHERE id = ? AND dashboard_id = ?
+                """,
+                (
+                    int(grid["x"]),
+                    int(grid["y"]),
+                    int(grid["w"]),
+                    int(grid["h"]),
+                    expanded_height,
+                    int(
+                        widget.get("collapsed_grid_h")
+                        or COLLAPSED_GRID_HEIGHT
+                    ),
+                    now,
+                    widget_id,
+                    dashboard_id,
+                ),
+            )
+    if changed:
+        conn.execute(
+            """
+            UPDATE dashboards
+            SET layout_version = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (DASHBOARD_SCHEMA_VERSION, now, dashboard_id),
+        )
+        logger.info(
+            "DASHBOARD_LAYOUT_REPAIRED dashboard_id=%s priority_widget_id=%s widgets=%s",
+            dashboard_id,
+            priority_widget_id,
+            len(widgets),
+        )
+    return changed
+
+
+def get_dashboard(
+    conn: sqlite3.Connection,
+    dashboard_id: int,
+    priority_widget_id: int | None = None,
+) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM dashboards WHERE id = ?", (dashboard_id,)).fetchone()
     if row is None:
         return None
+    layout_repaired = repair_dashboard_widgets(
+        conn,
+        dashboard_id,
+        priority_widget_id,
+    )
+    if layout_repaired:
+        row = conn.execute(
+            "SELECT * FROM dashboards WHERE id = ?",
+            (dashboard_id,),
+        ).fetchone()
     widgets = [
         widget_row_to_dict(widget)
         for widget in conn.execute(
@@ -1075,7 +1331,9 @@ def get_dashboard(conn: sqlite3.Connection, dashboard_id: int) -> dict[str, Any]
             (dashboard_id,),
         ).fetchall()
     ]
-    return dashboard_row_to_dict(row, widgets)
+    result = dashboard_row_to_dict(row, widgets)
+    result["layout_repaired"] = layout_repaired
+    return result
 
 
 def create_dashboard(
