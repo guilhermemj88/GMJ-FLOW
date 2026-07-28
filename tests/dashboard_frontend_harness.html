@@ -33,10 +33,13 @@
       };
       const frontendResponse = await fetch('../frontend/index.html');
       const frontendSource = await frontendResponse.text();
-      const parsedFrontend = new DOMParser().parseFromString(
-        frontendSource,
-        'text/html'
-      );
+       const parsedFrontend = new DOMParser().parseFromString(
+         frontendSource,
+         'text/html'
+       );
+       parsedFrontend.querySelectorAll('style').forEach(style => {
+         document.head.appendChild(style.cloneNode(true));
+       });
       parsedFrontend.querySelectorAll('script:not([src])').forEach(script => {
         try {
           new Function(script.textContent);
@@ -44,8 +47,208 @@
           failures.push(`index inline syntax: ${error.message}`);
         }
       });
-      const format = GMJDashboardFormatters;
-      const timeRange = GMJDashboardTimeRange;
+       const format = GMJDashboardFormatters;
+       const timeRange = GMJDashboardTimeRange;
+       const chartHelpers = GMJDashboardCharts;
+
+       const wideLayout = chartHelpers.getWidgetResponsiveLayout(920, {
+         chartRatio: 60
+       });
+       const mediumLayout = chartHelpers.getWidgetResponsiveLayout(720, {
+         chartRatio: 60
+       });
+       const stackedLayout = chartHelpers.getWidgetResponsiveLayout(580, {
+         chartRatio: 60
+       });
+       assertEqual(wideLayout.mode, 'wide', 'wide widget layout');
+       assertEqual(wideLayout.chartRatio, 60, 'wide widget keeps configured 60/40 ratio');
+       assertEqual(mediumLayout.mode, 'medium', 'medium widget layout');
+       assertEqual(mediumLayout.chartRatio, 40, 'medium widget makes chart smaller');
+       assertEqual(stackedLayout.mode, 'stacked', 'narrow widget layout');
+       assertEqual(
+         chartHelpers.getWidgetResponsiveLayout(750, {
+           breakpoints: { stacked: 700, wide: 1000 }
+         }).mode,
+         'medium',
+         'widget breakpoints are configurable'
+       );
+
+       const responsiveFixture = document.createElement('article');
+       responsiveFixture.className = 'configurable-dashboard-widget';
+       responsiveFixture.dataset.widgetId = 'responsive-test';
+       responsiveFixture.dataset.gridW = '8';
+       responsiveFixture.dataset.gridH = '7';
+       responsiveFixture.style.cssText = 'position:absolute;left:-2000px;top:0;width:920px;height:360px';
+       responsiveFixture.innerHTML = `
+         <div class="panel p-3">
+           <div class="configurable-dashboard-widget-body" style="height:320px">
+             <div class="configurable-ranking-combined">
+               <div class="configurable-dashboard-widget-chart"></div>
+               <div class="configurable-ranking-table-pane">
+                 <div class="table-wrap">
+                   <table class="table configurable-ranking-table">
+                     <colgroup>
+                       <col class="ranking-col-position"><col class="ranking-col-item">
+                       <col class="ranking-col-value"><col class="ranking-col-percent">
+                       <col class="ranking-col-action">
+                     </colgroup>
+                     <thead><tr>
+                       <th class="ranking-cell-position">#</th>
+                       <th class="ranking-cell-item">Item</th>
+                       <th class="ranking-cell-value">bps</th>
+                       <th class="ranking-cell-percent">%</th>
+                       <th class="ranking-cell-action">Ação</th>
+                     </tr></thead>
+                     <tbody><tr>
+                       <td class="ranking-cell-position">1</td>
+                       <td class="ranking-cell-item" title="Nome completo muito longo">Nome completo muito longo</td>
+                       <td class="ranking-cell-value">1,25 Gbps</td>
+                       <td class="ranking-cell-percent">52,1%</td>
+                       <td class="ranking-cell-action">...</td>
+                     </tr></tbody>
+                   </table>
+                 </div>
+               </div>
+             </div>
+           </div>
+         </div>`;
+       document.body.appendChild(responsiveFixture);
+       const responsiveBody = responsiveFixture.querySelector(
+         '.configurable-dashboard-widget-body'
+       );
+       const responsiveCombined = responsiveFixture.querySelector(
+         '.configurable-ranking-combined'
+       );
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 920, {
+         chartRatio: 60
+       });
+       assertEqual(
+         responsiveBody.dataset.responsiveLayout,
+         'wide',
+         'wide chart and table state'
+       );
+       assert(
+         getComputedStyle(responsiveCombined).gridTemplateColumns.split(' ').length >= 2,
+         'wide chart and table are side by side'
+       );
+
+       responsiveFixture.style.width = '720px';
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 720, {
+         chartRatio: 60
+       });
+       assertEqual(
+         responsiveBody.style.getPropertyValue('--ranking-chart-ratio'),
+         '40%',
+         'medium CSS ratio is adaptive'
+       );
+
+       responsiveFixture.style.width = '580px';
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 580, {
+         chartRatio: 60
+       });
+       assertEqual(
+         responsiveBody.dataset.responsiveLayout,
+         'stacked',
+         'orientation change applies stacked state'
+       );
+       assertEqual(
+         getComputedStyle(responsiveCombined).gridTemplateColumns.split(' ').length,
+         1,
+         'narrow chart is above table'
+       );
+
+       responsiveFixture.style.width = '920px';
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 920, {
+         chartRatio: 60
+       });
+       assertEqual(
+         responsiveBody.dataset.responsiveLayout,
+         'wide',
+         'orientation change restores side-by-side state'
+       );
+       assertEqual(responsiveFixture.dataset.gridW, '8', 'responsive state preserves saved width');
+       assertEqual(responsiveFixture.dataset.gridH, '7', 'responsive state preserves saved height');
+
+       responsiveFixture.style.width = '360px';
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 360);
+       assertEqual(
+         getComputedStyle(
+           responsiveFixture.querySelector('th.ranking-cell-position')
+         ).display,
+         'none',
+         'tiny table hides position first'
+       );
+       assert(
+         getComputedStyle(
+           responsiveFixture.querySelector('th.ranking-cell-value')
+         ).display !== 'none',
+         'bps remains visible in tiny table'
+       );
+       responsiveFixture.querySelector('th.ranking-cell-value').textContent = 'pps';
+       assert(
+         getComputedStyle(
+           responsiveFixture.querySelector('th.ranking-cell-value')
+         ).display !== 'none',
+         'pps remains visible in tiny table'
+       );
+       assert(
+         getComputedStyle(
+           responsiveFixture.querySelector('th.ranking-cell-percent')
+         ).display !== 'none',
+         'percent remains visible in tiny table'
+       );
+       assertEqual(
+         getComputedStyle(
+           responsiveFixture.querySelector('.configurable-ranking-table-pane .table-wrap')
+         ).overflowX,
+         'hidden',
+         'ranking table has no horizontal overflow'
+       );
+       assert(
+         ['hidden', 'clip'].includes(getComputedStyle(responsiveFixture).overflowX),
+         'widget contains external horizontal overflow'
+       );
+
+       const wideLegend = chartHelpers.getResponsiveLegendLayout(920, 360, 'right');
+       const narrowLegend = chartHelpers.getResponsiveLegendLayout(480, 260, 'top');
+       assertEqual(wideLegend.position, 'top', 'wide legend moves to top');
+       assertEqual(narrowLegend.position, 'bottom', 'narrow legend moves below chart');
+       assertEqual(narrowLegend.type, 'scroll', 'narrow legend paginates');
+       assert(
+         narrowLegend.nameLimit < wideLegend.nameLimit,
+         'narrow legend truncates labels more aggressively'
+       );
+
+       const wideDonut = chartHelpers.getResponsivePieGeometry(600, 360, {
+         donut: true,
+         legend: wideLegend
+       });
+       const narrowDonut = chartHelpers.getResponsivePieGeometry(260, 190, {
+         donut: true,
+         legend: narrowLegend
+       });
+       assert(
+         narrowDonut.outerRadius < wideDonut.outerRadius,
+         'donut radius shrinks with available space'
+       );
+       assertEqual(wideDonut.center[0], '50%', 'wide donut remains horizontally centered');
+       assertEqual(narrowDonut.center[0], '50%', 'narrow donut remains horizontally centered');
+       assert(
+         Number.parseInt(narrowDonut.radius[1], 10) <= 56,
+         'narrow donut radius prevents clipping'
+       );
+
+       let resizeRenderCount = 0;
+       const debouncedResize = chartHelpers.debounce(() => {
+         resizeRenderCount += 1;
+       }, 20);
+       for (let width = 350; width <= 950; width += 25) {
+         chartHelpers.applyWidgetResponsiveLayout(responsiveBody, width);
+         debouncedResize();
+       }
+       await new Promise(resolve => setTimeout(resolve, 50));
+       assertEqual(resizeRenderCount, 1, 'continuous resize is debounced');
+       responsiveFixture.remove();
 
       const utcLabel = timeRange.formatUtcTimestamp(
         '2026-07-28T12:34:56Z',

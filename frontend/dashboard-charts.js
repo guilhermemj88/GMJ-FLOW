@@ -24,6 +24,11 @@
     minimum_slice_label_percent: 3
   });
   const DIRECTION_ORDER = Object.freeze(['upload', 'download']);
+  const DEFAULT_WIDGET_BREAKPOINTS = Object.freeze({
+    stacked: 600,
+    wide: 900,
+    tiny: 420
+  });
   const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
   function finiteNumber(value, fallback) {
@@ -206,6 +211,163 @@
     });
   }
 
+  function normalizeWidgetBreakpoints(value = {}) {
+    const source = value && typeof value === 'object' ? value : {};
+    const stacked = clamp(
+      finiteNumber(
+        source.stacked ?? source.stack_below ?? source.stacked_below,
+        DEFAULT_WIDGET_BREAKPOINTS.stacked
+      ),
+      320,
+      1200
+    );
+    const wide = clamp(
+      finiteNumber(
+        source.wide ?? source.wide_from ?? source.wide_min,
+        DEFAULT_WIDGET_BREAKPOINTS.wide
+      ),
+      stacked + 100,
+      1800
+    );
+    const tiny = clamp(
+      finiteNumber(
+        source.tiny ?? source.hide_secondary_below,
+        DEFAULT_WIDGET_BREAKPOINTS.tiny
+      ),
+      240,
+      stacked - 1
+    );
+    return Object.freeze({ stacked, wide, tiny });
+  }
+
+  function getWidgetResponsiveLayout(width, options = {}) {
+    const safeWidth = Math.max(0, finiteNumber(width, 0));
+    const breakpoints = normalizeWidgetBreakpoints(options.breakpoints);
+    const preferredChartRatio = clamp(
+      finiteNumber(options.chartRatio, 55),
+      25,
+      75
+    );
+    const mode = safeWidth >= breakpoints.wide
+      ? 'wide'
+      : safeWidth >= breakpoints.stacked
+        ? 'medium'
+        : 'stacked';
+    return Object.freeze({
+      mode,
+      width: safeWidth,
+      breakpoints,
+      chartRatio: mode === 'wide'
+        ? preferredChartRatio
+        : mode === 'medium'
+          ? Math.min(40, preferredChartRatio)
+          : 100,
+      tableDensity: safeWidth < breakpoints.tiny
+        ? 'tiny'
+        : safeWidth < breakpoints.stacked
+          ? 'compact'
+          : 'normal'
+    });
+  }
+
+  function applyWidgetResponsiveLayout(element, width, options = {}) {
+    const layout = getWidgetResponsiveLayout(width, options);
+    if (!element) return layout;
+    element.dataset.responsiveLayout = layout.mode;
+    element.dataset.responsiveTableDensity = layout.tableDensity;
+    element.style?.setProperty('--ranking-chart-ratio', `${layout.chartRatio}%`);
+    element.style?.setProperty(
+      '--widget-stacked-breakpoint',
+      `${layout.breakpoints.stacked}px`
+    );
+    element.style?.setProperty(
+      '--widget-wide-breakpoint',
+      `${layout.breakpoints.wide}px`
+    );
+    return layout;
+  }
+
+  function getResponsiveLegendLayout(
+    width,
+    height,
+    preferredPosition = 'top',
+    options = {}
+  ) {
+    const layout = getWidgetResponsiveLayout(width, options);
+    const safeHeight = Math.max(0, finiteNumber(height, 0));
+    const compact = layout.mode !== 'wide' || safeHeight < 280;
+    const position = layout.mode === 'wide' && safeHeight >= 220
+      ? 'top'
+      : 'bottom';
+    return Object.freeze({
+      position,
+      preferredPosition: ['top', 'bottom', 'right'].includes(preferredPosition)
+        ? preferredPosition
+        : 'top',
+      orient: 'horizontal',
+      type: 'scroll',
+      compact,
+      fontSize: compact ? 10 : 12,
+      itemWidth: compact ? 10 : 14,
+      itemHeight: compact ? 7 : 10,
+      nameLimit: layout.mode === 'wide' ? 32 : layout.mode === 'medium' ? 22 : 14,
+      top: position === 'top' ? 0 : null,
+      bottom: position === 'bottom' ? 0 : null,
+      left: 8,
+      right: 8
+    });
+  }
+
+  function getResponsivePieGeometry(width, height, options = {}) {
+    const legend = options.legend || getResponsiveLegendLayout(
+      width,
+      height,
+      options.preferredLegendPosition,
+      options
+    );
+    const safeWidth = Math.max(0, finiteNumber(width, 0));
+    const safeHeight = Math.max(0, finiteNumber(height, 0));
+    const layout = getWidgetResponsiveLayout(safeWidth, options);
+    let outerRadius = layout.mode === 'wide' ? 68 : layout.mode === 'medium' ? 62 : 56;
+    if (safeHeight < 260) outerRadius -= 6;
+    if (safeHeight < 190 || safeWidth < 240) outerRadius -= 6;
+    outerRadius = clamp(outerRadius, 38, 68);
+    const innerRadius = options.donut === false
+      ? 0
+      : Math.round(outerRadius * 0.58);
+    return Object.freeze({
+      radius: options.donut === false
+        ? `${outerRadius}%`
+        : [`${innerRadius}%`, `${outerRadius}%`],
+      center: [
+        '50%',
+        legend.position === 'top' ? '56%' : legend.position === 'bottom' ? '44%' : '50%'
+      ],
+      outerRadius,
+      innerRadius,
+      labelWidth: Math.max(52, Math.floor(safeWidth * (layout.mode === 'wide' ? 0.22 : 0.3))),
+      labelFontSize: layout.mode === 'wide' ? 12 : layout.mode === 'medium' ? 11 : 10,
+      showOutsideLabels: layout.mode === 'wide' && safeHeight >= 280
+    });
+  }
+
+  function debounce(callback, wait = 60) {
+    let timer = null;
+    const delay = Math.max(0, finiteNumber(wait, 60));
+    const debounced = function debouncedCallback(...args) {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        callback.apply(this, args);
+      }, delay);
+    };
+    debounced.cancel = () => {
+      clearTimeout(timer);
+      timer = null;
+    };
+    return debounced;
+  }
+
   function truncateCategory(value, maximum = 24) {
     const text = String(value ?? '');
     const limit = Math.max(4, Math.trunc(finiteNumber(maximum, 24)));
@@ -223,12 +385,19 @@
 
   return Object.freeze({
     DEFAULT_APPEARANCE,
+    DEFAULT_WIDGET_BREAKPOINTS,
     DIRECTION_ORDER,
     normalizeAppearance,
     canonicalMetric,
     consolidateDirectionSeries,
     getChartDensityMode,
     densitySettings,
+    normalizeWidgetBreakpoints,
+    getWidgetResponsiveLayout,
+    applyWidgetResponsiveLayout,
+    getResponsiveLegendLayout,
+    getResponsivePieGeometry,
+    debounce,
     truncateCategory,
     replaceChartOption
   });

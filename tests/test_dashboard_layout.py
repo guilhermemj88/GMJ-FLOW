@@ -416,6 +416,48 @@ class DashboardLayoutPersistenceTest(unittest.TestCase):
                 active_widget_id=stale[0]["id"],
             )
 
+    def test_resized_widget_size_persists_after_dashboard_refresh(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Persistência responsiva",
+                "is_default": False,
+                "is_shared": False,
+                "refresh_interval_seconds": 30,
+            },
+            1,
+            widgets=copy.deepcopy(GENERAL_WIDGETS[:2]),
+        )
+        layout = [
+            {"id": item["id"], "grid": dict(item["grid"])}
+            for item in dashboard["widgets"]
+        ]
+        resized_id = layout[0]["id"]
+        layout[0]["grid"].update({"w": 9, "h": 10})
+        persisted = persist_dashboard_layout(
+            self.conn,
+            dashboard["id"],
+            layout,
+            layout_version=dashboard["layout_version"],
+            active_widget_id=resized_id,
+            idempotency_key="responsive-refresh-size",
+        )
+        self.conn.commit()
+
+        refreshed = get_dashboard(self.conn, dashboard["id"])
+        refreshed_grid = next(
+            item["grid"]
+            for item in refreshed["widgets"]
+            if item["id"] == resized_id
+        )
+        persisted_grid = next(
+            item["grid"]
+            for item in persisted["widgets"]
+            if item["id"] == resized_id
+        )
+        self.assertEqual(refreshed_grid["w"], persisted_grid["w"])
+        self.assertEqual(refreshed_grid["h"], persisted_grid["h"])
+
     def test_custom_layout_preserves_free_slots_and_echoes_interaction(self):
         dashboard = create_dashboard(
             self.conn,

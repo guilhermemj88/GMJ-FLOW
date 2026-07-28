@@ -2356,11 +2356,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 0;
       flex: 1 1 auto;
       overflow: hidden;
+      overflow: clip;
     }
 
     .configurable-dashboard-widget-body .table-wrap,
     .configurable-dashboard-widget-body .widget-scroll-list {
       width: 100%;
+      max-width: 100%;
       height: 100%;
       min-height: 0;
       overflow: auto;
@@ -2388,16 +2390,98 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         minmax(0, var(--ranking-chart-ratio, 55%))
         minmax(0, 1fr);
       gap: 12px;
+      align-items: stretch;
       width: 100%;
+      max-width: 100%;
       height: 100%;
       min-height: 0;
       min-width: 0;
+      overflow: hidden;
     }
 
     .configurable-ranking-combined > * {
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .configurable-ranking-table-pane,
+    .configurable-ranking-table-pane .table-wrap {
+      width: 100%;
+      max-width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .configurable-ranking-table-pane .table-wrap {
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    .configurable-ranking-table {
+      width: 100%;
+      max-width: 100%;
+      table-layout: fixed;
+    }
+
+    .configurable-ranking-table .ranking-col-position {
+      width: 2.25rem;
+    }
+
+    .configurable-ranking-table .ranking-col-value {
+      width: 6.5rem;
+    }
+
+    .configurable-ranking-table .ranking-col-percent {
+      width: 4.25rem;
+    }
+
+    .configurable-ranking-table .ranking-col-action {
+      width: 2.65rem;
+    }
+
+    .configurable-ranking-table th,
+    .configurable-ranking-table td {
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+    }
+
+    .configurable-ranking-table .ranking-cell-position,
+    .configurable-ranking-table .ranking-cell-value,
+    .configurable-ranking-table .ranking-cell-percent,
+    .configurable-ranking-table .ranking-cell-action {
+      white-space: nowrap;
+    }
+
+    .configurable-ranking-table .ranking-cell-value,
+    .configurable-ranking-table .ranking-cell-percent {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .configurable-ranking-table .ranking-cell-action {
+      padding-right: .2rem;
+      padding-left: .2rem;
+      text-align: center;
+    }
+
+    .configurable-ranking-table .ranking-cell-item,
+    .configurable-ranking-table .ranking-item-content,
+    .configurable-ranking-table .ranking-secondary-line {
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .configurable-ranking-table .ranking-item-content,
+    .configurable-ranking-table .ranking-secondary-line {
+      display: block;
+      white-space: nowrap;
     }
 
     .configurable-ranking-row.is-selected > td {
@@ -2412,18 +2496,53 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       gap: .35rem;
     }
 
-    .ranking-identity-name {
-      max-width: 240px;
+    .ranking-identity > .ip-link,
+    .ranking-identity > .asn-link {
+      min-width: 0;
+      max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    @media (max-width: 820px) {
+    .ranking-identity-name {
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-layout="stacked"]
       .configurable-ranking-combined {
-        grid-template-columns: 1fr;
-        grid-template-rows: minmax(180px, 45%) minmax(0, 1fr);
-      }
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(110px, 45%) minmax(0, 1fr);
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-table-density="compact"]
+      .configurable-ranking-table .ranking-col-value,
+    .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
+      .configurable-ranking-table .ranking-col-value {
+      width: 5.75rem;
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-table-density="compact"]
+      .configurable-ranking-table .ranking-col-percent,
+    .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
+      .configurable-ranking-table .ranking-col-percent {
+      width: 3.75rem;
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
+      .configurable-ranking-table .ranking-cell-position,
+    .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
+      .configurable-ranking-table th.ranking-cell-position {
+      display: none;
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
+      .configurable-ranking-table .ranking-col-position {
+      width: 0;
     }
 
     .configurable-dashboard-widget-chart.chart-size-insufficient::after {
@@ -2448,6 +2567,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     .configurable-dashboard-widget canvas,
     .configurable-dashboard-widget svg {
+      display: block;
       max-width: 100% !important;
       max-height: 100% !important;
       overflow: hidden;
@@ -7501,6 +7621,14 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <option value="auto">Automática (conteúdo textual)</option>
               </select>
             </div>
+            <div class="field">
+              <label for="widgetConfigStackedBreakpoint">Empilhar abaixo de (px)</label>
+              <input id="widgetConfigStackedBreakpoint" type="number" min="320" max="1200" value="600" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigWideBreakpoint">Layout largo a partir de (px)</label>
+              <input id="widgetConfigWideBreakpoint" type="number" min="420" max="1800" value="900" class="form-control form-control-sm">
+            </div>
             <div class="field grid-span-2">
               <label for="widgetConfigDescription">Descrição</label>
               <input id="widgetConfigDescription" class="form-control form-control-sm" maxlength="500">
@@ -8683,6 +8811,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
+    const configurableWidgetChartResponsiveContexts = new Map();
     const configurableWidgetResizeObservers = new Map();
     const configurableWidgetChartResizeFrames = new Map();
     const configurableWidgetAutoHeightTimers = new Map();
@@ -19305,6 +19434,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function disposeConfigurableWidgetCharts() {
       configurableWidgetCharts.forEach(chart => chart.dispose());
       configurableWidgetCharts.clear();
+      configurableWidgetChartResponsiveContexts.clear();
       configurableWidgetResizeObservers.forEach(observer => observer.disconnect());
       configurableWidgetResizeObservers.clear();
       configurableWidgetChartResizeFrames.forEach(frame => cancelAnimationFrame(frame));
@@ -19313,115 +19443,284 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetAutoHeightTimers.clear();
     }
 
+    function configurableWidgetResponsiveOptions(widget = {}) {
+      return {
+        breakpoints: widget.config?.responsive_breakpoints,
+        chartRatio: Number(widget.config?.chart_table_ratio || 55)
+      };
+    }
+
+    function applyConfigurableWidgetResponsiveLayout(widget, body, width = null) {
+      if (!body) return null;
+      const widgetElement = body.closest('.configurable-dashboard-widget');
+      const measuredWidth = width !== null
+        && width !== undefined
+        && width !== ''
+        && Number.isFinite(Number(width))
+        ? Number(width)
+        : (widgetElement || body).getBoundingClientRect().width;
+      return GMJDashboardCharts.applyWidgetResponsiveLayout(
+        body,
+        measuredWidth,
+        configurableWidgetResponsiveOptions(widget)
+      );
+    }
+
+    function configurableResponsiveLegendOption(
+      widget,
+      bounds,
+      appearance,
+      context = {},
+      containerWidth = bounds.width
+    ) {
+      const layout = GMJDashboardCharts.getResponsiveLegendLayout(
+        containerWidth,
+        bounds.height,
+        appearance.legend_position,
+        configurableWidgetResponsiveOptions(widget)
+      );
+      const labelForName = typeof context.legendLabel === 'function'
+        ? context.legendLabel
+        : name => String(name || '');
+      return {
+        layout,
+        option: {
+          show: context.showLegend !== false && appearance.show_legend,
+          type: layout.type,
+          top: layout.top,
+          bottom: layout.bottom,
+          left: layout.left,
+          right: layout.right,
+          orient: layout.orient,
+          itemWidth: layout.itemWidth,
+          itemHeight: layout.itemHeight,
+          formatter: name => GMJDashboardCharts.truncateCategory(
+            labelForName(name),
+            layout.nameLimit
+          ),
+          tooltip: {
+            show: true,
+            formatter: params => escapeHtml(labelForName(params?.name || params))
+          },
+          pageTextStyle: {
+            color: getComputedStyle(document.documentElement)
+              .getPropertyValue('--text-secondary')
+              .trim()
+          },
+          textStyle: {
+            fontSize: layout.fontSize,
+            color: getComputedStyle(document.documentElement)
+              .getPropertyValue('--text-primary')
+              .trim(),
+            opacity: 1
+          }
+        }
+      };
+    }
+
+    function updateConfigurableChartResponsiveness(widget, body, chart) {
+      if (!body || !chart || chart.isDisposed?.()) return;
+      applyConfigurableWidgetResponsiveLayout(widget, body);
+      const chartElement = body.querySelector('.configurable-dashboard-widget-chart');
+      if (!chartElement) return;
+      const bounds = chartElement.getBoundingClientRect();
+      chartElement.classList.toggle(
+        'chart-size-insufficient',
+        bounds.width < 170 || bounds.height < 120
+      );
+      if (bounds.width < 1 || bounds.height < 1) return;
+      chart.resize();
+      const appearance = GMJDashboardCharts.normalizeAppearance(
+        widget.config?.appearance
+      );
+      const densityMode = GMJDashboardCharts.getChartDensityMode(
+        bounds.width,
+        bounds.height,
+        appearance.axis_label_density
+      );
+      const density = GMJDashboardCharts.densitySettings(densityMode);
+      const context = configurableWidgetChartResponsiveContexts.get(widget.id) || {};
+      const widgetWidth = (
+        body.closest('.configurable-dashboard-widget') || body
+      ).getBoundingClientRect().width;
+      const responsiveLegend = configurableResponsiveLegendOption(
+        widget,
+        bounds,
+        appearance,
+        context,
+        widgetWidth
+      );
+      const responsiveOption = {
+        legend: responsiveLegend.option
+      };
+      if (widget.type === 'timeseries') {
+        const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
+        const legendVisible = responsiveLegend.option.show;
+        responsiveOption.grid = {
+          left: 12,
+          right: 18,
+          top: legendVisible && responsiveLegend.layout.position === 'top' ? 38 : 12,
+          bottom: legendVisible && responsiveLegend.layout.position === 'bottom' ? 42 : 28,
+          containLabel: true
+        };
+        responsiveOption.xAxis = {
+          splitNumber: density.splitNumber,
+          axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+        };
+        responsiveOption.yAxis = {
+          splitNumber: density.splitNumber,
+          axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+        };
+        responsiveOption.series = Array.from({ length: seriesCount }, () => ({
+          clip: true,
+          label: {
+            show: appearance.show_point_labels && density.showPointLabels,
+            hideOverlap: true,
+            width: Math.max(52, Math.floor(bounds.width * 0.16)),
+            overflow: 'truncate',
+            fontSize: density.fontSize
+          },
+          labelLayout: { hideOverlap: true, moveOverlap: 'shiftX' }
+        }));
+      } else {
+        const visualization = configurableChartKind(widget);
+        if (['donut', 'pie'].includes(visualization)) {
+          const geometry = GMJDashboardCharts.getResponsivePieGeometry(
+            bounds.width,
+            bounds.height,
+            {
+              ...configurableWidgetResponsiveOptions(widget),
+              donut: visualization === 'donut',
+              legend: responsiveLegend.layout
+            }
+          );
+          const showLabels = appearance.show_value_labels
+            && densityMode !== 'compact'
+            && bounds.width >= 260
+            && bounds.height >= 180;
+          responsiveOption.title = visualization === 'donut'
+            ? {
+              left: 'center',
+              top: `${Number.parseFloat(geometry.center[1]) - 8}%`,
+              textStyle: {
+                fontSize: Math.max(12, Math.min(16, geometry.labelFontSize + 3)),
+                color: getComputedStyle(document.documentElement)
+                  .getPropertyValue('--text-primary')
+                  .trim(),
+                opacity: 1
+              },
+              subtextStyle: {
+                fontSize: Math.max(10, geometry.labelFontSize - 1),
+                color: getComputedStyle(document.documentElement)
+                  .getPropertyValue('--text-secondary')
+                  .trim(),
+                opacity: 1
+              }
+            }
+            : { show: false };
+          responsiveOption.series = [{
+            radius: geometry.radius,
+            center: geometry.center,
+            avoidLabelOverlap: true,
+            label: {
+              show: showLabels,
+              position: geometry.showOutsideLabels ? 'outside' : 'inside',
+              alignTo: geometry.showOutsideLabels ? 'edge' : undefined,
+              edgeDistance: geometry.showOutsideLabels ? 6 : undefined,
+              bleedMargin: 4,
+              width: geometry.labelWidth,
+              overflow: 'truncate',
+              fontSize: geometry.labelFontSize,
+              opacity: 1,
+              color: geometry.showOutsideLabels
+                ? getComputedStyle(document.documentElement)
+                  .getPropertyValue('--text-primary')
+                  .trim()
+                : '#ffffff',
+              textBorderColor: geometry.showOutsideLabels
+                ? 'transparent'
+                : 'rgba(15, 23, 42, .88)',
+              textBorderWidth: geometry.showOutsideLabels ? 0 : 2
+            },
+            labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' }
+          }];
+        } else {
+          const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
+          responsiveOption.grid = {
+            left: 12,
+            right: 18,
+            top: 12,
+            bottom: 18,
+            containLabel: true
+          };
+          responsiveOption.xAxis = {
+            splitNumber: density.splitNumber,
+            axisLabel: {
+              hideOverlap: true,
+              rotate: horizontal || densityMode !== 'compact' ? 0 : 35,
+              fontSize: density.fontSize
+            }
+          };
+          responsiveOption.yAxis = {
+            splitNumber: density.splitNumber,
+            axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+          };
+          responsiveOption.series = [{
+            clip: true,
+            label: {
+              show: appearance.show_value_labels && densityMode !== 'compact',
+              hideOverlap: true,
+              position: horizontal ? 'insideRight' : 'insideTop',
+              width: Math.max(52, Math.floor(bounds.width * 0.18)),
+              overflow: 'truncate',
+              fontSize: density.fontSize,
+              color: '#ffffff',
+              opacity: 1,
+              textBorderColor: 'rgba(15, 23, 42, .88)',
+              textBorderWidth: 2
+            },
+            labelLayout: { hideOverlap: true, moveOverlap: 'shiftX' }
+          }];
+        }
+      }
+      chart.setOption(responsiveOption, { notMerge: false, lazyUpdate: true });
+    }
+
     function observeConfigurableWidgetSize(widget, body) {
       configurableWidgetResizeObservers.get(widget.id)?.disconnect();
-      if (!('ResizeObserver' in window) || !body) return;
-      let resizeTimer = null;
-      const observer = new ResizeObserver(() => {
-        clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => {
-          const chart = configurableWidgetCharts.get(widget.id);
-          chart?.resize();
-          const chartElement = body.querySelector('.configurable-dashboard-widget-chart');
-          if (chart && chartElement) {
-            const bounds = chartElement.getBoundingClientRect();
-            const appearance = GMJDashboardCharts.normalizeAppearance(
-              widget.config?.appearance
-            );
-            const densityMode = GMJDashboardCharts.getChartDensityMode(
-              bounds.width,
-              bounds.height,
-              appearance.axis_label_density
-            );
-            const density = GMJDashboardCharts.densitySettings(densityMode);
-            const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
-            const visualization = configurableChartKind(widget);
-            chartElement.classList.toggle(
-              'chart-size-insufficient',
-              bounds.width < 170 || bounds.height < 120
-            );
-            const responsiveOption = {
-              legend: { textStyle: { fontSize: density.fontSize } }
-            };
-            if (widget.type === 'timeseries') {
-              responsiveOption.xAxis = {
-                splitNumber: density.splitNumber,
-                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
-              };
-              responsiveOption.yAxis = {
-                splitNumber: density.splitNumber,
-                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
-              };
-              responsiveOption.series = Array.from({ length: seriesCount }, () => ({
-                label: {
-                  show: appearance.show_point_labels && density.showPointLabels,
-                  hideOverlap: true
-                }
-              }));
-            } else if (['donut', 'pie'].includes(visualization)) {
-              responsiveOption.series = [{
-                label: {
-                  show: appearance.show_value_labels && densityMode === 'detailed'
-                },
-                labelLayout: { hideOverlap: true }
-              }];
-            } else {
-              const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
-              responsiveOption.xAxis = {
-                splitNumber: density.splitNumber,
-                axisLabel: {
-                  hideOverlap: true,
-                  rotate: horizontal || densityMode !== 'compact' ? 0 : 35,
-                  fontSize: density.fontSize
-                }
-              };
-              responsiveOption.yAxis = {
-                splitNumber: density.splitNumber,
-                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
-              };
-              responsiveOption.series = [{
-                label: {
-                  show: appearance.show_value_labels && densityMode !== 'compact',
-                  hideOverlap: true
-                }
-              }];
-            }
-            chart.setOption(responsiveOption, { notMerge: false, lazyUpdate: true });
-          }
-          const graphWidget = widget.type === 'timeseries'
-            || (
-              widget.type === 'top_n'
-              && ['vertical_bar', 'horizontal_bar', 'bar_gauge', 'pie', 'donut']
-                .includes(GMJDashboardVisualizations.visualizationKind(widget))
-            );
-          if (
-            widget.height_mode !== 'auto'
-            || graphWidget
-            || widget.type === 'top_n'
-            || widget.collapsed
-            || widget.hidden
-            || body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')
-          ) return;
-          const constraints = configurableWidgetLayoutConstraints(widget);
-          const requiredHeight = Math.max(
-            constraints.min_h,
-            Math.min(
-              constraints.max_h,
-              GMJDashboardLayout.requiredGridHeight(body.scrollHeight)
-            )
-          );
-          if (requiredHeight === Number(widget.grid?.h || 0)) return;
-          clearTimeout(configurableWidgetAutoHeightTimers.get(widget.id));
-          const autoTimer = setTimeout(() => {
-            patchConfigurableWidget(widget, {
-              grid: { ...widget.grid, h: requiredHeight }
-            }).catch(console.error);
-          }, 350);
-          configurableWidgetAutoHeightTimers.set(widget.id, autoTimer);
-        }, 60);
+      if (!body) return;
+      applyConfigurableWidgetResponsiveLayout(widget, body);
+      if (!('ResizeObserver' in window)) {
+        updateConfigurableChartResponsiveness(
+          widget,
+          body,
+          configurableWidgetCharts.get(widget.id)
+        );
+        return;
+      }
+      const handleResize = GMJDashboardCharts.debounce(() => {
+        updateConfigurableChartResponsiveness(
+          widget,
+          body,
+          configurableWidgetCharts.get(widget.id)
+        );
+      }, 60);
+      const observer = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1];
+        applyConfigurableWidgetResponsiveLayout(
+          widget,
+          body,
+          entry?.contentRect?.width
+        );
+        handleResize();
       });
-      observer.observe(body);
-      configurableWidgetResizeObservers.set(widget.id, observer);
+      observer.observe(body.closest('.configurable-dashboard-widget') || body);
+      configurableWidgetResizeObservers.set(widget.id, {
+        disconnect() {
+          handleResize.cancel();
+          observer.disconnect();
+        }
+      });
     }
 
     function configurableAppearanceFromForm() {
@@ -19492,6 +19791,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         throw new Error('Overrides precisam ser uma lista JSON.');
       }
       const visualizationKind = document.getElementById('widgetConfigVisualization').value || 'table';
+      const responsiveBreakpoints = GMJDashboardCharts.normalizeWidgetBreakpoints({
+        stacked: document.getElementById('widgetConfigStackedBreakpoint').value,
+        wide: document.getElementById('widgetConfigWideBreakpoint').value,
+        tiny: editingWidget?.config?.responsive_breakpoints?.tiny
+      });
       const existingFieldDefaults = (
         editingWidget?.config?.field_config?.defaults
         && typeof editingWidget.config.field_config.defaults === 'object'
@@ -19509,6 +19813,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         traffic_orientation: document.getElementById('widgetConfigTrafficOrientation').value || 'positive_both',
         axis_show_negative_sign: document.getElementById('widgetConfigAxisNegativeSign').value === 'true',
         comparison_mode: document.getElementById('widgetConfigComparison').value || 'none',
+        responsive_breakpoints: responsiveBreakpoints,
         appearance,
         field_config: {
           defaults: {
@@ -19844,6 +20149,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('widgetConfigWidth').value = item.grid?.w || 4;
       document.getElementById('widgetConfigHeight').value = item.grid?.h || 4;
       document.getElementById('widgetConfigHeightMode').value = item.height_mode || 'fixed';
+      const responsiveBreakpoints = GMJDashboardCharts.normalizeWidgetBreakpoints(
+        item.config?.responsive_breakpoints
+      );
+      document.getElementById('widgetConfigStackedBreakpoint').value =
+        responsiveBreakpoints.stacked;
+      document.getElementById('widgetConfigWideBreakpoint').value =
+        responsiveBreakpoints.wide;
       document.getElementById('widgetConfigGlobalRange').value = String(item.use_global_time_range !== false);
       document.getElementById('widgetConfigGlobalFilters').value = String(item.use_global_filters !== false);
       document.getElementById('widgetConfigCustomRangeMinutes').value = Number(item.custom_time_range?.minutes || 10);
@@ -20023,17 +20335,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (metadata.entity_kind === 'ip' || metadata.ip) {
         const asnName = metadata.as_name || metadata.org_name || '';
         return `
-          <div class="ranking-identity">
+          <div class="ranking-identity" title="${escapeHtml(label)}">
             ${ipLink(metadata.ip || item.key)}
           </div>
-          <div class="subtle">${metadata.asn ? asnLink(metadata.asn, asnName) : 'ASN resolvendo…'}${metadata.country ? ` · ${escapeHtml(metadata.country)}` : ''}</div>
-          ${metadata.prefix ? `<div class="subtle">${escapeHtml(metadata.prefix)}</div>` : ''}
+          <div class="subtle ranking-secondary-line" title="${escapeHtml([asnName, metadata.country].filter(Boolean).join(' · ') || 'ASN resolvendo…')}">${metadata.asn ? asnLink(metadata.asn, asnName) : 'ASN resolvendo…'}${metadata.country ? ` · ${escapeHtml(metadata.country)}` : ''}</div>
+          ${metadata.prefix ? `<div class="subtle ranking-secondary-line" title="${escapeHtml(metadata.prefix)}">${escapeHtml(metadata.prefix)}</div>` : ''}
         `;
       }
       if (metadata.entity_kind === 'asn' || metadata.asn) {
-        return `${asnLink(metadata.asn || item.key, metadata.as_name || metadata.org_name || '')}${metadata.country ? `<div class="subtle">${escapeHtml(metadata.country)}</div>` : ''}`;
+        return `<div class="ranking-item-content">${asnLink(metadata.asn || item.key, metadata.as_name || metadata.org_name || '')}</div>${metadata.country ? `<div class="subtle ranking-secondary-line" title="${escapeHtml(metadata.country)}">${escapeHtml(metadata.country)}</div>` : ''}`;
       }
-      return escapeHtml(label);
+      return `<span class="ranking-item-content" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
     }
 
     async function enrichConfigurableRankingAsns(root, payload, resolveMissing = true) {
@@ -20094,16 +20406,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const rows = Array.isArray(normalized.items) ? normalized.items : [];
       return `
         <div class="table-wrap">
-          <table class="table table-sm align-middle mb-0">
-            <thead><tr><th>#</th><th>Item</th><th class="text-end">${escapeHtml(metric)}</th><th class="text-end">%</th><th></th></tr></thead>
+          <table class="table table-sm align-middle mb-0 configurable-ranking-table">
+            <colgroup>
+              <col class="ranking-col-position">
+              <col class="ranking-col-item">
+              <col class="ranking-col-value">
+              <col class="ranking-col-percent">
+              <col class="ranking-col-action">
+            </colgroup>
+            <thead><tr><th class="ranking-cell-position">#</th><th class="ranking-cell-item">Item</th><th class="text-end ranking-cell-value">${escapeHtml(metric)}</th><th class="text-end ranking-cell-percent">%</th><th class="ranking-cell-action"><span class="visually-hidden">Investigar</span></th></tr></thead>
             <tbody>
               ${rows.map((item, index) => `
                 <tr class="configurable-ranking-row" data-ranking-key="${escapeHtml(item.key || item.label || '')}">
-                  <td>${Number(item.rank || index + 1)}</td>
-                  <td title="${escapeHtml(item.description || item.label || item.key || '-')}">${configurableRankingIdentity(item)}</td>
-                  <td class="text-end">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric], metric, { invalidValue: 'Sem dados' })}</td>
-                  <td class="text-end">${GMJDashboardFormatters.formatPercentage(item.percent ?? item.percentage ?? 0)}</td>
-                  <td><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Drilldown"><i data-lucide="search"></i></button></td>
+                  <td class="ranking-cell-position">${Number(item.rank || index + 1)}</td>
+                  <td class="ranking-cell-item" title="${escapeHtml(item.description || item.label || item.key || '-')}">${configurableRankingIdentity(item)}</td>
+                  <td class="text-end ranking-cell-value">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric], metric, { invalidValue: 'Sem dados' })}</td>
+                  <td class="text-end ranking-cell-percent">${GMJDashboardFormatters.formatPercentage(item.percent ?? item.percentage ?? 0)}</td>
+                  <td class="ranking-cell-action"><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Investigar item"><i data-lucide="search"></i></button></td>
                 </tr>
               `).join('') || '<tr><td colspan="5" class="text-muted">Sem dados para os filtros atuais</td></tr>'}
             </tbody>
@@ -20234,6 +20553,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!element) return;
       const body = element.querySelector('.configurable-dashboard-widget-body');
       const status = element.querySelector('.configurable-dashboard-widget-status');
+      applyConfigurableWidgetResponsiveLayout(widget, body);
       element.classList.remove('widget-loading');
       const qualityStatus = configurableQualityStatus(payload);
       const baseStatus = qualityStatus?.label
@@ -20260,6 +20580,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         existingChart.off?.();
         existingChart.dispose();
         configurableWidgetCharts.delete(widget.id);
+        configurableWidgetChartResponsiveContexts.delete(widget.id);
       }
       if (payload.kind === 'kpi') {
         const metric = configurableWidgetMetric(widget, payload);
@@ -20332,23 +20653,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         let chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
         let chart = existingChart;
         if (combinedRanking) {
-          const ratio = Math.max(
-            25,
-            Math.min(75, Number(widget.config?.chart_table_ratio || 55))
-          );
           if (!body.querySelector('.configurable-ranking-combined')) {
             chart?.off?.();
             chart?.dispose?.();
             chart = null;
             body.innerHTML = `
-              <div class="configurable-ranking-combined" style="--ranking-chart-ratio:${ratio}%">
+              <div class="configurable-ranking-combined">
                 <div class="configurable-dashboard-widget-chart"></div>
                 <div class="configurable-ranking-table-pane">${configurableWidgetTable(widget, payload)}</div>
               </div>
             `;
           } else {
-            body.querySelector('.configurable-ranking-combined')
-              .style.setProperty('--ranking-chart-ratio', `${ratio}%`);
             body.querySelector('.configurable-ranking-table-pane').innerHTML =
               configurableWidgetTable(widget, payload);
           }
@@ -20449,6 +20764,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           });
           const legendPosition = appearance.legend_position;
           const effectiveRange = configurableEffectiveRange(payload);
+          configurableWidgetChartResponsiveContexts.set(widget.id, {
+            showLegend: true,
+            legendLabel: name => `${name}: ${configurableMetricValue(
+              latestBySeries.get(String(name)),
+              metric,
+              { scale: metricScale }
+            )}`
+          });
           GMJDashboardCharts.replaceChartOption(chart, {
             useUTC: true,
             tooltip: {
@@ -20555,9 +20878,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             configurableItemsMaximum(items),
             metric
           );
+          const valuesByName = new Map(
+            items.map(item => [String(item.label), Number(item.value) || 0])
+          );
+          configurableWidgetChartResponsiveContexts.set(widget.id, {
+            showLegend: ['donut', 'pie'].includes(visualization),
+            legendLabel: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(
+              valuesByName.get(String(name)),
+              metric,
+              metricScale
+            )}`
+          });
           if (['donut', 'pie'].includes(visualization)) {
             const total = dataset.total;
-            const byName = new Map(items.map(item => [String(item.label), Number(item.value) || 0]));
             GMJDashboardCharts.replaceChartOption(chart, {
               title: visualization === 'donut' ? {
                 text: GMJDashboardFormatters.formatTooltipValue(total, metric, metricScale),
@@ -20583,7 +20916,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 bottom: appearance.legend_position === 'bottom' ? 0 : undefined,
                 right: appearance.legend_position === 'right' ? 0 : undefined,
                 orient: appearance.legend_position === 'right' ? 'vertical' : 'horizontal',
-                formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(byName.get(String(name)), metric, metricScale)}`
+                formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(valuesByName.get(String(name)), metric, metricScale)}`
               },
               series: [{
                 type: 'pie',
@@ -20709,6 +21042,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (rankingPayload) {
         enrichConfigurableRankingAsns(body, payload).catch(() => {});
       }
+      updateConfigurableChartResponsiveness(
+        widget,
+        body,
+        configurableWidgetCharts.get(widget.id)
+      );
       observeConfigurableWidgetSize(widget, body);
       createIcons();
     }

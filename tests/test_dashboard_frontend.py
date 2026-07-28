@@ -156,9 +156,45 @@ class DashboardResizeContractTest(unittest.TestCase):
             "commitConfigurableLayout",
             "/layout",
             "Idempotency-Key",
-            "body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')",
+            "observer.observe(body.closest('.configurable-dashboard-widget') || body)",
         ):
             self.assertIn(token, FRONTEND)
+
+    def test_container_responsive_chart_table_contract(self):
+        for token in (
+            "DEFAULT_WIDGET_BREAKPOINTS",
+            "normalizeWidgetBreakpoints",
+            "getWidgetResponsiveLayout",
+            "applyWidgetResponsiveLayout",
+            "getResponsiveLegendLayout",
+            "getResponsivePieGeometry",
+            "function debounce(",
+        ):
+            self.assertIn(token, CHARTS)
+        for token in (
+            'data-widget-tab-panel="layout"',
+            "widgetConfigStackedBreakpoint",
+            "widgetConfigWideBreakpoint",
+            'data-responsive-layout="stacked"',
+            "configurable-ranking-table",
+            "ranking-col-value",
+            "ranking-col-percent",
+            "table-layout: fixed",
+            "overflow-x: hidden",
+            "updateConfigurableChartResponsiveness",
+            "configurableWidgetChartResponsiveContexts",
+            "textBorderWidth",
+            "opacity: 1",
+        ):
+            self.assertIn(token, FRONTEND)
+        observer_block = FRONTEND[
+            FRONTEND.find("function observeConfigurableWidgetSize("):
+            FRONTEND.find("function configurableAppearanceFromForm(")
+        ]
+        self.assertIn("ResizeObserver", observer_block)
+        self.assertIn("GMJDashboardCharts.debounce", observer_block)
+        self.assertNotIn("patchConfigurableWidget(", observer_block)
+        self.assertNotIn("@media (max-width: 820px)", FRONTEND)
 
     def test_ranking_quality_identity_and_layout_race_contracts(self):
         for token in (

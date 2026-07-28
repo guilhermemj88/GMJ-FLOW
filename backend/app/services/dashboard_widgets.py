@@ -388,6 +388,24 @@ def normalize_widget_appearance(value: Any) -> dict[str, Any]:
     }
 
 
+def normalize_widget_responsive_breakpoints(value: Any) -> dict[str, int]:
+    source = value if isinstance(value, dict) else {}
+    stacked = int(
+        _bounded_float(source.get("stacked"), 600, 320, 1200)
+    )
+    wide = int(
+        _bounded_float(source.get("wide"), 900, stacked + 100, 1800)
+    )
+    tiny = int(
+        _bounded_float(source.get("tiny"), 420, 240, stacked - 1)
+    )
+    return {
+        "stacked": stacked,
+        "wide": wide,
+        "tiny": tiny,
+    }
+
+
 def canonical_dashboard_metric(metric: Any) -> str:
     normalized = str(metric or "").strip().lower()
     if normalized in {"bps", "bits_s", "bits_per_second"}:
@@ -1069,6 +1087,12 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
     config["appearance"] = normalize_widget_appearance(
         config.get("appearance")
     )
+    if "responsive_breakpoints" in config:
+        config["responsive_breakpoints"] = (
+            normalize_widget_responsive_breakpoints(
+                config.get("responsive_breakpoints")
+            )
+        )
     comparison_mode = str(
         config.get("comparison_mode") or "none"
     ).strip().lower()
