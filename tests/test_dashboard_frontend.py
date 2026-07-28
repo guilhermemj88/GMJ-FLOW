@@ -14,6 +14,9 @@ RESIZE = (ROOT / "frontend" / "dashboard-resize.js").read_text(
 CHARTS = (ROOT / "frontend" / "dashboard-charts.js").read_text(
     encoding="utf-8"
 )
+VISUALIZATIONS = (
+    ROOT / "frontend" / "dashboard-visualizations.js"
+).read_text(encoding="utf-8")
 FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 BACKEND = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
 HARNESS = ROOT / "tests" / "dashboard_frontend_harness.html"
@@ -104,12 +107,18 @@ class DashboardResizeContractTest(unittest.TestCase):
             "'Enter'",
             "setPointerCapture",
             "releasePointerCapture",
+            "'lostpointercapture'",
+            "DEFAULT_DRAG_THRESHOLD",
+            "Math.hypot(deltaX, deltaY) < threshold",
+            "requestAnimationFrame",
             "session.persisting",
             "await options.onPersist?.(",
             "await options.onRollback?.(",
         ):
             self.assertIn(token, RESIZE)
         self.assertNotIn("onPersist?.", RESIZE[RESIZE.find("function onPointerMove") :])
+        self.assertIn("3px solid", FRONTEND)
+        self.assertIn("is-drop-valid", FRONTEND)
 
     def test_dom_has_handles_edit_mode_and_containment(self):
         for token in (
@@ -166,6 +175,29 @@ class DashboardChartContractTest(unittest.TestCase):
             "labelLayout: { hideOverlap: true }",
             "containLabel: true",
             "hideOverlap: true",
+        ):
+            self.assertIn(token, FRONTEND)
+
+    def test_visualization_data_contract_and_split_zero(self):
+        for token in (
+            "dataQuerySignature",
+            "normalizeRankingPayload",
+            "rankingDataset",
+            "calculatePoints",
+            "normalizedFieldConfig",
+            "buildTrafficModel",
+            "last_not_null",
+            "split_zero",
+            "original_points",
+            "legend_value",
+        ):
+            self.assertIn(token, VISUALIZATIONS)
+        for token in (
+            '<script src="dashboard-visualizations.js"></script>',
+            "GMJDashboardVisualizations.visualizationKind",
+            "GMJDashboardVisualizations.buildTrafficModel",
+            "dashboardWidgetInspectorModal",
+            "configurableDeferredWidgetPayloads",
         ):
             self.assertIn(token, FRONTEND)
 

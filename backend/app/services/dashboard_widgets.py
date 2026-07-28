@@ -18,6 +18,16 @@ from .dashboard_layout import (
     resolve_collisions,
     validate_layout,
 )
+from .dashboard_visualizations import (
+    CALCULATIONS,
+    COMPACT_MODES,
+    LAYOUT_MODES,
+    TIMESERIES_VISUALIZATIONS,
+    TRAFFIC_ORIENTATIONS,
+    data_kind_for_widget,
+    normalize_visualization_config,
+    visualization_choices,
+)
 
 
 DASHBOARD_SCHEMA_VERSION = 2
@@ -139,13 +149,18 @@ AGGREGATIONS = {"sum", "avg", "max", "min", "p95"}
 VISUALIZATIONS = {
     "table",
     "bar",
+    "vertical_bar",
     "horizontal_bar",
     "line",
     "area",
+    "line_area",
+    "time_bars",
     "stacked_area",
     "donut",
     "pie",
     "number",
+    "stat",
+    "bar_gauge",
     "status",
 }
 FILTER_FIELDS = {
@@ -777,6 +792,20 @@ def widget_catalog() -> dict[str, Any]:
         "group_by": sorted(TIME_GROUPS),
         "aggregations": sorted(AGGREGATIONS),
         "visualizations": sorted(VISUALIZATIONS),
+        "visualizations_by_data_kind": {
+            data_kind: list(visualization_choices(data_kind))
+            for data_kind in (
+                "ranking_snapshot",
+                "timeseries",
+                "stat",
+                "status",
+                "table",
+            )
+        },
+        "calculations": sorted(CALCULATIONS),
+        "traffic_orientations": sorted(TRAFFIC_ORIENTATIONS),
+        "layout_modes": sorted(LAYOUT_MODES),
+        "compact_modes": sorted(COMPACT_MODES),
         "filter_fields": sorted(FILTER_FIELDS | set(FILTER_FIELD_ALIASES)),
         "filter_operators": sorted(FILTER_OPERATORS),
         "limits": [5, 10, 20, 50, 100],
@@ -1086,6 +1115,11 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
         visualization,
         type=visualization_type,
     )
+    config, normalized_visualization = normalize_visualization_config(
+        widget_type,
+        config,
+        normalized_visualization,
+    )
     grid = normalize_widget_grid(
         {
             "type": widget_type,
@@ -1131,13 +1165,36 @@ def normalize_dashboard_payload(payload: Any, partial: bool = False) -> dict[str
     refresh = int(payload.get("refresh_interval_seconds", 30) or 0)
     if refresh not in ALLOWED_REFRESH_INTERVALS:
         raise ValueError("intervalo de atualização inválido")
+    time_range = (
+        copy.deepcopy(payload.get("time_range"))
+        if isinstance(payload.get("time_range"), dict)
+        else {"mode": "relative", "minutes": 10}
+    )
+    layout_mode = str(
+        payload.get("layout_mode")
+        or time_range.get("_layout_mode")
+        or "custom"
+    ).strip().lower()
+    if layout_mode not in LAYOUT_MODES:
+        raise ValueError("layout_mode inválido")
+    compact_mode = str(
+        payload.get("compact_mode")
+        or time_range.get("_compact_mode")
+        or ("vertical" if layout_mode == "auto_grid" else "none")
+    ).strip().lower()
+    if compact_mode not in COMPACT_MODES:
+        raise ValueError("compact_mode inválido")
+    time_range["_layout_mode"] = layout_mode
+    time_range["_compact_mode"] = compact_mode
     result = {
         "name": name,
         "description": str(payload.get("description") or "").strip()[:500],
         "is_default": _bool(payload.get("is_default")),
         "is_shared": _bool(payload.get("is_shared")),
         "global_filters": validate_filters(payload.get("global_filters")),
-        "time_range": payload.get("time_range") if isinstance(payload.get("time_range"), dict) else {"mode": "relative", "minutes": 10},
+        "time_range": time_range,
+        "layout_mode": layout_mode,
+        "compact_mode": compact_mode,
         "refresh_interval_seconds": refresh,
     }
     return result
@@ -1361,6 +1418,17 @@ def dashboard_row_to_dict(
     row: sqlite3.Row | dict[str, Any],
     widgets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    time_range = _json_loads(
+        row["time_range_json"],
+        {"mode": "relative", "minutes": 10},
+    )
+    layout_mode = str(time_range.pop("_layout_mode", "custom"))
+    compact_mode = str(
+        time_range.pop(
+            "_compact_mode",
+            "vertical" if layout_mode == "auto_grid" else "none",
+        )
+    )
     result = {
         "id": int(row["id"]),
         "name": row["name"],
@@ -1371,9 +1439,12 @@ def dashboard_row_to_dict(
         "is_system": _bool(row["is_system"]),
         "template_key": row["template_key"],
         "global_filters": _json_loads(row["global_filters_json"], []),
-        "time_range": _json_loads(row["time_range_json"], {"mode": "relative", "minutes": 10}),
+        "time_range": time_range,
+        "layout_mode": layout_mode,
+        "compact_mode": compact_mode,
         "refresh_interval_seconds": int(row["refresh_interval_seconds"]),
         "layout_version": int(row["layout_version"]),
+        "revision": int(row["layout_version"]),
         "legacy_layout_migrated": _bool(row["legacy_layout_migrated"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -1532,8 +1603,11 @@ def persist_dashboard_layout(
     widgets_payload: Any,
     *,
     layout_version: int | None = None,
+    base_revision: int | None = None,
     active_widget_id: int | None = None,
     idempotency_key: str = "",
+    interaction_id: str = "",
+    compact_mode: str = "vertical",
 ) -> dict[str, Any]:
     if not isinstance(widgets_payload, list):
         raise ValueError("widgets deve ser uma lista")
@@ -1544,6 +1618,20 @@ def persist_dashboard_layout(
     if dashboard_row is None:
         raise ValueError("dashboard não encontrado")
     current_version = int(dashboard_row["layout_version"] or 0)
+    requested_revision = (
+        int(base_revision)
+        if base_revision is not None
+        else layout_version
+    )
+    if (
+        layout_version is not None
+        and base_revision is not None
+        and int(layout_version) != int(base_revision)
+    ):
+        raise ValueError("layout_version e base_revision divergem")
+    compact_mode = str(compact_mode or "vertical").strip().lower()
+    if compact_mode not in COMPACT_MODES:
+        raise ValueError("compact_mode inválido")
     rows = conn.execute(
         """
         SELECT *
@@ -1618,7 +1706,11 @@ def persist_dashboard_layout(
         requested_items.append(item)
 
     priority = int(active_widget_id) if active_widget_id is not None else None
-    resolved = resolve_collisions(requested_items, priority)
+    resolved = resolve_collisions(
+        requested_items,
+        priority,
+        compact=compact_mode == "vertical",
+    )
     validation = validate_layout(resolved)
     if not validation["valid"]:
         raise ValueError("; ".join(validation["errors"]))
@@ -1638,7 +1730,10 @@ def persist_dashboard_layout(
     current_signature = layout_signature(current_items)
     requested_signature = layout_signature(requested_items)
     resolved_signature = layout_signature(resolved)
-    if layout_version is not None and int(layout_version) != current_version:
+    if (
+        requested_revision is not None
+        and int(requested_revision) != current_version
+    ):
         if resolved_signature == current_signature:
             return {
                 "widgets": [
@@ -1652,13 +1747,16 @@ def persist_dashboard_layout(
                     for item in resolved
                 ],
                 "layout_version": current_version,
+                "revision": current_version,
                 "layout_repaired": False,
                 "idempotent_replay": True,
                 "idempotency_key": str(idempotency_key or ""),
+                "interaction_id": str(interaction_id or ""),
+                "compact_mode": compact_mode,
             }
         raise DashboardLayoutVersionConflict(
-            "layout_version desatualizada: esperado %s, recebido %s"
-            % (current_version, layout_version)
+            "revision desatualizada: esperado %s, recebido %s"
+            % (current_version, requested_revision)
         )
 
     changed = resolved_signature != current_signature
@@ -1712,11 +1810,14 @@ def persist_dashboard_layout(
             for item in resolved
         ],
         "layout_version": next_version,
+        "revision": next_version,
         "layout_repaired": (
             normalized_input or requested_signature != resolved_signature
         ),
         "idempotent_replay": not changed,
         "idempotency_key": str(idempotency_key or ""),
+        "interaction_id": str(interaction_id or ""),
+        "compact_mode": compact_mode,
     }
 
 
@@ -1802,6 +1903,8 @@ def duplicate_dashboard(
         "is_shared": False,
         "global_filters": source.get("global_filters", []),
         "time_range": source.get("time_range", {}),
+        "layout_mode": source.get("layout_mode", "custom"),
+        "compact_mode": source.get("compact_mode", "none"),
         "refresh_interval_seconds": source.get("refresh_interval_seconds", 30),
     }
     return create_dashboard(conn, payload, owner_user_id, widgets=source.get("widgets", []))
@@ -1842,7 +1945,22 @@ def widget_data_signature(widget: dict[str, Any], query_context: dict[str, Any])
         "config": {
             key: value
             for key, value in (widget.get("config") or {}).items()
-            if key not in {"visualization", "palette", "show_legend", "show_labels", "decimals", "unit"}
+            if key not in {
+                "appearance",
+                "axis_show_negative_sign",
+                "calculation",
+                "data_kind",
+                "field_config",
+                "legend_calculation",
+                "palette",
+                "show_labels",
+                "show_legend",
+                "traffic_orientation",
+                "unit",
+                "visualization",
+                "visualization_kind",
+                "decimals",
+            }
         },
         "filters": widget.get("filters") or [],
         "time_range": query_context.get("time_range") or {},
@@ -1877,6 +1995,7 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
             "metric": config["metric"],
             "direction": config["direction"],
             "limit": config["limit"],
+            "calculation": config.get("calculation", "current"),
             "filters": normalized["filters"],
         }
     if widget_type in {"timeseries", "kpi"}:
@@ -1887,6 +2006,11 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
             "group_by": config.get("group_by", "total"),
             "aggregation": config.get("aggregation", "sum"),
             "comparison_mode": config.get("comparison_mode", "none"),
+            "calculation": config.get("calculation", "last_not_null"),
+            "legend_calculation": config.get(
+                "legend_calculation",
+                "last_not_null",
+            ),
             "resolution_seconds": config.get("resolution_seconds", 0),
             "filters": normalized["filters"],
         }

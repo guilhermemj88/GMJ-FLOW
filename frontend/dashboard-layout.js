@@ -197,10 +197,9 @@
     const active = interactionLayout.find(item => item.id === itemId);
     if (!active) throw new Error('Widget não encontrado no layout.');
     Object.assign(active, normalizeGridItem({ ...active, ...geometry }));
-    let resolved = resolveCollisions(interactionLayout, itemId);
-    if (options.compact === false) {
-      resolved = placeWithoutCollisions(interactionLayout, itemId);
-    }
+    const resolved = options.compact === false
+      ? placeWithoutCollisions(interactionLayout, itemId)
+      : resolveCollisions(interactionLayout, itemId);
     const validation = validateLayout(resolved);
     if (!validation.valid) throw new Error(validation.errors.join('; '));
     return sortLayout(resolved);
@@ -245,6 +244,103 @@
 
   function rollbackLayoutInteraction(persistentLayout) {
     return sortLayout(normalizedLayout(persistentLayout));
+  }
+
+  function beginLayoutInteraction(
+    persistentLayout,
+    itemId,
+    options = {}
+  ) {
+    const persistent = sortLayout(normalizedLayout(persistentLayout));
+    if (!persistent.some(item => item.id === itemId)) {
+      throw new Error('Widget não encontrado no layout.');
+    }
+    return {
+      itemId,
+      compactMode: options.compact_mode === 'none' ? 'none' : 'vertical',
+      persistentLayout: persistent,
+      interactionLayout: persistent.map(item => ({ ...item }))
+    };
+  }
+
+  function updateLayoutInteraction(interaction, geometry = {}) {
+    if (!interaction?.persistentLayout) {
+      throw new Error('Interação de layout inválida.');
+    }
+    const interactionLayout = resolveLayoutDuringInteraction(
+      interaction.persistentLayout,
+      interaction.itemId,
+      geometry,
+      { compact: interaction.compactMode !== 'none' }
+    );
+    return { ...interaction, interactionLayout };
+  }
+
+  function resolveDropLayout(
+    persistentLayout,
+    itemId,
+    targetX,
+    targetY,
+    options = {}
+  ) {
+    return calculateMovePreview(
+      persistentLayout,
+      itemId,
+      targetX,
+      targetY,
+      { compact: options.compact !== true ? false : true }
+    );
+  }
+
+  function resolveResizeLayout(
+    persistentLayout,
+    itemId,
+    targetW,
+    targetH,
+    options = {}
+  ) {
+    return calculateResizePreview(
+      persistentLayout,
+      itemId,
+      targetW,
+      targetH,
+      options
+    );
+  }
+
+  function pushCollidingWidgets(items, priorityItemId) {
+    return placeWithoutCollisions(items, priorityItemId);
+  }
+
+  function compactPassiveWidgets(items, priorityItemId) {
+    return compactLayoutVertically(items, priorityItemId);
+  }
+
+  function autoGridLayout(items, options = {}) {
+    const normalized = sortLayout(normalizedLayout(items));
+    const requestedWidth = Math.max(1, integer(options.w, 4));
+    const requestedHeight = Math.max(1, integer(options.h, 6));
+    let x = 0;
+    let y = 0;
+    let rowHeight = 0;
+    const result = normalized.map(item => {
+      if (item.hidden) return { ...item };
+      const sized = normalizeGridItem({
+        ...item,
+        w: requestedWidth,
+        h: requestedHeight
+      });
+      if (x + sized.w > GRID_COLUMNS) {
+        x = 0;
+        y += rowHeight;
+        rowHeight = 0;
+      }
+      const placed = { ...sized, x, y };
+      x += placed.w;
+      rowHeight = Math.max(rowHeight, placed.h);
+      return placed;
+    });
+    return resolveCollisions(result);
   }
 
   function repairDashboardLayout(items, priorityItemId = null) {
@@ -409,6 +505,13 @@
     resizeItemAndPush,
     calculateResizePreview,
     calculateMovePreview,
+    beginLayoutInteraction,
+    updateLayoutInteraction,
+    resolveDropLayout,
+    resolveResizeLayout,
+    pushCollidingWidgets,
+    compactPassiveWidgets,
+    autoGridLayout,
     resolveLayoutDuringInteraction,
     commitLayoutInteraction,
     rollbackLayoutInteraction,

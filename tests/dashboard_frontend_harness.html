@@ -5,6 +5,7 @@
   <title>GMJ-FLOW dashboard frontend harness</title>
   <script src="../frontend/dashboard-formatters.js"></script>
   <script src="../frontend/dashboard-charts.js"></script>
+  <script src="../frontend/dashboard-visualizations.js"></script>
   <script src="../frontend/dashboard-layout.js"></script>
   <script src="../frontend/dashboard-resize.js"></script>
 </head>
@@ -69,6 +70,88 @@
       const ppsScale = format.selectMetricScale(4.3e6, 'pps');
       assertEqual(ppsScale.divisor, 1e6, 'pps scale divisor');
       assertEqual(ppsScale.unit, 'Mpps', 'pps scale unit');
+
+      const rankingPayload = {
+        kind: 'ranking',
+        metric: 'bps',
+        calculation: 'current',
+        items: [
+          { key: 'AS64500', value: 80 },
+          { key: 'AS64501', value: 20 }
+        ]
+      };
+      const rankingDataset = GMJDashboardVisualizations.rankingDataset(rankingPayload);
+      assertEqual(rankingDataset.items.length, 2, 'ranking canonical item count');
+      assertEqual(rankingDataset.items[0].percent, 80, 'ranking percent calculated');
+      assertEqual(rankingDataset.total, 100, 'ranking total calculated');
+      const baseWidget = {
+        type: 'top_n',
+        config: {
+          dimension: 'src_asn',
+          metric: 'bps',
+          direction: 'both',
+          visualization_kind: 'table'
+        },
+        filters: []
+      };
+      const tableSignature = GMJDashboardVisualizations.dataQuerySignature(baseWidget);
+      const pieSignature = GMJDashboardVisualizations.dataQuerySignature({
+        ...baseWidget,
+        config: {
+          ...baseWidget.config,
+          visualization_kind: 'pie',
+          legend_calculation: 'total',
+          field_config: { defaults: { unit: 'bps' } }
+        }
+      });
+      assertEqual(tableSignature, pieSignature, 'visual-only change keeps query signature');
+      assertEqual(
+        GMJDashboardVisualizations.calculatePoints(
+          [{ value: 1 }, { value: null }],
+          'last'
+        ),
+        null,
+        'last preserves terminal null'
+      );
+      assertEqual(
+        GMJDashboardVisualizations.calculatePoints(
+          [{ value: 1 }, { value: null }],
+          'last_not_null'
+        ),
+        1,
+        'last not null is defensive'
+      );
+      const trafficPayload = {
+        kind: 'timeseries',
+        metric: 'bps',
+        series: [
+          {
+            key: 'upload',
+            name: 'Upload',
+            direction: 'upload',
+            points: [{ ts: '2026-07-28T10:00:00Z', value: 50 }]
+          },
+          {
+            key: 'download',
+            name: 'Download',
+            direction: 'download',
+            points: [{ ts: '2026-07-28T10:00:00Z', value: 100 }]
+          }
+        ]
+      };
+      const trafficSnapshot = JSON.stringify(trafficPayload);
+      const trafficModel = GMJDashboardVisualizations.buildTrafficModel(
+        trafficPayload,
+        {
+          traffic_orientation: 'split_zero',
+          legend_calculation: 'last_not_null'
+        },
+        {}
+      );
+      assertEqual(trafficModel.series[0].points[0].value, -50, 'split zero upload visual negative');
+      assertEqual(trafficModel.series[0].legend_value, 50, 'split zero legend absolute');
+      assertEqual(trafficModel.y_min, -trafficModel.y_max, 'split zero symmetric axis');
+      assertEqual(JSON.stringify(trafficPayload), trafficSnapshot, 'split zero does not mutate API payload');
 
       const directionSeries = GMJDashboardCharts.consolidateDirectionSeries([
         {
@@ -345,6 +428,31 @@
       await new Promise(resolve => setTimeout(resolve, 20));
       assertEqual(persisted, 3, 'keyboard Enter persists once');
 
+      movePointer('pointerdown', 14, 0, 0);
+      movePointer('pointerup', 14, 0, 0);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assertEqual(movePersisted, 0, 'simple click does not persist move');
+      assertEqual(moveController.activeSession, null, 'simple click clears armed move');
+
+      movePointer('pointerdown', 15, 0, 0);
+      movePointer('pointermove', 15, 3, 0);
+      movePointer('pointerup', 15, 3, 0);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assertEqual(movePersisted, 0, 'movement below threshold does not persist');
+      assert(!article.classList.contains('is-dragging'), 'threshold does not add dragging class');
+
+      const beforeLostCapture = GMJDashboardLayout.layoutSignature(layout);
+      movePointer('pointerdown', 16, 0, 0);
+      movePointer('pointermove', 16, 204, 0);
+      movePointer('lostpointercapture', 16, 204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, 0, 'lost pointer capture does not persist');
+      assertEqual(
+        GMJDashboardLayout.layoutSignature(layout),
+        beforeLostCapture,
+        'lost pointer capture rolls back'
+      );
+
       movePointer('pointerdown', 13, 0, 0);
       movePointer('pointermove', 13, 204, 0);
       movePointer('pointerup', 13, 204, 0);
@@ -354,6 +462,14 @@
       assertEqual(movePersisted, 1, 'pointer move persists once');
       assert(GMJDashboardLayout.validateLayout(layout).valid, 'move preview has no collisions');
       assert(!article.classList.contains('is-dragging'), 'move class removed');
+
+      const upward = GMJDashboardLayout.resolveDropLayout([
+        { id: 1, x: 0, y: 8, w: 4, h: 4 },
+        { id: 2, x: 0, y: 4, w: 4, h: 4 }
+      ], 1, 4, 0, { compact: false });
+      const upwardById = new Map(upward.map(item => [item.id, item]));
+      assertEqual(upwardById.get(1).y, 0, 'active widget moves upward into free slot');
+      assertEqual(upwardById.get(2).y, 4, 'passive widget keeps slot without compaction');
 
       moveController.destroy();
       controller.destroy();

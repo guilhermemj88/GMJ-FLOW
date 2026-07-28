@@ -8,6 +8,7 @@
   const DEFAULT_COLUMNS = 12;
   const DEFAULT_ROW_HEIGHT = 48;
   const DEFAULT_GAP = 12;
+  const DEFAULT_DRAG_THRESHOLD = 6;
 
   function integer(value, fallback) {
     const number = Number(value);
@@ -103,9 +104,19 @@
   function pointerDeltaToGridPosition(session, clientX, clientY) {
     const columnPitch = Math.max(1, session.columnWidth + session.columnGap);
     const rowPitch = Math.max(1, session.rowHeight + session.rowGap);
-    const deltaColumns = Math.round((Number(clientX) - session.startX) / columnPitch)
+    const currentScroll = session.getScrollPosition?.() || session.startScroll || {
+      x: 0,
+      y: 0
+    };
+    const scrollDeltaX = Number(currentScroll.x || 0) - Number(session.startScroll?.x || 0);
+    const scrollDeltaY = Number(currentScroll.y || 0) - Number(session.startScroll?.y || 0);
+    const deltaColumns = Math.round(
+      (Number(clientX) - session.startX + scrollDeltaX) / columnPitch
+    )
       * session.columnFactor;
-    const deltaRows = Math.round((Number(clientY) - session.startY) / rowPitch);
+    const deltaRows = Math.round(
+      (Number(clientY) - session.startY + scrollDeltaY) / rowPitch
+    );
     const maximumX = Math.max(0, DEFAULT_COLUMNS - Number(session.item.w || 1));
     return {
       x: clamp(Number(session.item.x || 0) + deltaColumns, 0, maximumX),
@@ -123,6 +134,14 @@
     const eventRoot = options.eventRoot || grid.ownerDocument;
     let session = null;
     let destroyed = false;
+
+    function scrollPosition() {
+      const view = grid.ownerDocument?.defaultView;
+      return {
+        x: Number(view?.scrollX || 0) + Number(grid.scrollLeft || 0),
+        y: Number(view?.scrollY || 0) + Number(grid.scrollTop || 0)
+      };
+    }
 
     function moveHandle(target) {
       return target?.closest?.(options.handleSelector || '[data-widget-drag-handle]');
@@ -176,11 +195,13 @@
         keyboardY: Number(item.y),
         changed: false,
         persisting: false,
+        activated: false,
+        previewFrame: null,
+        pendingPosition: null,
+        startScroll: scrollPosition(),
+        getScrollPosition: scrollPosition,
         ...geometry()
       };
-      element.classList.add('is-dragging');
-      grid.classList.add('has-widget-interaction');
-      eventRoot.body?.classList.add('dashboard-widget-interacting');
       if (!keyboard) {
         event.preventDefault();
         event.stopPropagation();
@@ -190,25 +211,43 @@
           // Synthetic events and older browsers can reject pointer capture.
         }
       }
-      options.onStart?.(session);
+      if (keyboard) activate();
       return true;
+    }
+
+    function activate() {
+      if (!session || session.activated) return;
+      session.activated = true;
+      session.element.classList.add('is-dragging');
+      grid.classList.add('has-widget-interaction');
+      eventRoot.body?.classList.add('dashboard-widget-interacting');
+      options.onStart?.(session);
     }
 
     function preview(position) {
       if (!session) return;
-      const layout = layoutEngine.calculateMovePreview
-        ? layoutEngine.calculateMovePreview(
+      const layout = layoutEngine.resolveDropLayout
+        ? layoutEngine.resolveDropLayout(
           session.originalLayout,
           session.widget.id,
           position.x,
-          position.y
+          position.y,
+          { compact: false }
         )
-        : layoutEngine.moveItemAndPush(
-          session.originalLayout,
-          session.widget.id,
-          position.x,
-          position.y
-        );
+        : layoutEngine.calculateMovePreview
+          ? layoutEngine.calculateMovePreview(
+            session.originalLayout,
+            session.widget.id,
+            position.x,
+            position.y,
+            { compact: false }
+          )
+          : layoutEngine.moveItemAndPush(
+            session.originalLayout,
+            session.widget.id,
+            position.x,
+            position.y
+          );
       session.interactionLayout = layout;
       session.changed = (
         Number(position.x) !== Number(session.item.x)
@@ -225,6 +264,12 @@
     function cleanup() {
       if (!session) return;
       const current = session;
+      session = null;
+      if (current.previewFrame !== null) {
+        const cancelFrame = eventRoot.defaultView?.cancelAnimationFrame
+          || (typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : null);
+        cancelFrame?.(current.previewFrame);
+      }
       current.element.classList.remove('is-dragging');
       grid.classList.remove('has-widget-interaction');
       eventRoot.body?.classList.remove('dashboard-widget-interacting');
@@ -238,14 +283,17 @@
       } catch {
         // The browser may have released capture after pointercancel.
       }
-      session = null;
-      options.onFinish?.(current);
+      if (current.activated) options.onFinish?.(current);
     }
 
     async function cancel(event) {
       if (!session || session.persisting) return;
       const current = session;
       event?.preventDefault?.();
+      if (!current.activated) {
+        cleanup();
+        return;
+      }
       await options.onRollback?.({
         widget: current.widget,
         layout: layoutEngine.rollbackLayoutInteraction
@@ -259,6 +307,11 @@
 
     async function commit(event) {
       if (!session || session.persisting) return;
+      flushPreview();
+      if (!session?.activated) {
+        cleanup();
+        return;
+      }
       if (!session.changed) {
         await cancel(event);
         return;
@@ -307,8 +360,41 @@
 
     function onMovePointerMove(event) {
       if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      const currentScroll = scrollPosition();
+      const deltaX = Number(event.clientX) - session.startX
+        + currentScroll.x - session.startScroll.x;
+      const deltaY = Number(event.clientY) - session.startY
+        + currentScroll.y - session.startScroll.y;
+      const threshold = clamp(
+        Number(options.dragThreshold || DEFAULT_DRAG_THRESHOLD),
+        4,
+        8
+      );
+      if (!session.activated && Math.hypot(deltaX, deltaY) < threshold) return;
+      activate();
       event.preventDefault();
-      preview(pointerDeltaToGridPosition(session, event.clientX, event.clientY));
+      session.pendingPosition = pointerDeltaToGridPosition(
+        session,
+        event.clientX,
+        event.clientY
+      );
+      if (session.previewFrame !== null) return;
+      const requestFrame = eventRoot.defaultView?.requestAnimationFrame
+        || (typeof requestAnimationFrame === 'function'
+          ? requestAnimationFrame
+          : callback => setTimeout(callback, 0));
+      session.previewFrame = requestFrame(() => {
+        if (!session) return;
+        session.previewFrame = null;
+        flushPreview();
+      });
+    }
+
+    function flushPreview() {
+      if (!session?.pendingPosition) return;
+      const position = session.pendingPosition;
+      session.pendingPosition = null;
+      preview(position);
     }
 
     function onMovePointerUp(event) {
@@ -318,6 +404,16 @@
 
     function onMovePointerCancel(event) {
       if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      cancel(event);
+    }
+
+    function onLostPointerCapture(event) {
+      if (
+        !session
+        || session.keyboard
+        || event.pointerId !== session.pointerId
+        || session.persisting
+      ) return;
       cancel(event);
     }
 
@@ -353,6 +449,7 @@
     grid.addEventListener('pointermove', onMovePointerMove);
     grid.addEventListener('pointerup', onMovePointerUp);
     grid.addEventListener('pointercancel', onMovePointerCancel);
+    grid.addEventListener('lostpointercapture', onLostPointerCapture);
     grid.addEventListener('keydown', onKeyDown);
 
     return Object.freeze({
@@ -368,6 +465,7 @@
         grid.removeEventListener('pointermove', onMovePointerMove);
         grid.removeEventListener('pointerup', onMovePointerUp);
         grid.removeEventListener('pointercancel', onMovePointerCancel);
+        grid.removeEventListener('lostpointercapture', onLostPointerCapture);
         grid.removeEventListener('keydown', onKeyDown);
       }
     });
@@ -460,19 +558,28 @@
         ...session.constraints,
         lockWidth: session.lockWidth
       });
-      const layout = layoutEngine.calculateResizePreview
-        ? layoutEngine.calculateResizePreview(
+      const layout = layoutEngine.resolveResizeLayout
+        ? layoutEngine.resolveResizeLayout(
           session.originalLayout,
           session.widget.id,
           next.w,
-          next.h
+          next.h,
+          { compact: false }
         )
-        : layoutEngine.resizeItemAndPush(
-          session.originalLayout,
-          session.widget.id,
-          next.w,
-          next.h
-        );
+        : layoutEngine.calculateResizePreview
+          ? layoutEngine.calculateResizePreview(
+            session.originalLayout,
+            session.widget.id,
+            next.w,
+            next.h,
+            { compact: false }
+          )
+          : layoutEngine.resizeItemAndPush(
+            session.originalLayout,
+            session.widget.id,
+            next.w,
+            next.h
+          );
       session.interactionLayout = layout;
       session.previewSize = next;
       const badge = session.element.querySelector?.('.widget-resize-badge');
@@ -584,6 +691,16 @@
       cancel(event);
     }
 
+    function onResizeLostPointerCapture(event) {
+      if (
+        !session
+        || session.keyboard
+        || event.pointerId !== session.pointerId
+        || session.persisting
+      ) return;
+      cancel(event);
+    }
+
     function onKeyDown(event) {
       const handle = resizeHandle(event.target);
       if (!handle && !session?.keyboard) return;
@@ -620,6 +737,7 @@
     grid.addEventListener('pointermove', onPointerMove);
     grid.addEventListener('pointerup', onPointerUp);
     grid.addEventListener('pointercancel', onPointerCancel);
+    grid.addEventListener('lostpointercapture', onResizeLostPointerCapture);
     grid.addEventListener('keydown', onKeyDown);
 
     return Object.freeze({
@@ -635,6 +753,7 @@
         grid.removeEventListener('pointermove', onPointerMove);
         grid.removeEventListener('pointerup', onPointerUp);
         grid.removeEventListener('pointercancel', onPointerCancel);
+        grid.removeEventListener('lostpointercapture', onResizeLostPointerCapture);
         grid.removeEventListener('keydown', onKeyDown);
       }
     });

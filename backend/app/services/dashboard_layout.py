@@ -213,6 +213,8 @@ def _place_without_collisions(
 def resolve_collisions(
     items: list[dict[str, Any]],
     priority_item_id: Any | None = None,
+    *,
+    compact: bool = True,
 ) -> list[dict[str, Any]]:
     result = _normalized_layout(items)
     priority = next(
@@ -242,7 +244,8 @@ def resolve_collisions(
                 if iterations > MAX_LAYOUT_ITERATIONS:
                     raise ValueError("limite de push vertical excedido")
     result = _place_without_collisions(result, priority_item_id)
-    result = compact_layout_vertically(result, priority_item_id)
+    if compact:
+        result = compact_layout_vertically(result, priority_item_id)
     validation = validate_layout(result)
     if not validation["valid"]:
         raise ValueError("; ".join(validation["errors"]))
