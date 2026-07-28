@@ -43,6 +43,11 @@ class DashboardVisualizationContractTest(unittest.TestCase):
                     "combined_chart_kind": "donut",
                     "slice_limit": 100,
                     "chart_table_ratio": 5,
+                    "responsive_breakpoints": {
+                        "stacked": 200,
+                        "wide": 300,
+                        "tiny": 900,
+                    },
                 },
                 "visualization": {"type": "chart_table"},
                 "grid": {"x": 0, "y": 0, "w": 8, "h": 8},
@@ -52,6 +57,10 @@ class DashboardVisualizationContractTest(unittest.TestCase):
         self.assertEqual(widget["config"]["combined_chart_kind"], "donut")
         self.assertEqual(widget["config"]["slice_limit"], 20)
         self.assertEqual(widget["config"]["chart_table_ratio"], 25)
+        self.assertEqual(
+            widget["config"]["responsive_breakpoints"],
+            {"stacked": 320, "wide": 420, "tiny": 319},
+        )
 
     def test_legacy_bar_normalizes_without_changing_data_kind(self):
         config, visualization = normalize_visualization_config(
