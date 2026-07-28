@@ -574,6 +574,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script src="dashboard-formatters.js"></script>
   <script src="dashboard-charts.js"></script>
+  <script src="dashboard-visualizations.js"></script>
   <script src="dashboard-layout.js"></script>
   <script src="dashboard-resize.js"></script>
   <style>
@@ -2209,14 +2210,24 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 0;
       min-height: 0;
       pointer-events: none;
-      background: color-mix(in srgb, var(--accent) 14%, transparent);
-      border: 2px dashed color-mix(in srgb, var(--accent) 68%, var(--border));
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      border: 3px solid color-mix(in srgb, var(--accent) 82%, var(--border));
       border-radius: 8px;
       box-shadow: inset 0 0 0 1px color-mix(in srgb, white 32%, transparent);
       transition:
         grid-column-start .08s ease,
         grid-row-start .08s ease,
         height .08s ease;
+    }
+
+    .dashboard-widget-placeholder.is-drop-valid {
+      background: color-mix(in srgb, var(--accent) 22%, transparent);
+      border-color: var(--accent);
+    }
+
+    .dashboard-widget-placeholder.is-drop-invalid {
+      background: rgb(220 38 38 / 12%);
+      border-color: #dc2626;
     }
 
     .dashboard-widget-resizing,
@@ -7258,8 +7269,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <button type="button" class="btn btn-sm btn-success dashboard-config-tab" data-widget-tab="data">Dados</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="filters">Filtros</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="visual">Visualização</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="layout">Título e tamanho</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="appearance">Aparência</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="axes">Eixos</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="legend">Legenda</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="layout">Layout</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="interval">Atualização</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="preview">Preview</button>
         </div>
@@ -7309,6 +7322,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <label for="widgetConfigLimit">Limite</label>
               <input id="widgetConfigLimit" type="number" min="1" max="100" value="10" class="form-control form-control-sm">
             </div>
+            <div class="field">
+              <label for="widgetConfigCalculation">Valor exibido</label>
+              <select id="widgetConfigCalculation" class="form-select form-select-sm"></select>
+            </div>
           </div>
         </div>
         <div class="dashboard-config-tab-panel" data-widget-tab-panel="filters">
@@ -7326,6 +7343,61 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <select id="widgetConfigLegend" class="form-select form-select-sm">
                 <option value="true">Mostrar</option>
                 <option value="false">Ocultar</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="axes">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigTrafficOrientation">Orientação do tráfego</label>
+              <select id="widgetConfigTrafficOrientation" class="form-select form-select-sm">
+                <option value="positive_both">Upload e Download positivos</option>
+                <option value="split_zero">Download acima / Upload abaixo</option>
+                <option value="stacked">Empilhado</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigAxisNegativeSign">Sinal negativo no eixo</label>
+              <select id="widgetConfigAxisNegativeSign" class="form-select form-select-sm">
+                <option value="false">Ocultar sinal</option>
+                <option value="true">Mostrar sinal</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigUnit">Unidade</label>
+              <input id="widgetConfigUnit" class="form-control form-control-sm" maxlength="32" placeholder="bps">
+            </div>
+            <div class="field">
+              <label for="widgetConfigDecimals">Casas decimais</label>
+              <select id="widgetConfigDecimals" class="form-select form-select-sm">
+                <option value="auto">Automático</option>
+                <option value="0">0</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="legend">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigLegendCalculation">Cálculo da legenda</label>
+              <select id="widgetConfigLegendCalculation" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigShowLegend">Mostrar legenda</label>
+              <select id="widgetConfigShowLegend" class="form-select form-select-sm">
+                <option value="true">Sim</option><option value="false">Não</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigLegendPosition">Posição da legenda</label>
+              <select id="widgetConfigLegendPosition" class="form-select form-select-sm">
+                <option value="top">Topo</option>
+                <option value="bottom">Base</option>
+                <option value="right">Direita</option>
               </select>
             </div>
           </div>
@@ -7424,20 +7496,6 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </select>
             </div>
             <div class="field">
-              <label for="widgetConfigShowLegend">Mostrar legenda</label>
-              <select id="widgetConfigShowLegend" class="form-select form-select-sm">
-                <option value="true">Sim</option><option value="false">Não</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="widgetConfigLegendPosition">Posição da legenda</label>
-              <select id="widgetConfigLegendPosition" class="form-select form-select-sm">
-                <option value="top">Topo</option>
-                <option value="bottom">Base</option>
-                <option value="right">Direita</option>
-              </select>
-            </div>
-            <div class="field">
               <label for="widgetConfigAxisDensity">Densidade dos eixos</label>
               <select id="widgetConfigAxisDensity" class="form-select form-select-sm">
                 <option value="auto">Automática</option>
@@ -7452,6 +7510,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
             <div class="field d-flex align-items-end">
               <button id="resetWidgetPaletteButton" type="button" class="btn btn-sm btn-outline-secondary">Restaurar paleta padrão</button>
+            </div>
+            <div class="field grid-span-2">
+              <label for="widgetConfigFieldOverrides">Overrides por série (JSON)</label>
+              <textarea id="widgetConfigFieldOverrides" class="form-control" rows="6" spellcheck="false">[]</textarea>
+              <span class="subtle">Matchers permitidos: field_name, direction, regex e metric.</span>
             </div>
           </div>
         </div>
@@ -7571,15 +7634,100 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <option value="true">Sim</option>
             </select>
           </div>
+          <div class="field">
+            <label for="dashboardManagerLayoutMode">Modo de layout</label>
+            <select id="dashboardManagerLayoutMode" class="form-select form-select-sm">
+              <option value="custom">Custom · livre por células</option>
+              <option value="auto_grid">Auto grid · tamanho padronizado</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="dashboardManagerCompactMode">Compactação</label>
+            <select id="dashboardManagerCompactMode" class="form-select form-select-sm">
+              <option value="none">Preservar slots livres</option>
+              <option value="vertical">Compactar verticalmente</option>
+            </select>
+          </div>
         </div>
         <div id="dashboardManagerStatus" class="subtle mt-3"></div>
       </div>
       <div class="gmj-dialog-footer">
         <button id="importDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Importar</button>
         <button id="exportDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Exportar</button>
+        <button id="exportGrafanaDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Grafana</button>
         <button id="duplicateDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">Duplicar</button>
         <button id="deleteDashboardButton" type="button" class="btn btn-sm btn-outline-danger">Excluir</button>
         <button id="saveDashboardButton" type="button" class="btn btn-sm btn-success">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="grafanaExportModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="grafanaExportModalTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <div>
+          <h2 id="grafanaExportModalTitle" class="view-title">Exportar para Grafana</h2>
+          <div class="subtle">JSON determinístico para datasource Infinity; tokens e credenciais nunca entram no arquivo.</div>
+        </div>
+        <button type="button" class="icon-button" data-close-modal="grafanaExportModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div class="sensor-form-grid mb-3">
+          <div class="field">
+            <label for="grafanaExportVersion">Versão do Grafana</label>
+            <select id="grafanaExportVersion" class="form-select form-select-sm">
+              <option value="12">Grafana 12</option>
+              <option value="11">Grafana 11</option>
+              <option value="10">Grafana 10</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportDatasourceUid">Datasource UID</label>
+            <input id="grafanaExportDatasourceUid" class="form-control form-control-sm" value="${DS_GMJ_FLOW}">
+          </div>
+          <div class="field">
+            <label for="grafanaExportFolderUid">Folder UID</label>
+            <input id="grafanaExportFolderUid" class="form-control form-control-sm" value="gmj-flow">
+          </div>
+          <div class="field">
+            <label for="grafanaExportIncludeHidden">Widgets ocultos</label>
+            <select id="grafanaExportIncludeHidden" class="form-select form-select-sm">
+              <option value="false">Não incluir</option>
+              <option value="true">Incluir</option>
+            </select>
+          </div>
+        </div>
+        <div id="grafanaExportStatus" class="subtle mb-2">Gere ou teste o JSON antes do download.</div>
+        <pre id="grafanaExportPreview" class="panel p-3" style="max-height:52vh;overflow:auto">Nenhum export gerado.</pre>
+        <div class="alert alert-secondary mt-3 mb-0">
+          Publicação direta e dry-run remoto pertencem à Fase 3 e permanecem desabilitados por segurança.
+        </div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="testGrafanaExportButton" type="button" class="btn btn-sm btn-outline-secondary">Testar export</button>
+        <button id="copyGrafanaExportButton" type="button" class="btn btn-sm btn-outline-secondary">Copiar JSON</button>
+        <button id="downloadGrafanaExportButton" type="button" class="btn btn-sm btn-success">Baixar JSON</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" disabled title="Fase 3 não habilitada">Dry-run remoto</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" disabled title="Fase 3 não habilitada">Publicar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dashboardWidgetInspectorModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="dashboardWidgetInspectorTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <div>
+          <h2 id="dashboardWidgetInspectorTitle" class="view-title">Inspecionar dados</h2>
+          <div class="subtle">Payload normalizado e configuração efetiva, sem headers ou credenciais.</div>
+        </div>
+        <button type="button" class="icon-button" data-close-modal="dashboardWidgetInspectorModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+      </div>
+      <div class="gmj-dialog-body">
+        <pre id="dashboardWidgetInspectorBody" class="panel p-3" style="max-height:65vh;overflow:auto"></pre>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button id="copyDashboardWidgetInspectorButton" type="button" class="btn btn-sm btn-outline-secondary">Copiar JSON</button>
+        <button type="button" class="btn btn-sm btn-success" data-close-modal="dashboardWidgetInspectorModal">Fechar</button>
       </div>
     </div>
   </div>
@@ -8444,6 +8592,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableMoveController = null;
     let configurablePersistentLayout = [];
     let configurableInteractionLayout = null;
+    let configurableLayoutInteractionActive = false;
+    let configurableLayoutInteractionId = '';
+    let configurableLayoutInteractionSequence = 0;
+    let configurableLayoutCommitSequence = 0;
+    let configurableDashboardLoadSequence = 0;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
@@ -8452,6 +8605,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const configurableWidgetAutoHeightTimers = new Map();
     const configurableWidgetTimers = new Map();
     const configurableVisibleWidgets = new Set();
+    const configurableWidgetPayloads = new Map();
+    const configurableDeferredWidgetPayloads = new Map();
+    let configurableGrafanaExportPayload = null;
     let flowSearchAbortController = null;
     let mapAbortController = null;
     let mapDebounceTimer = null;
@@ -18565,7 +18721,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function configurableWidgetLayoutConstraints(widget) {
       const type = widget?.type || 'top_n';
-      const visualization = widget?.visualization?.type || widget?.config?.visualization || 'table';
+      const visualization = GMJDashboardVisualizations.visualizationKind(widget || {});
       let values;
       if (type === 'timeseries') values = [6, 8, 5, 6];
       else if (type === 'top_n' && widget?.config?.dimension === 'conversation') values = [6, 8, 5, 6];
@@ -18658,6 +18814,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return Boolean(
         dashboardEditMode
         && configurableDashboard?.permissions?.can_edit
+        && (configurableDashboard?.layout_mode || 'custom') === 'custom'
         && widget
         && !widget.hidden
         && !widget.collapsed
@@ -18750,16 +18907,46 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       placeholder.style.gridColumn = `${display.x + 1} / span ${display.w}`;
       placeholder.style.gridRow = `${display.y + 1} / span ${display.h}`;
       placeholder.style.height = `${GMJDashboardLayout.calculateGridPixelHeight(display.h)}px`;
+      placeholder.classList.add('is-drop-valid');
+      placeholder.classList.remove('is-drop-invalid');
     }
 
-    function finishConfigurableLayoutInteraction() {
+    function configurableInteractionIdentifier() {
+      if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+      return `layout-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function beginConfigurableLayoutInteraction(session) {
+      configurableLayoutInteractionSequence += 1;
+      configurableLayoutInteractionId = configurableInteractionIdentifier();
+      configurableLayoutInteractionActive = true;
+      session.interactionId = configurableLayoutInteractionId;
+      session.interactionSequence = configurableLayoutInteractionSequence;
+      configurableWidgetControllers.forEach(controller => controller.abort());
+      configurableWidgetControllers.clear();
+    }
+
+    function finishConfigurableLayoutInteraction(session = null) {
       document.querySelector('#configurableDashboardGrid .dashboard-widget-placeholder')?.remove();
       document.querySelectorAll('#configurableDashboardGrid .is-being-pushed')
         .forEach(element => element.classList.remove('is-being-pushed'));
+      if (
+        session?.interactionId
+        && session.interactionId !== configurableLayoutInteractionId
+      ) return;
       if (configurableInteractionLayout) {
         configurableInteractionLayout = null;
         updateConfigurableDashboardGridPositions(configurablePersistentLayout);
       }
+      configurableLayoutInteractionActive = false;
+      configurableLayoutInteractionId = '';
+      const deferred = [...configurableDeferredWidgetPayloads.entries()];
+      configurableDeferredWidgetPayloads.clear();
+      deferred.forEach(([widgetId, payload]) => {
+        const widget = (configurableDashboard?.widgets || [])
+          .find(item => Number(item.id) === Number(widgetId));
+        if (widget) renderConfigurableWidget(widget, payload);
+      });
     }
 
     function scheduleConfigurableChartResize(widgetId) {
@@ -18894,9 +19081,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             );
             const density = GMJDashboardCharts.densitySettings(densityMode);
             const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
-            const visualization = widget.visualization?.type
-              || widget.config?.visualization
-              || 'bar';
+            const visualization = GMJDashboardVisualizations.visualizationKind(widget);
             chartElement.classList.toggle(
               'chart-size-insufficient',
               bounds.width < 170 || bounds.height < 120
@@ -18927,7 +19112,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 labelLayout: { hideOverlap: true }
               }];
             } else {
-              const horizontal = visualization === 'horizontal_bar';
+              const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
               responsiveOption.xAxis = {
                 splitNumber: density.splitNumber,
                 axisLabel: {
@@ -18950,7 +19135,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             chart.setOption(responsiveOption, { notMerge: false, lazyUpdate: true });
           }
           const graphWidget = widget.type === 'timeseries'
-            || (widget.type === 'top_n' && ['bar', 'horizontal_bar', 'pie', 'donut'].includes(widget.visualization?.type || widget.config?.visualization));
+            || (
+              widget.type === 'top_n'
+              && ['vertical_bar', 'horizontal_bar', 'bar_gauge', 'pie', 'donut']
+                .includes(GMJDashboardVisualizations.visualizationKind(widget))
+            );
           if (
             widget.height_mode !== 'auto'
             || graphWidget
@@ -19030,12 +19219,54 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function configurableWidgetDefinitionFromForm() {
       const type = document.getElementById('widgetConfigType').value;
       const metric = document.getElementById('widgetConfigMetric').value || 'bps';
+      const editingWidget = editingConfigurableWidgetId
+        ? (configurableDashboard?.widgets || []).find(
+          item => Number(item.id) === Number(editingConfigurableWidgetId)
+        )
+        : null;
+      const appearance = configurableAppearanceFromForm();
+      let fieldOverrides;
+      try {
+        fieldOverrides = JSON.parse(
+          document.getElementById('widgetConfigFieldOverrides').value || '[]'
+        );
+      } catch {
+        throw new Error('Overrides precisam ser um JSON válido.');
+      }
+      if (!Array.isArray(fieldOverrides)) {
+        throw new Error('Overrides precisam ser uma lista JSON.');
+      }
+      const visualizationKind = document.getElementById('widgetConfigVisualization').value || 'table';
+      const existingFieldDefaults = (
+        editingWidget?.config?.field_config?.defaults
+        && typeof editingWidget.config.field_config.defaults === 'object'
+      ) ? editingWidget.config.field_config.defaults : {};
       const config = {
         metric,
         direction: document.getElementById('widgetConfigDirection').value || 'both',
-        visualization: document.getElementById('widgetConfigVisualization').value || 'table',
+        visualization: visualizationKind,
+        visualization_kind: visualizationKind,
+        data_kind: GMJDashboardVisualizations.dataKindForWidget({ type }),
+        calculation: document.getElementById('widgetConfigCalculation').value || (
+          type === 'top_n' ? 'current' : 'last_not_null'
+        ),
+        legend_calculation: document.getElementById('widgetConfigLegendCalculation').value || 'last_not_null',
+        traffic_orientation: document.getElementById('widgetConfigTrafficOrientation').value || 'positive_both',
+        axis_show_negative_sign: document.getElementById('widgetConfigAxisNegativeSign').value === 'true',
         comparison_mode: document.getElementById('widgetConfigComparison').value || 'none',
-        appearance: configurableAppearanceFromForm()
+        appearance,
+        field_config: {
+          defaults: {
+            ...existingFieldDefaults,
+            unit: document.getElementById('widgetConfigUnit').value.trim() || metric,
+            decimals: document.getElementById('widgetConfigDecimals').value || 'auto',
+            color: { mode: 'palette-classic' },
+            line_width: appearance.line_width,
+            fill_opacity: appearance.area_opacity * 100,
+            show_points: appearance.show_point_labels ? 'always' : 'never'
+          },
+          overrides: fieldOverrides
+        }
       };
       if (type === 'top_n') {
         config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
@@ -19103,17 +19334,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         config,
         filters,
         visualization: {
-          type: document.getElementById('widgetConfigVisualization').value || 'table',
+          type: visualizationKind,
+          visualization_kind: visualizationKind,
+          data_kind: config.data_kind,
           show_legend: config.appearance.show_legend
         },
         grid: {
-          x: 0,
-          y: Math.max(
-            0,
-            ...(configurableDashboard?.widgets || [])
-              .filter(widget => !widget.hidden)
-              .map(widget => Number(widget.grid?.y || 0) + Number(widget.grid?.h || 4))
-          ),
+          x: Number(editingWidget?.grid?.x || 0),
+          y: editingWidget
+            ? Number(editingWidget.grid?.y || 0)
+            : Math.max(
+              0,
+              ...(configurableDashboard?.widgets || [])
+                .filter(widget => !widget.hidden)
+                .map(widget => Number(widget.grid?.y || 0) + Number(widget.grid?.h || 4))
+            ),
           w: Number(document.getElementById('widgetConfigWidth').value || 4),
           h: Number(document.getElementById('widgetConfigHeight').value || 4)
         },
@@ -19141,6 +19376,34 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function syncConfigurableWidgetTypeFields() {
       const type = document.getElementById('widgetConfigType').value;
+      const visualizationSelect = document.getElementById('widgetConfigVisualization');
+      const selectedVisualization = visualizationSelect.value;
+      const dataKind = GMJDashboardVisualizations.dataKindForWidget({ type });
+      const visualizationLabels = {
+        table: 'Tabela',
+        horizontal_bar: 'Barras horizontais',
+        vertical_bar: 'Barras verticais',
+        pie: 'Pizza',
+        donut: 'Donut',
+        bar_gauge: 'Bar gauge',
+        stat: 'Stat',
+        line: 'Linha',
+        area: 'Área',
+        time_bars: 'Barras temporais',
+        line_area: 'Linha + área',
+        status: 'Status'
+      };
+      fillConfigurableSelect(
+        'widgetConfigVisualization',
+        GMJDashboardVisualizations.visualizationChoices(dataKind).map(id => ({
+          id,
+          label: visualizationLabels[id] || id
+        })),
+        selectedVisualization
+      );
+      if (!visualizationSelect.value) {
+        visualizationSelect.value = GMJDashboardVisualizations.visualizationChoices(dataKind)[0];
+      }
       const visibility = {
         widgetConfigDimension: type === 'top_n',
         widgetConfigMetric: ['top_n', 'timeseries', 'kpi'].includes(type),
@@ -19196,6 +19459,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           group_by: 'total',
           aggregation: 'sum',
           limit: 10,
+          calculation: 'current',
+          legend_calculation: 'last_not_null',
+          traffic_orientation: 'positive_both',
           appearance: GMJDashboardCharts.DEFAULT_APPEARANCE
         },
         filters: [],
@@ -19225,7 +19491,39 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         })),
         item.config?.resolution_seconds || 0
       );
-      fillConfigurableSelect('widgetConfigVisualization', catalog.visualizations || [], item.visualization?.type || item.config?.visualization || 'table');
+      const itemVisualization = GMJDashboardVisualizations.visualizationKind(item);
+      fillConfigurableSelect(
+        'widgetConfigVisualization',
+        GMJDashboardVisualizations.visualizationChoices(
+          GMJDashboardVisualizations.dataKindForWidget(item)
+        ),
+        itemVisualization
+      );
+      const calculationLabels = {
+        current: 'Valor atual do ranking',
+        last: 'Último valor',
+        last_not_null: 'Último valor não nulo',
+        mean: 'Média',
+        max: 'Máximo',
+        min: 'Mínimo',
+        total: 'Soma do período',
+        difference: 'Diferença'
+      };
+      fillConfigurableSelect(
+        'widgetConfigCalculation',
+        (catalog.calculations || GMJDashboardVisualizations.CALCULATIONS).map(id => ({
+          id,
+          label: calculationLabels[id] || id
+        })),
+        item.config?.calculation || (item.type === 'top_n' ? 'current' : 'last_not_null')
+      );
+      fillConfigurableSelect(
+        'widgetConfigLegendCalculation',
+        (catalog.calculations || GMJDashboardVisualizations.CALCULATIONS)
+          .filter(id => id !== 'current')
+          .map(id => ({ id, label: calculationLabels[id] || id })),
+        item.config?.legend_calculation || 'last_not_null'
+      );
       fillConfigurableSelect(
         'widgetConfigRefresh',
         (catalog.refresh_intervals || [0, 10, 30, 60, 300]).map(value => ({ id: value, label: value ? `${value}s` : 'Manual' })),
@@ -19244,6 +19542,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       populateConfigurableAppearance(item.config?.appearance || {
         show_legend: item.visualization?.show_legend !== false
       });
+      document.getElementById('widgetConfigTrafficOrientation').value =
+        item.config?.traffic_orientation || 'positive_both';
+      document.getElementById('widgetConfigAxisNegativeSign').value =
+        String(Boolean(item.config?.axis_show_negative_sign));
+      const fieldConfig = GMJDashboardVisualizations.normalizedFieldConfig(
+        item.config || {},
+        item.config?.appearance || GMJDashboardCharts.DEFAULT_APPEARANCE
+      );
+      document.getElementById('widgetConfigUnit').value =
+        fieldConfig.defaults.unit || item.config?.metric || '';
+      document.getElementById('widgetConfigDecimals').value =
+        String(fieldConfig.defaults.decimals ?? 'auto');
+      document.getElementById('widgetConfigFieldOverrides').value =
+        JSON.stringify(fieldConfig.overrides || [], null, 2);
       document.getElementById('widgetConfigWidth').value = item.grid?.w || 4;
       document.getElementById('widgetConfigHeight').value = item.grid?.h || 4;
       document.getElementById('widgetConfigHeightMode').value = item.height_mode || 'fixed';
@@ -19310,6 +19622,51 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       openModal('dashboardWidgetModal');
     }
 
+    function openConfigurableWidgetInspector(widget) {
+      const payload = configurableWidgetPayloads.get(Number(widget.id)) || {};
+      const snapshot = GMJDashboardVisualizations.inspectorSnapshot(
+        widget,
+        payload
+      );
+      const grafanaEndpoint = widget.type === 'timeseries'
+        ? '/api/v1/grafana/query/timeseries'
+        : widget.type === 'top_n'
+          ? '/api/v1/grafana/query/ranking'
+          : '/api/v1/grafana/query/table';
+      const grafanaVisualization = {
+        line: 'timeseries',
+        area: 'timeseries',
+        line_area: 'timeseries',
+        time_bars: 'timeseries',
+        table: 'table',
+        horizontal_bar: 'barchart',
+        vertical_bar: 'barchart',
+        pie: 'piechart',
+        donut: 'piechart',
+        stat: 'stat',
+        bar_gauge: 'bargauge'
+      }[snapshot.visualization_kind] || 'table';
+      const inspector = {
+        ...snapshot,
+        grafana: {
+          endpoint: grafanaEndpoint,
+          request: {
+            metric: widget.config?.metric,
+            group_by: widget.config?.group_by,
+            filters: widget.filters || []
+          },
+          datasource: 'Infinity (backend parser)',
+          visualization: grafanaVisualization,
+          warnings: []
+        }
+      };
+      document.getElementById('dashboardWidgetInspectorTitle').textContent =
+        `Inspecionar · ${widget.title}`;
+      document.getElementById('dashboardWidgetInspectorBody').textContent =
+        JSON.stringify(inspector, null, 2);
+      openModal('dashboardWidgetInspectorModal');
+    }
+
     async function previewConfigurableWidget() {
       const target = document.getElementById('dashboardWidgetPreview');
       try {
@@ -19329,15 +19686,44 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function saveConfigurableWidget() {
       try {
         const widget = configurableWidgetDefinitionFromForm();
+        const existing = editingConfigurableWidgetId
+          ? (configurableDashboard?.widgets || []).find(
+            item => Number(item.id) === Number(editingConfigurableWidgetId)
+          )
+          : null;
+        const previousDataSignature = existing
+          ? GMJDashboardVisualizations.dataQuerySignature(existing)
+          : '';
         const endpoint = editingConfigurableWidgetId
           ? `/api/dashboards/${configurableDashboard.id}/widgets/${editingConfigurableWidgetId}`
           : `/api/dashboards/${configurableDashboard.id}/widgets`;
-        await apiRequest(endpoint, {
+        const updated = await apiRequest(endpoint, {
           method: editingConfigurableWidgetId ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(widget)
         });
         closeModal('dashboardWidgetModal');
+        const currentPayload = existing
+          ? configurableWidgetPayloads.get(Number(existing.id))
+          : null;
+        const layoutUnchanged = existing && ['x', 'y', 'w', 'h'].every(
+          field => Number(existing.grid?.[field]) === Number(updated.grid?.[field])
+        );
+        const queryUnchanged = existing && (
+          previousDataSignature
+          === GMJDashboardVisualizations.dataQuerySignature(updated)
+        );
+        if (existing && currentPayload && layoutUnchanged && queryUnchanged) {
+          const widgetIndex = configurableDashboard.widgets.findIndex(
+            item => Number(item.id) === Number(updated.id)
+          );
+          configurableDashboard.widgets[widgetIndex] = updated;
+          document.querySelector(
+            `.configurable-dashboard-widget[data-widget-id="${updated.id}"] .panel-title`
+          ).textContent = updated.title;
+          renderConfigurableWidget(updated, currentPayload);
+          return;
+        }
         await loadConfigurableDashboard(configurableDashboard.id);
       } catch (error) {
         document.getElementById('dashboardWidgetModalStatus').textContent = `Falha: ${error.message}`;
@@ -19346,7 +19732,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function configurableWidgetTable(widget, payload) {
       const metric = configurableWidgetMetric(widget, payload);
-      const rows = Array.isArray(payload.items) ? payload.items : [];
+      const normalized = ['top_n', 'ranking'].includes(payload.kind)
+        ? GMJDashboardVisualizations.normalizeRankingPayload(payload)
+        : payload;
+      const rows = Array.isArray(normalized.items) ? normalized.items : [];
       return `
         <div class="table-wrap">
           <table class="table table-sm align-middle mb-0">
@@ -19355,9 +19744,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               ${rows.map((item, index) => `
                 <tr>
                   <td>${Number(item.rank || index + 1)}</td>
-                  <td title="${escapeHtml(item.description || item.key || '-')}">${escapeHtml(item.key || item.name || '-')}</td>
+                  <td title="${escapeHtml(item.description || item.label || item.key || '-')}">${escapeHtml(item.label || item.key || item.name || '-')}</td>
                   <td class="text-end">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric] ?? 0, metric)}</td>
-                  <td class="text-end">${GMJDashboardFormatters.formatPercentage(item.percentage ?? item.percent ?? 0)}</td>
+                  <td class="text-end">${GMJDashboardFormatters.formatPercentage(item.percent ?? item.percentage ?? 0)}</td>
                   <td><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Drilldown"><i data-lucide="search"></i></button></td>
                 </tr>
               `).join('') || '<tr><td colspan="5" class="text-muted">Sem dados para os filtros atuais</td></tr>'}
@@ -19367,6 +19756,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function renderConfigurableWidget(widget, payload) {
+      configurableWidgetPayloads.set(Number(widget.id), payload);
+      if (configurableLayoutInteractionActive) {
+        configurableDeferredWidgetPayloads.set(Number(widget.id), payload);
+        return;
+      }
       const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
       if (!element) return;
       const body = element.querySelector('.configurable-dashboard-widget-body');
@@ -19374,11 +19768,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       element.classList.remove('widget-loading');
       status.textContent = payload.cached ? 'cache' : (payload.source || 'atualizado');
       const existingChart = configurableWidgetCharts.get(widget.id);
+      const selectedVisualization = GMJDashboardVisualizations.visualizationKind(widget);
       const chartPayload = (
-        payload.kind === 'timeseries'
+        (payload.kind === 'timeseries' && selectedVisualization !== 'stat')
         || (
-          payload.kind === 'top_n'
-          && (widget.visualization?.type || widget.config?.visualization) !== 'table'
+          ['top_n', 'ranking'].includes(payload.kind)
+          && !['table', 'stat'].includes(selectedVisualization)
         )
       );
       if (existingChart && !chartPayload) {
@@ -19412,8 +19807,47 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         `).join('') || '<tr><td class="text-muted">Sem status</td></tr>'}</tbody></table></div>`;
       } else if (payload.kind === 'recent_events') {
         body.innerHTML = configurableWidgetTable(widget, payload);
-      } else if (payload.kind === 'top_n' && (widget.visualization?.type || widget.config?.visualization) === 'table') {
+      } else if (
+        ['top_n', 'ranking'].includes(payload.kind)
+        && GMJDashboardVisualizations.visualizationKind(widget) === 'table'
+      ) {
         body.innerHTML = configurableWidgetTable(widget, payload);
+      } else if (
+        ['top_n', 'ranking'].includes(payload.kind)
+        && GMJDashboardVisualizations.visualizationKind(widget) === 'stat'
+      ) {
+        const ranking = GMJDashboardVisualizations.normalizeRankingPayload(payload);
+        const first = ranking.items[0];
+        const calculation = widget.config?.calculation || ranking.calculation || 'current';
+        const reducedValue = calculation === 'current'
+          ? first?.value
+          : GMJDashboardVisualizations.calculatePoints(
+            ranking.items.map(item => ({ value: item.value })),
+            calculation
+          );
+        body.innerHTML = first
+          ? `<div class="widget-kpi-value">${configurableMetricValue(reducedValue, ranking.metric)}</div>
+             <div class="subtle text-center">${escapeHtml(first.label)} · ${GMJDashboardFormatters.formatPercentage(first.percent)}</div>`
+          : '<div class="subtle text-center">Sem dados</div>';
+      } else if (
+        payload.kind === 'timeseries'
+        && GMJDashboardVisualizations.visualizationKind(widget) === 'stat'
+      ) {
+        const appearance = GMJDashboardCharts.normalizeAppearance(widget.config?.appearance);
+        const model = GMJDashboardVisualizations.buildTrafficModel(
+          payload,
+          {
+            ...(widget.config || {}),
+            legend_calculation: widget.config?.calculation || 'last_not_null'
+          },
+          appearance
+        );
+        body.innerHTML = `<div class="widget-scroll-list">${model.series.map(series => `
+          <div class="d-flex justify-content-between gap-3 py-2">
+            <span>${escapeHtml(series.name || series.key || '-')}</span>
+            <strong>${configurableMetricValue(series.legend_value, payload.metric)}</strong>
+          </div>
+        `).join('') || '<div class="subtle text-center">Sem dados</div>'}</div>`;
       } else {
         let chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
         let chart = existingChart;
@@ -19460,39 +19894,40 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             configurableSeriesMaximum(payloadSeries),
             metric
           );
-          const latestBySeries = new Map(
-            payloadSeries.map(item => {
-              const points = item.points || [];
-              return [
-                String(item.name || item.label || ''),
-                Number(points[points.length - 1]?.value) || 0
-              ];
-            })
+          const trafficModel = GMJDashboardVisualizations.buildTrafficModel(
+            { ...payload, metric: canonicalMetric, series: payloadSeries },
+            widget.config || {},
+            appearance
           );
-          const series = payloadSeries.map(item => {
-            const direction = String(item.direction || item.key || '').toLowerCase();
-            const color = direction === 'upload'
-              ? appearance.upload_color
-              : direction === 'download'
-                ? appearance.download_color
-                : item.color;
+          const visualization = GMJDashboardVisualizations.visualizationKind(widget);
+          const latestBySeries = new Map(
+            trafficModel.series.map(item => [
+              String(item.name || item.label || ''),
+              Math.abs(Number(item.legend_value) || 0)
+            ])
+          );
+          const series = trafficModel.series.map(item => {
+            const color = item.properties.color || item.color;
+            const chartType = visualization === 'time_bars' ? 'bar' : 'line';
+            const areaEnabled = ['area', 'line_area'].includes(visualization)
+              || (!widget.config?.visualization_kind && appearance.show_area);
             return {
             name: item.name || item.label,
-            type: 'line',
-            smooth: appearance.smooth_lines,
+            type: chartType,
+            smooth: chartType === 'line' && item.properties.smooth,
             showSymbol: false,
-            connectNulls: false,
-            lineStyle: { width: appearance.line_width, color },
+            connectNulls: trafficModel.connect_nulls,
+            lineStyle: { width: item.properties.line_width, color },
             itemStyle: { color },
-            areaStyle: appearance.show_area
-              ? { opacity: appearance.area_opacity, color }
+            areaStyle: chartType === 'line' && areaEnabled
+              ? { opacity: item.properties.fill_opacity / 100, color, origin: 'auto' }
               : undefined,
-            stack: widget.visualization?.type === 'stacked_area' ? 'total' : undefined,
+            stack: trafficModel.stacked ? 'traffic' : undefined,
             label: {
               show: appearance.show_point_labels && density.showPointLabels,
               hideOverlap: true,
               formatter: params => GMJDashboardFormatters.formatTooltipValue(
-                Array.isArray(params.value) ? params.value[1] : params.value,
+                Math.abs(Array.isArray(params.value) ? params.value[1] : params.value),
                 metric,
                 metricScale
               )
@@ -19515,7 +19950,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                     const value = Array.isArray(item.value)
                       ? item.value[item.value.length - 1]
                       : item.value;
-                    return `${item.marker || ''}${escapeHtml(item.seriesName || '')}: ${GMJDashboardFormatters.formatTooltipValue(value, metric, metricScale)}`;
+                    return `${item.marker || ''}${escapeHtml(item.seriesName || '')}: ${GMJDashboardFormatters.formatTooltipValue(Math.abs(value), metric, metricScale)}`;
                   })
                 ].filter(Boolean).join('<br>');
               }
@@ -19557,12 +19992,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             },
             yAxis: {
               type: 'value',
+              min: trafficModel.y_min,
+              max: trafficModel.y_max,
               splitNumber: density.splitNumber,
+              axisLine: {
+                show: trafficModel.orientation === 'split_zero',
+                onZero: true,
+                lineStyle: { color: 'rgba(100,116,139,.75)', width: 1.25 }
+              },
               axisLabel: {
                 hideOverlap: true,
                 fontSize: density.fontSize,
                 formatter: value => GMJDashboardFormatters.formatAxisValue(
-                  value,
+                  trafficModel.axis_show_negative_sign ? value : Math.abs(value),
                   metric,
                   metricScale
                 )
@@ -19579,16 +20021,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             appearance.axis_label_density
           );
           const density = GMJDashboardCharts.densitySettings(densityMode);
-          const items = (payload.items || []).slice(0, density.categoryLimit);
+          const ranking = GMJDashboardVisualizations.normalizeRankingPayload(payload);
+          const dataset = GMJDashboardVisualizations.rankingDataset(ranking);
+          const items = dataset.items.slice(0, density.categoryLimit);
+          if (dataset.items.length > items.length) {
+            const remaining = dataset.items.slice(items.length);
+            items.push({
+              key: 'Outros',
+              label: 'Outros',
+              value: remaining.reduce((sum, item) => sum + item.value, 0),
+              percent: remaining.reduce((sum, item) => sum + item.percent, 0),
+              metadata: { grouped_items: remaining.length }
+            });
+          }
           const metric = configurableWidgetMetric(widget, payload);
           const metricScale = GMJDashboardFormatters.selectMetricScale(
             configurableItemsMaximum(items),
             metric
           );
-          const visualization = widget.visualization?.type || widget.config?.visualization || 'bar';
+          const visualization = GMJDashboardVisualizations.visualizationKind(widget);
           if (['donut', 'pie'].includes(visualization)) {
-            const total = items.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
-            const byName = new Map(items.map(item => [String(item.key), Number(item.value) || 0]));
+            const total = dataset.total;
+            const byName = new Map(items.map(item => [String(item.label), Number(item.value) || 0]));
             GMJDashboardCharts.replaceChartOption(chart, {
               title: visualization === 'donut' ? {
                 text: GMJDashboardFormatters.formatTooltipValue(total, metric, metricScale),
@@ -19620,11 +20074,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 },
                 labelLayout: { hideOverlap: true },
                 minShowLabelAngle: appearance.minimum_slice_label_percent * 3.6,
-                data: items.map(item => ({ name: item.key, value: item.value }))
+                data: items.map(item => ({ name: item.label, value: item.value }))
               }]
             });
           } else {
-            const horizontal = visualization === 'horizontal_bar';
+            const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
             GMJDashboardCharts.replaceChartOption(chart, {
               tooltip: {
                 trigger: 'axis',
@@ -19632,7 +20086,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                   const rows = Array.isArray(params) ? params : [params];
                   const index = Number(rows[0]?.dataIndex || 0);
                   const item = items[index] || {};
-                  return `${escapeHtml(item.key || item.name || '-')}: ${GMJDashboardFormatters.formatTooltipValue(item.value, metric, metricScale)}`;
+                  return `${escapeHtml(item.label || item.key || item.name || '-')}: ${GMJDashboardFormatters.formatTooltipValue(item.value, metric, metricScale)} (${GMJDashboardFormatters.formatPercentage(item.percent || 0)})`;
                 }
               },
               grid: {
@@ -19658,7 +20112,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 }
                 : {
                   type: 'category',
-                  data: items.map(item => item.key),
+                  data: items.map(item => item.label),
                   axisLabel: {
                     hideOverlap: true,
                     rotate: densityMode === 'compact' ? 35 : 0,
@@ -19672,7 +20126,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               yAxis: horizontal
                 ? {
                   type: 'category',
-                  data: items.map(item => item.key),
+                  data: items.map(item => item.label),
                   axisLabel: {
                     hideOverlap: true,
                     fontSize: density.fontSize,
@@ -19709,6 +20163,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                   )
                 },
                 itemStyle: { color: appearance.bar_color, borderRadius: 3 }
+                ,
+                showBackground: visualization === 'bar_gauge',
+                backgroundStyle: {
+                  color: 'rgba(148,163,184,.16)',
+                  borderRadius: 3
+                }
               }]
             });
           }
@@ -19732,6 +20192,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function queryConfigurableWidget(widget, { force = false } = {}) {
       if (!configurableDashboardActive || widget.hidden || widget.collapsed) return null;
+      if (configurableLayoutInteractionActive) return null;
       if (!force && !configurableVisibleWidgets.has(widget.id)) return null;
       configurableWidgetControllers.get(widget.id)?.abort();
       const controller = new AbortController();
@@ -19849,6 +20310,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                   <button class="icon-button configurable-admin-action configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-wider" ${actionsDisabled} title="Redimensionar"><i data-lucide="chevrons-right"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-collapse" ${actionsDisabled} title="Recolher"><i data-lucide="chevron-up"></i></button>
+                  <button class="icon-button configurable-widget-inspect" title="Inspecionar dados"><i data-lucide="braces"></i></button>
                   <button class="icon-button configurable-widget-fullscreen" title="Tela cheia"><i data-lucide="maximize-2"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-hide" ${actionsDisabled} title="${widget.hidden ? 'Exibir' : 'Ocultar'}"><i data-lucide="${widget.hidden ? 'eye' : 'eye-off'}"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-delete" ${actionsDisabled} title="Excluir"><i data-lucide="trash-2"></i></button>
@@ -19882,6 +20344,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadConfigurableDashboard(dashboardId) {
+      const loadSequence = ++configurableDashboardLoadSequence;
+      const interactionSequenceAtStart = configurableLayoutInteractionSequence;
       let dashboard = await apiRequest(`/api/dashboards/${dashboardId}`);
       if (
         !dashboard.legacy_layout_migrated
@@ -19902,6 +20366,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           body: JSON.stringify(legacyLayout)
         });
       }
+      if (
+        loadSequence !== configurableDashboardLoadSequence
+        || configurableLayoutInteractionActive
+        || interactionSequenceAtStart !== configurableLayoutInteractionSequence
+      ) {
+        return configurableDashboard || dashboard;
+      }
+      configurableWidgetPayloads.clear();
+      configurableDeferredWidgetPayloads.clear();
       configurableDashboard = dashboard;
       syncConfigurablePersistentLayout(configurableWidgetLayoutItems(dashboard.widgets || []));
       const clientLayoutRepaired = repairConfigurableDashboardClientLayout();
@@ -19952,6 +20425,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function refreshConfigurableDashboard() {
       if (!configurableDashboardActive || document.visibilityState !== 'visible' || activeView !== 'dashboard') return;
+      if (configurableLayoutInteractionActive) return;
       const visible = (configurableDashboard?.widgets || []).filter(widget =>
         !widget.hidden && !widget.collapsed && configurableVisibleWidgets.has(widget.id)
       );
@@ -19982,9 +20456,32 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       ].join(':');
     }
 
-    async function commitConfigurableLayout(layout, activeWidgetId) {
+    async function commitConfigurableLayout(
+      layout,
+      activeWidgetId,
+      {
+        interactionId = '',
+        interactionSequence = 0,
+        compactMode = ''
+      } = {}
+    ) {
       const committed = GMJDashboardLayout.commitLayoutInteraction(layout);
+      const effectiveCompactMode = compactMode
+        || configurableDashboard?.compact_mode
+        || (
+          configurableDashboard?.layout_mode === 'auto_grid'
+            ? 'vertical'
+            : 'none'
+        );
       const signature = GMJDashboardLayout.layoutSignature(committed);
+      const requestSequence = ++configurableLayoutCommitSequence;
+      const baseRevision = Number(
+        configurableDashboard.revision
+        ?? configurableDashboard.layout_version
+        ?? 0
+      );
+      const effectiveInteractionId = interactionId
+        || configurableInteractionIdentifier();
       const idempotencyKey = configurableLayoutIdempotencyKey(
         signature,
         activeWidgetId
@@ -20000,10 +20497,29 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             id: item.id,
             grid: { x: item.x, y: item.y, w: item.w, h: item.h }
           })),
-          layout_version: configurableDashboard.layout_version,
-          active_widget_id: activeWidgetId || null
+          layout_version: baseRevision,
+          base_revision: baseRevision,
+          active_widget_id: activeWidgetId || null,
+          interaction_id: effectiveInteractionId,
+          compact_mode: effectiveCompactMode
         })
       });
+      const staleResponse = (
+        requestSequence !== configurableLayoutCommitSequence
+        || result.interaction_id !== effectiveInteractionId
+        || (
+          interactionSequence
+          && interactionSequence !== configurableLayoutInteractionSequence
+        )
+        || (
+          interactionId
+          && configurableLayoutInteractionId
+          && interactionId !== configurableLayoutInteractionId
+        )
+      );
+      if (staleResponse) {
+        return { ...result, stale_response_ignored: true };
+      }
       const normalizedById = new Map(
         (result.widgets || []).map(item => [Number(item.id), item.grid])
       );
@@ -20012,6 +20528,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ...(normalizedById.get(Number(item.id)) || {})
       }));
       configurableDashboard.layout_version = result.layout_version;
+      configurableDashboard.revision = result.revision ?? result.layout_version;
       syncConfigurablePersistentLayout(normalized);
       updateConfigurableDashboardGridPositions(normalized);
       return result;
@@ -20037,6 +20554,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('dashboardManagerDescription').value = configurableDashboard.description || '';
       document.getElementById('dashboardManagerShared').value = String(Boolean(configurableDashboard.is_shared));
       document.getElementById('dashboardManagerDefault').value = String(Boolean(configurableDashboard.is_default));
+      document.getElementById('dashboardManagerLayoutMode').value =
+        configurableDashboard.layout_mode || 'custom';
+      document.getElementById('dashboardManagerCompactMode').value =
+        configurableDashboard.compact_mode
+        || (configurableDashboard.layout_mode === 'auto_grid' ? 'vertical' : 'none');
       document.getElementById('dashboardManagerStatus').textContent = configurableDashboard.is_system
         ? 'Template de sistema: duplique para personalizar.'
         : '';
@@ -20059,17 +20581,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function saveConfigurableDashboardManager() {
       if (!configurableDashboard?.permissions?.can_edit) return;
-      await apiRequest(`/api/dashboards/${configurableDashboard.id}`, {
+      const dashboardId = configurableDashboard.id;
+      const layoutMode = document.getElementById('dashboardManagerLayoutMode').value;
+      const compactMode = document.getElementById('dashboardManagerCompactMode').value;
+      await apiRequest(`/api/dashboards/${dashboardId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: document.getElementById('dashboardManagerName').value.trim(),
           description: document.getElementById('dashboardManagerDescription').value.trim(),
           is_shared: document.getElementById('dashboardManagerShared').value === 'true',
-          is_default: document.getElementById('dashboardManagerDefault').value === 'true'
+          is_default: document.getElementById('dashboardManagerDefault').value === 'true',
+          layout_mode: layoutMode,
+          compact_mode: compactMode
         })
       });
       closeModal('dashboardManagerModal');
+      await loadConfigurableDashboard(dashboardId);
+      if (layoutMode === 'auto_grid') {
+        const standardized = GMJDashboardLayout.autoGridLayout(
+          configurablePersistentLayout,
+          { w: 4, h: 6 }
+        );
+        await commitConfigurableLayout(standardized, null, {
+          compactMode: 'vertical'
+        });
+        renderConfigurableDashboard();
+      }
       await initializeConfigurableDashboards();
     }
 
@@ -20090,6 +20628,79 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
       link.download = `${String(configurableDashboard.name || 'dashboard').replace(/[^a-z0-9_-]+/gi, '-')}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    function openGrafanaExportModal() {
+      configurableGrafanaExportPayload = null;
+      document.getElementById('grafanaExportPreview').textContent = 'Nenhum export gerado.';
+      document.getElementById('grafanaExportStatus').textContent = 'Gere ou teste o JSON antes do download.';
+      closeModal('dashboardManagerModal');
+      openModal('grafanaExportModal');
+    }
+
+    async function generateGrafanaExport() {
+      if (!configurableDashboard?.id) throw new Error('Dashboard não selecionado.');
+      const query = new URLSearchParams({
+        grafana_version: document.getElementById('grafanaExportVersion').value,
+        datasource_uid: document.getElementById('grafanaExportDatasourceUid').value.trim() || '${DS_GMJ_FLOW}',
+        folder_uid: document.getElementById('grafanaExportFolderUid').value.trim() || 'gmj-flow',
+        include_hidden: document.getElementById('grafanaExportIncludeHidden').value
+      });
+      const payload = await apiRequest(
+        `/api/dashboards/${configurableDashboard.id}/grafana-export?${query}`
+      );
+      configurableGrafanaExportPayload = payload;
+      document.getElementById('grafanaExportPreview').textContent = JSON.stringify(payload, null, 2);
+      const panels = payload.dashboard?.panels?.length || 0;
+      const warnings = payload.meta?.warnings?.length || 0;
+      document.getElementById('grafanaExportStatus').textContent = (
+        `${panels} painel(is) · ${warnings} aviso(s) · hash ${payload.meta?.export_hash || '-'}`
+      );
+      return payload;
+    }
+
+    async function testGrafanaExport() {
+      const payload = await generateGrafanaExport();
+      const panels = Array.isArray(payload.dashboard?.panels)
+        ? payload.dashboard.panels
+        : [];
+      const hasInlineHeaders = panels.some(panel => (
+        (panel.targets || []).some(target => (
+          target.headers
+          || target.url_options?.headers
+          || target.url_options?.header_params
+        ))
+      ));
+      const validGrid = panels.every(panel => (
+        Number.isInteger(panel.gridPos?.x)
+        && Number.isInteger(panel.gridPos?.y)
+        && Number.isInteger(panel.gridPos?.w)
+        && Number.isInteger(panel.gridPos?.h)
+      ));
+      const safe = payload.meta?.credentials_included === false && !hasInlineHeaders;
+      document.getElementById('grafanaExportStatus').textContent = (
+        safe && validGrid
+          ? `Export válido · ${panels.length} painel(is) · sem credenciais · gridPos íntegro`
+          : 'Export reprovado na validação local; revise o preview.'
+      );
+    }
+
+    async function copyGrafanaExport() {
+      const payload = configurableGrafanaExportPayload || await generateGrafanaExport();
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      document.getElementById('grafanaExportStatus').textContent = 'JSON copiado para a área de transferência.';
+    }
+
+    async function downloadGrafanaExport() {
+      const payload = configurableGrafanaExportPayload || await generateGrafanaExport();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json'
+      });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${String(configurableDashboard.name || 'dashboard').replace(/[^a-z0-9_-]+/gi, '-')}-grafana.json`;
       link.click();
       URL.revokeObjectURL(link.href);
     }
@@ -20202,6 +20813,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         getConstraints: configurableWidgetLayoutConstraints,
         canResize: configurableWidgetCanResize,
         onStart: session => {
+          beginConfigurableLayoutInteraction(session);
           clearTimeout(configurableWidgetAutoHeightTimers.get(session.widget.id));
           configurableWidgetAutoHeightTimers.delete(session.widget.id);
           configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
@@ -20213,8 +20825,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           updateConfigurableInteractionVisuals(layout, session);
           layout.forEach(item => scheduleConfigurableChartResize(item.id));
         },
-        onPersist: async ({ widget, layout }) => {
-          await commitConfigurableLayout(layout, widget.id);
+        onPersist: async ({ widget, layout, session }) => {
+          await commitConfigurableLayout(layout, widget.id, {
+            interactionId: session.interactionId,
+            interactionSequence: session.interactionSequence,
+            compactMode: configurableDashboard?.compact_mode || 'none'
+          });
         },
         onRollback: ({ widget, layout, cancelled }) => {
           configurableInteractionLayout = cloneConfigurableLayout(layout);
@@ -20246,6 +20862,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           .find(widget => Number(widget.id) === Number(widgetId)),
         canMove: configurableWidgetCanResize,
         onStart: session => {
+          beginConfigurableLayoutInteraction(session);
           configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
           updateConfigurableInteractionVisuals(session.originalLayout, session);
         },
@@ -20255,8 +20872,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           updateConfigurableInteractionVisuals(layout, session);
           layout.forEach(item => scheduleConfigurableChartResize(item.id));
         },
-        onPersist: async ({ widget, layout }) => {
-          await commitConfigurableLayout(layout, widget.id);
+        onPersist: async ({ widget, layout, session }) => {
+          await commitConfigurableLayout(layout, widget.id, {
+            interactionId: session.interactionId,
+            interactionSequence: session.interactionSequence,
+            compactMode: 'none'
+          });
         },
         onRollback: ({ layout }) => {
           configurableInteractionLayout = cloneConfigurableLayout(layout);
@@ -20294,7 +20915,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (!widget) return;
         if (target.closest('.configurable-admin-action') && !dashboardEditMode) return;
         try {
-          if (target.closest('.configurable-widget-edit')) openConfigurableWidgetModal(widget);
+          if (target.closest('.configurable-widget-inspect')) openConfigurableWidgetInspector(widget);
+          else if (target.closest('.configurable-widget-edit')) openConfigurableWidgetModal(widget);
           else if (target.closest('.configurable-widget-duplicate')) {
             await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets`, {
               method: 'POST',
@@ -22435,6 +23057,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('saveDashboardWidgetButton').addEventListener('click', () => saveConfigurableWidget().catch(console.error));
     document.getElementById('previewDashboardWidgetButton').addEventListener('click', () => previewConfigurableWidget().catch(console.error));
     document.getElementById('widgetConfigType').addEventListener('change', syncConfigurableWidgetTypeFields);
+    document.getElementById('widgetConfigVisualization').addEventListener('change', syncConfigurableWidgetTypeFields);
+    document.getElementById('copyDashboardWidgetInspectorButton').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(
+        document.getElementById('dashboardWidgetInspectorBody').textContent || '{}'
+      );
+    });
     for (const field of ['Upload', 'Download', 'Bar', 'Positive', 'Negative']) {
       const colorInput = document.getElementById(`widgetConfig${field}Color`);
       const hexInput = document.getElementById(`widgetConfig${field}ColorHex`);
@@ -22478,6 +23106,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }));
     document.getElementById('exportDashboardButton').addEventListener('click', () => exportConfigurableDashboard().catch(error => {
       setText('dashboardManagerStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('exportGrafanaDashboardButton').addEventListener('click', openGrafanaExportModal);
+    document.getElementById('testGrafanaExportButton').addEventListener('click', () => testGrafanaExport().catch(error => {
+      setText('grafanaExportStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('copyGrafanaExportButton').addEventListener('click', () => copyGrafanaExport().catch(error => {
+      setText('grafanaExportStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('downloadGrafanaExportButton').addEventListener('click', () => downloadGrafanaExport().catch(error => {
+      setText('grafanaExportStatus', `Falha: ${error.message}`);
     }));
     document.getElementById('importDashboardButton').addEventListener('click', importConfigurableDashboard);
     document.getElementById('deleteDashboardButton').addEventListener('click', async () => {

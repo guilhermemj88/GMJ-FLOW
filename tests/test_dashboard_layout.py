@@ -416,6 +416,44 @@ class DashboardLayoutPersistenceTest(unittest.TestCase):
                 active_widget_id=stale[0]["id"],
             )
 
+    def test_custom_layout_preserves_free_slots_and_echoes_interaction(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Custom",
+                "is_default": False,
+                "is_shared": False,
+                "layout_mode": "custom",
+                "compact_mode": "none",
+                "refresh_interval_seconds": 30,
+            },
+            1,
+            widgets=copy.deepcopy(GENERAL_WIDGETS[:2]),
+        )
+        widgets = [
+            {"id": item["id"], "grid": dict(item["grid"])}
+            for item in dashboard["widgets"]
+        ]
+        active_id = widgets[0]["id"]
+        widgets[0]["grid"].update({"x": 8, "y": 20, "w": 4})
+        result = persist_dashboard_layout(
+            self.conn,
+            dashboard["id"],
+            widgets,
+            base_revision=dashboard["layout_version"],
+            active_widget_id=active_id,
+            interaction_id="drag-contract-1",
+            compact_mode="none",
+        )
+        by_id = {
+            item["id"]: item["grid"]
+            for item in result["widgets"]
+        }
+        self.assertEqual(by_id[active_id]["y"], 20)
+        self.assertEqual(result["revision"], dashboard["layout_version"] + 1)
+        self.assertEqual(result["interaction_id"], "drag-contract-1")
+        self.assertEqual(result["compact_mode"], "none")
+
     def test_full_layout_commit_rejects_missing_widget_without_partial_write(self):
         dashboard = create_dashboard(
             self.conn,

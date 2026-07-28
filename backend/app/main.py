@@ -26,7 +26,7 @@ from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Union
 
 import clickhouse_connect
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -145,6 +145,30 @@ from app.services.dashboard_widgets import (
     widget_data_signature,
     widget_row_to_dict,
 )
+from app.services.grafana_api import (
+    GRAFANA_API_VERSION,
+    GRAFANA_METRICS,
+    GrafanaApiError,
+    audit as audit_grafana_api,
+    authenticate as authenticate_grafana_api,
+    canonical_ranking as canonical_grafana_ranking,
+    canonical_timeseries as canonical_grafana_timeseries,
+    catalog as grafana_api_catalog,
+    correlation_id as grafana_correlation_id,
+    validate_ranking_request as validate_grafana_ranking_request,
+    validate_timeseries_request as validate_grafana_timeseries_request,
+)
+from app.services.grafana_exporter import export_dashboard as export_grafana_dashboard
+from app.services.grafana_schemas import (
+    GrafanaHealthResponse,
+    GrafanaPublishRequest,
+    GrafanaRankingQuery,
+    GrafanaRankingResponse,
+    GrafanaTableQuery,
+    GrafanaTableResponse,
+    GrafanaTimeseriesQuery,
+    GrafanaTimeseriesResponse,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -167,13 +191,22 @@ async def sqlite_operational_error_handler(request: Request, exc: sqlite3.Operat
 if hasattr(app, "exception_handler"):
     app.exception_handler(sqlite3.OperationalError)(sqlite_operational_error_handler)
 
-cors_origins = os.getenv("API_CORS_ORIGINS", "*")
+cors_origins = os.getenv("API_CORS_ORIGINS", "")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if cors_origins == "*" else [origin.strip() for origin in cors_origins.split(",")],
+    allow_origins=[
+        origin.strip()
+        for origin in cors_origins.split(",")
+        if origin.strip()
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Idempotency-Key",
+        "X-Correlation-ID",
+    ],
 )
 app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
@@ -33007,6 +33040,8 @@ def import_configurable_dashboard(payload: dict[str, Any], request: Request):
                 "is_shared": False,
                 "global_filters": source.get("global_filters", []),
                 "time_range": source.get("time_range", {}),
+                "layout_mode": source.get("layout_mode", "custom"),
+                "compact_mode": source.get("compact_mode", "none"),
                 "refresh_interval_seconds": source.get("refresh_interval_seconds", 30),
             }
         )
@@ -33102,6 +33137,14 @@ def update_configurable_dashboard_endpoint(
             "is_shared": payload.get("is_shared", current["is_shared"]),
             "global_filters": payload.get("global_filters", current["global_filters"]),
             "time_range": payload.get("time_range", current["time_range"]),
+            "layout_mode": payload.get(
+                "layout_mode",
+                current.get("layout_mode", "custom"),
+            ),
+            "compact_mode": payload.get(
+                "compact_mode",
+                current.get("compact_mode", "none"),
+            ),
             "refresh_interval_seconds": payload.get(
                 "refresh_interval_seconds",
                 current["refresh_interval_seconds"],
@@ -33342,6 +33385,7 @@ def persist_configurable_dashboard_layout_endpoint(
 ):
     user = dashboard_request_user(request)
     version_value = payload.get("layout_version")
+    base_revision_value = payload.get("base_revision")
     try:
         layout_version = (
             int(version_value)
@@ -33353,6 +33397,11 @@ def persist_configurable_dashboard_layout_endpoint(
             if payload.get("active_widget_id") is not None
             else None
         )
+        base_revision = (
+            int(base_revision_value)
+            if base_revision_value is not None
+            else None
+        )
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=400,
@@ -33362,6 +33411,18 @@ def persist_configurable_dashboard_layout_endpoint(
         request.headers.get("Idempotency-Key")
         or payload.get("idempotency_key")
     )[:160]
+    interaction_id = clean_text(payload.get("interaction_id"))[:160]
+    if interaction_id and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}",
+        interaction_id,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="interaction_id inválido",
+        )
+    compact_mode = clean_text(
+        payload.get("compact_mode") or "vertical"
+    ).lower()
     with sqlite_connection() as conn:
         ensure_dashboard_schema(conn)
         conn.commit()
@@ -33373,13 +33434,22 @@ def persist_configurable_dashboard_layout_endpoint(
                 dashboard_id,
                 payload.get("widgets"),
                 layout_version=layout_version,
+                base_revision=base_revision,
                 active_widget_id=active_widget_id,
                 idempotency_key=idempotency_key,
+                interaction_id=interaction_id,
+                compact_mode=compact_mode,
             )
             conn.commit()
         except DashboardLayoutVersionConflict as exc:
             conn.rollback()
-            raise HTTPException(status_code=409, detail=str(exc))
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "layout_revision_conflict",
+                    "message": str(exc),
+                },
+            )
         except ValueError as exc:
             conn.rollback()
             raise dashboard_validation_error(exc)
@@ -33407,6 +33477,562 @@ def export_configurable_dashboard_endpoint(dashboard_id: int, request: Request):
         "exported_at": utc_now_iso(),
         "dashboard": exported,
     }
+
+
+def grafana_api_authorize(
+    request: Request,
+    required_scope: str,
+    action: str,
+) -> dict[str, Any]:
+    request_correlation_id = grafana_correlation_id(
+        request.headers.get("X-Correlation-ID")
+    )
+    try:
+        return authenticate_grafana_api(
+            request.headers.get("Authorization"),
+            required_scope,
+            request_correlation_id=request_correlation_id,
+        )
+    except GrafanaApiError as exc:
+        audit_grafana_api(
+            action,
+            {
+                "correlation_id": request_correlation_id,
+                "token_id": "unauthorized",
+            },
+            outcome=exc.error,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.payload(request_correlation_id),
+            headers={"X-Correlation-ID": request_correlation_id},
+        )
+
+
+def grafana_api_result(
+    action: str,
+    context: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    metric: str = "",
+    status_code: int = 200,
+) -> JSONResponse:
+    audit_grafana_api(action, context, metric=metric)
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers={"X-Correlation-ID": context["correlation_id"]},
+    )
+
+
+def grafana_api_validation_error(
+    action: str,
+    context: dict[str, Any],
+    exc: GrafanaApiError,
+    *,
+    metric: str = "",
+) -> HTTPException:
+    audit_grafana_api(
+        action,
+        context,
+        metric=metric,
+        outcome=exc.error,
+    )
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=exc.payload(context["correlation_id"]),
+        headers={"X-Correlation-ID": context["correlation_id"]},
+    )
+
+
+def grafana_api_query_failure(
+    action: str,
+    context: dict[str, Any],
+    exc: Exception,
+    *,
+    metric: str = "",
+) -> HTTPException:
+    logger.exception(
+        "GRAFANA_API_QUERY_FAILED action=%s correlation_id=%s metric=%s",
+        action,
+        context["correlation_id"],
+        metric,
+    )
+    audit_grafana_api(
+        action,
+        context,
+        metric=metric,
+        outcome="query_execution_failed",
+    )
+    return HTTPException(
+        status_code=502,
+        detail={
+            "error": "query_execution_failed",
+            "message": "A consulta não pôde ser concluída.",
+            "correlation_id": context["correlation_id"],
+        },
+        headers={"X-Correlation-ID": context["correlation_id"]},
+    )
+
+
+def grafana_query_filters(request_data: dict[str, Any]) -> list[dict[str, Any]]:
+    filters = request_data["filters"]
+    protocols = filters.get("protocols") or []
+    return (
+        [{"field": "protocol", "operator": "eq", "value": protocols[0]}]
+        if protocols
+        else []
+    )
+
+
+def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
+    filters = request_data["filters"]
+    window_seconds = max(
+        1,
+        int((request_data["end"] - request_data["start"]).total_seconds()),
+    )
+    return {
+        "range_minutes": max(1, int((window_seconds + 59) / 60)),
+        "time_range": {},
+        "start": request_data["start"],
+        "end": request_data["end"],
+        "sensor_id": (
+            filters["sensor_ids"][0]
+            if filters.get("sensor_ids")
+            else None
+        ),
+        "interface_id": None,
+        "if_index": (
+            filters["interfaces"][0]
+            if filters.get("interfaces")
+            else None
+        ),
+        "zone_id": None,
+        "zone_direction": "both",
+        "series_limit": 50,
+        "global_filters": [],
+    }
+
+
+def grafana_resolution_seconds(interval_ms: int) -> int:
+    requested = max(1, int((int(interval_ms) + 999) / 1000))
+    for resolution in (5, 10, 30, 60, 300, 900, 3600):
+        if resolution >= requested:
+            return resolution
+    return 3600
+
+
+def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
+    group_by = request_data["group_by"][0]
+    widget = {
+        "title": "Grafana API",
+        "type": "timeseries",
+        "category": "traffic",
+        "config": {
+            "metric": "bps" if request_data["metric"] == "traffic_bps" else "pps",
+            "direction": request_data["filters"]["direction"],
+            "group_by": "total" if group_by == "direction" else group_by,
+            "aggregation": "sum",
+            "resolution_seconds": grafana_resolution_seconds(
+                request_data["interval_ms"]
+            ),
+            "calculation": request_data["calculation"],
+            "legend_calculation": "last_not_null",
+        },
+        "filters": grafana_query_filters(request_data),
+        "visualization": {"type": "line"},
+        "grid": {"x": 0, "y": 0, "w": 6, "h": 6},
+        "refresh_interval_seconds": 0,
+    }
+    return dashboard_widget_series_payload(
+        build_widget_query_plan(widget),
+        grafana_query_context(request_data),
+    )
+
+
+def execute_grafana_ranking(request_data: dict[str, Any]) -> dict[str, Any]:
+    metric_config = {
+        "top_download_origins": ("src_asn", "download"),
+        "top_upload_destinations": ("dst_asn", "upload"),
+        "top_protocols": (
+            "protocol",
+            request_data["filters"]["direction"],
+        ),
+    }
+    dimension, direction = metric_config[request_data["metric"]]
+    widget = {
+        "title": "Grafana API",
+        "type": "top_n",
+        "category": "traffic",
+        "config": {
+            "dimension": dimension,
+            "metric": "bps",
+            "direction": direction,
+            "limit": request_data["top_n"],
+            "calculation": request_data["calculation"],
+        },
+        "filters": grafana_query_filters(request_data),
+        "visualization": {"type": "table"},
+        "grid": {"x": 0, "y": 0, "w": 6, "h": 6},
+        "refresh_interval_seconds": 0,
+    }
+    return dashboard_widget_top_payload(
+        build_widget_query_plan(widget),
+        grafana_query_context(request_data),
+    )
+
+
+@app.get(
+    "/api/v1/grafana/health",
+    tags=["Grafana Integration"],
+    response_model=GrafanaHealthResponse,
+)
+def grafana_health_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "health",
+    )
+    return grafana_api_result(
+        "health",
+        context,
+        {
+            "status": "ok",
+            "service": "gmj-flow-grafana-api",
+            "api_version": GRAFANA_API_VERSION,
+            "timestamp": utc_now_iso(),
+            "correlation_id": context["correlation_id"],
+        },
+    )
+
+
+@app.get("/api/v1/grafana/catalog", tags=["Grafana Integration"])
+def grafana_catalog_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "catalog",
+    )
+    return grafana_api_result(
+        "catalog",
+        context,
+        {
+            **grafana_api_catalog(),
+            "correlation_id": context["correlation_id"],
+        },
+    )
+
+
+@app.post(
+    "/api/v1/grafana/query/timeseries",
+    tags=["Grafana Integration"],
+    response_model=Union[GrafanaTimeseriesResponse, GrafanaTableResponse],
+)
+def grafana_timeseries_endpoint(
+    payload: GrafanaTimeseriesQuery,
+    request: Request,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "query.timeseries",
+    )
+    metric = clean_text(getattr(payload, "metric", ""))
+    try:
+        request_data = validate_grafana_timeseries_request(payload)
+        raw = execute_grafana_timeseries(request_data)
+        result = canonical_grafana_timeseries(
+            raw,
+            request_data,
+            context["correlation_id"],
+        )
+    except GrafanaApiError as exc:
+        raise grafana_api_validation_error(
+            "query.timeseries",
+            context,
+            exc,
+            metric=metric,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "query.timeseries",
+            context,
+            exc,
+            metric=metric,
+        )
+    return grafana_api_result(
+        "query.timeseries",
+        context,
+        result,
+        metric=request_data["metric"],
+    )
+
+
+@app.post(
+    "/api/v1/grafana/query/ranking",
+    tags=["Grafana Integration"],
+    response_model=Union[GrafanaRankingResponse, GrafanaTableResponse],
+)
+def grafana_ranking_endpoint(
+    payload: GrafanaRankingQuery,
+    request: Request,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "query.ranking",
+    )
+    metric = clean_text(getattr(payload, "metric", ""))
+    try:
+        request_data = validate_grafana_ranking_request(payload)
+        raw = execute_grafana_ranking(request_data)
+        result = canonical_grafana_ranking(
+            raw,
+            request_data,
+            context["correlation_id"],
+        )
+    except GrafanaApiError as exc:
+        raise grafana_api_validation_error(
+            "query.ranking",
+            context,
+            exc,
+            metric=metric,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "query.ranking",
+            context,
+            exc,
+            metric=metric,
+        )
+    return grafana_api_result(
+        "query.ranking",
+        context,
+        result,
+        metric=request_data["metric"],
+    )
+
+
+@app.post(
+    "/api/v1/grafana/query/table",
+    tags=["Grafana Integration"],
+    response_model=GrafanaTableResponse,
+)
+def grafana_table_endpoint(
+    payload: GrafanaTableQuery,
+    request: Request,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "query.table",
+    )
+    data = payload.dict(by_alias=True)
+    metric = clean_text(data.get("metric")).lower()
+    try:
+        if GRAFANA_METRICS.get(metric, {}).get("kind") == "ranking":
+            request_data = validate_grafana_ranking_request(
+                {
+                    **data,
+                    "top_n": min(100, int(data.get("limit") or 100)),
+                    "calculation": "last_not_null",
+                    "format": "table",
+                }
+            )
+            raw = execute_grafana_ranking(request_data)
+            result = canonical_grafana_ranking(
+                raw,
+                request_data,
+                context["correlation_id"],
+            )
+        else:
+            request_data = validate_grafana_timeseries_request(
+                {
+                    **data,
+                    "interval_ms": 60000,
+                    "max_data_points": min(
+                        1000,
+                        int(data.get("limit") or 100),
+                    ),
+                    "group_by": ["direction"],
+                    "calculation": "rate",
+                    "format": "table",
+                }
+            )
+            raw = execute_grafana_timeseries(request_data)
+            result = canonical_grafana_timeseries(
+                raw,
+                request_data,
+                context["correlation_id"],
+            )
+    except GrafanaApiError as exc:
+        raise grafana_api_validation_error(
+            "query.table",
+            context,
+            exc,
+            metric=metric,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "query.table",
+            context,
+            exc,
+            metric=metric,
+        )
+    return grafana_api_result(
+        "query.table",
+        context,
+        result,
+        metric=metric,
+    )
+
+
+@app.get(
+    "/api/dashboards/{dashboard_id}/grafana-export",
+    tags=["Grafana Integration"],
+)
+def export_configurable_dashboard_to_grafana_endpoint(
+    dashboard_id: int,
+    request: Request,
+    grafana_version: str = "12",
+    datasource_uid: str = "${DS_GMJ_FLOW}",
+    folder_uid: str = "gmj-flow",
+    include_hidden: bool = False,
+):
+    user = dashboard_request_user(request)
+    if str(grafana_version) not in {"10", "11", "12"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Versão do Grafana deve ser 10, 11 ou 12",
+        )
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = dashboard_or_404(conn, dashboard_id, user)
+    return export_grafana_dashboard(
+        dashboard,
+        grafana_version=str(grafana_version),
+        datasource_uid=clean_text(datasource_uid) or "${DS_GMJ_FLOW}",
+        folder_uid=clean_text(folder_uid) or "gmj-flow",
+        include_hidden=bool(include_hidden),
+    )
+
+
+@app.get(
+    "/api/v1/grafana/dashboards/{dashboard_id}/export",
+    tags=["Grafana Integration"],
+)
+def public_export_configurable_dashboard_to_grafana_endpoint(
+    dashboard_id: int,
+    request: Request,
+    grafana_version: str = "12",
+    datasource_uid: str = "${DS_GMJ_FLOW}",
+    folder_uid: str = "gmj-flow",
+    include_hidden: bool = False,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:dashboard:export",
+        "dashboard.export",
+    )
+    if str(grafana_version) not in {"10", "11", "12"}:
+        exc = GrafanaApiError(
+            400,
+            "grafana_version_not_allowed",
+            "Versão do Grafana deve ser 10, 11 ou 12.",
+        )
+        raise grafana_api_validation_error(
+            "dashboard.export",
+            context,
+            exc,
+        )
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        dashboard = get_configurable_dashboard(conn, dashboard_id)
+    if dashboard is None:
+        exc = GrafanaApiError(
+            404,
+            "dashboard_not_found",
+            "Dashboard não encontrado.",
+        )
+        raise grafana_api_validation_error(
+            "dashboard.export",
+            context,
+            exc,
+        )
+    result = export_grafana_dashboard(
+        dashboard,
+        grafana_version=str(grafana_version),
+        datasource_uid=clean_text(datasource_uid) or "${DS_GMJ_FLOW}",
+        folder_uid=clean_text(folder_uid) or "gmj-flow",
+        include_hidden=bool(include_hidden),
+    )
+    return grafana_api_result(
+        "dashboard.export",
+        context,
+        result,
+    )
+
+
+@app.post(
+    "/api/v1/grafana/dashboards/{dashboard_id}/publish",
+    tags=["Grafana Integration"],
+)
+def publish_configurable_dashboard_to_grafana_endpoint(
+    dashboard_id: int,
+    payload: GrafanaPublishRequest,
+    request: Request,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:dashboard:publish",
+        "dashboard.publish",
+    )
+    result = {
+        "error": "phase_3_not_enabled",
+        "message": (
+            "Publicação direta permanece desabilitada; use a exportação "
+            "determinística da Fase 2."
+        ),
+        "dashboard_id": dashboard_id,
+        "dry_run": bool(payload.dry_run),
+        "correlation_id": context["correlation_id"],
+    }
+    audit_grafana_api(
+        "dashboard.publish",
+        context,
+        outcome="phase_3_not_enabled",
+    )
+    return JSONResponse(
+        status_code=501,
+        content=result,
+        headers={"X-Correlation-ID": context["correlation_id"]},
+    )
+
+
+@app.get(
+    "/api/v1/grafana/dashboards/{dashboard_id}/status",
+    tags=["Grafana Integration"],
+)
+def grafana_dashboard_publish_status_endpoint(
+    dashboard_id: int,
+    request: Request,
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:dashboard:publish",
+        "dashboard.status",
+    )
+    return grafana_api_result(
+        "dashboard.status",
+        context,
+        {
+            "dashboard_id": dashboard_id,
+            "publish_enabled": False,
+            "status": "phase_3_not_enabled",
+            "last_publish": None,
+            "correlation_id": context["correlation_id"],
+        },
+    )
 
 
 @app.post("/api/dashboards/{dashboard_id}/widgets")
@@ -40368,7 +40994,12 @@ def dashboard_widget_top_payload(
     zone_direction = context.get("zone_direction") or "both"
     source = "raw"
     aggregate_dimensions = {"src_ip", "dst_ip", "dst_port", "protocol", "tcp_flags"}
-    if dimension in aggregate_dimensions and metric == "bps" and not filters:
+    if (
+        dimension in aggregate_dimensions
+        and metric == "bps"
+        and not filters
+        and plan["direction"] == "both"
+    ):
         aggregate_dimension = {"protocol": "proto"}.get(dimension, dimension)
         payload = top_dimension(
             aggregate_dimension,
@@ -40391,7 +41022,12 @@ def dashboard_widget_top_payload(
             metric,
         )
         source = payload.get("query_source") or "aggregate_first"
-    elif dimension in {"src_asn", "dst_asn"} and metric == "bps" and not filters:
+    elif (
+        dimension in {"src_asn", "dst_asn"}
+        and metric == "bps"
+        and not filters
+        and plan["direction"] == "both"
+    ):
         payload = top_asn_dimension(
             "src" if dimension == "src_asn" else "dst",
             range_minutes,
@@ -40417,6 +41053,7 @@ def dashboard_widget_top_payload(
         dimension == "conversation"
         and not filters
         and metric in {"bps", "pps", "fps", "flows", "packets"}
+        and plan["direction"] == "both"
     ):
         payload = top_conversations_payload(
             range_minutes,
@@ -40541,11 +41178,30 @@ def dashboard_widget_top_payload(
     total = sum(dashboard_widget_item_value(item, metric) for item in items)
     for index, item in enumerate(items, start=1):
         item["rank"] = index
-        item["percentage"] = round(item["value"] / total * 100, 2) if total else 0.0
+        item["label"] = clean_text(
+            item.get("label")
+            or item.get("key")
+            or item.get("name")
+        ) or "-"
+        item["metadata"] = (
+            dict(item.get("metadata"))
+            if isinstance(item.get("metadata"), dict)
+            else {}
+        )
+        item["percent"] = (
+            round(item["value"] / total * 100, 2)
+            if total
+            else 0.0
+        )
+        item["percentage"] = item["percent"]
     return {
-        "kind": "top_n",
+        "kind": "ranking",
+        "data_kind": "ranking_snapshot",
         "dimension": dimension,
         "metric": metric,
+        "unit": metric,
+        "calculation": plan.get("calculation") or "current",
+        "total": round(total, 4),
         "source": source,
         "items": items,
         "start": iso(start) if isinstance(start, datetime) else start,
@@ -40628,8 +41284,14 @@ def dashboard_widget_series_payload(
         return {
             **payload,
             "kind": "timeseries",
+            "data_kind": "timeseries",
             "metric": canonical_dashboard_metric(
                 payload.get("metric") or metric
+            ),
+            "unit": "bps" if metric == "bps" else "pps",
+            "calculation": plan.get("calculation") or "last_not_null",
+            "legend_calculation": (
+                plan.get("legend_calculation") or "last_not_null"
             ),
             "source": payload.get("query_source") or "aggregate_first",
         }
@@ -40800,7 +41462,13 @@ def dashboard_widget_series_payload(
         )
     return {
         "kind": "timeseries",
+        "data_kind": "timeseries",
         "metric": response_metric,
+        "unit": "bps" if metric == "bps" else "pps" if metric == "pps" else metric,
+        "calculation": plan.get("calculation") or "last_not_null",
+        "legend_calculation": (
+            plan.get("legend_calculation") or "last_not_null"
+        ),
         "group_by": group_by,
         "bucket_seconds": bucket_seconds,
         "source": "raw",
