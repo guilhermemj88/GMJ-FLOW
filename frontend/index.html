@@ -572,7 +572,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/map/js/world.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script src="dashboard-formatters.js"></script>
   <script src="dashboard-layout.js"></script>
+  <script src="dashboard-resize.js"></script>
   <style>
     :root {
       --background: #f3f5f7;
@@ -2144,10 +2146,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .configurable-dashboard-widget {
+      position: relative;
       min-width: 0;
       min-height: 0;
       overflow: hidden;
-      transition: opacity .15s ease, box-shadow .15s ease;
+      transition:
+        opacity .15s ease,
+        box-shadow .15s ease,
+        grid-column-start .12s ease,
+        grid-row-start .12s ease,
+        height .12s ease;
     }
 
     .configurable-dashboard-widget.widget-loading {
@@ -2156,6 +2164,105 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     .configurable-dashboard-widget.dragging {
       opacity: .45;
+    }
+
+    .configurable-dashboard-widget.is-resizing {
+      z-index: 6;
+      outline: 2px solid color-mix(in srgb, var(--accent) 78%, white);
+      box-shadow: 0 12px 30px rgb(15 118 110 / 24%);
+      transition: none;
+    }
+
+    .configurable-dashboard-grid.has-widget-resizing
+      .configurable-dashboard-widget:not(.is-resizing) {
+      transition:
+        grid-column-start .12s ease,
+        grid-row-start .12s ease,
+        height .12s ease,
+        box-shadow .12s ease;
+    }
+
+    .dashboard-widget-resizing,
+    .dashboard-widget-resizing * {
+      user-select: none !important;
+    }
+
+    .widget-resize-handle {
+      position: absolute;
+      z-index: 8;
+      display: none;
+      touch-action: none;
+    }
+
+    .configurable-dashboard-widget.fullscreen-widget .widget-resize-handle {
+      display: none !important;
+    }
+
+    #view-dashboard.dashboard-editing
+      .configurable-dashboard-widget[data-resize-enabled="true"]
+      .widget-resize-handle {
+      display: block;
+    }
+
+    .widget-resize-handle-e {
+      top: 18px;
+      right: -2px;
+      bottom: 18px;
+      width: 10px;
+      cursor: e-resize;
+    }
+
+    .widget-resize-handle-s {
+      right: 18px;
+      bottom: -2px;
+      left: 18px;
+      height: 10px;
+      cursor: s-resize;
+    }
+
+    .widget-resize-handle-se {
+      right: 1px;
+      bottom: 1px;
+      width: 18px;
+      height: 18px;
+      cursor: se-resize;
+    }
+
+    .widget-resize-handle-se::after {
+      position: absolute;
+      right: 4px;
+      bottom: 4px;
+      width: 9px;
+      height: 9px;
+      content: "";
+      border-right: 2px solid color-mix(in srgb, var(--text-secondary) 72%, transparent);
+      border-bottom: 2px solid color-mix(in srgb, var(--text-secondary) 72%, transparent);
+      border-radius: 0 0 2px;
+    }
+
+    .widget-resize-handle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .widget-resize-badge {
+      position: absolute;
+      right: 16px;
+      bottom: 16px;
+      z-index: 9;
+      display: none;
+      padding: 4px 7px;
+      color: white;
+      background: rgb(15 23 42 / 86%);
+      border-radius: 5px;
+      box-shadow: 0 4px 12px rgb(15 23 42 / 20%);
+      font-size: .72rem;
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+
+    .configurable-dashboard-widget.is-resizing .widget-resize-badge {
+      display: block;
     }
 
     .configurable-dashboard-widget.is-hidden {
@@ -2183,6 +2290,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       height: 100%;
       min-height: 0;
       overflow: auto;
+    }
+
+    .configurable-dashboard-widget-body .table-wrap thead {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--surface);
     }
 
     .configurable-dashboard-widget-chart {
@@ -2217,6 +2331,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: inline-flex;
     }
 
+    #view-dashboard.dashboard-engine-active:not(.dashboard-editing)
+      .configurable-dashboard-widget .configurable-admin-action {
+      display: none;
+    }
+
+    #view-dashboard.dashboard-engine-active:not(.dashboard-editing)
+      #addDashboardWidgetButton {
+      display: none;
+    }
+
     .configurable-dashboard-empty,
     .configurable-dashboard-error {
       grid-column: 1 / -1;
@@ -2242,6 +2366,37 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     .widget-status-inactive,
     .widget-query-error {
       color: #dc2626;
+    }
+
+    @media (max-width: 991.98px) {
+      .configurable-dashboard-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 639.98px) {
+      .configurable-dashboard-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .widget-resize-handle-e {
+        display: none !important;
+      }
+
+      .widget-resize-handle-s {
+        right: 22px;
+        bottom: -4px;
+        left: 22px;
+        height: 20px;
+      }
+
+      .widget-resize-handle-se {
+        right: -2px;
+        bottom: -2px;
+        width: 26px;
+        height: 26px;
+        cursor: s-resize;
+      }
     }
 
     .dashboard-config-tabs {
@@ -7330,24 +7485,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   }
 
   function compactNumber(value, maximumFractionDigits = 1) {
-    const number = finiteNumber(value) || 0;
-    return new Intl.NumberFormat('pt-BR', {
-      notation: Math.abs(number) >= 1000 ? 'compact' : 'standard',
-      maximumFractionDigits
-    }).format(number);
+    return GMJDashboardFormatters.formatCount(value, {
+      maximumFractionDigits,
+      invalidValue: '0'
+    });
   }
 
   function formatBits(value) {
-    const number = Math.max(0, finiteNumber(value) || 0);
-    const units = [
-      [1e12, 'Tbps'],
-      [1e9, 'Gbps'],
-      [1e6, 'Mbps'],
-      [1e3, 'Kbps']
-    ];
-    const selected = units.find(([limit]) => number >= limit);
-    if (!selected) return `${compactNumber(number, 0)} bps`;
-    return `${compactNumber(number / selected[0], number >= selected[0] * 100 ? 0 : 1)} ${selected[1]}`;
+    return GMJDashboardFormatters.formatBitsPerSecond(value, {
+      invalidValue: '0 bps'
+    });
   }
 
   function normalizeProtocol(protocol) {
@@ -7448,9 +7595,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   }
 
   function formatMetric(value, metric) {
-    if (metric === 'flows') return `${compactNumber(value)} fluxos`;
-    if (metric === 'packets_s') return `${compactNumber(value)} pps`;
-    return formatBits(value);
+    if (metric === 'flows') {
+      return `${GMJDashboardFormatters.formatCount(value)} fluxos`;
+    }
+    return GMJDashboardFormatters.formatMetricValue(value, metric, {
+      invalidValue: '-'
+    });
   }
 
   function modeFromFilters(direction, metric) {
@@ -8113,7 +8263,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let dashboardRefreshTimer = null;
     let dashboardRefreshInFlight = false;
     let dashboardRefreshFailures = 0;
-    let dashboardEditing = false;
+    let dashboardEditMode = false;
     let dashboardAbortController = null;
     let dashboardRequestSequence = 0;
     let configurableDashboardActive = false;
@@ -8122,10 +8272,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableWidgetCatalog = null;
     let editingConfigurableWidgetId = null;
     let configurableDashboardObserver = null;
+    let configurableResizeController = null;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
     const configurableWidgetResizeObservers = new Map();
+    const configurableWidgetChartResizeFrames = new Map();
     const configurableWidgetAutoHeightTimers = new Map();
     const configurableWidgetTimers = new Map();
     const configurableVisibleWidgets = new Set();
@@ -9209,40 +9361,29 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function formatBps(value) {
-      const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
-      let size = Number(value) || 0;
-      let unit = 0;
-      while (size >= 1000 && unit < units.length - 1) {
-        size /= 1000;
-        unit += 1;
-      }
-      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+      return GMJDashboardFormatters.formatBitsPerSecond(value, {
+        invalidValue: '0 bps'
+      });
     }
 
     function formatPps(value) {
-      const units = ['pps', 'Kpps', 'Mpps', 'Gpps'];
-      let size = Number(value) || 0;
-      let unit = 0;
-      while (size >= 1000 && unit < units.length - 1) {
-        size /= 1000;
-        unit += 1;
-      }
-      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+      return GMJDashboardFormatters.formatPacketsPerSecond(value, {
+        invalidValue: '0 pps'
+      });
     }
 
     function formatNumber(value) {
-      return new Intl.NumberFormat('pt-BR').format(Number(value) || 0);
+      return GMJDashboardFormatters.formatCount(value, {
+        compact: false,
+        maximumFractionDigits: 3,
+        invalidValue: '0'
+      });
     }
 
     function formatBytes(value) {
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let size = Number(value) || 0;
-      let unit = 0;
-      while (size >= 1024 && unit < units.length - 1) {
-        size /= 1024;
-        unit += 1;
-      }
-      return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+      return GMJDashboardFormatters.formatBytes(value, {
+        invalidValue: '0 B'
+      });
     }
 
     function escapeHtml(value) {
@@ -11985,10 +12126,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function formatRateLimitBps(value) {
       const bps = Number(value || 0);
       if (!bps) return '-';
-      if (bps % 1000000000 === 0) return `${formatNumber(bps / 1000000000)} Gbps`;
-      if (bps % 1000000 === 0) return `${formatNumber(bps / 1000000)} Mbps`;
-      if (bps % 1000 === 0) return `${formatNumber(bps / 1000)} Kbps`;
-      return `${formatNumber(bps)} bps`;
+      return GMJDashboardFormatters.formatBitsPerSecond(bps);
     }
 
     function bgpActionLabel(item) {
@@ -13969,9 +14107,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function formatMetricValue(value, unit) {
-      if (unit === 'bits_s') return formatBps(value);
-      if (unit === 'packets_s') return formatPps(value);
-      return `${formatNumber(value)} flows/s`;
+      return GMJDashboardFormatters.formatMetricValue(value, unit, {
+        invalidValue: '-'
+      });
     }
 
     function formatOptionalMetricValue(value, unit) {
@@ -18285,6 +18423,49 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }));
     }
 
+    function configurableResponsiveColumns() {
+      if (window.matchMedia('(max-width: 639.98px)').matches) return 1;
+      if (window.matchMedia('(max-width: 991.98px)').matches) return 6;
+      return 12;
+    }
+
+    function configurableDisplayLayout(items = configurableLayoutItems()) {
+      const columns = configurableResponsiveColumns();
+      if (columns === 12) return items;
+      const factor = 12 / columns;
+      const responsiveItems = items.map(item => {
+        const x = columns === 1 ? 0 : Math.floor(Number(item.x || 0) / factor);
+        const w = columns === 1
+          ? 1
+          : Math.max(
+            1,
+            Math.min(columns - x, Math.ceil(Number(item.w || 1) / factor))
+          );
+        return {
+          ...item,
+          x,
+          w,
+          min_w: 1,
+          max_w: columns
+        };
+      });
+      return GMJDashboardLayout.repairDashboardLayout(responsiveItems);
+    }
+
+    function configurableWidgetCanResize(widget, element = null) {
+      return Boolean(
+        dashboardEditMode
+        && configurableDashboard?.permissions?.can_edit
+        && widget
+        && !widget.hidden
+        && !widget.collapsed
+        && !widget.locked
+        && !widget.readonly
+        && widget.permissions?.can_edit !== false
+        && !element?.classList.contains('fullscreen-widget')
+      );
+    }
+
     function applyConfigurableLayout(items) {
       const byId = new Map(items.map(item => [Number(item.id), item]));
       (configurableDashboard?.widgets || []).forEach(widget => {
@@ -18297,6 +18478,42 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           h: item.h
         };
       });
+    }
+
+    function updateConfigurableDashboardGridPositions(
+      items = configurableLayoutItems()
+    ) {
+      const displayItems = configurableDisplayLayout(items);
+      const displayById = new Map(
+        displayItems.map(item => [Number(item.id), item])
+      );
+      const desktopById = new Map(
+        items.map(item => [Number(item.id), item])
+      );
+      const grid = document.getElementById('configurableDashboardGrid');
+      grid.dataset.responsiveColumns = String(configurableResponsiveColumns());
+      grid.querySelectorAll('.configurable-dashboard-widget').forEach(element => {
+        const id = Number(element.dataset.widgetId);
+        const item = displayById.get(id);
+        const desktop = desktopById.get(id);
+        if (!item || !desktop) return;
+        element.dataset.gridX = String(desktop.x);
+        element.dataset.gridY = String(desktop.y);
+        element.dataset.gridW = String(desktop.w);
+        element.dataset.gridH = String(desktop.h);
+        element.style.gridColumn = `${item.x + 1} / span ${item.w}`;
+        element.style.gridRow = `${item.y + 1} / span ${item.h}`;
+        element.style.height = `${GMJDashboardLayout.calculateGridPixelHeight(item.h)}px`;
+      });
+    }
+
+    function scheduleConfigurableChartResize(widgetId) {
+      if (configurableWidgetChartResizeFrames.has(widgetId)) return;
+      const frame = requestAnimationFrame(() => {
+        configurableWidgetChartResizeFrames.delete(widgetId);
+        configurableWidgetCharts.get(widgetId)?.resize();
+      });
+      configurableWidgetChartResizeFrames.set(widgetId, frame);
     }
 
     function repairConfigurableDashboardClientLayout() {
@@ -18359,12 +18576,34 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
-    function configurableMetricValue(value, metric) {
-      if (metric === 'bps') return formatBps(value);
-      if (metric === 'pps') return formatPps(value);
-      if (metric === 'bytes') return formatBytes(value);
-      if (metric === 'percentage') return `${Number(value || 0).toFixed(2)}%`;
-      return formatNumber(value);
+    function configurableWidgetMetric(widget, payload = {}) {
+      return payload.metric
+        || payload.unit
+        || widget?.config?.metric
+        || 'count';
+    }
+
+    function configurableMetricValue(value, metric, options = {}) {
+      return GMJDashboardFormatters.formatMetricValue(value, metric, {
+        invalidValue: '-',
+        ...options
+      });
+    }
+
+    function configurableSeriesMaximum(series = []) {
+      return Math.max(
+        0,
+        ...series.flatMap(item =>
+          (item.points || []).map(point => Math.abs(Number(point.value) || 0))
+        )
+      );
+    }
+
+    function configurableItemsMaximum(items = []) {
+      return Math.max(
+        0,
+        ...items.map(item => Math.abs(Number(item.value) || 0))
+      );
     }
 
     function disposeConfigurableWidgetCharts() {
@@ -18372,6 +18611,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetCharts.clear();
       configurableWidgetResizeObservers.forEach(observer => observer.disconnect());
       configurableWidgetResizeObservers.clear();
+      configurableWidgetChartResizeFrames.forEach(frame => cancelAnimationFrame(frame));
+      configurableWidgetChartResizeFrames.clear();
       configurableWidgetAutoHeightTimers.forEach(timer => clearTimeout(timer));
       configurableWidgetAutoHeightTimers.clear();
     }
@@ -18386,7 +18627,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           configurableWidgetCharts.get(widget.id)?.resize();
           const graphWidget = widget.type === 'timeseries'
             || (widget.type === 'top_n' && ['bar', 'horizontal_bar', 'pie', 'donut'].includes(widget.visualization?.type || widget.config?.visualization));
-          if (widget.height_mode !== 'auto' || graphWidget || widget.collapsed || widget.hidden) return;
+          if (
+            widget.height_mode !== 'auto'
+            || graphWidget
+            || widget.collapsed
+            || widget.hidden
+            || body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')
+          ) return;
           const constraints = configurableWidgetLayoutConstraints(widget);
           const requiredHeight = Math.max(
             constraints.min_h,
@@ -18671,7 +18918,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function openConfigurableWidgetModal(widget = null) {
-      if (!configurableDashboard?.permissions?.can_edit) return;
+      if (
+        !dashboardEditMode
+        || !configurableDashboard?.permissions?.can_edit
+      ) return;
       editingConfigurableWidgetId = widget?.id || null;
       populateConfigurableWidgetForm(widget);
       openModal('dashboardWidgetModal');
@@ -18712,7 +18962,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function configurableWidgetTable(widget, payload) {
-      const metric = widget.config?.metric || 'flows';
+      const metric = configurableWidgetMetric(widget, payload);
       const rows = Array.isArray(payload.items) ? payload.items : [];
       return `
         <div class="table-wrap">
@@ -18723,8 +18973,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 <tr>
                   <td>${Number(item.rank || index + 1)}</td>
                   <td title="${escapeHtml(item.description || item.key || '-')}">${escapeHtml(item.key || item.name || '-')}</td>
-                  <td class="text-end">${configurableMetricValue(item.value ?? item[metric] ?? 0, metric)}</td>
-                  <td class="text-end">${Number(item.percentage ?? item.percent ?? 0).toFixed(2)}%</td>
+                  <td class="text-end">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric] ?? 0, metric)}</td>
+                  <td class="text-end">${GMJDashboardFormatters.formatPercentage(item.percentage ?? item.percent ?? 0)}</td>
                   <td><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Drilldown"><i data-lucide="search"></i></button></td>
                 </tr>
               `).join('') || '<tr><td colspan="5" class="text-muted">Sem dados para os filtros atuais</td></tr>'}
@@ -18746,13 +18996,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableWidgetCharts.delete(widget.id);
       }
       if (payload.kind === 'kpi') {
+        const metric = configurableWidgetMetric(widget, payload);
         body.innerHTML = `
-          <div class="widget-kpi-value">${configurableMetricValue(payload.value, widget.config?.metric)}</div>
+          <div class="widget-kpi-value">${configurableMetricValue(payload.value, metric)}</div>
           ${payload.comparison_value === null || payload.comparison_value === undefined ? '' : `
             <div class="subtle text-center">
-              Comparação: ${configurableMetricValue(payload.comparison_value, widget.config?.metric)}
-              · Δ ${configurableMetricValue(payload.delta, widget.config?.metric)}
-              ${payload.delta_percent === null ? '' : `(${Number(payload.delta_percent).toFixed(2)}%)`}
+              Comparação: ${configurableMetricValue(payload.comparison_value, metric)}
+              · Δ ${configurableMetricValue(payload.delta, metric)}
+              ${payload.delta_percent === null ? '' : `(${GMJDashboardFormatters.formatPercentage(payload.delta_percent)})`}
             </div>
           `}`;
       } else if (payload.kind === 'status_list') {
@@ -18768,6 +19019,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const chart = echarts.init(body.firstElementChild);
         configurableWidgetCharts.set(widget.id, chart);
         if (payload.kind === 'timeseries') {
+          const metric = configurableWidgetMetric(widget, payload);
+          const metricScale = GMJDashboardFormatters.selectMetricScale(
+            configurableSeriesMaximum(payload.series || []),
+            metric
+          );
+          const latestBySeries = new Map(
+            (payload.series || []).map(item => {
+              const points = item.points || [];
+              return [
+                String(item.name || item.label || ''),
+                Number(points[points.length - 1]?.value) || 0
+              ];
+            })
+          );
           const series = (payload.series || []).map(item => ({
             name: item.name || item.label,
             type: 'line',
@@ -18778,42 +19043,133 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             data: (item.points || []).map(point => [point.ts, point.value])
           }));
           chart.setOption({
-            tooltip: { trigger: 'axis' },
+            tooltip: {
+              trigger: 'axis',
+              formatter: params => {
+                const rows = Array.isArray(params) ? params : [params];
+                const heading = rows[0]?.axisValueLabel || '';
+                return [
+                  heading,
+                  ...rows.map(item => {
+                    const value = Array.isArray(item.value)
+                      ? item.value[item.value.length - 1]
+                      : item.value;
+                    return `${item.marker || ''}${escapeHtml(item.seriesName || '')}: ${GMJDashboardFormatters.formatTooltipValue(value, metric, metricScale)}`;
+                  })
+                ].filter(Boolean).join('<br>');
+              }
+            },
             legend: {
               show: widget.visualization?.show_legend !== false,
+              formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(
+                latestBySeries.get(String(name)),
+                metric,
+                metricScale
+              )}`,
               textStyle: {
                 color: getComputedStyle(document.documentElement)
                   .getPropertyValue('--text-primary')
                   .trim()
               }
             },
-            grid: { left: 54, right: 18, top: 34, bottom: 38 },
+            grid: { left: 74, right: 18, top: 34, bottom: 38 },
             xAxis: { type: 'time' },
-            yAxis: { type: 'value' },
+            yAxis: {
+              type: 'value',
+              axisLabel: {
+                formatter: value => GMJDashboardFormatters.formatAxisValue(
+                  value,
+                  metric,
+                  metricScale
+                )
+              }
+            },
             series
           });
         } else {
           const items = payload.items || [];
+          const metric = configurableWidgetMetric(widget, payload);
+          const metricScale = GMJDashboardFormatters.selectMetricScale(
+            configurableItemsMaximum(items),
+            metric
+          );
           const visualization = widget.visualization?.type || widget.config?.visualization || 'bar';
-          if (visualization === 'donut') {
+          if (['donut', 'pie'].includes(visualization)) {
+            const total = items.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
+            const byName = new Map(items.map(item => [String(item.key), Number(item.value) || 0]));
             chart.setOption({
-              tooltip: { trigger: 'item' },
-              legend: { show: widget.visualization?.show_legend !== false },
-              series: [{ type: 'pie', radius: ['42%', '72%'], data: items.map(item => ({ name: item.key, value: item.value })) }]
+              title: visualization === 'donut' ? {
+                text: GMJDashboardFormatters.formatTooltipValue(total, metric, metricScale),
+                subtext: 'Total',
+                left: 'center',
+                top: '40%',
+                textStyle: { fontSize: 16 },
+                subtextStyle: { fontSize: 11 }
+              } : undefined,
+              tooltip: {
+                trigger: 'item',
+                formatter: params => `${params.marker || ''}${escapeHtml(params.name || '')}: ${GMJDashboardFormatters.formatTooltipValue(params.value, metric, metricScale)} (${GMJDashboardFormatters.formatPercentage(params.percent)})`
+              },
+              legend: {
+                show: widget.visualization?.show_legend !== false,
+                formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(byName.get(String(name)), metric, metricScale)}`
+              },
+              series: [{
+                type: 'pie',
+                radius: visualization === 'donut' ? ['42%', '72%'] : '72%',
+                label: {
+                  formatter: params => `${params.name}\n${GMJDashboardFormatters.formatTooltipValue(params.value, metric, metricScale)}`
+                },
+                data: items.map(item => ({ name: item.key, value: item.value }))
+              }]
             });
           } else {
             chart.setOption({
-              tooltip: { trigger: 'axis' },
-              grid: { left: visualization === 'horizontal_bar' ? 110 : 54, right: 18, top: 18, bottom: 58 },
+              tooltip: {
+                trigger: 'axis',
+                valueFormatter: value => GMJDashboardFormatters.formatTooltipValue(
+                  value,
+                  metric,
+                  metricScale
+                )
+              },
+              grid: { left: visualization === 'horizontal_bar' ? 110 : 74, right: 28, top: 18, bottom: 58 },
               xAxis: visualization === 'horizontal_bar'
-                ? { type: 'value' }
+                ? {
+                  type: 'value',
+                  axisLabel: {
+                    formatter: value => GMJDashboardFormatters.formatAxisValue(
+                      value,
+                      metric,
+                      metricScale
+                    )
+                  }
+                }
                 : { type: 'category', data: items.map(item => item.key), axisLabel: { rotate: 28 } },
               yAxis: visualization === 'horizontal_bar'
                 ? { type: 'category', data: items.map(item => item.key) }
-                : { type: 'value' },
+                : {
+                  type: 'value',
+                  axisLabel: {
+                    formatter: value => GMJDashboardFormatters.formatAxisValue(
+                      value,
+                      metric,
+                      metricScale
+                    )
+                  }
+                },
               series: [{
                 type: 'bar',
                 data: items.map(item => item.value),
+                label: {
+                  show: true,
+                  position: visualization === 'horizontal_bar' ? 'right' : 'top',
+                  formatter: params => GMJDashboardFormatters.formatTooltipValue(
+                    params.value,
+                    metric,
+                    metricScale
+                  )
+                },
                 itemStyle: { color: '#0f766e', borderRadius: 3 }
               }]
             });
@@ -18925,35 +19281,48 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const grid = document.getElementById('configurableDashboardGrid');
       clearConfigurableWidgetRuntime();
       const widgets = (configurableDashboard?.widgets || []).filter(
-        widget => !widget.hidden || dashboardEditing
+        widget => !widget.hidden || dashboardEditMode
       );
+      const desktopItems = configurableLayoutItems(widgets);
+      const displayById = new Map(
+        configurableDisplayLayout(desktopItems)
+          .map(item => [Number(item.id), item])
+      );
+      grid.dataset.responsiveColumns = String(configurableResponsiveColumns());
       grid.innerHTML = widgets.map(widget => {
         const cached = widget.hidden ? null : readConfigurableWidgetCache(widget);
         const actionsDisabled = configurableDashboard.permissions?.can_edit ? '' : 'disabled';
-        const gridHeight = GMJDashboardLayout.calculateGridPixelHeight(Number(widget.grid?.h || 1));
+        const displayGrid = displayById.get(Number(widget.id)) || widget.grid;
+        const resizeEnabled = configurableWidgetCanResize(widget);
+        const gridHeight = GMJDashboardLayout.calculateGridPixelHeight(Number(displayGrid?.h || 1));
         return `
-          <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="${dashboardEditing && configurableDashboard.permissions?.can_edit ? 'true' : 'false'}"
+          <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="${dashboardEditMode && configurableDashboard.permissions?.can_edit ? 'true' : 'false'}"
+            data-resize-enabled="${resizeEnabled}"
             data-widget-id="${widget.id}" data-grid-x="${Number(widget.grid?.x || 0)}" data-grid-y="${Number(widget.grid?.y || 0)}"
             data-grid-w="${Number(widget.grid?.w || 4)}" data-grid-h="${Number(widget.grid?.h || 4)}"
-            style="height:${gridHeight}px;grid-column:${Number(widget.grid?.x || 0) + 1} / span ${Number(widget.grid?.w || 4)};grid-row:${Number(widget.grid?.y || 0) + 1} / span ${Number(widget.grid?.h || 4)}">
+            style="height:${gridHeight}px;grid-column:${Number(displayGrid?.x || 0) + 1} / span ${Number(displayGrid?.w || 1)};grid-row:${Number(displayGrid?.y || 0) + 1} / span ${Number(displayGrid?.h || 1)}">
             <div class="panel p-3">
               <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                 <div><div class="panel-title">${escapeHtml(widget.title)}</div><div class="configurable-dashboard-widget-status subtle">${cached ? 'cache local' : 'aguardando visibilidade'}</div></div>
                 <div class="widget-actions">
-                  <button class="icon-button configurable-widget-edit" ${actionsDisabled} title="Configurar"><i data-lucide="settings"></i></button>
-                  <button class="icon-button configurable-widget-duplicate" ${actionsDisabled} title="Duplicar"><i data-lucide="copy"></i></button>
-                  <button class="icon-button configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
-                  <button class="icon-button configurable-widget-wider" ${actionsDisabled} title="Redimensionar"><i data-lucide="chevrons-right"></i></button>
-                  <button class="icon-button configurable-widget-collapse" ${actionsDisabled} title="Recolher"><i data-lucide="chevron-up"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-edit" ${actionsDisabled} title="Configurar"><i data-lucide="settings"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-duplicate" ${actionsDisabled} title="Duplicar"><i data-lucide="copy"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-wider" ${actionsDisabled} title="Redimensionar"><i data-lucide="chevrons-right"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-collapse" ${actionsDisabled} title="Recolher"><i data-lucide="chevron-up"></i></button>
                   <button class="icon-button configurable-widget-fullscreen" title="Tela cheia"><i data-lucide="maximize-2"></i></button>
-                  <button class="icon-button configurable-widget-hide" ${actionsDisabled} title="${widget.hidden ? 'Exibir' : 'Ocultar'}"><i data-lucide="${widget.hidden ? 'eye' : 'eye-off'}"></i></button>
-                  <button class="icon-button configurable-widget-delete" ${actionsDisabled} title="Excluir"><i data-lucide="trash-2"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-hide" ${actionsDisabled} title="${widget.hidden ? 'Exibir' : 'Ocultar'}"><i data-lucide="${widget.hidden ? 'eye' : 'eye-off'}"></i></button>
+                  <button class="icon-button configurable-admin-action configurable-widget-delete" ${actionsDisabled} title="Excluir"><i data-lucide="trash-2"></i></button>
                 </div>
               </div>
               <div class="configurable-dashboard-widget-body">${widget.hidden
                 ? '<div class="subtle">Widget oculto. Use o botão de olho para exibi-lo novamente.</div>'
                 : cached ? '' : '<div class="subtle">Os dados serão carregados quando o widget estiver visível.</div>'}</div>
             </div>
+            <div class="widget-resize-badge" aria-live="polite"></div>
+            <div class="widget-resize-handle widget-resize-handle-e" data-resize-handle="e" role="separator" aria-orientation="vertical" aria-label="Redimensionar largura de ${escapeHtml(widget.title)}" tabindex="${resizeEnabled ? '0' : '-1'}"></div>
+            <div class="widget-resize-handle widget-resize-handle-s" data-resize-handle="s" role="separator" aria-orientation="horizontal" aria-label="Redimensionar altura de ${escapeHtml(widget.title)}" tabindex="${resizeEnabled ? '0' : '-1'}"></div>
+            <div class="widget-resize-handle widget-resize-handle-se" data-resize-handle="se" role="separator" aria-label="Redimensionar largura e altura de ${escapeHtml(widget.title)}" tabindex="${resizeEnabled ? '0' : '-1'}"></div>
           </article>`;
       }).join('') || '<div class="configurable-dashboard-empty panel p-4">Este dashboard ainda não tem widgets. Use “Widget” para adicionar o primeiro.</div>';
       widgets.forEach(widget => {
@@ -19003,9 +19372,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableDashboard = dashboard;
       }
       configurableDashboardActive = true;
+      if (!dashboard.permissions?.can_edit) dashboardEditMode = false;
       document.getElementById('view-dashboard').classList.add('dashboard-engine-active');
+      document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditMode);
       document.getElementById('addDashboardWidgetButton').disabled = !dashboard.permissions?.can_edit;
       document.getElementById('editDashboardButton').disabled = !dashboard.permissions?.can_edit;
+      document.getElementById('editDashboardButton').classList.toggle('btn-success', dashboardEditMode);
+      document.getElementById('editDashboardButton').setAttribute('aria-pressed', String(dashboardEditMode));
+      document.querySelector('#editDashboardButton span').textContent =
+        dashboardEditMode ? 'Finalizar edição' : 'Editar Dashboard';
       syncConfigurableDashboardSelector(dashboard.id);
       renderConfigurableDashboard();
       return dashboard;
@@ -19051,23 +19426,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function persistConfigurableLayoutAction(widget, repairedLayout, patch = {}) {
+      const previousLayout = configurableLayoutItems();
       applyConfigurableLayout(repairedLayout);
       renderConfigurableDashboard();
       const active = repairedLayout.find(item => Number(item.id) === Number(widget.id));
-      await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...patch,
-          grid: {
-            x: active.x,
-            y: active.y,
-            w: active.w,
-            h: active.h
-          }
-        })
-      });
-      await loadConfigurableDashboard(configurableDashboard.id);
+      try {
+        await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...patch,
+            expanded_grid_h: widget.expanded_grid_h,
+            collapsed_grid_h: widget.collapsed_grid_h,
+            height_mode: widget.height_mode,
+            grid: {
+              x: active.x,
+              y: active.y,
+              w: active.w,
+              h: active.h
+            }
+          })
+        });
+        await loadConfigurableDashboard(configurableDashboard.id);
+      } catch (error) {
+        applyConfigurableLayout(previousLayout);
+        renderConfigurableDashboard();
+        throw error;
+      }
     }
 
     function openDashboardManager() {
@@ -19228,10 +19613,70 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function installConfigurableWidgetResize() {
+      if (configurableResizeController || !window.GMJDashboardResize) return;
+      const grid = document.getElementById('configurableDashboardGrid');
+      configurableResizeController = GMJDashboardResize.createDashboardResizeController({
+        grid,
+        layoutEngine: GMJDashboardLayout,
+        getResponsiveColumns: configurableResponsiveColumns,
+        getLayout: () => configurableLayoutItems(),
+        getWidget: widgetId => (configurableDashboard?.widgets || [])
+          .find(widget => Number(widget.id) === Number(widgetId)),
+        getConstraints: configurableWidgetLayoutConstraints,
+        canResize: configurableWidgetCanResize,
+        onStart: session => {
+          clearTimeout(configurableWidgetAutoHeightTimers.get(session.widget.id));
+          configurableWidgetAutoHeightTimers.delete(session.widget.id);
+        },
+        onPreview: ({ widget, layout }) => {
+          applyConfigurableLayout(layout);
+          updateConfigurableDashboardGridPositions(layout);
+          scheduleConfigurableChartResize(widget.id);
+        },
+        onPersist: async ({ widget, layout }) => {
+          const active = layout.find(item => Number(item.id) === Number(widget.id));
+          await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              grid: {
+                x: active.x,
+                y: active.y,
+                w: active.w,
+                h: active.h
+              },
+              expanded_grid_h: widget.expanded_grid_h,
+              collapsed_grid_h: widget.collapsed_grid_h,
+              height_mode: widget.height_mode
+            })
+          });
+          await loadConfigurableDashboard(configurableDashboard.id).catch(error => {
+            console.warn('Resize salvo, mas o dashboard não pôde ser recarregado.', error);
+          });
+        },
+        onRollback: ({ widget, layout, cancelled }) => {
+          applyConfigurableLayout(layout);
+          updateConfigurableDashboardGridPositions(layout);
+          scheduleConfigurableChartResize(widget.id);
+          if (!cancelled) {
+            const status = document.querySelector(
+              `.configurable-dashboard-widget[data-widget-id="${widget.id}"] .configurable-dashboard-widget-status`
+            );
+            if (status) status.textContent = 'falha ao salvar redimensionamento';
+          }
+        },
+        onError: error => {
+          console.error('Falha ao persistir redimensionamento do widget.', error);
+        }
+      });
+    }
+
     function installConfigurableDashboardEvents() {
       const grid = document.getElementById('configurableDashboardGrid');
       if (grid.dataset.eventsInstalled) return;
       grid.dataset.eventsInstalled = 'true';
+      installConfigurableWidgetResize();
       document.getElementById('configurableDrilldownMenu').addEventListener('click', event => {
         const action = event.target.closest('[data-drilldown-action]')?.dataset.drilldownAction;
         if (action) runConfigurableDrilldown(action).catch(console.error);
@@ -19249,6 +19694,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const element = target?.closest('.configurable-dashboard-widget');
         const widget = (configurableDashboard?.widgets || []).find(item => item.id === Number(element?.dataset.widgetId));
         if (!widget) return;
+        if (target.closest('.configurable-admin-action') && !dashboardEditMode) return;
         try {
           if (target.closest('.configurable-widget-edit')) openConfigurableWidgetModal(widget);
           else if (target.closest('.configurable-widget-duplicate')) {
@@ -19299,7 +19745,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
       grid.addEventListener('dragstart', event => {
         const widget = event.target.closest('.configurable-dashboard-widget');
-        if (!widget) return;
+        if (
+          !widget
+          || !dashboardEditMode
+          || !configurableDashboard?.permissions?.can_edit
+          || event.target.closest('.widget-resize-handle')
+        ) {
+          event.preventDefault();
+          return;
+        }
         widget.classList.add('dragging');
         event.dataTransfer.setData('text/widget-id', widget.dataset.widgetId);
       });
@@ -19307,6 +19761,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       grid.addEventListener('dragover', event => event.preventDefault());
       grid.addEventListener('drop', async event => {
         event.preventDefault();
+        if (!dashboardEditMode || !configurableDashboard?.permissions?.can_edit) return;
         const sourceId = Number(event.dataTransfer.getData('text/widget-id'));
         const targetId = Number(event.target.closest('.configurable-dashboard-widget')?.dataset.widgetId);
         if (!sourceId || !targetId || sourceId === targetId) return;
@@ -19408,9 +19863,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function toggleDashboardEdit() {
-      dashboardEditing = !dashboardEditing;
-      document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditing);
-      document.getElementById('editDashboardButton').classList.toggle('btn-success', dashboardEditing);
+      if (
+        configurableResizeController?.activeSession
+        || !configurableDashboard?.permissions?.can_edit
+      ) return;
+      dashboardEditMode = !dashboardEditMode;
+      document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditMode);
+      document.getElementById('editDashboardButton').classList.toggle('btn-success', dashboardEditMode);
+      document.getElementById('editDashboardButton').setAttribute('aria-pressed', String(dashboardEditMode));
+      document.querySelector('#editDashboardButton span').textContent =
+        dashboardEditMode ? 'Finalizar edição' : 'Editar Dashboard';
       if (configurableDashboardActive) renderConfigurableDashboard();
       createIcons();
     }
@@ -21265,7 +21727,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     document.getElementById('view-dashboard').addEventListener('click', event => {
       const button = event.target.closest('button');
-      if (!button || !dashboardEditing) return;
+      if (!button || !dashboardEditMode) return;
       const widget = button.closest('.dashboard-widget');
       if (!widget) return;
       if (button.classList.contains('widget-hide')) {
@@ -22114,6 +22576,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     window.addEventListener('resize', () => {
       Object.values(charts).forEach(chart => chart.resize());
+      if (configurableDashboardActive && !configurableResizeController?.activeSession) {
+        updateConfigurableDashboardGridPositions();
+        configurableWidgetCharts.forEach((chart, widgetId) =>
+          scheduleConfigurableChartResize(widgetId)
+        );
+      }
       resizeGeoFlowMaps();
     });
     document.addEventListener('visibilitychange', scheduleDashboardRefresh);
