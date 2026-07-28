@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from .dashboard_layout import (
     layout_signature,
     normalize_grid_item,
     repair_dashboard_layout,
+    resolve_collisions,
     validate_layout,
 )
 
@@ -32,6 +34,25 @@ COMPARISON_MODES = {
     "last_week_same_time",
 }
 ALLOWED_RESOLUTIONS = {0, 5, 10, 30, 60, 300, 900, 3600}
+DEFAULT_WIDGET_APPEARANCE = {
+    "palette_mode": "default",
+    "upload_color": "#2563eb",
+    "download_color": "#16a34a",
+    "line_width": 2,
+    "area_opacity": 0.22,
+    "smooth_lines": True,
+    "show_area": True,
+    "show_point_labels": False,
+    "show_value_labels": False,
+    "show_legend": True,
+    "legend_position": "top",
+    "axis_label_density": "auto",
+    "bar_color": "#0f766e",
+    "positive_color": "#16a34a",
+    "negative_color": "#dc2626",
+    "minimum_slice_label_percent": 3,
+}
+DIRECTION_SERIES_ORDER = ("upload", "download")
 STATUS_SOURCES = {
     "anomalies",
     "alerts",
@@ -249,6 +270,186 @@ def _bool(value: Any) -> bool:
     return bool(value)
 
 
+def _bounded_float(
+    value: Any,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    return max(minimum, min(maximum, number))
+
+
+def _appearance_color(value: Any, default: str) -> str:
+    color = str(value or "").strip().lower()
+    return color if re.fullmatch(r"#[0-9a-f]{6}", color) else default
+
+
+def normalize_widget_appearance(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    defaults = DEFAULT_WIDGET_APPEARANCE
+    palette_mode = (
+        "custom"
+        if str(source.get("palette_mode") or "").strip().lower() == "custom"
+        else "default"
+    )
+    custom = palette_mode == "custom"
+
+    def color(field: str) -> str:
+        return (
+            _appearance_color(source.get(field), defaults[field])
+            if custom
+            else defaults[field]
+        )
+
+    legend_position = str(
+        source.get("legend_position") or defaults["legend_position"]
+    ).strip().lower()
+    if legend_position not in {"top", "bottom", "right"}:
+        legend_position = defaults["legend_position"]
+    axis_label_density = str(
+        source.get("axis_label_density") or defaults["axis_label_density"]
+    ).strip().lower()
+    if axis_label_density not in {"auto", "sparse", "normal", "dense"}:
+        axis_label_density = defaults["axis_label_density"]
+    show_point_labels = _bool(
+        source.get(
+            "show_point_labels",
+            source.get(
+                "show_value_labels",
+                defaults["show_point_labels"],
+            ),
+        )
+    )
+    show_value_labels = _bool(
+        source.get(
+            "show_value_labels",
+            source.get(
+                "show_point_labels",
+                defaults["show_value_labels"],
+            ),
+        )
+    )
+    return {
+        "palette_mode": palette_mode,
+        "upload_color": color("upload_color"),
+        "download_color": color("download_color"),
+        "line_width": _bounded_float(
+            source.get("line_width"),
+            defaults["line_width"],
+            1,
+            5,
+        ),
+        "area_opacity": _bounded_float(
+            source.get("area_opacity"),
+            defaults["area_opacity"],
+            0,
+            1,
+        ),
+        "smooth_lines": _bool(
+            source.get("smooth_lines", defaults["smooth_lines"])
+        ),
+        "show_area": _bool(source.get("show_area", defaults["show_area"])),
+        "show_point_labels": show_point_labels,
+        "show_value_labels": show_value_labels,
+        "show_legend": _bool(
+            source.get("show_legend", defaults["show_legend"])
+        ),
+        "legend_position": legend_position,
+        "axis_label_density": axis_label_density,
+        "bar_color": color("bar_color"),
+        "positive_color": color("positive_color"),
+        "negative_color": color("negative_color"),
+        "minimum_slice_label_percent": _bounded_float(
+            source.get("minimum_slice_label_percent"),
+            defaults["minimum_slice_label_percent"],
+            0,
+            100,
+        ),
+    }
+
+
+def canonical_dashboard_metric(metric: Any) -> str:
+    normalized = str(metric or "").strip().lower()
+    if normalized in {"bps", "bits_s", "bits_per_second"}:
+        return "bits_s"
+    if normalized in {"pps", "packets_s", "packets_per_second"}:
+        return "packets_s"
+    return normalized or "count"
+
+
+def consolidate_direction_series(
+    metric: Any,
+    series: Any,
+    requested_direction: str = "both",
+) -> list[dict[str, Any]]:
+    direction = str(requested_direction or "both").strip().lower()
+    requested = (
+        (direction,)
+        if direction in DIRECTION_SERIES_ORDER
+        else DIRECTION_SERIES_ORDER
+    )
+    points_by_direction: dict[str, dict[str, float]] = {
+        current: {} for current in requested
+    }
+    for item in series if isinstance(series, list) else []:
+        if not isinstance(item, dict):
+            continue
+        item_direction = str(
+            item.get("direction") or item.get("key") or ""
+        ).strip().lower()
+        if item_direction not in points_by_direction:
+            continue
+        target = points_by_direction[item_direction]
+        item_points: dict[str, float] = {}
+        for point in item.get("points") if isinstance(item.get("points"), list) else []:
+            if not isinstance(point, dict):
+                continue
+            timestamp = str(
+                point.get("ts")
+                or point.get("time")
+                or point.get("timestamp")
+                or ""
+            ).strip()
+            if not timestamp:
+                continue
+            try:
+                value = float(point.get("value") or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            item_points[timestamp] = value
+        for timestamp, value in item_points.items():
+            target[timestamp] = target.get(timestamp, 0.0) + value
+    canonical_metric = canonical_dashboard_metric(metric)
+    return [
+        {
+            "key": current,
+            "name": (
+                "Total Upload"
+                if current == "upload"
+                else "Total Download"
+            ),
+            "direction": current,
+            "metric": canonical_metric,
+            "color": (
+                DEFAULT_WIDGET_APPEARANCE["upload_color"]
+                if current == "upload"
+                else DEFAULT_WIDGET_APPEARANCE["download_color"]
+            ),
+            "points": [
+                {"ts": timestamp, "value": round(value, 2)}
+                for timestamp, value in sorted(
+                    points_by_direction[current].items()
+                )
+            ],
+        }
+        for current in requested
+    ]
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, name: str, ddl: str) -> None:
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(%s)" % table).fetchall()}
     if name not in columns:
@@ -285,7 +486,10 @@ def _default_widget(
         "description": "",
         "type": widget_type,
         "category": category,
-        "config": config,
+        "config": {
+            **config,
+            "appearance": copy.deepcopy(DEFAULT_WIDGET_APPEARANCE),
+        },
         "filters": [],
         "visualization": {"type": config.get("visualization", "table"), "show_legend": True},
         "grid": {"x": x, "y": y, "w": width, "h": height},
@@ -316,7 +520,7 @@ GENERAL_WIDGETS = [
         "Pacotes/s",
         "timeseries",
         "traffic",
-        {"metric": "pps", "direction": "both", "group_by": "total", "aggregation": "sum", "visualization": "line"},
+        {"metric": "pps", "direction": "both", "group_by": "total", "aggregation": "sum", "visualization": "area"},
         6,
         0,
         6,
@@ -794,6 +998,9 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
     config = payload.get("config") or {}
     if not isinstance(config, dict):
         raise ValueError("config deve ser um objeto")
+    config["appearance"] = normalize_widget_appearance(
+        config.get("appearance")
+    )
     comparison_mode = str(
         config.get("comparison_mode") or "none"
     ).strip().lower()
@@ -1185,10 +1392,14 @@ def repair_dashboard_widgets(
         "SELECT layout_version FROM dashboards WHERE id = ?",
         (dashboard_id,),
     ).fetchone()
+    current_layout_version = (
+        int(dashboard_row["layout_version"] or 0)
+        if dashboard_row is not None
+        else 0
+    )
     schema_outdated = bool(
         dashboard_row is not None
-        and int(dashboard_row["layout_version"] or 0)
-        < DASHBOARD_SCHEMA_VERSION
+        and current_layout_version < DASHBOARD_SCHEMA_VERSION
     )
     rows = conn.execute(
         """
@@ -1249,7 +1460,8 @@ def repair_dashboard_widgets(
     if not validation["valid"]:
         raise ValueError("; ".join(validation["errors"]))
     repaired_by_id = {int(item["id"]): item for item in repaired}
-    changed = before != layout_signature(repaired) or schema_outdated
+    layout_changed = before != layout_signature(repaired)
+    changed = layout_changed or schema_outdated
     now = _utc_now()
     for widget in widgets:
         widget_id = int(widget["id"])
@@ -1289,13 +1501,17 @@ def repair_dashboard_widgets(
                 ),
             )
     if changed:
+        next_layout_version = max(
+            DASHBOARD_SCHEMA_VERSION,
+            current_layout_version + (1 if layout_changed else 0),
+        )
         conn.execute(
             """
             UPDATE dashboards
             SET layout_version = ?, updated_at = ?
             WHERE id = ?
             """,
-            (DASHBOARD_SCHEMA_VERSION, now, dashboard_id),
+            (next_layout_version, now, dashboard_id),
         )
         logger.info(
             "DASHBOARD_LAYOUT_REPAIRED dashboard_id=%s priority_widget_id=%s widgets=%s",
@@ -1304,6 +1520,204 @@ def repair_dashboard_widgets(
             len(widgets),
         )
     return changed
+
+
+class DashboardLayoutVersionConflict(ValueError):
+    pass
+
+
+def persist_dashboard_layout(
+    conn: sqlite3.Connection,
+    dashboard_id: int,
+    widgets_payload: Any,
+    *,
+    layout_version: int | None = None,
+    active_widget_id: int | None = None,
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    if not isinstance(widgets_payload, list):
+        raise ValueError("widgets deve ser uma lista")
+    dashboard_row = conn.execute(
+        "SELECT layout_version FROM dashboards WHERE id = ?",
+        (dashboard_id,),
+    ).fetchone()
+    if dashboard_row is None:
+        raise ValueError("dashboard não encontrado")
+    current_version = int(dashboard_row["layout_version"] or 0)
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM dashboard_widgets
+        WHERE dashboard_id = ?
+        ORDER BY grid_y, grid_x, id
+        """,
+        (dashboard_id,),
+    ).fetchall()
+    current_widgets = [widget_row_to_dict(row) for row in rows]
+    current_by_id = {
+        int(widget["id"]): widget for widget in current_widgets
+    }
+    payload_by_id: dict[int, dict[str, Any]] = {}
+    for value in widgets_payload:
+        if not isinstance(value, dict):
+            raise ValueError("item de layout inválido")
+        try:
+            widget_id = int(value.get("id"))
+        except (TypeError, ValueError):
+            raise ValueError("id de widget inválido")
+        if widget_id in payload_by_id:
+            raise ValueError("layout contém IDs duplicados")
+        if widget_id not in current_by_id:
+            raise ValueError("widget %s não pertence ao dashboard" % widget_id)
+        grid = value.get("grid")
+        if not isinstance(grid, dict):
+            raise ValueError("grid ausente no widget %s" % widget_id)
+        payload_by_id[widget_id] = grid
+    expected_ids = set(current_by_id)
+    received_ids = set(payload_by_id)
+    if received_ids != expected_ids:
+        missing = sorted(expected_ids - received_ids)
+        unknown = sorted(received_ids - expected_ids)
+        details = []
+        if missing:
+            details.append(
+                "widgets ausentes: %s" % ", ".join(map(str, missing))
+            )
+        if unknown:
+            details.append(
+                "widgets desconhecidos: %s" % ", ".join(map(str, unknown))
+            )
+        raise ValueError("; ".join(details))
+    if active_widget_id is not None and int(active_widget_id) not in expected_ids:
+        raise ValueError("widget ativo não pertence ao dashboard")
+
+    requested_items: list[dict[str, Any]] = []
+    normalized_input = False
+    for widget_id, widget in current_by_id.items():
+        grid = payload_by_id[widget_id]
+        constraints = widget_layout_constraints(widget)
+        item = normalize_grid_item(
+            {
+                "id": widget_id,
+                **grid,
+                "hidden": bool(widget.get("hidden")),
+                "min_w": constraints["min_w"],
+                "min_h": constraints["min_h"],
+                "max_w": constraints["max_w"],
+                "max_h": constraints["max_h"],
+            },
+            constraints,
+        )
+        for field in ("x", "y", "w", "h"):
+            try:
+                received = int(grid.get(field))
+            except (TypeError, ValueError):
+                received = None
+            if received != int(item[field]):
+                normalized_input = True
+        requested_items.append(item)
+
+    priority = int(active_widget_id) if active_widget_id is not None else None
+    resolved = resolve_collisions(requested_items, priority)
+    validation = validate_layout(resolved)
+    if not validation["valid"]:
+        raise ValueError("; ".join(validation["errors"]))
+    current_items = [
+        {
+            "id": int(widget["id"]),
+            **widget["grid"],
+            "hidden": bool(widget.get("hidden")),
+            **{
+                key: value
+                for key, value in widget_layout_constraints(widget).items()
+                if key in {"min_w", "min_h", "max_w", "max_h"}
+            },
+        }
+        for widget in current_widgets
+    ]
+    current_signature = layout_signature(current_items)
+    requested_signature = layout_signature(requested_items)
+    resolved_signature = layout_signature(resolved)
+    if layout_version is not None and int(layout_version) != current_version:
+        if resolved_signature == current_signature:
+            return {
+                "widgets": [
+                    {
+                        "id": int(item["id"]),
+                        "grid": {
+                            field: int(item[field])
+                            for field in ("x", "y", "w", "h")
+                        },
+                    }
+                    for item in resolved
+                ],
+                "layout_version": current_version,
+                "layout_repaired": False,
+                "idempotent_replay": True,
+                "idempotency_key": str(idempotency_key or ""),
+            }
+        raise DashboardLayoutVersionConflict(
+            "layout_version desatualizada: esperado %s, recebido %s"
+            % (current_version, layout_version)
+        )
+
+    changed = resolved_signature != current_signature
+    now = _utc_now()
+    if changed:
+        resolved_by_id = {
+            int(item["id"]): item for item in resolved
+        }
+        conn.executemany(
+            """
+            UPDATE dashboard_widgets
+            SET grid_x = ?, grid_y = ?, grid_w = ?, grid_h = ?, updated_at = ?
+            WHERE id = ? AND dashboard_id = ?
+            """,
+            [
+                (
+                    int(resolved_by_id[widget_id]["x"]),
+                    int(resolved_by_id[widget_id]["y"]),
+                    int(resolved_by_id[widget_id]["w"]),
+                    int(resolved_by_id[widget_id]["h"]),
+                    now,
+                    widget_id,
+                    dashboard_id,
+                )
+                for widget_id in sorted(resolved_by_id)
+            ],
+        )
+    next_version = (
+        max(DASHBOARD_SCHEMA_VERSION, current_version + 1)
+        if changed
+        else current_version
+    )
+    if changed:
+        conn.execute(
+            """
+            UPDATE dashboards
+            SET layout_version = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_version, now, dashboard_id),
+        )
+    return {
+        "widgets": [
+            {
+                "id": int(item["id"]),
+                "grid": {
+                    field: int(item[field])
+                    for field in ("x", "y", "w", "h")
+                },
+            }
+            for item in resolved
+        ],
+        "layout_version": next_version,
+        "layout_repaired": (
+            normalized_input or requested_signature != resolved_signature
+        ),
+        "idempotent_replay": not changed,
+        "idempotency_key": str(idempotency_key or ""),
+    }
 
 
 def get_dashboard(

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>GMJ-FLOW dashboard frontend harness</title>
   <script src="../frontend/dashboard-formatters.js"></script>
+  <script src="../frontend/dashboard-charts.js"></script>
   <script src="../frontend/dashboard-layout.js"></script>
   <script src="../frontend/dashboard-resize.js"></script>
 </head>
@@ -12,6 +13,7 @@
   <div id="grid" style="display:grid;width:1212px;column-gap:12px;row-gap:12px">
     <article class="configurable-dashboard-widget" data-widget-id="1">
       <div class="widget-resize-badge"></div>
+      <button data-widget-drag-handle type="button">Mover</button>
       <div class="widget-resize-handle" data-resize-handle="se"></div>
     </article>
   </div>
@@ -67,6 +69,56 @@
       const ppsScale = format.selectMetricScale(4.3e6, 'pps');
       assertEqual(ppsScale.divisor, 1e6, 'pps scale divisor');
       assertEqual(ppsScale.unit, 'Mpps', 'pps scale unit');
+
+      const directionSeries = GMJDashboardCharts.consolidateDirectionSeries([
+        {
+          direction: 'upload',
+          points: [
+            { ts: '2026-07-28T10:01:00Z', value: 2 },
+            { ts: '2026-07-28T10:00:00Z', value: 1 }
+          ]
+        },
+        {
+          direction: 'download',
+          points: [
+            { ts: '2026-07-28T10:00:00Z', value: 3 },
+            { ts: '2026-07-28T10:00:00Z', value: 4 }
+          ]
+        },
+        {
+          direction: 'download',
+          points: [
+            { ts: '2026-07-28T10:00:00Z', value: 2 }
+          ]
+        }
+      ], 'bits_s');
+      assertEqual(directionSeries.length, 2, 'direction series count');
+      assertEqual(directionSeries[0].name, 'Total Upload', 'stable upload order');
+      assertEqual(directionSeries[1].name, 'Total Download', 'stable download order');
+      assertEqual(directionSeries[1].points.length, 1, 'unique direction timestamps');
+      assertEqual(directionSeries[1].points[0].value, 6, 'duplicate timestamp consolidation');
+      assertEqual(GMJDashboardCharts.getChartDensityMode(300, 220), 'compact', 'compact density');
+      assertEqual(GMJDashboardCharts.getChartDensityMode(800, 450), 'detailed', 'detailed density');
+      assertEqual(GMJDashboardCharts.getChartDensityMode(800, 450, 'sparse'), 'compact', 'configured sparse density');
+      assertEqual(GMJDashboardCharts.getChartDensityMode(300, 220, 'dense'), 'detailed', 'configured dense density');
+      const fakeChart = {
+        offCount: 0,
+        option: null,
+        options: null,
+        off() { this.offCount += 1; },
+        setOption(option, options) {
+          this.option = option;
+          this.options = options;
+        }
+      };
+      for (let refresh = 0; refresh < 20; refresh += 1) {
+        GMJDashboardCharts.replaceChartOption(fakeChart, {
+          series: [{ name: 'Total Upload' }, { name: 'Total Download' }]
+        });
+      }
+      assertEqual(fakeChart.option.series.length, 2, '20 refreshes keep two series');
+      assertEqual(fakeChart.offCount, 20, '20 refreshes clear old handlers');
+      assert(fakeChart.options.notMerge, 'chart refresh is non-merging');
 
       assertEqual(
         GMJDashboardResize.pixelWidthToGridColumns(192, 90, 12),
@@ -128,6 +180,7 @@
       const grid = document.getElementById('grid');
       const article = grid.querySelector('article');
       const handle = grid.querySelector('[data-resize-handle]');
+      const moveHandle = grid.querySelector('[data-widget-drag-handle]');
       const widget = {
         id: 1,
         grid: { x: 0, y: 0, w: 4, h: 4 },
@@ -168,8 +221,37 @@
           layout = payload.layout.map(item => ({ ...item }));
         }
       });
+      let movePersisted = 0;
+      const moveController = GMJDashboardResize.createDashboardMoveController({
+        grid,
+        layoutEngine: GMJDashboardLayout,
+        getResponsiveColumns: () => responsiveColumns,
+        getLayout: () => layout.map(item => ({ ...item })),
+        getWidget: id => id === 1 ? widget : null,
+        canMove: () => editable,
+        onPreview: payload => {
+          layout = payload.layout.map(item => ({ ...item }));
+        },
+        onPersist: async () => {
+          movePersisted += 1;
+        },
+        onRollback: payload => {
+          layout = payload.layout.map(item => ({ ...item }));
+        }
+      });
 
       const pointer = (type, pointerId, x, y) => handle.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId,
+          pointerType: 'mouse',
+          button: 0,
+          clientX: x,
+          clientY: y
+        })
+      );
+      const movePointer = (type, pointerId, x, y) => moveHandle.dispatchEvent(
         new PointerEvent(type, {
           bubbles: true,
           cancelable: true,
@@ -263,6 +345,17 @@
       await new Promise(resolve => setTimeout(resolve, 20));
       assertEqual(persisted, 3, 'keyboard Enter persists once');
 
+      movePointer('pointerdown', 13, 0, 0);
+      movePointer('pointermove', 13, 204, 0);
+      movePointer('pointerup', 13, 204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const afterMove = new Map(layout.map(item => [item.id, item]));
+      assertEqual(afterMove.get(1).x, 2, 'pointer move snaps active widget');
+      assertEqual(movePersisted, 1, 'pointer move persists once');
+      assert(GMJDashboardLayout.validateLayout(layout).valid, 'move preview has no collisions');
+      assert(!article.classList.contains('is-dragging'), 'move class removed');
+
+      moveController.destroy();
       controller.destroy();
       pointer('pointerdown', 12, 0, 0);
       pointer('pointermove', 12, 204, 120);

@@ -11,6 +11,9 @@ FORMATTERS = (ROOT / "frontend" / "dashboard-formatters.js").read_text(
 RESIZE = (ROOT / "frontend" / "dashboard-resize.js").read_text(
     encoding="utf-8"
 )
+CHARTS = (ROOT / "frontend" / "dashboard-charts.js").read_text(
+    encoding="utf-8"
+)
 FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 BACKEND = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
 HARNESS = ROOT / "tests" / "dashboard_frontend_harness.html"
@@ -83,7 +86,9 @@ class DashboardResizeContractTest(unittest.TestCase):
             self.assertIn("function %s(" % name, RESIZE)
             self.assertIn(name, exports)
         self.assertIn("layoutEngine.resizeItemAndPush(", RESIZE)
-        self.assertIn("layoutEngine.repairDashboardLayout(", RESIZE)
+        self.assertIn("layoutEngine.calculateResizePreview", RESIZE)
+        self.assertIn("layoutEngine.commitLayoutInteraction", RESIZE)
+        self.assertIn("createDashboardMoveController", RESIZE)
 
     def test_pointer_keyboard_permissions_and_single_commit_contract(self):
         for token in (
@@ -133,10 +138,34 @@ class DashboardResizeContractTest(unittest.TestCase):
             "configurableResponsiveColumns",
             "updateConfigurableDashboardGridPositions",
             "scheduleConfigurableChartResize",
-            "expanded_grid_h: widget.expanded_grid_h",
-            "collapsed_grid_h: widget.collapsed_grid_h",
-            "height_mode: widget.height_mode",
+            "commitConfigurableLayout",
+            "/layout",
+            "Idempotency-Key",
             "body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')",
+        ):
+            self.assertIn(token, FRONTEND)
+
+
+class DashboardChartContractTest(unittest.TestCase):
+    def test_safe_refresh_density_and_appearance_contract(self):
+        for token in (
+            "DEFAULT_APPEARANCE",
+            "normalizeAppearance",
+            "consolidateDirectionSeries",
+            "getChartDensityMode",
+            "replaceChartOption",
+            "notMerge: true",
+            "replaceMerge: ['series', 'xAxis', 'yAxis']",
+            "chart.off?.()",
+        ):
+            self.assertIn(token, CHARTS)
+        for token in (
+            '<script src="dashboard-charts.js"></script>',
+            "GMJDashboardCharts.replaceChartOption",
+            "minimum_slice_label_percent",
+            "labelLayout: { hideOverlap: true }",
+            "containLabel: true",
+            "hideOverlap: true",
         ):
             self.assertIn(token, FRONTEND)
 
