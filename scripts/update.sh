@@ -11,9 +11,8 @@ fi
 
 git pull
 
-compose_file_args="-f docker-compose.yml"
-if [ -f docker-compose.collectors.yml ]; then
-  compose_file_args="$compose_file_args -f docker-compose.collectors.yml"
-fi
+docker compose --env-file .env -f docker-compose.yml up -d --build backend frontend
 
-docker compose --env-file .env $compose_file_args up -d --build --remove-orphans
+if [ -f docker-compose.collectors.yml ]; then
+  sh "$PROJECT_ROOT/scripts/check_pmacct_collectors.sh"
+fi

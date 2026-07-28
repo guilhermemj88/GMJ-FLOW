@@ -69,6 +69,16 @@ GRAFANA_SCOPES = {
 }
 
 
+def is_grafana_api_path(path: Any) -> bool:
+    """Identify only the namespace that owns dedicated bearer authentication."""
+
+    normalized = str(path or "").rstrip("/")
+    return (
+        normalized == "/api/v1/grafana"
+        or normalized.startswith("/api/v1/grafana/")
+    )
+
+
 def _bounded_env_int(
     name: str,
     default: int,
@@ -381,6 +391,9 @@ def validate_timeseries_request(payload: Any) -> dict[str, Any]:
         "filters": filters,
         "group_by": group_by,
         "calculation": calculation,
+        "include_partial_bucket": bool(
+            data.get("include_partial_bucket", False)
+        ),
         "timezone": timezone_name,
         "format": response_format,
     }
@@ -432,26 +445,43 @@ def canonical_timeseries(
     normalized_series = []
     for item in payload.get("series") if isinstance(payload.get("series"), list) else []:
         direction = str(item.get("direction") or item.get("key") or "").lower()
-        points: dict[int, float] = {}
+        points: dict[int, dict[str, Any]] = {}
         for point in item.get("points") if isinstance(item.get("points"), list) else []:
             timestamp = _timestamp_ms(
                 point.get("timestamp")
                 or point.get("ts")
                 or point.get("time")
             )
-            try:
-                value = abs(float(point.get("value")))
-            except (TypeError, ValueError):
-                continue
-            points[timestamp] = value
+            raw_value = point.get("value")
+            if raw_value is None:
+                value = None
+            else:
+                try:
+                    value = abs(float(raw_value))
+                except (TypeError, ValueError):
+                    continue
+            points[timestamp] = {
+                "value": value,
+                "partial": bool(point.get("partial")),
+                "bucket_duration_seconds": point.get(
+                    "bucket_duration_seconds"
+                ),
+            }
         normalized_series.append(
             {
                 "key": str(item.get("key") or direction or item.get("name") or ""),
                 "name": str(item.get("name") or item.get("label") or direction),
                 "labels": {"direction": direction} if direction else {},
                 "points": [
-                    {"timestamp": timestamp, "value": value}
-                    for timestamp, value in sorted(points.items())
+                    {
+                        "timestamp": timestamp,
+                        "value": point["value"],
+                        "partial": point["partial"],
+                        "bucket_duration_seconds": point[
+                            "bucket_duration_seconds"
+                        ],
+                    }
+                    for timestamp, point in sorted(points.items())
                 ],
             }
         )
@@ -482,9 +512,19 @@ def canonical_timeseries(
         "meta": {
             "source": payload.get("source") or payload.get("query_source") or "raw",
             "interval_ms": request["interval_ms"],
-            "partial": bool(payload.get("partial")),
+            "partial": any(
+                point.get("partial")
+                for series in normalized_series
+                for point in series["points"]
+            ),
+            "include_partial_bucket": request["include_partial_bucket"],
             "calculation": request["calculation"],
             "timezone": "UTC",
+            "quality": (
+                payload.get("quality")
+                if isinstance(payload.get("quality"), dict)
+                else {}
+            ),
             "correlation_id": correlation,
         },
     }
@@ -524,7 +564,19 @@ def canonical_ranking(
         safe_metadata = {
             key: value
             for key, value in metadata.items()
-            if key in {"asn", "protocol", "direction"}
+            if key in {
+                "asn",
+                "asn_label",
+                "as_name",
+                "org_name",
+                "country",
+                "prefix",
+                "ip",
+                "entity_kind",
+                "resolution_state",
+                "protocol",
+                "direction",
+            }
             and isinstance(value, (str, int, float, bool))
         }
         items.append(

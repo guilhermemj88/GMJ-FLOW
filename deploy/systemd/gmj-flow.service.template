@@ -1,0 +1,16 @@
+[Unit]
+Description=GMJ-FLOW Stack
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory={{PROJECT_DIR}}
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml {{EXABGP_COMPOSE_FILE}} {{AI_PROFILE}} up -d
+ExecStop=/usr/bin/docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml {{EXABGP_COMPOSE_FILE}} {{AI_PROFILE}} down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

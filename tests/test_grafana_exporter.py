@@ -141,6 +141,7 @@ class GrafanaExporterTest(unittest.TestCase):
             target_body["from"],
             "${__timeFrom:date:iso}",
         )
+        self.assertFalse(target_body["include_partial_bucket"])
         self.assertEqual(
             panel["targets"][0]["root_selector"],
             "$.rows",
@@ -175,6 +176,27 @@ class GrafanaExporterTest(unittest.TestCase):
         self.assertEqual(warning["widget_id"], 1)
         self.assertEqual(warning["field"], "appearance.custom_gradient")
         self.assertIn("Grafana", warning["message"])
+
+    def test_chart_table_exports_graph_with_structured_warning(self):
+        dashboard = sample_dashboard()
+        widget = dashboard["widgets"][-2]
+        widget["config"]["visualization_kind"] = "chart_table"
+        widget["config"]["combined_chart_kind"] = "donut"
+        widget["visualization"] = {"type": "chart_table"}
+        exported = export_dashboard(dashboard)
+        panel = next(
+            item
+            for item in exported["dashboard"]["panels"]
+            if item["title"] == widget["title"]
+        )
+        self.assertEqual(panel["type"], "piechart")
+        warning = next(
+            item
+            for item in exported["meta"]["warnings"]
+            if item["widget_id"] == widget["id"]
+            and item["field"] == "visualization_kind"
+        )
+        self.assertIn("gráfico + tabela", warning["message"])
 
 
 if __name__ == "__main__":

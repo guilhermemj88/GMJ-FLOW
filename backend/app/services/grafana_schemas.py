@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,7 @@ class GrafanaTimeseriesQuery(BaseModel):
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
     group_by: list[str] = Field(default_factory=lambda: ["direction"])
     calculation: str = "rate"
+    include_partial_bucket: bool = False
     timezone: str = "UTC"
     format: str = "json"
 
@@ -36,6 +37,7 @@ class GrafanaTimeseriesQuery(BaseModel):
                 "filters": {"direction": "both"},
                 "group_by": ["direction"],
                 "calculation": "rate",
+                "include_partial_bucket": False,
             }
         }
 
@@ -83,10 +85,23 @@ class GrafanaHealthResponse(BaseModel):
     timestamp: str
     correlation_id: str
 
+    class Config:
+        schema_extra = {
+            "example": {
+                "status": "ok",
+                "service": "gmj-flow-grafana-api",
+                "api_version": "v1",
+                "timestamp": "2026-07-28T10:10:00Z",
+                "correlation_id": "grafana-health-01",
+            }
+        }
+
 
 class GrafanaTimeseriesPoint(BaseModel):
     timestamp: int
-    value: float
+    value: Optional[float]
+    partial: bool = False
+    bucket_duration_seconds: Optional[float] = None
 
 
 class GrafanaTimeseriesSeries(BaseModel):
@@ -99,7 +114,7 @@ class GrafanaTimeseriesSeries(BaseModel):
 class GrafanaTimeseriesRow(BaseModel):
     timestamp: int
     series: str
-    value: float
+    value: Optional[float]
 
 
 class GrafanaTimeseriesResponse(BaseModel):
@@ -109,6 +124,48 @@ class GrafanaTimeseriesResponse(BaseModel):
     series: list[GrafanaTimeseriesSeries]
     rows: list[GrafanaTimeseriesRow]
     meta: dict[str, Any]
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "kind": "timeseries",
+                "metric": "traffic_bps",
+                "unit": "bps",
+                "series": [
+                    {
+                        "key": "download",
+                        "name": "Total Download",
+                        "labels": {"direction": "download"},
+                        "points": [
+                            {
+                                "timestamp": 1785233340000,
+                                "value": 12500000.0,
+                                "partial": False,
+                                "bucket_duration_seconds": 60.0,
+                            }
+                        ],
+                    }
+                ],
+                "rows": [
+                    {
+                        "timestamp": 1785233340000,
+                        "series": "Total Download",
+                        "value": 12500000.0,
+                    }
+                ],
+                "meta": {
+                    "interval_ms": 60000,
+                    "partial": False,
+                    "include_partial_bucket": False,
+                    "timezone": "UTC",
+                    "quality": {
+                        "data_status": "current",
+                        "last_complete_sample_at": "2026-07-28T10:09:00Z",
+                    },
+                    "correlation_id": "grafana-query-01",
+                },
+            }
+        }
 
 
 class GrafanaRankingItem(BaseModel):
@@ -129,6 +186,36 @@ class GrafanaRankingResponse(BaseModel):
     calculation: str
     meta: dict[str, Any]
 
+    class Config:
+        schema_extra = {
+            "example": {
+                "kind": "ranking",
+                "metric": "top_download_origins",
+                "unit": "bps",
+                "items": [
+                    {
+                        "rank": 1,
+                        "key": "15169",
+                        "label": "AS15169 — Google LLC",
+                        "value": 8500000.0,
+                        "percent": 68.0,
+                        "metadata": {
+                            "asn": 15169,
+                            "as_name": "Google LLC",
+                            "country": "US",
+                            "entity_kind": "asn",
+                        },
+                    }
+                ],
+                "total": 12500000.0,
+                "calculation": "last_not_null",
+                "meta": {
+                    "timezone": "UTC",
+                    "correlation_id": "grafana-ranking-01",
+                },
+            }
+        }
+
 
 class GrafanaTableColumn(BaseModel):
     name: str
@@ -139,6 +226,28 @@ class GrafanaTableResponse(BaseModel):
     columns: list[GrafanaTableColumn]
     rows: list[list[Any]]
     meta: dict[str, Any]
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "columns": [
+                    {"name": "time", "type": "time"},
+                    {"name": "series", "type": "string"},
+                    {"name": "value", "type": "number"},
+                ],
+                "rows": [
+                    [
+                        1785233340000,
+                        "Total Download",
+                        12500000.0,
+                    ]
+                ],
+                "meta": {
+                    "timezone": "UTC",
+                    "correlation_id": "grafana-table-01",
+                },
+            }
+        }
 
 
 class GrafanaPublishRequest(BaseModel):

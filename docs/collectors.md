@@ -38,14 +38,19 @@ Collectors dinamicos nao usam o allow list global `/etc/pmacct/allow.lst`.
 Com `GMJFLOW_ENABLE_COLLECTOR_APPLY=false`, a API apenas gera os arquivos. Aplique manualmente na raiz do projeto:
 
 ```sh
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml config
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml up -d --build --remove-orphans
+docker compose --env-file .env -f docker-compose.collectors.yml config
+docker compose --env-file .env -f docker-compose.collectors.yml up -d --build
 ```
 
-Para conferir que apenas o collector sensorizado esta publicando a porta UDP do sensor:
+O stack principal e os collectors sao projetos operacionais separados. Nunca
+use `--remove-orphans` ao atualizar o backend/frontend: os servicos PMACCT que
+nao constam no compose base sao intencionais. Tambem nao remova volumes para
+fazer uma atualizacao.
+
+Para conferir que todos os collectors e parsers declarados continuam ativos:
 
 ```sh
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml ps
+sh scripts/check_pmacct_collectors.sh
 ```
 
 ## Modo automatico
@@ -72,10 +77,21 @@ O script `scripts/apply_collectors.sh`:
 
 1. entra na raiz do projeto;
 2. valida `docker-compose.collectors.yml`;
-3. executa `docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml config`;
-4. executa `docker compose --env-file .env -f docker-compose.yml -f docker-compose.collectors.yml up -d --build --remove-orphans`.
+3. enumera apenas servicos `pmacct-sensor-*` e
+   `pmacct-parser-sensor-*`;
+4. atualiza esses servicos com `--no-deps`, sem tocar no stack principal.
 
 O retorno de `POST /api/collectors/apply` inclui `stdout`, `stderr` e `returncode`.
+
+Depois de atualizar somente a aplicacao, use:
+
+```sh
+docker compose --env-file .env -f docker-compose.yml up -d --build backend frontend
+sh scripts/check_pmacct_collectors.sh
+```
+
+O segundo comando e somente leitura. Ele falha se algum servico PMACCT
+declarado nao estiver no estado `running`; nao reinicia nem remove containers.
 
 ## ASN no IPFIX/NetFlow
 

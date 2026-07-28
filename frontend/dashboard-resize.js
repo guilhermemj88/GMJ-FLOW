@@ -353,6 +353,15 @@
     function onMovePointerDown(event) {
       if (event.button !== undefined && event.button !== 0) return;
       const handle = moveHandle(event.target);
+      if (!handle) return;
+      const cancelledTarget = event.target?.closest?.(
+        options.cancelSelector
+        || 'button, a, input, select, textarea, table, .widget-content, .scroll-container'
+      );
+      if (cancelledTarget && !cancelledTarget.closest?.(
+        options.handleSelector || '[data-widget-drag-handle]'
+      )) return;
+      if (event.defaultPrevented) return;
       const element = widgetElement(handle);
       const widget = options.getWidget?.(Number(element?.dataset.widgetId));
       begin(event, handle, element, widget, false);

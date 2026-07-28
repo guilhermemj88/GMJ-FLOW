@@ -28,6 +28,7 @@ RANKING_VISUALIZATIONS = (
     "pie",
     "donut",
     "bar_gauge",
+    "chart_table",
     "stat",
 )
 TIMESERIES_VISUALIZATIONS = (

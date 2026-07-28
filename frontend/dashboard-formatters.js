@@ -251,8 +251,11 @@
     });
   }
 
-  function formatTableValue(value, metric) {
-    return formatMetricValue(value, metric, { maximumFractionDigits: 2 });
+  function formatTableValue(value, metric, options = {}) {
+    return formatMetricValue(value, metric, {
+      maximumFractionDigits: 2,
+      ...options
+    });
   }
 
   return Object.freeze({

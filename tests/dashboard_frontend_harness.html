@@ -5,6 +5,7 @@
   <title>GMJ-FLOW dashboard frontend harness</title>
   <script src="../frontend/dashboard-formatters.js"></script>
   <script src="../frontend/dashboard-charts.js"></script>
+  <script src="../frontend/dashboard-time-range.js"></script>
   <script src="../frontend/dashboard-visualizations.js"></script>
   <script src="../frontend/dashboard-layout.js"></script>
   <script src="../frontend/dashboard-resize.js"></script>
@@ -16,6 +17,9 @@
       <div class="widget-resize-badge"></div>
       <button data-widget-drag-handle type="button">Mover</button>
       <div class="widget-resize-handle" data-resize-handle="se"></div>
+      <div class="widget-content scroll-container">
+        <table><tbody><tr><td><a id="rankingLink" href="#asn">AS15169</a></td></tr></tbody></table>
+      </div>
     </article>
   </div>
   <script>
@@ -41,6 +45,60 @@
         }
       });
       const format = GMJDashboardFormatters;
+      const timeRange = GMJDashboardTimeRange;
+
+      const utcLabel = timeRange.formatUtcTimestamp(
+        '2026-07-28T12:34:56Z',
+        'pt-BR'
+      );
+      assert(utcLabel.includes('12:34:56'), 'UTC formatter keeps the UTC clock');
+      assert(utcLabel.toUpperCase().includes('UTC'), 'UTC formatter labels timezone');
+
+      for (const minutes of [15, 60, 1440, 10080]) {
+        assertEqual(
+          timeRange.buildRangeContext(String(minutes)).range_minutes,
+          minutes,
+          `relative range ${minutes}m`
+        );
+      }
+      const customContext = timeRange.buildRangeContext('custom', {
+        start: '2026-07-27T10:00:00Z',
+        end: '2026-07-28T10:00:00Z',
+        previous: '20'
+      });
+      assertEqual(customContext.range_minutes, 1440, 'custom range ignores stale previous');
+      assertEqual(customContext.start, '2026-07-27T10:00:00Z', 'custom start is absolute UTC');
+      assertEqual(customContext.end, '2026-07-28T10:00:00Z', 'custom end is absolute UTC');
+      const hourCacheKey = timeRange.widgetCacheKey(1, 2, 'query', {
+        range_minutes: 60,
+        interval: 60,
+        sensor_id: 7,
+        interface_id: 9
+      });
+      const dayCacheKey = timeRange.widgetCacheKey(1, 2, 'query', {
+        range_minutes: 1440,
+        interval: 300,
+        sensor_id: 7,
+        interface_id: 9
+      });
+      assert(hourCacheKey !== dayCacheKey, 'cache is separated by range and interval');
+      const requestGate = timeRange.createRequestGate();
+      const oldHourRequest = requestGate.activate({ range_minutes: 60 });
+      const hourAutoRefresh = requestGate.activate({ range_minutes: 60 });
+      assertEqual(
+        hourAutoRefresh.revision,
+        oldHourRequest.revision,
+        'auto refresh preserves current range revision'
+      );
+      const currentDayRequest = requestGate.activate({ range_minutes: 1440 });
+      assert(
+        !requestGate.isCurrent(oldHourRequest),
+        'rapid 1h response is stale after switching to 24h'
+      );
+      assert(
+        requestGate.isCurrent(currentDayRequest),
+        '24h response remains current with auto refresh active'
+      );
 
       assertEqual(format.formatBitsPerSecond(0), '0 bps', 'bps zero');
       assertEqual(format.formatBitsPerSecond(950), '950 bps', 'bps base');
@@ -84,6 +142,22 @@
       assertEqual(rankingDataset.items.length, 2, 'ranking canonical item count');
       assertEqual(rankingDataset.items[0].percent, 80, 'ranking percent calculated');
       assertEqual(rankingDataset.total, 100, 'ranking total calculated');
+      const groupedRanking = GMJDashboardVisualizations.groupRankingItems(
+        Array.from({ length: 12 }, (_, index) => ({
+          key: `AS${64500 + index}`,
+          label: `AS${64500 + index}`,
+          value: 12 - index,
+          percent: 100 / 12
+        })),
+        8
+      );
+      assertEqual(groupedRanking.length, 8, 'donut keeps configured slice limit');
+      assertEqual(groupedRanking[7].label, 'Outros', 'donut groups remaining slices');
+      assertEqual(
+        groupedRanking[7].metadata.grouped_items,
+        5,
+        'others metadata keeps grouped count'
+      );
       const baseWidget = {
         type: 'top_n',
         config: {
@@ -152,6 +226,28 @@
       assertEqual(trafficModel.series[0].legend_value, 50, 'split zero legend absolute');
       assertEqual(trafficModel.y_min, -trafficModel.y_max, 'split zero symmetric axis');
       assertEqual(JSON.stringify(trafficPayload), trafficSnapshot, 'split zero does not mutate API payload');
+      const partialLegendModel = GMJDashboardVisualizations.buildTrafficModel(
+        {
+          kind: 'timeseries',
+          metric: 'bps',
+          series: [{
+            key: 'download',
+            name: 'Download',
+            direction: 'download',
+            points: [
+              { ts: '2026-07-28T10:00:00Z', value: 100, partial: false },
+              { ts: '2026-07-28T10:01:00Z', value: 5, partial: true }
+            ]
+          }]
+        },
+        { legend_calculation: 'last_not_null' },
+        {}
+      );
+      assertEqual(
+        partialLegendModel.series[0].legend_value,
+        100,
+        'legend uses last complete bucket'
+      );
 
       const directionSeries = GMJDashboardCharts.consolidateDirectionSeries([
         {
@@ -180,6 +276,13 @@
       assertEqual(directionSeries[1].name, 'Total Download', 'stable download order');
       assertEqual(directionSeries[1].points.length, 1, 'unique direction timestamps');
       assertEqual(directionSeries[1].points[0].value, 6, 'duplicate timestamp consolidation');
+      const nullDirection = GMJDashboardCharts.consolidateDirectionSeries([
+        {
+          direction: 'upload',
+          points: [{ ts: '2026-07-28T10:00:00Z', value: null }]
+        }
+      ], 'bits_s');
+      assertEqual(nullDirection[0].points[0].value, null, 'direction null is not zero');
       assertEqual(GMJDashboardCharts.getChartDensityMode(300, 220), 'compact', 'compact density');
       assertEqual(GMJDashboardCharts.getChartDensityMode(800, 450), 'detailed', 'detailed density');
       assertEqual(GMJDashboardCharts.getChartDensityMode(800, 450, 'sparse'), 'compact', 'configured sparse density');
@@ -264,6 +367,7 @@
       const article = grid.querySelector('article');
       const handle = grid.querySelector('[data-resize-handle]');
       const moveHandle = grid.querySelector('[data-widget-drag-handle]');
+      const rankingLink = grid.querySelector('#rankingLink');
       const widget = {
         id: 1,
         grid: { x: 0, y: 0, w: 4, h: 4 },
@@ -322,6 +426,21 @@
           layout = payload.layout.map(item => ({ ...item }));
         }
       });
+
+      rankingLink.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 99,
+        pointerType: 'mouse',
+        button: 0,
+        clientX: 0,
+        clientY: 0
+      }));
+      assertEqual(
+        moveController.activeSession,
+        null,
+        'link and table content do not start drag'
+      );
 
       const pointer = (type, pointerId, x, y) => handle.dispatchEvent(
         new PointerEvent(type, {

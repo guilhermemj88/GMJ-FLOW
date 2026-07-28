@@ -43,7 +43,7 @@ COMPARISON_MODES = {
     "yesterday_same_time",
     "last_week_same_time",
 }
-ALLOWED_RESOLUTIONS = {0, 5, 10, 30, 60, 300, 900, 3600}
+ALLOWED_RESOLUTIONS = {0, 1, 5, 10, 30, 60, 300, 900, 3600}
 DEFAULT_WIDGET_APPEARANCE = {
     "palette_mode": "default",
     "upload_color": "#2563eb",
@@ -161,6 +161,7 @@ VISUALIZATIONS = {
     "number",
     "stat",
     "bar_gauge",
+    "chart_table",
     "status",
 }
 FILTER_FIELDS = {
@@ -407,7 +408,7 @@ def consolidate_direction_series(
         if direction in DIRECTION_SERIES_ORDER
         else DIRECTION_SERIES_ORDER
     )
-    points_by_direction: dict[str, dict[str, float]] = {
+    points_by_direction: dict[str, dict[str, dict[str, Any]]] = {
         current: {} for current in requested
     }
     for item in series if isinstance(series, list) else []:
@@ -419,7 +420,7 @@ def consolidate_direction_series(
         if item_direction not in points_by_direction:
             continue
         target = points_by_direction[item_direction]
-        item_points: dict[str, float] = {}
+        item_points: dict[str, dict[str, Any]] = {}
         for point in item.get("points") if isinstance(item.get("points"), list) else []:
             if not isinstance(point, dict):
                 continue
@@ -431,13 +432,34 @@ def consolidate_direction_series(
             ).strip()
             if not timestamp:
                 continue
+            raw_value = point.get("value")
             try:
-                value = float(point.get("value") or 0)
+                value = float(raw_value) if raw_value is not None else None
             except (TypeError, ValueError):
-                value = 0.0
-            item_points[timestamp] = value
-        for timestamp, value in item_points.items():
-            target[timestamp] = target.get(timestamp, 0.0) + value
+                value = None
+            item_points[timestamp] = {
+                "value": value,
+                "partial": bool(point.get("partial")),
+                "bucket_duration_seconds": point.get(
+                    "bucket_duration_seconds"
+                ),
+            }
+        for timestamp, point in item_points.items():
+            current = target.setdefault(
+                timestamp,
+                {
+                    "values": [],
+                    "partial": False,
+                    "bucket_duration_seconds": None,
+                },
+            )
+            if point["value"] is not None:
+                current["values"].append(point["value"])
+            current["partial"] = current["partial"] or point["partial"]
+            current["bucket_duration_seconds"] = (
+                point["bucket_duration_seconds"]
+                or current["bucket_duration_seconds"]
+            )
     canonical_metric = canonical_dashboard_metric(metric)
     return [
         {
@@ -455,8 +477,19 @@ def consolidate_direction_series(
                 else DEFAULT_WIDGET_APPEARANCE["download_color"]
             ),
             "points": [
-                {"ts": timestamp, "value": round(value, 2)}
-                for timestamp, value in sorted(
+                {
+                    "ts": timestamp,
+                    "value": (
+                        round(sum(point["values"]), 2)
+                        if point["values"]
+                        else None
+                    ),
+                    "partial": point["partial"],
+                    "bucket_duration_seconds": point[
+                        "bucket_duration_seconds"
+                    ],
+                }
+                for timestamp, point in sorted(
                     points_by_direction[current].items()
                 )
             ],
@@ -646,10 +679,10 @@ GENERAL_WIDGETS = [
         "Destinos do upload",
         "top_n",
         "traffic",
-        {"dimension": "src_asn", "metric": "bps", "direction": "upload", "limit": 10, "visualization": "table"},
+        {"dimension": "dst_asn", "metric": "bps", "direction": "upload", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55},
         0,
         28,
-        4,
+        6,
         7,
     ),
     _default_widget(
@@ -657,10 +690,10 @@ GENERAL_WIDGETS = [
         "Origens do download",
         "top_n",
         "traffic",
-        {"dimension": "dst_asn", "metric": "bps", "direction": "download", "limit": 10, "visualization": "table"},
-        4,
+        {"dimension": "src_asn", "metric": "bps", "direction": "download", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55},
+        6,
         28,
-        4,
+        6,
         7,
     ),
     _default_widget(
@@ -751,6 +784,10 @@ SYSTEM_TEMPLATES = (
 WIDGET_PRESETS = (
     {"id": "timeseries", "category": "traffic", "label": "Série temporal", "type": "timeseries", "config": {"metric": "bps", "direction": "both", "group_by": "total", "aggregation": "sum", "visualization": "area"}},
     {"id": "top-n", "category": "traffic", "label": "Top N", "type": "top_n", "config": {"dimension": "src_ip", "metric": "bps", "direction": "both", "limit": 10, "visualization": "table"}},
+    {"id": "top-upload-destinations", "category": "traffic", "label": "Destinos do upload", "type": "top_n", "config": {"dimension": "dst_asn", "metric": "bps", "direction": "upload", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55}},
+    {"id": "top-download-origins", "category": "traffic", "label": "Origens do download", "type": "top_n", "config": {"dimension": "src_asn", "metric": "bps", "direction": "download", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55}},
+    {"id": "top-download-destinations", "category": "traffic", "label": "Destinos do download", "type": "top_n", "config": {"dimension": "dst_asn", "metric": "bps", "direction": "download", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55}},
+    {"id": "top-upload-origins", "category": "traffic", "label": "Origens do upload", "type": "top_n", "config": {"dimension": "src_asn", "metric": "bps", "direction": "upload", "limit": 10, "visualization": "chart_table", "combined_chart_kind": "donut", "slice_limit": 8, "chart_table_ratio": 55}},
     {"id": "conversations", "category": "traffic", "label": "Top conversas", "type": "top_n", "config": {"dimension": "conversation", "metric": "bps", "direction": "both", "limit": 10, "visualization": "table"}},
     {"id": "protocols", "category": "traffic", "label": "Protocolos", "type": "top_n", "config": {"dimension": "protocol", "metric": "bps", "direction": "both", "limit": 10, "visualization": "donut"}},
     {"id": "tcp-flags", "category": "traffic", "label": "TCP flags", "type": "top_n", "config": {"dimension": "tcp_flags", "metric": "flows", "direction": "both", "limit": 10, "visualization": "bar"}},
@@ -915,6 +952,8 @@ def widget_layout_constraints(widget: dict[str, Any]) -> dict[str, int]:
     ).lower()
     if widget_type == "timeseries":
         default_width, default_height, min_width, min_height = 6, 8, 5, 6
+    elif widget_type == "top_n" and visualization_type == "chart_table":
+        default_width, default_height, min_width, min_height = 8, 8, 6, 6
     elif widget_type == "top_n" and config.get("dimension") == "conversation":
         default_width, default_height, min_width, min_height = 6, 8, 5, 6
     elif widget_type == "top_n" and visualization_type in {
@@ -1052,7 +1091,32 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
         limit = int(config.get("limit") or 10)
         if limit < 1 or limit > MAX_WIDGET_LIMIT:
             raise ValueError("limit deve estar entre 1 e %s" % MAX_WIDGET_LIMIT)
-        config.update({"dimension": dimension, "metric": metric, "direction": direction, "limit": limit})
+        combined_chart_kind = str(
+            config.get("combined_chart_kind") or "donut"
+        ).strip().lower()
+        if combined_chart_kind not in {
+            "horizontal_bar",
+            "pie",
+            "donut",
+        }:
+            combined_chart_kind = "donut"
+        config.update(
+            {
+                "dimension": dimension,
+                "metric": metric,
+                "direction": direction,
+                "limit": limit,
+                "combined_chart_kind": combined_chart_kind,
+                "slice_limit": max(
+                    2,
+                    min(20, int(config.get("slice_limit") or 8)),
+                ),
+                "chart_table_ratio": max(
+                    25,
+                    min(75, int(config.get("chart_table_ratio") or 55)),
+                ),
+            }
+        )
     elif widget_type in {"timeseries", "kpi"}:
         metric = str(config.get("metric") or "").strip().lower()
         direction = str(config.get("direction") or "both").strip().lower()
@@ -1082,6 +1146,9 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
                     "group_by": group_by,
                     "aggregation": aggregation,
                     "resolution_seconds": resolution_seconds,
+                    "include_partial_bucket": _bool(
+                        config.get("include_partial_bucket")
+                    ),
                 }
             )
     elif widget_type in {"status_list", "recent_events"}:
@@ -1129,6 +1196,15 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
         },
         payload.get("grid"),
     )
+    use_global_time_range = _bool(payload.get("use_global_time_range", True))
+    custom_time_range = (
+        payload.get("custom_time_range")
+        if (
+            not use_global_time_range
+            and isinstance(payload.get("custom_time_range"), dict)
+        )
+        else {}
+    )
     normalized.update(
         {
             "title": title,
@@ -1144,9 +1220,9 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
             "height_mode": height_mode,
             "refresh_interval_seconds": refresh,
             "use_global_filters": _bool(payload.get("use_global_filters", True)),
-            "use_global_time_range": _bool(payload.get("use_global_time_range", True)),
+            "use_global_time_range": use_global_time_range,
             "inheritance": validate_inheritance(payload.get("inheritance")),
-            "custom_time_range": payload.get("custom_time_range") if isinstance(payload.get("custom_time_range"), dict) else {},
+            "custom_time_range": custom_time_range,
         }
     )
     return normalized
@@ -1303,7 +1379,16 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboards_template_key ON dashboards(template_key) WHERE template_key IS NOT NULL"
     )
+    conn.execute(
+        """
+        UPDATE dashboard_widgets
+        SET custom_time_range_json = '{}'
+        WHERE use_global_time_range = 1
+          AND custom_time_range_json <> '{}'
+        """
+    )
     _seed_system_templates(conn)
+    _migrate_legacy_asn_ranking_widgets(conn)
 
 
 def insert_widget(conn: sqlite3.Connection, dashboard_id: int, widget: dict[str, Any], now: str | None = None) -> int:
@@ -1382,6 +1467,90 @@ def _seed_system_templates(conn: sqlite3.Connection) -> None:
             insert_widget(conn, dashboard_id, copy.deepcopy(widget), now)
 
 
+def _migrate_legacy_asn_ranking_widgets(
+    conn: sqlite3.Connection,
+) -> None:
+    """Correct the two historical ranking definitions without touching custom keys."""
+
+    migrations = {
+        "top-asn-src": {
+            "legacy_dimension": "src_asn",
+            "dimension": "dst_asn",
+            "direction": "upload",
+        },
+        "top-asn-dst": {
+            "legacy_dimension": "dst_asn",
+            "dimension": "src_asn",
+            "direction": "download",
+        },
+    }
+    rows = conn.execute(
+        """
+        SELECT w.id, w.widget_key, w.config_json, w.visualization_json,
+               d.is_system
+        FROM dashboard_widgets AS w
+        JOIN dashboards AS d ON d.id = w.dashboard_id
+        WHERE w.widget_key IN ('top-asn-src', 'top-asn-dst')
+        """
+    ).fetchall()
+    timestamp = _utc_now()
+    for row in rows:
+        migration = migrations[str(row["widget_key"])]
+        config = _json_loads(row["config_json"], {})
+        if (
+            config.get("dimension") != migration["legacy_dimension"]
+            or config.get("direction") != migration["direction"]
+        ):
+            continue
+        config["dimension"] = migration["dimension"]
+        visualization = _json_loads(row["visualization_json"], {})
+        if _bool(row["is_system"]):
+            config.update(
+                {
+                    "visualization": "chart_table",
+                    "visualization_kind": "chart_table",
+                    "combined_chart_kind": "donut",
+                    "slice_limit": 8,
+                    "chart_table_ratio": 55,
+                }
+            )
+            visualization.update(
+                {
+                    "type": "chart_table",
+                    "visualization_kind": "chart_table",
+                }
+            )
+            conn.execute(
+                """
+                UPDATE dashboard_widgets
+                SET config_json = ?, visualization_json = ?,
+                    grid_x = ?, grid_w = 6, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _canonical_json(config),
+                    _canonical_json(visualization),
+                    0 if row["widget_key"] == "top-asn-src" else 6,
+                    timestamp,
+                    int(row["id"]),
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE dashboard_widgets
+                SET config_json = ?, visualization_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _canonical_json(config),
+                    _canonical_json(visualization),
+                    timestamp,
+                    int(row["id"]),
+                ),
+            )
+
+
 def widget_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
@@ -1408,7 +1577,11 @@ def widget_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "use_global_filters": _bool(row["use_global_filters"]),
         "use_global_time_range": _bool(row["use_global_time_range"]),
         "inheritance": _json_loads(row["inheritance_json"], {}),
-        "custom_time_range": _json_loads(row["custom_time_range_json"], {}),
+        "custom_time_range": (
+            {}
+            if _bool(row["use_global_time_range"])
+            else _json_loads(row["custom_time_range_json"], {})
+        ),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -1974,6 +2147,8 @@ def widget_data_signature(widget: dict[str, Any], query_context: dict[str, Any])
         "zone_id": query_context.get("zone_id"),
         "zone_direction": query_context.get("zone_direction"),
         "series_limit": query_context.get("series_limit"),
+        "interval": query_context.get("interval"),
+        "maximum_data_points": query_context.get("maximum_data_points"),
     }
     return hashlib.sha256(_canonical_json(data_definition).encode("utf-8")).hexdigest()
 
@@ -2012,6 +2187,9 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
                 "last_not_null",
             ),
             "resolution_seconds": config.get("resolution_seconds", 0),
+            "include_partial_bucket": bool(
+                config.get("include_partial_bucket", False)
+            ),
             "filters": normalized["filters"],
         }
     return {
