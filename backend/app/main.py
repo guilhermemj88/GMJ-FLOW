@@ -40829,6 +40829,32 @@ def dashboard_widget_status_payload(source: str, limit: int) -> dict[str, Any]:
     }
 
 
+def dashboard_widget_metric_metadata(metric: str | None) -> dict[str, str]:
+    normalized = clean_text(metric).lower() or "count"
+    aliases = {
+        "bits_s": "bps",
+        "bits_per_second": "bps",
+        "packets_s": "pps",
+        "packets_per_second": "pps",
+        "flows_s": "fps",
+        "flows_per_second": "fps",
+    }
+    normalized = aliases.get(normalized, normalized)
+    unit, value_kind = {
+        "bps": ("bps", "rate"),
+        "pps": ("pps", "rate"),
+        "fps": ("flows/s", "rate"),
+        "bytes": ("B", "bytes"),
+        "percentage": ("%", "percentage"),
+        "duration": ("s", "duration"),
+    }.get(normalized, ("count", "count"))
+    return {
+        "metric": normalized,
+        "unit": unit,
+        "value_kind": value_kind,
+    }
+
+
 def dashboard_widget_execute(
     widget: dict[str, Any],
     query_context: dict[str, Any],
@@ -40991,6 +41017,9 @@ def dashboard_widget_execute(
     )
     return {
         **payload,
+        **dashboard_widget_metric_metadata(
+            payload.get("metric") or plan.get("metric")
+        ),
         "request_id": HTTP_REQUEST_ID.get(),
         "widget_schema_version": DASHBOARD_SCHEMA_VERSION,
     }

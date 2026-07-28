@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>GMJ-FLOW dashboard frontend harness</title>
+  <script src="../frontend/dashboard-formatters.js"></script>
+  <script src="../frontend/dashboard-layout.js"></script>
+  <script src="../frontend/dashboard-resize.js"></script>
+</head>
+<body>
+  <div id="result" data-status="running">Executando</div>
+  <div id="grid" style="display:grid;width:1212px;column-gap:12px;row-gap:12px">
+    <article class="configurable-dashboard-widget" data-widget-id="1">
+      <div class="widget-resize-badge"></div>
+      <div class="widget-resize-handle" data-resize-handle="se"></div>
+    </article>
+  </div>
+  <script>
+    (async function runDashboardFrontendHarness() {
+      const failures = [];
+      const assertEqual = (actual, expected, label) => {
+        if (actual !== expected) failures.push(`${label}: ${actual} !== ${expected}`);
+      };
+      const assert = (condition, label) => {
+        if (!condition) failures.push(label);
+      };
+      const frontendResponse = await fetch('../frontend/index.html');
+      const frontendSource = await frontendResponse.text();
+      const parsedFrontend = new DOMParser().parseFromString(
+        frontendSource,
+        'text/html'
+      );
+      parsedFrontend.querySelectorAll('script:not([src])').forEach(script => {
+        try {
+          new Function(script.textContent);
+        } catch (error) {
+          failures.push(`index inline syntax: ${error.message}`);
+        }
+      });
+      const format = GMJDashboardFormatters;
+
+      assertEqual(format.formatBitsPerSecond(0), '0 bps', 'bps zero');
+      assertEqual(format.formatBitsPerSecond(950), '950 bps', 'bps base');
+      assertEqual(format.formatBitsPerSecond(12500), '12,5 Kbps', 'bps kilo');
+      assertEqual(format.formatBitsPerSecond(45000000), '45 Mbps', 'bps mega');
+      assertEqual(format.formatBitsPerSecond(45435545677.2), '45,44 Gbps', 'bps giga');
+      assertEqual(format.formatPacketsPerSecond(850), '850 pps', 'pps base');
+      assertEqual(format.formatPacketsPerSecond(8400), '8,4 Kpps', 'pps kilo');
+      assertEqual(format.formatPacketsPerSecond(4350000), '4,35 Mpps', 'pps mega');
+      assertEqual(format.formatBitsPerSecond(-12500), '-12,5 Kbps', 'negative');
+      assertEqual(format.formatBitsPerSecond(null), '-', 'null');
+      assertEqual(format.formatBitsPerSecond(Number.NaN), '-', 'NaN');
+      assertEqual(format.formatBitsPerSecond(Number.POSITIVE_INFINITY), '-', 'Infinity');
+      assertEqual(format.formatPercentage(12.345), '12,35%', 'percentage');
+      assertEqual(format.formatCount(12500), '12,5 K', 'count');
+      assertEqual(format.formatTableValue(4350000, 'packets_s'), '4,35 Mpps', 'table');
+
+      const bpsScale = format.selectMetricScale(45e9, 'bps');
+      assertEqual(bpsScale.divisor, 1e9, 'bps scale divisor');
+      assertEqual(bpsScale.unit, 'Gbps', 'bps scale unit');
+      assertEqual(format.formatAxisValue(0, 'bps', bpsScale), '0 Gbps', 'axis fixed scale');
+      assertEqual(
+        format.formatTooltipValue(45435545677.2, 'bps', bpsScale),
+        '45,44 Gbps',
+        'tooltip fixed scale'
+      );
+      const ppsScale = format.selectMetricScale(4.3e6, 'pps');
+      assertEqual(ppsScale.divisor, 1e6, 'pps scale divisor');
+      assertEqual(ppsScale.unit, 'Mpps', 'pps scale unit');
+
+      assertEqual(
+        GMJDashboardResize.pixelWidthToGridColumns(192, 90, 12),
+        2,
+        'pixel width snap'
+      );
+      assertEqual(
+        GMJDashboardResize.pixelHeightToGridRows(108, 48, 12),
+        2,
+        'pixel height snap'
+      );
+      assertEqual(
+        GMJDashboardResize.gridColumnsToPixelWidth(2, 90, 12),
+        192,
+        'grid width conversion'
+      );
+      assertEqual(
+        GMJDashboardResize.gridRowsToPixelHeight(2, 48, 12),
+        108,
+        'grid height conversion'
+      );
+      const resizeSession = {
+        item: { x: 0, w: 4, h: 4, min_w: 2, min_h: 2, max_w: 12, max_h: 12 },
+        initialW: 4,
+        initialH: 4,
+        startX: 0,
+        startY: 0,
+        columnWidth: 90,
+        columnGap: 12,
+        columnFactor: 1,
+        rowHeight: 48,
+        rowGap: 12,
+        constraints: { columns: 12, min_w: 2, min_h: 2, max_w: 12, max_h: 12 },
+        lockWidth: false
+      };
+      const horizontal = GMJDashboardResize.pointerDeltaToGridSize(
+        { ...resizeSession, direction: 'e' },
+        204,
+        120
+      );
+      assertEqual(horizontal.w, 6, 'right handle changes width');
+      assertEqual(horizontal.h, 4, 'right handle preserves height');
+      const vertical = GMJDashboardResize.pointerDeltaToGridSize(
+        { ...resizeSession, direction: 's' },
+        204,
+        120
+      );
+      assertEqual(vertical.w, 4, 'bottom handle preserves width');
+      assertEqual(vertical.h, 6, 'bottom handle changes height');
+      const bounded = GMJDashboardResize.snapWidgetSize(
+        { x: 10, w: 2, h: 3, min_w: 2, min_h: 2, max_w: 12, max_h: 8 },
+        { w: 8.7, h: 1.2 },
+        { columns: 12 }
+      );
+      assertEqual(bounded.w, 2, 'x plus w bound');
+      assertEqual(bounded.h, 2, 'minimum height');
+      assert(Number.isInteger(bounded.w) && Number.isInteger(bounded.h), 'integer snap');
+
+      const grid = document.getElementById('grid');
+      const article = grid.querySelector('article');
+      const handle = grid.querySelector('[data-resize-handle]');
+      const widget = {
+        id: 1,
+        grid: { x: 0, y: 0, w: 4, h: 4 },
+        height_mode: 'fixed'
+      };
+      let layout = [
+        { id: 1, x: 0, y: 0, w: 4, h: 4, min_w: 2, min_h: 2, max_w: 12, max_h: 12 },
+        { id: 2, x: 0, y: 4, w: 4, h: 3, min_w: 2, min_h: 2, max_w: 12, max_h: 12 },
+        { id: 3, x: 0, y: 7, w: 4, h: 3, min_w: 2, min_h: 2, max_w: 12, max_h: 12 }
+      ];
+      let persisted = 0;
+      let persistAttempts = 0;
+      let rolledBack = 0;
+      let rejectNextPersist = false;
+      let editable = true;
+      let responsiveColumns = 12;
+      const controller = GMJDashboardResize.createDashboardResizeController({
+        grid,
+        layoutEngine: GMJDashboardLayout,
+        getResponsiveColumns: () => responsiveColumns,
+        getLayout: () => layout.map(item => ({ ...item })),
+        getWidget: id => id === 1 ? widget : null,
+        getConstraints: () => ({ columns: 12, min_w: 2, min_h: 2, max_w: 12, max_h: 12 }),
+        canResize: () => editable,
+        onPreview: payload => {
+          layout = payload.layout.map(item => ({ ...item }));
+        },
+        onPersist: async () => {
+          persistAttempts += 1;
+          if (rejectNextPersist) {
+            rejectNextPersist = false;
+            throw new Error('PATCH rejeitado');
+          }
+          persisted += 1;
+        },
+        onRollback: payload => {
+          rolledBack += 1;
+          layout = payload.layout.map(item => ({ ...item }));
+        }
+      });
+
+      const pointer = (type, pointerId, x, y) => handle.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId,
+          pointerType: 'mouse',
+          button: 0,
+          clientX: x,
+          clientY: y
+        })
+      );
+      pointer('pointerdown', 7, 0, 0);
+      pointer('pointermove', 7, 80, 40);
+      pointer('pointermove', 7, 204, 120);
+      pointer('pointermove', 7, 204, 120);
+      pointer('pointerup', 7, 204, 120);
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const afterResize = new Map(layout.map(item => [item.id, item]));
+      assertEqual(persisted, 1, 'single persistence after many pointer moves');
+      assertEqual(afterResize.get(1).w, 6, 'horizontal resize');
+      assertEqual(afterResize.get(1).h, 6, 'vertical resize');
+      assertEqual(afterResize.get(2).y, 6, 'push first collision');
+      assertEqual(afterResize.get(3).y, 9, 'cascade push');
+      assert(GMJDashboardLayout.validateLayout(layout).valid, 'valid layout after pointerup');
+      assert(!article.classList.contains('is-resizing'), 'resize class removed');
+
+      const compacted = GMJDashboardLayout.resizeItemAndPush(layout, 1, 6, 4);
+      const compactedById = new Map(compacted.map(item => [item.id, item]));
+      assertEqual(compactedById.get(2).y, 4, 'shrink compacts first widget below');
+      assertEqual(compactedById.get(3).y, 7, 'shrink compacts cascade below');
+      assert(GMJDashboardLayout.validateLayout(compacted).valid, 'valid layout after shrink');
+
+      const beforeCancel = GMJDashboardLayout.layoutSignature(layout);
+      pointer('pointerdown', 8, 0, 0);
+      pointer('pointermove', 8, 102, 60);
+      pointer('pointercancel', 8, 102, 60);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(persisted, 1, 'pointercancel does not persist');
+      assertEqual(rolledBack, 1, 'pointercancel rolls back');
+      assertEqual(GMJDashboardLayout.layoutSignature(layout), beforeCancel, 'cancel restores layout');
+
+      editable = false;
+      pointer('pointerdown', 9, 0, 0);
+      pointer('pointermove', 9, 204, 120);
+      pointer('pointerup', 9, 204, 120);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assertEqual(persisted, 1, 'readonly does not resize');
+      assertEqual(controller.activeSession, null, 'readonly creates no session');
+
+      editable = true;
+      responsiveColumns = 1;
+      const mobileInitialWidth = new Map(layout.map(item => [item.id, item])).get(1).w;
+      pointer('pointerdown', 10, 0, 0);
+      pointer('pointermove', 10, 600, 60);
+      pointer('pointerup', 10, 600, 60);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(
+        new Map(layout.map(item => [item.id, item])).get(1).w,
+        mobileInitialWidth,
+        'mobile preserves desktop width'
+      );
+      assertEqual(persisted, 2, 'mobile vertical resize persists once');
+
+      const beforePatchError = GMJDashboardLayout.layoutSignature(layout);
+      rejectNextPersist = true;
+      pointer('pointerdown', 11, 0, 0);
+      pointer('pointermove', 11, 102, 60);
+      pointer('pointerup', 11, 102, 60);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(persisted, 2, 'failed PATCH is not accepted');
+      assertEqual(persistAttempts, 3, 'failed PATCH has one attempt');
+      assertEqual(rolledBack, 2, 'failed PATCH rolls back');
+      assertEqual(
+        GMJDashboardLayout.layoutSignature(layout),
+        beforePatchError,
+        'failed PATCH restores layout'
+      );
+
+      responsiveColumns = 12;
+      handle.focus();
+      handle.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'ArrowDown'
+      }));
+      handle.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter'
+      }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(persisted, 3, 'keyboard Enter persists once');
+
+      controller.destroy();
+      pointer('pointerdown', 12, 0, 0);
+      pointer('pointermove', 12, 204, 120);
+      pointer('pointerup', 12, 204, 120);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assertEqual(persisted, 3, 'destroy releases listeners');
+
+      const result = document.getElementById('result');
+      result.dataset.status = failures.length ? 'failed' : 'passed';
+      result.textContent = failures.length ? failures.join(' | ') : 'DASHBOARD_FRONTEND_TESTS_OK';
+    })().catch(error => {
+      const result = document.getElementById('result');
+      result.dataset.status = 'failed';
+      result.textContent = `${error.name}: ${error.message}`;
+    });
+  </script>
+</body>
+</html>
