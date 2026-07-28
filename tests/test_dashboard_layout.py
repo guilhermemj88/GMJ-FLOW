@@ -20,10 +20,12 @@ from backend.app.services.dashboard_layout import (
 from backend.app.services.dashboard_widgets import (
     COLLAPSED_GRID_HEIGHT,
     DASHBOARD_SCHEMA_VERSION,
+    DashboardLayoutVersionConflict,
     GENERAL_WIDGETS,
     create_dashboard,
     ensure_dashboard_schema,
     get_dashboard,
+    persist_dashboard_layout,
     repair_dashboard_widgets,
     widget_layout_constraints,
 )
@@ -113,6 +115,23 @@ class DashboardLayoutPureEngineTest(unittest.TestCase):
         moved = resize_item_and_push(items, "A", 4, 10)
         by_id = {item["id"]: item for item in moved}
         self.assertEqual(by_id["B"]["y"], 0)
+
+    def test_grafana_style_resize_only_pushes_intersecting_columns(self):
+        items = [
+            {"id": "A", "x": 0, "y": 0, "w": 6, "h": 8},
+            {"id": "B", "x": 6, "y": 0, "w": 6, "h": 8},
+            {"id": "C", "x": 0, "y": 8, "w": 4, "h": 6},
+            {"id": "D", "x": 4, "y": 8, "w": 4, "h": 6},
+            {"id": "E", "x": 8, "y": 8, "w": 4, "h": 6},
+        ]
+        resized = resize_item_and_push(items, "A", 6, 12)
+        by_id = {item["id"]: item for item in resized}
+        self.assertEqual((by_id["A"]["y"], by_id["A"]["h"]), (0, 12))
+        self.assertEqual(by_id["B"]["y"], 0)
+        self.assertEqual(by_id["C"]["y"], 12)
+        self.assertEqual(by_id["D"]["y"], 12)
+        self.assertEqual(by_id["E"]["y"], 8)
+        assert_no_overlap(self, resized)
 
     def test_compaction_removes_gaps_without_collisions(self):
         compacted = compact_layout_vertically(
@@ -290,7 +309,7 @@ class DashboardLayoutPersistenceTest(unittest.TestCase):
         self.assertFalse(repaired["layout_repaired"])
         self.assertEqual(
             repaired["layout_version"],
-            DASHBOARD_SCHEMA_VERSION,
+            DASHBOARD_SCHEMA_VERSION + 1,
         )
         assert_no_overlap(
             self,
@@ -347,6 +366,90 @@ class DashboardLayoutPersistenceTest(unittest.TestCase):
         self.assertIn("height_mode", columns)
         self.assertEqual(COLLAPSED_GRID_HEIGHT, 2)
 
+    def test_full_layout_commit_is_atomic_versioned_and_idempotent(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Transacional",
+                "is_default": False,
+                "is_shared": False,
+                "refresh_interval_seconds": 30,
+            },
+            1,
+            widgets=copy.deepcopy(GENERAL_WIDGETS[:3]),
+        )
+        current_version = dashboard["layout_version"]
+        widgets = [
+            {"id": item["id"], "grid": dict(item["grid"])}
+            for item in dashboard["widgets"]
+        ]
+        widgets[0]["grid"]["h"] = 12
+        result = persist_dashboard_layout(
+            self.conn,
+            dashboard["id"],
+            widgets,
+            layout_version=current_version,
+            active_widget_id=widgets[0]["id"],
+            idempotency_key="resize-1",
+        )
+        self.assertEqual(result["layout_version"], current_version + 1)
+        self.assertFalse(result["idempotent_replay"])
+        self.assertEqual(result["idempotency_key"], "resize-1")
+        self.conn.commit()
+        replay = persist_dashboard_layout(
+            self.conn,
+            dashboard["id"],
+            result["widgets"],
+            layout_version=current_version,
+            active_widget_id=widgets[0]["id"],
+            idempotency_key="resize-1",
+        )
+        self.assertTrue(replay["idempotent_replay"])
+        with self.assertRaises(DashboardLayoutVersionConflict):
+            stale = copy.deepcopy(result["widgets"])
+            stale[0]["grid"]["w"] -= 1
+            persist_dashboard_layout(
+                self.conn,
+                dashboard["id"],
+                stale,
+                layout_version=current_version,
+                active_widget_id=stale[0]["id"],
+            )
+
+    def test_full_layout_commit_rejects_missing_widget_without_partial_write(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Rollback",
+                "is_default": False,
+                "is_shared": False,
+                "refresh_interval_seconds": 30,
+            },
+            1,
+            widgets=copy.deepcopy(GENERAL_WIDGETS[:2]),
+        )
+        before = [
+            (item["id"], dict(item["grid"]))
+            for item in dashboard["widgets"]
+        ]
+        with self.assertRaises(ValueError):
+            persist_dashboard_layout(
+                self.conn,
+                dashboard["id"],
+                [
+                    {
+                        "id": dashboard["widgets"][0]["id"],
+                        "grid": {"x": 0, "y": 0, "w": 6, "h": 10},
+                    }
+                ],
+                layout_version=dashboard["layout_version"],
+            )
+        after = get_dashboard(self.conn, dashboard["id"])
+        self.assertEqual(
+            before,
+            [(item["id"], item["grid"]) for item in after["widgets"]],
+        )
+
 
 class DashboardLayoutFrontendContractTest(unittest.TestCase):
     def test_javascript_exports_pure_engine_contract(self):
@@ -357,6 +460,11 @@ class DashboardLayoutFrontendContractTest(unittest.TestCase):
             "findCollisions",
             "moveItemAndPush",
             "resizeItemAndPush",
+            "calculateResizePreview",
+            "calculateMovePreview",
+            "resolveLayoutDuringInteraction",
+            "commitLayoutInteraction",
+            "rollbackLayoutInteraction",
             "pushItemDown",
             "resolveCollisions",
             "compactLayoutVertically",

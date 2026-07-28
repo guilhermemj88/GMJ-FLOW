@@ -187,6 +187,66 @@
     return resolveCollisions(result, itemId);
   }
 
+  function resolveLayoutDuringInteraction(
+    persistentLayout,
+    itemId,
+    geometry = {},
+    options = {}
+  ) {
+    const interactionLayout = normalizedLayout(persistentLayout);
+    const active = interactionLayout.find(item => item.id === itemId);
+    if (!active) throw new Error('Widget não encontrado no layout.');
+    Object.assign(active, normalizeGridItem({ ...active, ...geometry }));
+    let resolved = resolveCollisions(interactionLayout, itemId);
+    if (options.compact === false) {
+      resolved = placeWithoutCollisions(interactionLayout, itemId);
+    }
+    const validation = validateLayout(resolved);
+    if (!validation.valid) throw new Error(validation.errors.join('; '));
+    return sortLayout(resolved);
+  }
+
+  function calculateResizePreview(
+    persistentLayout,
+    itemId,
+    targetW,
+    targetH,
+    options = {}
+  ) {
+    return resolveLayoutDuringInteraction(
+      persistentLayout,
+      itemId,
+      { w: targetW, h: targetH },
+      options
+    );
+  }
+
+  function calculateMovePreview(
+    persistentLayout,
+    itemId,
+    targetX,
+    targetY,
+    options = {}
+  ) {
+    return resolveLayoutDuringInteraction(
+      persistentLayout,
+      itemId,
+      { x: targetX, y: targetY },
+      options
+    );
+  }
+
+  function commitLayoutInteraction(interactionLayout) {
+    const committed = sortLayout(normalizedLayout(interactionLayout));
+    const validation = validateLayout(committed);
+    if (!validation.valid) throw new Error(validation.errors.join('; '));
+    return committed;
+  }
+
+  function rollbackLayoutInteraction(persistentLayout) {
+    return sortLayout(normalizedLayout(persistentLayout));
+  }
+
   function repairDashboardLayout(items, priorityItemId = null) {
     const normalized = normalizedLayout(items);
     const visible = normalized.filter(item => !item.hidden);
@@ -347,6 +407,11 @@
     findCollisions,
     moveItemAndPush,
     resizeItemAndPush,
+    calculateResizePreview,
+    calculateMovePreview,
+    resolveLayoutDuringInteraction,
+    commitLayoutInteraction,
+    rollbackLayoutInteraction,
     pushItemDown,
     resolveCollisions,
     compactLayoutVertically,

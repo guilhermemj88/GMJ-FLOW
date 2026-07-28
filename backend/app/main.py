@@ -125,8 +125,11 @@ from app.services.dashboard_widgets import (
     DASHBOARD_EXPORT_VERSION,
     DASHBOARD_SCHEMA_VERSION,
     DASHBOARD_WIDGET_METRICS,
+    DashboardLayoutVersionConflict,
     MAX_DASHBOARD_WIDGETS,
     build_widget_query_plan,
+    canonical_dashboard_metric,
+    consolidate_direction_series,
     create_dashboard as create_configurable_dashboard,
     dashboard_row_to_dict,
     duplicate_dashboard as duplicate_configurable_dashboard,
@@ -135,6 +138,7 @@ from app.services.dashboard_widgets import (
     get_dashboard as get_configurable_dashboard,
     insert_widget as insert_configurable_dashboard_widget,
     normalize_dashboard_payload,
+    persist_dashboard_layout,
     repair_dashboard_widgets,
     validate_widget_definition,
     widget_catalog,
@@ -33327,6 +33331,61 @@ def repair_configurable_dashboard_layout_endpoint(
     return result
 
 
+@app.api_route(
+    "/api/dashboards/{dashboard_id}/layout",
+    methods=["PATCH"],
+)
+def persist_configurable_dashboard_layout_endpoint(
+    dashboard_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    version_value = payload.get("layout_version")
+    try:
+        layout_version = (
+            int(version_value)
+            if version_value is not None
+            else None
+        )
+        active_widget_id = (
+            int(payload.get("active_widget_id"))
+            if payload.get("active_widget_id") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="layout_version ou active_widget_id inválido",
+        )
+    idempotency_key = clean_text(
+        request.headers.get("Idempotency-Key")
+        or payload.get("idempotency_key")
+    )[:160]
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        conn.commit()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            dashboard_or_404(conn, dashboard_id, user, edit=True)
+            result = persist_dashboard_layout(
+                conn,
+                dashboard_id,
+                payload.get("widgets"),
+                layout_version=layout_version,
+                active_widget_id=active_widget_id,
+                idempotency_key=idempotency_key,
+            )
+            conn.commit()
+        except DashboardLayoutVersionConflict as exc:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            conn.rollback()
+            raise dashboard_validation_error(exc)
+    return result
+
+
 @app.get("/api/dashboards/{dashboard_id}/export")
 def export_configurable_dashboard_endpoint(dashboard_id: int, request: Request):
     user = dashboard_request_user(request)
@@ -36550,6 +36609,11 @@ def dashboard_series_payload(
                 """
             )
     if not selects:
+        empty_series = (
+            consolidate_direction_series(metric, [], direction)
+            if group_by == "total"
+            else []
+        )
         return dashboard_cache_set(
             cache_key,
             {
@@ -36560,8 +36624,9 @@ def dashboard_series_payload(
                 "direction": direction,
                 "bucket_seconds": bucket_seconds,
                 "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
-                "series": [],
-                "items": [],
+                "series": empty_series,
+                "items": empty_series,
+                "query_source": query_source,
             },
         )
     result = query_clickhouse(query_prefix + " UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
@@ -36630,6 +36695,13 @@ def dashboard_series_payload(
                     {"ts": iso(end_dt), "value": 0.0},
                 ],
             }
+    normalized_series = list(series_by_key.values())
+    if group_by == "total":
+        normalized_series = consolidate_direction_series(
+            metric,
+            normalized_series,
+            direction,
+        )
     payload = {
         "start": iso(start_dt),
         "end": iso(end_dt),
@@ -36638,8 +36710,8 @@ def dashboard_series_payload(
         "direction": direction,
         "bucket_seconds": bucket_seconds,
         "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
-        "series": list(series_by_key.values()),
-        "items": list(series_by_key.values()),
+        "series": normalized_series,
+        "items": normalized_series,
         "query_source": query_source,
     }
     return dashboard_cache_set(cache_key, payload)
@@ -40556,7 +40628,9 @@ def dashboard_widget_series_payload(
         return {
             **payload,
             "kind": "timeseries",
-            "metric": metric,
+            "metric": canonical_dashboard_metric(
+                payload.get("metric") or metric
+            ),
             "source": payload.get("query_source") or "aggregate_first",
         }
 
@@ -40616,33 +40690,76 @@ def dashboard_widget_series_payload(
         if metric in {"pps", "packets"}
         else "flow_count"
     )
-    corrected = corrected_value_expr(value_field, factor)
-    aggregation = {
-        "sum": "sum(%s)" % corrected,
-        "avg": "avg(%s)" % corrected,
-        "max": "max(%s)" % corrected,
-        "min": "min(%s)" % corrected,
-        "p95": "quantile(0.95)(%s)" % corrected,
-    }[plan.get("aggregation", "sum")]
-    if metric == "bps":
-        value_expression = "%s * 8 / %s" % (aggregation, bucket_seconds)
-    elif metric in {"pps", "fps"}:
-        value_expression = "%s / %s" % (aggregation, bucket_seconds)
+    def rate_value_expression(rate_factor: str) -> str:
+        corrected = corrected_value_expr(value_field, rate_factor)
+        aggregation = {
+            "sum": "sum(%s)" % corrected,
+            "avg": "avg(%s)" % corrected,
+            "max": "max(%s)" % corrected,
+            "min": "min(%s)" % corrected,
+            "p95": "quantile(0.95)(%s)" % corrected,
+        }[plan.get("aggregation", "sum")]
+        if metric == "bps":
+            return "%s * 8 / %s" % (aggregation, bucket_seconds)
+        if metric in {"pps", "fps"}:
+            return "%s / %s" % (aggregation, bucket_seconds)
+        return aggregation
+
+    value_expression = rate_value_expression(factor)
+    directional_total = group_by == "total" and metric in {"bps", "pps"}
+    if directional_total:
+        directional_selects = []
+        normalized_direction = (
+            "download"
+            if direction in {"download", "receives", "input"}
+            else "upload"
+            if direction in {"upload", "transmits", "output"}
+            else "both"
+        )
+        if normalized_direction in {"both", "upload"}:
+            directional_selects.append(
+                f"""
+                SELECT
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
+                    'upload' AS group_key,
+                    {rate_value_expression("dashboard_output_sample_rate")} AS value
+                FROM rated_source
+                WHERE {query_context["where"]} AND output_if > 0
+                GROUP BY ts, group_key
+                """
+            )
+        if normalized_direction in {"both", "download"}:
+            directional_selects.append(
+                f"""
+                SELECT
+                    toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
+                    'download' AS group_key,
+                    {rate_value_expression("dashboard_input_sample_rate")} AS value
+                FROM rated_source
+                WHERE {query_context["where"]} AND input_if > 0
+                GROUP BY ts, group_key
+                """
+            )
+        query_sql = (
+            query_prefix
+            + " UNION ALL ".join(directional_selects)
+            + " ORDER BY ts, group_key"
+        )
     else:
-        value_expression = aggregation
+        query_sql = f"""
+        {query_prefix}
+        SELECT
+            toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
+            {group_expression} AS group_key,
+            {value_expression} AS value
+        FROM rated_source
+        WHERE {query_context["where"]}
+        GROUP BY ts, group_key
+        ORDER BY ts, value DESC
+        """
     rows = rows_as_dicts(
         query_clickhouse(
-            f"""
-            {query_prefix}
-            SELECT
-                toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
-                {group_expression} AS group_key,
-                {value_expression} AS value
-            FROM rated_source
-            WHERE {query_context["where"]}
-            GROUP BY ts, group_key
-            ORDER BY ts, value DESC
-            """,
+            query_sql,
             params,
         )
     )
@@ -40652,9 +40769,16 @@ def dashboard_widget_series_payload(
         target = series.setdefault(
             key,
             {
-                "name": key,
+                "name": (
+                    "Total Upload"
+                    if key == "upload"
+                    else "Total Download"
+                    if key == "download"
+                    else key
+                ),
                 "group": key,
                 "label": key,
+                "direction": key if key in {"upload", "download"} else None,
                 "color": DASHBOARD_PALETTE[len(series) % len(DASHBOARD_PALETTE)],
                 "points": [],
             },
@@ -40665,16 +40789,25 @@ def dashboard_widget_series_payload(
                 "value": round(float(row.get("value") or 0), 2),
             }
         )
+    normalized_series = list(series.values())
+    response_metric = metric
+    if directional_total:
+        response_metric = canonical_dashboard_metric(metric)
+        normalized_series = consolidate_direction_series(
+            metric,
+            normalized_series,
+            normalized_direction,
+        )
     return {
         "kind": "timeseries",
-        "metric": metric,
+        "metric": response_metric,
         "group_by": group_by,
         "bucket_seconds": bucket_seconds,
         "source": "raw",
         "start": iso(query_context["start"]),
         "end": iso(query_context["end"]),
-        "series": list(series.values()),
-        "items": list(series.values()),
+        "series": normalized_series,
+        "items": normalized_series,
     }
 
 

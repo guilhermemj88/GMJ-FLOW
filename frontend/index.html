@@ -573,6 +573,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script src="dashboard-formatters.js"></script>
+  <script src="dashboard-charts.js"></script>
   <script src="dashboard-layout.js"></script>
   <script src="dashboard-resize.js"></script>
   <style>
@@ -2143,6 +2144,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       grid-auto-rows: var(--dashboard-grid-row-height);
       gap: var(--dashboard-grid-gap);
       align-items: stretch;
+      position: relative;
+    }
+
+    #view-dashboard.dashboard-editing .configurable-dashboard-grid {
+      background-image:
+        linear-gradient(to right, color-mix(in srgb, var(--border) 30%, transparent) 1px, transparent 1px),
+        linear-gradient(to bottom, color-mix(in srgb, var(--border) 30%, transparent) 1px, transparent 1px);
+      background-size:
+        calc((100% + var(--dashboard-grid-gap)) / 12) calc(var(--dashboard-grid-row-height) + var(--dashboard-grid-gap)),
+        calc((100% + var(--dashboard-grid-gap)) / 12) calc(var(--dashboard-grid-row-height) + var(--dashboard-grid-gap));
     }
 
     .configurable-dashboard-widget {
@@ -2162,8 +2173,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       opacity: .72;
     }
 
-    .configurable-dashboard-widget.dragging {
-      opacity: .45;
+    .configurable-dashboard-widget.is-dragging {
+      z-index: 6;
+      outline: 2px solid color-mix(in srgb, var(--accent) 78%, white);
+      box-shadow: 0 12px 30px rgb(15 118 110 / 24%);
+      transition: none;
     }
 
     .configurable-dashboard-widget.is-resizing {
@@ -2182,8 +2196,33 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         box-shadow .12s ease;
     }
 
+    .configurable-dashboard-widget.is-being-pushed {
+      transition:
+        grid-column-start .12s ease,
+        grid-row-start .12s ease,
+        height .12s ease,
+        box-shadow .12s ease;
+    }
+
+    .dashboard-widget-placeholder {
+      z-index: 1;
+      min-width: 0;
+      min-height: 0;
+      pointer-events: none;
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      border: 2px dashed color-mix(in srgb, var(--accent) 68%, var(--border));
+      border-radius: 8px;
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, white 32%, transparent);
+      transition:
+        grid-column-start .08s ease,
+        grid-row-start .08s ease,
+        height .08s ease;
+    }
+
     .dashboard-widget-resizing,
-    .dashboard-widget-resizing * {
+    .dashboard-widget-resizing *,
+    .dashboard-widget-interacting,
+    .dashboard-widget-interacting * {
       user-select: none !important;
     }
 
@@ -2192,6 +2231,15 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       z-index: 8;
       display: none;
       touch-action: none;
+    }
+
+    [data-widget-drag-handle] {
+      touch-action: none;
+      cursor: grab;
+    }
+
+    .is-dragging [data-widget-drag-handle] {
+      cursor: grabbing;
     }
 
     .configurable-dashboard-widget.fullscreen-widget .widget-resize-handle {
@@ -2300,11 +2348,28 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .configurable-dashboard-widget-chart {
+      position: relative;
       width: 100%;
       height: 100%;
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .configurable-dashboard-widget-chart.chart-size-insufficient::after {
+      content: "Aumente o widget para visualizar melhor";
+      position: absolute;
+      inset: auto 8px 8px;
+      z-index: 2;
+      padding: 4px 7px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      color: var(--text-secondary);
+      font-size: 0.7rem;
+      line-height: 1.2;
+      text-align: center;
+      pointer-events: none;
     }
 
     .configurable-dashboard-widget.collapsed .configurable-dashboard-widget-body {
@@ -7193,7 +7258,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <button type="button" class="btn btn-sm btn-success dashboard-config-tab" data-widget-tab="data">Dados</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="filters">Filtros</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="visual">Visualização</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="appearance">Título e tamanho</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="layout">Título e tamanho</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="appearance">Aparência</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="interval">Atualização</button>
           <button type="button" class="btn btn-sm btn-outline-secondary dashboard-config-tab" data-widget-tab="preview">Preview</button>
         </div>
@@ -7264,7 +7330,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </div>
         </div>
-        <div class="dashboard-config-tab-panel" data-widget-tab-panel="appearance">
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="layout">
           <div class="sensor-form-grid">
             <div class="field">
               <label for="widgetConfigWidth">Largura (1–12)</label>
@@ -7284,6 +7350,108 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="field grid-span-2">
               <label for="widgetConfigDescription">Descrição</label>
               <input id="widgetConfigDescription" class="form-control form-control-sm" maxlength="500">
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-config-tab-panel" data-widget-tab-panel="appearance">
+          <div class="sensor-form-grid">
+            <div class="field">
+              <label for="widgetConfigPaletteMode">Paleta</label>
+              <select id="widgetConfigPaletteMode" class="form-select form-select-sm">
+                <option value="default">Padrão do sistema</option>
+                <option value="custom">Personalizada</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigUploadColor">Cor Upload</label>
+              <div class="d-flex gap-2">
+                <input id="widgetConfigUploadColor" type="color" class="form-control form-control-color">
+                <input id="widgetConfigUploadColorHex" class="form-control form-control-sm" maxlength="7" placeholder="#2563eb">
+              </div>
+            </div>
+            <div class="field">
+              <label for="widgetConfigDownloadColor">Cor Download</label>
+              <div class="d-flex gap-2">
+                <input id="widgetConfigDownloadColor" type="color" class="form-control form-control-color">
+                <input id="widgetConfigDownloadColorHex" class="form-control form-control-sm" maxlength="7" placeholder="#16a34a">
+              </div>
+            </div>
+            <div class="field">
+              <label for="widgetConfigBarColor">Cor principal</label>
+              <div class="d-flex gap-2">
+                <input id="widgetConfigBarColor" type="color" class="form-control form-control-color">
+                <input id="widgetConfigBarColorHex" class="form-control form-control-sm" maxlength="7" placeholder="#0f766e">
+              </div>
+            </div>
+            <div class="field">
+              <label for="widgetConfigPositiveColor">Cor positiva</label>
+              <div class="d-flex gap-2">
+                <input id="widgetConfigPositiveColor" type="color" class="form-control form-control-color">
+                <input id="widgetConfigPositiveColorHex" class="form-control form-control-sm" maxlength="7" placeholder="#16a34a">
+              </div>
+            </div>
+            <div class="field">
+              <label for="widgetConfigNegativeColor">Cor negativa</label>
+              <div class="d-flex gap-2">
+                <input id="widgetConfigNegativeColor" type="color" class="form-control form-control-color">
+                <input id="widgetConfigNegativeColorHex" class="form-control form-control-sm" maxlength="7" placeholder="#dc2626">
+              </div>
+            </div>
+            <div class="field">
+              <label for="widgetConfigLineWidth">Espessura da linha</label>
+              <input id="widgetConfigLineWidth" type="number" min="1" max="5" step="0.5" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigAreaOpacity">Opacidade da área</label>
+              <input id="widgetConfigAreaOpacity" type="number" min="0" max="1" step="0.01" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigSmoothLines">Linha suave</label>
+              <select id="widgetConfigSmoothLines" class="form-select form-select-sm">
+                <option value="true">Sim</option><option value="false">Não</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigShowArea">Preencher área</label>
+              <select id="widgetConfigShowArea" class="form-select form-select-sm">
+                <option value="true">Sim</option><option value="false">Não</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigShowValueLabels">Mostrar valores sobre gráfico</label>
+              <select id="widgetConfigShowValueLabels" class="form-select form-select-sm">
+                <option value="false">Não</option><option value="true">Sim</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigShowLegend">Mostrar legenda</label>
+              <select id="widgetConfigShowLegend" class="form-select form-select-sm">
+                <option value="true">Sim</option><option value="false">Não</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigLegendPosition">Posição da legenda</label>
+              <select id="widgetConfigLegendPosition" class="form-select form-select-sm">
+                <option value="top">Topo</option>
+                <option value="bottom">Base</option>
+                <option value="right">Direita</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigAxisDensity">Densidade dos eixos</label>
+              <select id="widgetConfigAxisDensity" class="form-select form-select-sm">
+                <option value="auto">Automática</option>
+                <option value="sparse">Baixa</option>
+                <option value="normal">Normal</option>
+                <option value="dense">Alta</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigMinimumSlicePercent">Label mínimo do donut (%)</label>
+              <input id="widgetConfigMinimumSlicePercent" type="number" min="0" max="100" step="0.5" class="form-control form-control-sm">
+            </div>
+            <div class="field d-flex align-items-end">
+              <button id="resetWidgetPaletteButton" type="button" class="btn btn-sm btn-outline-secondary">Restaurar paleta padrão</button>
             </div>
           </div>
         </div>
@@ -8273,6 +8441,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let editingConfigurableWidgetId = null;
     let configurableDashboardObserver = null;
     let configurableResizeController = null;
+    let configurableMoveController = null;
+    let configurablePersistentLayout = [];
+    let configurableInteractionLayout = null;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
@@ -17214,9 +17385,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           type: 'line',
           smooth: true,
           showSymbol: false,
-          lineStyle: { width: 1.6, color },
+          connectNulls: false,
+          lineStyle: { width: 2, color },
           itemStyle: { color },
-          areaStyle: { color: hexToRgba(color, .18) },
+          areaStyle: { color: hexToRgba(color, .22) },
+          label: { show: false },
           emphasis: { focus: 'series' },
           data
         });
@@ -18414,13 +18587,42 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       };
     }
 
-    function configurableLayoutItems(widgets = configurableDashboard?.widgets || []) {
+    function configurableWidgetLayoutItems(widgets = configurableDashboard?.widgets || []) {
       return widgets.map(widget => GMJDashboardLayout.normalizeGridItem({
         id: widget.id,
         ...(widget.grid || {}),
         hidden: Boolean(widget.hidden),
         ...configurableWidgetLayoutConstraints(widget)
       }));
+    }
+
+    function cloneConfigurableLayout(items) {
+      return (items || []).map(item => ({ ...item }));
+    }
+
+    function configurableLayoutItems(widgets = null) {
+      if (Array.isArray(widgets)) return configurableWidgetLayoutItems(widgets);
+      const activeLayout = configurableInteractionLayout?.length
+        ? configurableInteractionLayout
+        : configurablePersistentLayout;
+      if (activeLayout?.length) return cloneConfigurableLayout(activeLayout);
+      return configurableWidgetLayoutItems();
+    }
+
+    function syncConfigurablePersistentLayout(items = configurableWidgetLayoutItems()) {
+      configurablePersistentLayout = cloneConfigurableLayout(items);
+      configurableInteractionLayout = null;
+      const byId = new Map(items.map(item => [Number(item.id), item]));
+      (configurableDashboard?.widgets || []).forEach(widget => {
+        const item = byId.get(Number(widget.id));
+        if (!item) return;
+        widget.grid = {
+          x: item.x,
+          y: item.y,
+          w: item.w,
+          h: item.h
+        };
+      });
     }
 
     function configurableResponsiveColumns() {
@@ -18466,18 +18668,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       );
     }
 
-    function applyConfigurableLayout(items) {
-      const byId = new Map(items.map(item => [Number(item.id), item]));
-      (configurableDashboard?.widgets || []).forEach(widget => {
-        const item = byId.get(Number(widget.id));
-        if (!item) return;
-        widget.grid = {
-          x: item.x,
-          y: item.y,
-          w: item.w,
-          h: item.h
-        };
-      });
+    function applyConfigurableLayout(items, { persistent = false } = {}) {
+      if (persistent) {
+        syncConfigurablePersistentLayout(items);
+      } else {
+        configurableInteractionLayout = cloneConfigurableLayout(items);
+      }
     }
 
     function updateConfigurableDashboardGridPositions(
@@ -18507,6 +18703,65 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
     }
 
+    function configurableInteractionPlaceholder() {
+      const grid = document.getElementById('configurableDashboardGrid');
+      let placeholder = grid.querySelector('.dashboard-widget-placeholder');
+      if (!placeholder) {
+        placeholder = document.createElement('div');
+        placeholder.className = 'dashboard-widget-placeholder';
+        placeholder.setAttribute('aria-hidden', 'true');
+        grid.appendChild(placeholder);
+      }
+      return placeholder;
+    }
+
+    function updateConfigurableInteractionVisuals(layout, session) {
+      const originalById = new Map(
+        (session?.originalLayout || []).map(item => [Number(item.id), item])
+      );
+      const currentById = new Map(
+        (layout || []).map(item => [Number(item.id), item])
+      );
+      const activeId = Number(session?.widget?.id);
+      document.querySelectorAll('#configurableDashboardGrid .configurable-dashboard-widget')
+        .forEach(element => {
+          const id = Number(element.dataset.widgetId);
+          const before = originalById.get(id);
+          const current = currentById.get(id);
+          const pushed = (
+            id !== activeId
+            && before
+            && current
+            && (
+              before.x !== current.x
+              || before.y !== current.y
+              || before.w !== current.w
+              || before.h !== current.h
+            )
+          );
+          element.classList.toggle('is-being-pushed', Boolean(pushed));
+        });
+      const active = currentById.get(activeId);
+      if (!active) return;
+      const display = configurableDisplayLayout(layout)
+        .find(item => Number(item.id) === activeId);
+      if (!display) return;
+      const placeholder = configurableInteractionPlaceholder();
+      placeholder.style.gridColumn = `${display.x + 1} / span ${display.w}`;
+      placeholder.style.gridRow = `${display.y + 1} / span ${display.h}`;
+      placeholder.style.height = `${GMJDashboardLayout.calculateGridPixelHeight(display.h)}px`;
+    }
+
+    function finishConfigurableLayoutInteraction() {
+      document.querySelector('#configurableDashboardGrid .dashboard-widget-placeholder')?.remove();
+      document.querySelectorAll('#configurableDashboardGrid .is-being-pushed')
+        .forEach(element => element.classList.remove('is-being-pushed'));
+      if (configurableInteractionLayout) {
+        configurableInteractionLayout = null;
+        updateConfigurableDashboardGridPositions(configurablePersistentLayout);
+      }
+    }
+
     function scheduleConfigurableChartResize(widgetId) {
       if (configurableWidgetChartResizeFrames.has(widgetId)) return;
       const frame = requestAnimationFrame(() => {
@@ -18523,7 +18778,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (GMJDashboardLayout.layoutSignature(before) === GMJDashboardLayout.layoutSignature(repaired)) {
         return false;
       }
-      applyConfigurableLayout(repaired);
+      applyConfigurableLayout(repaired, { persistent: true });
       console.info('DASHBOARD_LAYOUT_REPAIRED_CLIENT', {
         dashboard_id: configurableDashboard.id,
         widgets: repaired.length
@@ -18624,7 +18879,76 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const observer = new ResizeObserver(() => {
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
-          configurableWidgetCharts.get(widget.id)?.resize();
+          const chart = configurableWidgetCharts.get(widget.id);
+          chart?.resize();
+          const chartElement = body.querySelector('.configurable-dashboard-widget-chart');
+          if (chart && chartElement) {
+            const bounds = chartElement.getBoundingClientRect();
+            const appearance = GMJDashboardCharts.normalizeAppearance(
+              widget.config?.appearance
+            );
+            const densityMode = GMJDashboardCharts.getChartDensityMode(
+              bounds.width,
+              bounds.height,
+              appearance.axis_label_density
+            );
+            const density = GMJDashboardCharts.densitySettings(densityMode);
+            const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
+            const visualization = widget.visualization?.type
+              || widget.config?.visualization
+              || 'bar';
+            chartElement.classList.toggle(
+              'chart-size-insufficient',
+              bounds.width < 170 || bounds.height < 120
+            );
+            const responsiveOption = {
+              legend: { textStyle: { fontSize: density.fontSize } }
+            };
+            if (widget.type === 'timeseries') {
+              responsiveOption.xAxis = {
+                splitNumber: density.splitNumber,
+                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+              };
+              responsiveOption.yAxis = {
+                splitNumber: density.splitNumber,
+                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+              };
+              responsiveOption.series = Array.from({ length: seriesCount }, () => ({
+                label: {
+                  show: appearance.show_point_labels && density.showPointLabels,
+                  hideOverlap: true
+                }
+              }));
+            } else if (['donut', 'pie'].includes(visualization)) {
+              responsiveOption.series = [{
+                label: {
+                  show: appearance.show_value_labels && densityMode === 'detailed'
+                },
+                labelLayout: { hideOverlap: true }
+              }];
+            } else {
+              const horizontal = visualization === 'horizontal_bar';
+              responsiveOption.xAxis = {
+                splitNumber: density.splitNumber,
+                axisLabel: {
+                  hideOverlap: true,
+                  rotate: horizontal || densityMode !== 'compact' ? 0 : 35,
+                  fontSize: density.fontSize
+                }
+              };
+              responsiveOption.yAxis = {
+                splitNumber: density.splitNumber,
+                axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+              };
+              responsiveOption.series = [{
+                label: {
+                  show: appearance.show_value_labels && densityMode !== 'compact',
+                  hideOverlap: true
+                }
+              }];
+            }
+            chart.setOption(responsiveOption, { notMerge: false, lazyUpdate: true });
+          }
           const graphWidget = widget.type === 'timeseries'
             || (widget.type === 'top_n' && ['bar', 'horizontal_bar', 'pie', 'donut'].includes(widget.visualization?.type || widget.config?.visualization));
           if (
@@ -18656,6 +18980,53 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetResizeObservers.set(widget.id, observer);
     }
 
+    function configurableAppearanceFromForm() {
+      return GMJDashboardCharts.normalizeAppearance({
+        palette_mode: document.getElementById('widgetConfigPaletteMode').value,
+        upload_color: document.getElementById('widgetConfigUploadColorHex').value,
+        download_color: document.getElementById('widgetConfigDownloadColorHex').value,
+        line_width: document.getElementById('widgetConfigLineWidth').value,
+        area_opacity: document.getElementById('widgetConfigAreaOpacity').value,
+        smooth_lines: document.getElementById('widgetConfigSmoothLines').value,
+        show_area: document.getElementById('widgetConfigShowArea').value,
+        show_point_labels: document.getElementById('widgetConfigShowValueLabels').value,
+        show_value_labels: document.getElementById('widgetConfigShowValueLabels').value,
+        show_legend: document.getElementById('widgetConfigShowLegend').value,
+        legend_position: document.getElementById('widgetConfigLegendPosition').value,
+        axis_label_density: document.getElementById('widgetConfigAxisDensity').value,
+        bar_color: document.getElementById('widgetConfigBarColorHex').value,
+        positive_color: document.getElementById('widgetConfigPositiveColorHex').value,
+        negative_color: document.getElementById('widgetConfigNegativeColorHex').value,
+        minimum_slice_label_percent: document.getElementById('widgetConfigMinimumSlicePercent').value
+      });
+    }
+
+    function setConfigurableColorPair(field, value) {
+      const color = String(value || '').toLowerCase();
+      document.getElementById(`widgetConfig${field}Color`).value = color;
+      document.getElementById(`widgetConfig${field}ColorHex`).value = color;
+    }
+
+    function populateConfigurableAppearance(value = {}) {
+      const appearance = GMJDashboardCharts.normalizeAppearance(value);
+      document.getElementById('widgetConfigPaletteMode').value = appearance.palette_mode;
+      setConfigurableColorPair('Upload', appearance.upload_color);
+      setConfigurableColorPair('Download', appearance.download_color);
+      setConfigurableColorPair('Bar', appearance.bar_color);
+      setConfigurableColorPair('Positive', appearance.positive_color);
+      setConfigurableColorPair('Negative', appearance.negative_color);
+      document.getElementById('widgetConfigLineWidth').value = appearance.line_width;
+      document.getElementById('widgetConfigAreaOpacity').value = appearance.area_opacity;
+      document.getElementById('widgetConfigSmoothLines').value = String(appearance.smooth_lines);
+      document.getElementById('widgetConfigShowArea').value = String(appearance.show_area);
+      document.getElementById('widgetConfigShowValueLabels').value = String(appearance.show_value_labels);
+      document.getElementById('widgetConfigShowLegend').value = String(appearance.show_legend);
+      document.getElementById('widgetConfigLegendPosition').value = appearance.legend_position;
+      document.getElementById('widgetConfigAxisDensity').value = appearance.axis_label_density;
+      document.getElementById('widgetConfigMinimumSlicePercent').value = appearance.minimum_slice_label_percent;
+      document.getElementById('widgetConfigLegend').value = String(appearance.show_legend);
+    }
+
     function configurableWidgetDefinitionFromForm() {
       const type = document.getElementById('widgetConfigType').value;
       const metric = document.getElementById('widgetConfigMetric').value || 'bps';
@@ -18663,7 +19034,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         metric,
         direction: document.getElementById('widgetConfigDirection').value || 'both',
         visualization: document.getElementById('widgetConfigVisualization').value || 'table',
-        comparison_mode: document.getElementById('widgetConfigComparison').value || 'none'
+        comparison_mode: document.getElementById('widgetConfigComparison').value || 'none',
+        appearance: configurableAppearanceFromForm()
       };
       if (type === 'top_n') {
         config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
@@ -18732,7 +19104,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         filters,
         visualization: {
           type: document.getElementById('widgetConfigVisualization').value || 'table',
-          show_legend: document.getElementById('widgetConfigLegend').value === 'true'
+          show_legend: config.appearance.show_legend
         },
         grid: {
           x: 0,
@@ -18817,7 +19189,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         title: 'Novo widget',
         type: 'top_n',
         category: 'traffic',
-        config: { dimension: 'src_ip', metric: 'bps', direction: 'both', group_by: 'total', aggregation: 'sum', limit: 10 },
+        config: {
+          dimension: 'src_ip',
+          metric: 'bps',
+          direction: 'both',
+          group_by: 'total',
+          aggregation: 'sum',
+          limit: 10,
+          appearance: GMJDashboardCharts.DEFAULT_APPEARANCE
+        },
         filters: [],
         visualization: { type: 'table', show_legend: true },
         grid: { w: 4, h: 7 },
@@ -18861,6 +19241,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('widgetConfigLimit').value = item.config?.limit || 10;
       document.getElementById('widgetConfigFilters').value = JSON.stringify(item.filters || [], null, 2);
       document.getElementById('widgetConfigLegend').value = String(item.visualization?.show_legend !== false);
+      populateConfigurableAppearance(item.config?.appearance || {
+        show_legend: item.visualization?.show_legend !== false
+      });
       document.getElementById('widgetConfigWidth').value = item.grid?.w || 4;
       document.getElementById('widgetConfigHeight').value = item.grid?.h || 4;
       document.getElementById('widgetConfigHeightMode').value = item.height_mode || 'fixed';
@@ -18991,16 +19374,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       element.classList.remove('widget-loading');
       status.textContent = payload.cached ? 'cache' : (payload.source || 'atualizado');
       const existingChart = configurableWidgetCharts.get(widget.id);
-      if (existingChart) {
+      const chartPayload = (
+        payload.kind === 'timeseries'
+        || (
+          payload.kind === 'top_n'
+          && (widget.visualization?.type || widget.config?.visualization) !== 'table'
+        )
+      );
+      if (existingChart && !chartPayload) {
+        existingChart.off?.();
         existingChart.dispose();
         configurableWidgetCharts.delete(widget.id);
       }
       if (payload.kind === 'kpi') {
         const metric = configurableWidgetMetric(widget, payload);
+        const appearance = GMJDashboardCharts.normalizeAppearance(
+          widget.config?.appearance
+        );
+        const deltaValue = Number(payload.delta);
+        const deltaColor = Number.isFinite(deltaValue) && deltaValue !== 0
+          ? deltaValue > 0
+            ? appearance.positive_color
+            : appearance.negative_color
+          : '';
         body.innerHTML = `
           <div class="widget-kpi-value">${configurableMetricValue(payload.value, metric)}</div>
           ${payload.comparison_value === null || payload.comparison_value === undefined ? '' : `
-            <div class="subtle text-center">
+            <div class="subtle text-center" ${deltaColor ? `style="color:${deltaColor}"` : ''}>
               Comparação: ${configurableMetricValue(payload.comparison_value, metric)}
               · Δ ${configurableMetricValue(payload.delta, metric)}
               ${payload.delta_percent === null ? '' : `(${GMJDashboardFormatters.formatPercentage(payload.delta_percent)})`}
@@ -19015,17 +19415,53 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else if (payload.kind === 'top_n' && (widget.visualization?.type || widget.config?.visualization) === 'table') {
         body.innerHTML = configurableWidgetTable(widget, payload);
       } else {
-        body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
-        const chart = echarts.init(body.firstElementChild);
+        let chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
+        let chart = existingChart;
+        if (!chartContainer || !chart || chart.isDisposed?.()) {
+          chart?.off?.();
+          chart?.dispose?.();
+          body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
+          chartContainer = body.firstElementChild;
+          chart = echarts.init(chartContainer);
+        }
         configurableWidgetCharts.set(widget.id, chart);
+        const initialChartBounds = chartContainer.getBoundingClientRect();
+        chartContainer.classList.toggle(
+          'chart-size-insufficient',
+          initialChartBounds.width < 170 || initialChartBounds.height < 120
+        );
         if (payload.kind === 'timeseries') {
           const metric = configurableWidgetMetric(widget, payload);
+          const appearance = GMJDashboardCharts.normalizeAppearance(widget.config?.appearance);
+          const bounds = chartContainer.getBoundingClientRect();
+          const densityMode = GMJDashboardCharts.getChartDensityMode(
+            bounds.width,
+            bounds.height,
+            appearance.axis_label_density
+          );
+          const density = GMJDashboardCharts.densitySettings(densityMode);
+          const rawSeries = Array.isArray(payload.series) ? payload.series : [];
+          const hasDirectionalSeries = rawSeries.some(item =>
+            ['upload', 'download'].includes(item.direction || item.key)
+          );
+          const canonicalMetric = GMJDashboardCharts.canonicalMetric(metric);
+          const payloadSeries = (
+            ['bits_s', 'packets_s'].includes(canonicalMetric)
+            && (widget.config?.group_by || 'total') === 'total'
+            && hasDirectionalSeries
+          )
+            ? GMJDashboardCharts.consolidateDirectionSeries(
+              rawSeries,
+              canonicalMetric,
+              widget.config?.direction || 'both'
+            )
+            : rawSeries;
           const metricScale = GMJDashboardFormatters.selectMetricScale(
-            configurableSeriesMaximum(payload.series || []),
+            configurableSeriesMaximum(payloadSeries),
             metric
           );
           const latestBySeries = new Map(
-            (payload.series || []).map(item => {
+            payloadSeries.map(item => {
               const points = item.points || [];
               return [
                 String(item.name || item.label || ''),
@@ -19033,18 +19469,43 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               ];
             })
           );
-          const series = (payload.series || []).map(item => ({
+          const series = payloadSeries.map(item => {
+            const direction = String(item.direction || item.key || '').toLowerCase();
+            const color = direction === 'upload'
+              ? appearance.upload_color
+              : direction === 'download'
+                ? appearance.download_color
+                : item.color;
+            return {
             name: item.name || item.label,
             type: 'line',
-            smooth: true,
+            smooth: appearance.smooth_lines,
             showSymbol: false,
-            areaStyle: ['area', 'stacked_area'].includes(widget.visualization?.type) ? { opacity: .16 } : undefined,
+            connectNulls: false,
+            lineStyle: { width: appearance.line_width, color },
+            itemStyle: { color },
+            areaStyle: appearance.show_area
+              ? { opacity: appearance.area_opacity, color }
+              : undefined,
             stack: widget.visualization?.type === 'stacked_area' ? 'total' : undefined,
+            label: {
+              show: appearance.show_point_labels && density.showPointLabels,
+              hideOverlap: true,
+              formatter: params => GMJDashboardFormatters.formatTooltipValue(
+                Array.isArray(params.value) ? params.value[1] : params.value,
+                metric,
+                metricScale
+              )
+            },
+            emphasis: { label: { show: false } },
             data: (item.points || []).map(point => [point.ts, point.value])
-          }));
-          chart.setOption({
+          };
+          });
+          const legendPosition = appearance.legend_position;
+          GMJDashboardCharts.replaceChartOption(chart, {
             tooltip: {
               trigger: 'axis',
+              axisPointer: { type: 'line' },
               formatter: params => {
                 const rows = Array.isArray(params) ? params : [params];
                 const heading = rows[0]?.axisValueLabel || '';
@@ -19060,23 +19521,46 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               }
             },
             legend: {
-              show: widget.visualization?.show_legend !== false,
-              formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(
-                latestBySeries.get(String(name)),
-                metric,
-                metricScale
-              )}`,
+              show: appearance.show_legend,
+              top: legendPosition === 'top' ? 0 : undefined,
+              bottom: legendPosition === 'bottom' ? 0 : undefined,
+              right: legendPosition === 'right' ? 0 : undefined,
+              orient: legendPosition === 'right' ? 'vertical' : 'horizontal',
+              formatter: name => density.compactLegend
+                ? name
+                : `${name}: ${GMJDashboardFormatters.formatTooltipValue(
+                  latestBySeries.get(String(name)),
+                  metric,
+                  metricScale
+                )}`,
               textStyle: {
+                fontSize: density.fontSize,
                 color: getComputedStyle(document.documentElement)
                   .getPropertyValue('--text-primary')
                   .trim()
               }
             },
-            grid: { left: 74, right: 18, top: 34, bottom: 38 },
-            xAxis: { type: 'time' },
+            grid: {
+              left: 12,
+              right: legendPosition === 'right' && appearance.show_legend ? 110 : 18,
+              top: legendPosition === 'top' && appearance.show_legend ? 38 : 12,
+              bottom: legendPosition === 'bottom' && appearance.show_legend ? 42 : 28,
+              containLabel: true
+            },
+            xAxis: {
+              type: 'time',
+              splitNumber: density.splitNumber,
+              axisLabel: {
+                hideOverlap: true,
+                fontSize: density.fontSize
+              }
+            },
             yAxis: {
               type: 'value',
+              splitNumber: density.splitNumber,
               axisLabel: {
+                hideOverlap: true,
+                fontSize: density.fontSize,
                 formatter: value => GMJDashboardFormatters.formatAxisValue(
                   value,
                   metric,
@@ -19087,7 +19571,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             series
           });
         } else {
-          const items = payload.items || [];
+          const appearance = GMJDashboardCharts.normalizeAppearance(widget.config?.appearance);
+          const bounds = chartContainer.getBoundingClientRect();
+          const densityMode = GMJDashboardCharts.getChartDensityMode(
+            bounds.width,
+            bounds.height,
+            appearance.axis_label_density
+          );
+          const density = GMJDashboardCharts.densitySettings(densityMode);
+          const items = (payload.items || []).slice(0, density.categoryLimit);
           const metric = configurableWidgetMetric(widget, payload);
           const metricScale = GMJDashboardFormatters.selectMetricScale(
             configurableItemsMaximum(items),
@@ -19097,7 +19589,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           if (['donut', 'pie'].includes(visualization)) {
             const total = items.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
             const byName = new Map(items.map(item => [String(item.key), Number(item.value) || 0]));
-            chart.setOption({
+            GMJDashboardCharts.replaceChartOption(chart, {
               title: visualization === 'donut' ? {
                 text: GMJDashboardFormatters.formatTooltipValue(total, metric, metricScale),
                 subtext: 'Total',
@@ -19111,33 +19603,52 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 formatter: params => `${params.marker || ''}${escapeHtml(params.name || '')}: ${GMJDashboardFormatters.formatTooltipValue(params.value, metric, metricScale)} (${GMJDashboardFormatters.formatPercentage(params.percent)})`
               },
               legend: {
-                show: widget.visualization?.show_legend !== false,
+                show: appearance.show_legend,
+                type: 'scroll',
+                top: appearance.legend_position === 'top' ? 0 : undefined,
+                bottom: appearance.legend_position === 'bottom' ? 0 : undefined,
+                right: appearance.legend_position === 'right' ? 0 : undefined,
+                orient: appearance.legend_position === 'right' ? 'vertical' : 'horizontal',
                 formatter: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(byName.get(String(name)), metric, metricScale)}`
               },
               series: [{
                 type: 'pie',
                 radius: visualization === 'donut' ? ['42%', '72%'] : '72%',
                 label: {
+                  show: appearance.show_value_labels && densityMode === 'detailed',
                   formatter: params => `${params.name}\n${GMJDashboardFormatters.formatTooltipValue(params.value, metric, metricScale)}`
                 },
+                labelLayout: { hideOverlap: true },
+                minShowLabelAngle: appearance.minimum_slice_label_percent * 3.6,
                 data: items.map(item => ({ name: item.key, value: item.value }))
               }]
             });
           } else {
-            chart.setOption({
+            const horizontal = visualization === 'horizontal_bar';
+            GMJDashboardCharts.replaceChartOption(chart, {
               tooltip: {
                 trigger: 'axis',
-                valueFormatter: value => GMJDashboardFormatters.formatTooltipValue(
-                  value,
-                  metric,
-                  metricScale
-                )
+                formatter: params => {
+                  const rows = Array.isArray(params) ? params : [params];
+                  const index = Number(rows[0]?.dataIndex || 0);
+                  const item = items[index] || {};
+                  return `${escapeHtml(item.key || item.name || '-')}: ${GMJDashboardFormatters.formatTooltipValue(item.value, metric, metricScale)}`;
+                }
               },
-              grid: { left: visualization === 'horizontal_bar' ? 110 : 74, right: 28, top: 18, bottom: 58 },
-              xAxis: visualization === 'horizontal_bar'
+              grid: {
+                left: 12,
+                right: appearance.show_value_labels && horizontal ? 64 : 18,
+                top: 12,
+                bottom: 18,
+                containLabel: true
+              },
+              xAxis: horizontal
                 ? {
                   type: 'value',
+                  splitNumber: density.splitNumber,
                   axisLabel: {
+                    hideOverlap: true,
+                    fontSize: density.fontSize,
                     formatter: value => GMJDashboardFormatters.formatAxisValue(
                       value,
                       metric,
@@ -19145,12 +19656,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                     )
                   }
                 }
-                : { type: 'category', data: items.map(item => item.key), axisLabel: { rotate: 28 } },
-              yAxis: visualization === 'horizontal_bar'
-                ? { type: 'category', data: items.map(item => item.key) }
+                : {
+                  type: 'category',
+                  data: items.map(item => item.key),
+                  axisLabel: {
+                    hideOverlap: true,
+                    rotate: densityMode === 'compact' ? 35 : 0,
+                    fontSize: density.fontSize,
+                    formatter: value => GMJDashboardCharts.truncateCategory(
+                      value,
+                      densityMode === 'compact' ? 10 : 18
+                    )
+                  }
+                },
+              yAxis: horizontal
+                ? {
+                  type: 'category',
+                  data: items.map(item => item.key),
+                  axisLabel: {
+                    hideOverlap: true,
+                    fontSize: density.fontSize,
+                    formatter: value => GMJDashboardCharts.truncateCategory(
+                      value,
+                      densityMode === 'compact' ? 12 : 22
+                    )
+                  }
+                }
                 : {
                   type: 'value',
+                  splitNumber: density.splitNumber,
                   axisLabel: {
+                    hideOverlap: true,
+                    fontSize: density.fontSize,
                     formatter: value => GMJDashboardFormatters.formatAxisValue(
                       value,
                       metric,
@@ -19162,15 +19699,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 type: 'bar',
                 data: items.map(item => item.value),
                 label: {
-                  show: true,
-                  position: visualization === 'horizontal_bar' ? 'right' : 'top',
+                  show: appearance.show_value_labels && densityMode !== 'compact',
+                  hideOverlap: true,
+                  position: horizontal ? 'right' : 'top',
                   formatter: params => GMJDashboardFormatters.formatTooltipValue(
                     params.value,
                     metric,
                     metricScale
                   )
                 },
-                itemStyle: { color: '#0f766e', borderRadius: 3 }
+                itemStyle: { color: appearance.bar_color, borderRadius: 3 }
               }]
             });
           }
@@ -19296,7 +19834,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const resizeEnabled = configurableWidgetCanResize(widget);
         const gridHeight = GMJDashboardLayout.calculateGridPixelHeight(Number(displayGrid?.h || 1));
         return `
-          <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="${dashboardEditMode && configurableDashboard.permissions?.can_edit ? 'true' : 'false'}"
+          <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="false"
             data-resize-enabled="${resizeEnabled}"
             data-widget-id="${widget.id}" data-grid-x="${Number(widget.grid?.x || 0)}" data-grid-y="${Number(widget.grid?.y || 0)}"
             data-grid-w="${Number(widget.grid?.w || 4)}" data-grid-h="${Number(widget.grid?.h || 4)}"
@@ -19305,6 +19843,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
                 <div><div class="panel-title">${escapeHtml(widget.title)}</div><div class="configurable-dashboard-widget-status subtle">${cached ? 'cache local' : 'aguardando visibilidade'}</div></div>
                 <div class="widget-actions">
+                  <button type="button" class="icon-button configurable-admin-action configurable-widget-drag-handle" data-widget-drag-handle title="Mover no grid" aria-label="Mover ${escapeHtml(widget.title)}" ${actionsDisabled}><i data-lucide="grip-horizontal"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-edit" ${actionsDisabled} title="Configurar"><i data-lucide="settings"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-duplicate" ${actionsDisabled} title="Duplicar"><i data-lucide="copy"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
@@ -19364,12 +19903,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         });
       }
       configurableDashboard = dashboard;
+      syncConfigurablePersistentLayout(configurableWidgetLayoutItems(dashboard.widgets || []));
       const clientLayoutRepaired = repairConfigurableDashboardClientLayout();
       if (clientLayoutRepaired && dashboard.permissions?.can_edit) {
-        dashboard = await apiRequest(`/api/dashboards/${dashboard.id}/repair-layout`, {
-          method: 'POST'
-        });
-        configurableDashboard = dashboard;
+        const result = await commitConfigurableLayout(
+          configurablePersistentLayout,
+          null
+        );
+        configurableDashboard.layout_repaired = Boolean(result.layout_repaired);
+        dashboard = configurableDashboard;
       }
       configurableDashboardActive = true;
       if (!dashboard.permissions?.can_edit) dashboardEditMode = false;
@@ -19425,32 +19967,66 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await loadConfigurableDashboard(configurableDashboard.id);
     }
 
+    function configurableLayoutIdempotencyKey(signature, activeWidgetId) {
+      let hash = 2166136261;
+      for (let index = 0; index < signature.length; index += 1) {
+        hash ^= signature.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return [
+        'dashboard-layout',
+        configurableDashboard.id,
+        configurableDashboard.layout_version,
+        activeWidgetId || 0,
+        (hash >>> 0).toString(16)
+      ].join(':');
+    }
+
+    async function commitConfigurableLayout(layout, activeWidgetId) {
+      const committed = GMJDashboardLayout.commitLayoutInteraction(layout);
+      const signature = GMJDashboardLayout.layoutSignature(committed);
+      const idempotencyKey = configurableLayoutIdempotencyKey(
+        signature,
+        activeWidgetId
+      );
+      const result = await apiRequest(`/api/dashboards/${configurableDashboard.id}/layout`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey
+        },
+        body: JSON.stringify({
+          widgets: committed.map(item => ({
+            id: item.id,
+            grid: { x: item.x, y: item.y, w: item.w, h: item.h }
+          })),
+          layout_version: configurableDashboard.layout_version,
+          active_widget_id: activeWidgetId || null
+        })
+      });
+      const normalizedById = new Map(
+        (result.widgets || []).map(item => [Number(item.id), item.grid])
+      );
+      const normalized = committed.map(item => ({
+        ...item,
+        ...(normalizedById.get(Number(item.id)) || {})
+      }));
+      configurableDashboard.layout_version = result.layout_version;
+      syncConfigurablePersistentLayout(normalized);
+      updateConfigurableDashboardGridPositions(normalized);
+      return result;
+    }
+
     async function persistConfigurableLayoutAction(widget, repairedLayout, patch = {}) {
-      const previousLayout = configurableLayoutItems();
+      const previousLayout = cloneConfigurableLayout(configurablePersistentLayout);
       applyConfigurableLayout(repairedLayout);
-      renderConfigurableDashboard();
-      const active = repairedLayout.find(item => Number(item.id) === Number(widget.id));
+      updateConfigurableDashboardGridPositions(repairedLayout);
       try {
-        await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...patch,
-            expanded_grid_h: widget.expanded_grid_h,
-            collapsed_grid_h: widget.collapsed_grid_h,
-            height_mode: widget.height_mode,
-            grid: {
-              x: active.x,
-              y: active.y,
-              w: active.w,
-              h: active.h
-            }
-          })
-        });
-        await loadConfigurableDashboard(configurableDashboard.id);
+        if (Object.keys(patch).length) await patchConfigurableWidget(widget, patch);
+        await commitConfigurableLayout(repairedLayout, widget.id);
       } catch (error) {
-        applyConfigurableLayout(previousLayout);
-        renderConfigurableDashboard();
+        applyConfigurableLayout(previousLayout, { persistent: true });
+        updateConfigurableDashboardGridPositions(previousLayout);
         throw error;
       }
     }
@@ -19628,35 +20204,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         onStart: session => {
           clearTimeout(configurableWidgetAutoHeightTimers.get(session.widget.id));
           configurableWidgetAutoHeightTimers.delete(session.widget.id);
+          configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
+          updateConfigurableInteractionVisuals(session.originalLayout, session);
         },
-        onPreview: ({ widget, layout }) => {
+        onPreview: ({ widget, layout, session }) => {
           applyConfigurableLayout(layout);
           updateConfigurableDashboardGridPositions(layout);
-          scheduleConfigurableChartResize(widget.id);
+          updateConfigurableInteractionVisuals(layout, session);
+          layout.forEach(item => scheduleConfigurableChartResize(item.id));
         },
         onPersist: async ({ widget, layout }) => {
-          const active = layout.find(item => Number(item.id) === Number(widget.id));
-          await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              grid: {
-                x: active.x,
-                y: active.y,
-                w: active.w,
-                h: active.h
-              },
-              expanded_grid_h: widget.expanded_grid_h,
-              collapsed_grid_h: widget.collapsed_grid_h,
-              height_mode: widget.height_mode
-            })
-          });
-          await loadConfigurableDashboard(configurableDashboard.id).catch(error => {
-            console.warn('Resize salvo, mas o dashboard não pôde ser recarregado.', error);
-          });
+          await commitConfigurableLayout(layout, widget.id);
         },
         onRollback: ({ widget, layout, cancelled }) => {
-          applyConfigurableLayout(layout);
+          configurableInteractionLayout = cloneConfigurableLayout(layout);
           updateConfigurableDashboardGridPositions(layout);
           scheduleConfigurableChartResize(widget.id);
           if (!cancelled) {
@@ -19668,7 +20229,43 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         },
         onError: error => {
           console.error('Falha ao persistir redimensionamento do widget.', error);
-        }
+        },
+        onFinish: finishConfigurableLayoutInteraction
+      });
+    }
+
+    function installConfigurableWidgetMove() {
+      if (configurableMoveController || !window.GMJDashboardResize?.createDashboardMoveController) return;
+      const grid = document.getElementById('configurableDashboardGrid');
+      configurableMoveController = GMJDashboardResize.createDashboardMoveController({
+        grid,
+        layoutEngine: GMJDashboardLayout,
+        getResponsiveColumns: configurableResponsiveColumns,
+        getLayout: () => configurableLayoutItems(),
+        getWidget: widgetId => (configurableDashboard?.widgets || [])
+          .find(widget => Number(widget.id) === Number(widgetId)),
+        canMove: configurableWidgetCanResize,
+        onStart: session => {
+          configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
+          updateConfigurableInteractionVisuals(session.originalLayout, session);
+        },
+        onPreview: ({ layout, session }) => {
+          applyConfigurableLayout(layout);
+          updateConfigurableDashboardGridPositions(layout);
+          updateConfigurableInteractionVisuals(layout, session);
+          layout.forEach(item => scheduleConfigurableChartResize(item.id));
+        },
+        onPersist: async ({ widget, layout }) => {
+          await commitConfigurableLayout(layout, widget.id);
+        },
+        onRollback: ({ layout }) => {
+          configurableInteractionLayout = cloneConfigurableLayout(layout);
+          updateConfigurableDashboardGridPositions(layout);
+        },
+        onError: error => {
+          console.error('Falha ao persistir movimentação do widget.', error);
+        },
+        onFinish: finishConfigurableLayoutInteraction
       });
     }
 
@@ -19677,6 +20274,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (grid.dataset.eventsInstalled) return;
       grid.dataset.eventsInstalled = 'true';
       installConfigurableWidgetResize();
+      installConfigurableWidgetMove();
       document.getElementById('configurableDrilldownMenu').addEventListener('click', event => {
         const action = event.target.closest('[data-drilldown-action]')?.dataset.drilldownAction;
         if (action) runConfigurableDrilldown(action).catch(console.error);
@@ -19865,6 +20463,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function toggleDashboardEdit() {
       if (
         configurableResizeController?.activeSession
+        || configurableMoveController?.activeSession
         || !configurableDashboard?.permissions?.can_edit
       ) return;
       dashboardEditMode = !dashboardEditMode;
@@ -20019,8 +20618,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const allItems = payloadSeries(payload);
         const items = limitDashboardSeries(allItems);
         updateDashboardWidgetTitles(payload);
-        charts.bps.clear();
-        charts.bps.setOption(stackedTrafficOption(items, 'bits_s'), true);
+        GMJDashboardCharts.replaceChartOption(
+          charts.bps,
+          stackedTrafficOption(items, 'bits_s')
+        );
         const hiddenCount = Math.max(0, allItems.length - items.length);
         setText('bpsReadout', `${stackedReadout(items, 'bits_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
         return;
@@ -20033,8 +20634,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         }
         const allItems = payloadSeries(payload);
         const items = limitDashboardSeries(allItems);
-        charts.pps.clear();
-        charts.pps.setOption(stackedTrafficOption(items, 'packets_s'), true);
+        GMJDashboardCharts.replaceChartOption(
+          charts.pps,
+          stackedTrafficOption(items, 'packets_s')
+        );
         const hiddenCount = Math.max(0, allItems.length - items.length);
         setText('ppsReadout', `${stackedReadout(items, 'packets_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
         return;
@@ -21832,6 +22435,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('saveDashboardWidgetButton').addEventListener('click', () => saveConfigurableWidget().catch(console.error));
     document.getElementById('previewDashboardWidgetButton').addEventListener('click', () => previewConfigurableWidget().catch(console.error));
     document.getElementById('widgetConfigType').addEventListener('change', syncConfigurableWidgetTypeFields);
+    for (const field of ['Upload', 'Download', 'Bar', 'Positive', 'Negative']) {
+      const colorInput = document.getElementById(`widgetConfig${field}Color`);
+      const hexInput = document.getElementById(`widgetConfig${field}ColorHex`);
+      colorInput.addEventListener('input', () => {
+        hexInput.value = colorInput.value.toLowerCase();
+        document.getElementById('widgetConfigPaletteMode').value = 'custom';
+      });
+      hexInput.addEventListener('input', () => {
+        const color = hexInput.value.trim();
+        if (/^#[0-9a-f]{6}$/i.test(color)) {
+          colorInput.value = color;
+          document.getElementById('widgetConfigPaletteMode').value = 'custom';
+        }
+      });
+    }
+    document.getElementById('widgetConfigLegend').addEventListener('change', event => {
+      document.getElementById('widgetConfigShowLegend').value = event.target.value;
+    });
+    document.getElementById('widgetConfigShowLegend').addEventListener('change', event => {
+      document.getElementById('widgetConfigLegend').value = event.target.value;
+    });
+    document.getElementById('resetWidgetPaletteButton').addEventListener('click', () => {
+      populateConfigurableAppearance(GMJDashboardCharts.DEFAULT_APPEARANCE);
+    });
     document.querySelectorAll('.dashboard-config-tab').forEach(button => {
       button.addEventListener('click', () => {
         document.querySelectorAll('.dashboard-config-tab').forEach(item => {
@@ -22576,7 +23203,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     window.addEventListener('resize', () => {
       Object.values(charts).forEach(chart => chart.resize());
-      if (configurableDashboardActive && !configurableResizeController?.activeSession) {
+      if (
+        configurableDashboardActive
+        && !configurableResizeController?.activeSession
+        && !configurableMoveController?.activeSession
+      ) {
         updateConfigurableDashboardGridPositions();
         configurableWidgetCharts.forEach((chart, widgetId) =>
           scheduleConfigurableChartResize(widgetId)

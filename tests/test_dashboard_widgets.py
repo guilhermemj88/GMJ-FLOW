@@ -9,15 +9,18 @@ from backend.app.services.dashboard_widgets import (
     DASHBOARD_EXPORT_VERSION,
     DASHBOARD_SCHEMA_VERSION,
     DASHBOARD_WIDGET_METRICS,
+    DEFAULT_WIDGET_APPEARANCE,
     GENERAL_WIDGETS,
     SYSTEM_TEMPLATES,
     build_widget_query_plan,
+    consolidate_direction_series,
     create_dashboard,
     duplicate_dashboard,
     ensure_dashboard_schema,
     ensure_user_default_dashboard,
     get_dashboard,
     normalize_grid,
+    normalize_widget_appearance,
     validate_filters,
     validate_inheritance,
     validate_widget_definition,
@@ -290,6 +293,86 @@ class DashboardWidgetValidationTest(unittest.TestCase):
             widget_data_signature(base, shifted_range),
         )
 
+    def test_appearance_is_typed_persisted_and_defaults_are_readable(self):
+        widget = copy.deepcopy(GENERAL_WIDGETS[0])
+        widget["config"]["appearance"] = {
+            "palette_mode": "custom",
+            "upload_color": "#123456",
+            "download_color": "#abcdef",
+            "line_width": 2.5,
+            "area_opacity": 0.4,
+            "smooth_lines": False,
+            "show_area": True,
+            "show_value_labels": True,
+            "show_legend": False,
+            "legend_position": "bottom",
+            "bar_color": "#654321",
+            "positive_color": "#00aa00",
+            "negative_color": "#aa0000",
+            "minimum_slice_label_percent": 4,
+        }
+        normalized = validate_widget_definition(widget)
+        appearance = normalized["config"]["appearance"]
+        self.assertEqual(appearance["upload_color"], "#123456")
+        self.assertEqual(appearance["download_color"], "#abcdef")
+        self.assertEqual(appearance["area_opacity"], 0.4)
+        self.assertTrue(appearance["show_value_labels"])
+        self.assertFalse(appearance["show_legend"])
+        reset = normalize_widget_appearance(
+            {"palette_mode": "default", "upload_color": "#000000"}
+        )
+        self.assertEqual(
+            reset["upload_color"],
+            DEFAULT_WIDGET_APPEARANCE["upload_color"],
+        )
+
+    def test_bits_and_packets_contract_has_two_ordered_unique_series(self):
+        duplicated = [
+            {
+                "direction": "upload",
+                "points": [
+                    {"ts": "2026-07-28T10:01:00Z", "value": 4},
+                    {"ts": "2026-07-28T10:00:00Z", "value": 1},
+                ],
+            },
+            {
+                "direction": "upload",
+                "points": [
+                    {"ts": "2026-07-28T10:00:00Z", "value": 2},
+                ],
+            },
+            {
+                "direction": "download",
+                "points": [
+                    {"ts": "2026-07-28T10:00:00Z", "value": 9},
+                    {"ts": "2026-07-28T10:00:00Z", "value": 1},
+                ],
+            },
+            {
+                "direction": "download",
+                "points": [
+                    {"ts": "2026-07-28T10:00:00Z", "value": 2},
+                ],
+            },
+        ]
+        for metric in ("bits_s", "packets_s"):
+            with self.subTest(metric=metric):
+                series = consolidate_direction_series(metric, duplicated)
+                self.assertEqual(len(series), 2)
+                self.assertEqual(
+                    [item["key"] for item in series],
+                    ["upload", "download"],
+                )
+                self.assertEqual(
+                    [item["name"] for item in series],
+                    ["Total Upload", "Total Download"],
+                )
+                for item in series:
+                    timestamps = [point["ts"] for point in item["points"]]
+                    self.assertEqual(timestamps, sorted(set(timestamps)))
+                self.assertEqual(series[0]["points"][0]["value"], 3)
+                self.assertEqual(series[1]["points"][0]["value"], 3)
+
     def test_observability_snapshot_is_stable(self):
         before = DASHBOARD_WIDGET_METRICS.snapshot()["queries_total"]
         DASHBOARD_WIDGET_METRICS.record(
@@ -311,6 +394,7 @@ class DashboardWidgetContractTest(unittest.TestCase):
             '"/api/dashboards/{dashboard_id}/duplicate"',
             '"/api/dashboards/{dashboard_id}/set-default"',
             '"/api/dashboards/{dashboard_id}/repair-layout"',
+            '"/api/dashboards/{dashboard_id}/layout"',
             '"/api/dashboards/{dashboard_id}/export"',
             '"/api/dashboards/import"',
             '"/api/dashboards/{dashboard_id}/widgets"',
@@ -324,6 +408,9 @@ class DashboardWidgetContractTest(unittest.TestCase):
         self.assertIn("widget_data_signature", MAIN_SOURCE)
         self.assertIn("DASHBOARD_WIDGET_METRICS.snapshot()", MAIN_SOURCE)
         self.assertIn('widget.get("hidden") or widget.get("collapsed")', MAIN_SOURCE)
+        self.assertIn("consolidate_direction_series(", MAIN_SOURCE)
+        self.assertIn("'upload' AS group_key", MAIN_SOURCE)
+        self.assertIn("'download' AS group_key", MAIN_SOURCE)
 
     def test_frontend_uses_real_widget_engine_and_progressive_loading(self):
         for token in (
