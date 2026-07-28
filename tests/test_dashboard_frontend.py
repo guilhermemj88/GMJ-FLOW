@@ -14,6 +14,9 @@ RESIZE = (ROOT / "frontend" / "dashboard-resize.js").read_text(
 CHARTS = (ROOT / "frontend" / "dashboard-charts.js").read_text(
     encoding="utf-8"
 )
+TIME_RANGE = (ROOT / "frontend" / "dashboard-time-range.js").read_text(
+    encoding="utf-8"
+)
 VISUALIZATIONS = (
     ROOT / "frontend" / "dashboard-visualizations.js"
 ).read_text(encoding="utf-8")
@@ -137,8 +140,11 @@ class DashboardResizeContractTest(unittest.TestCase):
             "touch-action: none",
             "overflow: auto",
             "position: sticky",
+            'draggable="false"',
         ):
             self.assertIn(token, FRONTEND)
+        self.assertNotIn("grid.addEventListener('dragstart'", FRONTEND)
+        self.assertNotIn("'text/widget-id'", FRONTEND)
 
     def test_resize_persists_desktop_grid_and_preserves_height_fields(self):
         for token in (
@@ -153,6 +159,30 @@ class DashboardResizeContractTest(unittest.TestCase):
             "body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')",
         ):
             self.assertIn(token, FRONTEND)
+
+    def test_ranking_quality_identity_and_layout_race_contracts(self):
+        for token in (
+            "groupRankingItems",
+            "chart_table",
+            "configurable-ranking-combined",
+            "chart_table_ratio",
+            "slice_limit",
+            "openAsnDetails",
+            "/api/asn/info?asns=",
+            "/api/asn/details?asn=",
+            "/api/ip/whois?ip=",
+            "configurableQualityStatus",
+            "last_complete_sample_at",
+            "configurableLayoutCommitQueue",
+            "performConfigurableLayoutCommit",
+            "stale_response_ignored",
+            "configurableWidgetAutoHeightTimers.clear()",
+        ):
+            self.assertIn(token, FRONTEND)
+        self.assertIn(
+            "button, a, input, select, textarea, table, .widget-content, .scroll-container",
+            RESIZE,
+        )
 
 
 class DashboardChartContractTest(unittest.TestCase):
@@ -177,6 +207,34 @@ class DashboardChartContractTest(unittest.TestCase):
             "hideOverlap: true",
         ):
             self.assertIn(token, FRONTEND)
+
+    def test_global_time_range_controls_axis_requests_and_cache(self):
+        for token in (
+            "buildRangeContext",
+            "contextSignature",
+            "formatUtcTimestamp",
+            "widgetCacheKey",
+            "createRequestGate",
+        ):
+            self.assertIn(token, TIME_RANGE)
+        self.assertIn("timeZone: 'UTC'", TIME_RANGE)
+        for token in (
+            '<script src="dashboard-time-range.js"></script>',
+            "activateConfigurableDashboardContext",
+            "configurableRangeRequestGate.isCurrent",
+            "maximum_data_points",
+            "min: effectiveRange.start || undefined",
+            "max: effectiveRange.end || undefined",
+            "configurableTimestampLabel(pointTimestamp)",
+            "dashboard_debug_period",
+            "useUTC: true",
+        ):
+            self.assertIn(token, FRONTEND)
+        configurable_block = FRONTEND[
+            FRONTEND.find("function configurableDashboardContext("):
+            FRONTEND.find("function clearConfigurableWidgetRuntime(")
+        ]
+        self.assertNotIn(".slice(-", configurable_block)
 
     def test_visualization_data_contract_and_split_zero(self):
         for token in (
@@ -215,6 +273,7 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                     "--disable-gpu",
                     "--disable-extensions",
                     "--no-first-run",
+                    "--force-time-zone=America/Sao_Paulo",
                     "--allow-file-access-from-files",
                     "--virtual-time-budget=3000",
                     "--user-data-dir=%s" % profile,

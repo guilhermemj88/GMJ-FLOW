@@ -4,11 +4,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+TIME_BUCKETS = (
+    ROOT / "backend" / "app" / "services" / "time_buckets.py"
+).read_text(encoding="utf-8")
 RUNNER = (ROOT / "backend" / "app" / "services" / "peak_hunter_runner.py").read_text(encoding="utf-8")
 API = (ROOT / "backend" / "app" / "api" / "peak_hunter.py").read_text(encoding="utf-8")
 
 
 class TrafficLearningStaticTest(unittest.TestCase):
+    def test_chart_reduces_density_without_cutting_range_tail_or_head(self):
+        render_start = FRONTEND.index("function renderTrafficLearningResult")
+        render_end = FRONTEND.index("async function analyzeTrafficLearning", render_start)
+        render_source = FRONTEND[render_start:render_end]
+        self.assertNotIn(".slice(-", render_source)
+        self.assertIn("maximum_data_points: 100", FRONTEND)
+        self.assertIn("bucket_seconds_for_window(", MAIN)
+        self.assertIn("aggregate_temporal_points(", MAIN)
+        self.assertIn('"strategy": "aggregate_full_range"', MAIN)
+        self.assertIn("ordered[0]", TIME_BUCKETS)
+        self.assertIn("ordered[-1]", TIME_BUCKETS)
+
     def test_learn_from_traffic_endpoint_contract_exists(self):
         self.assertIn('/api/detection-templates/{template_id}/learn-from-traffic', MAIN)
         self.assertIn('/api/detection/templates/{template_id}/learn-from-traffic', MAIN)

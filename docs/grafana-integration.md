@@ -29,6 +29,7 @@ GMJ_FLOW_GRAFANA_PREVIOUS_TOKEN=<opcional-durante-rotacao>
 GMJ_FLOW_GRAFANA_SCOPES=grafana:data:read,grafana:dashboard:export
 GMJ_FLOW_GRAFANA_RATE_LIMIT_PER_MINUTE=120
 GMJ_FLOW_GRAFANA_MAX_WINDOW_SECONDS=604800
+GMJ_FLOW_DATA_STALE_AFTER_SECONDS=90
 ```
 
 Scopes:
@@ -42,10 +43,11 @@ rotacionado com `GMJ_FLOW_GRAFANA_PREVIOUS_TOKEN`. Cada resposta inclui um
 `X-Correlation-ID`, e a auditoria registra somente o hash curto de identidade
 do token, ação, métrica e resultado.
 
-CORS fica desabilitado por padrão. Se uma origem diferente realmente precisar
-chamar a API do navegador, configure `API_CORS_ORIGINS` com uma lista explícita
-de origens. Não use `*`. Para Grafana, prefira o parser backend do Infinity:
-assim a consulta sai do servidor do Grafana, não do navegador.
+CORS fica desabilitado por padrão tanto na aplicação quanto no Compose. Se uma
+origem diferente realmente precisar chamar a API do navegador, configure
+`API_CORS_ORIGINS` com uma lista explícita de origens separadas por vírgula. Não
+use `*`. Para Grafana, prefira o parser backend do Infinity: assim a consulta
+sai do servidor do Grafana, não do navegador e não depende de CORS aberto.
 
 ## Contrato da API read-only
 
@@ -90,6 +92,7 @@ curl -X POST \
     },
     "group_by": ["direction"],
     "calculation": "rate",
+    "include_partial_bucket": false,
     "timezone": "UTC",
     "format": "json"
   }'
@@ -98,6 +101,17 @@ curl -X POST \
 Os pontos têm timestamps Unix em milissegundos, são ordenados e deduplicados.
 Download e upload permanecem positivos no contrato; a inversão de upload no
 modo `split_zero` é exclusivamente visual.
+
+Por padrão, o bucket ainda aberto não é retornado. A taxa usa a duração real
+do intervalo selecionado (1 s, 5 s, 10 s, 30 s, 1 min, 5 min etc.). Para
+diagnóstico, `include_partial_bucket: true` inclui o bucket vigente com
+`partial: true` e `bucket_duration_seconds` igual ao tempo efetivamente
+transcorrido. `null` continua `null`; zero é uma amostra válida.
+
+`meta.quality` informa `data_status` (`current`, `delayed` ou `no_data`),
+`last_complete_sample_at`, atraso, limite configurado, aviso de ingestão e
+timezone UTC. Erro de consulta permanece um erro HTTP e não é convertido em
+zero ou em “sem dados”.
 
 ### Ranking
 
@@ -149,6 +163,15 @@ Erros usam a forma:
 4. Use `Authorization: Bearer <token>` no armazenamento seguro do datasource.
 5. Importe o JSON gerado pelo GMJ-FLOW e selecione o datasource quando
    solicitado.
+
+Exemplo de datasource:
+
+```text
+Base URL: https://gmj-flow.exemplo
+Allowed hosts: https://gmj-flow.exemplo
+Authentication header: Authorization = Bearer <token>
+Parser: Backend
+```
 
 O export usa:
 
@@ -215,6 +238,45 @@ Ele converte visualizações para `timeseries`, `barchart`, `piechart`,
 
 O mesmo dashboard e as mesmas opções produzem o mesmo `meta.export_hash`.
 Campos voláteis e credenciais não participam do documento.
+
+## Painéis e variáveis
+
+Para séries, use o endpoint de timeseries e selecione `$.rows` quando o painel
+esperar dados tabulares: `timestamp` é epoch em milissegundos, `series` é texto
+e `value` é número ou `null`. Para rankings, `$.items` alimenta barras,
+pie/donut e tabelas; `value` e `percent` são numéricos, e `metadata` pode
+conter ASN, organização, país, IP e prefixo.
+
+As macros `${__timeFrom:date:iso}`, `${__timeTo:date:iso}`,
+`${__interval_ms}` e `${__maxDataPoints}` devem vir do Grafana. Variáveis de
+sensor, interface ou protocolo podem preencher os arrays correspondentes em
+`filters`; o contrato aceita no máximo um valor de cada por consulta.
+
+## Troubleshooting
+
+- **401:** confirme que o header é `Authorization: Bearer ...`, que o token
+  foi configurado no container backend e que não há espaços extras.
+- **403:** inclua `grafana:data:read` para consultas ou
+  `grafana:dashboard:export` para exportação.
+- **URL not allowed:** adicione exatamente a origem da Base URL em Allowed
+  hosts e use o parser Backend.
+- **Sem dados:** consulte health e catalog, confira o período em UTC e leia
+  `meta.quality`. `no_data` indica ausência de amostras; `delayed` indica que
+  a última completa ultrapassou `GMJ_FLOW_DATA_STALE_AFTER_SECONDS`.
+- **Último ponto ausente:** é o comportamento esperado enquanto o bucket está
+  aberto. Use `include_partial_bucket: true` apenas para diagnóstico.
+
+## Compose e PMACCT
+
+Os collectors rodam pelo arquivo separado `docker-compose.collectors.yml`.
+Ao reconstruir backend/frontend, não use `--remove-orphans`, pois os containers
+PMACCT são intencionais embora não apareçam no compose base. Não remova
+volumes durante uma atualização. Depois do deploy da aplicação, valide sem
+mutação:
+
+```sh
+sh scripts/check_pmacct_collectors.sh
+```
 
 ## Plano detalhado da Fase 3
 

@@ -27,6 +27,7 @@
   const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
   function finiteNumber(value, fallback) {
+    if (value === null || value === undefined || value === '') return fallback;
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
   }
@@ -124,10 +125,23 @@
       (Array.isArray(item.points) ? item.points : []).forEach(point => {
         const timestamp = pointTimestamp(point);
         if (!timestamp) return;
-        itemPoints.set(timestamp, finiteNumber(point?.value, 0) || 0);
+        itemPoints.set(timestamp, {
+          value: finiteNumber(point?.value, null),
+          partial: Boolean(point?.partial),
+          bucket_duration_seconds: point?.bucket_duration_seconds ?? null
+        });
       });
-      itemPoints.forEach((value, timestamp) => {
-        points.set(timestamp, (points.get(timestamp) || 0) + value);
+      itemPoints.forEach((point, timestamp) => {
+        const current = points.get(timestamp) || {
+          values: [],
+          partial: false,
+          bucket_duration_seconds: null
+        };
+        if (point.value !== null) current.values.push(point.value);
+        current.partial = current.partial || point.partial;
+        current.bucket_duration_seconds = point.bucket_duration_seconds
+          ?? current.bucket_duration_seconds;
+        points.set(timestamp, current);
       });
     });
     const appearance = DEFAULT_APPEARANCE;
@@ -141,7 +155,14 @@
         : appearance.download_color,
       points: [...values.get(direction).entries()]
         .sort((left, right) => left[0].localeCompare(right[0]))
-        .map(([ts, value]) => ({ ts, value }))
+        .map(([ts, point]) => ({
+          ts,
+          value: point.values.length
+            ? point.values.reduce((sum, value) => sum + value, 0)
+            : null,
+          partial: point.partial,
+          bucket_duration_seconds: point.bucket_duration_seconds
+        }))
     }));
   }
 

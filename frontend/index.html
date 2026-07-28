@@ -574,6 +574,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
   <script src="dashboard-formatters.js"></script>
   <script src="dashboard-charts.js"></script>
+  <script src="dashboard-time-range.js"></script>
   <script src="dashboard-visualizations.js"></script>
   <script src="dashboard-layout.js"></script>
   <script src="dashboard-resize.js"></script>
@@ -1593,8 +1594,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .ip-link:hover,
-    .ip-link:focus {
+    .ip-link:focus,
+    .asn-link:hover,
+    .asn-link:focus {
       color: #1d4ed8;
+    }
+
+    .asn-link {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: #2563eb;
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+      cursor: pointer;
+      font: inherit;
     }
 
     .ip-detail-grid {
@@ -2365,6 +2380,50 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .configurable-ranking-combined {
+      display: grid;
+      grid-template-columns:
+        minmax(0, var(--ranking-chart-ratio, 55%))
+        minmax(0, 1fr);
+      gap: 12px;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      min-width: 0;
+    }
+
+    .configurable-ranking-combined > * {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .configurable-ranking-row.is-selected > td {
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+
+    .ranking-identity {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 100%;
+      gap: .35rem;
+    }
+
+    .ranking-identity-name {
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 820px) {
+      .configurable-ranking-combined {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(180px, 45%) minmax(0, 1fr);
+      }
     }
 
     .configurable-dashboard-widget-chart.chart-size-insufficient::after {
@@ -7319,6 +7378,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <select id="widgetConfigResolution" class="form-select form-select-sm"></select>
             </div>
             <div class="field">
+              <label for="widgetConfigIncludePartialBucket">Bucket em andamento</label>
+              <select id="widgetConfigIncludePartialBucket" class="form-select form-select-sm">
+                <option value="false">Excluir (recomendado)</option>
+                <option value="true">Incluir como parcial</option>
+              </select>
+            </div>
+            <div class="field">
               <label for="widgetConfigLimit">Limite</label>
               <input id="widgetConfigLimit" type="number" min="1" max="100" value="10" class="form-control form-control-sm">
             </div>
@@ -7344,6 +7410,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <option value="true">Mostrar</option>
                 <option value="false">Ocultar</option>
               </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigCombinedChartKind">Gráfico do modo combinado</label>
+              <select id="widgetConfigCombinedChartKind" class="form-select form-select-sm">
+                <option value="donut">Donut</option>
+                <option value="pie">Pizza</option>
+                <option value="horizontal_bar">Barras horizontais</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigChartTableRatio">Proporção do gráfico (%)</label>
+              <input id="widgetConfigChartTableRatio" type="number" min="25" max="75" value="55" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigSliceLimit">Slices antes de “Outros”</label>
+              <input id="widgetConfigSliceLimit" type="number" min="2" max="20" value="8" class="form-control form-control-sm">
             </div>
           </div>
         </div>
@@ -8596,6 +8678,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableLayoutInteractionId = '';
     let configurableLayoutInteractionSequence = 0;
     let configurableLayoutCommitSequence = 0;
+    let configurableLayoutCommitQueue = Promise.resolve();
     let configurableDashboardLoadSequence = 0;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
@@ -8607,6 +8690,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const configurableVisibleWidgets = new Set();
     const configurableWidgetPayloads = new Map();
     const configurableDeferredWidgetPayloads = new Map();
+    const configurableRangeRequestGate = GMJDashboardTimeRange.createRequestGate();
     let configurableGrafanaExportPayload = null;
     let flowSearchAbortController = null;
     let mapAbortController = null;
@@ -10746,7 +10830,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         exclude_peak_hunter_peaks: boolSelectValue('trafficLearnExcludePeakHunter'),
         exclude_top_percent: numberValue('trafficLearnTopPercent', 1),
         stability_mode: selectValue('trafficLearnStability', 'media'),
-        window_seconds: numberValue('detectionRuleWindow', 60) || 60
+        window_seconds: numberValue('detectionRuleWindow', 60) || 60,
+        maximum_data_points: 100
       };
       if (period === 'custom') {
         payload.start_time = parsePeakHunterBrtInputToUtcIso(selectValue('trafficLearnStart'));
@@ -10769,7 +10854,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         ['Warning sugerido', formatNumber(suggested.warning || 0)],
         ['Critical sugerido', formatNumber(suggested.critical || 0)]
       ].map(([label, value]) => `<div class="metric-card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div></div>`).join('');
-      const chartPoints = [...(result.series || []).slice(-80), ...(result.removed_points || []).slice(-20).map(point => ({ ...point, removed: true }))].sort((a, b) => String(a.time).localeCompare(String(b.time)));
+      const chartPoints = [
+        ...(result.series || []),
+        ...(result.removed_points || []).map(point => ({ ...point, removed: true }))
+      ].sort((a, b) => String(a.time).localeCompare(String(b.time)));
       const maxValue = Math.max(...chartPoints.map(point => Number(point.value || 0)), Number(suggested.critical || 0), 1);
       document.getElementById('trafficLearnChart').innerHTML = chartPoints.map(point => {
         const width = Math.max(2, Math.round((Number(point.value || 0) / maxValue) * 100));
@@ -17407,6 +17495,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `<button type="button" class="ip-link" data-ip="${escapeHtml(value)}" title="Consultar WHOIS/RDAP">${escapeHtml(value)}</button>`;
     }
 
+    function asnNumber(value) {
+      const match = String(value ?? '').match(/(\d+)/);
+      return match ? Number(match[1]) : 0;
+    }
+
+    function asnLink(asn, name = '') {
+      const number = asnNumber(asn);
+      if (!number) return escapeHtml(name || 'ASN não encontrado');
+      const label = `AS${number}`;
+      return `
+        <span class="ranking-identity">
+          <button type="button" class="asn-link" data-asn="${number}" title="Investigar ${label}">${label}</button>
+          <span class="ranking-identity-name" data-asn-name="${number}" title="${escapeHtml(name || label)}">${name ? `— ${escapeHtml(name)}` : ''}</span>
+        </span>
+      `;
+    }
+
     function ipDetailItem(label, value) {
       return `
         <div class="ip-detail-item">
@@ -17451,13 +17556,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ${message}
         <div class="ip-detail-grid mb-3">
           ${ipDetailItem('IP', payload.ip)}
+          ${ipDetailItem('Hostname', payload.hostname || payload.reverse_dns)}
           ${ipDetailItem('Tipo', typeLabel)}
           ${ipDetailItem('DNS Reverso', payload.reverse_dns)}
+          ${ipDetailItem('Prefixo anunciado', payload.prefix)}
           ${ipDetailItem('Organizacao', payload.organization)}
           ${ipDetailItem('ASN', payload.asn)}
           ${ipDetailItem('Pais', payload.country)}
           ${ipDetailItem('Regiao/Estado', payload.region)}
           ${ipDetailItem('Cidade', payload.city)}
+        </div>
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-copy-value="${escapeHtml(payload.ip || '')}">Copiar IP</button>
+          ${payload.hostname || payload.reverse_dns ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-copy-value="${escapeHtml(payload.hostname || payload.reverse_dns)}">Copiar hostname</button>` : ''}
+          <a class="btn btn-sm btn-outline-secondary" href="${escapeHtml(payload.rdap_url || `https://rdap.org/ip/${encodeURIComponent(payload.ip || '')}`)}" target="_blank" rel="noopener noreferrer">Abrir RDAP</a>
         </div>
         <div class="panel-title mb-2">Entidades principais</div>
         ${renderIpEntities(payload.entities)}
@@ -18141,6 +18253,70 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function renderAsnDetails(payload) {
+      const prefixes = Array.isArray(payload.prefixes) ? payload.prefixes : [];
+      const stateMessage = {
+        resolved: '',
+        resolving: '<div class="subtle mb-3">Resolvendo informações RDAP em segundo plano…</div>',
+        not_found: '<div class="subtle mb-3">Nome e organização não encontrados; o número do ASN foi preservado.</div>',
+        error: `<div class="text-danger mb-3">Falha na consulta RDAP${payload.last_error ? `: ${escapeHtml(payload.last_error)}` : '.'}</div>`,
+        erro: `<div class="text-danger mb-3">Falha na consulta RDAP${payload.last_error ? `: ${escapeHtml(payload.last_error)}` : '.'}</div>`
+      }[payload.state] || '<div class="subtle mb-3">Estado da resolução não informado.</div>';
+      document.getElementById('ipDetailsModalTitle').textContent =
+        `ASN ${payload.asn_label || payload.asn || ''}`.trim();
+      document.getElementById('ipDetailsBody').innerHTML = `
+        ${stateMessage}
+        <div class="ip-detail-grid mb-3">
+          ${ipDetailItem('ASN', payload.asn_label)}
+          ${ipDetailItem('Nome', payload.as_name)}
+          ${ipDetailItem('Organização', payload.org_name)}
+          ${ipDetailItem('País', payload.country)}
+          ${ipDetailItem('Fonte', payload.source)}
+          ${ipDetailItem('Estado', payload.state)}
+        </div>
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-copy-value="${escapeHtml(payload.asn_label || '')}">Copiar ASN</button>
+          <a class="btn btn-sm btn-outline-secondary" href="${escapeHtml(payload.external_url || '')}" target="_blank" rel="noopener noreferrer">Abrir RDAP</a>
+        </div>
+        <div class="panel-title mb-2">Prefixos conhecidos</div>
+        <div class="widget-scroll-list">
+          ${prefixes.map(item => `<div class="ip-detail-item mb-1"><strong>${escapeHtml(item.prefix)}</strong><div class="subtle">${escapeHtml(item.country || 'País não informado')} · ${escapeHtml(item.source || 'fonte local')}</div></div>`).join('')
+            || '<div class="subtle">Nenhum prefixo conhecido no cache local.</div>'}
+        </div>
+      `;
+    }
+
+    async function openAsnDetails(asn) {
+      const number = asnNumber(asn);
+      if (!number) return;
+      document.getElementById('ipDetailsModalTitle').textContent = `ASN AS${number}`;
+      document.getElementById('ipDetailsBody').innerHTML =
+        '<div class="subtle">Resolvendo ASN…</div>';
+      openModal('ipDetailsModal');
+      try {
+        let payload = await apiRequest(`/api/asn/details?asn=${number}`);
+        renderAsnDetails(payload);
+        if (payload.state !== 'resolved') {
+          apiRequest('/api/asn/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ limit: 1, force: false })
+          }).then(() => apiRequest(`/api/asn/details?asn=${number}`))
+            .then(renderAsnDetails)
+            .catch(() => {});
+        }
+      } catch (error) {
+        renderAsnDetails({
+          asn: number,
+          asn_label: `AS${number}`,
+          state: 'erro',
+          last_error: error.message,
+          prefixes: [],
+          external_url: `https://rdap.org/autnum/${number}`
+        });
+      }
+    }
+
     async function exportFlowsCsv() {
       const status = document.getElementById('flowSearchStatus');
       status.textContent = 'Exportando CSV';
@@ -18724,6 +18900,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const visualization = GMJDashboardVisualizations.visualizationKind(widget || {});
       let values;
       if (type === 'timeseries') values = [6, 8, 5, 6];
+      else if (type === 'top_n' && visualization === 'chart_table') values = [8, 8, 6, 6];
       else if (type === 'top_n' && widget?.config?.dimension === 'conversation') values = [6, 8, 5, 6];
       else if (type === 'top_n' && ['pie', 'donut', 'horizontal_bar', 'bar'].includes(visualization)) values = [4, 6, 3, 5];
       else if (type === 'top_n') values = [4, 7, 3, 5];
@@ -18924,6 +19101,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       session.interactionSequence = configurableLayoutInteractionSequence;
       configurableWidgetControllers.forEach(controller => controller.abort());
       configurableWidgetControllers.clear();
+      configurableWidgetAutoHeightTimers.forEach(timer => clearTimeout(timer));
+      configurableWidgetAutoHeightTimers.clear();
     }
 
     function finishConfigurableLayoutInteraction(session = null) {
@@ -18976,7 +19155,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function configurableDashboardContext() {
       const rangeValue = document.getElementById('rangeMinutes')?.value || '10';
       const context = {
-        range_minutes: Number(rangeValue === 'custom' ? customRanges.dashboard.previous || 10 : rangeValue) || 10,
+        ...GMJDashboardTimeRange.buildRangeContext(
+          rangeValue,
+          customRanges.dashboard
+        ),
         sensor_id: selectedDashboardSensorId(),
         interface_id: selectedDashboardInterfaceId(),
         zone_id: selectedDashboardZoneId(),
@@ -18985,21 +19167,50 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? 50
           : Number(document.getElementById('dashboardSeriesLimit')?.value || 8)
       };
-      if (rangeValue === 'custom' && customRanges.dashboard.start && customRanges.dashboard.end) {
-        context.start = customRanges.dashboard.start;
-        context.end = customRanges.dashboard.end;
-      }
       return context;
     }
 
-    function configurableWidgetCacheKey(widget) {
-      const context = configurableDashboardContext();
-      return `gmjflow_widget_data_${configurableDashboard?.id || 0}_${widget.id}_${encodeURIComponent(JSON.stringify(context))}`;
+    function configurableWidgetQueryContext(widget, globalContext = configurableDashboardContext()) {
+      const configuredMaximum = Number(
+        widget?.config?.maximum_data_points
+        ?? widget?.config?.maximumDataPoints
+        ?? 1000
+      );
+      return {
+        ...globalContext,
+        interval: Math.max(0, Number(widget?.config?.resolution_seconds || 0)),
+        maximum_data_points: Math.max(
+          1,
+          Math.min(5000, Number.isFinite(configuredMaximum) ? configuredMaximum : 1000)
+        )
+      };
     }
 
-    function readConfigurableWidgetCache(widget) {
+    function activateConfigurableDashboardContext(context) {
+      const token = configurableRangeRequestGate.activate(context);
+      if (token.changed) {
+        configurableWidgetControllers.forEach(controller => controller.abort());
+        configurableWidgetControllers.clear();
+        configurableDeferredWidgetPayloads.clear();
+      }
+      return token;
+    }
+
+    function configurableWidgetCacheKey(widget, context = null) {
+      const queryContext = context || configurableWidgetQueryContext(widget);
+      return GMJDashboardTimeRange.widgetCacheKey(
+        configurableDashboard?.id || 0,
+        widget.id,
+        GMJDashboardVisualizations.dataQuerySignature(widget),
+        queryContext
+      );
+    }
+
+    function readConfigurableWidgetCache(widget, context = null) {
       try {
-        const cached = JSON.parse(localStorage.getItem(configurableWidgetCacheKey(widget)) || 'null');
+        const cached = JSON.parse(
+          localStorage.getItem(configurableWidgetCacheKey(widget, context)) || 'null'
+        );
         if (!cached || Date.now() - Number(cached.saved_at || 0) > 300000) return null;
         return cached.payload || null;
       } catch {
@@ -19007,9 +19218,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
-    function writeConfigurableWidgetCache(widget, payload) {
+    function writeConfigurableWidgetCache(widget, payload, context) {
       try {
-        localStorage.setItem(configurableWidgetCacheKey(widget), JSON.stringify({
+        localStorage.setItem(configurableWidgetCacheKey(widget, context), JSON.stringify({
           saved_at: Date.now(),
           payload
         }));
@@ -19027,9 +19238,44 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function configurableMetricValue(value, metric, options = {}) {
       return GMJDashboardFormatters.formatMetricValue(value, metric, {
-        invalidValue: '-',
+        invalidValue: 'Sem dados',
         ...options
       });
+    }
+
+    function configurableQualityStatus(payload = {}) {
+      const quality = payload.quality && typeof payload.quality === 'object'
+        ? payload.quality
+        : payload.meta?.quality && typeof payload.meta.quality === 'object'
+          ? payload.meta.quality
+          : null;
+      if (!quality) return null;
+      const lastComplete = quality.last_complete_sample_at;
+      const lastLabel = lastComplete
+        ? new Date(lastComplete).toLocaleString('pt-BR', {
+          timeZone: 'UTC',
+          hour12: false
+        })
+        : '';
+      if (quality.data_status === 'no_data') {
+        return {
+          label: 'Sem dados · UTC',
+          title: quality.collector_warning || 'Nenhuma amostra no período.',
+          state: 'no-data'
+        };
+      }
+      if (quality.data_status === 'delayed') {
+        return {
+          label: `Dados atrasados${lastLabel ? ` · ${lastLabel} UTC` : ''}`,
+          title: quality.collector_warning || 'Última amostra completa atrasada.',
+          state: 'delayed'
+        };
+      }
+      return {
+        label: `Última completa${lastLabel ? ` · ${lastLabel} UTC` : ' · UTC'}`,
+        title: 'Valores calculados com buckets completos em UTC.',
+        state: 'current'
+      };
     }
 
     function configurableSeriesMaximum(series = []) {
@@ -19046,6 +19292,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         0,
         ...items.map(item => Math.abs(Number(item.value) || 0))
       );
+    }
+
+    function configurableChartKind(widget = {}) {
+      const selected = GMJDashboardVisualizations.visualizationKind(widget);
+      if (selected !== 'chart_table') return selected;
+      return ['donut', 'pie', 'horizontal_bar'].includes(
+        widget.config?.combined_chart_kind
+      ) ? widget.config.combined_chart_kind : 'donut';
     }
 
     function disposeConfigurableWidgetCharts() {
@@ -19081,7 +19335,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             );
             const density = GMJDashboardCharts.densitySettings(densityMode);
             const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
-            const visualization = GMJDashboardVisualizations.visualizationKind(widget);
+            const visualization = configurableChartKind(widget);
             chartElement.classList.toggle(
               'chart-size-insufficient',
               bounds.width < 170 || bounds.height < 120
@@ -19143,6 +19397,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           if (
             widget.height_mode !== 'auto'
             || graphWidget
+            || widget.type === 'top_n'
             || widget.collapsed
             || widget.hidden
             || body.closest('.configurable-dashboard-widget')?.classList.contains('is-resizing')
@@ -19271,10 +19526,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (type === 'top_n') {
         config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
+        config.combined_chart_kind =
+          document.getElementById('widgetConfigCombinedChartKind').value || 'donut';
+        config.chart_table_ratio = Math.max(
+          25,
+          Math.min(75, Number(document.getElementById('widgetConfigChartTableRatio').value || 55))
+        );
+        config.slice_limit = Math.max(
+          2,
+          Math.min(20, Number(document.getElementById('widgetConfigSliceLimit').value || 8))
+        );
       } else if (type === 'timeseries') {
         config.group_by = document.getElementById('widgetConfigGroupBy').value || 'total';
         config.aggregation = document.getElementById('widgetConfigAggregation').value || 'sum';
         config.resolution_seconds = Number(document.getElementById('widgetConfigResolution').value || 0);
+        config.include_partial_bucket =
+          document.getElementById('widgetConfigIncludePartialBucket').value === 'true';
       } else if (type === 'recent_events') {
         config.source = document.getElementById('widgetConfigSource').value || 'anomalies';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
@@ -19357,10 +19624,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         use_global_filters: document.getElementById('widgetConfigGlobalFilters').value === 'true',
         use_global_time_range: useGlobalTimeRange,
         inheritance,
-        custom_time_range: {
-          mode: 'relative',
-          minutes: customRangeMinutes
-        }
+        custom_time_range: useGlobalTimeRange
+          ? {}
+          : {
+            mode: 'relative',
+            minutes: customRangeMinutes
+          }
       };
     }
 
@@ -19386,6 +19655,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         pie: 'Pizza',
         donut: 'Donut',
         bar_gauge: 'Bar gauge',
+        chart_table: 'Gráfico + tabela',
         stat: 'Stat',
         line: 'Linha',
         area: 'Área',
@@ -19412,7 +19682,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         widgetConfigAggregation: type === 'timeseries',
         widgetConfigSource: ['recent_events', 'status_list'].includes(type),
         widgetConfigResolution: type === 'timeseries',
-        widgetConfigLimit: ['top_n', 'recent_events', 'status_list'].includes(type)
+        widgetConfigIncludePartialBucket: type === 'timeseries',
+        widgetConfigLimit: ['top_n', 'recent_events', 'status_list'].includes(type),
+        widgetConfigCombinedChartKind: type === 'top_n'
+          && visualizationSelect.value === 'chart_table',
+        widgetConfigChartTableRatio: type === 'top_n'
+          && visualizationSelect.value === 'chart_table',
+        widgetConfigSliceLimit: type === 'top_n'
+          && ['pie', 'donut', 'chart_table'].includes(visualizationSelect.value)
       };
       Object.entries(visibility).forEach(([id, visible]) => {
         document.getElementById(id)?.closest('.field')?.classList.toggle('auth-hidden', !visible);
@@ -19502,7 +19779,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const calculationLabels = {
         current: 'Valor atual do ranking',
         last: 'Último valor',
-        last_not_null: 'Último valor não nulo',
+        last_not_null: 'Último bucket completo',
         mean: 'Média',
         max: 'Máximo',
         min: 'Mínimo',
@@ -19537,6 +19814,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('widgetConfigTitle').value = item.title || '';
       document.getElementById('widgetConfigDescription').value = item.description || '';
       document.getElementById('widgetConfigLimit').value = item.config?.limit || 10;
+      document.getElementById('widgetConfigCombinedChartKind').value =
+        item.config?.combined_chart_kind || 'donut';
+      document.getElementById('widgetConfigChartTableRatio').value =
+        Number(item.config?.chart_table_ratio || 55);
+      document.getElementById('widgetConfigSliceLimit').value =
+        Number(item.config?.slice_limit || 8);
+      document.getElementById('widgetConfigIncludePartialBucket').value =
+        String(Boolean(item.config?.include_partial_bucket));
       document.getElementById('widgetConfigFilters').value = JSON.stringify(item.filters || [], null, 2);
       document.getElementById('widgetConfigLegend').value = String(item.visualization?.show_legend !== false);
       populateConfigurableAppearance(item.config?.appearance || {
@@ -19730,6 +20015,77 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function configurableRankingIdentity(item = {}) {
+      const metadata = item.metadata && typeof item.metadata === 'object'
+        ? item.metadata
+        : {};
+      const label = item.label || item.key || item.name || '-';
+      if (metadata.entity_kind === 'ip' || metadata.ip) {
+        const asnName = metadata.as_name || metadata.org_name || '';
+        return `
+          <div class="ranking-identity">
+            ${ipLink(metadata.ip || item.key)}
+          </div>
+          <div class="subtle">${metadata.asn ? asnLink(metadata.asn, asnName) : 'ASN resolvendo…'}${metadata.country ? ` · ${escapeHtml(metadata.country)}` : ''}</div>
+          ${metadata.prefix ? `<div class="subtle">${escapeHtml(metadata.prefix)}</div>` : ''}
+        `;
+      }
+      if (metadata.entity_kind === 'asn' || metadata.asn) {
+        return `${asnLink(metadata.asn || item.key, metadata.as_name || metadata.org_name || '')}${metadata.country ? `<div class="subtle">${escapeHtml(metadata.country)}</div>` : ''}`;
+      }
+      return escapeHtml(label);
+    }
+
+    async function enrichConfigurableRankingAsns(root, payload, resolveMissing = true) {
+      if (!root || root.dataset.asnEnrichmentStarted === 'true') return;
+      root.dataset.asnEnrichmentStarted = 'true';
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const numbers = [...new Set(items.map(item =>
+        asnNumber(item.metadata?.asn || item.asn_number || item.asn)
+      ).filter(Boolean))];
+      if (!numbers.length) return;
+      try {
+        const response = await apiRequest(
+          `/api/asn/info?asns=${encodeURIComponent(numbers.join(','))}`
+        );
+        (response.items || []).forEach(info => {
+          const number = Number(info.asn || 0);
+          const name = info.as_name || info.org_name || '';
+          if (!number || !name) return;
+          root.querySelectorAll(`[data-asn-name="${number}"]`).forEach(element => {
+            element.textContent = `— ${name}`;
+            element.title = name;
+          });
+          items.filter(item =>
+            asnNumber(item.metadata?.asn || item.asn_number || item.asn) === number
+          ).forEach(item => {
+            item.metadata = {
+              ...(item.metadata || {}),
+              as_name: name,
+              org_name: info.org_name || item.metadata?.org_name,
+              country: info.country || item.metadata?.country,
+              resolution_state: 'resolved'
+            };
+          });
+        });
+        if (resolveMissing && Number(response.queued || 0) > 0) {
+          apiRequest('/api/asn/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              limit: Math.min(25, numbers.length),
+              force: false
+            })
+          }).then(() => {
+            root.dataset.asnEnrichmentStarted = 'false';
+            return enrichConfigurableRankingAsns(root, payload, false);
+          }).catch(() => {});
+        }
+      } catch (error) {
+        root.dataset.asnEnrichmentState = 'error';
+      }
+    }
+
     function configurableWidgetTable(widget, payload) {
       const metric = configurableWidgetMetric(widget, payload);
       const normalized = ['top_n', 'ranking'].includes(payload.kind)
@@ -19742,10 +20098,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <thead><tr><th>#</th><th>Item</th><th class="text-end">${escapeHtml(metric)}</th><th class="text-end">%</th><th></th></tr></thead>
             <tbody>
               ${rows.map((item, index) => `
-                <tr>
+                <tr class="configurable-ranking-row" data-ranking-key="${escapeHtml(item.key || item.label || '')}">
                   <td>${Number(item.rank || index + 1)}</td>
-                  <td title="${escapeHtml(item.description || item.label || item.key || '-')}">${escapeHtml(item.label || item.key || item.name || '-')}</td>
-                  <td class="text-end">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric] ?? 0, metric)}</td>
+                  <td title="${escapeHtml(item.description || item.label || item.key || '-')}">${configurableRankingIdentity(item)}</td>
+                  <td class="text-end">${GMJDashboardFormatters.formatTableValue(item.value ?? item[metric], metric, { invalidValue: 'Sem dados' })}</td>
                   <td class="text-end">${GMJDashboardFormatters.formatPercentage(item.percent ?? item.percentage ?? 0)}</td>
                   <td><button type="button" class="icon-button configurable-drilldown" data-key="${escapeHtml(item.key || '')}" title="Drilldown"><i data-lucide="search"></i></button></td>
                 </tr>
@@ -19753,6 +20109,119 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             </tbody>
           </table>
         </div>`;
+    }
+
+    function installConfigurableRankingSelection(chart, root, items) {
+      if (!chart || !root || !Array.isArray(items)) return;
+      const selectKey = key => {
+        const selectedItem = items.find(item =>
+          String(item.key || item.label) === String(key)
+        );
+        const groupedKeys = new Set(
+          selectedItem?.metadata?.grouped_keys?.map(String) || []
+        );
+        root.querySelectorAll('.configurable-ranking-row').forEach(row => {
+          row.classList.toggle(
+            'is-selected',
+            String(row.dataset.rankingKey) === String(key)
+              || groupedKeys.has(String(row.dataset.rankingKey))
+          );
+        });
+      };
+      chart.on?.('click', params => {
+        const item = items[Number(params.dataIndex || 0)];
+        if (item) selectKey(item.key || item.label);
+      });
+      const table = root.querySelector('.table-wrap');
+      if (table && table.dataset.rankingSelectionInstalled !== 'true') {
+        table.dataset.rankingSelectionInstalled = 'true';
+        table.addEventListener('click', event => {
+          const row = event.target.closest('.configurable-ranking-row');
+          if (!row || event.target.closest('button, a')) return;
+          let index = items.findIndex(item =>
+            String(item.key || item.label) === String(row.dataset.rankingKey)
+          );
+          if (index < 0) {
+            index = items.findIndex(item =>
+              (item.metadata?.grouped_keys || []).map(String)
+                .includes(String(row.dataset.rankingKey))
+            );
+          }
+          if (index < 0) return;
+          selectKey(items[index].key || items[index].label);
+          chart.dispatchAction?.({ type: 'downplay', seriesIndex: 0 });
+          chart.dispatchAction?.({
+            type: 'highlight',
+            seriesIndex: 0,
+            dataIndex: index
+          });
+          chart.dispatchAction?.({
+            type: 'showTip',
+            seriesIndex: 0,
+            dataIndex: index
+          });
+        });
+      }
+    }
+
+    function configurableRankingTooltip(item, metric, metricScale, percent = null) {
+      const metadata = item?.metadata || {};
+      const lines = [
+        `<strong>${escapeHtml(item?.label || item?.key || '-')}</strong>`,
+        metadata.asn
+          ? escapeHtml(`AS${metadata.asn}${metadata.as_name || metadata.org_name ? ` — ${metadata.as_name || metadata.org_name}` : ''}`)
+          : '',
+        metadata.country ? `País: ${escapeHtml(metadata.country)}` : '',
+        metadata.prefix ? `Prefixo: ${escapeHtml(metadata.prefix)}` : '',
+        `Valor: ${GMJDashboardFormatters.formatTooltipValue(item?.value, metric, metricScale)}`,
+        `Percentual: ${GMJDashboardFormatters.formatPercentage(percent ?? item?.percent ?? 0)}`
+      ];
+      return lines.filter(Boolean).join('<br>');
+    }
+
+    function configurableEffectiveRange(payload = {}) {
+      const effective = payload.effective_range && typeof payload.effective_range === 'object'
+        ? payload.effective_range
+        : payload;
+      const start = effective.start || payload.start || '';
+      const end = effective.end || payload.end || '';
+      return {
+        start,
+        end,
+        range_minutes: Number(
+          effective.range_minutes
+          ?? payload.range_minutes
+          ?? 0
+        ),
+        interval: Number(
+          effective.interval
+          ?? effective.interval_seconds
+          ?? payload.bucket_seconds
+          ?? 0
+        )
+      };
+    }
+
+    function configurableTimestampLabel(value) {
+      return GMJDashboardTimeRange.formatUtcTimestamp(value, 'pt-BR');
+    }
+
+    function configurableEffectiveRangeDebugEnabled() {
+      const queryValue = new URLSearchParams(window.location.search)
+        .get('dashboard_debug_period');
+      if (queryValue !== null) return ['1', 'true', 'yes'].includes(queryValue.toLowerCase());
+      try {
+        return localStorage.getItem('gmjflow_dashboard_debug_period') === 'true';
+      } catch {
+        return false;
+      }
+    }
+
+    function configurableEffectiveRangeDebugText(payload = {}) {
+      const range = configurableEffectiveRange(payload);
+      if (!range.start || !range.end) return '';
+      const bucket = range.interval > 0 ? ` · bucket ${range.interval}s` : '';
+      return `${configurableTimestampLabel(range.start)} → ${configurableTimestampLabel(range.end)}${bucket}`;
     }
 
     function renderConfigurableWidget(widget, payload) {
@@ -19766,13 +20235,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const body = element.querySelector('.configurable-dashboard-widget-body');
       const status = element.querySelector('.configurable-dashboard-widget-status');
       element.classList.remove('widget-loading');
-      status.textContent = payload.cached ? 'cache' : (payload.source || 'atualizado');
+      const qualityStatus = configurableQualityStatus(payload);
+      const baseStatus = qualityStatus?.label
+        || (payload.cached ? 'cache' : (payload.source || 'atualizado'));
+      const effectiveRangeDebug = configurableEffectiveRangeDebugText(payload);
+      status.textContent = configurableEffectiveRangeDebugEnabled() && effectiveRangeDebug
+        ? `${baseStatus} · ${effectiveRangeDebug}`
+        : baseStatus;
+      status.title = [qualityStatus?.title, effectiveRangeDebug].filter(Boolean).join(' · ');
+      status.dataset.qualityState = qualityStatus?.state || '';
       const existingChart = configurableWidgetCharts.get(widget.id);
       const selectedVisualization = GMJDashboardVisualizations.visualizationKind(widget);
+      const rankingPayload = ['top_n', 'ranking'].includes(payload.kind);
+      const combinedRanking = rankingPayload
+        && selectedVisualization === 'chart_table';
       const chartPayload = (
         (payload.kind === 'timeseries' && selectedVisualization !== 'stat')
         || (
-          ['top_n', 'ranking'].includes(payload.kind)
+          rankingPayload
           && !['table', 'stat'].includes(selectedVisualization)
         )
       );
@@ -19851,11 +20331,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else {
         let chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
         let chart = existingChart;
+        if (combinedRanking) {
+          const ratio = Math.max(
+            25,
+            Math.min(75, Number(widget.config?.chart_table_ratio || 55))
+          );
+          if (!body.querySelector('.configurable-ranking-combined')) {
+            chart?.off?.();
+            chart?.dispose?.();
+            chart = null;
+            body.innerHTML = `
+              <div class="configurable-ranking-combined" style="--ranking-chart-ratio:${ratio}%">
+                <div class="configurable-dashboard-widget-chart"></div>
+                <div class="configurable-ranking-table-pane">${configurableWidgetTable(widget, payload)}</div>
+              </div>
+            `;
+          } else {
+            body.querySelector('.configurable-ranking-combined')
+              .style.setProperty('--ranking-chart-ratio', `${ratio}%`);
+            body.querySelector('.configurable-ranking-table-pane').innerHTML =
+              configurableWidgetTable(widget, payload);
+          }
+          chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
+        }
         if (!chartContainer || !chart || chart.isDisposed?.()) {
           chart?.off?.();
           chart?.dispose?.();
-          body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
-          chartContainer = body.firstElementChild;
+          if (!combinedRanking) {
+            body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
+            chartContainer = body.firstElementChild;
+          } else {
+            chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
+          }
           chart = echarts.init(chartContainer);
         }
         configurableWidgetCharts.set(widget.id, chart);
@@ -19899,11 +20406,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             widget.config || {},
             appearance
           );
-          const visualization = GMJDashboardVisualizations.visualizationKind(widget);
+          const visualization = configurableChartKind(widget);
           const latestBySeries = new Map(
             trafficModel.series.map(item => [
               String(item.name || item.label || ''),
-              Math.abs(Number(item.legend_value) || 0)
+              Number.isFinite(item.legend_value)
+                ? Math.abs(item.legend_value)
+                : null
             ])
           );
           const series = trafficModel.series.map(item => {
@@ -19914,7 +20423,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             return {
             name: item.name || item.label,
             type: chartType,
-            smooth: chartType === 'line' && item.properties.smooth,
+            smooth: chartType === 'line'
+              && item.properties.smooth
+              && !(item.original_points || []).some(point => point.partial),
             showSymbol: false,
             connectNulls: trafficModel.connect_nulls,
             lineStyle: { width: item.properties.line_width, color },
@@ -19937,13 +20448,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           };
           });
           const legendPosition = appearance.legend_position;
+          const effectiveRange = configurableEffectiveRange(payload);
           GMJDashboardCharts.replaceChartOption(chart, {
+            useUTC: true,
             tooltip: {
               trigger: 'axis',
               axisPointer: { type: 'line' },
               formatter: params => {
                 const rows = Array.isArray(params) ? params : [params];
-                const heading = rows[0]?.axisValueLabel || '';
+                const pointTimestamp = Array.isArray(rows[0]?.value)
+                  ? rows[0].value[0]
+                  : rows[0]?.axisValue;
+                const heading = configurableTimestampLabel(pointTimestamp);
                 return [
                   heading,
                   ...rows.map(item => {
@@ -19963,10 +20479,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               orient: legendPosition === 'right' ? 'vertical' : 'horizontal',
               formatter: name => density.compactLegend
                 ? name
-                : `${name}: ${GMJDashboardFormatters.formatTooltipValue(
+                : `${name}: ${configurableMetricValue(
                   latestBySeries.get(String(name)),
                   metric,
-                  metricScale
+                  { scale: metricScale }
                 )}`,
               textStyle: {
                 fontSize: density.fontSize,
@@ -19984,6 +20500,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             },
             xAxis: {
               type: 'time',
+              min: effectiveRange.start || undefined,
+              max: effectiveRange.end || undefined,
+              boundaryGap: false,
               splitNumber: density.splitNumber,
               axisLabel: {
                 hideOverlap: true,
@@ -20023,23 +20542,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           const density = GMJDashboardCharts.densitySettings(densityMode);
           const ranking = GMJDashboardVisualizations.normalizeRankingPayload(payload);
           const dataset = GMJDashboardVisualizations.rankingDataset(ranking);
-          const items = dataset.items.slice(0, density.categoryLimit);
-          if (dataset.items.length > items.length) {
-            const remaining = dataset.items.slice(items.length);
-            items.push({
-              key: 'Outros',
-              label: 'Outros',
-              value: remaining.reduce((sum, item) => sum + item.value, 0),
-              percent: remaining.reduce((sum, item) => sum + item.percent, 0),
-              metadata: { grouped_items: remaining.length }
-            });
-          }
+          const visualization = configurableChartKind(widget);
+          const categoryLimit = ['donut', 'pie'].includes(visualization)
+            ? Number(widget.config?.slice_limit || 8)
+            : density.categoryLimit;
+          const items = GMJDashboardVisualizations.groupRankingItems(
+            dataset.items,
+            categoryLimit
+          );
           const metric = configurableWidgetMetric(widget, payload);
           const metricScale = GMJDashboardFormatters.selectMetricScale(
             configurableItemsMaximum(items),
             metric
           );
-          const visualization = GMJDashboardVisualizations.visualizationKind(widget);
           if (['donut', 'pie'].includes(visualization)) {
             const total = dataset.total;
             const byName = new Map(items.map(item => [String(item.label), Number(item.value) || 0]));
@@ -20054,7 +20569,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               } : undefined,
               tooltip: {
                 trigger: 'item',
-                formatter: params => `${params.marker || ''}${escapeHtml(params.name || '')}: ${GMJDashboardFormatters.formatTooltipValue(params.value, metric, metricScale)} (${GMJDashboardFormatters.formatPercentage(params.percent)})`
+                formatter: params => `${params.marker || ''}${configurableRankingTooltip(
+                  items[Number(params.dataIndex || 0)] || {},
+                  metric,
+                  metricScale,
+                  params.percent
+                )}`
               },
               legend: {
                 show: appearance.show_legend,
@@ -20074,7 +20594,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 },
                 labelLayout: { hideOverlap: true },
                 minShowLabelAngle: appearance.minimum_slice_label_percent * 3.6,
-                data: items.map(item => ({ name: item.label, value: item.value }))
+                data: items.map(item => ({
+                  name: item.label,
+                  value: item.value,
+                  rankingKey: item.key
+                }))
               }]
             });
           } else {
@@ -20086,7 +20610,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                   const rows = Array.isArray(params) ? params : [params];
                   const index = Number(rows[0]?.dataIndex || 0);
                   const item = items[index] || {};
-                  return `${escapeHtml(item.label || item.key || item.name || '-')}: ${GMJDashboardFormatters.formatTooltipValue(item.value, metric, metricScale)} (${GMJDashboardFormatters.formatPercentage(item.percent || 0)})`;
+                  return configurableRankingTooltip(
+                    item,
+                    metric,
+                    metricScale
+                  );
                 }
               },
               grid: {
@@ -20151,7 +20679,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 },
               series: [{
                 type: 'bar',
-                data: items.map(item => item.value),
+                data: items.map(item => ({
+                  value: item.value,
+                  rankingKey: item.key
+                })),
                 label: {
                   show: appearance.show_value_labels && densityMode !== 'compact',
                   hideOverlap: true,
@@ -20172,7 +20703,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               }]
             });
           }
+          installConfigurableRankingSelection(chart, body, items);
         }
+      }
+      if (rankingPayload) {
+        enrichConfigurableRankingAsns(body, payload).catch(() => {});
       }
       observeConfigurableWidgetSize(widget, body);
       createIcons();
@@ -20190,10 +20725,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         </div>`;
     }
 
-    async function queryConfigurableWidget(widget, { force = false } = {}) {
+    async function queryConfigurableWidget(
+      widget,
+      {
+        force = false,
+        globalContext = null,
+        rangeToken = null
+      } = {}
+    ) {
       if (!configurableDashboardActive || widget.hidden || widget.collapsed) return null;
       if (configurableLayoutInteractionActive) return null;
       if (!force && !configurableVisibleWidgets.has(widget.id)) return null;
+      const activeGlobalContext = globalContext || configurableDashboardContext();
+      const activeRangeToken = rangeToken
+        || activateConfigurableDashboardContext(activeGlobalContext);
+      const queryContext = configurableWidgetQueryContext(widget, activeGlobalContext);
+      const dashboardId = Number(configurableDashboard?.id || 0);
       configurableWidgetControllers.get(widget.id)?.abort();
       const controller = new AbortController();
       configurableWidgetControllers.set(widget.id, controller);
@@ -20204,18 +20751,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            dashboard_id: configurableDashboard.id,
+            dashboard_id: dashboardId,
             widget_id: widget.id,
-            ...configurableDashboardContext()
+            ...queryContext
           }),
           signal: controller.signal
         });
-        if (controller.signal.aborted) return null;
-        writeConfigurableWidgetCache(widget, payload);
+        if (
+          controller.signal.aborted
+          || configurableWidgetControllers.get(widget.id) !== controller
+          || !configurableRangeRequestGate.isCurrent(activeRangeToken)
+          || Number(configurableDashboard?.id || 0) !== dashboardId
+        ) return null;
+        writeConfigurableWidgetCache(widget, payload, queryContext);
         renderConfigurableWidget(widget, payload);
         return payload;
       } catch (error) {
-        if (error.name === 'AbortError') return null;
+        if (
+          error.name === 'AbortError'
+          || configurableWidgetControllers.get(widget.id) !== controller
+          || !configurableRangeRequestGate.isCurrent(activeRangeToken)
+        ) return null;
         renderConfigurableWidgetError(widget, error);
         throw error;
       } finally {
@@ -20425,11 +20981,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function refreshConfigurableDashboard() {
       if (!configurableDashboardActive || document.visibilityState !== 'visible' || activeView !== 'dashboard') return;
+      const globalContext = configurableDashboardContext();
+      const rangeToken = activateConfigurableDashboardContext(globalContext);
       if (configurableLayoutInteractionActive) return;
       const visible = (configurableDashboard?.widgets || []).filter(widget =>
         !widget.hidden && !widget.collapsed && configurableVisibleWidgets.has(widget.id)
       );
-      await Promise.allSettled(visible.map(widget => queryConfigurableWidget(widget, { force: true })));
+      await Promise.allSettled(visible.map(widget => queryConfigurableWidget(widget, {
+        force: true,
+        globalContext,
+        rangeToken
+      })));
     }
 
     async function patchConfigurableWidget(widget, patch) {
@@ -20456,7 +21018,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       ].join(':');
     }
 
-    async function commitConfigurableLayout(
+    async function performConfigurableLayoutCommit(
       layout,
       activeWidgetId,
       {
@@ -20518,6 +21080,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         )
       );
       if (staleResponse) {
+        configurableDashboard.layout_version = result.layout_version;
+        configurableDashboard.revision =
+          result.revision ?? result.layout_version;
         return { ...result, stale_response_ignored: true };
       }
       const normalizedById = new Map(
@@ -20532,6 +21097,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       syncConfigurablePersistentLayout(normalized);
       updateConfigurableDashboardGridPositions(normalized);
       return result;
+    }
+
+    function commitConfigurableLayout(layout, activeWidgetId, options = {}) {
+      const task = configurableLayoutCommitQueue
+        .catch(() => {})
+        .then(() => performConfigurableLayoutCommit(
+          layout,
+          activeWidgetId,
+          options
+        ));
+      configurableLayoutCommitQueue = task;
+      return task;
     }
 
     async function persistConfigurableLayoutAction(widget, repairedLayout, patch = {}) {
@@ -20779,6 +21356,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else if (action === 'details') {
         if (['src_ip', 'dst_ip', 'src_prefix', 'dst_prefix', 'conversation'].includes(dimension)) {
           await openIpDetails(String(filter.value).split('/')[0]);
+        } else if (['src_asn', 'dst_asn'].includes(dimension)) {
+          await openAsnDetails(filter.value);
         }
       } else if (action === 'anomalies') {
         showView('anomalies');
@@ -20861,6 +21440,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         getWidget: widgetId => (configurableDashboard?.widgets || [])
           .find(widget => Number(widget.id) === Number(widgetId)),
         canMove: configurableWidgetCanResize,
+        cancelSelector: 'button, a, input, select, textarea, table, .widget-content, .scroll-container',
         onStart: session => {
           beginConfigurableLayoutInteraction(session);
           configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
@@ -20962,38 +21542,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         } catch (error) {
           renderConfigurableWidgetError(widget, error);
         }
-      });
-      grid.addEventListener('dragstart', event => {
-        const widget = event.target.closest('.configurable-dashboard-widget');
-        if (
-          !widget
-          || !dashboardEditMode
-          || !configurableDashboard?.permissions?.can_edit
-          || event.target.closest('.widget-resize-handle')
-        ) {
-          event.preventDefault();
-          return;
-        }
-        widget.classList.add('dragging');
-        event.dataTransfer.setData('text/widget-id', widget.dataset.widgetId);
-      });
-      grid.addEventListener('dragend', event => event.target.closest('.configurable-dashboard-widget')?.classList.remove('dragging'));
-      grid.addEventListener('dragover', event => event.preventDefault());
-      grid.addEventListener('drop', async event => {
-        event.preventDefault();
-        if (!dashboardEditMode || !configurableDashboard?.permissions?.can_edit) return;
-        const sourceId = Number(event.dataTransfer.getData('text/widget-id'));
-        const targetId = Number(event.target.closest('.configurable-dashboard-widget')?.dataset.widgetId);
-        if (!sourceId || !targetId || sourceId === targetId) return;
-        const source = configurableDashboard.widgets.find(item => item.id === sourceId);
-        const target = configurableDashboard.widgets.find(item => item.id === targetId);
-        const repaired = GMJDashboardLayout.moveItemAndPush(
-          configurableLayoutItems(),
-          source.id,
-          target.grid.x,
-          target.grid.y
-        );
-        await persistConfigurableLayoutAction(source, repaired);
       });
     }
 
@@ -22944,10 +23492,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
 
     document.addEventListener('click', event => {
-      const target = event.target.closest('.ip-link[data-ip]');
-      if (!target) return;
-      event.preventDefault();
-      openIpDetails(target.dataset.ip).catch(console.error);
+      const copyTarget = event.target.closest('[data-copy-value]');
+      if (copyTarget) {
+        event.preventDefault();
+        copyText(copyTarget.dataset.copyValue).catch(console.error);
+        return;
+      }
+      const ipTarget = event.target.closest('.ip-link[data-ip]');
+      if (ipTarget) {
+        event.preventDefault();
+        openIpDetails(ipTarget.dataset.ip).catch(console.error);
+        return;
+      }
+      const asnTarget = event.target.closest('.asn-link[data-asn]');
+      if (asnTarget) {
+        event.preventDefault();
+        openAsnDetails(asnTarget.dataset.asn).catch(console.error);
+      }
     });
 
     document.getElementById('view-dashboard').addEventListener('click', event => {

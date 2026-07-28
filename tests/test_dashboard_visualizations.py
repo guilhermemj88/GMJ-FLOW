@@ -24,8 +24,34 @@ class DashboardVisualizationContractTest(unittest.TestCase):
                 "donut",
                 "bar_gauge",
                 "stat",
+                "chart_table",
             },
         )
+
+    def test_chart_table_configuration_is_typed_and_bounded(self):
+        widget = validate_widget_definition(
+            {
+                "title": "ASN",
+                "type": "top_n",
+                "category": "traffic",
+                "config": {
+                    "metric": "bps",
+                    "dimension": "src_asn",
+                    "direction": "download",
+                    "limit": 10,
+                    "visualization_kind": "chart_table",
+                    "combined_chart_kind": "donut",
+                    "slice_limit": 100,
+                    "chart_table_ratio": 5,
+                },
+                "visualization": {"type": "chart_table"},
+                "grid": {"x": 0, "y": 0, "w": 8, "h": 8},
+            }
+        )
+        self.assertEqual(widget["config"]["visualization_kind"], "chart_table")
+        self.assertEqual(widget["config"]["combined_chart_kind"], "donut")
+        self.assertEqual(widget["config"]["slice_limit"], 20)
+        self.assertEqual(widget["config"]["chart_table_ratio"], 25)
 
     def test_legacy_bar_normalizes_without_changing_data_kind(self):
         config, visualization = normalize_visualization_config(
@@ -118,4 +144,3 @@ class DashboardVisualizationContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import sys
@@ -188,6 +189,7 @@ HTML = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 ENV_EXAMPLE = (ROOT / ".env.example").read_text(encoding="utf-8")
 INSTALL = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 UPDATE = (ROOT / "scripts" / "update.sh").read_text(encoding="utf-8")
+UNINSTALL = (ROOT / "scripts" / "uninstall.sh").read_text(encoding="utf-8")
 APPLY_COLLECTORS = (ROOT / "scripts" / "apply_collectors.sh").read_text(encoding="utf-8")
 ROOT_COLLECTORS_COMPOSE = (ROOT / "docker-compose.collectors.yml").read_text(encoding="utf-8")
 
@@ -268,12 +270,34 @@ class CollectorApplyStaticTest(unittest.TestCase):
         self.assertIn("diagnosticBadge(item.clickhouse_receiving", HTML)
         self.assertIn("ingestionDiagnosticTitle(item)", HTML)
 
-    def test_install_and_update_include_collectors_compose_when_present(self):
+    def test_install_and_update_keep_collectors_separate_and_safe(self):
+        self.assertIn("-f docker-compose.yml", INSTALL)
+        self.assertIn("-f docker-compose.collectors.yml", INSTALL)
+        self.assertIn("check_pmacct_collectors.sh", INSTALL)
+        self.assertIn("-f docker-compose.yml", UPDATE)
+        self.assertIn("backend frontend", UPDATE)
+        self.assertIn("check_pmacct_collectors.sh", UPDATE)
         for script in (INSTALL, UPDATE):
-            self.assertIn("docker-compose.collectors.yml", script)
-            self.assertIn("-f docker-compose.yml", script)
-            self.assertIn("-f docker-compose.collectors.yml", script)
-            self.assertIn("--remove-orphans", script)
+            self.assertNotIn("--remove-orphans", script)
+
+    def test_uninstall_targets_only_application_and_preserves_collectors(self):
+        for forbidden in (
+            "--remove-orphans",
+            "down -v",
+            "volume prune",
+            "system prune",
+            "docker-compose.collectors.yml down",
+        ):
+            self.assertNotIn(forbidden, UNINSTALL)
+        self.assertIn("compose_app stop backend frontend", UNINSTALL)
+        self.assertIn("compose_app rm -f backend frontend", UNINSTALL)
+        self.assertIn("DESTROY APPLICATION DATA", UNINSTALL)
+        self.assertIn('"$PROJECT_ROOT"/data/backend', UNINSTALL)
+        self.assertIn("all Docker volumes, .env, PMACCT and ExaBGP", UNINSTALL)
+        self.assertNotIn("rm -f \"$PROJECT_ROOT/.env\"", UNINSTALL)
+        self.assertNotIn("systemctl disable --now", UNINSTALL)
+        self.assertIn("gmj-flow.service also owns PMACCT collectors", UNINSTALL)
+        self.assertIn("exit 4", UNINSTALL)
 
     def test_collector_apply_only_starts_pmacct_services_without_dependencies(self):
         self.assertIn("config --services", APPLY_COLLECTORS)
@@ -570,6 +594,103 @@ class CollectorApplyStaticTest(unittest.TestCase):
             self.assertNotIn("depends_on:\n      clickhouse:", compose_text)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class IpAndAsnEnrichmentContractTest(unittest.TestCase):
+    def test_ip_with_ptr_and_rdap_prefix_keeps_identity_fields(self):
+        payload = backend_main.rdap_response(
+            "8.8.8.8",
+            {
+                "name": "GOGL",
+                "country": "US",
+                "cidr0_cidrs": [{"v4prefix": "8.8.8.0", "length": 24}],
+                "links": [
+                    {
+                        "rel": "self",
+                        "href": "https://rdap.example/ip/8.8.8.8",
+                    }
+                ],
+            },
+            "dns.google",
+            {"as": "AS15169 Google LLC", "org": "Google LLC"},
+        )
+        self.assertEqual(payload["hostname"], "dns.google")
+        self.assertEqual(payload["reverse_dns"], "dns.google")
+        self.assertEqual(payload["prefix"], "8.8.8.0/24")
+        self.assertEqual(payload["asn"], "AS15169 Google LLC")
+
+    def test_ip_without_ptr_and_external_failure_are_explicit(self):
+        with mock.patch.object(
+            backend_main.socket,
+            "gethostbyaddr",
+            side_effect=OSError("sem PTR"),
+        ):
+            self.assertIsNone(backend_main.reverse_dns_lookup("192.0.2.1"))
+        failure = backend_main.rdap_failure_response(
+            "192.0.2.1",
+            None,
+            "timeout",
+        )
+        self.assertFalse(failure["ok"])
+        self.assertIsNone(failure["hostname"])
+        self.assertIn("timeout", failure["message"])
+
+    def test_known_and_unknown_asn_names_keep_the_number_visible(self):
+        self.assertEqual(
+            backend_main.asn_display_name(15169, "Google LLC"),
+            "Google LLC",
+        )
+        self.assertEqual(
+            backend_main.asn_display_name(64500, "AS64500"),
+            "AS64500",
+        )
+        self.assertEqual(backend_main.asn_label(64500), "AS64500")
+
+
+class AuthenticationBoundaryContractTest(unittest.TestCase):
+    @staticmethod
+    def request(path):
+        return types.SimpleNamespace(
+            method="GET",
+            url=types.SimpleNamespace(path=path),
+            state=types.SimpleNamespace(),
+        )
+
+    def test_grafana_namespace_bypasses_session_but_export_does_not(self):
+        calls = []
+
+        async def call_next(request):
+            calls.append(request.url.path)
+            return "ok"
+
+        with mock.patch.object(
+            backend_main,
+            "token_user_from_request",
+            return_value=None,
+        ):
+            grafana = asyncio.run(
+                backend_main.auth_middleware(
+                    self.request("/api/v1/grafana/health"),
+                    call_next,
+                )
+            )
+            export = asyncio.run(
+                backend_main.auth_middleware(
+                    self.request("/api/dashboards/42/grafana-export"),
+                    call_next,
+                )
+            )
+            regular = asyncio.run(
+                backend_main.auth_middleware(
+                    self.request("/api/dashboard/series"),
+                    call_next,
+                )
+            )
+
+        self.assertEqual(grafana, "ok")
+        self.assertEqual(calls, ["/api/v1/grafana/health"])
+        self.assertEqual(export.status_code, 401)
+        self.assertEqual(regular.status_code, 401)
 
 
 if __name__ == "__main__":

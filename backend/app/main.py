@@ -155,6 +155,7 @@ from app.services.grafana_api import (
     canonical_timeseries as canonical_grafana_timeseries,
     catalog as grafana_api_catalog,
     correlation_id as grafana_correlation_id,
+    is_grafana_api_path,
     validate_ranking_request as validate_grafana_ranking_request,
     validate_timeseries_request as validate_grafana_timeseries_request,
 )
@@ -168,6 +169,13 @@ from app.services.grafana_schemas import (
     GrafanaTableResponse,
     GrafanaTimeseriesQuery,
     GrafanaTimeseriesResponse,
+)
+from app.services.time_buckets import (
+    aggregate_temporal_points,
+    bucket_seconds_for_window,
+    normalize_rate_bucket_rows,
+    range_minutes_for_window,
+    series_data_quality,
 )
 
 
@@ -1214,6 +1222,7 @@ class DetectionTrafficLearnPayload(BaseModel):
     stability_mode: str = "medium"
     peak_window_minutes: int = Field(5, ge=1, le=60)
     window_seconds: int = Field(60, ge=5, le=3600)
+    maximum_data_points: int = Field(100, ge=10, le=1000)
 
 
 class DetectionWhitelistPayload(BaseModel):
@@ -4405,7 +4414,13 @@ def dashboard_cache_invalidate_for_http_mutation(path: str) -> int:
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or path == "/health" or path == "/api/auth/login" or not path.startswith("/api/"):
+    if (
+        request.method == "OPTIONS"
+        or path == "/health"
+        or path == "/api/auth/login"
+        or not path.startswith("/api/")
+        or is_grafana_api_path(path)
+    ):
         return await call_next(request)
 
     user = token_user_from_request(request)
@@ -7067,7 +7082,8 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
         ensure_asn_db(conn)
         row = conn.execute(
             """
-            SELECT asn, as_name, org_name, country, source, updated_at, expires_at, last_error
+            SELECT asn, as_name, org_name, country, source, raw_json,
+                   updated_at, expires_at, last_error
             FROM asn_info
             WHERE asn = ?
             """,
@@ -7082,6 +7098,10 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
                 return None
         except ValueError:
             pass
+    try:
+        rdap_data = json.loads(clean_text(row["raw_json"]) or "{}")
+    except (TypeError, ValueError):
+        rdap_data = {}
     return {
         "asn": number,
         "as_name": clean_text(row["as_name"]),
@@ -7091,6 +7111,7 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
         "updated_at": clean_text(row["updated_at"]),
         "expires_at": expires_at,
         "last_error": clean_text(row["last_error"]),
+        "rdap": rdap_data if isinstance(rdap_data, dict) else {},
     }
 
 
@@ -7349,6 +7370,20 @@ def rdap_link(data: dict[str, Any]) -> str:
     return ""
 
 
+def rdap_prefix(data: dict[str, Any]) -> str | None:
+    for item in data.get("cidr0_cidrs") or []:
+        if not isinstance(item, dict):
+            continue
+        prefix = clean_text(
+            item.get("v4prefix") or item.get("v6prefix")
+        )
+        length = item.get("length")
+        if prefix and length is not None:
+            return "%s/%s" % (prefix, length)
+    name = clean_text(data.get("name"))
+    return name if "/" in name else None
+
+
 def vcard_values(entity: dict[str, Any], key: str) -> list[str]:
     values = []
     vcard = entity.get("vcardArray")
@@ -7435,6 +7470,11 @@ def rdap_response(
         "is_public": True,
         "ok": True,
         "reverse_dns": reverse_dns,
+        "hostname": reverse_dns,
+        "prefix": rdap_prefix(data),
+        "start_address": clean_text(data.get("startAddress")) or None,
+        "end_address": clean_text(data.get("endAddress")) or None,
+        "rdap_url": rdap_link(data) or None,
         "country": country or None,
         "region": clean_text(geo.get("regionName")) or None,
         "city": clean_text(geo.get("city")) or None,
@@ -7464,6 +7504,11 @@ def rdap_failure_response(
         "is_public": True,
         "ok": False,
         "reverse_dns": reverse_dns,
+        "hostname": reverse_dns,
+        "prefix": None,
+        "start_address": None,
+        "end_address": None,
+        "rdap_url": None,
         "country": clean_text(geo.get("country")) or None,
         "region": clean_text(geo.get("regionName")) or None,
         "city": clean_text(geo.get("city")) or None,
@@ -24287,11 +24332,18 @@ def learn_detection_template_from_traffic(template_id: int, payload: DetectionTr
             zone_filters["dst_cidrs"] = zone_cidrs
         else:
             zone_filters["zone_cidrs"] = zone_cidrs
+    requested_maximum_points = int(payload.maximum_data_points or 100)
+    effective_window_seconds = bucket_seconds_for_window(
+        start,
+        end,
+        maximum_data_points=requested_maximum_points,
+        minimum_seconds=int(payload.window_seconds or 60),
+    )
     rows = fetch_learning_traffic_series({
         **dump_model(payload),
         "start_time": start,
         "end_time": end,
-        "window_seconds": payload.window_seconds,
+        "window_seconds": effective_window_seconds,
         **zone_filters,
     })
     points = detection_learning_series_points(rows, payload.metric)
@@ -24302,6 +24354,24 @@ def learn_detection_template_from_traffic(template_id: int, payload: DetectionTr
     reason_summary: dict[str, int] = {}
     for point in removed_points:
         reason_summary[point["reason"]] = reason_summary.get(point["reason"], 0) + 1
+    total_display_points = len(clean_points) + len(removed_points)
+    if total_display_points > requested_maximum_points and removed_points:
+        removed_limit = max(
+            2,
+            round(requested_maximum_points * len(removed_points) / total_display_points),
+        )
+        removed_limit = min(requested_maximum_points - 2, removed_limit)
+    else:
+        removed_limit = min(len(removed_points), requested_maximum_points)
+    clean_limit = max(1, requested_maximum_points - removed_limit)
+    display_clean_points = aggregate_temporal_points(
+        clean_points,
+        maximum_data_points=clean_limit,
+    )
+    display_removed_points = aggregate_temporal_points(
+        removed_points,
+        maximum_data_points=max(1, removed_limit),
+    )
     return {
         "ok": True,
         "template_id": template_id,
@@ -24313,12 +24383,38 @@ def learn_detection_template_from_traffic(template_id: int, payload: DetectionTr
             "removed_reason_summary": reason_summary,
         },
         "suggested_rule": suggested,
-        "series": [{"time": point["time"], "value": point["value"], "removed": False} for point in clean_points[:1000]],
+        "series": [
+            {
+                **{
+                    key: value
+                    for key, value in point.items()
+                    if key != "time_dt"
+                },
+                "removed": False,
+            }
+            for point in display_clean_points
+        ],
         "removed_windows": [
             {"start": iso(window["start"]), "end": iso(window["end"]), "reason": window["reason"], "source": window["source"]}
             for window in windows[:200]
         ],
-        "removed_points": [{"time": point["time"], "value": point["value"], "reason": point["reason"]} for point in removed_points[:1000]],
+        "removed_points": [
+            {
+                key: value
+                for key, value in point.items()
+                if key != "time_dt"
+            }
+            for point in display_removed_points
+        ],
+        "sampling": {
+            "maximum_data_points": requested_maximum_points,
+            "bucket_seconds": effective_window_seconds,
+            "source_points": total_display_points,
+            "returned_points": (
+                len(display_clean_points) + len(display_removed_points)
+            ),
+            "strategy": "aggregate_full_range",
+        },
         "peak_hunter": {
             "windows_removed": sum(1 for window in windows if window.get("source") == "peak_hunter"),
             "negative_samples_used": negative_samples,
@@ -33616,7 +33712,7 @@ def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
 
 def grafana_resolution_seconds(interval_ms: int) -> int:
     requested = max(1, int((int(interval_ms) + 999) / 1000))
-    for resolution in (5, 10, 30, 60, 300, 900, 3600):
+    for resolution in (1, 5, 10, 30, 60, 300, 900, 3600):
         if resolution >= requested:
             return resolution
     return 3600
@@ -33638,6 +33734,9 @@ def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
             ),
             "calculation": request_data["calculation"],
             "legend_calculation": "last_not_null",
+            "include_partial_bucket": bool(
+                request_data.get("include_partial_bucket", False)
+            ),
         },
         "filters": grafana_query_filters(request_data),
         "visualization": {"type": "line"},
@@ -34623,6 +34722,11 @@ def ip_whois(ip: str = Query(..., min_length=2)):
                 "is_public": False,
                 "ok": True,
                 "reverse_dns": reverse_dns,
+                "hostname": reverse_dns,
+                "prefix": None,
+                "start_address": None,
+                "end_address": None,
+                "rdap_url": None,
                 "country": None,
                 "region": None,
                 "city": None,
@@ -35201,6 +35305,84 @@ def asn_info_endpoint(asns: str = Query(..., min_length=1)):
             )
         conn.commit()
     return {"items": items, "queued": queued}
+
+
+@app.get("/api/asn/details")
+def asn_details_endpoint(asn: int = Query(..., ge=1, le=4294967295)):
+    number = int(asn)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        info = lookup_asn_info(number)
+        if info is None:
+            queue_asn_info_resolution(conn, number, priority=10)
+        prefix_rows = conn.execute(
+            """
+            SELECT prefix, country, source, updated_at
+            FROM asn_prefixes
+            WHERE asn = ?
+            ORDER BY ip_version, prefix
+            LIMIT 100
+            """,
+            (number,),
+        ).fetchall()
+        conn.commit()
+    info = info or {
+        "asn": number,
+        "as_name": "",
+        "org_name": "",
+        "country": "",
+        "source": "queued",
+        "updated_at": "",
+        "last_error": "",
+        "rdap": {},
+    }
+    name = usable_asn_name(
+        info.get("as_name") or info.get("org_name"),
+        number,
+    )
+    last_error = clean_text(info.get("last_error"))
+    source = clean_text(info.get("source")) or "queued"
+    state = (
+        "resolved"
+        if name
+        else "error"
+        if last_error
+        else "resolving"
+        if source in {"queued", "pending", "resolving", "stale"}
+        else "not_found"
+    )
+    return {
+        "asn": number,
+        "asn_label": asn_label(number),
+        "display_name": (
+            "%s — %s" % (asn_label(number), name)
+            if name
+            else asn_label(number)
+        ),
+        "as_name": name or None,
+        "org_name": clean_text(info.get("org_name")) or None,
+        "country": clean_text(info.get("country")).upper() or None,
+        "source": source,
+        "state": state,
+        "updated_at": clean_text(info.get("updated_at")) or None,
+        "last_error": last_error or None,
+        "prefixes": [
+            {
+                "prefix": clean_text(row["prefix"]),
+                "country": clean_text(row["country"]).upper() or None,
+                "source": clean_text(row["source"]) or None,
+                "updated_at": clean_text(row["updated_at"]) or None,
+            }
+            for row in prefix_rows
+        ],
+        "rdap": (
+            info.get("rdap")
+            if isinstance(info.get("rdap"), dict)
+            else {}
+        ),
+        "external_url": "https://rdap.org/autnum/%s" % number,
+    }
 
 
 @app.post("/api/asn/import")
@@ -36065,6 +36247,7 @@ def traffic_items(
     end: datetime | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    include_partial_bucket: bool = False,
 ):
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
@@ -36075,6 +36258,7 @@ def traffic_items(
             "end": end or end_time or "",
             "sensor": sensor,
             "sensor_id": sensor_id,
+            "include_partial_bucket": bool(include_partial_bucket),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -36092,8 +36276,8 @@ def traffic_items(
         SELECT
             toStartOfMinute(flow_time) AS time,
             sensor,
-            sumIf({corrected_value_expr(value_field, input_factor)}, input_if > 0) * {multiplier} / 60 AS download_{metric},
-            sumIf({corrected_value_expr(value_field, output_factor)}, output_if > 0) * {multiplier} / 60 AS upload_{metric}
+            sumIf({corrected_value_expr(value_field, input_factor)}, input_if > 0) * {multiplier} AS download_total,
+            sumIf({corrected_value_expr(value_field, output_factor)}, output_if > 0) * {multiplier} AS upload_total
         FROM flow_raw
         WHERE {where}
         GROUP BY time, sensor
@@ -36101,9 +36285,20 @@ def traffic_items(
         """,
         params,
     )
+    normalized_rows = normalize_rate_bucket_rows(
+        rows_as_dicts(result),
+        bucket_seconds=60,
+        range_end=end_dt,
+        totals={
+            f"download_{metric}": "download_total",
+            f"upload_{metric}": "upload_total",
+        },
+        timestamp_field="time",
+        include_partial_bucket=include_partial_bucket,
+    )
 
     series_by_sensor: dict[str, dict[str, Any]] = {}
-    for row in rows_as_dicts(result):
+    for row in normalized_rows:
         sensor_name = str(row["sensor"] or "Sensor desconhecido")
         item = series_by_sensor.setdefault(
             sensor_name,
@@ -36116,17 +36311,51 @@ def traffic_items(
                 "points": [],
             },
         )
-        download_value = round(float(row[f"download_{metric}"] or 0), 2)
-        upload_value = round(float(row[f"upload_{metric}"] or 0), 2)
+        download_value = row[f"download_{metric}"]
+        upload_value = row[f"upload_{metric}"]
+        combined_value = (
+            None
+            if download_value is None and upload_value is None
+            else round(
+                float(download_value or 0)
+                + float(upload_value or 0),
+                2,
+            )
+        )
         item["points"].append(
             {
                 "time": iso(row["time"]),
                 f"download_{metric}": download_value,
                 f"upload_{metric}": upload_value,
-                metric: round(download_value + upload_value, 2),
+                metric: combined_value,
+                "partial": bool(row["partial"]),
+                "bucket_duration_seconds": row[
+                    "bucket_duration_seconds"
+                ],
             }
         )
-    return dashboard_cache_set(cache_key, {"start": iso(start_dt), "end": iso(end_dt), "items": list(series_by_sensor.values())})
+    items = list(series_by_sensor.values())
+    for item in items:
+        item["quality"] = series_data_quality(
+            item["points"],
+            bucket_seconds=60,
+            range_end=end_dt,
+            timestamp_field="time",
+        )
+    payload = {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "bucket_seconds": 60,
+        "include_partial_bucket": bool(include_partial_bucket),
+        "quality": series_data_quality(
+            normalized_rows,
+            bucket_seconds=60,
+            range_end=end_dt,
+            timestamp_field="time",
+        ),
+        "items": items,
+    }
+    return dashboard_cache_set(cache_key, payload)
 
 
 @app.get("/api/traffic/bps")
@@ -36138,8 +36367,19 @@ def get_bps(
     end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    include_partial_bucket: bool = False,
 ):
-    return traffic_items("bps", range_minutes, sensor, sensor_id, start, end, start_time, end_time)
+    return traffic_items(
+        "bps",
+        range_minutes,
+        sensor,
+        sensor_id,
+        start,
+        end,
+        start_time,
+        end_time,
+        include_partial_bucket,
+    )
 
 
 @app.get("/api/traffic/pps")
@@ -36151,8 +36391,19 @@ def get_pps(
     end_time: datetime | None = None,
     sensor: str | None = None,
     sensor_id: int | None = Query(None, ge=1),
+    include_partial_bucket: bool = False,
 ):
-    return traffic_items("pps", range_minutes, sensor, sensor_id, start, end, start_time, end_time)
+    return traffic_items(
+        "pps",
+        range_minutes,
+        sensor,
+        sensor_id,
+        start,
+        end,
+        start_time,
+        end_time,
+        include_partial_bucket,
+    )
 
 
 def monitored_sensor_interfaces(
@@ -36657,6 +36908,7 @@ def interface_traffic_items(
     end: datetime | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    include_partial_bucket: bool = False,
 ) -> dict[str, Any]:
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     ensure_sensor_db()
@@ -36684,8 +36936,8 @@ def interface_traffic_items(
             f"""
             SELECT
                 toStartOfMinute(flow_time) AS time,
-                sumIf({corrected_value_expr(value_field, input_factor)}, input_if = {{if_index:UInt32}}) * {multiplier} / 60 AS download_{metric},
-                sumIf({corrected_value_expr(value_field, output_factor)}, output_if = {{if_index:UInt32}}) * {multiplier} / 60 AS upload_{metric}
+                sumIf({corrected_value_expr(value_field, input_factor)}, input_if = {{if_index:UInt32}}) * {multiplier} AS download_total,
+                sumIf({corrected_value_expr(value_field, output_factor)}, output_if = {{if_index:UInt32}}) * {multiplier} AS upload_total
             FROM flow_raw
             WHERE {where}
               AND toString(exporter_ip) = {{exporter_ip:String}}
@@ -36695,19 +36947,42 @@ def interface_traffic_items(
             """,
             params,
         )
-
-        points = [
-            {
-                "time": iso(row["time"]),
-                f"download_{metric}": round(float(row[f"download_{metric}"] or 0), 2),
-                f"upload_{metric}": round(float(row[f"upload_{metric}"] or 0), 2),
-                metric: round(
-                    float(row[f"download_{metric}"] or 0) + float(row[f"upload_{metric}"] or 0),
+        normalized_rows = normalize_rate_bucket_rows(
+            rows_as_dicts(result),
+            bucket_seconds=60,
+            range_end=end_dt,
+            totals={
+                f"download_{metric}": "download_total",
+                f"upload_{metric}": "upload_total",
+            },
+            timestamp_field="time",
+            include_partial_bucket=include_partial_bucket,
+        )
+        points = []
+        for row in normalized_rows:
+            download_value = row[f"download_{metric}"]
+            upload_value = row[f"upload_{metric}"]
+            combined_value = (
+                None
+                if download_value is None and upload_value is None
+                else round(
+                    float(download_value or 0)
+                    + float(upload_value or 0),
                     2,
-                ),
-            }
-            for row in rows_as_dicts(result)
-        ]
+                )
+            )
+            points.append(
+                {
+                    "time": iso(row["time"]),
+                    f"download_{metric}": download_value,
+                    f"upload_{metric}": upload_value,
+                    metric: combined_value,
+                    "partial": bool(row["partial"]),
+                    "bucket_duration_seconds": row[
+                        "bucket_duration_seconds"
+                    ],
+                }
+            )
         items.append(
             {
                 "series_type": "interface",
@@ -36719,10 +36994,36 @@ def interface_traffic_items(
                 "direction": interface.get("direction") or "Unset",
                 "color": interface["color"] or "#64748b",
                 "points": points,
+                "quality": series_data_quality(
+                    normalized_rows,
+                    bucket_seconds=60,
+                    range_end=end_dt,
+                    timestamp_field="time",
+                ),
             }
         )
 
-    return {"start": iso(start_dt), "end": iso(end_dt), "items": items}
+    quality_rows = [
+        {
+            "time": point["time"],
+            "partial": point["partial"],
+        }
+        for item in items
+        for point in item["points"]
+    ]
+    return {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "bucket_seconds": 60,
+        "include_partial_bucket": bool(include_partial_bucket),
+        "quality": series_data_quality(
+            quality_rows,
+            bucket_seconds=60,
+            range_end=end_dt,
+            timestamp_field="time",
+        ),
+        "items": items,
+    }
 
 
 @app.get("/api/traffic/interface-bps")
@@ -36735,8 +37036,20 @@ def get_interface_bps(
     end_time: datetime | None = None,
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
+    include_partial_bucket: bool = False,
 ):
-    return interface_traffic_items("bps", sensor_id, range_minutes, interface_id, if_index, start, end, start_time, end_time)
+    return interface_traffic_items(
+        "bps",
+        sensor_id,
+        range_minutes,
+        interface_id,
+        if_index,
+        start,
+        end,
+        start_time,
+        end_time,
+        include_partial_bucket,
+    )
 
 
 @app.get("/api/traffic/interface-pps")
@@ -36749,8 +37062,20 @@ def get_interface_pps(
     end_time: datetime | None = None,
     interface_id: int | None = Query(None, ge=1),
     if_index: int | None = Query(None, ge=0),
+    include_partial_bucket: bool = False,
 ):
-    return interface_traffic_items("pps", sensor_id, range_minutes, interface_id, if_index, start, end, start_time, end_time)
+    return interface_traffic_items(
+        "pps",
+        sensor_id,
+        range_minutes,
+        interface_id,
+        if_index,
+        start,
+        end,
+        start_time,
+        end_time,
+        include_partial_bucket,
+    )
 
 
 def decoder_label_expr() -> str:
@@ -37066,6 +37391,8 @@ def dashboard_series_payload(
     limit: int,
     zone_id: int | None = None,
     zone_direction: str = "both",
+    include_partial_bucket: bool = False,
+    maximum_data_points: int = 1000,
 ) -> dict[str, Any]:
     ensure_clickhouse_schema()
     group_by = clean_text(group_by).lower() or "total"
@@ -37100,12 +37427,21 @@ def dashboard_series_payload(
     )
     start_dt = context["start"]
     end_dt = context["end"]
+    effective_range_minutes = range_minutes_for_window(start_dt, end_dt)
+    bucket_seconds = bucket_seconds_for_window(
+        start_dt,
+        end_dt,
+        maximum_data_points=maximum_data_points,
+        minimum_seconds=dashboard_bucket_seconds(effective_range_minutes),
+    )
     cache_key = dashboard_cache_key(
         "dashboard-series",
         {
             "range_minutes": range_minutes,
             "start": start or start_time or "",
             "end": end or end_time or "",
+            "interval": bucket_seconds,
+            "maximum_data_points": maximum_data_points,
             "sensor_id": sensor_id,
             "interface_id": interface_id,
             "if_index": if_index,
@@ -37117,11 +37453,13 @@ def dashboard_series_payload(
             "zone_direction": zone_direction,
         },
     )
-    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
+    cached = dashboard_cache_get(
+        cache_key,
+        dashboard_cache_ttl(effective_range_minutes),
+    )
     if cached:
         return cached
 
-    bucket_seconds = dashboard_bucket_seconds(range_minutes)
     value_field = "bytes" if metric == "bits_s" else "packets"
     multiplier = "8" if metric == "bits_s" else "1"
     params = dict(context["params"])
@@ -37188,7 +37526,7 @@ def dashboard_series_payload(
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {zone_input_group} AS group_key,
                     'download' AS flow_direction,
-                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} AS total_value
                 FROM {source_table}
                 WHERE {base_where} AND {zone_download_filter} AND {input_condition}
                 GROUP BY ts, group_key
@@ -37201,7 +37539,7 @@ def dashboard_series_payload(
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {zone_output_group} AS group_key,
                     'upload' AS flow_direction,
-                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} AS total_value
                 FROM {source_table}
                 WHERE {base_where} AND {zone_upload_filter} AND {output_condition}
                 GROUP BY ts, group_key
@@ -37215,7 +37553,7 @@ def dashboard_series_payload(
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {input_group} AS group_key,
                     'download' AS flow_direction,
-                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} / {bucket_seconds} AS value
+                    sum({corrected_value_expr(value_field, input_factor)}) * {multiplier} AS total_value
                 FROM {source_table}
                 WHERE {base_where} AND {input_condition}
                 GROUP BY ts, group_key
@@ -37228,7 +37566,7 @@ def dashboard_series_payload(
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     {output_group} AS group_key,
                     'upload' AS flow_direction,
-                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} / {bucket_seconds} AS value
+                    sum({corrected_value_expr(value_field, output_factor)}) * {multiplier} AS total_value
                 FROM {source_table}
                 WHERE {base_where} AND {output_condition}
                 GROUP BY ts, group_key
@@ -37245,10 +37583,17 @@ def dashboard_series_payload(
             {
                 "start": iso(start_dt),
                 "end": iso(end_dt),
+                "range_minutes": effective_range_minutes,
                 "metric": metric,
                 "group_by": group_by,
                 "direction": direction,
                 "bucket_seconds": bucket_seconds,
+                "include_partial_bucket": bool(include_partial_bucket),
+                "quality": series_data_quality(
+                    [],
+                    bucket_seconds=bucket_seconds,
+                    range_end=end_dt,
+                ),
                 "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
                 "series": empty_series,
                 "items": empty_series,
@@ -37256,7 +37601,13 @@ def dashboard_series_payload(
             },
         )
     result = query_clickhouse(query_prefix + " UNION ALL ".join(selects) + " ORDER BY ts, group_key, flow_direction", params)
-    rows = rows_as_dicts(result)
+    rows = normalize_rate_bucket_rows(
+        rows_as_dicts(result),
+        bucket_seconds=bucket_seconds,
+        range_end=end_dt,
+        totals={"value": "total_value"},
+        include_partial_bucket=include_partial_bucket,
+    )
     totals: dict[str, float] = {}
     for row in rows:
         totals[clean_text(row["group_key"])] = totals.get(clean_text(row["group_key"]), 0.0) + float(row["value"] or 0)
@@ -37298,7 +37649,18 @@ def dashboard_series_payload(
                 "points": [],
             },
         )
-        item["points"].append({"ts": iso(row["ts"]), "value": round(float(row["value"] or 0), 2)})
+        item["points"].append(
+            {
+                "ts": iso(row["ts"]),
+                "value": (
+                    round(float(row["value"]), 2)
+                    if row.get("value") is not None
+                    else None
+                ),
+                "partial": bool(row.get("partial")),
+                "bucket_duration_seconds": row.get("bucket_duration_seconds"),
+            }
+        )
     if zone_id is not None and group_by == "total":
         expected_zone_directions = {
             "both": ("download", "upload"),
@@ -37316,10 +37678,7 @@ def dashboard_series_payload(
                 "label": "Total",
                 "direction": flow_direction,
                 "color": dashboard_series_color("Total", group_by, len(series_by_key)),
-                "points": [
-                    {"ts": iso(start_dt), "value": 0.0},
-                    {"ts": iso(end_dt), "value": 0.0},
-                ],
+                "points": [],
             }
     normalized_series = list(series_by_key.values())
     if group_by == "total":
@@ -37331,10 +37690,17 @@ def dashboard_series_payload(
     payload = {
         "start": iso(start_dt),
         "end": iso(end_dt),
+        "range_minutes": effective_range_minutes,
         "metric": metric,
         "group_by": group_by,
         "direction": direction,
         "bucket_seconds": bucket_seconds,
+        "include_partial_bucket": bool(include_partial_bucket),
+        "quality": series_data_quality(
+            rows,
+            bucket_seconds=bucket_seconds,
+            range_end=end_dt,
+        ),
         "interface": dashboard_interface_metadata(sensor_id, interface_id, if_index),
         "series": normalized_series,
         "items": normalized_series,
@@ -37359,6 +37725,7 @@ def dashboard_series(
     limit: int = Query(12, ge=1, le=50),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    include_partial_bucket: bool = False,
 ):
     return dashboard_series_payload(
         range_minutes,
@@ -37375,6 +37742,7 @@ def dashboard_series(
         limit,
         zone_id,
         zone_direction,
+        include_partial_bucket,
     )
 
 
@@ -37724,6 +38092,7 @@ def top_conversations_payload(
             "limit": limit,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "include_partial_bucket": bool(include_partial_bucket),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -37969,6 +38338,7 @@ def dashboard_top_syn(
             "limit": limit,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "include_partial_bucket": bool(include_partial_bucket),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40704,6 +41074,165 @@ def dashboard_widget_normalize_top_items(
     return normalized
 
 
+def dashboard_widget_item_asn(item: dict[str, Any]) -> int:
+    metadata = (
+        item.get("metadata")
+        if isinstance(item.get("metadata"), dict)
+        else {}
+    )
+    raw_asn = (
+        item.get("asn_number")
+        or item.get("asn")
+        or metadata.get("asn")
+        or item.get("key")
+    )
+    match = re.search(r"(\d+)", clean_text(raw_asn))
+    return int(match.group(1)) if match else 0
+
+
+def dashboard_widget_known_asn_prefixes(
+    items: list[dict[str, Any]],
+    dimension: str,
+) -> dict[int, str]:
+    if dimension not in {"src_asn", "dst_asn"}:
+        return {}
+    numbers = sorted(
+        {
+            dashboard_widget_item_asn(item)
+            for item in items
+            if dashboard_widget_item_asn(item) > 0
+        }
+    )
+    if not numbers:
+        return {}
+    placeholders = ", ".join("?" for _ in numbers)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        rows = conn.execute(
+            f"""
+            SELECT asn, prefix
+            FROM asn_prefixes
+            WHERE asn IN ({placeholders})
+            ORDER BY asn, ip_version, prefix
+            """,
+            numbers,
+        ).fetchall()
+    prefixes: dict[int, str] = {}
+    for row in rows:
+        prefixes.setdefault(
+            int(row["asn"]),
+            clean_text(row["prefix"]),
+        )
+    return prefixes
+
+
+def dashboard_widget_enrich_ranking_identity(
+    item: dict[str, Any],
+    dimension: str,
+    known_prefix: str = "",
+) -> dict[str, Any]:
+    metadata = (
+        dict(item.get("metadata"))
+        if isinstance(item.get("metadata"), dict)
+        else {}
+    )
+    if dimension in {"src_ip", "dst_ip"}:
+        ip_text = clean_ip(item.get("ip") or item.get("key"))
+        try:
+            ip_address(ip_text)
+        except ValueError:
+            item["metadata"] = metadata
+            return item
+        resolved = resolve_asn_for_ip(ip_text)
+        asn = int(resolved.get("asn") or 0)
+        asn_info = lookup_asn_info(asn) or {} if asn > 0 else {}
+        as_name = usable_asn_name(
+            asn_info.get("as_name")
+            or asn_info.get("org_name")
+            or resolved.get("as_name"),
+            asn,
+        )
+        metadata.update(
+            {
+                "entity_kind": "ip",
+                "ip": ip_text,
+                "prefix": clean_text(resolved.get("prefix")) or None,
+                "asn": asn or None,
+                "asn_label": asn_label(asn) if asn > 0 else None,
+                "as_name": as_name or None,
+                "org_name": clean_text(asn_info.get("org_name")) or None,
+                "country": (
+                    clean_text(
+                        asn_info.get("country")
+                        or resolved.get("country")
+                    ).upper()
+                    or None
+                ),
+                "resolution_state": (
+                    "resolved"
+                    if asn > 0 and as_name
+                    else "queued"
+                    if is_public_ip(ip_text)
+                    else "not_found"
+                ),
+            }
+        )
+        item["ip"] = ip_text
+    elif dimension in {"src_prefix", "dst_prefix"}:
+        metadata.update(
+            {
+                "entity_kind": "prefix",
+                "prefix": clean_text(item.get("key")) or None,
+            }
+        )
+    elif dimension in {"src_asn", "dst_asn"}:
+        asn = dashboard_widget_item_asn(item)
+        asn_info = lookup_asn_info(asn) or {} if asn > 0 else {}
+        if asn > 0 and not asn_info:
+            queue_missing_asn_info(asn, priority=20)
+        as_name = usable_asn_name(
+            asn_info.get("as_name")
+            or asn_info.get("org_name")
+            or item.get("display_name")
+            or item.get("description")
+            or item.get("as_name"),
+            asn,
+        )
+        label = asn_label(asn)
+        if as_name:
+            label = "%s — %s" % (label, as_name)
+        metadata.update(
+            {
+                "entity_kind": "asn",
+                "asn": asn or None,
+                "asn_label": asn_label(asn) if asn > 0 else None,
+                "as_name": as_name or None,
+                "org_name": clean_text(asn_info.get("org_name")) or None,
+                "prefix": clean_text(known_prefix) or None,
+                "country": (
+                    clean_text(
+                        asn_info.get("country")
+                        or item.get("country")
+                    ).upper()
+                    or None
+                ),
+                "resolution_state": (
+                    "resolved"
+                    if as_name
+                    else "queued"
+                    if asn > 0
+                    else "not_found"
+                ),
+            }
+        )
+        item["asn_number"] = asn or None
+        item["display_label"] = label
+        item["description"] = label
+    item["metadata"] = metadata
+    return item
+
+
 def dashboard_widget_fold_prefixes(
     items: list[dict[str, Any]],
     metric: str,
@@ -41176,10 +41705,21 @@ def dashboard_widget_top_payload(
         if all(dashboard_widget_match_filter(item, rule) for rule in post_filters)
     ][:limit]
     total = sum(dashboard_widget_item_value(item, metric) for item in items)
+    known_asn_prefixes = dashboard_widget_known_asn_prefixes(
+        items,
+        dimension,
+    )
     for index, item in enumerate(items, start=1):
         item["rank"] = index
+        item_asn = dashboard_widget_item_asn(item)
+        dashboard_widget_enrich_ranking_identity(
+            item,
+            dimension,
+            known_asn_prefixes.get(item_asn, ""),
+        )
         item["label"] = clean_text(
-            item.get("label")
+            item.get("display_label")
+            or item.get("label")
             or item.get("key")
             or item.get("name")
         ) or "-"
@@ -41280,6 +41820,8 @@ def dashboard_widget_series_payload(
             int(context.get("series_limit") or 12),
             context.get("zone_id"),
             context.get("zone_direction") or "both",
+            bool(plan.get("include_partial_bucket", False)),
+            int(context.get("maximum_data_points") or 1000),
         )
         return {
             **payload,
@@ -41317,12 +41859,27 @@ def dashboard_widget_series_payload(
         None,
         "download" if direction in {"download", "receives", "input"} else "upload" if direction in {"upload", "transmits", "output"} else "both",
     )
-    requested_resolution = int(plan.get("resolution_seconds") or 0)
-    minimum_resolution = max(1, int((range_minutes * 60 + 1999) / 2000))
-    bucket_seconds = (
-        max(requested_resolution, minimum_resolution)
+    requested_resolution = max(
+        int(plan.get("resolution_seconds") or 0),
+        int(context.get("interval") or 0),
+    )
+    effective_range_minutes = range_minutes_for_window(
+        query_context["start"],
+        query_context["end"],
+    )
+    minimum_resolution = (
+        requested_resolution
         if requested_resolution
-        else dashboard_bucket_seconds(range_minutes)
+        else dashboard_bucket_seconds(effective_range_minutes)
+    )
+    bucket_seconds = bucket_seconds_for_window(
+        query_context["start"],
+        query_context["end"],
+        maximum_data_points=int(
+            context.get("maximum_data_points")
+            or 1000
+        ),
+        minimum_seconds=minimum_resolution,
     )
     params = dict(query_context["params"])
     group_by = plan.get("group_by", "total")
@@ -41352,7 +41909,7 @@ def dashboard_widget_series_payload(
         if metric in {"pps", "packets"}
         else "flow_count"
     )
-    def rate_value_expression(rate_factor: str) -> str:
+    def bucket_total_expression(rate_factor: str) -> str:
         corrected = corrected_value_expr(value_field, rate_factor)
         aggregation = {
             "sum": "sum(%s)" % corrected,
@@ -41362,12 +41919,15 @@ def dashboard_widget_series_payload(
             "p95": "quantile(0.95)(%s)" % corrected,
         }[plan.get("aggregation", "sum")]
         if metric == "bps":
-            return "%s * 8 / %s" % (aggregation, bucket_seconds)
-        if metric in {"pps", "fps"}:
-            return "%s / %s" % (aggregation, bucket_seconds)
+            return "%s * 8" % aggregation
         return aggregation
 
-    value_expression = rate_value_expression(factor)
+    value_expression = bucket_total_expression(factor)
+    value_alias = (
+        "total_value"
+        if metric in {"bps", "pps", "fps"}
+        else "value"
+    )
     directional_total = group_by == "total" and metric in {"bps", "pps"}
     if directional_total:
         directional_selects = []
@@ -41384,7 +41944,7 @@ def dashboard_widget_series_payload(
                 SELECT
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     'upload' AS group_key,
-                    {rate_value_expression("dashboard_output_sample_rate")} AS value
+                    {bucket_total_expression("dashboard_output_sample_rate")} AS {value_alias}
                 FROM rated_source
                 WHERE {query_context["where"]} AND output_if > 0
                 GROUP BY ts, group_key
@@ -41396,7 +41956,7 @@ def dashboard_widget_series_payload(
                 SELECT
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     'download' AS group_key,
-                    {rate_value_expression("dashboard_input_sample_rate")} AS value
+                    {bucket_total_expression("dashboard_input_sample_rate")} AS {value_alias}
                 FROM rated_source
                 WHERE {query_context["where"]} AND input_if > 0
                 GROUP BY ts, group_key
@@ -41413,7 +41973,7 @@ def dashboard_widget_series_payload(
         SELECT
             toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
             {group_expression} AS group_key,
-            {value_expression} AS value
+            {value_expression} AS {value_alias}
         FROM rated_source
         WHERE {query_context["where"]}
         GROUP BY ts, group_key
@@ -41425,6 +41985,16 @@ def dashboard_widget_series_payload(
             params,
         )
     )
+    if metric in {"bps", "pps", "fps"}:
+        rows = normalize_rate_bucket_rows(
+            rows,
+            bucket_seconds=bucket_seconds,
+            range_end=query_context["end"],
+            totals={"value": "total_value"},
+            include_partial_bucket=bool(
+                plan.get("include_partial_bucket", False)
+            ),
+        )
     series: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = clean_text(row.get("group_key")) or "Total"
@@ -41448,7 +42018,15 @@ def dashboard_widget_series_payload(
         target["points"].append(
             {
                 "ts": iso(row["ts"]),
-                "value": round(float(row.get("value") or 0), 2),
+                "value": (
+                    round(float(row["value"]), 2)
+                    if row.get("value") is not None
+                    else None
+                ),
+                "partial": bool(row.get("partial")),
+                "bucket_duration_seconds": row.get(
+                    "bucket_duration_seconds"
+                ),
             }
         )
     normalized_series = list(series.values())
@@ -41471,9 +42049,18 @@ def dashboard_widget_series_payload(
         ),
         "group_by": group_by,
         "bucket_seconds": bucket_seconds,
+        "include_partial_bucket": bool(
+            plan.get("include_partial_bucket", False)
+        ),
+        "quality": series_data_quality(
+            rows,
+            bucket_seconds=bucket_seconds,
+            range_end=query_context["end"],
+        ),
         "source": "raw",
         "start": iso(query_context["start"]),
         "end": iso(query_context["end"]),
+        "range_minutes": effective_range_minutes,
         "series": normalized_series,
         "items": normalized_series,
     }
@@ -41836,16 +42423,16 @@ def dashboard_widget_query_context(
         else {}
     )
     dashboard_time = dashboard.get("time_range", {}) if dashboard else {}
-    time_range = {**dashboard_time, **requested_time}
-    try:
-        range_minutes = int(
-            payload.get("range_minutes")
-            or time_range.get("minutes")
-            or 10
-        )
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="range_minutes inválido")
-    range_minutes = max(1, min(MAX_RANGE_MINUTES, range_minutes))
+    has_direct_time = any(
+        payload.get(name) not in (None, "")
+        for name in ("range_minutes", "start", "end")
+    )
+    if requested_time:
+        time_range = dict(requested_time)
+    elif has_direct_time:
+        time_range = {}
+    else:
+        time_range = dict(dashboard_time)
     start_value = payload.get("start") or time_range.get("start")
     end_value = payload.get("end") or time_range.get("end")
     start = parse_datetime_text(start_value)
@@ -41859,6 +42446,42 @@ def dashboard_widget_query_context(
             status_code=400,
             detail="start e end devem ser informados juntos",
         )
+    if start is not None and end is not None:
+        start, end = resolve_requested_range(1, start, end)
+        try:
+            range_minutes = range_minutes_for_window(start, end)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=clean_text(exc))
+        time_range = {
+            "mode": "absolute",
+            "start": iso(start),
+            "end": iso(end),
+            "minutes": range_minutes,
+        }
+    else:
+        range_value = payload.get("range_minutes")
+        if range_value in (None, ""):
+            range_value = time_range.get("minutes")
+        if range_value in (None, ""):
+            range_value = 10
+        try:
+            range_minutes = int(range_value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="range_minutes inválido",
+            )
+        if range_minutes < 1 or range_minutes > MAX_RANGE_MINUTES:
+            raise HTTPException(
+                status_code=400,
+                detail="range_minutes deve ficar entre 1 e %s"
+                % MAX_RANGE_MINUTES,
+            )
+        time_range = {
+            **time_range,
+            "mode": "relative",
+            "minutes": range_minutes,
+        }
 
     def optional_int(name: str) -> int | None:
         if payload.get(name) in (None, ""):
@@ -41867,6 +42490,28 @@ def dashboard_widget_query_context(
             return int(payload[name])
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="%s inválido" % name)
+
+    def aliased_int(
+        names: tuple[str, ...],
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        value: Any = None
+        for name in names:
+            if payload.get(name) not in (None, ""):
+                value = payload[name]
+                break
+        if value is None:
+            value = default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="%s inválido" % names[0],
+            )
+        return max(minimum, min(maximum, parsed))
 
     try:
         series_limit = int(payload.get("series_limit") or 12)
@@ -41884,7 +42529,49 @@ def dashboard_widget_query_context(
         "zone_id": optional_int("zone_id"),
         "zone_direction": clean_text(payload.get("zone_direction")) or "both",
         "series_limit": max(1, min(50, series_limit)),
+        "interval": aliased_int(
+            ("interval", "interval_seconds"),
+            0,
+            0,
+            86400,
+        ),
+        "maximum_data_points": aliased_int(
+            ("maximum_data_points", "maximumDataPoints", "max_data_points"),
+            1000,
+            1,
+            5000,
+        ),
+        "sensor": clean_text(payload.get("sensor")),
         "global_filters": dashboard.get("global_filters", []) if dashboard else [],
+    }
+
+
+def dashboard_widget_effective_range(
+    payload: dict[str, Any],
+    query_context: dict[str, Any],
+) -> dict[str, Any]:
+    start = payload.get("start") or query_context.get("start")
+    end = payload.get("end") or query_context.get("end")
+    range_minutes = int(query_context["range_minutes"])
+    if start and end:
+        try:
+            range_minutes = range_minutes_for_window(start, end)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "start": iso(start) if isinstance(start, datetime) else start,
+        "end": iso(end) if isinstance(end, datetime) else end,
+        "range_minutes": range_minutes,
+        "interval": int(
+            payload.get("bucket_seconds")
+            or query_context.get("interval")
+            or 0
+        ),
+        "maximum_data_points": int(
+            query_context.get("maximum_data_points")
+            or 1000
+        ),
+        "timezone": "UTC",
     }
 
 
@@ -41900,7 +42587,25 @@ def dashboard_widget_cached_query(
         "configurable-widget",
         {
             "signature": signature,
+            "start": query_context.get("start") or "",
+            "end": query_context.get("end") or "",
             "range_minutes": query_context["range_minutes"],
+            "interval": query_context.get("interval") or 0,
+            "maximum_data_points": (
+                query_context.get("maximum_data_points") or 1000
+            ),
+            "sensor": query_context.get("sensor") or "",
+            "sensor_id": query_context.get("sensor_id") or "",
+            "interface_id": query_context.get("interface_id") or "",
+            "if_index": (
+                query_context.get("if_index")
+                if query_context.get("if_index") is not None
+                else ""
+            ),
+            "zone_id": query_context.get("zone_id") or "",
+            "zone_direction": query_context.get("zone_direction") or "both",
+            "widget_filters": widget.get("filters") or [],
+            "global_filters": query_context.get("global_filters") or [],
             "ttl_seconds": ttl,
         },
     )
@@ -41914,7 +42619,14 @@ def dashboard_widget_cached_query(
             widget.get("type"),
             HTTP_REQUEST_ID.get(),
         )
-        return {**cached, "data_signature": signature}
+        return {
+            **cached,
+            "data_signature": signature,
+            "effective_range": dashboard_widget_effective_range(
+                cached,
+                query_context,
+            ),
+        }
     DASHBOARD_WIDGET_METRICS.cache_event(False)
     logger.info(
         "DASHBOARD_WIDGET_QUERY dashboard_id=%s widget_id=%s widget_type=%s cache=miss request_id=%s",
@@ -41930,6 +42642,10 @@ def dashboard_widget_cached_query(
             preview=preview,
         )
         result["data_signature"] = signature
+        result["effective_range"] = dashboard_widget_effective_range(
+            result,
+            query_context,
+        )
         return dashboard_cache_set(key, result)
     except Exception as exc:
         DASHBOARD_CACHE.fail_flight(key, exc)

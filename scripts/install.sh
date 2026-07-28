@@ -113,11 +113,12 @@ chmod 750 data data/backend data/collectors data/logs
 chmod 700 data/backups
 
 compose_file_args="-f docker-compose.yml"
-if [ -f docker-compose.collectors.yml ]; then
-  compose_file_args="$compose_file_args -f docker-compose.collectors.yml"
-fi
+docker compose --env-file .env $compose_file_args up -d --build
 
-docker compose --env-file .env $compose_file_args up -d --build --remove-orphans
+if [ -f docker-compose.collectors.yml ]; then
+  docker compose --env-file .env -f docker-compose.collectors.yml up -d --build
+  sh "$PROJECT_ROOT/scripts/check_pmacct_collectors.sh"
+fi
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   docker_bin=$(command -v docker)

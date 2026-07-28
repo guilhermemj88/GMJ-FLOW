@@ -90,6 +90,28 @@ class DashboardWidgetSchemaTest(unittest.TestCase):
             widget_count,
         )
 
+    def test_global_range_widgets_drop_legacy_custom_range(self):
+        widget_id = self.conn.execute(
+            "SELECT id FROM dashboard_widgets ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        self.conn.execute(
+            """
+            UPDATE dashboard_widgets
+            SET use_global_time_range = 1,
+                custom_time_range_json = '{"mode":"relative","minutes":20}'
+            WHERE id = ?
+            """,
+            (widget_id,),
+        )
+        ensure_dashboard_schema(self.conn)
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT custom_time_range_json FROM dashboard_widgets WHERE id = ?",
+                (widget_id,),
+            ).fetchone()[0],
+            "{}",
+        )
+
     def test_existing_user_gets_one_server_side_default(self):
         first = ensure_user_default_dashboard(self.conn, 2)
         second = ensure_user_default_dashboard(self.conn, 2)
@@ -127,6 +149,36 @@ class DashboardWidgetSchemaTest(unittest.TestCase):
         self.assertFalse(loaded["is_shared"])
         self.assertNotEqual(source["id"], duplicate["id"])
 
+    def test_legacy_asn_rankings_are_corrected_without_restyling_user_widget(self):
+        legacy = copy.deepcopy(GENERAL_WIDGETS[10])
+        legacy["config"].update(
+            {
+                "dimension": "src_asn",
+                "direction": "upload",
+                "visualization": "table",
+            }
+        )
+        legacy["visualization"] = {"type": "table", "show_legend": True}
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Legado",
+                "description": "",
+                "is_default": False,
+                "is_shared": False,
+                "global_filters": [],
+                "time_range": {"mode": "relative", "minutes": 10},
+                "refresh_interval_seconds": 30,
+            },
+            2,
+            widgets=[legacy],
+        )
+        ensure_dashboard_schema(self.conn)
+        migrated = get_dashboard(self.conn, dashboard["id"])
+        widget = migrated["widgets"][0]
+        self.assertEqual(widget["config"]["dimension"], "dst_asn")
+        self.assertEqual(widget["visualization"]["type"], "table")
+
 
 class DashboardWidgetValidationTest(unittest.TestCase):
     def test_catalog_is_declarative_and_complete(self):
@@ -158,6 +210,18 @@ class DashboardWidgetValidationTest(unittest.TestCase):
             {preset["id"] for preset in catalog["presets"]},
         )
         self.assertGreaterEqual(len(catalog["presets"]), 15)
+        presets = {item["id"]: item for item in catalog["presets"]}
+        for preset_id in (
+            "top-upload-destinations",
+            "top-download-origins",
+            "top-download-destinations",
+            "top-upload-origins",
+        ):
+            self.assertEqual(
+                presets[preset_id]["config"]["visualization"],
+                "chart_table",
+            )
+            self.assertEqual(presets[preset_id]["config"]["slice_limit"], 8)
 
     def test_rejects_sql_and_unknown_filter_surface(self):
         widget = copy.deepcopy(GENERAL_WIDGETS[2])
@@ -293,6 +357,40 @@ class DashboardWidgetValidationTest(unittest.TestCase):
             widget_data_signature(base, shifted_range),
         )
 
+    def test_data_cache_is_separated_by_range_interval_and_filters(self):
+        widget = copy.deepcopy(GENERAL_WIDGETS[0])
+        base = {
+            "time_range": {"mode": "relative", "minutes": 60},
+            "range_minutes": 60,
+            "start": None,
+            "end": None,
+            "interval": 60,
+            "maximum_data_points": 1000,
+            "sensor_id": 3,
+            "interface_id": 4,
+            "global_filters": [],
+        }
+        day = {
+            **base,
+            "time_range": {"mode": "relative", "minutes": 1440},
+            "range_minutes": 1440,
+            "interval": 300,
+        }
+        filtered = {
+            **base,
+            "global_filters": [
+                {"field": "protocol", "operator": "eq", "value": "udp"}
+            ],
+        }
+        self.assertNotEqual(
+            widget_data_signature(widget, base),
+            widget_data_signature(widget, day),
+        )
+        self.assertNotEqual(
+            widget_data_signature(widget, base),
+            widget_data_signature(widget, filtered),
+        )
+
     def test_appearance_is_typed_persisted_and_defaults_are_readable(self):
         widget = copy.deepcopy(GENERAL_WIDGETS[0])
         widget["config"]["appearance"] = {
@@ -373,6 +471,29 @@ class DashboardWidgetValidationTest(unittest.TestCase):
                 self.assertEqual(series[0]["points"][0]["value"], 3)
                 self.assertEqual(series[1]["points"][0]["value"], 3)
 
+    def test_direction_consolidation_preserves_null_and_partial_metadata(self):
+        series = consolidate_direction_series(
+            "bits_s",
+            [
+                {
+                    "direction": "upload",
+                    "points": [
+                        {
+                            "ts": "2026-07-28T10:00:00Z",
+                            "value": None,
+                            "partial": True,
+                            "bucket_duration_seconds": 2.5,
+                        }
+                    ],
+                }
+            ],
+            "upload",
+        )
+        point = series[0]["points"][0]
+        self.assertIsNone(point["value"])
+        self.assertTrue(point["partial"])
+        self.assertEqual(point["bucket_duration_seconds"], 2.5)
+
     def test_observability_snapshot_is_stable(self):
         before = DASHBOARD_WIDGET_METRICS.snapshot()["queries_total"]
         DASHBOARD_WIDGET_METRICS.record(
@@ -411,6 +532,30 @@ class DashboardWidgetContractTest(unittest.TestCase):
         self.assertIn("consolidate_direction_series(", MAIN_SOURCE)
         self.assertIn("'upload' AS group_key", MAIN_SOURCE)
         self.assertIn("'download' AS group_key", MAIN_SOURCE)
+        for token in (
+            "has_direct_time",
+            '"start": query_context.get("start") or ""',
+            '"end": query_context.get("end") or ""',
+            '"interval": query_context.get("interval") or 0',
+            '"maximum_data_points": (',
+            '"widget_filters": widget.get("filters") or []',
+            '"global_filters": query_context.get("global_filters") or []',
+            "dashboard_widget_effective_range(",
+            "bucket_seconds_for_window(",
+        ):
+            self.assertIn(token, MAIN_SOURCE)
+
+    def test_normal_traffic_api_uses_complete_bucket_contract(self):
+        block = MAIN_SOURCE[
+            MAIN_SOURCE.find("def traffic_items("):
+            MAIN_SOURCE.find("def monitored_sensor_interfaces(")
+        ]
+        self.assertIn("include_partial_bucket: bool = False", block)
+        self.assertIn("normalize_rate_bucket_rows(", block)
+        self.assertIn('"bucket_duration_seconds"', block)
+        self.assertIn('"quality": series_data_quality(', block)
+        self.assertNotIn("/ 60 AS download_", block)
+        self.assertNotIn("/ 60 AS upload_", block)
 
     def test_frontend_uses_real_widget_engine_and_progressive_loading(self):
         for token in (

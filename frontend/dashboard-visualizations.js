@@ -23,6 +23,7 @@
       'pie',
       'donut',
       'bar_gauge',
+      'chart_table',
       'stat'
     ]),
     timeseries: Object.freeze(['line', 'area', 'time_bars', 'line_area', 'stat']),
@@ -111,7 +112,9 @@
       inheritance: widget.inheritance || {},
       use_global_filters: widget.use_global_filters !== false,
       use_global_time_range: widget.use_global_time_range !== false,
-      custom_time_range: widget.custom_time_range || {}
+      custom_time_range: widget.use_global_time_range === false
+        ? widget.custom_time_range || {}
+        : {}
     }));
   }
 
@@ -167,6 +170,27 @@
       calculation: normalized.calculation,
       metric: normalized.metric
     };
+  }
+
+  function groupRankingItems(items = [], sliceLimit = 8) {
+    const source = Array.isArray(items) ? items : [];
+    const limit = clamp(Math.trunc(finiteNumber(sliceLimit, 8)), 2, 20);
+    if (source.length <= limit) return source.map(item => ({ ...item }));
+    const visibleCount = limit - 1;
+    const visible = source.slice(0, visibleCount).map(item => ({ ...item }));
+    const remaining = source.slice(visibleCount);
+    visible.push({
+      rank: limit,
+      key: '__others__',
+      label: 'Outros',
+      value: remaining.reduce((sum, item) => sum + finiteNumber(item.value, 0), 0),
+      percent: remaining.reduce((sum, item) => sum + finiteNumber(item.percent, 0), 0),
+      metadata: {
+        grouped_items: remaining.length,
+        grouped_keys: remaining.map(item => item.key)
+      }
+    });
+    return visible;
   }
 
   function pointValue(point) {
@@ -294,6 +318,8 @@
         const number = finiteNumber(point.value, NaN);
         return {
           ts: point.ts ?? point.timestamp ?? point.time,
+          partial: Boolean(point.partial),
+          bucket_duration_seconds: point.bucket_duration_seconds ?? null,
           value: Number.isFinite(number)
             ? Math.abs(number)
             : fieldConfig.defaults.null_value === 'zero'
@@ -308,10 +334,19 @@
       });
       const visualPoints = originalPoints.map(point => ({
         ts: point.ts,
+        partial: point.partial,
+        bucket_duration_seconds: point.bucket_duration_seconds,
         value: Number.isFinite(point.value)
           ? (negative ? -point.value : point.value)
           : null
       }));
+      const legendPoints = calculation === 'last_not_null'
+        ? originalPoints.filter(point => !point.partial)
+        : originalPoints;
+      const calculatedLegendValue = calculatePoints(
+        legendPoints,
+        calculation
+      );
       return {
         ...item,
         direction,
@@ -319,7 +354,9 @@
         negative,
         original_points: originalPoints,
         points: visualPoints,
-        legend_value: Math.abs(calculatePoints(originalPoints, calculation) || 0)
+        legend_value: Number.isFinite(calculatedLegendValue)
+          ? Math.abs(calculatedLegendValue)
+          : null
       };
     }).filter(item => item.properties.visible !== false);
     const configuredMaximum = Math.max(
@@ -399,6 +436,7 @@
     dataQuerySignature,
     normalizeRankingPayload,
     rankingDataset,
+    groupRankingItems,
     calculatePoints,
     normalizedFieldConfig,
     fieldProperties,

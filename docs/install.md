@@ -139,3 +139,22 @@ docker exec gmj-flow-clickhouse clickhouse-client --query "SELECT count(), max(f
 - Frontend 502 após recriar backend: confirme `frontend/nginx.conf` com `resolver 127.0.0.11`.
 - GMJ-FLOW não sobe após reboot: instale `gmj-flow.service` e confira `systemctl is-enabled gmj-flow`.
 - PDF com números crus: exporte Flows novamente; o PDF deve mostrar `Mbps`, `Kpps`, `MB`, `K/M/G`.
+
+## Remoção segura da aplicação
+
+`scripts/uninstall.sh` remove somente os containers `backend` e `frontend`.
+O modo padrão `PRESERVE` mantém ClickHouse, todos os volumes Docker, `.env`,
+collectors PMACCT, configurações de collector e ExaBGP.
+
+```sh
+sudo ./scripts/uninstall.sh
+```
+
+O modo `DESTROY APPLICATION DATA` exige uma segunda confirmação literal e
+remove apenas `data/backend`. Ele não remove o volume do ClickHouse, o spool
+PMACCT, dados de collectors ou o volume do Ollama.
+
+Se `gmj-flow.service` também contiver `docker-compose.collectors.yml`, o
+desinstalador recusa a operação antes de remover os containers. Nesse caso,
+separe primeiro o autostart dos collectors; assim a remoção não derruba,
+desabilita nem altera o autostart dos collectors.

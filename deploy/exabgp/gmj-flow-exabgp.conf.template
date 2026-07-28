@@ -1,0 +1,21 @@
+process watch {
+    run /bin/cat {{PIPE_INPUT}};
+    encoder text;
+}
+
+neighbor {{PEER_IP}} {
+    router-id {{ROUTER_ID}};
+    local-address {{LOCAL_ADDRESS}};
+    local-as {{LOCAL_AS}};
+    peer-as {{PEER_AS}};
+{{PASSIVE_LINE}}
+
+    family {
+        ipv4 flow;
+        ipv6 flow;
+    }
+
+    api {
+        processes [ watch ];
+    }
+}

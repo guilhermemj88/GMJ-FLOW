@@ -107,6 +107,9 @@ def _target_body(widget: dict[str, Any], query_kind: str) -> dict[str, Any]:
         "to": "${__timeTo:date:iso}",
         "filters": filters,
         "calculation": str(config.get("calculation") or "last_not_null"),
+        "include_partial_bucket": bool(
+            config.get("include_partial_bucket", False)
+        ),
         "timezone": "UTC",
         "format": "json",
     }
@@ -395,7 +398,7 @@ def _panel(
     datasource_uid: str,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     config = widget.get("config") if isinstance(widget.get("config"), dict) else {}
-    visualization = infer_visualization_kind(
+    requested_visualization = infer_visualization_kind(
         str(widget.get("type") or ""),
         config,
         (
@@ -404,8 +407,26 @@ def _panel(
             else {}
         ),
     )
+    visualization = requested_visualization
+    if requested_visualization == "chart_table":
+        visualization = str(
+            config.get("combined_chart_kind") or "donut"
+        ).strip().lower()
+        if visualization not in {"horizontal_bar", "pie", "donut"}:
+            visualization = "donut"
     panel_type = GRAFANA_PANEL_TYPES.get(visualization, "table")
     field_config, warnings = _field_config(widget, visualization)
+    if requested_visualization == "chart_table":
+        warnings.append(
+            {
+                "field": "visualization_kind",
+                "message": (
+                    "O modo gráfico + tabela foi exportado como o painel "
+                    "gráfico; a tabela permanece disponível pelo mesmo "
+                    "endpoint no Infinity."
+                ),
+            }
+        )
     if visualization not in GRAFANA_PANEL_TYPES:
         warnings.append(
             {

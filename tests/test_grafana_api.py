@@ -10,6 +10,7 @@ from backend.app.services.grafana_api import (
     canonical_ranking,
     canonical_timeseries,
     catalog,
+    is_grafana_api_path,
     validate_ranking_request,
     validate_timeseries_request,
 )
@@ -26,6 +27,23 @@ BASE_ENV = {
 
 
 class GrafanaAuthenticationTest(unittest.TestCase):
+    def test_dedicated_auth_namespace_does_not_capture_session_export(self):
+        self.assertTrue(is_grafana_api_path("/api/v1/grafana/health"))
+        self.assertTrue(
+            is_grafana_api_path("/api/v1/grafana/query/timeseries")
+        )
+        self.assertFalse(
+            is_grafana_api_path("/api/dashboards/42/grafana-export")
+        )
+        self.assertFalse(is_grafana_api_path("/api/dashboard/series"))
+
+    def test_missing_token_is_rejected(self):
+        with patch.dict(os.environ, BASE_ENV, clear=False):
+            with self.assertRaises(GrafanaApiError) as missing:
+                authenticate(None, "grafana:data:read")
+        self.assertEqual(missing.exception.status_code, 401)
+        self.assertEqual(missing.exception.error, "grafana_token_required")
+
     def test_valid_token_returns_scopes_without_secret(self):
         with patch.dict(os.environ, BASE_ENV, clear=False):
             result = authenticate(
@@ -82,6 +100,7 @@ class GrafanaRequestValidationTest(unittest.TestCase):
             }
         )
         self.assertEqual(request["interval_ms"], 60000)
+        self.assertFalse(request["include_partial_bucket"])
 
     def test_rejects_large_filter_fanout_and_non_utc_timezone(self):
         payload = {
@@ -161,6 +180,43 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
         self.assertLess(points[0]["timestamp"], points[1]["timestamp"])
         self.assertEqual(points[0]["value"], 12)
         self.assertEqual(points[1]["value"], 20)
+        self.assertFalse(result["meta"]["include_partial_bucket"])
+
+    def test_timeseries_preserves_null_without_converting_it_to_zero(self):
+        request = validate_timeseries_request(
+            {
+                "metric": "traffic_pps",
+                "from": "2026-07-28T10:00:00Z",
+                "to": "2026-07-28T10:10:00Z",
+                "filters": {},
+                "group_by": ["direction"],
+                "calculation": "rate",
+            }
+        )
+        result = canonical_timeseries(
+            {
+                "series": [
+                    {
+                        "name": "Download",
+                        "direction": "download",
+                        "points": [
+                            {
+                                "ts": "2026-07-28T10:00:00Z",
+                                "value": None,
+                            },
+                            {
+                                "ts": "2026-07-28T10:01:00Z",
+                                "value": 0,
+                            },
+                        ],
+                    }
+                ]
+            },
+            request,
+            "null-test",
+        )
+        self.assertIsNone(result["series"][0]["points"][0]["value"])
+        self.assertEqual(result["series"][0]["points"][1]["value"], 0)
 
     def test_ranking_table_contract(self):
         request = validate_ranking_request(
@@ -190,4 +246,3 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
