@@ -67,6 +67,51 @@ GRAFANA_SCOPES = {
     "grafana:dashboard:export",
     "grafana:dashboard:publish",
 }
+GRAFANA_READ_ENDPOINTS = {
+    "health": "/api/v1/grafana/health",
+    "catalog": "/api/v1/grafana/catalog",
+    "anomalies_active": "/api/v1/grafana/anomalies/active",
+    "anomalies_history": "/api/v1/grafana/anomalies/history",
+    "mitigations": "/api/v1/grafana/mitigations",
+    "bgp_status": "/api/v1/grafana/bgp/status",
+}
+GRAFANA_RESOURCE_DATASETS = {
+    "anomalies_active": {
+        "label": "Anomalias ativas",
+        "path": GRAFANA_READ_ENDPOINTS["anomalies_active"],
+    },
+    "anomalies_history": {
+        "label": "Histórico de anomalias",
+        "path": GRAFANA_READ_ENDPOINTS["anomalies_history"],
+    },
+    "mitigations": {
+        "label": "Mitigações",
+        "path": GRAFANA_READ_ENDPOINTS["mitigations"],
+    },
+    "bgp_status": {
+        "label": "Status BGP",
+        "path": GRAFANA_READ_ENDPOINTS["bgp_status"],
+    },
+}
+GRAFANA_ANOMALY_FIELDS = (
+    "id",
+    "status",
+    "severity",
+    "title",
+    "source_ip",
+    "destination_ip",
+    "protocol",
+    "source_port",
+    "destination_port",
+    "bps",
+    "pps",
+    "bytes",
+    "packets",
+    "started_at",
+    "last_seen_at",
+    "duration_seconds",
+    "mitigation_status",
+)
 
 
 def is_grafana_api_path(path: Any) -> bool:
@@ -231,6 +276,13 @@ def catalog() -> dict[str, Any]:
             {"id": metric_id, **definition}
             for metric_id, definition in sorted(GRAFANA_METRICS.items())
         ],
+        "datasets": [
+            {"id": dataset_id, "method": "GET", **definition}
+            for dataset_id, definition in sorted(
+                GRAFANA_RESOURCE_DATASETS.items()
+            )
+        ],
+        "endpoints": dict(GRAFANA_READ_ENDPOINTS),
         "group_by": sorted(GRAFANA_GROUP_BY),
         "calculations": sorted(GRAFANA_CALCULATIONS),
         "formats": sorted(GRAFANA_FORMATS),
@@ -241,6 +293,282 @@ def catalog() -> dict[str, Any]:
             "maximum_data_points": 5000,
             "maximum_top_n": 100,
         },
+    }
+
+
+def service_document(timestamp: str) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "gmj-flow-grafana-api",
+        "api_version": GRAFANA_API_VERSION,
+        "timestamp": timestamp,
+        "endpoints": dict(GRAFANA_READ_ENDPOINTS),
+    }
+
+
+def _optional_utc_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _integer(value: Any) -> int:
+    return int(_number(value))
+
+
+def _first_text(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def canonical_anomaly_item(item: dict[str, Any]) -> dict[str, Any]:
+    metric_unit = _first_text(item, "metric_unit").lower()
+    observed = _number(item.get("observed_value"))
+    bps = _number(item.get("bps") or item.get("bits_s"))
+    pps = _number(item.get("pps") or item.get("packets_s"))
+    if not bps and metric_unit in {"bps", "bit/s", "bits/s", "bits_s"}:
+        bps = observed
+    if not pps and metric_unit in {
+        "pps",
+        "packet/s",
+        "packets/s",
+        "packets_s",
+    }:
+        pps = observed
+
+    started_at = _first_text(item, "started_at", "first_seen", "created_at")
+    last_seen_at = _first_text(
+        item,
+        "last_seen_at",
+        "last_seen",
+        "ended_at",
+        "updated_at",
+        "created_at",
+    )
+    started = _optional_utc_timestamp(started_at)
+    last_seen = _optional_utc_timestamp(last_seen_at)
+    duration_seconds = (
+        max(0, int((last_seen - started).total_seconds()))
+        if started is not None and last_seen is not None
+        else 0
+    )
+
+    result = {
+        "id": item.get("id"),
+        "status": _first_text(item, "status") or "unknown",
+        "severity": _first_text(item, "severity") or "info",
+        "title": _first_text(
+            item,
+            "display_name",
+            "type_label",
+            "title",
+            "summary",
+            "vector_name",
+            "attack_vector_name",
+            "source_name",
+        ),
+        "source_ip": _first_text(
+            item,
+            "top_src_ip",
+            "dominant_src_ip",
+            "src_ip",
+        ),
+        "destination_ip": _first_text(
+            item,
+            "top_dst_ip",
+            "dominant_dst_ip",
+            "dst_ip",
+            "target_ip",
+        ),
+        "protocol": _first_text(
+            item,
+            "protocol",
+            "dominant_protocol",
+            "decoder",
+        ),
+        "source_port": item.get("top_src_port") or item.get("src_port"),
+        "destination_port": (
+            item.get("top_dst_port")
+            or item.get("dominant_dst_port")
+            or item.get("dst_port")
+            or item.get("target_port")
+        ),
+        "bps": bps,
+        "pps": pps,
+        "bytes": _integer(item.get("estimated_bytes") or item.get("bytes")),
+        "packets": _integer(
+            item.get("estimated_packets") or item.get("packets")
+        ),
+        "started_at": started_at,
+        "last_seen_at": last_seen_at,
+        "duration_seconds": duration_seconds,
+        "mitigation_status": _first_text(
+            item,
+            "response_status",
+            "mitigation_state",
+            "auto_mitigation_status",
+        )
+        or "none",
+    }
+    return {field: result[field] for field in GRAFANA_ANOMALY_FIELDS}
+
+
+def canonical_active_anomalies(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result = [
+        canonical_anomaly_item(item)
+        for item in items
+        if _first_text(item, "status").lower() == "active"
+    ]
+    return sorted(
+        result,
+        key=lambda item: (
+            _optional_utc_timestamp(item["last_seen_at"])
+            or datetime.min.replace(tzinfo=timezone.utc),
+            str(item["id"]),
+        ),
+        reverse=True,
+    )
+
+
+def filter_anomaly_history(
+    items: list[dict[str, Any]],
+    *,
+    from_value: Any = None,
+    to_value: Any = None,
+    limit: int = 100,
+    offset: int = 0,
+    status: str = "",
+    severity: str = "",
+    search: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    start = (
+        parse_utc_timestamp(from_value, "from")
+        if str(from_value or "").strip()
+        else None
+    )
+    end = (
+        parse_utc_timestamp(to_value, "to")
+        if str(to_value or "").strip()
+        else None
+    )
+    if start is not None and end is not None and start >= end:
+        raise GrafanaApiError(
+            400,
+            "invalid_time_range",
+            "from deve ser anterior a to.",
+        )
+
+    status_filter = str(status or "").strip().lower()
+    severity_filter = str(severity or "").strip().lower()
+    search_filter = str(search or "").strip().casefold()
+    filtered: list[dict[str, Any]] = []
+    for source in items:
+        item = canonical_anomaly_item(source)
+        if status_filter and item["status"].lower() != status_filter:
+            continue
+        if severity_filter and item["severity"].lower() != severity_filter:
+            continue
+        item_started = _optional_utc_timestamp(item["started_at"])
+        item_last_seen = _optional_utc_timestamp(item["last_seen_at"])
+        if start is not None and (
+            item_last_seen is None or item_last_seen < start
+        ):
+            continue
+        if end is not None and (
+            item_started is None or item_started > end
+        ):
+            continue
+        if search_filter:
+            searchable = " ".join(
+                str(item.get(field) or "")
+                for field in (
+                    "id",
+                    "title",
+                    "source_ip",
+                    "destination_ip",
+                    "protocol",
+                    "source_port",
+                    "destination_port",
+                    "mitigation_status",
+                )
+            ).casefold()
+            if search_filter not in searchable:
+                continue
+        filtered.append(item)
+    filtered.sort(
+        key=lambda item: (
+            _optional_utc_timestamp(item["last_seen_at"])
+            or datetime.min.replace(tzinfo=timezone.utc),
+            str(item["id"]),
+        ),
+        reverse=True,
+    )
+    safe_limit = max(1, min(int(limit), 1000))
+    safe_offset = max(0, int(offset))
+    return filtered[safe_offset : safe_offset + safe_limit], len(filtered)
+
+
+def canonical_mitigation_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "anomaly_id": item.get("anomaly_id"),
+        "status": _first_text(item, "status") or "unknown",
+        "action": _first_text(item, "action"),
+        "automatic": bool(item.get("automatic")),
+        "vector": _first_text(item, "vector"),
+        "profile": _first_text(item, "profile"),
+        "connector_id": item.get("connector_id"),
+        "connector_type": _first_text(item, "connector_type"),
+        "policy_reason": _first_text(item, "policy_reason"),
+        "ttl_seconds": _integer(item.get("ttl_seconds")),
+        "created_at": _first_text(item, "created_at"),
+        "queued_at": _first_text(item, "queued_at"),
+        "applied_at": _first_text(item, "applied_at"),
+        "expires_at": _first_text(item, "expires_at"),
+        "withdrawn_at": _first_text(item, "withdrawn_at"),
+        "error_code": _first_text(item, "error_code"),
+        "error_message": _first_text(item, "error_message"),
+        "updated_at": _first_text(item, "updated_at"),
+    }
+
+
+def canonical_bgp_status_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "name": _first_text(item, "name"),
+        "enabled": bool(item.get("enabled")),
+        "is_active": bool(item.get("is_active")),
+        "backend": _first_text(item, "backend_type", "backend"),
+        "mode": _first_text(item, "mode"),
+        "local_asn": item.get("local_asn"),
+        "peer_asn": item.get("peer_asn"),
+        "peer_ip": _first_text(item, "peer_ip"),
+        "bgp_state": _first_text(item, "bgp_state") or "not_checked",
+        "flowspec_state": (
+            _first_text(item, "flowspec_state") or "not_checked"
+        ),
+        "pipe_state": _first_text(item, "pipe_state") or "not_checked",
+        "last_checked_at": _first_text(item, "last_checked_at"),
+        "status_message": _first_text(item, "status_message", "message"),
     }
 
 

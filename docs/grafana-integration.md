@@ -6,8 +6,9 @@ widgets ou arquivos exportados.
 
 ## Escopo implementado
 
-- **Fase 1 — API read-only:** catálogo, health e consultas canônicas de série
-  temporal, ranking e tabela em `/api/v1/grafana`.
+- **Fase 1 — API read-only:** rota de teste do datasource, catálogo, health,
+  anomalias, mitigações, status BGP e consultas canônicas de série temporal,
+  ranking e tabela em `/api/v1/grafana`.
 - **Fase 2 — exportação:** conversão determinística de dashboards GMJ-FLOW
   para JSON de dashboard do Grafana, direcionado ao datasource Infinity.
 - **Fase 3 — publicação:** não habilitada. As rotas de publicação não fazem
@@ -51,9 +52,12 @@ sai do servidor do Grafana, não do navegador e não depende de CORS aberto.
 
 ## Contrato da API read-only
 
-### Health e catálogo
+### Save & Test, health e catálogo
 
 ```bash
+curl -H "Authorization: Bearer <GMJ_FLOW_GRAFANA_TOKEN>" \
+  https://gmj-flow.exemplo/api/v1/grafana
+
 curl -H "Authorization: Bearer <GMJ_FLOW_GRAFANA_TOKEN>" \
   https://gmj-flow.exemplo/api/v1/grafana/health
 
@@ -69,6 +73,34 @@ iniciais:
 - `top_download_origins`
 - `top_upload_destinations`
 - `top_protocols`
+
+Datasets read-only para consultas JSONPath:
+
+- `anomalies_active`: `/api/v1/grafana/anomalies/active`
+- `anomalies_history`: `/api/v1/grafana/anomalies/history`
+- `mitigations`: `/api/v1/grafana/mitigations`
+- `bgp_status`: `/api/v1/grafana/bgp/status`
+
+O histórico aceita `from`, `to`, `limit` (100 por padrão e 1.000 no máximo),
+`offset`, `status`, `severity` e `search`. As respostas mantêm timestamps em
+UTC e usam objetos JSON simples; `$.items[*]` pode ser usado diretamente nos
+painéis. Essas rotas aceitam apenas `GET` e não executam, aprovam, rejeitam ou
+retiram mitigações.
+
+## Configuração do Grafana JSON API
+
+1. Crie um datasource do tipo **JSON API**.
+2. Configure a URL como `https://gmj-flow.exemplo/api/v1/grafana`.
+3. Adicione o header seguro
+   `Authorization: Bearer <GMJ_FLOW_GRAFANA_TOKEN>`.
+4. Execute **Save & Test**. A rota-base autenticada deve responder
+   `status: ok`.
+5. Nos painéis, consulte um dos caminhos read-only listados no catálogo e use
+   `$.items[*]` como raiz dos dados.
+
+O datasource deve usar um token cujo conjunto de scopes inclua
+`grafana:data:read`. Não é necessário nem suportado um plugin Grafana próprio
+para esses endpoints.
 
 ### Série temporal
 

@@ -16,8 +16,13 @@ SCHEMAS = (
 class GrafanaIntegrationStaticTest(unittest.TestCase):
     def test_public_api_has_versioned_read_only_contract_and_openapi_models(self):
         for route in (
+            "/api/v1/grafana",
             "/api/v1/grafana/health",
             "/api/v1/grafana/catalog",
+            "/api/v1/grafana/anomalies/active",
+            "/api/v1/grafana/anomalies/history",
+            "/api/v1/grafana/mitigations",
+            "/api/v1/grafana/bgp/status",
             "/api/v1/grafana/query/timeseries",
             "/api/v1/grafana/query/ranking",
             "/api/v1/grafana/query/table",
@@ -32,6 +37,18 @@ class GrafanaIntegrationStaticTest(unittest.TestCase):
             "GrafanaHealthResponse",
         ):
             self.assertIn("class %s(" % model, SCHEMAS)
+
+    def test_json_api_resources_are_get_only_and_use_read_scope(self):
+        for route in (
+            "/api/v1/grafana",
+            "/api/v1/grafana/anomalies/active",
+            "/api/v1/grafana/anomalies/history",
+            "/api/v1/grafana/mitigations",
+            "/api/v1/grafana/bgp/status",
+        ):
+            self.assertIn(f'@app.get("{route}"', MAIN)
+            self.assertNotIn(f'@app.post("{route}"', MAIN)
+        self.assertGreaterEqual(MAIN.count('"grafana:data:read"'), 8)
 
     def test_security_defaults_are_narrow_and_token_is_dedicated(self):
         self.assertIn('cors_origins = os.getenv("API_CORS_ORIGINS", "")', MAIN)

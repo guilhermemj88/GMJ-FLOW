@@ -152,11 +152,16 @@ from app.services.grafana_api import (
     GrafanaApiError,
     audit as audit_grafana_api,
     authenticate as authenticate_grafana_api,
+    canonical_active_anomalies as canonical_grafana_active_anomalies,
+    canonical_bgp_status_item as canonical_grafana_bgp_status_item,
+    canonical_mitigation_item as canonical_grafana_mitigation_item,
     canonical_ranking as canonical_grafana_ranking,
     canonical_timeseries as canonical_grafana_timeseries,
     catalog as grafana_api_catalog,
     correlation_id as grafana_correlation_id,
+    filter_anomaly_history as filter_grafana_anomaly_history,
     is_grafana_api_path,
+    service_document as grafana_api_service_document,
     validate_ranking_request as validate_grafana_ranking_request,
     validate_timeseries_request as validate_grafana_timeseries_request,
 )
@@ -33805,6 +33810,105 @@ def execute_grafana_ranking(request_data: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def grafana_anomaly_records(status_filter: str) -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    status_where = (
+        "e.status = 'active'"
+        if status_filter == "active"
+        else "e.status <> 'active'"
+    )
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.*,
+                v.name AS attack_vector_name,
+                v.display_name AS attack_vector_display_name,
+                v.domain_type AS attack_domain_type,
+                s.name AS sensor_name
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            LEFT JOIN sensors s ON s.id = e.sensor_id
+            WHERE {status_where}
+            ORDER BY e.last_seen_at DESC, e.id DESC
+            """
+        ).fetchall()
+    items = [anomaly_event_row_to_dict(row) for row in rows]
+    items.extend(
+        group["event"]
+        for group in consolidated_security_anomaly_groups(status_filter)
+    )
+    return items
+
+
+def grafana_mitigation_records(
+    *,
+    anomaly_id: int | None,
+    status: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    filters: list[str] = []
+    values: list[Any] = []
+    if anomaly_id is not None:
+        filters.append(
+            "EXISTS ("
+            "SELECT 1 FROM mitigation_execution_anomalies l "
+            "WHERE l.execution_id = e.id AND l.anomaly_id = ?"
+            ")"
+        )
+        values.append(anomaly_id)
+    if clean_text(status):
+        filters.append("e.status = ?")
+        values.append(clean_text(status))
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.*
+            FROM mitigation_executions e
+            {where}
+            ORDER BY e.updated_at DESC, e.id DESC
+            LIMIT ?
+            """,
+            (*values, limit),
+        ).fetchall()
+    return [
+        canonical_grafana_mitigation_item(execution_row_to_dict(row))
+        for row in rows
+    ]
+
+
+def grafana_bgp_status_records() -> list[dict[str, Any]]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM bgp_connectors
+            ORDER BY name, id
+            """
+        ).fetchall()
+    return [
+        canonical_grafana_bgp_status_item(bgp_connector_row_to_dict(row))
+        for row in rows
+    ]
+
+
+@app.get("/api/v1/grafana", tags=["Grafana Integration"])
+def grafana_root_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "root",
+    )
+    return grafana_api_result(
+        "root",
+        context,
+        grafana_api_service_document(utc_now_iso()),
+    )
+
+
 @app.get(
     "/api/v1/grafana/health",
     tags=["Grafana Integration"],
@@ -33842,6 +33946,147 @@ def grafana_catalog_endpoint(request: Request):
         {
             **grafana_api_catalog(),
             "correlation_id": context["correlation_id"],
+        },
+    )
+
+
+@app.get("/api/v1/grafana/anomalies/active", tags=["Grafana Integration"])
+def grafana_active_anomalies_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "anomalies.active",
+    )
+    try:
+        items = canonical_grafana_active_anomalies(
+            grafana_anomaly_records("active")
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "anomalies.active",
+            context,
+            exc,
+        )
+    return grafana_api_result(
+        "anomalies.active",
+        context,
+        {
+            "items": items,
+            "count": len(items),
+            "timestamp": utc_now_iso(),
+        },
+    )
+
+
+@app.get("/api/v1/grafana/anomalies/history", tags=["Grafana Integration"])
+def grafana_anomaly_history_endpoint(
+    request: Request,
+    from_value: str | None = Query(None, alias="from"),
+    to_value: str | None = Query(None, alias="to"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    status: str = "",
+    severity: str = "",
+    search: str = "",
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "anomalies.history",
+    )
+    try:
+        items, total = filter_grafana_anomaly_history(
+            grafana_anomaly_records("history"),
+            from_value=from_value,
+            to_value=to_value,
+            limit=limit,
+            offset=offset,
+            status=status,
+            severity=severity,
+            search=search,
+        )
+    except GrafanaApiError as exc:
+        raise grafana_api_validation_error(
+            "anomalies.history",
+            context,
+            exc,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "anomalies.history",
+            context,
+            exc,
+        )
+    return grafana_api_result(
+        "anomalies.history",
+        context,
+        {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "timestamp": utc_now_iso(),
+        },
+    )
+
+
+@app.get("/api/v1/grafana/mitigations", tags=["Grafana Integration"])
+def grafana_mitigations_endpoint(
+    request: Request,
+    anomaly_id: int | None = None,
+    status: str = "",
+    limit: int = Query(100, ge=1, le=1000),
+):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "mitigations",
+    )
+    try:
+        items = grafana_mitigation_records(
+            anomaly_id=anomaly_id,
+            status=status,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "mitigations",
+            context,
+            exc,
+        )
+    return grafana_api_result(
+        "mitigations",
+        context,
+        {
+            "items": items,
+            "count": len(items),
+            "timestamp": utc_now_iso(),
+        },
+    )
+
+
+@app.get("/api/v1/grafana/bgp/status", tags=["Grafana Integration"])
+def grafana_bgp_status_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "bgp.status",
+    )
+    try:
+        items = grafana_bgp_status_records()
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "bgp.status",
+            context,
+            exc,
+        )
+    return grafana_api_result(
+        "bgp.status",
+        context,
+        {
+            "items": items,
+            "count": len(items),
+            "timestamp": utc_now_iso(),
         },
     )
 
