@@ -46,6 +46,7 @@ from app.services.cgnat_mapping import (
     CGNAT_AI_PROMPT_VERSION,
     CGNAT_AI_SCHEMA,
     CGNAT_AI_SYSTEM_PROMPT,
+    CGNAT_SOURCE_MODES,
     CGNAT_SOURCE_TYPES,
     activate_cgnat_batch,
     approve_cgnat_batch,
@@ -1241,7 +1242,7 @@ class CgnatImportUploadPayload(BaseModel):
     filename: str
     content: str
     mime_type: str | None = None
-    source_type: str | None = None
+    source_type: str = "auto"
     device_name: str | None = None
     pool_name: str | None = None
     connector_id: int | None = Field(None, ge=1)
@@ -1250,7 +1251,7 @@ class CgnatImportUploadPayload(BaseModel):
 
 
 class CgnatImportParsePayload(BaseModel):
-    source_type: str | None = None
+    source_type: str = "auto"
     allow_deterministic_fallback: bool = True
 
 
@@ -4567,7 +4568,7 @@ def interpret_cgnat_import_batch(
         raise ValueError("batch_not_found")
     if clean_text(batch["status"]) in {"approved", "active", "superseded", "rejected"}:
         raise ValueError("batch_cannot_be_reparsed")
-    source_hint = clean_text(source_type or batch["source_type_confirmed"])
+    source_hint = clean_text(source_type or batch["source_type_confirmed"]) or "auto"
     if source_hint and source_hint not in CGNAT_SOURCE_TYPES:
         raise ValueError("source_type_invalid")
     content = str(batch["original_content"] or "")
@@ -4578,15 +4579,36 @@ def interpret_cgnat_import_batch(
     payload = None
     model_provider = ""
     model_name = ""
-    if source_hint == "a10":
+    deterministic_modes = {"mikrotik_netmap", "expanded_mapping_table", "a10", "generic", "mikrotik", "other"}
+    if source_hint != "ai":
         deterministic_payload = parse_known_cgnat_text(content, source_hint)
-        if deterministic_payload.get("records"):
+        deterministic_source = clean_text(deterministic_payload.get("source_type"))
+        deterministic_metadata = (
+            deterministic_payload.get("_metadata")
+            if isinstance(deterministic_payload.get("_metadata"), dict)
+            else {}
+        )
+        recognized_deterministic = bool(
+            deterministic_payload.get("records")
+            or (
+                deterministic_source == "mikrotik_netmap"
+                and int(deterministic_metadata.get("routeros_rules") or 0) > 0
+            )
+            or (
+                deterministic_source == "expanded_mapping_table"
+                and deterministic_metadata.get("header_line") is not None
+            )
+        )
+        if recognized_deterministic:
             payload = deterministic_payload
             model_provider = "deterministic_fallback"
-            model_name = "builtin:a10"
+            model_name = f"builtin:{deterministic_payload.get('source_type') or source_hint}"
             parser_notes.append(
-                "Formato A10 conhecido interpretado pelo parser deterministico; Ollama nao foi necessario."
+                f"Formato {deterministic_payload.get('source_type') or source_hint} interpretado pelo parser deterministico; Ollama nao foi necessario."
             )
+        elif source_hint in deterministic_modes:
+            detail = "; ".join(str(item) for item in deterministic_payload.get("notes") or []) or "nenhum registro reconhecido"
+            raise ValueError(f"{source_hint}_parse_failed:line_1:{detail}")
     config = local_cgnat_ai_config(conn) if payload is None else None
     if payload is None and config is not None:
         interpreted_chunks: list[dict[str, Any]] = []
@@ -4616,10 +4638,12 @@ def interpret_cgnat_import_batch(
             payload = consolidate_cgnat_chunks(interpreted_chunks)
             parser_notes.append("Arquivo interpretado pela IA local; todos os registros foram revalidados pelo backend.")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            if not allow_deterministic_fallback:
+            if source_hint == "ai" or not allow_deterministic_fallback:
                 raise ValueError(f"cgnat_ai_parse_failed:{clean_text(exc)}") from exc
             parser_notes.append(f"IA local indisponivel ou invalida; fallback deterministico aplicado: {clean_text(exc)}")
     if payload is None:
+        if source_hint == "ai":
+            raise ValueError("cgnat_ai_not_configured")
         if not allow_deterministic_fallback:
             raise ValueError("cgnat_ai_not_configured")
         payload = parse_known_cgnat_text(content, source_hint)
@@ -4649,7 +4673,7 @@ def cgnat_config(request: Request):
         config = central_ai_effective_config(conn, "cgnat_import")
     return {
         "limits": cgnat_upload_limits(),
-        "source_types": sorted(CGNAT_SOURCE_TYPES),
+        "source_types": list(CGNAT_SOURCE_MODES),
         "prompt_version": CGNAT_AI_PROMPT_VERSION,
         "ai": {
             "configured": config is not None,

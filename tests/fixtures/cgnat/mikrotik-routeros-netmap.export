@@ -1,0 +1,8 @@
+# Export RouterOS NETMAP de referência
+/ip firewall nat add action=netmap chain=CGNAT_0 protocol=tcp src-address=100.64.8.0/27 to-addresses=170.238.47.96/27 to-ports=1024-2031
+/ip firewall nat add action=netmap chain=CGNAT_0 protocol=udp src-address=100.64.8.0/27 to-addresses=170.238.47.96/27 to-ports=1024-2031
+/ip firewall nat add action=netmap chain=CGNAT_0 src-address=100.64.8.0/27 to-addresses=170.238.47.96/27
+add chain=CGNAT_1 src-address=100.64.8.32/27 action=netmap \
+    to-ports=2032-3039 to-addresses=170.238.47.96/27 protocol=tcp
+add to-addresses=170.238.47.96/27 protocol=udp action=netmap chain=CGNAT_1 to-ports=2032-3039 src-address=100.64.8.32/27
+add src-address=100.64.8.32/27 to-addresses=170.238.47.96/27 chain=CGNAT_1 action=netmap

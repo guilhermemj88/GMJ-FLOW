@@ -253,7 +253,8 @@ class DashboardChartContractTest(unittest.TestCase):
             "createRequestGate",
         ):
             self.assertIn(token, TIME_RANGE)
-        self.assertIn("timeZone: 'UTC'", TIME_RANGE)
+        self.assertIn("timeZone: 'America/Sao_Paulo'", TIME_RANGE)
+        self.assertNotIn("timeZone: 'UTC'", TIME_RANGE)
         for token in (
             '<script src="dashboard-time-range.js"></script>',
             "activateConfigurableDashboardContext",
@@ -263,9 +264,16 @@ class DashboardChartContractTest(unittest.TestCase):
             "max: effectiveRange.end || undefined",
             "configurableTimestampLabel(pointTimestamp)",
             "dashboard_debug_period",
-            "useUTC: true",
+            "useUTC: false",
+            "formatter: value => configurableTimestampLabel(value)",
+            "Sem dados · BRT",
+            "Dados atrasados",
+            "Última completa",
+            "America/Sao_Paulo (BRT)",
         ):
             self.assertIn(token, FRONTEND)
+        self.assertNotIn("Sem dados · UTC", FRONTEND)
+        self.assertNotIn("${lastLabel} UTC", FRONTEND)
         configurable_block = FRONTEND[
             FRONTEND.find("function configurableDashboardContext("):
             FRONTEND.find("function clearConfigurableWidgetRuntime(")

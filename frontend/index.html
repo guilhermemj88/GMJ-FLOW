@@ -6466,7 +6466,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <div class="view-header">
             <div>
               <h1 class="view-title">CGNAT / Mapeamentos</h1>
-              <div class="subtle">Arquivo → IA local → validação determinística → prévia → aprovação → ativação</div>
+              <div class="subtle">Arquivo → parser determinístico/IA local → schema intermediário → validação → prévia → aprovação → ativação</div>
             </div>
             <div class="toolbar">
               <button id="refreshCgnatButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
@@ -6484,7 +6484,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
             <div id="cgnatFileMeta" class="metric-readout mb-3">Nenhum arquivo selecionado.</div>
             <div class="flow-search-grid mb-3">
-              <div class="field"><label for="cgnatSourceType">Fabricante/formato</label><select id="cgnatSourceType" class="form-select form-select-sm"><option value="">Detectar pela IA</option><option value="a10">A10</option><option value="mikrotik">MikroTik</option><option value="other">Outro</option></select></div>
+              <div class="field"><label for="cgnatSourceType">Fabricante/formato</label><select id="cgnatSourceType" class="form-select form-select-sm"><option value="auto">Detectar automaticamente</option><option value="mikrotik_netmap">MikroTik RouterOS NETMAP</option><option value="expanded_mapping_table">Tabela expandida IP público / portas / IP privado</option><option value="a10">A10</option><option value="generic">Genérico</option><option value="ai">Interpretar com IA local</option></select></div>
               <div class="field"><label for="cgnatDeviceName">Equipamento</label><input id="cgnatDeviceName" class="form-control form-control-sm" placeholder="A10-CGNAT-01"></div>
               <div class="field"><label for="cgnatPoolName">Pool</label><input id="cgnatPoolName" class="form-control form-control-sm" placeholder="POOL-OUTSIDE"></div>
               <div class="field"><label for="cgnatConnector">Conector</label><select id="cgnatConnector" class="form-select form-select-sm"><option value="">Sem vínculo</option></select></div>
@@ -6492,7 +6492,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="field"><label for="cgnatValidUntil">Válido até</label><input id="cgnatValidUntil" type="datetime-local" class="form-control form-control-sm"></div>
             </div>
             <div class="toolbar">
-              <button id="processCgnatFileButton" type="button" class="btn btn-sm btn-success"><i data-lucide="brain-circuit"></i><span>Interpretar com IA local</span></button>
+              <button id="processCgnatFileButton" type="button" class="btn btn-sm btn-success"><i data-lucide="scan-search"></i><span>Processar e gerar prévia</span></button>
               <button id="clearCgnatFileButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="x"></i><span>Limpar</span></button>
             </div>
             <div id="cgnatProgress" class="subtle mt-2">Aguardando arquivo.</div>
@@ -6512,8 +6512,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="metric-card"><div class="metric-label">Ignorados</div><div id="cgnatIgnoredRows" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Fabricante</div><div id="cgnatDetectedSource" class="metric-value">-</div></div>
               <div class="metric-card"><div class="metric-label">Confiança</div><div id="cgnatConfidence" class="metric-value">-</div></div>
+              <div class="metric-card"><div class="metric-label">Blocos NETMAP</div><div id="cgnatNetmapBlocks" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Linhas originais</div><div id="cgnatSourceLines" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Regras de origem</div><div id="cgnatSourceRules" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Mapeamentos expandidos</div><div id="cgnatExpandedMappings" class="metric-value">0</div></div>
             </div>
             <div id="cgnatParserNotes" class="metric-readout mb-3">Sem notas do parser.</div>
+            <div id="cgnatPreviewDetails" class="metric-readout mb-3">Sem detalhes da prévia.</div>
             <div class="toolbar mb-2">
               <input id="cgnatPreviewSearch" class="form-control form-control-sm" placeholder="Pesquisar IP, pool, erro ou linha">
               <select id="cgnatPreviewFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="valid">Válidos</option><option value="invalid">Inválidos</option><option value="duplicate">Duplicados</option><option value="overlap">Sobreposições</option></select>
@@ -19379,30 +19384,36 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? payload.meta.quality
           : null;
       if (!quality) return null;
+      const timeZoneTitle = 'Os dados continuam em UTC internamente, mas são exibidos em America/Sao_Paulo (BRT).';
       const lastComplete = quality.last_complete_sample_at;
       const lastLabel = lastComplete
         ? new Date(lastComplete).toLocaleString('pt-BR', {
-          timeZone: 'UTC',
+          timeZone: 'America/Sao_Paulo',
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
           hour12: false
-        })
+        }).replace(',', '') + ' BRT'
         : '';
       if (quality.data_status === 'no_data') {
         return {
-          label: 'Sem dados · UTC',
-          title: quality.collector_warning || 'Nenhuma amostra no período.',
+          label: 'Sem dados · BRT',
+          title: `${quality.collector_warning || 'Nenhuma amostra no período.'} ${timeZoneTitle}`,
           state: 'no-data'
         };
       }
       if (quality.data_status === 'delayed') {
         return {
-          label: `Dados atrasados${lastLabel ? ` · ${lastLabel} UTC` : ''}`,
-          title: quality.collector_warning || 'Última amostra completa atrasada.',
+          label: `Dados atrasados${lastLabel ? ` · ${lastLabel}` : ' · BRT'}`,
+          title: `${quality.collector_warning || 'Última amostra completa atrasada.'} ${timeZoneTitle}`,
           state: 'delayed'
         };
       }
       return {
-        label: `Última completa${lastLabel ? ` · ${lastLabel} UTC` : ' · UTC'}`,
-        title: 'Valores calculados com buckets completos em UTC.',
+        label: `Última completa${lastLabel ? ` · ${lastLabel}` : ' · BRT'}`,
+        title: `Valores calculados com buckets completos. ${timeZoneTitle}`,
         state: 'current'
       };
     }
@@ -20773,7 +20784,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             )}`
           });
           GMJDashboardCharts.replaceChartOption(chart, {
-            useUTC: true,
+            useUTC: false,
             tooltip: {
               trigger: 'axis',
               axisPointer: { type: 'line' },
@@ -20829,7 +20840,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               splitNumber: density.splitNumber,
               axisLabel: {
                 hideOverlap: true,
-                fontSize: density.fontSize
+                fontSize: density.fontSize,
+                formatter: value => configurableTimestampLabel(value)
               }
             },
             yAxis: {
@@ -23493,16 +23505,34 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function renderCgnatBatch(batch) {
       currentCgnatBatchId = batch?.id ? Number(batch.id) : null;
       currentCgnatBatchStatus = String(batch?.status || '');
+      const preview = batch?.preview || {};
       setText('cgnatTotalRows', formatNumber(batch?.total_rows || 0));
       setText('cgnatValidRows', formatNumber(batch?.valid_rows || 0));
       setText('cgnatInvalidRows', formatNumber(batch?.invalid_rows || 0));
       setText('cgnatDuplicateRows', formatNumber(batch?.duplicate_rows || 0));
       setText('cgnatOverlapRows', formatNumber(batch?.overlapping_rows || 0));
       setText('cgnatIgnoredRows', formatNumber(batch?.ignored_rows || 0));
-      setText('cgnatDetectedSource', batch?.source_type_confirmed || batch?.source_type_detected || '-');
+      setText('cgnatDetectedSource', preview.format_detected || batch?.source_type_detected || batch?.source_type_confirmed || '-');
       setText('cgnatConfidence', batch?.confidence !== undefined ? `${(Number(batch.confidence || 0) * 100).toFixed(1)}%` : '-');
+      setText('cgnatNetmapBlocks', formatNumber(preview.netmap_blocks || 0));
+      setText('cgnatSourceLines', formatNumber(preview.source_lines || 0));
+      setText('cgnatSourceRules', formatNumber(preview.routeros_rules || 0));
+      setText('cgnatExpandedMappings', formatNumber(preview.expanded_mappings || 0));
       document.getElementById('cgnatBatchBadge').outerHTML = `<span id="cgnatBatchBadge" class="badge-soft ${batch?.status === 'active' ? 'ok' : batch?.status === 'awaiting_approval' ? 'warn' : 'off'}">Lote ${batch?.id ? `#${batch.id}` : '-'} / ${escapeHtml(batch?.status || 'nenhum')}</span>`;
       setText('cgnatParserNotes', (batch?.parser_notes || []).join('\n') || 'Sem notas do parser.');
+      const previewList = value => (Array.isArray(value) && value.length ? value.join(', ') : '-');
+      const conflictList = (preview.conflicts || []).slice(0, 10).map(item => `linha ${item.line || '-'}: ${item.reason || '-'}`).join('; ') || 'nenhum';
+      const gapList = (preview.port_gaps || []).slice(0, 10).map(item => `${item.public_ip} ${item.port_start}-${item.port_end}`).join(', ') || 'nenhum';
+      document.getElementById('cgnatPreviewDetails').innerHTML = `
+        <div><strong>Formato detectado:</strong> ${escapeHtml(preview.format_detected || batch?.source_type_detected || '-')}</div>
+        <div><strong>Redes/IPs privados:</strong> ${escapeHtml(previewList(preview.private_networks))}</div>
+        <div><strong>Redes/IPs públicos:</strong> ${escapeHtml(previewList(preview.public_networks))}</div>
+        <div><strong>Faixas:</strong> ${escapeHtml(previewList(preview.port_ranges))} · <strong>Protocolos:</strong> ${escapeHtml(previewList(preview.protocols))}</div>
+        <div><strong>Regras consolidadas:</strong> ${escapeHtml(formatNumber(preview.consolidated_rules || 0))} · <strong>Genéricas:</strong> ${escapeHtml(formatNumber(preview.generic_rules || 0))}</div>
+        <div><strong>Conflitos:</strong> ${escapeHtml(conflictList)}</div>
+        <div><strong>Buracos de portas:</strong> ${escapeHtml(gapList)}</div>
+        <div><strong>Linhas ignoradas/inválidas:</strong> ${escapeHtml(`${preview.ignored_line_count || 0} / ${(preview.invalid_lines || []).length}`)} · <strong>Amostra:</strong> ${escapeHtml(`${(preview.sample || []).length} de até 20`)}</div>
+      `;
       const rows = Array.isArray(batch?.rows) ? batch.rows : [];
       document.getElementById('cgnatPreviewTable').innerHTML = rows.map(row => {
         const status = row.validation_status || 'pending';
@@ -23537,7 +23567,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <tr>
             <td>#${batch.id}</td>
             <td>${escapeHtml(batch.original_filename || batch.filename || '-')}<div class="small text-muted">${escapeHtml(batch.file_hash || '')}</div></td>
-            <td>${escapeHtml(batch.source_type_confirmed || batch.source_type_detected || '-')}</td>
+            <td>${escapeHtml(batch.preview?.format_detected || batch.source_type_detected || batch.source_type_confirmed || '-')}</td>
             <td>${escapeHtml([batch.model_provider, batch.model_name].filter(Boolean).join(' / ') || '-')}</td>
             <td>${formatNumber(batch.valid_rows || 0)} válidos / ${formatNumber(batch.invalid_rows || 0)} inválidos</td>
             <td>${cgnatStatusBadge(status)}</td>
@@ -23600,8 +23630,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setText(
         'cgnatStatus',
         ai.enabled && ai.local
-          ? `IA local pronta: ${ai.provider || 'Ollama'} / ${ai.model || '-'} / prompt ${config.prompt_version}`
-          : `Rota cgnat_import local não habilitada; formatos A10/MikroTik podem usar fallback determinístico seguro. Limite ${formatBytes(config.limits?.max_file_bytes || 0)}.`
+          ? `Parsers determinísticos prontos; IA local disponível para formatos desconhecidos: ${ai.provider || 'Ollama'} / ${ai.model || '-'} / prompt ${config.prompt_version}`
+          : `Parsers determinísticos NETMAP, tabela expandida, A10 e genérico prontos sem IA. Limite ${formatBytes(config.limits?.max_file_bytes || 0)}.`
       );
       if (currentCgnatBatchId) await loadCgnatBatch(currentCgnatBatchId);
       createIcons();
@@ -23617,7 +23647,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         filename: selectedCgnatFile.name,
         content,
         mime_type: selectedCgnatFile.type || null,
-        source_type: selectValue('cgnatSourceType') || null,
+        source_type: selectValue('cgnatSourceType') || 'auto',
         device_name: selectValue('cgnatDeviceName').trim() || null,
         pool_name: selectValue('cgnatPoolName').trim() || null,
         connector_id: Number(selectValue('cgnatConnector')) || null,
@@ -23644,13 +23674,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await parseCurrentCgnatBatch(uploadPayload.source_type);
     }
 
-    async function parseCurrentCgnatBatch(sourceType = null) {
+    async function parseCurrentCgnatBatch(sourceType = 'auto') {
       if (!currentCgnatBatchId) throw new Error('Abra um lote primeiro.');
-      setText('cgnatProgress', 'IA local interpretando chunks; o backend validará cada registro...');
+      setText('cgnatProgress', sourceType === 'ai' ? 'IA local convertendo o arquivo; o backend validará cada registro...' : 'Parser determinístico interpretando e validando o arquivo...');
       const parsed = await apiRequest(`/api/cgnat/imports/${currentCgnatBatchId}/parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_type: sourceType, allow_deterministic_fallback: true })
+        body: JSON.stringify({ source_type: sourceType || 'auto', allow_deterministic_fallback: true })
       });
       renderCgnatBatch(parsed);
       setText('cgnatProgress', `Prévia pronta: ${parsed.valid_rows || 0} válido(s), ${parsed.invalid_rows || 0} inválido(s). Nada foi ativado.`);
