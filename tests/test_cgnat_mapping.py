@@ -20,7 +20,9 @@ from app.services.cgnat_mapping import (
     list_active_cgnat_mappings,
     list_cgnat_batches,
     parse_cgnat_ai_json,
+    parse_expanded_mapping_table,
     parse_known_cgnat_text,
+    parse_mikrotik_netmap,
     reject_cgnat_batch,
     resolve_cgnat_subscriber,
     split_cgnat_content,
@@ -60,6 +62,8 @@ protocol=udp
 pool-name=POOL-MT
 subscriber-id=assinante-42
 """
+NETMAP_FIXTURE = (ROOT / "tests" / "fixtures" / "cgnat" / "mikrotik-routeros-netmap.export").read_text(encoding="utf-8")
+EXPANDED_TABLE_FIXTURE = (ROOT / "tests" / "fixtures" / "cgnat" / "expanded-mapping-table.txt").read_text(encoding="utf-8")
 
 
 def memory_db():
@@ -661,6 +665,251 @@ NAT Address: 168.232.197.33
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM cgnat_import_batches").fetchone()[0], 1)
 
 
+class CgnatMikrotikNetmapTest(unittest.TestCase):
+    @staticmethod
+    def mapping_set(payload):
+        checked = validate_cgnat_records(
+            NETMAP_FIXTURE if payload["source_type"] == "mikrotik_netmap" else EXPANDED_TABLE_FIXTURE,
+            payload,
+        )
+        return {
+            (row["private_ip"], row["public_ip"], row["port_start"], row["port_end"])
+            for row in checked["rows"]
+            if row["validation_status"] == "valid"
+        }
+
+    def test_routeros_tcp_udp_and_generic_rules_form_two_logical_blocks(self):
+        parsed = parse_mikrotik_netmap(NETMAP_FIXTURE)
+        checked = validate_cgnat_records(NETMAP_FIXTURE, parsed)
+        self.assertEqual(parsed["source_type"], "mikrotik_netmap")
+        self.assertEqual(len(parsed["_blocks"]), 2)
+        self.assertEqual(parsed["_metadata"]["routeros_rules"], 6)
+        self.assertEqual(parsed["_metadata"]["consolidated_rules"], 4)
+        self.assertEqual(checked["valid_rows"], 64)
+        self.assertEqual(checked["duplicate_rows"], 0)
+        self.assertEqual(checked["overlapping_rows"], 0)
+        self.assertEqual(parsed["_blocks"][0]["protocols"], ["tcp", "udp"])
+        self.assertTrue(parsed["_blocks"][0]["generic_rule_present"])
+
+    def test_netmap_expansion_is_positional_and_keeps_first_and_last_addresses(self):
+        parsed = parse_mikrotik_netmap(NETMAP_FIXTURE)
+        mappings = [
+            (item["private_ip"], item["public_ip"], item["port_start"], item["port_end"])
+            for item in parsed["records"]
+        ]
+        self.assertEqual(mappings[0], ("100.64.8.0", "170.238.47.96", 1024, 2031))
+        self.assertEqual(mappings[31], ("100.64.8.31", "170.238.47.127", 1024, 2031))
+        self.assertEqual(mappings[32], ("100.64.8.32", "170.238.47.96", 2032, 3039))
+        self.assertEqual(mappings[-1], ("100.64.8.63", "170.238.47.127", 2032, 3039))
+
+    def test_first_reference_block_preview_has_one_block_three_rules_and_32_mappings(self):
+        content = "\n".join(NETMAP_FIXTURE.splitlines()[1:4])
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="first-block.export",
+            content=content,
+            source_type_confirmed="mikrotik_netmap",
+        )
+        preview = backend_main.interpret_cgnat_import_batch(
+            conn,
+            batch["id"],
+            source_type="mikrotik_netmap",
+        )
+        summary = preview["preview"]
+        self.assertEqual(summary["netmap_blocks"], 1)
+        self.assertEqual(summary["routeros_rules"], 3)
+        self.assertEqual(summary["expanded_mappings"], 32)
+        self.assertEqual(summary["private_networks"], ["100.64.8.0/27"])
+        self.assertEqual(summary["public_networks"], ["170.238.47.96/27"])
+        self.assertEqual(summary["port_ranges"], ["1024-2031"])
+        conn.close()
+
+    def test_routeros_and_expanded_table_fixtures_are_equivalent(self):
+        netmap = parse_mikrotik_netmap(NETMAP_FIXTURE)
+        table = parse_expanded_mapping_table(EXPANDED_TABLE_FIXTURE)
+        self.assertEqual(len(table["records"]), 64)
+        self.assertEqual(self.mapping_set(netmap), self.mapping_set(table))
+
+    def test_auto_detection_prefers_both_deterministic_parsers_without_ai(self):
+        conn = memory_db()
+        with mock.patch.object(
+            backend_main,
+            "local_cgnat_ai_config",
+            side_effect=AssertionError("AI configuration should not be consulted"),
+        ), mock.patch.object(
+            backend_main,
+            "execute_ai_route",
+            side_effect=AssertionError("AI should not be called"),
+        ):
+            for filename, content, expected in (
+                ("router.export", NETMAP_FIXTURE, "mikrotik_netmap"),
+                ("table.txt", EXPANDED_TABLE_FIXTURE, "expanded_mapping_table"),
+            ):
+                batch = create_cgnat_import_batch(
+                    conn,
+                    filename=filename,
+                    content=content,
+                    source_type_confirmed="auto",
+                )
+                preview = backend_main.interpret_cgnat_import_batch(conn, batch["id"], source_type="auto")
+                self.assertEqual(preview["source_type_detected"], expected)
+                self.assertEqual(preview["valid_rows"], 64)
+                self.assertEqual(preview["status"], "awaiting_approval")
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings").fetchone()[0], 0)
+        conn.close()
+
+    def test_explicit_parsers_work_with_local_ai_disabled(self):
+        for filename, content, mode in (
+            ("router.export", NETMAP_FIXTURE, "mikrotik_netmap"),
+            ("table.txt", EXPANDED_TABLE_FIXTURE, "expanded_mapping_table"),
+        ):
+            with self.subTest(mode=mode):
+                conn = memory_db()
+                batch = create_cgnat_import_batch(conn, filename=filename, content=content, source_type_confirmed=mode)
+                with mock.patch.object(
+                    backend_main,
+                    "local_cgnat_ai_config",
+                    side_effect=AssertionError("AI configuration should not be consulted"),
+                ):
+                    preview = backend_main.interpret_cgnat_import_batch(
+                        conn,
+                        batch["id"],
+                        source_type=mode,
+                        allow_deterministic_fallback=False,
+                    )
+                self.assertEqual(preview["valid_rows"], 64)
+                conn.close()
+
+    def test_network_size_mismatch_is_invalid_and_not_expanded(self):
+        content = (
+            "/ip firewall nat add action=netmap chain=CGNAT_BAD protocol=tcp "
+            "src-address=100.64.9.0/27 to-addresses=203.0.113.0/28 to-ports=1024-2031"
+        )
+        parsed = parse_mikrotik_netmap(content)
+        checked = validate_cgnat_records(content, parsed)
+        self.assertEqual(len(parsed["_blocks"]), 1)
+        self.assertFalse(parsed["_blocks"][0]["valid"])
+        self.assertIn("network_size_mismatch", parsed["_blocks"][0]["errors"])
+        self.assertEqual(checked["valid_rows"], 0)
+        self.assertIn("network_size_mismatch", checked["rows"][0]["validation_error"])
+
+    def test_duplicate_routeros_blocks_are_detected_and_consolidated(self):
+        block = "\n".join(NETMAP_FIXTURE.splitlines()[1:4])
+        parsed = parse_mikrotik_netmap(f"{block}\n{block}")
+        checked = validate_cgnat_records(f"{block}\n{block}", parsed)
+        self.assertEqual(len(parsed["blocks"]), 1)
+        self.assertEqual(checked["valid_rows"], 32)
+        self.assertEqual(parsed["_metadata"]["duplicate_routeros_rules"], 3)
+        self.assertTrue(
+            any("duplicate_netmap_block_or_rule" in item["reason"] for item in parsed["_metadata"]["conflicts"])
+        )
+
+    def test_disabled_routeros_rule_is_accepted_but_not_activated(self):
+        content = (
+            "add action=netmap disabled=yes chain=OFF src-address=100.64.9.1/32 "
+            "to-addresses=203.0.113.1/32 to-ports=1000-1999"
+        )
+        parsed = parse_mikrotik_netmap(content)
+        self.assertEqual(parsed["records"], [])
+        self.assertEqual(parsed["_metadata"]["routeros_rules"], 1)
+        self.assertEqual(parsed["_metadata"]["disabled_routeros_rules"], 1)
+        self.assertEqual(parsed["_metadata"]["ignored_lines"], [{"line": 1, "reason": "disabled_rule"}])
+
+    def test_preview_detects_port_holes_without_marking_disjoint_ranges_as_conflicts(self):
+        content = """Public IP | Port Range | Private IP
+203.0.113.10 | 1000-1099 | 100.64.0.1
+203.0.113.10 | 1200-1299 | 100.64.0.2
+"""
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="gaps.txt",
+            content=content,
+            source_type_confirmed="expanded_mapping_table",
+        )
+        preview = backend_main.interpret_cgnat_import_batch(
+            conn,
+            batch["id"],
+            source_type="expanded_mapping_table",
+        )
+        self.assertEqual(preview["overlapping_rows"], 0)
+        self.assertEqual(
+            preview["preview"]["port_gaps"],
+            [{"public_ip": "203.0.113.10", "port_start": 1100, "port_end": 1199}],
+        )
+        conn.close()
+
+    def test_supported_prefixes_expand_all_addresses(self):
+        for prefix in range(24, 33):
+            with self.subTest(prefix=prefix):
+                private_base = "100.64.10.0" if prefix < 32 else "100.64.10.7"
+                public_base = "198.51.100.0" if prefix < 32 else "198.51.100.7"
+                content = (
+                    f"add action=netmap chain=C{prefix} src-address={private_base}/{prefix} "
+                    f"to-addresses={public_base}/{prefix} to-ports=4000-4999"
+                )
+                parsed = parse_mikrotik_netmap(content)
+                self.assertEqual(len(parsed["records"]), 2 ** (32 - prefix))
+
+    def test_expanded_table_accepts_headers_separators_and_range_spellings(self):
+        ranges = ("1024 à 2031", "1024 a 2031", "1024 até 2031", "1024-2031", "1024..2031")
+        headers = (
+            "IP Público | Range de Portas | IP Privado",
+            "IP Publico; Faixa de Portas; IP Privado",
+            "Public IP,Port Range,Private IP",
+        )
+        for index, range_text in enumerate(ranges):
+            header = headers[index % len(headers)]
+            content = f"{header}\n203.0.113.{index + 1} | {range_text} | 100.64.0.{index + 1}"
+            parsed = parse_expanded_mapping_table(content)
+            checked = validate_cgnat_records(content, parsed)
+            self.assertEqual(checked["valid_rows"], 1)
+
+    def test_preview_reports_blocks_rules_ranges_protocols_and_twenty_samples(self):
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="router.export",
+            content=NETMAP_FIXTURE,
+            source_type_confirmed="mikrotik_netmap",
+        )
+        preview = backend_main.interpret_cgnat_import_batch(
+            conn,
+            batch["id"],
+            source_type="mikrotik_netmap",
+        )
+        summary = preview["preview"]
+        self.assertEqual(summary["netmap_blocks"], 2)
+        self.assertEqual(summary["routeros_rules"], 6)
+        self.assertEqual(summary["expanded_mappings"], 64)
+        self.assertEqual(summary["private_networks"], ["100.64.8.0/27", "100.64.8.32/27"])
+        self.assertEqual(summary["public_networks"], ["170.238.47.96/27"])
+        self.assertEqual(summary["port_ranges"], ["1024-2031", "2032-3039"])
+        self.assertEqual(summary["protocols"], ["tcp", "udp"])
+        self.assertEqual(summary["port_gaps"], [])
+        self.assertEqual(len(summary["sample"]), 20)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings").fetchone()[0], 0)
+        approve_cgnat_batch(conn, batch["id"], "operator")
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings").fetchone()[0], 64)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings WHERE active = 1").fetchone()[0], 0)
+        activate_cgnat_batch(conn, batch["id"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings WHERE active = 1").fetchone()[0], 64)
+        conn.close()
+
+    def test_frontend_exposes_all_explicit_modes_and_never_uses_null_source_type(self):
+        for marker in (
+            'value="auto">Detectar automaticamente',
+            'value="mikrotik_netmap">MikroTik RouterOS NETMAP',
+            'value="expanded_mapping_table">Tabela expandida',
+            'value="a10">A10',
+            'value="generic">Genérico',
+            'value="ai">Interpretar com IA local',
+            "source_type: selectValue('cgnatSourceType') || 'auto'",
+        ):
+            self.assertIn(marker, FRONTEND)
+
+
 class CgnatUploadSafetyTest(unittest.TestCase):
     def test_extensionless_a10_file_is_accepted_and_reaches_preview(self):
         conn = memory_db()
@@ -854,7 +1103,7 @@ class CgnatMappingSchemaAndSafetyTest(unittest.TestCase):
 
     def test_local_ai_interpretation_records_model_and_still_runs_backend_validation(self):
         conn = memory_db()
-        batch = create_cgnat_import_batch(conn, filename="local-ai.txt", content=A10_CONTENT)
+        batch = create_cgnat_import_batch(conn, filename="local-ai.txt", content=A10_CONTENT, source_type_confirmed="ai")
         structured = parse_known_cgnat_text(A10_CONTENT)
         calls = []
 
@@ -874,7 +1123,7 @@ class CgnatMappingSchemaAndSafetyTest(unittest.TestCase):
             "local_cgnat_ai_config",
             return_value={"enabled": True, "provider": "ollama", "selected_model": "qwen-cgnat"},
         ), mock.patch.object(backend_main, "execute_ai_route", side_effect=fake_execute):
-            preview = backend_main.interpret_cgnat_import_batch(conn, batch["id"])
+            preview = backend_main.interpret_cgnat_import_batch(conn, batch["id"], source_type="ai")
         self.assertEqual(preview["status"], "awaiting_approval")
         self.assertEqual(preview["valid_rows"], 3)
         self.assertEqual(preview["model_provider"], "Ollama local")

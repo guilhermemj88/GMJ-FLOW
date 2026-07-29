@@ -250,12 +250,12 @@
        assertEqual(resizeRenderCount, 1, 'continuous resize is debounced');
        responsiveFixture.remove();
 
-      const utcLabel = timeRange.formatUtcTimestamp(
-        '2026-07-28T12:34:56Z',
+      const brtLabel = timeRange.formatUtcTimestamp(
+        '2026-07-29T11:55:00Z',
         'pt-BR'
       );
-      assert(utcLabel.includes('12:34:56'), 'UTC formatter keeps the UTC clock');
-      assert(utcLabel.toUpperCase().includes('UTC'), 'UTC formatter labels timezone');
+      assert(brtLabel.includes('08:55:00'), 'UTC instant is displayed with the Sao Paulo clock');
+      assert(brtLabel.toUpperCase().includes('BRT'), 'Sao Paulo formatter labels BRT');
 
       for (const minutes of [15, 60, 1440, 10080]) {
         assertEqual(
