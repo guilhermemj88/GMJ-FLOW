@@ -48,6 +48,10 @@ class GrafanaRankingQuery(BaseModel):
     to_time: str = Field(alias="to")
     top_n: int = Field(10, ge=1, le=100)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
+    direction: Optional[str] = None
+    sensor: Optional[int] = Field(None, ge=1)
+    interface: Optional[int] = Field(None, ge=1)
+    protocol: Optional[str] = None
     calculation: str = "last_not_null"
     timezone: str = "UTC"
     format: str = "json"
@@ -56,12 +60,15 @@ class GrafanaRankingQuery(BaseModel):
         allow_population_by_field_name = True
         schema_extra = {
             "example": {
-                "metric": "top_download_origins",
+                "metric": "top_ports",
                 "from": "2026-07-28T10:00:00Z",
                 "to": "2026-07-28T10:10:00Z",
                 "top_n": 10,
-                "filters": {},
-                "calculation": "last_not_null",
+                "direction": "both",
+                "sensor": 2,
+                "interface": 17,
+                "protocol": "udp",
+                "calculation": "rate",
             }
         }
 
@@ -71,7 +78,13 @@ class GrafanaTableQuery(BaseModel):
     from_time: str = Field(alias="from")
     to_time: str = Field(alias="to")
     limit: int = Field(100, ge=1, le=1000)
+    top_n: Optional[int] = Field(None, ge=1, le=100)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
+    direction: Optional[str] = None
+    sensor: Optional[int] = Field(None, ge=1)
+    interface: Optional[int] = Field(None, ge=1)
+    protocol: Optional[str] = None
+    calculation: str = "last_not_null"
     timezone: str = "UTC"
 
     class Config:
@@ -173,7 +186,19 @@ class GrafanaRankingItem(BaseModel):
     key: str
     label: str
     value: float
+    bps: float
+    pps: float
+    percentage: float
     percent: float
+    asn: Optional[int] = None
+    asn_name: str = ""
+    country_code: str = ""
+    country_name: str = ""
+    protocol: Optional[str] = None
+    port: Optional[int] = None
+    display_name: Optional[str] = None
+    tcp_flags: Optional[str] = None
+    packets: int = 0
     metadata: dict[str, Any]
 
 
@@ -183,6 +208,7 @@ class GrafanaRankingResponse(BaseModel):
     unit: str
     items: list[GrafanaRankingItem]
     total: float
+    timestamp: str
     calculation: str
     meta: dict[str, Any]
 
@@ -195,10 +221,22 @@ class GrafanaRankingResponse(BaseModel):
                 "items": [
                     {
                         "rank": 1,
-                        "key": "15169",
+                        "key": "AS15169",
                         "label": "AS15169 — Google LLC",
                         "value": 8500000.0,
+                        "bps": 8500000.0,
+                        "pps": 12500.0,
+                        "percentage": 68.0,
                         "percent": 68.0,
+                        "asn": 15169,
+                        "asn_name": "Google LLC",
+                        "country_code": "US",
+                        "country_name": "United States",
+                        "protocol": None,
+                        "port": None,
+                        "display_name": None,
+                        "tcp_flags": None,
+                        "packets": 7500000,
                         "metadata": {
                             "asn": 15169,
                             "as_name": "Google LLC",
@@ -208,6 +246,7 @@ class GrafanaRankingResponse(BaseModel):
                     }
                 ],
                 "total": 12500000.0,
+                "timestamp": "2026-07-28T10:10:00Z",
                 "calculation": "last_not_null",
                 "meta": {
                     "timezone": "UTC",

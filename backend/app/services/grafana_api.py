@@ -48,6 +48,69 @@ GRAFANA_METRICS = {
         "unit": "bps",
         "dimensions": ["protocol"],
     },
+    "top_source_ips": {
+        "label": "Top IPs de origem",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["source_ip"],
+    },
+    "top_destination_ips": {
+        "label": "Top IPs de destino",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["destination_ip"],
+    },
+    "top_ports": {
+        "label": "Top portas",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["protocol", "port"],
+    },
+    "top_tcp_flags": {
+        "label": "Top TCP Flags",
+        "kind": "ranking",
+        "unit": "pps",
+        "dimensions": ["tcp_flags"],
+    },
+}
+GRAFANA_RANKING_QUERY_PLANS = {
+    "top_download_origins": {
+        "dimension": "src_asn",
+        "direction": "download",
+        "metric": "bps",
+    },
+    "top_upload_destinations": {
+        "dimension": "dst_asn",
+        "direction": "upload",
+        "metric": "bps",
+    },
+    "top_protocols": {
+        "dimension": "protocol",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_source_ips": {
+        "dimension": "src_ip",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_destination_ips": {
+        "dimension": "dst_ip",
+        "direction": None,
+        "metric": "bps",
+    },
+    # The MVP groups destination port together with protocol. The shared
+    # dst_port query already performs GROUP BY port, proto in ClickHouse.
+    "top_ports": {
+        "dimension": "dst_port",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_tcp_flags": {
+        "dimension": "tcp_flags",
+        "direction": None,
+        "metric": "pps",
+    },
 }
 GRAFANA_GROUP_BY = {"direction", "sensor", "interface", "protocol"}
 GRAFANA_DIRECTIONS = {"both", "upload", "download"}
@@ -61,6 +124,15 @@ GRAFANA_CALCULATIONS = {
     "total",
     "difference",
 }
+GRAFANA_RANKING_CALCULATIONS = {
+    "rate",
+    "last",
+    "last_not_null",
+    "mean",
+    "max",
+    "min",
+    "total",
+}
 GRAFANA_FORMATS = {"json", "table"}
 GRAFANA_SCOPES = {
     "grafana:data:read",
@@ -73,20 +145,67 @@ GRAFANA_READ_ENDPOINTS = {
     "anomalies_active": "/api/v1/grafana/anomalies/active",
     "anomalies_history": "/api/v1/grafana/anomalies/history",
     "mitigations": "/api/v1/grafana/mitigations",
+    "mitigations_active": "/api/v1/grafana/mitigations/active",
     "bgp_status": "/api/v1/grafana/bgp/status",
+}
+GRAFANA_CGNAT_FIELDS = (
+    "cgnat_applicable",
+    "cgnat_resolved",
+    "cgnat_private_ip",
+    "cgnat_public_ip",
+    "cgnat_public_port",
+    "cgnat_port_range",
+    "cgnat_pool",
+    "cgnat_device",
+    "cgnat_vendor",
+    "cgnat_mapping_source",
+    "cgnat_confidence",
+)
+GRAFANA_RESOURCE_FIELDS = (
+    "cgnat_private_ip",
+    "cgnat_public_ip",
+    "cgnat_public_port",
+    "cgnat_pool",
+    "cgnat_device",
+)
+GRAFANA_ACTIVE_MITIGATION_STATUSES = {
+    "sent",
+    "advertised",
+    "active",
+    "applied",
+    "announced",
+}
+GRAFANA_EXCLUDED_MITIGATION_STATUSES = {
+    "expired",
+    "withdrawn",
+    "failed",
+    "failed_withdraw",
+    "blocked",
+    "rejected",
+    "rejected_by_policy",
+    "dry_run",
+    "simulation_only",
 }
 GRAFANA_RESOURCE_DATASETS = {
     "anomalies_active": {
         "label": "Anomalias ativas",
         "path": GRAFANA_READ_ENDPOINTS["anomalies_active"],
+        "fields": list(GRAFANA_RESOURCE_FIELDS),
     },
     "anomalies_history": {
         "label": "Histórico de anomalias",
         "path": GRAFANA_READ_ENDPOINTS["anomalies_history"],
+        "fields": list(GRAFANA_RESOURCE_FIELDS),
     },
     "mitigations": {
         "label": "Mitigações",
         "path": GRAFANA_READ_ENDPOINTS["mitigations"],
+        "fields": list(GRAFANA_RESOURCE_FIELDS),
+    },
+    "mitigations_active": {
+        "label": "Mitigações ativas",
+        "path": GRAFANA_READ_ENDPOINTS["mitigations_active"],
+        "fields": list(GRAFANA_RESOURCE_FIELDS),
     },
     "bgp_status": {
         "label": "Status BGP",
@@ -111,6 +230,7 @@ GRAFANA_ANOMALY_FIELDS = (
     "last_seen_at",
     "duration_seconds",
     "mitigation_status",
+    *GRAFANA_CGNAT_FIELDS,
 )
 
 
@@ -282,9 +402,15 @@ def catalog() -> dict[str, Any]:
                 GRAFANA_RESOURCE_DATASETS.items()
             )
         ],
+        "resource_fields": list(GRAFANA_RESOURCE_FIELDS),
+        "fields": [
+            {"id": field_id}
+            for field_id in GRAFANA_RESOURCE_FIELDS
+        ],
         "endpoints": dict(GRAFANA_READ_ENDPOINTS),
         "group_by": sorted(GRAFANA_GROUP_BY),
         "calculations": sorted(GRAFANA_CALCULATIONS),
+        "ranking_calculations": sorted(GRAFANA_RANKING_CALCULATIONS),
         "formats": sorted(GRAFANA_FORMATS),
         "limits": {
             "max_window_seconds": max_window_seconds(),
@@ -330,12 +456,95 @@ def _integer(value: Any) -> int:
     return int(_number(value))
 
 
+def _optional_integer(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _first_text(item: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = str(item.get(key) or "").strip()
         if value:
             return value
     return ""
+
+
+def _cgnat_vendor(source_type: str) -> str | None:
+    normalized = source_type.strip().lower()
+    if normalized == "a10":
+        return "A10"
+    if normalized in {"mikrotik", "mikrotik_netmap"}:
+        return "MikroTik"
+    return None
+
+
+def canonical_cgnat_fields(item: dict[str, Any]) -> dict[str, Any]:
+    addressing = (
+        item.get("subscriber_addressing_resolution")
+        if isinstance(item.get("subscriber_addressing_resolution"), dict)
+        else {}
+    )
+    effective_mode = _first_text(
+        item,
+        "effective_subscriber_addressing_mode",
+    ).lower() or str(addressing.get("effective_mode") or "").strip().lower()
+    applicable = bool(
+        item.get("cgnat_applicable")
+        or item.get("cgnat_matched")
+        or item.get("cgnat_lookup_performed")
+        or effective_mode == "cgnat"
+        or _first_text(item, "cgnat_gate").lower() == "required"
+    )
+    private_ip = _first_text(item, "private_ip")
+    resolved = bool(
+        applicable
+        and item.get("cgnat_matched")
+        and not item.get("cgnat_ambiguous")
+        and private_ip
+    )
+    if not resolved:
+        return {
+            "cgnat_applicable": applicable,
+            "cgnat_resolved": False,
+            **{
+                field: None
+                for field in GRAFANA_CGNAT_FIELDS
+                if field not in {"cgnat_applicable", "cgnat_resolved"}
+            },
+        }
+
+    port_start = _optional_integer(item.get("mapped_port_start"))
+    port_end = _optional_integer(item.get("mapped_port_end"))
+    port_range = (
+        f"{port_start}-{port_end}"
+        if port_start is not None and port_end is not None
+        else None
+    )
+    source_type = _first_text(item, "cgnat_source_type").lower()
+    confidence = (
+        _number(item.get("cgnat_confidence"))
+        if item.get("cgnat_confidence") not in (None, "")
+        else None
+    )
+    return {
+        "cgnat_applicable": True,
+        "cgnat_resolved": True,
+        "cgnat_private_ip": private_ip,
+        "cgnat_public_ip": _first_text(item, "public_ip") or None,
+        "cgnat_public_port": _optional_integer(item.get("public_port")),
+        "cgnat_port_range": port_range,
+        "cgnat_pool": _first_text(item, "cgnat_pool_name") or None,
+        "cgnat_device": _first_text(item, "cgnat_device_name") or None,
+        "cgnat_vendor": _cgnat_vendor(source_type),
+        # Expose only the parser/source type. The internal source filename,
+        # batch, candidates and full mapping rule remain private.
+        "cgnat_mapping_source": source_type or None,
+        "cgnat_confidence": confidence,
+    }
 
 
 def canonical_anomaly_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -426,6 +635,7 @@ def canonical_anomaly_item(item: dict[str, Any]) -> dict[str, Any]:
             "auto_mitigation_status",
         )
         or "none",
+        **canonical_cgnat_fields(item),
     }
     return {field: result[field] for field in GRAFANA_ANOMALY_FIELDS}
 
@@ -527,28 +737,211 @@ def filter_anomaly_history(
     return filtered[safe_offset : safe_offset + safe_limit], len(filtered)
 
 
-def canonical_mitigation_item(item: dict[str, Any]) -> dict[str, Any]:
+def mitigation_is_active(
+    item: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    status = _first_text(item, "status").lower()
+    if status not in GRAFANA_ACTIVE_MITIGATION_STATUSES:
+        return False
+    if status in GRAFANA_EXCLUDED_MITIGATION_STATUSES:
+        return False
+    if _first_text(item, "confirmation_level").lower() == "simulation_only":
+        return False
+    if _first_text(item, "requested_mode").lower() == "dry_run":
+        return False
+    expires_at = _optional_utc_timestamp(item.get("expires_at"))
+    current = now or datetime.now(timezone.utc)
+    return expires_at is None or expires_at > current
+
+
+def validate_mitigation_filters(
+    *,
+    active_only: bool = False,
+    anomaly_id: Any = None,
+    status: str = "",
+    connector_id: Any = None,
+    from_value: Any = None,
+    to_value: Any = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    start = (
+        parse_utc_timestamp(from_value, "from")
+        if str(from_value or "").strip()
+        else None
+    )
+    end = (
+        parse_utc_timestamp(to_value, "to")
+        if str(to_value or "").strip()
+        else None
+    )
+    if start is not None and end is not None and start >= end:
+        raise GrafanaApiError(
+            400,
+            "invalid_time_range",
+            "from deve ser anterior a to.",
+        )
     return {
+        "active_only": bool(active_only),
+        "anomaly_id": _optional_integer(anomaly_id),
+        "status": str(status or "").strip().lower(),
+        "connector_id": _optional_integer(connector_id),
+        "start": start,
+        "end": end,
+        "limit": max(1, min(int(limit), 1000)),
+        "offset": max(0, int(offset)),
+    }
+
+
+def canonical_mitigation_item(
+    item: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    raw_payload = (
+        item.get("raw_payload")
+        if isinstance(item.get("raw_payload"), dict)
+        else {}
+    )
+    raw_anomaly = (
+        raw_payload.get("anomaly")
+        if isinstance(raw_payload.get("anomaly"), dict)
+        else {}
+    )
+    cgnat_event = (
+        item.get("_cgnat_event")
+        if isinstance(item.get("_cgnat_event"), dict)
+        else raw_anomaly
+    )
+    top_flow = (
+        cgnat_event.get("top_flow")
+        if isinstance(cgnat_event.get("top_flow"), dict)
+        else {}
+    )
+    status = _first_text(item, "status").lower() or "unknown"
+    requested_mode = _first_text(item, "requested_mode").lower()
+    mode = (
+        "automatic"
+        if requested_mode in {"auto", "automatic"}
+        else "manual"
+        if requested_mode in {
+            "",
+            "manual",
+            "manual_approval",
+            "announce_now",
+            "semi_auto",
+        }
+        else requested_mode
+    )
+    raw_connector_mode = _first_text(item, "connector_mode").lower()
+    connector_mode = (
+        "automatic"
+        if raw_connector_mode in {"auto", "automatic"}
+        else raw_connector_mode
+    )
+    ttl_seconds = _integer(
+        item.get("duration_seconds") or item.get("ttl_seconds")
+    )
+    expires_at = _first_text(item, "expires_at")
+    expires = _optional_utc_timestamp(expires_at)
+    current = now or datetime.now(timezone.utc)
+    remaining_seconds = (
+        max(0, int((expires - current).total_seconds()))
+        if expires is not None
+        else ttl_seconds
+        if mitigation_is_active(item, now=current)
+        else 0
+    )
+    source_ip = _first_text(
+        cgnat_event,
+        "public_ip",
+        "top_src_ip",
+        "dominant_src_ip",
+        "src_ip",
+    ) or _first_text(top_flow, "src_ip")
+    if not source_ip:
+        source_ip = _first_text(item, "src_prefix").split("/", 1)[0]
+    destination_ip = _first_text(
+        cgnat_event,
+        "top_dst_ip",
+        "dominant_dst_ip",
+        "dst_ip",
+    ) or _first_text(top_flow, "dst_ip") or _first_text(item, "dst_ip")
+    if not destination_ip:
+        destination_ip = _first_text(
+            item,
+            "dst_prefix",
+            "target_prefix",
+        ).split("/", 1)[0]
+    source_port = (
+        _optional_integer(cgnat_event.get("public_port"))
+        or _optional_integer(cgnat_event.get("top_src_port"))
+        or _optional_integer(top_flow.get("src_port"))
+        or _optional_integer(item.get("src_port"))
+    )
+    destination_port = (
+        _optional_integer(cgnat_event.get("top_dst_port"))
+        or _optional_integer(cgnat_event.get("target_port"))
+        or _optional_integer(top_flow.get("dst_port"))
+        or _optional_integer(item.get("dst_port"))
+    )
+    started_at = _first_text(
+        item,
+        "advertised_at",
+        "sent_at",
+        "queued_at",
+        "created_at",
+    )
+    result = {
         "id": item.get("id"),
         "anomaly_id": item.get("anomaly_id"),
-        "status": _first_text(item, "status") or "unknown",
-        "action": _first_text(item, "action"),
-        "automatic": bool(item.get("automatic")),
-        "vector": _first_text(item, "vector"),
-        "profile": _first_text(item, "profile"),
+        "status": status,
+        "action": (
+            "withdraw"
+            if status in {"withdrawn", "expired", "failed_withdraw"}
+            else "announce"
+        ),
+        "mode": mode,
         "connector_id": item.get("connector_id"),
-        "connector_type": _first_text(item, "connector_type"),
-        "policy_reason": _first_text(item, "policy_reason"),
-        "ttl_seconds": _integer(item.get("ttl_seconds")),
-        "created_at": _first_text(item, "created_at"),
-        "queued_at": _first_text(item, "queued_at"),
-        "applied_at": _first_text(item, "applied_at"),
-        "expires_at": _first_text(item, "expires_at"),
-        "withdrawn_at": _first_text(item, "withdrawn_at"),
-        "error_code": _first_text(item, "error_code"),
-        "error_message": _first_text(item, "error_message"),
-        "updated_at": _first_text(item, "updated_at"),
+        "connector_name": _first_text(item, "connector_name"),
+        "connector_backend": _first_text(item, "connector_backend"),
+        "connector_mode": connector_mode,
+        "rule_type": _first_text(
+            item,
+            "attack_vector_name",
+        )
+        or _first_text(
+            cgnat_event,
+            "vector_name",
+            "attack_vector_name",
+            "source_name",
+        ),
+        "source_ip": source_ip or None,
+        "destination_ip": destination_ip or None,
+        "protocol": _first_text(
+            item,
+            "protocol",
+        )
+        or _first_text(cgnat_event, "protocol", "decoder")
+        or _first_text(top_flow, "protocol"),
+        "source_port": source_port,
+        "destination_port": destination_port,
+        "prefix": _first_text(
+            item,
+            "target_prefix",
+            "dst_prefix",
+            "src_prefix",
+        )
+        or None,
+        "started_at": started_at or None,
+        "expires_at": expires_at or None,
+        "ttl_seconds": ttl_seconds,
+        "remaining_seconds": remaining_seconds,
+        **canonical_cgnat_fields(cgnat_event),
     }
+    return result
 
 
 def canonical_bgp_status_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -734,23 +1127,80 @@ def validate_ranking_request(payload: Any) -> dict[str, Any]:
     if not definition or definition["kind"] != "ranking":
         raise GrafanaApiError(400, "metric_not_allowed", "Métrica não permitida.")
     start, end = validate_window(data.get("from"), data.get("to"))
-    filters = _validated_filters(data.get("filters"))
+    raw_filters = data.get("filters")
+    if hasattr(raw_filters, "dict"):
+        raw_filters = raw_filters.dict()
+    raw_filters = dict(raw_filters) if isinstance(raw_filters, dict) else {}
+    aliases = {
+        "sensor": "sensor_ids",
+        "interface": "interfaces",
+        "protocol": "protocols",
+    }
+    for alias, target in aliases.items():
+        alias_value = data.get(alias)
+        if alias_value is None or alias_value == "":
+            continue
+        normalized_alias = [alias_value]
+        current = raw_filters.get(target) or []
+        if current and [
+            str(item).strip().lower() for item in current
+        ] != [
+            str(item).strip().lower() for item in normalized_alias
+        ]:
+            raise GrafanaApiError(
+                400,
+                "filter_not_allowed",
+                "Filtro %s foi informado com valores conflitantes." % alias,
+            )
+        raw_filters[target] = normalized_alias
+    if data.get("direction") not in (None, ""):
+        current_direction = str(
+            raw_filters.get("direction") or "both"
+        ).strip().lower()
+        alias_direction = str(data["direction"]).strip().lower()
+        if current_direction not in {"", "both", alias_direction}:
+            raise GrafanaApiError(
+                400,
+                "filter_not_allowed",
+                "Filtro direction foi informado com valores conflitantes.",
+            )
+        raw_filters["direction"] = alias_direction
+    filters = _validated_filters(raw_filters)
     timezone_name = _validate_timezone(data.get("timezone"))
     calculation = str(
         data.get("calculation") or "last_not_null"
     ).strip().lower()
-    if calculation not in GRAFANA_CALCULATIONS - {"rate"}:
+    if calculation not in GRAFANA_RANKING_CALCULATIONS:
         raise GrafanaApiError(400, "calculation_not_allowed", "Cálculo inválido.")
     response_format = str(data.get("format") or "json").strip().lower()
     if response_format not in GRAFANA_FORMATS:
         raise GrafanaApiError(400, "format_not_allowed", "Formato inválido.")
+    try:
+        raw_top_n = data.get("top_n")
+        top_n = int(
+            10
+            if raw_top_n is None or raw_top_n == ""
+            else raw_top_n
+        )
+    except (TypeError, ValueError):
+        raise GrafanaApiError(
+            400,
+            "top_n_not_allowed",
+            "top_n deve ser um inteiro entre 1 e 100.",
+        )
+    if top_n < 1 or top_n > 100:
+        raise GrafanaApiError(
+            400,
+            "top_n_not_allowed",
+            "top_n deve estar entre 1 e 100.",
+        )
     return {
         **data,
         "metric": metric,
         "definition": definition,
         "start": start,
         "end": end,
-        "top_n": max(1, min(100, int(data.get("top_n") or 10))),
+        "top_n": top_n,
         "filters": filters,
         "calculation": calculation,
         "timezone": timezone_name,
@@ -880,24 +1330,83 @@ def canonical_ranking(
     request: dict[str, Any],
     correlation: str,
 ) -> dict[str, Any]:
+    metric = request["metric"]
+    unit = request["definition"]["unit"]
+
+    def number(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def optional_integer(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        match = re.search(r"(\d+)", str(value))
+        return int(match.group(1)) if match else None
+
+    def normalized_flags(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text or text.upper() in {"0", "NONE", "NULL"}:
+            return "NONE"
+        flag_order = (
+            (0x01, "FIN"),
+            (0x02, "SYN"),
+            (0x04, "RST"),
+            (0x08, "PSH"),
+            (0x10, "ACK"),
+            (0x20, "URG"),
+            (0x40, "ECE"),
+            (0x80, "CWR"),
+        )
+        try:
+            bits = int(text, 0)
+        except ValueError:
+            requested = {
+                token.strip().upper()
+                for token in re.split(r"[,|+ ]+", text)
+                if token.strip()
+            }
+            names = [
+                name
+                for _, name in flag_order
+                if name in requested
+            ]
+            return ",".join(names) if names else text.upper()
+        names = [name for bit, name in flag_order if bits & bit]
+        return ",".join(names) if names else "NONE"
+
     items = []
     for index, item in enumerate(
         payload.get("items") if isinstance(payload.get("items"), list) else []
     ):
-        try:
-            value = float(item.get("value") or 0)
-        except (TypeError, ValueError):
-            value = 0.0
+        raw_value = item.get("value")
+        if raw_value is None:
+            if unit == "pps":
+                raw_value = (
+                    item.get("pps")
+                    if item.get("pps") is not None
+                    else item.get("packets_s")
+                )
+            else:
+                raw_value = (
+                    item.get("bps")
+                    if item.get("bps") is not None
+                    else item.get("bits_s")
+                )
+        value = number(raw_value)
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         safe_metadata = {
-            key: value
-            for key, value in metadata.items()
+            key: metadata_value
+            for key, metadata_value in metadata.items()
             if key in {
                 "asn",
                 "asn_label",
                 "as_name",
                 "org_name",
                 "country",
+                "country_code",
+                "country_name",
                 "prefix",
                 "ip",
                 "entity_kind",
@@ -905,19 +1414,107 @@ def canonical_ranking(
                 "protocol",
                 "direction",
             }
-            and isinstance(value, (str, int, float, bool))
+            and isinstance(metadata_value, (str, int, float, bool))
         }
+        key = str(item.get("key") or item.get("label") or "-")
+        label = str(item.get("label") or item.get("key") or "-")
+        bps = number(
+            item.get("bps")
+            if item.get("bps") is not None
+            else item.get("bits_s")
+        )
+        pps = number(
+            item.get("pps")
+            if item.get("pps") is not None
+            else item.get("packets_s")
+        )
+        if unit == "bps" and not bps:
+            bps = value
+        if unit == "pps" and not pps:
+            pps = value
+        percentage = number(
+            item.get("percentage")
+            if item.get("percentage") is not None
+            else item.get("percent")
+        )
+        asn = optional_integer(
+            item.get("asn")
+            or item.get("asn_number")
+            or metadata.get("asn")
+        )
+        asn_name = str(
+            metadata.get("as_name")
+            or metadata.get("org_name")
+            or item.get("as_name")
+            or item.get("description")
+            or ""
+        ).strip()
+        if asn_name in {"-", "N/D"}:
+            asn_name = ""
+        country_code = str(
+            metadata.get("country_code")
+            or metadata.get("country")
+            or item.get("country_code")
+            or item.get("country")
+            or ""
+        ).strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}", country_code):
+            country_code = ""
+        country_name = str(
+            metadata.get("country_name")
+            or item.get("country_name")
+            or ""
+        ).strip()
+        protocol = str(
+            item.get("protocol")
+            or item.get("proto")
+            or metadata.get("protocol")
+            or ""
+        ).strip().upper()
+        port = optional_integer(item.get("port"))
+        display_name = ""
+        tcp_flags = ""
+        packets = int(number(item.get("packets")))
+        if metric == "top_ports":
+            if "/" in key:
+                raw_protocol, raw_port = key.rsplit("/", 1)
+                protocol = protocol or raw_protocol.strip().upper()
+                port = port or optional_integer(raw_port)
+            display_name = (
+                "%s/%s" % (protocol, port)
+                if protocol and port is not None
+                else label
+            )
+            key = display_name
+            label = display_name
+        elif metric == "top_tcp_flags":
+            tcp_flags = normalized_flags(
+                item.get("tcp_flags")
+                or item.get("flags")
+                or label
+                or key
+            )
+            key = tcp_flags
+            label = tcp_flags
         items.append(
             {
                 "rank": index + 1,
-                "key": str(item.get("key") or item.get("label") or "-"),
-                "label": str(item.get("label") or item.get("key") or "-"),
+                "key": key,
+                "label": label,
                 "value": value,
-                "percent": float(
-                    item.get("percent")
-                    if item.get("percent") is not None
-                    else item.get("percentage") or 0
-                ),
+                "bps": bps,
+                "pps": pps,
+                "percentage": percentage,
+                "percent": percentage,
+                "asn": asn,
+                "asn_name": asn_name,
+                "country_code": country_code,
+                "country_name": country_name,
+                "protocol": protocol or None,
+                "port": port,
+                "display_name": display_name or None,
+                "tcp_flags": tcp_flags or None,
+                "packets": packets,
                 "metadata": safe_metadata,
             }
         )
@@ -926,12 +1523,23 @@ def canonical_ranking(
         if payload.get("total") is not None
         else sum(item["value"] for item in items)
     )
+    if total:
+        for item in items:
+            if item["percentage"] == 0 and item["value"] != 0:
+                percentage = round(item["value"] / total * 100, 2)
+                item["percentage"] = percentage
+                item["percent"] = percentage
+    response_timestamp = (
+        str(payload.get("timestamp") or "").strip()
+        or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     result = {
         "kind": "ranking",
-        "metric": request["metric"],
-        "unit": request["definition"]["unit"],
+        "metric": metric,
+        "unit": unit,
         "items": items,
         "total": total,
+        "timestamp": response_timestamp,
         "calculation": request["calculation"],
         "meta": {
             "source": payload.get("source") or "raw",
@@ -940,18 +1548,40 @@ def canonical_ranking(
         },
     }
     if request["format"] == "table":
+        fields = [
+            ("rank", "number"),
+            ("key", "string"),
+            ("label", "string"),
+            ("value", "number"),
+            ("bps", "number"),
+            ("pps", "number"),
+            ("percentage", "number"),
+            ("asn", "number"),
+            ("asn_name", "string"),
+            ("country_code", "string"),
+            ("country_name", "string"),
+            ("protocol", "string"),
+            ("port", "number"),
+            ("display_name", "string"),
+            ("tcp_flags", "string"),
+            ("packets", "number"),
+        ]
         return {
             "columns": [
-                {"name": "rank", "type": "number"},
-                {"name": "label", "type": "string"},
-                {"name": "value", "type": "number"},
-                {"name": "percent", "type": "number"},
+                {"name": name, "type": field_type}
+                for name, field_type in fields
             ],
             "rows": [
-                [item["rank"], item["label"], item["value"], item["percent"]]
+                [item[name] for name, _ in fields]
                 for item in items
             ],
-            "meta": result["meta"],
+            "meta": {
+                **result["meta"],
+                "metric": metric,
+                "unit": unit,
+                "total": total,
+                "timestamp": response_timestamp,
+            },
         }
     return result
 

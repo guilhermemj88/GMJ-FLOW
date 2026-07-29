@@ -66,19 +66,36 @@ curl -H "Authorization: Bearer <GMJ_FLOW_GRAFANA_TOKEN>" \
 ```
 
 O catálogo informa métricas, dimensões, cálculos e limites vigentes. Métricas
-iniciais:
+disponíveis:
 
 - `traffic_bps`
 - `traffic_pps`
-- `top_download_origins`
 - `top_upload_destinations`
+- `top_download_origins`
+- `top_source_ips`
+- `top_destination_ips`
+- `top_ports`
 - `top_protocols`
+- `top_tcp_flags`
+
+Os rankings têm as seguintes dimensões e unidades:
+
+| Métrica | Dimensão | Unidade principal |
+| --- | --- | --- |
+| `top_upload_destinations` | ASN de destino | `bps` |
+| `top_download_origins` | ASN de origem | `bps` |
+| `top_source_ips` | IP de origem | `bps` |
+| `top_destination_ips` | IP de destino | `bps` |
+| `top_ports` | protocolo + porta de destino | `bps` |
+| `top_protocols` | protocolo | `bps` |
+| `top_tcp_flags` | combinação de TCP flags | `pps` |
 
 Datasets read-only para consultas JSONPath:
 
 - `anomalies_active`: `/api/v1/grafana/anomalies/active`
 - `anomalies_history`: `/api/v1/grafana/anomalies/history`
 - `mitigations`: `/api/v1/grafana/mitigations`
+- `mitigations_active`: `/api/v1/grafana/mitigations/active`
 - `bgp_status`: `/api/v1/grafana/bgp/status`
 
 O histórico aceita `from`, `to`, `limit` (100 por padrão e 1.000 no máximo),
@@ -86,6 +103,54 @@ O histórico aceita `from`, `to`, `limit` (100 por padrão e 1.000 no máximo),
 UTC e usam objetos JSON simples; `$.items[*]` pode ser usado diretamente nos
 painéis. Essas rotas aceitam apenas `GET` e não executam, aprovam, rejeitam ou
 retiram mitigações.
+
+### Anomalias e CGNAT
+
+Cada item de anomalia inclui:
+
+```text
+cgnat_applicable, cgnat_resolved, cgnat_private_ip, cgnat_public_ip,
+cgnat_public_port, cgnat_port_range, cgnat_pool, cgnat_device,
+cgnat_vendor, cgnat_mapping_source, cgnat_confidence
+```
+
+`cgnat_private_ip` é o mesmo valor exibido como
+**Cliente CGNAT/private_ip** no detalhe da anomalia. A API reutiliza o
+enriquecimento do detalhe e não mantém um algoritmo de resolução paralelo.
+Quando CGNAT não se aplica, `cgnat_applicable` e `cgnat_resolved` são `false`
+e os demais campos CGNAT são `null`. Quando a resolução é necessária, mas não
+encontra um cliente inequívoco, `cgnat_applicable` é `true`,
+`cgnat_resolved` é `false` e os dados do mapeamento permanecem `null`.
+
+`cgnat_mapping_source` contém somente o tipo seguro da fonte, como `a10` ou
+`mikrotik_netmap`. Nome de arquivo, conteúdo importado, lote, candidatos
+internos e regras completas não fazem parte do contrato Grafana.
+
+### Mitigações
+
+`GET /api/v1/grafana/mitigations/active` retorna anúncios operacionais nos
+estados equivalentes a `sent`, `advertised`, `active`, `applied` e o estado
+legado `announced`. Registros expirados pelo timestamp também são excluídos,
+mesmo antes da próxima rotina de manutenção.
+
+Nunca são considerados ativos estados como `expired`, `withdrawn`, `failed`,
+`blocked`, `rejected`, `dry_run` ou `simulation_only`. A resposta informa o
+conector, regra, fluxo, prefixo, início, expiração, TTL restante e os mesmos
+campos CGNAT seguros das anomalias.
+
+`GET /api/v1/grafana/mitigations` aceita:
+
+```text
+active_only, anomaly_id, status, connector_id, from, to, limit, offset
+```
+
+`limit` usa 100 por padrão e aceita no máximo 1.000. `from` e `to` são
+ISO-8601 e filtram o instante operacional da mitigação. A resposta inclui
+`count`, `total`, `limit` e `offset`.
+
+As rotas Grafana nunca retornam comandos `announce`/`withdraw`, senha,
+credencial BGP ou Bearer Token. Também não possuem métodos para anunciar,
+retirar, aprovar, rejeitar ou modificar mitigações.
 
 ## Configuração do Grafana JSON API
 
@@ -153,25 +218,130 @@ curl -X POST \
   -H "Content-Type: application/json" \
   https://gmj-flow.exemplo/api/v1/grafana/query/ranking \
   -d '{
-    "metric": "top_download_origins",
+    "metric": "top_ports",
     "from": "2026-07-28T10:00:00Z",
     "to": "2026-07-28T10:10:00Z",
+    "direction": "both",
+    "sensor": 2,
+    "interface": 17,
+    "protocol": "udp",
     "top_n": 10,
-    "filters": {"direction": "both"},
-    "calculation": "last_not_null",
+    "calculation": "rate",
     "timezone": "UTC",
     "format": "json"
   }'
 ```
 
-A resposta canônica contém `rank`, `key`, `label`, `value`, `percent` e
-`metadata`. Use `format: "table"` para obter `columns` e `rows`. O endpoint
-`/query/table` também aceita qualquer métrica do catálogo e retorna o formato
-tabular estável.
+Os filtros podem ser enviados diretamente como no exemplo ou no formato
+anterior:
 
-O contrato aceita no máximo um sensor, uma interface e um protocolo por
-consulta, um único `group_by`, até 5.000 pontos e até 100 itens de ranking. O
-período máximo e o rate limit são configuráveis pelas variáveis acima.
+```json
+{
+  "filters": {
+    "direction": "both",
+    "sensor_ids": [2],
+    "interfaces": [17],
+    "protocols": ["udp"]
+  }
+}
+```
+
+Não misture os dois formatos com valores diferentes. `direction` aceita
+`both`, `upload` e `download`; `top_n` aceita de 1 a 100. O contrato aceita
+um sensor, uma interface e um protocolo por consulta e aplica esses filtros
+antes da agregação. `from` e `to` são obrigatórios, em ISO-8601, e o intervalo
+selecionado no Grafana é preservado.
+
+Os cálculos aceitos em rankings são `last`, `last_not_null`, `mean`, `max`,
+`min`, `total` e `rate`. Rankings de tráfego mantêm `bps` como valor
+principal. `top_tcp_flags` mantém `pps` como valor principal e também retorna
+o total de `packets`.
+
+Resposta canônica:
+
+```json
+{
+  "kind": "ranking",
+  "metric": "top_ports",
+  "unit": "bps",
+  "items": [
+    {
+      "rank": 1,
+      "key": "UDP/443",
+      "label": "UDP/443",
+      "value": 1200000000,
+      "bps": 1200000000,
+      "pps": 820000,
+      "percentage": 45.2,
+      "percent": 45.2,
+      "asn": null,
+      "asn_name": "",
+      "country_code": "",
+      "country_name": "",
+      "protocol": "UDP",
+      "port": 443,
+      "display_name": "UDP/443",
+      "tcp_flags": null,
+      "packets": 492000000,
+      "metadata": {}
+    }
+  ],
+  "total": 2650000000,
+  "timestamp": "2026-07-28T10:10:00Z",
+  "calculation": "rate",
+  "meta": {
+    "source": "aggregate_first",
+    "timezone": "UTC",
+    "correlation_id": "grafana-panel-top-ports"
+  }
+}
+```
+
+`percentage` é o campo canônico; `percent` permanece como alias para não
+quebrar painéis existentes. Para o plugin Grafana JSON API, use
+`$.items[*]` como raiz e mapeie `label` para o texto e `value` para o valor.
+Campos numéricos permanecem números, sem formatação localizada.
+
+#### ASN, portas e TCP flags
+
+`top_upload_destinations` agrupa o upload por ASN de destino.
+`top_download_origins` agrupa o download por ASN de origem. Ambos reutilizam
+o enriquecimento ASN do dashboard nativo e retornam `asn`, `asn_name`,
+`country_code` e `country_name`:
+
+```json
+{
+  "rank": 1,
+  "key": "AS263009",
+  "label": "AS263009 — Nome da rede",
+  "value": 7900000000,
+  "bps": 7900000000,
+  "pps": 3500000,
+  "percentage": 49.49,
+  "asn": 263009,
+  "asn_name": "Nome da rede",
+  "country_code": "BR",
+  "country_name": "Brazil"
+}
+```
+
+No primeiro contrato de `top_ports`, `port` é sempre a porta de destino e a
+chave de agrupamento é protocolo + porta. Exemplos de `display_name`:
+`UDP/443`, `TCP/57300` e `UDP/53`.
+
+`top_tcp_flags` normaliza ausência de flags como `NONE`. Combinações seguem a
+ordem `FIN,SYN,RST,PSH,ACK,URG,ECE,CWR`; por exemplo `SYN,ACK`,
+`FIN,ACK`, `PSH,ACK` e `SYN,PSH,ACK`. Cada item retorna `tcp_flags`, `pps`,
+`packets` e `percentage`.
+
+Use `format: "table"` para obter `columns` e `rows`. O endpoint
+`POST /api/v1/grafana/query/table` também aceita qualquer métrica de ranking,
+os mesmos filtros, `top_n` e `calculation`, e retorna colunas estáveis para
+JSONPath.
+
+O período máximo e o rate limit são configuráveis pelas variáveis acima. As
+consultas reutilizam os agregados e o motor Top N do dashboard, aplicam
+`LIMIT` no ClickHouse e não carregam registros de fluxo linha a linha.
 
 Erros usam a forma:
 
@@ -276,13 +446,15 @@ Campos voláteis e credenciais não participam do documento.
 Para séries, use o endpoint de timeseries e selecione `$.rows` quando o painel
 esperar dados tabulares: `timestamp` é epoch em milissegundos, `series` é texto
 e `value` é número ou `null`. Para rankings, `$.items` alimenta barras,
-pie/donut e tabelas; `value` e `percent` são numéricos, e `metadata` pode
-conter ASN, organização, país, IP e prefixo.
+pie/donut e tabelas; `value` e `percentage` são numéricos (`percent` é o alias
+legado), e os campos planos incluem ASN, organização, país, protocolo, porta
+e TCP flags conforme a métrica.
 
 As macros `${__timeFrom:date:iso}`, `${__timeTo:date:iso}`,
 `${__interval_ms}` e `${__maxDataPoints}` devem vir do Grafana. Variáveis de
-sensor, interface ou protocolo podem preencher os arrays correspondentes em
-`filters`; o contrato aceita no máximo um valor de cada por consulta.
+sensor, interface ou protocolo podem preencher `sensor`, `interface` e
+`protocol`, ou os arrays correspondentes em `filters`; o contrato aceita no
+máximo um valor de cada por consulta.
 
 ## Troubleshooting
 

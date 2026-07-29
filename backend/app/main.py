@@ -147,8 +147,10 @@ from app.services.dashboard_widgets import (
     widget_row_to_dict,
 )
 from app.services.grafana_api import (
+    GRAFANA_ACTIVE_MITIGATION_STATUSES,
     GRAFANA_API_VERSION,
     GRAFANA_METRICS,
+    GRAFANA_RANKING_QUERY_PLANS,
     GrafanaApiError,
     audit as audit_grafana_api,
     authenticate as authenticate_grafana_api,
@@ -162,6 +164,7 @@ from app.services.grafana_api import (
     filter_anomaly_history as filter_grafana_anomaly_history,
     is_grafana_api_path,
     service_document as grafana_api_service_document,
+    validate_mitigation_filters as validate_grafana_mitigation_filters,
     validate_ranking_request as validate_grafana_ranking_request,
     validate_timeseries_request as validate_grafana_timeseries_request,
 )
@@ -33779,22 +33782,20 @@ def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute_grafana_ranking(request_data: dict[str, Any]) -> dict[str, Any]:
-    metric_config = {
-        "top_download_origins": ("src_asn", "download"),
-        "top_upload_destinations": ("dst_asn", "upload"),
-        "top_protocols": (
-            "protocol",
-            request_data["filters"]["direction"],
-        ),
-    }
-    dimension, direction = metric_config[request_data["metric"]]
+    metric_plan = GRAFANA_RANKING_QUERY_PLANS[request_data["metric"]]
+    dimension = metric_plan["dimension"]
+    direction = (
+        metric_plan["direction"]
+        or request_data["filters"]["direction"]
+    )
+    value_metric = metric_plan["metric"]
     widget = {
         "title": "Grafana API",
         "type": "top_n",
         "category": "traffic",
         "config": {
             "dimension": dimension,
-            "metric": "bps",
+            "metric": value_metric,
             "direction": direction,
             "limit": request_data["top_n"],
             "calculation": request_data["calculation"],
@@ -33838,45 +33839,191 @@ def grafana_anomaly_records(status_filter: str) -> list[dict[str, Any]]:
         group["event"]
         for group in consolidated_security_anomaly_groups(status_filter)
     )
-    return items
+    enriched: list[dict[str, Any]] = []
+    with sqlite_connection() as conn:
+        for item in items:
+            reference_id = int(
+                item.get("action_id")
+                if clean_text(item.get("source")).lower()
+                == "security_anomalies"
+                else item.get("id")
+            )
+            try:
+                detail = fetch_anomaly_mitigation_context(
+                    conn,
+                    reference_id,
+                )["event"]
+            except HTTPException:
+                # A stale consolidated identifier must not fail the complete
+                # Grafana page. The fallback still uses the exact resolver
+                # shared by the anomaly detail.
+                detail = enrich_anomaly_event_with_cgnat(conn, item)
+            enriched.append(detail)
+    return enriched
+
+
+def grafana_announcement_cgnat_event(
+    conn: sqlite3.Connection,
+    announcement: dict[str, Any],
+) -> dict[str, Any]:
+    raw_payload = (
+        announcement.get("raw_payload")
+        if isinstance(announcement.get("raw_payload"), dict)
+        else {}
+    )
+    raw_anomaly = (
+        raw_payload.get("anomaly")
+        if isinstance(raw_payload.get("anomaly"), dict)
+        else {}
+    )
+    if raw_anomaly:
+        return enrich_anomaly_event_with_cgnat(conn, raw_anomaly)
+    anomaly_id = int_or_none(announcement.get("anomaly_id"))
+    if anomaly_id is None:
+        return {}
+    if clean_text(announcement.get("anomaly_source")).lower() in {
+        "security_anomaly",
+        "security_anomalies",
+    }:
+        security_item = resolve_security_anomaly_identifier(
+            conn,
+            anomaly_id,
+            raise_not_found=False,
+        )
+        if security_item is None:
+            return {}
+        event = security_anomaly_event_from_items(
+            [security_item],
+            preferred_id=int(security_item["id"]),
+        )
+        return enrich_anomaly_event_with_cgnat(conn, event)
+    try:
+        return fetch_anomaly_mitigation_context(
+            conn,
+            anomaly_id,
+        )["event"]
+    except HTTPException:
+        return {}
 
 
 def grafana_mitigation_records(
     *,
+    active_only: bool,
     anomaly_id: int | None,
     status: str,
-    limit: int,
-) -> list[dict[str, Any]]:
+    connector_id: int | None,
+    from_value: str | None,
+    to_value: str | None,
+    limit: int | None,
+    offset: int,
+) -> tuple[list[dict[str, Any]], int]:
     ensure_sensor_db()
+    validated = validate_grafana_mitigation_filters(
+        active_only=active_only,
+        anomaly_id=anomaly_id,
+        status=status,
+        connector_id=connector_id,
+        from_value=from_value,
+        to_value=to_value,
+        limit=limit or 1000,
+        offset=offset,
+    )
     filters: list[str] = []
     values: list[Any] = []
-    if anomaly_id is not None:
+    if validated["active_only"]:
+        active_statuses = sorted(GRAFANA_ACTIVE_MITIGATION_STATUSES)
         filters.append(
-            "EXISTS ("
-            "SELECT 1 FROM mitigation_execution_anomalies l "
-            "WHERE l.execution_id = e.id AND l.anomaly_id = ?"
-            ")"
+            "lower(a.status) IN ("
+            + ",".join("?" for _ in active_statuses)
+            + ")"
         )
-        values.append(anomaly_id)
-    if clean_text(status):
-        filters.append("e.status = ?")
-        values.append(clean_text(status))
+        values.extend(active_statuses)
+        filters.extend(
+            [
+                "lower(COALESCE(a.confirmation_level, '')) "
+                "<> 'simulation_only'",
+                "lower(COALESCE(a.requested_mode, '')) <> 'dry_run'",
+                "(a.expires_at IS NULL OR a.expires_at = '' "
+                "OR datetime(a.expires_at) > datetime(?))",
+            ]
+        )
+        values.append(utc_now_iso())
+    if validated["anomaly_id"] is not None:
+        filters.append("a.anomaly_id = ?")
+        values.append(validated["anomaly_id"])
+    if validated["status"]:
+        filters.append("lower(a.status) = ?")
+        values.append(validated["status"])
+    if validated["connector_id"] is not None:
+        filters.append("a.connector_id = ?")
+        values.append(validated["connector_id"])
+    activity_time = (
+        "COALESCE(NULLIF(a.advertised_at, ''), "
+        "NULLIF(a.sent_at, ''), NULLIF(a.queued_at, ''), a.created_at)"
+    )
+    if validated["start"] is not None:
+        filters.append(f"datetime({activity_time}) >= datetime(?)")
+        values.append(
+            validated["start"].isoformat().replace("+00:00", "Z")
+        )
+    if validated["end"] is not None:
+        filters.append(f"datetime({activity_time}) <= datetime(?)")
+        values.append(
+            validated["end"].isoformat().replace("+00:00", "Z")
+        )
     where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    pagination = ""
+    query_values = list(values)
+    if limit is not None:
+        pagination = "LIMIT ? OFFSET ?"
+        query_values.extend(
+            [validated["limit"], validated["offset"]]
+        )
     with sqlite_connection() as conn:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM bgp_announcements a {where}",
+            tuple(values),
+        ).fetchone()
         rows = conn.execute(
             f"""
-            SELECT e.*
-            FROM mitigation_executions e
+            SELECT
+                a.*,
+                c.name AS connector_name,
+                c.backend_type AS connector_backend,
+                c.mode AS connector_mode,
+                p.name AS response_profile_name
+            FROM bgp_announcements a
+            LEFT JOIN bgp_connectors c ON c.id = a.connector_id
+            LEFT JOIN bgp_response_profiles p
+                ON p.id = a.response_profile_id
             {where}
-            ORDER BY e.updated_at DESC, e.id DESC
-            LIMIT ?
+            ORDER BY
+                COALESCE(
+                    a.advertised_at,
+                    a.sent_at,
+                    a.queued_at,
+                    a.created_at
+                ) DESC,
+                a.id DESC
+            {pagination}
             """,
-            (*values, limit),
+            tuple(query_values),
         ).fetchall()
-    return [
-        canonical_grafana_mitigation_item(execution_row_to_dict(row))
-        for row in rows
-    ]
+        items = []
+        for row in rows:
+            raw_row = dict(row)
+            announcement = bgp_announcement_row_to_dict(row)
+            announcement["connector_backend"] = (
+                raw_row.get("connector_backend") or ""
+            )
+            announcement["connector_mode"] = (
+                raw_row.get("connector_mode") or ""
+            )
+            announcement["_cgnat_event"] = (
+                grafana_announcement_cgnat_event(conn, announcement)
+            )
+            items.append(canonical_grafana_mitigation_item(announcement))
+    return items, int(total_row["count"] or 0) if total_row else 0
 
 
 def grafana_bgp_status_records() -> list[dict[str, Any]]:
@@ -34033,9 +34180,14 @@ def grafana_anomaly_history_endpoint(
 @app.get("/api/v1/grafana/mitigations", tags=["Grafana Integration"])
 def grafana_mitigations_endpoint(
     request: Request,
+    active_only: bool = False,
     anomaly_id: int | None = None,
     status: str = "",
+    connector_id: int | None = None,
+    from_value: str | None = Query(None, alias="from"),
+    to_value: str | None = Query(None, alias="to"),
     limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
     context = grafana_api_authorize(
         request,
@@ -34043,10 +34195,21 @@ def grafana_mitigations_endpoint(
         "mitigations",
     )
     try:
-        items = grafana_mitigation_records(
+        items, total = grafana_mitigation_records(
+            active_only=active_only,
             anomaly_id=anomaly_id,
             status=status,
+            connector_id=connector_id,
+            from_value=from_value,
+            to_value=to_value,
             limit=limit,
+            offset=offset,
+        )
+    except GrafanaApiError as exc:
+        raise grafana_api_validation_error(
+            "mitigations",
+            context,
+            exc,
         )
     except Exception as exc:
         raise grafana_api_query_failure(
@@ -34056,6 +34219,44 @@ def grafana_mitigations_endpoint(
         )
     return grafana_api_result(
         "mitigations",
+        context,
+        {
+            "items": items,
+            "count": len(items),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "timestamp": utc_now_iso(),
+        },
+    )
+
+
+@app.get("/api/v1/grafana/mitigations/active", tags=["Grafana Integration"])
+def grafana_active_mitigations_endpoint(request: Request):
+    context = grafana_api_authorize(
+        request,
+        "grafana:data:read",
+        "mitigations.active",
+    )
+    try:
+        items, _ = grafana_mitigation_records(
+            active_only=True,
+            anomaly_id=None,
+            status="",
+            connector_id=None,
+            from_value=None,
+            to_value=None,
+            limit=None,
+            offset=0,
+        )
+    except Exception as exc:
+        raise grafana_api_query_failure(
+            "mitigations.active",
+            context,
+            exc,
+        )
+    return grafana_api_result(
+        "mitigations.active",
         context,
         {
             "items": items,
@@ -34202,8 +34403,12 @@ def grafana_table_endpoint(
             request_data = validate_grafana_ranking_request(
                 {
                     **data,
-                    "top_n": min(100, int(data.get("limit") or 100)),
-                    "calculation": "last_not_null",
+                    "top_n": (
+                        int(data["top_n"])
+                        if data.get("top_n") is not None
+                        else min(100, int(data.get("limit") or 100))
+                    ),
+                    "calculation": data.get("calculation") or "last_not_null",
                     "format": "table",
                 }
             )
@@ -41422,6 +41627,12 @@ def dashboard_widget_enrich_ranking_identity(
             or resolved.get("as_name"),
             asn,
         )
+        country_code = clean_text(
+            asn_info.get("country") or resolved.get("country")
+        ).upper()
+        if not re.fullmatch(r"[A-Z]{2}", country_code):
+            country_code = ""
+        country = country_geo(country_code) if country_code else {}
         metadata.update(
             {
                 "entity_kind": "ip",
@@ -41431,13 +41642,11 @@ def dashboard_widget_enrich_ranking_identity(
                 "asn_label": asn_label(asn) if asn > 0 else None,
                 "as_name": as_name or None,
                 "org_name": clean_text(asn_info.get("org_name")) or None,
-                "country": (
-                    clean_text(
-                        asn_info.get("country")
-                        or resolved.get("country")
-                    ).upper()
-                    or None
-                ),
+                "country": country_code or None,
+                "country_code": country_code or None,
+                "country_name": clean_text(
+                    country.get("country_name")
+                ) or None,
                 "resolution_state": (
                     "resolved"
                     if asn > 0 and as_name
@@ -41471,6 +41680,12 @@ def dashboard_widget_enrich_ranking_identity(
         label = asn_label(asn)
         if as_name:
             label = "%s — %s" % (label, as_name)
+        country_code = clean_text(
+            asn_info.get("country") or item.get("country")
+        ).upper()
+        if not re.fullmatch(r"[A-Z]{2}", country_code):
+            country_code = ""
+        country = country_geo(country_code) if country_code else {}
         metadata.update(
             {
                 "entity_kind": "asn",
@@ -41479,13 +41694,11 @@ def dashboard_widget_enrich_ranking_identity(
                 "as_name": as_name or None,
                 "org_name": clean_text(asn_info.get("org_name")) or None,
                 "prefix": clean_text(known_prefix) or None,
-                "country": (
-                    clean_text(
-                        asn_info.get("country")
-                        or item.get("country")
-                    ).upper()
-                    or None
-                ),
+                "country": country_code or None,
+                "country_code": country_code or None,
+                "country_name": clean_text(
+                    country.get("country_name")
+                ) or None,
                 "resolution_state": (
                     "resolved"
                     if as_name

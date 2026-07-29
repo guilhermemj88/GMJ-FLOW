@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from backend.app.services.grafana_api import (
     GRAFANA_ANOMALY_FIELDS,
+    GRAFANA_CGNAT_FIELDS,
+    GRAFANA_RANKING_QUERY_PLANS,
     GrafanaApiError,
     authenticate,
     canonical_active_anomalies,
@@ -17,7 +20,9 @@ from backend.app.services.grafana_api import (
     catalog,
     filter_anomaly_history,
     is_grafana_api_path,
+    mitigation_is_active,
     service_document,
+    validate_mitigation_filters,
     validate_ranking_request,
     validate_timeseries_request,
 )
@@ -91,6 +96,23 @@ class GrafanaAuthenticationTest(unittest.TestCase):
         self.assertEqual(scope.exception.status_code, 403)
         self.assertEqual(scope.exception.error, "grafana_scope_insufficient")
 
+    def test_data_routes_reject_token_without_data_read_scope(self):
+        env = {
+            **BASE_ENV,
+            "GMJ_FLOW_GRAFANA_SCOPES": "grafana:dashboard:export",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(GrafanaApiError) as caught:
+                authenticate(
+                    "Bearer test-grafana-token",
+                    "grafana:data:read",
+                )
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(
+            caught.exception.error,
+            "grafana_scope_insufficient",
+        )
+
     def test_bearer_token_is_not_written_to_auth_log(self):
         with patch.dict(os.environ, BASE_ENV, clear=False):
             with self.assertLogs("gmj-flow.grafana", level="INFO") as logs:
@@ -114,7 +136,69 @@ class GrafanaRequestValidationTest(unittest.TestCase):
                 "top_download_origins",
                 "top_upload_destinations",
                 "top_protocols",
+                "top_source_ips",
+                "top_destination_ips",
+                "top_ports",
+                "top_tcp_flags",
             },
+        )
+        ranking_metrics = {
+            item["id"]: item
+            for item in result["metrics"]
+            if item["kind"] == "ranking"
+        }
+        self.assertEqual(
+            ranking_metrics["top_source_ips"]["dimensions"],
+            ["source_ip"],
+        )
+        self.assertEqual(
+            ranking_metrics["top_destination_ips"]["dimensions"],
+            ["destination_ip"],
+        )
+        self.assertEqual(
+            ranking_metrics["top_ports"]["dimensions"],
+            ["protocol", "port"],
+        )
+        self.assertEqual(ranking_metrics["top_tcp_flags"]["unit"], "pps")
+        self.assertEqual(
+            set(result["ranking_calculations"]),
+            {
+                "last",
+                "last_not_null",
+                "mean",
+                "max",
+                "min",
+                "total",
+                "rate",
+            },
+        )
+        self.assertEqual(
+            set(GRAFANA_RANKING_QUERY_PLANS),
+            set(ranking_metrics),
+        )
+        self.assertEqual(
+            GRAFANA_RANKING_QUERY_PLANS["top_upload_destinations"],
+            {
+                "dimension": "dst_asn",
+                "direction": "upload",
+                "metric": "bps",
+            },
+        )
+        self.assertEqual(
+            GRAFANA_RANKING_QUERY_PLANS["top_download_origins"],
+            {
+                "dimension": "src_asn",
+                "direction": "download",
+                "metric": "bps",
+            },
+        )
+        self.assertEqual(
+            GRAFANA_RANKING_QUERY_PLANS["top_ports"]["dimension"],
+            "dst_port",
+        )
+        self.assertEqual(
+            GRAFANA_RANKING_QUERY_PLANS["top_tcp_flags"]["metric"],
+            "pps",
         )
         self.assertEqual(
             {item["id"] for item in result["datasets"]},
@@ -122,8 +206,19 @@ class GrafanaRequestValidationTest(unittest.TestCase):
                 "anomalies_active",
                 "anomalies_history",
                 "mitigations",
+                "mitigations_active",
                 "bgp_status",
             },
+        )
+        self.assertTrue(
+            {
+                "cgnat_private_ip",
+                "cgnat_public_ip",
+                "cgnat_public_port",
+                "cgnat_pool",
+                "cgnat_device",
+            }
+            <= set(result["resource_fields"])
         )
 
     def test_save_and_test_document_lists_read_endpoints(self):
@@ -139,6 +234,10 @@ class GrafanaRequestValidationTest(unittest.TestCase):
         self.assertEqual(
             result["endpoints"]["bgp_status"],
             "/api/v1/grafana/bgp/status",
+        )
+        self.assertEqual(
+            result["endpoints"]["mitigations_active"],
+            "/api/v1/grafana/mitigations/active",
         )
 
     def test_timeseries_applies_max_points_to_interval(self):
@@ -190,6 +289,82 @@ class GrafanaRequestValidationTest(unittest.TestCase):
                 }
             )
         self.assertEqual(caught.exception.error, "metric_not_allowed")
+
+    def test_all_top_n_metrics_accept_filters_and_calculations(self):
+        metrics = {
+            "top_upload_destinations",
+            "top_download_origins",
+            "top_source_ips",
+            "top_destination_ips",
+            "top_ports",
+            "top_protocols",
+            "top_tcp_flags",
+        }
+        for metric in metrics:
+            for calculation in (
+                "last",
+                "last_not_null",
+                "mean",
+                "max",
+                "min",
+                "total",
+                "rate",
+            ):
+                request = validate_ranking_request(
+                    {
+                        "metric": metric,
+                        "from": "2026-07-28T10:00:00Z",
+                        "to": "2026-07-28T10:10:00Z",
+                        "direction": "upload",
+                        "sensor": 4,
+                        "interface": 11,
+                        "protocol": "udp",
+                        "top_n": 100,
+                        "calculation": calculation,
+                    }
+                )
+                self.assertEqual(request["filters"]["direction"], "upload")
+                self.assertEqual(request["filters"]["sensor_ids"], [4])
+                self.assertEqual(request["filters"]["interfaces"], [11])
+                self.assertEqual(request["filters"]["protocols"], ["udp"])
+                self.assertEqual(request["top_n"], 100)
+                self.assertEqual(
+                    int((request["end"] - request["start"]).total_seconds()),
+                    600,
+                )
+
+    def test_ranking_validates_direction_top_n_and_filter_conflicts(self):
+        base = {
+            "metric": "top_source_ips",
+            "from": "2026-07-28T10:00:00Z",
+            "to": "2026-07-28T10:10:00Z",
+        }
+        self.assertEqual(
+            validate_ranking_request({**base, "top_n": 1})["top_n"],
+            1,
+        )
+        self.assertEqual(
+            validate_ranking_request(
+                {**base, "direction": "download"}
+            )["filters"]["direction"],
+            "download",
+        )
+        for top_n in (0, 101):
+            with self.assertRaises(GrafanaApiError) as caught:
+                validate_ranking_request({**base, "top_n": top_n})
+            self.assertEqual(caught.exception.error, "top_n_not_allowed")
+        with self.assertRaises(GrafanaApiError) as direction:
+            validate_ranking_request({**base, "direction": "sideways"})
+        self.assertEqual(direction.exception.error, "filter_not_allowed")
+        with self.assertRaises(GrafanaApiError) as conflict:
+            validate_ranking_request(
+                {
+                    **base,
+                    "protocol": "udp",
+                    "filters": {"protocols": ["tcp"]},
+                }
+            )
+        self.assertEqual(conflict.exception.error, "filter_not_allowed")
 
 
 class GrafanaCanonicalResponseTest(unittest.TestCase):
@@ -295,9 +470,159 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
         )
         self.assertEqual(
             [column["name"] for column in result["columns"]],
-            ["rank", "label", "value", "percent"],
+            [
+                "rank",
+                "key",
+                "label",
+                "value",
+                "bps",
+                "pps",
+                "percentage",
+                "asn",
+                "asn_name",
+                "country_code",
+                "country_name",
+                "protocol",
+                "port",
+                "display_name",
+                "tcp_flags",
+                "packets",
+            ],
         )
-        self.assertEqual(result["rows"][0], [1, "tcp", 80.0, 80.0])
+        self.assertEqual(result["rows"][0][0:7], [1, "tcp", "tcp", 80.0, 80.0, 0.0, 80.0])
+        self.assertEqual(result["meta"]["metric"], "top_protocols")
+        self.assertEqual(result["meta"]["total"], 100.0)
+
+    def test_asn_ranking_exposes_network_and_country_contract(self):
+        request = validate_ranking_request(
+            {
+                "metric": "top_upload_destinations",
+                "from": "2026-07-28T10:00:00Z",
+                "to": "2026-07-28T10:10:00Z",
+            }
+        )
+        result = canonical_ranking(
+            {
+                "total": 1000,
+                "timestamp": "2026-07-28T10:10:00Z",
+                "items": [
+                    {
+                        "key": "AS263009",
+                        "label": "AS263009 — Nome da rede",
+                        "value": 790,
+                        "packets_s": 18,
+                        "percentage": 79,
+                        "metadata": {
+                            "asn": 263009,
+                            "as_name": "Nome da rede",
+                            "org_name": "Organizacao",
+                            "country": "BR",
+                            "country_code": "BR",
+                            "country_name": "Brazil",
+                            "password": "must-not-leak",
+                            "announce_command": "must-not-leak",
+                        },
+                    }
+                ],
+            },
+            request,
+            "asn-ranking",
+        )
+        item = result["items"][0]
+        self.assertEqual(item["asn"], 263009)
+        self.assertEqual(item["asn_name"], "Nome da rede")
+        self.assertEqual(item["country_code"], "BR")
+        self.assertEqual(item["country_name"], "Brazil")
+        self.assertEqual(item["bps"], 790)
+        self.assertEqual(item["pps"], 18)
+        self.assertEqual(item["percentage"], 79)
+        self.assertEqual(result["total"], 1000)
+        self.assertEqual(result["timestamp"], "2026-07-28T10:10:00Z")
+        self.assertNotIn("must-not-leak", str(result))
+
+    def test_ports_use_protocol_and_destination_port_display(self):
+        request = validate_ranking_request(
+            {
+                "metric": "top_ports",
+                "from": "2026-07-28T10:00:00Z",
+                "to": "2026-07-28T10:10:00Z",
+            }
+        )
+        result = canonical_ranking(
+            {
+                "items": [
+                    {
+                        "key": "UDP/443",
+                        "value": 250,
+                        "bits_s": 250,
+                        "packets_s": 25,
+                        "port": 443,
+                        "protocol": "UDP",
+                    }
+                ]
+            },
+            request,
+            "port-ranking",
+        )
+        item = result["items"][0]
+        self.assertEqual(item["key"], "UDP/443")
+        self.assertEqual(item["display_name"], "UDP/443")
+        self.assertEqual(item["protocol"], "UDP")
+        self.assertEqual(item["port"], 443)
+
+    def test_tcp_flags_are_normalized_and_keep_pps_packets(self):
+        request = validate_ranking_request(
+            {
+                "metric": "top_tcp_flags",
+                "from": "2026-07-28T10:00:00Z",
+                "to": "2026-07-28T10:10:00Z",
+            }
+        )
+        result = canonical_ranking(
+            {
+                "items": [
+                    {
+                        "key": "",
+                        "label": "NONE",
+                        "value": 80,
+                        "packets": 800,
+                    },
+                    {
+                        "key": "ACK,SYN,PSH",
+                        "label": "ACK,SYN,PSH",
+                        "value": 20,
+                        "packets": 200,
+                    },
+                ]
+            },
+            request,
+            "flags-ranking",
+        )
+        self.assertEqual(result["items"][0]["tcp_flags"], "NONE")
+        self.assertEqual(result["items"][0]["pps"], 80)
+        self.assertEqual(result["items"][0]["packets"], 800)
+        self.assertEqual(result["items"][1]["tcp_flags"], "SYN,PSH,ACK")
+        self.assertEqual(result["items"][1]["percentage"], 20)
+
+    def test_empty_ranking_is_jsonpath_safe_and_has_no_secrets(self):
+        request = validate_ranking_request(
+            {
+                "metric": "top_destination_ips",
+                "from": "2026-07-28T10:00:00Z",
+                "to": "2026-07-28T10:10:00Z",
+            }
+        )
+        result = canonical_ranking({}, request, "empty-ranking")
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total"], 0)
+        serialized = str(result).lower()
+        for secret in (
+            "bearer",
+            "password",
+            "announce_command",
+            "withdraw_command",
+        ):
+            self.assertNotIn(secret, serialized)
 
 
 class GrafanaResourceResponseTest(unittest.TestCase):
@@ -379,13 +704,151 @@ class GrafanaResourceResponseTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.status_code, 400)
 
+    def test_resolved_cgnat_exposes_private_ip_from_detail_contract(self):
+        event = {
+            **self.history[0],
+            "cgnat_matched": True,
+            "cgnat_ambiguous": False,
+            "cgnat_lookup_performed": True,
+            "effective_subscriber_addressing_mode": "cgnat",
+            "private_ip": "100.64.17.186",
+            "public_ip": "186.232.173.250",
+            "public_port": 23922,
+            "mapped_port_start": 22528,
+            "mapped_port_end": 24575,
+            "cgnat_pool_name": "POOL-OUTSIDE",
+            "cgnat_device_name": "A10-VNT",
+            "cgnat_source_type": "a10",
+            "cgnat_mapping_source": "internal-router-dump.txt",
+            "cgnat_confidence": 0.98,
+        }
+        result = canonical_anomaly_item(event)
+        self.assertTrue(result["cgnat_applicable"])
+        self.assertTrue(result["cgnat_resolved"])
+        self.assertEqual(result["cgnat_private_ip"], "100.64.17.186")
+        self.assertEqual(result["cgnat_public_ip"], "186.232.173.250")
+        self.assertEqual(result["cgnat_public_port"], 23922)
+        self.assertEqual(result["cgnat_port_range"], "22528-24575")
+        self.assertEqual(result["cgnat_vendor"], "A10")
+        self.assertEqual(result["cgnat_mapping_source"], "a10")
+        self.assertNotIn("internal-router-dump.txt", str(result))
+
+    def test_anomaly_without_cgnat_has_null_cgnat_fields(self):
+        result = canonical_anomaly_item(self.history[1])
+        self.assertFalse(result["cgnat_applicable"])
+        self.assertFalse(result["cgnat_resolved"])
+        for field in GRAFANA_CGNAT_FIELDS:
+            if field not in {"cgnat_applicable", "cgnat_resolved"}:
+                self.assertIsNone(result[field])
+
+    def test_active_mitigation_contract_and_remaining_ttl(self):
+        now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+        mitigation = canonical_mitigation_item(
+            {
+                "id": 91,
+                "anomaly_id": 1669,
+                "status": "advertised",
+                "requested_mode": "automatic",
+                "connector_id": 2,
+                "connector_name": "BGP-NE40-VNT",
+                "connector_backend": "exabgp",
+                "connector_mode": "auto",
+                "attack_vector_name": "DNS_SINGLE_FLOW_OUTBOUND",
+                "protocol": "udp",
+                "dst_port": "53",
+                "dst_prefix": "102.218.215.26/32",
+                "advertised_at": "2026-07-29T11:55:00Z",
+                "expires_at": "2026-07-29T12:10:00Z",
+                "duration_seconds": 900,
+                "_cgnat_event": {
+                    "cgnat_matched": True,
+                    "cgnat_lookup_performed": True,
+                    "effective_subscriber_addressing_mode": "cgnat",
+                    "private_ip": "100.64.17.186",
+                    "public_ip": "186.232.173.250",
+                    "public_port": 23922,
+                    "mapped_port_start": 22528,
+                    "mapped_port_end": 24575,
+                    "cgnat_pool_name": "POOL-OUTSIDE",
+                    "cgnat_device_name": "A10-VNT",
+                    "cgnat_source_type": "a10",
+                    "cgnat_confidence": 1,
+                    "top_dst_ip": "102.218.215.26",
+                    "top_dst_port": 53,
+                    "protocol": "udp",
+                },
+            },
+            now=now,
+        )
+        self.assertEqual(mitigation["action"], "announce")
+        self.assertEqual(mitigation["mode"], "automatic")
+        self.assertEqual(mitigation["connector_mode"], "automatic")
+        self.assertEqual(mitigation["source_ip"], "186.232.173.250")
+        self.assertEqual(mitigation["destination_ip"], "102.218.215.26")
+        self.assertEqual(mitigation["remaining_seconds"], 600)
+        self.assertEqual(mitigation["cgnat_private_ip"], "100.64.17.186")
+
+    def test_active_mitigation_states_exclude_expired_and_simulation(self):
+        now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+        self.assertTrue(
+            mitigation_is_active(
+                {"status": "sent", "expires_at": None},
+                now=now,
+            )
+        )
+        self.assertFalse(
+            mitigation_is_active(
+                {"status": "expired"},
+                now=now,
+            )
+        )
+        self.assertFalse(
+            mitigation_is_active(
+                {
+                    "status": "advertised",
+                    "expires_at": "2026-07-29T11:59:59Z",
+                },
+                now=now,
+            )
+        )
+        self.assertFalse(
+            mitigation_is_active(
+                {
+                    "status": "active",
+                    "confirmation_level": "simulation_only",
+                },
+                now=now,
+            )
+        )
+
+    def test_mitigation_filters_and_pagination_are_validated(self):
+        result = validate_mitigation_filters(
+            active_only=True,
+            anomaly_id=1669,
+            status="Advertised",
+            connector_id=2,
+            from_value="2026-07-29T10:00:00Z",
+            to_value="2026-07-29T12:00:00Z",
+            limit=5000,
+            offset=25,
+        )
+        self.assertTrue(result["active_only"])
+        self.assertEqual(result["anomaly_id"], 1669)
+        self.assertEqual(result["status"], "advertised")
+        self.assertEqual(result["connector_id"], 2)
+        self.assertEqual(result["limit"], 1000)
+        self.assertEqual(result["offset"], 25)
+
     def test_read_only_resource_rows_are_flat_and_omit_secrets(self):
         mitigation = canonical_mitigation_item(
             {
                 "id": 4,
                 "anomaly_id": 11,
                 "status": "active",
-                "command": "secret router command",
+                "announce_command": "secret announce command",
+                "withdraw_command": "secret withdraw command",
+                "router_password": "secret password",
+                "raw_payload": {"token": "secret bearer token"},
                 "updated_at": "2026-07-29T12:00:00Z",
             }
         )
@@ -399,7 +862,14 @@ class GrafanaResourceResponseTest(unittest.TestCase):
                 "bgp_state": "established",
             }
         )
-        self.assertNotIn("command", mitigation)
+        serialized = str(mitigation)
+        for secret in (
+            "secret announce command",
+            "secret withdraw command",
+            "secret password",
+            "secret bearer token",
+        ):
+            self.assertNotIn(secret, serialized)
         self.assertNotIn("router_password", bgp)
         self.assertTrue(
             all(

@@ -1,6 +1,9 @@
 import json
+import os
 import sqlite3
+import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -30,6 +33,7 @@ from app.services.cgnat_mapping import (
     validate_upload_content,
     validate_cgnat_records,
 )
+from app.services.grafana_api import canonical_anomaly_item
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -550,6 +554,34 @@ NAT Address: 168.232.197.33
         self.assertEqual(enriched["unique_destinations"], 1)
         self.assertEqual(enriched["unique_conversations"], 1)
         self.assertEqual(enriched["cgnat_conversation_share"], 1.0)
+
+    def test_27b_grafana_uses_detail_cgnat_private_ip(self):
+        content = """Device: A10-VNT
+Pool: POOL-OUTSIDE
+NAT Address: 45.5.248.196
+100.97.0.1 2032-3039
+"""
+        activate_preview(self.conn, content)
+        event = {
+            "id": 1669,
+            "status": "active",
+            "severity": "critical",
+            "vector_name": backend_main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+            "direction": "transmits",
+            "top_src_ip": "45.5.248.196",
+            "top_src_port": 2811,
+            "top_dst_ip": "195.136.19.76",
+            "top_dst_port": 53,
+            "protocol": "udp",
+        }
+        detail = backend_main.enrich_anomaly_event_with_cgnat(
+            self.conn,
+            event,
+        )
+        grafana = canonical_anomaly_item(detail)
+        self.assertEqual(detail["private_ip"], "100.97.0.1")
+        self.assertEqual(grafana["cgnat_private_ip"], detail["private_ip"])
+        self.assertNotIn("mapping.txt", str(grafana))
 
     def test_28_missing_mapping_does_not_downgrade_anomaly(self):
         event = {
@@ -1156,6 +1188,130 @@ class CgnatMappingSchemaAndSafetyTest(unittest.TestCase):
         self.assertIn("FILE_CONTEXT_BEGIN", prompt)
         self.assertIn("1: NAT Address: 203.0.113.10", prompt)
         self.assertIn("nao emita registros", prompt)
+
+
+class GrafanaMitigationDatabaseContractTest(unittest.TestCase):
+    def test_active_query_excludes_expired_and_applies_pagination_filters(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "gmjflow.db")
+            with mock.patch.dict(
+                os.environ,
+                {"GMJFLOW_DB_PATH": db_path},
+                clear=False,
+            ), mock.patch.object(
+                backend_main,
+                "SENSOR_DB_READY",
+                False,
+            ), mock.patch.object(
+                backend_main,
+                "hash_password",
+                return_value="test-hash",
+            ):
+                backend_main.ensure_sensor_db()
+                now = datetime.now(timezone.utc)
+                now_text = now.isoformat().replace("+00:00", "Z")
+                future = (
+                    now + timedelta(minutes=10)
+                ).isoformat().replace("+00:00", "Z")
+                past = (
+                    now - timedelta(minutes=10)
+                ).isoformat().replace("+00:00", "Z")
+                with backend_main.sqlite_connection() as conn:
+                    connector_id = int(
+                        conn.execute(
+                            """
+                            INSERT INTO bgp_connectors (
+                                name, backend_type, mode,
+                                created_at, updated_at
+                            )
+                            VALUES ('BGP-NE40-VNT', 'exabgp', 'automatic', ?, ?)
+                            """,
+                            (now_text, now_text),
+                        ).lastrowid
+                    )
+                    ids = []
+                    for anomaly_id, status, expires_at in (
+                        (1669, "advertised", future),
+                        (1670, "sent", None),
+                        (1671, "expired", past),
+                    ):
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO bgp_announcements (
+                                connector_id, anomaly_id, status,
+                                target_prefix, dst_prefix, dst_ip,
+                                protocol, dst_port, duration_seconds,
+                                expires_at, sent_at, advertised_at,
+                                confirmation_level, requested_mode,
+                                announce_command, withdraw_command,
+                                attack_vector_name, created_at, updated_at
+                            )
+                            VALUES (
+                                ?, ?, ?, '102.218.215.26/32',
+                                '102.218.215.26/32', '102.218.215.26',
+                                'udp', '53', 900, ?, ?, ?,
+                                'peer_established_announce_requested',
+                                'automatic', 'secret announce',
+                                'secret withdraw',
+                                'DNS_SINGLE_FLOW_OUTBOUND', ?, ?
+                            )
+                            """,
+                            (
+                                connector_id,
+                                anomaly_id,
+                                status,
+                                expires_at,
+                                now_text,
+                                (
+                                    now_text
+                                    if status == "advertised"
+                                    else None
+                                ),
+                                now_text,
+                                now_text,
+                            ),
+                        )
+                        ids.append(int(cursor.lastrowid))
+                    conn.commit()
+                conn.close()
+
+                active, active_total = (
+                    backend_main.grafana_mitigation_records(
+                        active_only=True,
+                        anomaly_id=None,
+                        status="",
+                        connector_id=None,
+                        from_value=None,
+                        to_value=None,
+                        limit=None,
+                        offset=0,
+                    )
+                )
+                self.assertEqual(active_total, 2)
+                self.assertEqual(
+                    {item["id"] for item in active},
+                    set(ids[:2]),
+                )
+                self.assertNotIn(ids[2], {item["id"] for item in active})
+                self.assertNotIn("secret announce", str(active))
+                self.assertNotIn("secret withdraw", str(active))
+
+                page, total = backend_main.grafana_mitigation_records(
+                    active_only=False,
+                    anomaly_id=None,
+                    status="",
+                    connector_id=connector_id,
+                    from_value=(
+                        now - timedelta(minutes=1)
+                    ).isoformat(),
+                    to_value=(
+                        now + timedelta(minutes=1)
+                    ).isoformat(),
+                    limit=1,
+                    offset=1,
+                )
+                self.assertEqual(total, 3)
+                self.assertEqual(len(page), 1)
 
 
 if __name__ == "__main__":
