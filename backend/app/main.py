@@ -37775,6 +37775,34 @@ def dashboard_raw_rated_source_cte(raw_where: str, columns: list[str]) -> str:
     """
 
 
+_DASHBOARD_SOURCE_ONLY_EXPORTER_FILTER = (
+    "toString(exporter_ip) = {exporter_ip:String}"
+)
+
+
+def dashboard_rated_source_where(source_where: str) -> str:
+    """Remove predicates that are valid only on physical flow sources.
+
+    The exporter filter is pushed into flow_raw and each minute aggregate
+    branch. Repeating it over rated_source is unnecessary and can reference
+    a column that is not projected by every aggregate-backed query.
+    """
+
+    where = clean_text(source_where)
+    fragment = _DASHBOARD_SOURCE_ONLY_EXPORTER_FILTER
+    while fragment in where:
+        if where == fragment:
+            return "1"
+        if f"{fragment} AND " in where:
+            where = where.replace(f"{fragment} AND ", "", 1)
+            continue
+        if f" AND {fragment}" in where:
+            where = where.replace(f" AND {fragment}", "", 1)
+            continue
+        break
+    return where or "1"
+
+
 def dashboard_hybrid_source_cte(
     table: str,
     raw_where: str,
@@ -37983,7 +38011,7 @@ def dashboard_series_payload(
         output_group = "'Total'"
 
     selects = []
-    base_where = context["where"]
+    base_where = context["rated_where"]
     if zone_id is not None:
         zone_direction_normalized = normalize_zone_direction(zone_direction)
         zone_src_filter, zone_dst_filter = ip_zone_clickhouse_membership_filters(zone_id, params, "series_zone")
@@ -38576,13 +38604,18 @@ def top_conversations_payload(
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "conversation_zone")
-    where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
+    source_where = (
+        f"{context['where']} AND {zone_filter}"
+        if zone_filter
+        else context["where"]
+    )
+    rated_where = dashboard_rated_source_where(source_where)
     factor_expr = {
         "input": "dashboard_input_sample_rate",
         "output": "dashboard_output_sample_rate",
     }.get(context["rate_direction"], "dashboard_auto_sample_rate")
     query_prefix = dashboard_raw_rated_source_cte(
-        where,
+        source_where,
         [
             "src_ip",
             "dst_ip",
@@ -38608,7 +38641,7 @@ def top_conversations_payload(
         query_prefix = (
             dashboard_hybrid_source_cte(
                 aggregate_table,
-                where,
+                source_where,
                 start_dt,
                 end_dt,
                 params,
@@ -38656,7 +38689,7 @@ def top_conversations_payload(
                     min({first_seen_column}) AS first_seen,
                     max({last_seen_column}) AS last_seen
                 FROM {source_table}
-                WHERE {where}
+                WHERE {rated_where}
                 GROUP BY src_ip, dst_ip, src_port, dst_port, proto
             ),
             totals AS (
@@ -38822,13 +38855,18 @@ def dashboard_top_syn(
     params = dict(context["params"])
     params.update({"seconds": seconds, "limit": limit})
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "syn_zone")
-    where = f"{context['where']} AND {zone_filter}" if zone_filter else context["where"]
+    source_where = (
+        f"{context['where']} AND {zone_filter}"
+        if zone_filter
+        else context["where"]
+    )
+    rated_where = dashboard_rated_source_where(source_where)
     factor_expr = {
         "input": "dashboard_input_sample_rate",
         "output": "dashboard_output_sample_rate",
     }.get(context["rate_direction"], "dashboard_auto_sample_rate")
     query_prefix = dashboard_raw_rated_source_cte(
-        where,
+        source_where,
         [
             "src_ip",
             "dst_ip",
@@ -38851,7 +38889,7 @@ def dashboard_top_syn(
         query_prefix = (
             dashboard_hybrid_source_cte(
                 aggregate_table,
-                where,
+                source_where,
                 start_dt,
                 end_dt,
                 params,
@@ -38890,7 +38928,7 @@ def dashboard_top_syn(
                     sum({packets_value}) AS packets,
                     sum(flow_count) AS flows
                 FROM {source_table}
-                WHERE {where}
+                WHERE {rated_where}
                   AND bitAnd(tcp_flags, 2) != 0
                   AND bitAnd(tcp_flags, 16) = 0
                 GROUP BY ip
@@ -39489,13 +39527,16 @@ def geo_flows(
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "geo_zone")
     if zone_filter:
         filters.append(zone_filter)
-    where = " AND ".join(f"({item})" for item in filters if item)
+    source_where = " AND ".join(
+        f"({item})" for item in filters if item
+    )
+    rated_where = dashboard_rated_source_where(source_where)
     factor_expr = {
         "input": "dashboard_input_sample_rate",
         "output": "dashboard_output_sample_rate",
     }.get(context["rate_direction"], "dashboard_auto_sample_rate")
     query_prefix = dashboard_raw_rated_source_cte(
-        where,
+        source_where,
         [
             "src_ip",
             "dst_ip",
@@ -39542,7 +39583,7 @@ def geo_flows(
                     any(src_as_name) AS src_as_name,
                     any(dst_as_name) AS dst_as_name
                 FROM rated_source
-                WHERE {where}
+                WHERE {rated_where}
                 GROUP BY src_ip, dst_ip, src_asn, dst_asn, top_protocol
                 ORDER BY {top_order_expr} DESC
                 LIMIT {{limit:UInt32}}
@@ -39796,6 +39837,7 @@ def top_dimension(
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
+    rated_where = dashboard_rated_source_where(where)
     dimension_columns = {
         "src_ip": ["src_ip"],
         "dst_ip": ["dst_ip"],
@@ -39841,7 +39883,7 @@ def top_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         GROUP BY ip
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -39854,7 +39896,7 @@ def top_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         GROUP BY ip
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -39868,7 +39910,7 @@ def top_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         GROUP BY port, proto
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -39881,7 +39923,7 @@ def top_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         GROUP BY proto
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -39894,7 +39936,7 @@ def top_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         GROUP BY tcp_flags
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -40107,6 +40149,7 @@ def top_asn_dimension(
         as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
         ip_col = "src_ip" if dimension == "src" else "dst_ip"
 
+    rated_where = dashboard_rated_source_where(where)
     factor_expr = {
         "input": "dashboard_input_sample_rate",
         "output": "dashboard_output_sample_rate",
@@ -40157,7 +40200,7 @@ def top_asn_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where} AND {asn_col} > 0
+        WHERE {rated_where} AND {asn_col} > 0
         GROUP BY asn
         ORDER BY bps DESC
         LIMIT {{limit:UInt32}}
@@ -40203,7 +40246,7 @@ def top_asn_dimension(
             {packets_sum} AS packets,
             sum(flow_count) AS flows
         FROM {source_table}
-        WHERE {where} AND {asn_col} = 0
+        WHERE {rated_where} AND {asn_col} = 0
         GROUP BY ip
         ORDER BY bps DESC
         LIMIT 200
@@ -40255,7 +40298,7 @@ def top_asn_dimension(
                 {packets_sum} AS packets,
                 sum(flow_count) AS flows
             FROM {source_table}
-            WHERE {where}
+            WHERE {rated_where}
             GROUP BY ip
             ORDER BY bps DESC
             LIMIT 200
@@ -40309,7 +40352,7 @@ def top_asn_dimension(
         query_prefix + f"""
         SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bps
         FROM {source_table}
-        WHERE {where}
+        WHERE {rated_where}
         """,
         params,
     )
@@ -40511,11 +40554,17 @@ def flow_query_context(
         params["decoder_port"] = decoder_ports[decoder_text]
         filters.append("(src_port = {decoder_port:UInt16} OR dst_port = {decoder_port:UInt16})")
 
+    source_where = " AND ".join(filters)
     return {
         "start": start_dt,
         "end": end_dt,
         "params": params,
-        "where": " AND ".join(filters),
+        # `where` remains the physical-source predicate for compatibility
+        # with direct flow_raw queries. CTE consumers must use rated_where
+        # after the source has already applied the exporter restriction.
+        "where": source_where,
+        "source_where": source_where,
+        "rated_where": dashboard_rated_source_where(source_where),
         "resolved_if_index": resolved_if_index,
         "rate_direction": rate_direction,
     }
@@ -42428,7 +42477,7 @@ def dashboard_widget_series_payload(
                     'upload' AS group_key,
                     {bucket_total_expression("dashboard_output_sample_rate")} AS {value_alias}
                 FROM rated_source
-                WHERE {query_context["where"]} AND output_if > 0
+                WHERE {query_context["rated_where"]} AND output_if > 0
                 GROUP BY ts, group_key
                 """
             )
@@ -42440,7 +42489,7 @@ def dashboard_widget_series_payload(
                     'download' AS group_key,
                     {bucket_total_expression("dashboard_input_sample_rate")} AS {value_alias}
                 FROM rated_source
-                WHERE {query_context["where"]} AND input_if > 0
+                WHERE {query_context["rated_where"]} AND input_if > 0
                 GROUP BY ts, group_key
                 """
             )
@@ -42457,7 +42506,7 @@ def dashboard_widget_series_payload(
             {group_expression} AS group_key,
             {value_expression} AS {value_alias}
         FROM rated_source
-        WHERE {query_context["where"]}
+        WHERE {query_context["rated_where"]}
         GROUP BY ts, group_key
         ORDER BY ts, value DESC
         """
