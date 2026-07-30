@@ -17,6 +17,10 @@ DASHBOARD_AGGREGATE_TABLES = {
     # traffic. A new table avoids serving already-contaminated historical
     # rows while the corrected materialized view is populated.
     "tcp_flags": "flow_dashboard_tcp_flags_tcp_1m",
+    # Prefix-aware aggregate keeps the minimum dimensions required to apply
+    # source/destination CIDR or range predicates before ranking/grouping.
+    # It is minute-granular and does not duplicate individual flow rows.
+    "prefix": "flow_dashboard_prefix_1m",
     "syn": "flow_dashboard_syn_1m",
     "conversations": "flow_dashboard_conversations_1m",
 }
@@ -123,6 +127,18 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
         "asn_src": [("src_asn", "UInt32"), ("src_as_name", "String"), ("src_ip", "IPv6")],
         "asn_dst": [("dst_asn", "UInt32"), ("dst_as_name", "String"), ("dst_ip", "IPv6")],
         "tcp_flags": [("tcp_flags", "UInt16"), ("proto", "UInt8")],
+        "prefix": [
+            ("src_ip", "IPv6"),
+            ("dst_ip", "IPv6"),
+            ("src_port", "UInt16"),
+            ("dst_port", "UInt16"),
+            ("proto", "UInt8"),
+            ("tcp_flags", "UInt16"),
+            ("src_asn", "UInt32"),
+            ("dst_asn", "UInt32"),
+            ("src_as_name", "String"),
+            ("dst_as_name", "String"),
+        ],
         "syn": [
             ("src_ip", "IPv6"),
             ("dst_ip", "IPv6"),
@@ -153,6 +169,18 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
         "tcp_flags": [
             ("tcp_flags", "tcp_flags AS tcp_flags"),
             ("proto", "proto AS proto"),
+        ],
+        "prefix": [
+            ("src_ip", "src_ip AS src_ip"),
+            ("dst_ip", "dst_ip AS dst_ip"),
+            ("src_port", "src_port AS src_port"),
+            ("dst_port", "dst_port AS dst_port"),
+            ("proto", "proto AS proto"),
+            ("tcp_flags", "tcp_flags AS tcp_flags"),
+            ("src_asn", "src_asn AS src_asn"),
+            ("dst_asn", "dst_asn AS dst_asn"),
+            ("src_as_name", "src_as_name AS src_as_name"),
+            ("dst_as_name", "dst_as_name AS dst_as_name"),
         ],
         "syn": [
             ("src_ip", "src_ip AS src_ip"),

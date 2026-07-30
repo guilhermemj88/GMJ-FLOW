@@ -133,6 +133,9 @@ class GrafanaRequestValidationTest(unittest.TestCase):
             {
                 "traffic_bps",
                 "traffic_pps",
+                "traffic_by_prefix_bps",
+                "traffic_by_prefix_pps",
+                "prefix_timeseries",
                 "top_download_origins",
                 "top_upload_destinations",
                 "top_protocols",
@@ -140,6 +143,10 @@ class GrafanaRequestValidationTest(unittest.TestCase):
                 "top_destination_ips",
                 "top_ports",
                 "top_tcp_flags",
+                "top_source_prefixes",
+                "top_destination_prefixes",
+                "top_ports_by_prefix",
+                "top_protocols_by_prefix",
             },
         )
         ranking_metrics = {

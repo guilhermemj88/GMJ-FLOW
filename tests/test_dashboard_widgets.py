@@ -186,7 +186,22 @@ class DashboardWidgetValidationTest(unittest.TestCase):
         self.assertEqual(catalog["schema_version"], DASHBOARD_SCHEMA_VERSION)
         self.assertEqual(
             {item["id"] for item in catalog["types"]},
-            {"top_n", "timeseries", "kpi", "status_list", "recent_events"},
+            {
+                "top_n",
+                "timeseries",
+                "kpi",
+                "status_list",
+                "recent_events",
+                "traffic_by_prefix_bps",
+                "traffic_by_prefix_pps",
+                "top_source_prefixes",
+                "top_destination_prefixes",
+                "prefix_timeseries",
+                "top_ports_by_prefix",
+                "top_protocols_by_prefix",
+                "prefix_table",
+                "prefix_distribution",
+            },
         )
         for required in (
             "src_ip",

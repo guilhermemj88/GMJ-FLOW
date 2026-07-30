@@ -12,6 +12,27 @@ class GrafanaQueryFilters(BaseModel):
     direction: str = "both"
 
 
+class GrafanaPrefixFilter(BaseModel):
+    enabled: bool = True
+    cidr: Optional[str] = None
+    prefix_id: Optional[int] = Field(None, ge=1)
+    start_ip: Optional[str] = None
+    end_ip: Optional[str] = None
+    address_family: str = "both"
+    match_side: str = "either"
+    direction: Optional[str] = None
+    temporary: bool = False
+
+
+class GrafanaPrefixGrouping(BaseModel):
+    enabled: bool = False
+    ipv4_prefix_length: int = Field(24, ge=0, le=32)
+    ipv6_prefix_length: int = Field(64, ge=0, le=128)
+    side: str = "destination"
+    top_n: int = Field(10, ge=1, le=100)
+    include_empty: bool = False
+
+
 class GrafanaTimeseriesQuery(BaseModel):
     metric: str
     from_time: str = Field(alias="from")
@@ -19,6 +40,16 @@ class GrafanaTimeseriesQuery(BaseModel):
     interval_ms: int = Field(60000, ge=1000, le=3600000)
     max_data_points: int = Field(1000, ge=1, le=5000)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
+    prefix_filter: GrafanaPrefixFilter = Field(
+        default_factory=GrafanaPrefixFilter
+    )
+    prefix_grouping: GrafanaPrefixGrouping = Field(
+        default_factory=GrafanaPrefixGrouping
+    )
+    direction: Optional[str] = None
+    sensor: Optional[Any] = None
+    interface: Optional[Any] = None
+    zone: Optional[Any] = None
     group_by: list[str] = Field(default_factory=lambda: ["direction"])
     calculation: str = "rate"
     include_partial_bucket: bool = False
@@ -48,9 +79,16 @@ class GrafanaRankingQuery(BaseModel):
     to_time: str = Field(alias="to")
     top_n: int = Field(10, ge=1, le=100)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
+    prefix_filter: GrafanaPrefixFilter = Field(
+        default_factory=GrafanaPrefixFilter
+    )
+    prefix_grouping: GrafanaPrefixGrouping = Field(
+        default_factory=GrafanaPrefixGrouping
+    )
     direction: Optional[str] = None
-    sensor: Optional[int] = Field(None, ge=1)
-    interface: Optional[int] = Field(None, ge=1)
+    sensor: Optional[Any] = None
+    interface: Optional[Any] = None
+    zone: Optional[Any] = None
     protocol: Optional[str] = None
     calculation: str = "last_not_null"
     timezone: str = "UTC"
@@ -80,9 +118,16 @@ class GrafanaTableQuery(BaseModel):
     limit: int = Field(100, ge=1, le=1000)
     top_n: Optional[int] = Field(None, ge=1, le=100)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
+    prefix_filter: GrafanaPrefixFilter = Field(
+        default_factory=GrafanaPrefixFilter
+    )
+    prefix_grouping: GrafanaPrefixGrouping = Field(
+        default_factory=GrafanaPrefixGrouping
+    )
     direction: Optional[str] = None
-    sensor: Optional[int] = Field(None, ge=1)
-    interface: Optional[int] = Field(None, ge=1)
+    sensor: Optional[Any] = None
+    interface: Optional[Any] = None
+    zone: Optional[Any] = None
     protocol: Optional[str] = None
     calculation: str = "last_not_null"
     timezone: str = "UTC"
@@ -222,7 +267,7 @@ class GrafanaRankingResponse(BaseModel):
                     {
                         "rank": 1,
                         "key": "AS15169",
-                        "label": "AS15169 — Google LLC",
+                        "label": "AS15169 — Google LLC (US)",
                         "value": 8500000.0,
                         "bps": 8500000.0,
                         "pps": 12500.0,

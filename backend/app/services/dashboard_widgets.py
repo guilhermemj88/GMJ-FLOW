@@ -28,6 +28,11 @@ from .dashboard_visualizations import (
     normalize_visualization_config,
     visualization_choices,
 )
+from .prefixes import (
+    ensure_prefix_schema,
+    normalize_prefix_filter,
+    normalize_prefix_grouping,
+)
 
 
 DASHBOARD_SCHEMA_VERSION = 2
@@ -78,6 +83,119 @@ STATUS_SOURCES = {
 }
 
 WIDGET_TYPES = {"top_n", "timeseries", "kpi", "status_list", "recent_events"}
+PREFIX_WIDGET_ALIASES = {
+    "traffic_by_prefix_bps": {
+        "type": "timeseries",
+        "config": {
+            "metric": "bps",
+            "direction": "both",
+            "group_by": "dst_prefix",
+            "aggregation": "sum",
+            "visualization": "area",
+        },
+    },
+    "traffic_by_prefix_pps": {
+        "type": "timeseries",
+        "config": {
+            "metric": "pps",
+            "direction": "both",
+            "group_by": "dst_prefix",
+            "aggregation": "sum",
+            "visualization": "area",
+        },
+    },
+    "top_source_prefixes": {
+        "type": "top_n",
+        "config": {
+            "dimension": "src_prefix",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 10,
+            "visualization": "horizontal_bar",
+        },
+    },
+    "top_destination_prefixes": {
+        "type": "top_n",
+        "config": {
+            "dimension": "dst_prefix",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 10,
+            "visualization": "horizontal_bar",
+        },
+    },
+    "prefix_timeseries": {
+        "type": "timeseries",
+        "config": {
+            "metric": "bps",
+            "direction": "both",
+            "group_by": "dst_prefix",
+            "aggregation": "sum",
+            "visualization": "line",
+        },
+    },
+    "top_ports_by_prefix": {
+        "type": "top_n",
+        "config": {
+            "dimension": "dst_port",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 10,
+            "visualization": "table",
+        },
+    },
+    "top_protocols_by_prefix": {
+        "type": "top_n",
+        "config": {
+            "dimension": "protocol",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 10,
+            "visualization": "donut",
+        },
+    },
+    "prefix_table": {
+        "type": "top_n",
+        "config": {
+            "dimension": "dst_prefix",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 20,
+            "visualization": "table",
+        },
+    },
+    "prefix_distribution": {
+        "type": "top_n",
+        "config": {
+            "dimension": "dst_prefix",
+            "metric": "bps",
+            "direction": "both",
+            "limit": 10,
+            "visualization": "donut",
+        },
+    },
+}
+PREFIX_WIDGET_LABELS = {
+    "traffic_by_prefix_bps": "Tráfego por prefixo (bits/s)",
+    "traffic_by_prefix_pps": "Tráfego por prefixo (pacotes/s)",
+    "top_source_prefixes": "Top prefixos de origem",
+    "top_destination_prefixes": "Top prefixos de destino",
+    "prefix_timeseries": "Série temporal por prefixo",
+    "top_ports_by_prefix": "Top portas por prefixo",
+    "top_protocols_by_prefix": "Top protocolos por prefixo",
+    "prefix_table": "Tabela de prefixos",
+    "prefix_distribution": "Distribuição por prefixo",
+}
+PREFIX_WIDGET_PRESETS = tuple(
+    {
+        "id": widget_type.replace("_", "-"),
+        "category": "traffic",
+        "label": PREFIX_WIDGET_LABELS[widget_type],
+        "type": widget_type,
+        "config": copy.deepcopy(definition["config"]),
+    }
+    for widget_type, definition in PREFIX_WIDGET_ALIASES.items()
+)
 WIDGET_CATEGORIES = {"traffic", "security", "operation"}
 TOP_DIMENSIONS = {
     "src_ip",
@@ -144,6 +262,8 @@ TIME_GROUPS = {
     "dst_asn",
     "zone",
     "asn",
+    "src_prefix",
+    "dst_prefix",
 }
 AGGREGATIONS = {"sum", "avg", "max", "min", "p95"}
 VISUALIZATIONS = {
@@ -824,7 +944,7 @@ WIDGET_PRESETS = (
     {"id": "bgp-peers", "category": "operation", "label": "Peers BGP", "type": "status_list", "config": {"source": "bgp", "limit": 20, "visualization": "status"}},
     {"id": "ingestion", "category": "operation", "label": "Taxa de ingestão", "type": "kpi", "config": {"metric": "fps", "direction": "both", "visualization": "number"}},
     {"id": "resources", "category": "operation", "label": "Recursos do sistema", "type": "status_list", "config": {"source": "resources", "limit": 10, "visualization": "status"}},
-)
+) + PREFIX_WIDGET_PRESETS
 
 
 def widget_catalog() -> dict[str, Any]:
@@ -836,7 +956,17 @@ def widget_catalog() -> dict[str, Any]:
             {"id": "kpi", "label": "Indicador", "categories": ["traffic", "security", "operation"]},
             {"id": "status_list", "label": "Lista de status", "categories": ["security", "operation"]},
             {"id": "recent_events", "label": "Eventos recentes", "categories": ["security", "operation"]},
+            *[
+                {
+                    "id": widget_type,
+                    "label": PREFIX_WIDGET_LABELS[widget_type],
+                    "categories": ["traffic"],
+                    "base_type": definition["type"],
+                }
+                for widget_type, definition in PREFIX_WIDGET_ALIASES.items()
+            ],
         ],
+        "widget_type_aliases": copy.deepcopy(PREFIX_WIDGET_ALIASES),
         "categories": sorted(WIDGET_CATEGORIES),
         "dimensions": sorted(TOP_DIMENSIONS | set(DIMENSION_ALIASES)),
         "dimension_aliases": dict(DIMENSION_ALIASES),
@@ -1068,7 +1198,13 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
     if _contains_sql_escape(payload):
         raise ValueError("SQL livre não é permitido em widgets")
     normalized = copy.deepcopy(payload)
-    widget_type = str(payload.get("type") or "").strip().lower()
+    requested_widget_type = str(payload.get("type") or "").strip().lower()
+    alias_definition = PREFIX_WIDGET_ALIASES.get(requested_widget_type)
+    widget_type = (
+        str(alias_definition["type"])
+        if alias_definition is not None
+        else requested_widget_type
+    )
     if not widget_type and partial:
         widget_type = ""
     elif widget_type not in WIDGET_TYPES:
@@ -1084,6 +1220,20 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
     config = payload.get("config") or {}
     if not isinstance(config, dict):
         raise ValueError("config deve ser um objeto")
+    config = {
+        **(
+            copy.deepcopy(alias_definition.get("config") or {})
+            if alias_definition is not None
+            else {}
+        ),
+        **copy.deepcopy(config),
+    }
+    if alias_definition is not None:
+        config["widget_alias"] = requested_widget_type
+        config["requires_prefix"] = requested_widget_type in {
+            "top_ports_by_prefix",
+            "top_protocols_by_prefix",
+        }
     config["appearance"] = normalize_widget_appearance(
         config.get("appearance")
     )
@@ -1292,6 +1442,10 @@ def normalize_dashboard_payload(payload: Any, partial: bool = False) -> dict[str
         "is_default": _bool(payload.get("is_default")),
         "is_shared": _bool(payload.get("is_shared")),
         "global_filters": validate_filters(payload.get("global_filters")),
+        "prefix_filter": normalize_prefix_filter(payload.get("prefix_filter")),
+        "prefix_grouping": normalize_prefix_grouping(
+            payload.get("prefix_grouping")
+        ),
         "time_range": time_range,
         "layout_mode": layout_mode,
         "compact_mode": compact_mode,
@@ -1301,6 +1455,7 @@ def normalize_dashboard_payload(payload: Any, partial: bool = False) -> dict[str
 
 
 def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
+    ensure_prefix_schema(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS dashboards (
@@ -1313,6 +1468,8 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
             is_system INTEGER NOT NULL DEFAULT 0,
             template_key TEXT,
             global_filters_json TEXT NOT NULL DEFAULT '[]',
+            prefix_filter_json TEXT NOT NULL DEFAULT '{}',
+            prefix_grouping_json TEXT NOT NULL DEFAULT '{}',
             time_range_json TEXT NOT NULL DEFAULT '{"mode":"relative","minutes":10}',
             refresh_interval_seconds INTEGER NOT NULL DEFAULT 30,
             layout_version INTEGER NOT NULL DEFAULT 1,
@@ -1359,6 +1516,18 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "dashboards", "layout_version", "layout_version INTEGER NOT NULL DEFAULT 1")
     _ensure_column(conn, "dashboards", "template_key", "template_key TEXT")
+    _ensure_column(
+        conn,
+        "dashboards",
+        "prefix_filter_json",
+        "prefix_filter_json TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(
+        conn,
+        "dashboards",
+        "prefix_grouping_json",
+        "prefix_grouping_json TEXT NOT NULL DEFAULT '{}'",
+    )
     _ensure_column(
         conn,
         "dashboards",
@@ -1636,6 +1805,12 @@ def dashboard_row_to_dict(
         "is_system": _bool(row["is_system"]),
         "template_key": row["template_key"],
         "global_filters": _json_loads(row["global_filters_json"], []),
+        "prefix_filter": normalize_prefix_filter(
+            _json_loads(row["prefix_filter_json"], {})
+        ),
+        "prefix_grouping": normalize_prefix_grouping(
+            _json_loads(row["prefix_grouping_json"], {})
+        ),
         "time_range": time_range,
         "layout_mode": layout_mode,
         "compact_mode": compact_mode,
@@ -2063,9 +2238,10 @@ def create_dashboard(
         """
         INSERT INTO dashboards (
             name, description, owner_user_id, is_default, is_shared, is_system,
-            template_key, global_filters_json, time_range_json,
+            template_key, global_filters_json, prefix_filter_json,
+            prefix_grouping_json, time_range_json,
             refresh_interval_seconds, layout_version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             normalized["name"],
@@ -2074,6 +2250,8 @@ def create_dashboard(
             int(normalized["is_default"]),
             int(normalized["is_shared"]),
             _canonical_json(normalized["global_filters"]),
+            _canonical_json(normalized["prefix_filter"]),
+            _canonical_json(normalized["prefix_grouping"]),
             _canonical_json(normalized["time_range"]),
             normalized["refresh_interval_seconds"],
             DASHBOARD_SCHEMA_VERSION,
@@ -2099,6 +2277,8 @@ def duplicate_dashboard(
         "is_default": False,
         "is_shared": False,
         "global_filters": source.get("global_filters", []),
+        "prefix_filter": source.get("prefix_filter", {}),
+        "prefix_grouping": source.get("prefix_grouping", {}),
         "time_range": source.get("time_range", {}),
         "layout_mode": source.get("layout_mode", "custom"),
         "compact_mode": source.get("compact_mode", "none"),
@@ -2165,6 +2345,8 @@ def widget_data_signature(widget: dict[str, Any], query_context: dict[str, Any])
         "start": query_context.get("start"),
         "end": query_context.get("end"),
         "global_filters": query_context.get("global_filters") or [],
+        "prefix_filter": query_context.get("prefix_filter") or {},
+        "prefix_grouping": query_context.get("prefix_grouping") or {},
         "sensor_id": query_context.get("sensor_id"),
         "interface_id": query_context.get("interface_id"),
         "if_index": query_context.get("if_index"),

@@ -4,6 +4,10 @@ Esta integração foi dividida em fases para manter o dashboard nativo como
 fonte de verdade e evitar que credenciais do Grafana sejam armazenadas em
 widgets ou arquivos exportados.
 
+O guia integrado de layout, prefixos IPv4/IPv6, variáveis de exportação e
+reimportação segura está em
+[Dashboard, prefixos e Grafana — Fase 1](dashboard-prefixes-grafana-phase1.md).
+
 ## Escopo implementado
 
 - **Fase 1 — API read-only:** rota de teste do datasource, catálogo, health,
@@ -14,8 +18,10 @@ widgets ou arquivos exportados.
 - **Fase 3 — publicação:** não habilitada. As rotas de publicação não fazem
   chamadas externas e retornam `phase_3_not_enabled`.
 
-Nenhuma dessas fases altera o schema do ClickHouse, o pipeline de ingestão ou
-o cache interno.
+A integração Grafana não duplica `flow_raw` nem altera o pipeline de
+ingestão. O recurso integrado de prefixos adiciona somente a agregação
+derivada minuto `flow_dashboard_prefix_1m` e inclui o contexto de prefixo nas
+chaves do cache.
 
 ## Autenticação e segurança
 
@@ -267,8 +273,8 @@ Resposta canônica:
   "items": [
     {
       "rank": 1,
-      "key": "UDP/443",
-      "label": "UDP/443",
+      "key": "udp/443",
+      "label": "udp/443",
       "value": 1200000000,
       "bps": 1200000000,
       "pps": 820000,
@@ -280,7 +286,7 @@ Resposta canônica:
       "country_name": "",
       "protocol": "UDP",
       "port": 443,
-      "display_name": "UDP/443",
+      "display_name": "udp/443",
       "tcp_flags": null,
       "packets": 492000000,
       "metadata": {}
@@ -301,6 +307,9 @@ Resposta canônica:
 quebrar painéis existentes. Para o plugin Grafana JSON API, use
 `$.items[*]` como raiz e mapeie `label` para o texto e `value` para o valor.
 Campos numéricos permanecem números, sem formatação localizada.
+Os dois campos percentuais são recalculados como
+`value / soma dos values retornados * 100`; totais anteriores ao `LIMIT` ou
+expressos em outra unidade não entram nesse cálculo.
 
 #### ASN, portas e TCP flags
 
@@ -313,7 +322,7 @@ o enriquecimento ASN do dashboard nativo e retornam `asn`, `asn_name`,
 {
   "rank": 1,
   "key": "AS263009",
-  "label": "AS263009 — Nome da rede",
+  "label": "AS263009 — Nome da rede (BR)",
   "value": 7900000000,
   "bps": 7900000000,
   "pps": 3500000,
@@ -327,9 +336,10 @@ o enriquecimento ASN do dashboard nativo e retornam `asn`, `asn_name`,
 
 No primeiro contrato de `top_ports`, `port` é sempre a porta de destino e a
 chave de agrupamento é protocolo + porta. Exemplos de `display_name`:
-`UDP/443`, `TCP/57300` e `UDP/53`.
+`udp/443`, `tcp/57300` e `udp/53`.
 
-`top_tcp_flags` normaliza ausência de flags como `NONE`. Combinações seguem a
+`top_tcp_flags` considera somente fluxos cujo protocolo IP é TCP e normaliza
+ausência de flags como `NONE`. Combinações seguem a
 ordem `FIN,SYN,RST,PSH,ACK,URG,ECE,CWR`; por exemplo `SYN,ACK`,
 `FIN,ACK`, `PSH,ACK` e `SYN,PSH,ACK`. Cada item retorna `tcp_flags`, `pps`,
 `packets` e `percentage`.
@@ -337,7 +347,7 @@ ordem `FIN,SYN,RST,PSH,ACK,URG,ECE,CWR`; por exemplo `SYN,ACK`,
 Use `format: "table"` para obter `columns` e `rows`. O endpoint
 `POST /api/v1/grafana/query/table` também aceita qualquer métrica de ranking,
 os mesmos filtros, `top_n` e `calculation`, e retorna colunas estáveis para
-JSONPath.
+JSONPath: `rank`, `label`, `value` e `percent`.
 
 O período máximo e o rate limit são configuráveis pelas variáveis acima. As
 consultas reutilizam os agregados e o motor Top N do dashboard, aplicam

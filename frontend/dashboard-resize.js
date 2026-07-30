@@ -339,12 +339,8 @@
         });
         cleanup();
       } catch (error) {
-        await options.onRollback?.({
-          widget: current.widget,
-          layout: current.originalLayout,
-          session: current,
-          error
-        });
+        // A failed save keeps the committed preview in place. The host owns
+        // retry feedback; rollback is reserved for Escape/pointer cancel.
         options.onError?.(error, current);
         cleanup();
       }
@@ -648,14 +644,8 @@
         });
         cleanup();
       } catch (error) {
-        await options.onRollback?.({
-          widget: current.widget,
-          layout: layoutEngine.rollbackLayoutInteraction
-            ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
-            : current.originalLayout,
-          session: current,
-          error
-        });
+        // Preserve the final local size on persistence failure. A retry can
+        // send the same stable widget-id layout without another interaction.
         options.onError?.(error, current);
         cleanup();
       }

@@ -860,6 +860,27 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 190px;
     }
 
+    .dashboard-prefix-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: .65rem;
+      margin-bottom: 1rem;
+      align-items: end;
+    }
+
+    .dashboard-prefix-controls .field {
+      min-width: 0;
+    }
+
+    .dashboard-prefix-summary {
+      grid-column: 1 / -1;
+    }
+
+    .layout-save-status {
+      min-width: 112px;
+      text-align: right;
+    }
+
     .panel {
       background: var(--panel-bg);
       border: 1px solid var(--line);
@@ -2927,8 +2948,79 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <button id="refresh" type="button" class="btn btn-sm btn-success">
                 <i data-lucide="refresh-cw"></i><span>Atualizar</span>
               </button>
+              <span id="dashboardLayoutSaveStatus" class="subtle layout-save-status" aria-live="polite"></span>
+              <button id="retryDashboardLayoutSave" type="button" class="btn btn-sm btn-outline-danger" hidden>
+                Tentar salvar layout
+              </button>
             </div>
           </div>
+
+          <section id="dashboardPrefixControls" class="panel p-3 dashboard-prefix-controls" aria-label="Filtro global por prefixo">
+            <div class="field">
+              <label for="dashboardPrefixFamily">Família</label>
+              <select id="dashboardPrefixFamily" class="form-select form-select-sm">
+                <option value="both">IPv4 e IPv6</option>
+                <option value="ipv4">IPv4</option>
+                <option value="ipv6">IPv6</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixSaved">Prefixo cadastrado</label>
+              <select id="dashboardPrefixSaved" class="form-select form-select-sm">
+                <option value="">Todos os prefixos</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixSubnet">Subprefixo</label>
+              <select id="dashboardPrefixSubnet" class="form-select form-select-sm" disabled>
+                <option value="">Bloco completo</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixCidr">CIDR personalizado</label>
+              <input id="dashboardPrefixCidr" class="form-control form-control-sm" placeholder="186.232.160.0/20">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixStart">Range inicial</label>
+              <input id="dashboardPrefixStart" class="form-control form-control-sm" placeholder="IP inicial">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixEnd">Range final</label>
+              <input id="dashboardPrefixEnd" class="form-control form-control-sm" placeholder="IP final">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixMatchSide">Aplicar em</label>
+              <select id="dashboardPrefixMatchSide" class="form-select form-select-sm">
+                <option value="either">Origem ou destino</option>
+                <option value="source">Somente origem</option>
+                <option value="destination">Somente destino</option>
+                <option value="both">Origem e destino</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixIpv4Length">Divisão IPv4</label>
+              <input id="dashboardPrefixIpv4Length" type="number" min="0" max="32" value="24" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixIpv6Length">Divisão IPv6</label>
+              <input id="dashboardPrefixIpv6Length" type="number" min="0" max="128" value="64" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixGroupSide">Agrupar por</label>
+              <select id="dashboardPrefixGroupSide" class="form-select form-select-sm">
+                <option value="destination">Destino</option>
+                <option value="source">Origem</option>
+              </select>
+            </div>
+            <div class="toolbar">
+              <button id="applyDashboardPrefixFilter" type="button" class="btn btn-sm btn-success">Aplicar temporariamente</button>
+              <button id="saveDashboardPrefixFilter" type="button" class="btn btn-sm btn-outline-secondary">Salvar no dashboard</button>
+              <button id="clearDashboardPrefixFilter" type="button" class="btn btn-sm btn-outline-secondary">Limpar filtro</button>
+            </div>
+            <div id="dashboardPrefixSummary" class="subtle dashboard-prefix-summary" aria-live="polite">
+              Filtro ativo: nenhum · Agrupamento: IPv4 /24 · IPv6 /64
+            </div>
+          </section>
 
           <section id="configurableDashboardGrid" class="configurable-dashboard-grid" aria-live="polite">
             <div class="configurable-dashboard-empty panel p-4">
@@ -7864,6 +7956,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </select>
           </div>
         </div>
+        <div class="panel p-3 mt-3">
+          <strong>Filtro por prefixo</strong>
+          <div id="dashboardManagerPrefixSummary" class="subtle">
+            Use os seletores globais do dashboard e clique em “Salvar no dashboard”.
+          </div>
+        </div>
         <div id="dashboardManagerStatus" class="subtle mt-3"></div>
       </div>
       <div class="gmj-dialog-footer">
@@ -7901,14 +7999,94 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <input id="grafanaExportDatasourceUid" class="form-control form-control-sm" value="${DS_GMJ_FLOW}">
           </div>
           <div class="field">
+            <label for="grafanaExportDatasourceType">Datasource type</label>
+            <input id="grafanaExportDatasourceType" class="form-control form-control-sm" value="yesoreyeram-infinity-datasource">
+          </div>
+          <div class="field">
             <label for="grafanaExportFolderUid">Folder UID</label>
             <input id="grafanaExportFolderUid" class="form-control form-control-sm" value="gmj-flow">
+          </div>
+          <div class="field">
+            <label for="grafanaExportTitle">Título</label>
+            <input id="grafanaExportTitle" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="grafanaExportUid">Dashboard UID opcional</label>
+            <input id="grafanaExportUid" class="form-control form-control-sm">
+          </div>
+          <div class="field">
+            <label for="grafanaExportRefresh">Refresh</label>
+            <input id="grafanaExportRefresh" class="form-control form-control-sm" value="30s">
+          </div>
+          <div class="field">
+            <label for="grafanaExportDefaultFrom">Período inicial</label>
+            <input id="grafanaExportDefaultFrom" class="form-control form-control-sm" value="now-10m">
+          </div>
+          <div class="field">
+            <label for="grafanaExportDefaultTo">Período final</label>
+            <input id="grafanaExportDefaultTo" class="form-control form-control-sm" value="now">
           </div>
           <div class="field">
             <label for="grafanaExportIncludeHidden">Widgets ocultos</label>
             <select id="grafanaExportIncludeHidden" class="form-select form-select-sm">
               <option value="false">Não incluir</option>
               <option value="true">Incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportSavedFilters">Filtros salvos</label>
+            <select id="grafanaExportSavedFilters" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportEditableFilters">Filtros editáveis</label>
+            <select id="grafanaExportEditableFilters" class="form-select form-select-sm">
+              <option value="false">Fixos</option>
+              <option value="true">Variáveis Grafana</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportPrefixes">Prefixos</label>
+            <select id="grafanaExportPrefixes" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportTopN">Top N</label>
+            <select id="grafanaExportTopN" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportTables">Tabelas</label>
+            <select id="grafanaExportTables" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportCharts">Gráficos</label>
+            <select id="grafanaExportCharts" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportAnomalies">Anomalias</label>
+            <select id="grafanaExportAnomalies" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grafanaExportMitigations">Mitigações</label>
+            <select id="grafanaExportMitigations" class="form-select form-select-sm">
+              <option value="true">Incluir</option>
+              <option value="false">Não incluir</option>
             </select>
           </div>
         </div>
@@ -7920,6 +8098,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       </div>
       <div class="gmj-dialog-footer">
         <button id="testGrafanaExportButton" type="button" class="btn btn-sm btn-outline-secondary">Testar export</button>
+        <button id="copyGrafanaApiConfigButton" type="button" class="btn btn-sm btn-outline-secondary">Copiar configuração da API</button>
         <button id="copyGrafanaExportButton" type="button" class="btn btn-sm btn-outline-secondary">Copiar JSON</button>
         <button id="downloadGrafanaExportButton" type="button" class="btn btn-sm btn-success">Baixar JSON</button>
         <button type="button" class="btn btn-sm btn-outline-secondary" disabled title="Fase 3 não habilitada">Dry-run remoto</button>
@@ -8812,7 +8991,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableLayoutInteractionSequence = 0;
     let configurableLayoutCommitSequence = 0;
     let configurableLayoutCommitQueue = Promise.resolve();
+    let configurablePendingLayoutRetry = null;
     let configurableDashboardLoadSequence = 0;
+    let configurablePrefixCatalog = [];
+    let configurableTemporaryPrefixFilter = null;
+    let configurableTemporaryPrefixGrouping = null;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
@@ -19296,6 +19479,220 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return true;
     }
 
+    function configurableActivePrefixFilter() {
+      return configurableTemporaryPrefixFilter
+        || configurableDashboard?.prefix_filter
+        || {
+          enabled: false,
+          address_family: 'both',
+          match_side: 'either'
+        };
+    }
+
+    function configurableActivePrefixGrouping() {
+      return configurableTemporaryPrefixGrouping
+        || configurableDashboard?.prefix_grouping
+        || {
+          enabled: false,
+          ipv4_prefix_length: 24,
+          ipv6_prefix_length: 64,
+          side: 'destination',
+          top_n: 10,
+          include_empty: false
+        };
+    }
+
+    function renderConfigurablePrefixCatalog() {
+      const selector = document.getElementById('dashboardPrefixSaved');
+      const selected = selector.value;
+      selector.innerHTML = [
+        '<option value="">Todos os prefixos</option>',
+        ...configurablePrefixCatalog.map(item => (
+          `<option value="${item.id}" data-cidr="${escapeHtml(item.cidr)}" data-family="${item.address_family}" data-split="${item.default_split_prefix_length}">`
+          + `${escapeHtml(item.name)} · ${escapeHtml(item.cidr)}</option>`
+        ))
+      ].join('');
+      if ([...selector.options].some(option => option.value === selected)) {
+        selector.value = selected;
+      }
+    }
+
+    async function loadConfigurablePrefixCatalog() {
+      const payload = await apiRequest('/api/prefixes?enabled=true&limit=500');
+      configurablePrefixCatalog = Array.isArray(payload.items) ? payload.items : [];
+      renderConfigurablePrefixCatalog();
+      return configurablePrefixCatalog;
+    }
+
+    function configurablePrefixControlsValue({ temporary = true } = {}) {
+      const selectedId = Number(document.getElementById('dashboardPrefixSaved').value || 0);
+      const selectedPrefix = configurablePrefixCatalog.find(item => Number(item.id) === selectedId);
+      const subnet = document.getElementById('dashboardPrefixSubnet').value.trim();
+      const customCidr = document.getElementById('dashboardPrefixCidr').value.trim();
+      const startIp = document.getElementById('dashboardPrefixStart').value.trim();
+      const endIp = document.getElementById('dashboardPrefixEnd').value.trim();
+      const rangeActive = Boolean(startIp || endIp);
+      const cidr = rangeActive
+        ? null
+        : customCidr || subnet || selectedPrefix?.cidr || null;
+      const prefixId = (
+        !rangeActive
+        && !customCidr
+        && !subnet
+        && selectedPrefix
+      ) ? selectedPrefix.id : null;
+      const filter = {
+        enabled: Boolean(cidr || (startIp && endIp)),
+        cidr,
+        prefix_id: prefixId,
+        start_ip: rangeActive ? startIp || null : null,
+        end_ip: rangeActive ? endIp || null : null,
+        address_family: document.getElementById('dashboardPrefixFamily').value,
+        match_side: document.getElementById('dashboardPrefixMatchSide').value,
+        direction: null,
+        temporary
+      };
+      const grouping = {
+        enabled: true,
+        ipv4_prefix_length: Number(document.getElementById('dashboardPrefixIpv4Length').value || 24),
+        ipv6_prefix_length: Number(document.getElementById('dashboardPrefixIpv6Length').value || 64),
+        side: document.getElementById('dashboardPrefixGroupSide').value,
+        top_n: Number(document.getElementById('dashboardSeriesLimit').value || 10) || 10,
+        include_empty: false
+      };
+      return { filter, grouping };
+    }
+
+    function updateConfigurablePrefixSummary() {
+      const filter = configurableActivePrefixFilter();
+      const grouping = configurableActivePrefixGrouping();
+      const active = filter.enabled
+        ? filter.cidr
+          || (
+            filter.start_ip && filter.end_ip
+              ? `${filter.start_ip}–${filter.end_ip}`
+              : 'família selecionada'
+          )
+        : 'nenhum';
+      const matchLabel = {
+        source: 'origem',
+        destination: 'destino',
+        either: 'origem ou destino',
+        both: 'origem e destino'
+      }[filter.match_side] || 'origem ou destino';
+      document.getElementById('dashboardPrefixSummary').textContent = (
+        `Filtro ativo: ${active} · Aplicação: ${matchLabel} · `
+        + `Agrupamento: IPv4 /${grouping.ipv4_prefix_length || 24} · `
+        + `IPv6 /${grouping.ipv6_prefix_length || 64}`
+      );
+      const manager = document.getElementById('dashboardManagerPrefixSummary');
+      if (manager) manager.textContent = document.getElementById('dashboardPrefixSummary').textContent;
+    }
+
+    function syncConfigurablePrefixControls() {
+      const filter = configurableActivePrefixFilter();
+      const grouping = configurableActivePrefixGrouping();
+      document.getElementById('dashboardPrefixFamily').value = filter.address_family || 'both';
+      document.getElementById('dashboardPrefixMatchSide').value = filter.match_side || 'either';
+      document.getElementById('dashboardPrefixIpv4Length').value = String(grouping.ipv4_prefix_length ?? 24);
+      document.getElementById('dashboardPrefixIpv6Length').value = String(grouping.ipv6_prefix_length ?? 64);
+      document.getElementById('dashboardPrefixGroupSide').value = grouping.side || 'destination';
+      const saved = document.getElementById('dashboardPrefixSaved');
+      saved.value = filter.prefix_id ? String(filter.prefix_id) : '';
+      document.getElementById('dashboardPrefixCidr').value = (
+        filter.prefix_id ? '' : filter.cidr || ''
+      );
+      document.getElementById('dashboardPrefixStart').value = filter.start_ip || '';
+      document.getElementById('dashboardPrefixEnd').value = filter.end_ip || '';
+      document.getElementById('dashboardPrefixSubnet').innerHTML = '<option value="">Bloco completo</option>';
+      document.getElementById('dashboardPrefixSubnet').disabled = !filter.prefix_id;
+      updateConfigurablePrefixSummary();
+    }
+
+    async function loadConfigurablePrefixSubnets() {
+      const selector = document.getElementById('dashboardPrefixSaved');
+      const prefixId = Number(selector.value || 0);
+      const subnetSelector = document.getElementById('dashboardPrefixSubnet');
+      subnetSelector.innerHTML = '<option value="">Bloco completo</option>';
+      subnetSelector.disabled = !prefixId;
+      if (!prefixId) return;
+      const prefix = configurablePrefixCatalog.find(item => Number(item.id) === prefixId);
+      if (!prefix) return;
+      document.getElementById('dashboardPrefixFamily').value = prefix.address_family;
+      const length = prefix.address_family === 'ipv4'
+        ? Number(document.getElementById('dashboardPrefixIpv4Length').value || prefix.default_split_prefix_length)
+        : Number(document.getElementById('dashboardPrefixIpv6Length').value || prefix.default_split_prefix_length);
+      try {
+        const payload = await apiRequest(
+          `/api/prefixes/${prefixId}/subnets?prefix_length=${length}&limit=500`
+        );
+        subnetSelector.innerHTML = [
+          '<option value="">Bloco completo</option>',
+          ...(payload.items || []).map(cidr => (
+            `<option value="${escapeHtml(cidr)}">${escapeHtml(cidr)}</option>`
+          ))
+        ].join('');
+        subnetSelector.disabled = false;
+        document.getElementById('dashboardPrefixSummary').textContent = (
+          `${payload.total} subprefixo(s): ${payload.start} até ${payload.end}`
+        );
+      } catch (error) {
+        subnetSelector.disabled = true;
+        document.getElementById('dashboardPrefixSummary').textContent = error.message;
+      }
+    }
+
+    async function applyConfigurablePrefixFilter({ save = false } = {}) {
+      const { filter, grouping } = configurablePrefixControlsValue({
+        temporary: !save
+      });
+      if (save) {
+        const updated = await apiRequest(`/api/dashboards/${configurableDashboard.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prefix_filter: { ...filter, temporary: false },
+            prefix_grouping: grouping
+          })
+        });
+        configurableDashboard.prefix_filter = updated.prefix_filter;
+        configurableDashboard.prefix_grouping = updated.prefix_grouping;
+        configurableTemporaryPrefixFilter = null;
+        configurableTemporaryPrefixGrouping = null;
+      } else {
+        configurableTemporaryPrefixFilter = filter;
+        configurableTemporaryPrefixGrouping = grouping;
+      }
+      updateConfigurablePrefixSummary();
+      configurableWidgetPayloads.clear();
+      configurableDeferredWidgetPayloads.clear();
+      await refreshConfigurableDashboard();
+    }
+
+    async function clearConfigurablePrefixFilter() {
+      configurableTemporaryPrefixFilter = {
+        enabled: false,
+        cidr: null,
+        prefix_id: null,
+        start_ip: null,
+        end_ip: null,
+        address_family: 'both',
+        match_side: 'either',
+        direction: null,
+        temporary: true
+      };
+      configurableTemporaryPrefixGrouping = {
+        enabled: false,
+        ipv4_prefix_length: 24,
+        ipv6_prefix_length: 64,
+        side: 'destination',
+        top_n: 10,
+        include_empty: false
+      };
+      syncConfigurablePrefixControls();
+      await refreshConfigurableDashboard();
+    }
+
     function configurableDashboardContext() {
       const rangeValue = document.getElementById('rangeMinutes')?.value || '10';
       const context = {
@@ -19307,6 +19704,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         interface_id: selectedDashboardInterfaceId(),
         zone_id: selectedDashboardZoneId(),
         zone_direction: document.getElementById('dashboardZoneDirection')?.value || 'both',
+        prefix_filter: configurableActivePrefixFilter(),
+        prefix_grouping: configurableActivePrefixGrouping(),
         series_limit: document.getElementById('dashboardSeriesLimit')?.value === 'all'
           ? 50
           : Number(document.getElementById('dashboardSeriesLimit')?.value || 8)
@@ -21291,6 +21690,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
       configurableWidgetPayloads.clear();
       configurableDeferredWidgetPayloads.clear();
+      const dashboardChanged = Number(configurableDashboard?.id || 0) !== Number(dashboard.id);
+      if (dashboardChanged) {
+        configurableTemporaryPrefixFilter = null;
+        configurableTemporaryPrefixGrouping = null;
+      }
       configurableDashboard = dashboard;
       syncConfigurablePersistentLayout(configurableWidgetLayoutItems(dashboard.widgets || []));
       const clientLayoutRepaired = repairConfigurableDashboardClientLayout();
@@ -21313,6 +21717,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.querySelector('#editDashboardButton span').textContent =
         dashboardEditMode ? 'Finalizar edição' : 'Editar Dashboard';
       syncConfigurableDashboardSelector(dashboard.id);
+      renderConfigurablePrefixCatalog();
+      syncConfigurablePrefixControls();
       renderConfigurableDashboard();
       return dashboard;
     }
@@ -21321,7 +21727,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       try {
         const [listPayload, catalog] = await Promise.all([
           apiRequest('/api/dashboards'),
-          apiRequest('/api/dashboards/widget-catalog')
+          apiRequest('/api/dashboards/widget-catalog'),
+          loadConfigurablePrefixCatalog()
         ]);
         configurableDashboardList = Array.isArray(listPayload.items) ? listPayload.items : [];
         configurableWidgetCatalog = catalog;
@@ -21378,6 +21785,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       ].join(':');
     }
 
+    function setConfigurableLayoutSaveStatus(state, message = '') {
+      const status = document.getElementById('dashboardLayoutSaveStatus');
+      const retry = document.getElementById('retryDashboardLayoutSave');
+      if (!status || !retry) return;
+      status.dataset.state = state;
+      status.textContent = message || {
+        saving: 'Salvando layout...',
+        saved: 'Layout salvo',
+        error: 'Erro ao salvar layout'
+      }[state] || '';
+      retry.hidden = state !== 'error';
+    }
+
     async function performConfigurableLayoutCommit(
       layout,
       activeWidgetId,
@@ -21388,6 +21808,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } = {}
     ) {
       const committed = GMJDashboardLayout.commitLayoutInteraction(layout);
+      // The drop is the authoritative local state. Network failure must not
+      // silently snap the dashboard back to the previous snapshot.
+      syncConfigurablePersistentLayout(committed);
+      updateConfigurableDashboardGridPositions(committed);
       const effectiveCompactMode = compactMode
         || configurableDashboard?.compact_mode
         || (
@@ -21408,24 +21832,36 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         signature,
         activeWidgetId
       );
-      const result = await apiRequest(`/api/dashboards/${configurableDashboard.id}/layout`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': idempotencyKey
-        },
-        body: JSON.stringify({
-          widgets: committed.map(item => ({
-            id: item.id,
-            grid: { x: item.x, y: item.y, w: item.w, h: item.h }
-          })),
-          layout_version: baseRevision,
-          base_revision: baseRevision,
-          active_widget_id: activeWidgetId || null,
-          interaction_id: effectiveInteractionId,
-          compact_mode: effectiveCompactMode
-        })
-      });
+      configurablePendingLayoutRetry = {
+        layout: cloneConfigurableLayout(committed),
+        activeWidgetId,
+        options: { compactMode: effectiveCompactMode }
+      };
+      setConfigurableLayoutSaveStatus('saving');
+      let result;
+      try {
+        result = await apiRequest(`/api/dashboards/${configurableDashboard.id}/layout`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey
+          },
+          body: JSON.stringify({
+            widgets: committed.map(item => ({
+              id: item.id,
+              grid: { x: item.x, y: item.y, w: item.w, h: item.h }
+            })),
+            layout_version: baseRevision,
+            base_revision: baseRevision,
+            active_widget_id: activeWidgetId || null,
+            interaction_id: effectiveInteractionId,
+            compact_mode: effectiveCompactMode
+          })
+        });
+      } catch (error) {
+        setConfigurableLayoutSaveStatus('error');
+        throw error;
+      }
       const staleResponse = (
         requestSequence !== configurableLayoutCommitSequence
         || result.interaction_id !== effectiveInteractionId
@@ -21443,6 +21879,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableDashboard.layout_version = result.layout_version;
         configurableDashboard.revision =
           result.revision ?? result.layout_version;
+        configurablePendingLayoutRetry = null;
+        setConfigurableLayoutSaveStatus('saved');
         return { ...result, stale_response_ignored: true };
       }
       const normalizedById = new Map(
@@ -21456,6 +21894,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableDashboard.revision = result.revision ?? result.layout_version;
       syncConfigurablePersistentLayout(normalized);
       updateConfigurableDashboardGridPositions(normalized);
+      configurablePendingLayoutRetry = null;
+      setConfigurableLayoutSaveStatus('saved');
       return result;
     }
 
@@ -21472,17 +21912,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function persistConfigurableLayoutAction(widget, repairedLayout, patch = {}) {
-      const previousLayout = cloneConfigurableLayout(configurablePersistentLayout);
-      applyConfigurableLayout(repairedLayout);
+      applyConfigurableLayout(repairedLayout, { persistent: true });
       updateConfigurableDashboardGridPositions(repairedLayout);
-      try {
-        if (Object.keys(patch).length) await patchConfigurableWidget(widget, patch);
-        await commitConfigurableLayout(repairedLayout, widget.id);
-      } catch (error) {
-        applyConfigurableLayout(previousLayout, { persistent: true });
-        updateConfigurableDashboardGridPositions(previousLayout);
-        throw error;
-      }
+      if (Object.keys(patch).length) await patchConfigurableWidget(widget, patch);
+      await commitConfigurableLayout(repairedLayout, widget.id);
+    }
+
+    async function retryConfigurableLayoutSave() {
+      if (!configurablePendingLayoutRetry || !configurableDashboard?.id) return;
+      const pending = {
+        ...configurablePendingLayoutRetry,
+        layout: cloneConfigurableLayout(configurablePendingLayoutRetry.layout)
+      };
+      const latest = await apiRequest(`/api/dashboards/${configurableDashboard.id}`);
+      configurableDashboard.layout_version = Number(latest.layout_version || 0);
+      configurableDashboard.revision = Number(latest.revision ?? latest.layout_version ?? 0);
+      await commitConfigurableLayout(
+        pending.layout,
+        pending.activeWidgetId,
+        pending.options
+      );
     }
 
     function openDashboardManager() {
@@ -21571,6 +22020,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function openGrafanaExportModal() {
       configurableGrafanaExportPayload = null;
+      document.getElementById('grafanaExportTitle').value = configurableDashboard?.name || '';
+      document.getElementById('grafanaExportRefresh').value = `${Math.max(5, Number(configurableDashboard?.refresh_interval_seconds || 30))}s`;
+      document.getElementById('grafanaExportDefaultFrom').value = `now-${Number(configurableDashboard?.time_range?.minutes || 10)}m`;
       document.getElementById('grafanaExportPreview').textContent = 'Nenhum export gerado.';
       document.getElementById('grafanaExportStatus').textContent = 'Gere ou teste o JSON antes do download.';
       closeModal('dashboardManagerModal');
@@ -21582,11 +22034,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const query = new URLSearchParams({
         grafana_version: document.getElementById('grafanaExportVersion').value,
         datasource_uid: document.getElementById('grafanaExportDatasourceUid').value.trim() || '${DS_GMJ_FLOW}',
+        datasource_type: document.getElementById('grafanaExportDatasourceType').value.trim() || 'yesoreyeram-infinity-datasource',
         folder_uid: document.getElementById('grafanaExportFolderUid').value.trim() || 'gmj-flow',
-        include_hidden: document.getElementById('grafanaExportIncludeHidden').value
+        include_hidden: document.getElementById('grafanaExportIncludeHidden').value,
+        include_saved_filters: document.getElementById('grafanaExportSavedFilters').value,
+        make_filters_editable: document.getElementById('grafanaExportEditableFilters').value,
+        include_variables: document.getElementById('grafanaExportEditableFilters').value,
+        include_prefixes: document.getElementById('grafanaExportPrefixes').value,
+        include_top_n: document.getElementById('grafanaExportTopN').value,
+        include_tables: document.getElementById('grafanaExportTables').value,
+        include_charts: document.getElementById('grafanaExportCharts').value,
+        include_anomalies: document.getElementById('grafanaExportAnomalies').value,
+        include_mitigations: document.getElementById('grafanaExportMitigations').value,
+        dashboard_title: document.getElementById('grafanaExportTitle').value.trim(),
+        dashboard_uid: document.getElementById('grafanaExportUid').value.trim(),
+        refresh: document.getElementById('grafanaExportRefresh').value.trim(),
+        default_from: document.getElementById('grafanaExportDefaultFrom').value.trim(),
+        default_to: document.getElementById('grafanaExportDefaultTo').value.trim()
       });
+      // Compatibility: the backend also keeps the legacy /grafana-export alias.
       const payload = await apiRequest(
-        `/api/dashboards/${configurableDashboard.id}/grafana-export?${query}`
+        `/api/dashboards/${configurableDashboard.id}/export/grafana?${query}`
       );
       configurableGrafanaExportPayload = payload;
       document.getElementById('grafanaExportPreview').textContent = JSON.stringify(payload, null, 2);
@@ -21630,6 +22098,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('grafanaExportStatus').textContent = 'JSON copiado para a área de transferência.';
     }
 
+    async function copyGrafanaApiConfiguration() {
+      const configuration = {
+        datasource_uid: document.getElementById('grafanaExportDatasourceUid').value.trim() || '${DS_GMJ_FLOW}',
+        datasource_type: document.getElementById('grafanaExportDatasourceType').value.trim() || 'yesoreyeram-infinity-datasource',
+        base_url: window.location.origin,
+        endpoints: {
+          timeseries: '/api/v1/grafana/query/timeseries',
+          ranking: '/api/v1/grafana/query/ranking',
+          table: '/api/v1/grafana/query/table'
+        },
+        authentication: 'Bearer configurado no datasource; token não incluído',
+        time_macros: { from: '$__isoFrom()', to: '$__isoTo()' }
+      };
+      await navigator.clipboard.writeText(JSON.stringify(configuration, null, 2));
+      document.getElementById('grafanaExportStatus').textContent = 'Configuração da API copiada sem credenciais.';
+    }
+
     async function downloadGrafanaExport() {
       const payload = configurableGrafanaExportPayload || await generateGrafanaExport();
       const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -21649,11 +22134,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       input.addEventListener('change', async () => {
         try {
           const payload = JSON.parse(await input.files[0].text());
-          const created = await apiRequest('/api/dashboards/import', {
+          const isGmjGrafana = (
+            payload?.dashboard?.gmj_flow?.source === 'gmj-flow'
+            || payload?.gmj_flow?.source === 'gmj-flow'
+          );
+          const created = await apiRequest(
+            isGmjGrafana
+              ? '/api/dashboards/import/grafana'
+              : '/api/dashboards/import',
+            {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-          });
+            }
+          );
           closeModal('dashboardManagerModal');
           await initializeConfigurableDashboards();
           await loadConfigurableDashboard(created.id);
@@ -21698,9 +22192,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const filter = configurableDrilldownFilter(widget, key);
       const dimension = widget.config?.dimension || '';
       if (action === 'filter') {
-        await patchConfigurableWidget(widget, {
-          filters: [...(widget.filters || []), filter]
-        });
+        if (['src_prefix', 'dst_prefix'].includes(dimension)) {
+          configurableTemporaryPrefixFilter = {
+            enabled: true,
+            cidr: String(key),
+            prefix_id: null,
+            start_ip: null,
+            end_ip: null,
+            address_family: String(key).includes(':') ? 'ipv6' : 'ipv4',
+            match_side: dimension === 'src_prefix' ? 'source' : 'destination',
+            direction: null,
+            temporary: true
+          };
+          configurableTemporaryPrefixGrouping = {
+            ...configurableActivePrefixGrouping(),
+            enabled: true,
+            side: dimension === 'src_prefix' ? 'source' : 'destination'
+          };
+          syncConfigurablePrefixControls();
+          await refreshConfigurableDashboard();
+        } else {
+          await patchConfigurableWidget(widget, {
+            filters: [...(widget.filters || []), filter]
+          });
+        }
       } else if (action === 'create') {
         await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets`, {
           method: 'POST',
@@ -23992,6 +24507,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
     document.getElementById('newDashboardButton').addEventListener('click', () => createConfigurableDashboardFromPrompt().catch(console.error));
     document.getElementById('dashboardManagerButton').addEventListener('click', openDashboardManager);
+    document.getElementById('dashboardPrefixSaved').addEventListener('change', () => {
+      loadConfigurablePrefixSubnets().catch(console.error);
+    });
+    document.getElementById('dashboardPrefixIpv4Length').addEventListener('change', () => {
+      if (document.getElementById('dashboardPrefixSaved').value) {
+        loadConfigurablePrefixSubnets().catch(console.error);
+      }
+    });
+    document.getElementById('dashboardPrefixIpv6Length').addEventListener('change', () => {
+      if (document.getElementById('dashboardPrefixSaved').value) {
+        loadConfigurablePrefixSubnets().catch(console.error);
+      }
+    });
+    document.getElementById('applyDashboardPrefixFilter').addEventListener('click', () => {
+      applyConfigurablePrefixFilter().catch(error => {
+        setText('dashboardPrefixSummary', `Falha: ${error.message}`);
+      });
+    });
+    document.getElementById('saveDashboardPrefixFilter').addEventListener('click', () => {
+      applyConfigurablePrefixFilter({ save: true }).catch(error => {
+        setText('dashboardPrefixSummary', `Falha: ${error.message}`);
+      });
+    });
+    document.getElementById('clearDashboardPrefixFilter').addEventListener('click', () => {
+      clearConfigurablePrefixFilter().catch(console.error);
+    });
+    document.getElementById('retryDashboardLayoutSave').addEventListener('click', () => {
+      retryConfigurableLayoutSave().catch(error => {
+        console.error('Falha ao tentar salvar o layout novamente.', error);
+        setConfigurableLayoutSaveStatus('error');
+      });
+    });
     document.getElementById('addDashboardWidgetButton').addEventListener('click', () => openConfigurableWidgetModal());
     document.getElementById('saveDashboardWidgetButton').addEventListener('click', () => saveConfigurableWidget().catch(console.error));
     document.getElementById('previewDashboardWidgetButton').addEventListener('click', () => previewConfigurableWidget().catch(console.error));
@@ -24048,6 +24595,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }));
     document.getElementById('exportGrafanaDashboardButton').addEventListener('click', openGrafanaExportModal);
     document.getElementById('testGrafanaExportButton').addEventListener('click', () => testGrafanaExport().catch(error => {
+      setText('grafanaExportStatus', `Falha: ${error.message}`);
+    }));
+    document.getElementById('copyGrafanaApiConfigButton').addEventListener('click', () => copyGrafanaApiConfiguration().catch(error => {
       setText('grafanaExportStatus', `Falha: ${error.message}`);
     }));
     document.getElementById('copyGrafanaExportButton').addEventListener('click', () => copyGrafanaExport().catch(error => {

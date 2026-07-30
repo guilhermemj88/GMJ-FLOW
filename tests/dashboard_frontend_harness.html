@@ -584,6 +584,7 @@
       let persisted = 0;
       let persistAttempts = 0;
       let rolledBack = 0;
+      let persistErrors = 0;
       let rejectNextPersist = false;
       let editable = true;
       let responsiveColumns = 12;
@@ -609,9 +610,16 @@
         onRollback: payload => {
           rolledBack += 1;
           layout = payload.layout.map(item => ({ ...item }));
+        },
+        onError: () => {
+          persistErrors += 1;
         }
       });
       let movePersisted = 0;
+      let movePersistAttempts = 0;
+      let moveRolledBack = 0;
+      let movePersistErrors = 0;
+      let rejectNextMovePersist = false;
       const moveController = GMJDashboardResize.createDashboardMoveController({
         grid,
         layoutEngine: GMJDashboardLayout,
@@ -623,10 +631,19 @@
           layout = payload.layout.map(item => ({ ...item }));
         },
         onPersist: async () => {
+          movePersistAttempts += 1;
+          if (rejectNextMovePersist) {
+            rejectNextMovePersist = false;
+            throw new Error('PATCH de movimento rejeitado');
+          }
           movePersisted += 1;
         },
         onRollback: payload => {
+          moveRolledBack += 1;
           layout = payload.layout.map(item => ({ ...item }));
+        },
+        onError: () => {
+          movePersistErrors += 1;
         }
       });
 
@@ -728,11 +745,11 @@
       await new Promise(resolve => setTimeout(resolve, 20));
       assertEqual(persisted, 2, 'failed PATCH is not accepted');
       assertEqual(persistAttempts, 3, 'failed PATCH has one attempt');
-      assertEqual(rolledBack, 2, 'failed PATCH rolls back');
-      assertEqual(
-        GMJDashboardLayout.layoutSignature(layout),
-        beforePatchError,
-        'failed PATCH restores layout'
+      assertEqual(persistErrors, 1, 'failed PATCH reports one error');
+      assertEqual(rolledBack, 1, 'failed PATCH does not roll back');
+      assert(
+        GMJDashboardLayout.layoutSignature(layout) !== beforePatchError,
+        'failed PATCH preserves committed local layout'
       );
 
       responsiveColumns = 12;
@@ -784,6 +801,21 @@
       assertEqual(movePersisted, 1, 'pointer move persists once');
       assert(GMJDashboardLayout.validateLayout(layout).valid, 'move preview has no collisions');
       assert(!article.classList.contains('is-dragging'), 'move class removed');
+
+      const beforeMovePatchError = GMJDashboardLayout.layoutSignature(layout);
+      rejectNextMovePersist = true;
+      movePointer('pointerdown', 17, 0, 0);
+      movePointer('pointermove', 17, -204, 0);
+      movePointer('pointerup', 17, -204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, 1, 'failed move PATCH is not accepted');
+      assertEqual(movePersistAttempts, 2, 'failed move PATCH has one attempt');
+      assertEqual(movePersistErrors, 1, 'failed move PATCH reports one error');
+      assertEqual(moveRolledBack, 1, 'failed move PATCH does not add rollback');
+      assert(
+        GMJDashboardLayout.layoutSignature(layout) !== beforeMovePatchError,
+        'failed move PATCH preserves exact local drop'
+      );
 
       const upward = GMJDashboardLayout.resolveDropLayout([
         { id: 1, x: 0, y: 8, w: 4, h: 4 },

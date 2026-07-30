@@ -11,8 +11,10 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from typing import Any, Callable
+
+from .prefixes import normalize_prefix_filter, normalize_prefix_grouping
 
 
 logger = logging.getLogger("gmj-flow.grafana")
@@ -30,6 +32,24 @@ GRAFANA_METRICS = {
         "kind": "timeseries",
         "unit": "pps",
         "dimensions": ["direction", "sensor", "interface", "protocol"],
+    },
+    "traffic_by_prefix_bps": {
+        "label": "Tráfego por prefixo em bits/s",
+        "kind": "timeseries",
+        "unit": "bps",
+        "dimensions": ["source_prefix", "destination_prefix"],
+    },
+    "traffic_by_prefix_pps": {
+        "label": "Tráfego por prefixo em pacotes/s",
+        "kind": "timeseries",
+        "unit": "pps",
+        "dimensions": ["source_prefix", "destination_prefix"],
+    },
+    "prefix_timeseries": {
+        "label": "Série temporal por prefixo",
+        "kind": "timeseries",
+        "unit": "bps",
+        "dimensions": ["source_prefix", "destination_prefix"],
     },
     "top_download_origins": {
         "label": "Top origens do download",
@@ -73,6 +93,30 @@ GRAFANA_METRICS = {
         "unit": "pps",
         "dimensions": ["tcp_flags"],
     },
+    "top_source_prefixes": {
+        "label": "Top prefixos de origem",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["source_prefix"],
+    },
+    "top_destination_prefixes": {
+        "label": "Top prefixos de destino",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["destination_prefix"],
+    },
+    "top_ports_by_prefix": {
+        "label": "Top portas no prefixo",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["protocol", "port", "prefix"],
+    },
+    "top_protocols_by_prefix": {
+        "label": "Top protocolos no prefixo",
+        "kind": "ranking",
+        "unit": "bps",
+        "dimensions": ["protocol", "prefix"],
+    },
 }
 GRAFANA_RANKING_QUERY_PLANS = {
     "top_download_origins": {
@@ -112,8 +156,35 @@ GRAFANA_RANKING_QUERY_PLANS = {
         "direction": None,
         "metric": "pps",
     },
+    "top_source_prefixes": {
+        "dimension": "src_prefix",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_destination_prefixes": {
+        "dimension": "dst_prefix",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_ports_by_prefix": {
+        "dimension": "dst_port",
+        "direction": None,
+        "metric": "bps",
+    },
+    "top_protocols_by_prefix": {
+        "dimension": "protocol",
+        "direction": None,
+        "metric": "bps",
+    },
 }
-GRAFANA_GROUP_BY = {"direction", "sensor", "interface", "protocol"}
+GRAFANA_GROUP_BY = {
+    "direction",
+    "sensor",
+    "interface",
+    "protocol",
+    "src_prefix",
+    "dst_prefix",
+}
 GRAFANA_DIRECTIONS = {"both", "upload", "download"}
 GRAFANA_CALCULATIONS = {
     "rate",
@@ -1073,6 +1144,75 @@ def _validate_timezone(value: Any) -> str:
     return "UTC"
 
 
+def _optional_filter_id(value: Any, field: str) -> int | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if text.lower() in {"all", "*", "todos"}:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        raise GrafanaApiError(
+            400,
+            "filter_not_allowed",
+            "%s deve ser um ID positivo ou 'all'." % field,
+        )
+    if parsed < 1:
+        raise GrafanaApiError(
+            400,
+            "filter_not_allowed",
+            "%s deve ser um ID positivo ou 'all'." % field,
+        )
+    return parsed
+
+
+def _filters_with_scalar_aliases(
+    data: dict[str, Any],
+) -> tuple[dict[str, Any], int | None]:
+    raw_filters = data.get("filters")
+    if hasattr(raw_filters, "dict"):
+        raw_filters = raw_filters.dict()
+    raw_filters = dict(raw_filters) if isinstance(raw_filters, dict) else {}
+    for alias, target in (
+        ("sensor", "sensor_ids"),
+        ("interface", "interfaces"),
+    ):
+        alias_id = _optional_filter_id(data.get(alias), alias)
+        if alias_id is None:
+            if str(data.get(alias) or "").strip().lower() in {
+                "all",
+                "*",
+                "todos",
+            }:
+                raw_filters[target] = []
+            continue
+        current = raw_filters.get(target) or []
+        if current and [int(item) for item in current] != [alias_id]:
+            raise GrafanaApiError(
+                400,
+                "filter_not_allowed",
+                "Filtro %s foi informado com valores conflitantes." % alias,
+            )
+        raw_filters[target] = [alias_id]
+    if data.get("direction") not in (None, ""):
+        current_direction = str(
+            raw_filters.get("direction") or "both"
+        ).strip().lower()
+        alias_direction = str(data["direction"]).strip().lower()
+        if current_direction not in {"", "both", alias_direction}:
+            raise GrafanaApiError(
+                400,
+                "filter_not_allowed",
+                "Filtro direction foi informado com valores conflitantes.",
+            )
+        raw_filters["direction"] = alias_direction
+    return _validated_filters(raw_filters), _optional_filter_id(
+        data.get("zone"),
+        "zone",
+    )
+
+
 def validate_timeseries_request(payload: Any) -> dict[str, Any]:
     data = payload.dict(by_alias=True) if hasattr(payload, "dict") else dict(payload)
     metric = str(data.get("metric") or "").strip().lower()
@@ -1080,7 +1220,14 @@ def validate_timeseries_request(payload: Any) -> dict[str, Any]:
     if not definition or definition["kind"] != "timeseries":
         raise GrafanaApiError(400, "metric_not_allowed", "Métrica não permitida.")
     start, end = validate_window(data.get("from"), data.get("to"))
-    filters = _validated_filters(data.get("filters"))
+    filters, zone_id = _filters_with_scalar_aliases(data)
+    try:
+        prefix_filter = normalize_prefix_filter(data.get("prefix_filter"))
+        prefix_grouping = normalize_prefix_grouping(
+            data.get("prefix_grouping")
+        )
+    except ValueError as exc:
+        raise GrafanaApiError(400, "prefix_filter_not_allowed", str(exc))
     timezone_name = _validate_timezone(data.get("timezone"))
     group_by = list(data.get("group_by") or ["direction"])
     if len(group_by) != 1 or group_by[0] not in GRAFANA_GROUP_BY:
@@ -1111,6 +1258,9 @@ def validate_timeseries_request(payload: Any) -> dict[str, Any]:
         "interval_ms": effective_interval_ms,
         "max_data_points": max_data_points,
         "filters": filters,
+        "zone_id": zone_id,
+        "prefix_filter": prefix_filter,
+        "prefix_grouping": prefix_grouping,
         "group_by": group_by,
         "calculation": calculation,
         "include_partial_bucket": bool(
@@ -1128,45 +1278,25 @@ def validate_ranking_request(payload: Any) -> dict[str, Any]:
     if not definition or definition["kind"] != "ranking":
         raise GrafanaApiError(400, "metric_not_allowed", "Métrica não permitida.")
     start, end = validate_window(data.get("from"), data.get("to"))
-    raw_filters = data.get("filters")
-    if hasattr(raw_filters, "dict"):
-        raw_filters = raw_filters.dict()
-    raw_filters = dict(raw_filters) if isinstance(raw_filters, dict) else {}
-    aliases = {
-        "sensor": "sensor_ids",
-        "interface": "interfaces",
-        "protocol": "protocols",
-    }
-    for alias, target in aliases.items():
-        alias_value = data.get(alias)
-        if alias_value is None or alias_value == "":
-            continue
-        normalized_alias = [alias_value]
-        current = raw_filters.get(target) or []
-        if current and [
-            str(item).strip().lower() for item in current
-        ] != [
-            str(item).strip().lower() for item in normalized_alias
-        ]:
+    filters, zone_id = _filters_with_scalar_aliases(data)
+    protocol_alias = str(data.get("protocol") or "").strip().lower()
+    if protocol_alias:
+        current_protocols = filters.get("protocols") or []
+        if current_protocols and current_protocols != [protocol_alias]:
             raise GrafanaApiError(
                 400,
                 "filter_not_allowed",
-                "Filtro %s foi informado com valores conflitantes." % alias,
+                "Filtro protocol foi informado com valores conflitantes.",
             )
-        raw_filters[target] = normalized_alias
-    if data.get("direction") not in (None, ""):
-        current_direction = str(
-            raw_filters.get("direction") or "both"
-        ).strip().lower()
-        alias_direction = str(data["direction"]).strip().lower()
-        if current_direction not in {"", "both", alias_direction}:
-            raise GrafanaApiError(
-                400,
-                "filter_not_allowed",
-                "Filtro direction foi informado com valores conflitantes.",
-            )
-        raw_filters["direction"] = alias_direction
-    filters = _validated_filters(raw_filters)
+        filters["protocols"] = [protocol_alias]
+        filters = _validated_filters(filters)
+    try:
+        prefix_filter = normalize_prefix_filter(data.get("prefix_filter"))
+        prefix_grouping = normalize_prefix_grouping(
+            data.get("prefix_grouping")
+        )
+    except ValueError as exc:
+        raise GrafanaApiError(400, "prefix_filter_not_allowed", str(exc))
     timezone_name = _validate_timezone(data.get("timezone"))
     calculation = str(
         data.get("calculation") or "last_not_null"
@@ -1203,6 +1333,9 @@ def validate_ranking_request(payload: Any) -> dict[str, Any]:
         "end": end,
         "top_n": top_n,
         "filters": filters,
+        "zone_id": zone_id,
+        "prefix_filter": prefix_filter,
+        "prefix_grouping": prefix_grouping,
         "calculation": calculation,
         "timezone": timezone_name,
         "format": response_format,
@@ -1527,7 +1660,7 @@ def canonical_ranking(
                 continue
             key = dimension_ip
             label = dimension_ip
-        elif metric == "top_ports":
+        elif metric in {"top_ports", "top_ports_by_prefix"}:
             key_match = re.fullmatch(
                 r"\s*([^/]+)/(\d{1,5})\s*",
                 key or label,
@@ -1542,7 +1675,7 @@ def canonical_ranking(
             display_name = "%s/%s" % (protocol.lower(), port)
             key = display_name
             label = display_name
-        elif metric == "top_protocols":
+        elif metric in {"top_protocols", "top_protocols_by_prefix"}:
             protocol = normalized_protocol(
                 protocol or item.get("key") or item.get("label")
             )
@@ -1566,6 +1699,22 @@ def canonical_ranking(
             key = tcp_flags
             label = tcp_flags
             protocol = "TCP"
+        elif metric in {
+            "top_source_prefixes",
+            "top_destination_prefixes",
+        }:
+            candidate = str(
+                item.get("prefix")
+                or item.get("key")
+                or item.get("label")
+                or ""
+            ).strip()
+            try:
+                prefix_label = str(ip_network(candidate, strict=False))
+            except ValueError:
+                continue
+            key = prefix_label
+            label = prefix_label
         elif metric in {
             "top_upload_destinations",
             "top_download_origins",

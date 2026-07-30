@@ -168,7 +168,10 @@ from app.services.grafana_api import (
     validate_ranking_request as validate_grafana_ranking_request,
     validate_timeseries_request as validate_grafana_timeseries_request,
 )
-from app.services.grafana_exporter import export_dashboard as export_grafana_dashboard
+from app.services.grafana_exporter import (
+    dashboard_from_grafana_export,
+    export_dashboard as export_grafana_dashboard,
+)
 from app.services.grafana_schemas import (
     GrafanaHealthResponse,
     GrafanaPublishRequest,
@@ -178,6 +181,17 @@ from app.services.grafana_schemas import (
     GrafanaTableResponse,
     GrafanaTimeseriesQuery,
     GrafanaTimeseriesResponse,
+)
+from app.services.prefixes import (
+    create_prefix,
+    ensure_prefix_schema,
+    get_prefix,
+    list_prefixes,
+    normalize_prefix_filter,
+    normalize_prefix_grouping,
+    preview_subnets,
+    resolve_prefix_filter,
+    update_prefix,
 )
 from app.services.time_buckets import (
     aggregate_temporal_points,
@@ -217,7 +231,7 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
         "Authorization",
         "Content-Type",
@@ -33323,6 +33337,149 @@ def dashboard_validation_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=clean_text(exc) or "Configuração inválida")
 
 
+@app.get("/api/prefixes")
+def list_prefixes_endpoint(
+    request: Request,
+    enabled: bool | None = None,
+    address_family: str = "",
+    search: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        ensure_prefix_schema(conn)
+        try:
+            return list_prefixes(
+                conn,
+                enabled=enabled,
+                address_family=address_family,
+                search=search,
+                offset=offset,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+
+
+@app.post("/api/prefixes")
+def create_prefix_endpoint(payload: dict[str, Any], request: Request):
+    dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_prefix_schema(conn)
+        try:
+            item = create_prefix(conn, payload)
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+        conn.commit()
+    return item
+
+
+@app.put("/api/prefixes/{prefix_id}")
+def update_prefix_endpoint(
+    prefix_id: int,
+    payload: dict[str, Any],
+    request: Request,
+):
+    dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_prefix_schema(conn)
+        try:
+            item = update_prefix(conn, prefix_id, payload)
+        except LookupError:
+            raise HTTPException(status_code=404, detail="Prefixo não encontrado")
+        except ValueError as exc:
+            raise dashboard_validation_error(exc)
+        conn.commit()
+    return item
+
+
+@app.delete("/api/prefixes/{prefix_id}")
+def delete_prefix_endpoint(prefix_id: int, request: Request):
+    dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        ensure_prefix_schema(conn)
+        if get_prefix(conn, prefix_id) is None:
+            raise HTTPException(status_code=404, detail="Prefixo não encontrado")
+        in_use = conn.execute(
+            """
+            SELECT count(*) AS total
+            FROM dashboards
+            WHERE json_extract(prefix_filter_json, '$.prefix_id') = ?
+            """,
+            (prefix_id,),
+        ).fetchone()
+        if int(in_use["total"] or 0):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Prefixo está salvo em um dashboard; remova o filtro "
+                    "antes de excluir"
+                ),
+            )
+        conn.execute("DELETE FROM prefixes WHERE id = ?", (prefix_id,))
+        conn.commit()
+    return {"ok": True, "deleted_id": prefix_id}
+
+
+@app.get("/api/prefixes/preview")
+def preview_prefix_endpoint(
+    request: Request,
+    cidr: str,
+    prefix_length: int,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    contains_ip: str | None = None,
+    contains_cidr: str | None = None,
+):
+    dashboard_request_user(request)
+    try:
+        return preview_subnets(
+            cidr,
+            prefix_length,
+            offset=offset,
+            limit=limit,
+            contains_ip=contains_ip,
+            contains_cidr=contains_cidr,
+        )
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+
+
+@app.get("/api/prefixes/{prefix_id}/subnets")
+def preview_registered_prefix_endpoint(
+    prefix_id: int,
+    request: Request,
+    prefix_length: int | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    contains_ip: str | None = None,
+    contains_cidr: str | None = None,
+):
+    dashboard_request_user(request)
+    with sqlite_connection() as conn:
+        item = get_prefix(conn, prefix_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Prefixo não encontrado")
+    try:
+        return preview_subnets(
+            item["cidr"],
+            (
+                prefix_length
+                if prefix_length is not None
+                else item["default_split_prefix_length"]
+            ),
+            offset=offset,
+            limit=limit,
+            contains_ip=contains_ip,
+            contains_cidr=contains_cidr,
+        )
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+
+
 @app.get("/api/dashboards/widget-catalog")
 def configurable_dashboard_widget_catalog():
     return widget_catalog()
@@ -33363,6 +33520,8 @@ def import_configurable_dashboard(payload: dict[str, Any], request: Request):
                 "is_default": False,
                 "is_shared": False,
                 "global_filters": source.get("global_filters", []),
+                "prefix_filter": source.get("prefix_filter", {}),
+                "prefix_grouping": source.get("prefix_grouping", {}),
                 "time_range": source.get("time_range", {}),
                 "layout_mode": source.get("layout_mode", "custom"),
                 "compact_mode": source.get("compact_mode", "none"),
@@ -33376,6 +33535,57 @@ def import_configurable_dashboard(payload: dict[str, Any], request: Request):
         created = create_configurable_dashboard(
             conn,
             dashboard_payload,
+            int(user["id"]),
+            widgets=normalized_widgets,
+        )
+        conn.commit()
+    return dashboard_with_permissions(created, user)
+
+
+@app.post("/api/dashboards/import/grafana")
+def reimport_grafana_dashboard_endpoint(
+    payload: dict[str, Any],
+    request: Request,
+):
+    user = dashboard_request_user(request)
+    try:
+        source = dashboard_from_grafana_export(payload)
+        widgets = source.get("widgets") or []
+        if (
+            not isinstance(widgets, list)
+            or len(widgets) > MAX_DASHBOARD_WIDGETS
+        ):
+            raise ValueError("quantidade de widgets inválida")
+        normalized_widgets = [
+            validate_widget_definition(widget)
+            for widget in widgets
+        ]
+        normalized_dashboard = normalize_dashboard_payload(
+            {
+                "name": clean_text(source.get("name"))
+                or "Dashboard Grafana reimportado",
+                "description": source.get("description", ""),
+                "is_default": False,
+                "is_shared": False,
+                "global_filters": source.get("global_filters", []),
+                "prefix_filter": source.get("prefix_filter", {}),
+                "prefix_grouping": source.get("prefix_grouping", {}),
+                "time_range": source.get("time_range", {}),
+                "layout_mode": source.get("layout_mode", "custom"),
+                "compact_mode": source.get("compact_mode", "none"),
+                "refresh_interval_seconds": source.get(
+                    "refresh_interval_seconds",
+                    30,
+                ),
+            }
+        )
+    except ValueError as exc:
+        raise dashboard_validation_error(exc)
+    with sqlite_connection() as conn:
+        ensure_dashboard_schema(conn)
+        created = create_configurable_dashboard(
+            conn,
+            normalized_dashboard,
             int(user["id"]),
             widgets=normalized_widgets,
         )
@@ -33460,6 +33670,14 @@ def update_configurable_dashboard_endpoint(
             "is_default": payload.get("is_default", current["is_default"]),
             "is_shared": payload.get("is_shared", current["is_shared"]),
             "global_filters": payload.get("global_filters", current["global_filters"]),
+            "prefix_filter": payload.get(
+                "prefix_filter",
+                current.get("prefix_filter", {}),
+            ),
+            "prefix_grouping": payload.get(
+                "prefix_grouping",
+                current.get("prefix_grouping", {}),
+            ),
             "time_range": payload.get("time_range", current["time_range"]),
             "layout_mode": payload.get(
                 "layout_mode",
@@ -33487,7 +33705,8 @@ def update_configurable_dashboard_endpoint(
             """
             UPDATE dashboards
             SET name = ?, description = ?, is_default = ?, is_shared = ?,
-                global_filters_json = ?, time_range_json = ?,
+                global_filters_json = ?, prefix_filter_json = ?,
+                prefix_grouping_json = ?, time_range_json = ?,
                 refresh_interval_seconds = ?, updated_at = ?
             WHERE id = ?
             """,
@@ -33497,6 +33716,8 @@ def update_configurable_dashboard_endpoint(
                 int(normalized["is_default"]),
                 int(normalized["is_shared"]),
                 json.dumps(normalized["global_filters"], sort_keys=True, separators=(",", ":")),
+                json.dumps(normalized["prefix_filter"], sort_keys=True, separators=(",", ":")),
+                json.dumps(normalized["prefix_grouping"], sort_keys=True, separators=(",", ":")),
                 json.dumps(normalized["time_range"], sort_keys=True, separators=(",", ":")),
                 normalized["refresh_interval_seconds"],
                 utc_now_iso(),
@@ -33915,6 +34136,19 @@ def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
         1,
         int((request_data["end"] - request_data["start"]).total_seconds()),
     )
+    with sqlite_connection() as conn:
+        ensure_prefix_schema(conn)
+        try:
+            prefix_filter = resolve_prefix_filter(
+                conn,
+                request_data.get("prefix_filter"),
+            )
+        except ValueError as exc:
+            raise GrafanaApiError(
+                400,
+                "prefix_filter_not_allowed",
+                clean_text(exc),
+            )
     return {
         "range_minutes": max(1, int((window_seconds + 59) / 60)),
         "time_range": {},
@@ -33931,10 +34165,14 @@ def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
             if filters.get("interfaces")
             else None
         ),
-        "zone_id": None,
+        "zone_id": request_data.get("zone_id"),
         "zone_direction": "both",
         "series_limit": 50,
         "global_filters": [],
+        "prefix_filter": prefix_filter,
+        "prefix_grouping": normalize_prefix_grouping(
+            request_data.get("prefix_grouping")
+        ),
     }
 
 
@@ -33947,13 +34185,35 @@ def grafana_resolution_seconds(interval_ms: int) -> int:
 
 
 def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
-    group_by = request_data["group_by"][0]
+    requested_metric = request_data["metric"]
+    prefix_grouping = request_data.get("prefix_grouping") or {}
+    prefix_metric = requested_metric in {
+        "traffic_by_prefix_bps",
+        "traffic_by_prefix_pps",
+        "prefix_timeseries",
+    }
+    group_by = (
+        "src_prefix"
+        if prefix_metric and prefix_grouping.get("side") == "source"
+        else "dst_prefix"
+        if prefix_metric
+        else request_data["group_by"][0]
+    )
+    value_metric = (
+        "pps"
+        if requested_metric == "traffic_by_prefix_pps"
+        else "bps"
+        if prefix_metric
+        else "bps"
+        if requested_metric == "traffic_bps"
+        else "pps"
+    )
     widget = {
         "title": "Grafana API",
         "type": "timeseries",
         "category": "traffic",
         "config": {
-            "metric": "bps" if request_data["metric"] == "traffic_bps" else "pps",
+            "metric": value_metric,
             "direction": request_data["filters"]["direction"],
             "group_by": "total" if group_by == "direction" else group_by,
             "aggregation": "sum",
@@ -34705,13 +34965,32 @@ def grafana_table_endpoint(
     "/api/dashboards/{dashboard_id}/grafana-export",
     tags=["Grafana Integration"],
 )
+@app.get(
+    "/api/dashboards/{dashboard_id}/export/grafana",
+    tags=["Grafana Integration"],
+)
 def export_configurable_dashboard_to_grafana_endpoint(
     dashboard_id: int,
     request: Request,
     grafana_version: str = "12",
     datasource_uid: str = "${DS_GMJ_FLOW}",
+    datasource_type: str = "yesoreyeram-infinity-datasource",
     folder_uid: str = "gmj-flow",
     include_hidden: bool = False,
+    include_saved_filters: bool = True,
+    make_filters_editable: bool = False,
+    include_variables: bool = True,
+    include_prefixes: bool = True,
+    include_top_n: bool = True,
+    include_tables: bool = True,
+    include_charts: bool = True,
+    include_anomalies: bool = True,
+    include_mitigations: bool = True,
+    dashboard_title: str = "",
+    dashboard_uid: str = "",
+    refresh: str = "",
+    default_from: str = "",
+    default_to: str = "",
 ):
     user = dashboard_request_user(request)
     if str(grafana_version) not in {"10", "11", "12"}:
@@ -34726,8 +35005,26 @@ def export_configurable_dashboard_to_grafana_endpoint(
         dashboard,
         grafana_version=str(grafana_version),
         datasource_uid=clean_text(datasource_uid) or "${DS_GMJ_FLOW}",
+        datasource_type=(
+            clean_text(datasource_type)
+            or "yesoreyeram-infinity-datasource"
+        ),
         folder_uid=clean_text(folder_uid) or "gmj-flow",
         include_hidden=bool(include_hidden),
+        include_saved_filters=bool(include_saved_filters),
+        make_filters_editable=bool(make_filters_editable),
+        include_variables=bool(include_variables),
+        include_prefixes=bool(include_prefixes),
+        include_top_n=bool(include_top_n),
+        include_tables=bool(include_tables),
+        include_charts=bool(include_charts),
+        include_anomalies=bool(include_anomalies),
+        include_mitigations=bool(include_mitigations),
+        dashboard_title=clean_text(dashboard_title),
+        dashboard_uid=clean_text(dashboard_uid),
+        refresh=clean_text(refresh),
+        default_from=clean_text(default_from),
+        default_to=clean_text(default_to),
     )
 
 
@@ -36738,6 +37035,139 @@ def raw_flow_where(
     return where
 
 
+def prefix_filter_active(prefix_filter: Any) -> bool:
+    return bool(
+        isinstance(prefix_filter, dict)
+        and prefix_filter.get("enabled")
+        and (
+            prefix_filter.get("cidr")
+            or (
+                prefix_filter.get("start_ip")
+                and prefix_filter.get("end_ip")
+            )
+            or prefix_filter.get("address_family") in {"ipv4", "ipv6"}
+        )
+    )
+
+
+def clickhouse_prefix_filter_condition(
+    prefix_filter: dict[str, Any] | None,
+    params: dict[str, Any],
+    prefix: str,
+) -> str:
+    """Build a parameterized native CIDR/range predicate for IPv6 columns.
+
+    ``flow_raw`` stores the address columns as IPv6 (IPv4 is mapped). CIDR
+    membership therefore uses ClickHouse's native range function and range
+    comparisons use IPv6 values, without stringifying every row for grouping.
+    """
+
+    if not prefix_filter_active(prefix_filter):
+        return ""
+    normalized = normalize_prefix_filter(prefix_filter)
+
+    def side_condition(column: str, suffix: str) -> str:
+        conditions: list[str] = []
+        if normalized.get("cidr"):
+            network = ip_network(normalized["cidr"], strict=False)
+            start_key = "%s_start" % prefix
+            end_key = "%s_end" % prefix
+            if network.version == 4:
+                params[start_key] = "::ffff:%s" % network.network_address
+                params[end_key] = "::ffff:%s" % network.broadcast_address
+            else:
+                params[start_key] = str(network.network_address)
+                params[end_key] = str(network.broadcast_address)
+            conditions.append(
+                "(%s >= toIPv6({%s:String}) "
+                "AND %s <= toIPv6({%s:String}))"
+                % (column, start_key, column, end_key)
+            )
+        elif normalized.get("start_ip") and normalized.get("end_ip"):
+            start_key = "%s_start" % prefix
+            end_key = "%s_end" % prefix
+            params[start_key] = normalized["start_ip"]
+            params[end_key] = normalized["end_ip"]
+            conditions.append(
+                "(%s >= toIPv6({%s:String}) AND %s <= toIPv6({%s:String}))"
+                % (column, start_key, column, end_key)
+            )
+        family = (
+            normalized.get("address_family")
+            if not (
+                normalized.get("cidr")
+                or (
+                    normalized.get("start_ip")
+                    and normalized.get("end_ip")
+                )
+            )
+            else "both"
+        )
+        mapped_v4 = (
+            "(isIPv4String(toString(%s)) OR "
+            "startsWith(toString(%s), '::ffff:'))"
+            % (column, column)
+        )
+        if family == "ipv4":
+            conditions.append(mapped_v4)
+        elif family == "ipv6":
+            conditions.append("NOT %s" % mapped_v4)
+        return "(%s)" % " AND ".join(conditions) if conditions else "1"
+
+    source = side_condition("src_ip", "source")
+    destination = side_condition("dst_ip", "destination")
+    match_side = normalized.get("match_side") or "either"
+    if match_side == "source":
+        membership = source
+    elif match_side == "destination":
+        membership = destination
+    elif match_side == "both":
+        membership = "(%s AND %s)" % (source, destination)
+    else:
+        membership = "(%s OR %s)" % (source, destination)
+    direction = normalized.get("direction")
+    direction_condition = (
+        "output_if > 0"
+        if direction in {"upload", "output", "transmits"}
+        else "input_if > 0"
+        if direction in {"download", "input", "receives"}
+        else ""
+    )
+    return (
+        "(%s AND %s)" % (membership, direction_condition)
+        if direction_condition
+        else membership
+    )
+
+
+def dashboard_prefix_group_expression(
+    column: str,
+    prefix_grouping: dict[str, Any] | None,
+) -> str:
+    grouping = normalize_prefix_grouping(prefix_grouping)
+    ipv4_length = int(grouping["ipv4_prefix_length"])
+    ipv6_length = int(grouping["ipv6_prefix_length"])
+    text = "toString(%s)" % column
+    mapped_text = (
+        "if(startsWith(%s, '::ffff:'), substring(%s, 8), %s)"
+        % (text, text, text)
+    )
+    return (
+        "if(isIPv4String(%(text)s) OR startsWith(%(text)s, '::ffff:'), "
+        "concat(toString(IPv4CIDRToRange(toIPv4(%(mapped)s), %(v4)s).1), "
+        "'/%(v4)s'), "
+        "concat(toString(IPv6CIDRToRange(%(column)s, %(v6)s).1), "
+        "'/%(v6)s'))"
+        % {
+            "text": text,
+            "mapped": mapped_text,
+            "column": column,
+            "v4": ipv4_length,
+            "v6": ipv6_length,
+        }
+    )
+
+
 def sensor_exporter_ip(sensor_id: int) -> str:
     ensure_sensor_db()
     with sqlite_connection() as conn:
@@ -37984,6 +38414,18 @@ def dashboard_aggregate_range_covered(
     return bool(DASHBOARD_CACHE.get_or_compute(cache_key, 30, check).get("covered"))
 
 
+def dashboard_aggregate_query_source(
+    start_dt: datetime,
+    end_dt: datetime,
+) -> str:
+    interior_start, interior_end = aggregate_boundaries(start_dt, end_dt)
+    return (
+        "aggregate_1m"
+        if interior_start == start_dt and interior_end == end_dt
+        else "aggregate_hybrid"
+    )
+
+
 def dashboard_raw_rated_source_cte(raw_where: str, columns: list[str]) -> str:
     selected_columns = [
         "flow_time",
@@ -38230,7 +38672,7 @@ def dashboard_series_payload(
             ["proto", "tcp_flags"],
         )
         source_table = "rated_source"
-        query_source = "aggregate_hybrid"
+        query_source = dashboard_aggregate_query_source(start_dt, end_dt)
         input_factor = "dashboard_input_sample_rate"
         output_factor = "dashboard_output_sample_rate"
     resolved_if_index = context["resolved_if_index"]
@@ -40049,8 +40491,19 @@ def top_dimension(
     zone_id: int | None = None,
     zone_direction: str = "both",
     metric: str = "bps",
+    prefix_filter: dict[str, Any] | None = None,
+    prefix_grouping: dict[str, Any] | None = None,
+    protocol: str | None = None,
 ):
-    if dimension not in {"src_ip", "dst_ip", "dst_port", "proto", "tcp_flags"}:
+    if dimension not in {
+        "src_ip",
+        "dst_ip",
+        "src_prefix",
+        "dst_prefix",
+        "dst_port",
+        "proto",
+        "tcp_flags",
+    }:
         raise HTTPException(status_code=400, detail="dimensao invalida")
     metric = clean_text(metric).lower() or "bps"
     if metric not in {"bps", "pps"}:
@@ -40070,6 +40523,9 @@ def top_dimension(
             "zone_id": zone_id,
             "zone_direction": zone_direction,
             "metric": metric,
+            "protocol": clean_text(protocol).lower(),
+            "prefix_filter": normalize_prefix_filter(prefix_filter),
+            "prefix_grouping": normalize_prefix_grouping(prefix_grouping),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40083,24 +40539,65 @@ def top_dimension(
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
+    prefix_condition = clickhouse_prefix_filter_condition(
+        prefix_filter,
+        params,
+        "top_prefix",
+    )
+    if prefix_condition:
+        where += f" AND {prefix_condition}"
+    requested_protocol = clean_text(protocol).lower()
+    if requested_protocol:
+        parsed_protocol = parse_proto_filter(requested_protocol)
+        if parsed_protocol is not None:
+            params["top_protocol"] = parsed_protocol
+            where += " AND proto = {top_protocol:UInt8}"
     if dimension == "tcp_flags":
         where += " AND proto = 6"
     rated_where = dashboard_rated_source_where(where)
     dimension_columns = {
         "src_ip": ["src_ip"],
         "dst_ip": ["dst_ip"],
+        "src_prefix": ["src_ip"],
+        "dst_prefix": ["dst_ip"],
         "dst_port": ["dst_port", "proto"],
         "proto": ["proto"],
         "tcp_flags": ["tcp_flags", "proto"],
     }[dimension]
+    prefix_aware = (
+        prefix_filter_active(prefix_filter)
+        or dimension in {"src_prefix", "dst_prefix"}
+    )
+    source_dimensions = list(dimension_columns)
+    if prefix_aware:
+        for column in (
+            "src_ip",
+            "dst_ip",
+            "src_port",
+            "dst_port",
+            "proto",
+            "tcp_flags",
+            "src_asn",
+            "dst_asn",
+            "src_as_name",
+            "dst_as_name",
+        ):
+            if column not in source_dimensions:
+                source_dimensions.append(column)
     factor_expr = "dashboard_auto_sample_rate"
     query_prefix = dashboard_raw_rated_source_cte(
         where,
-        [*dimension_columns, "src_ip", "dst_ip"],
+        source_dimensions,
     )
     query_source = "raw"
     source_table = "rated_source"
-    aggregate_key = "protocol" if dimension == "proto" else dimension
+    aggregate_key = (
+        "prefix"
+        if prefix_aware
+        else "protocol"
+        if dimension == "proto"
+        else dimension
+    )
     aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
     if zone_id is None and dashboard_aggregate_range_covered(
         aggregate_table,
@@ -40115,11 +40612,11 @@ def top_dimension(
             start_dt,
             end_dt,
             params,
-            dimension_columns,
+            source_dimensions if prefix_aware else dimension_columns,
         )
         source_table = "rated_source"
         factor_expr = "dashboard_auto_sample_rate"
-        query_source = "aggregate_hybrid"
+        query_source = dashboard_aggregate_query_source(start_dt, end_dt)
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
     order_metric = "packets_s" if metric == "pps" else "bps"
@@ -40149,6 +40646,25 @@ def top_dimension(
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY ip
+        ORDER BY {order_metric} DESC
+        LIMIT {{limit:UInt32}}
+        """
+    elif dimension in {"src_prefix", "dst_prefix"}:
+        address_column = "src_ip" if dimension == "src_prefix" else "dst_ip"
+        prefix_expression = dashboard_prefix_group_expression(
+            address_column,
+            prefix_grouping,
+        )
+        query = f"""
+        SELECT
+            {prefix_expression} AS prefix,
+            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
+            {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
+            sum(flow_count) AS flows
+        FROM {source_table}
+        WHERE {rated_where}
+        GROUP BY prefix
         ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
@@ -40209,6 +40725,16 @@ def top_dimension(
             ip = clean_ip(row["ip"])
             item = {
                 "ip": ip,
+                "bps": bps,
+                "packets_s": packets_s,
+                "flows": flows,
+                "packets": packets,
+            }
+        elif dimension in {"src_prefix", "dst_prefix"}:
+            prefix_label = clean_text(row.get("prefix"))
+            item = {
+                "key": prefix_label,
+                "prefix": prefix_label,
                 "bps": bps,
                 "packets_s": packets_s,
                 "flows": flows,
@@ -40359,6 +40885,8 @@ def top_asn_dimension(
     zone_id: int | None = None,
     zone_direction: str = "both",
     traffic_direction: str | None = None,
+    prefix_filter: dict[str, Any] | None = None,
+    protocol: str | None = None,
 ):
     ensure_clickhouse_schema()
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
@@ -40376,6 +40904,8 @@ def top_asn_dimension(
             "zone_id": zone_id,
             "zone_direction": zone_direction,
             "traffic_direction": traffic_direction or "",
+            "protocol": clean_text(protocol).lower(),
+            "prefix_filter": normalize_prefix_filter(prefix_filter),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40386,6 +40916,19 @@ def top_asn_dimension(
     exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    prefix_condition = clickhouse_prefix_filter_condition(
+        prefix_filter,
+        params,
+        "asn_prefix",
+    )
+    if prefix_condition:
+        where += f" AND {prefix_condition}"
+    requested_protocol = clean_text(protocol).lower()
+    if requested_protocol:
+        parsed_protocol = parse_proto_filter(requested_protocol)
+        if parsed_protocol is not None:
+            params["asn_protocol"] = parsed_protocol
+            where += " AND proto = {asn_protocol:UInt8}"
     rate_direction = "auto"
     if zone_id is not None:
         requested_zone_direction = normalize_zone_direction(zone_direction)
@@ -40463,7 +41006,13 @@ def top_asn_dimension(
     source_table = "rated_source"
     query_source = "raw"
     if zone_id is None:
-        aggregate_key = "asn_src" if dimension == "src" else "asn_dst"
+        aggregate_key = (
+            "prefix"
+            if prefix_filter_active(prefix_filter)
+            else "asn_src"
+            if dimension == "src"
+            else "asn_dst"
+        )
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
         if dashboard_aggregate_range_covered(
             aggregate_table,
@@ -40478,10 +41027,22 @@ def top_asn_dimension(
                 start_dt,
                 end_dt,
                 params,
-                [asn_col, as_name_col, ip_col],
+                (
+                    [
+                        "src_ip",
+                        "dst_ip",
+                        "src_asn",
+                        "dst_asn",
+                        "src_as_name",
+                        "dst_as_name",
+                        "proto",
+                    ]
+                    if prefix_filter_active(prefix_filter)
+                    else [asn_col, as_name_col, ip_col]
+                ),
             )
             source_table = "rated_source"
-            query_source = "aggregate_hybrid"
+            query_source = dashboard_aggregate_query_source(start_dt, end_dt)
             factor_expr = {
                 "input": "dashboard_input_sample_rate",
                 "output": "dashboard_output_sample_rate",
@@ -40762,6 +41323,7 @@ def flow_query_context(
     tcp_flags: str | None = None,
     decoder: str | None = None,
     direction: str = "both",
+    prefix_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     params: dict[str, Any] = {"start": start_dt, "end": end_dt}
@@ -40858,6 +41420,13 @@ def flow_query_context(
     if decoder_text in decoder_ports and port is None and src_port is None and dst_port is None:
         params["decoder_port"] = decoder_ports[decoder_text]
         filters.append("(src_port = {decoder_port:UInt16} OR dst_port = {decoder_port:UInt16})")
+    prefix_condition = clickhouse_prefix_filter_condition(
+        prefix_filter,
+        params,
+        "flow_prefix",
+    )
+    if prefix_condition:
+        filters.append(prefix_condition)
 
     source_where = " AND ".join(filters)
     return {
@@ -41552,6 +42121,7 @@ def top_flows(
     limit: int = Query(10, ge=1, le=100),
     order_by: str = "bits_s",
     order_dir: str = "desc",
+    prefix_filter: dict[str, Any] | None = None,
 ):
     ensure_clickhouse_schema()
     top_type = clean_text(top_type).lower().replace("-", "_")
@@ -41580,6 +42150,7 @@ def top_flows(
         tcp_flags,
         decoder,
         direction,
+        prefix_filter,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -42072,7 +42643,9 @@ def dashboard_widget_enrich_ranking_identity(
 def dashboard_widget_fold_prefixes(
     items: list[dict[str, Any]],
     metric: str,
+    prefix_grouping: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    grouping = normalize_prefix_grouping(prefix_grouping)
     grouped: dict[str, dict[str, Any]] = {}
     for item in items:
         try:
@@ -42081,7 +42654,13 @@ def dashboard_widget_fold_prefixes(
             continue
         prefix = str(
             ip_network(
-                "%s/%s" % (address, 24 if address.version == 4 else 64),
+                "%s/%s"
+                % (
+                    address,
+                    grouping["ipv4_prefix_length"]
+                    if address.version == 4
+                    else grouping["ipv6_prefix_length"],
+                ),
                 strict=False,
             )
         )
@@ -42357,12 +42936,27 @@ def dashboard_widget_top_payload(
     if_index = context.get("if_index") if context.get("if_index") is not None else arguments["if_index"]
     zone_id = context.get("zone_id") if context.get("zone_id") is not None else arguments["zone_id"]
     zone_direction = context.get("zone_direction") or "both"
+    prefix_filter = context.get("prefix_filter") or {}
+    prefix_grouping = context.get("prefix_grouping") or {}
     source = "raw"
-    aggregate_dimensions = {"src_ip", "dst_ip", "dst_port", "protocol", "tcp_flags"}
+    aggregate_dimensions = {
+        "src_ip",
+        "dst_ip",
+        "src_prefix",
+        "dst_prefix",
+        "dst_port",
+        "protocol",
+        "tcp_flags",
+    }
+    aggregate_safe_filters = all(
+        clean_text(rule.get("field")).lower() == "protocol"
+        and rule.get("operator") == "eq"
+        for rule in filters
+    )
     if (
         dimension in aggregate_dimensions
         and metric in {"bps", "pps"}
-        and not filters
+        and aggregate_safe_filters
         and plan["direction"] == "both"
     ):
         aggregate_dimension = {"protocol": "proto"}.get(dimension, dimension)
@@ -42381,6 +42975,9 @@ def dashboard_widget_top_payload(
             zone_id,
             zone_direction,
             metric,
+            prefix_filter,
+            prefix_grouping,
+            arguments["proto"],
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),
@@ -42391,7 +42988,7 @@ def dashboard_widget_top_payload(
     elif (
         dimension in {"src_asn", "dst_asn"}
         and metric == "bps"
-        and not filters
+        and aggregate_safe_filters
         and plan["direction"] in {"both", "upload", "download"}
     ):
         payload = top_asn_dimension(
@@ -42409,6 +43006,8 @@ def dashboard_widget_top_payload(
             zone_id,
             zone_direction,
             plan["direction"],
+            prefix_filter,
+            arguments["proto"],
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),
@@ -42485,6 +43084,7 @@ def dashboard_widget_top_payload(
                 "fps": "flows",
             }.get(metric, metric),
             "desc",
+            prefix_filter,
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),
@@ -42492,7 +43092,11 @@ def dashboard_widget_top_payload(
             metric,
         )
         if dimension in {"src_prefix", "dst_prefix"}:
-            items = dashboard_widget_fold_prefixes(items, metric)
+            items = dashboard_widget_fold_prefixes(
+                items,
+                metric,
+                prefix_grouping,
+            )
         elif dimension == "country":
             items = dashboard_widget_fold_countries(items, metric)
         elif dimension == "zone":
@@ -42641,6 +43245,7 @@ def dashboard_widget_series_payload(
         metric in {"bps", "pps"}
         and supported_group
         and not filters
+        and not prefix_filter_active(context.get("prefix_filter"))
         and not int(plan.get("resolution_seconds") or 0)
     ):
         payload = dashboard_series_payload(
@@ -42696,6 +43301,7 @@ def dashboard_widget_series_payload(
         arguments["tcp_flags"],
         None,
         "download" if direction in {"download", "receives", "input"} else "upload" if direction in {"upload", "transmits", "output"} else "both",
+        context.get("prefix_filter"),
     )
     requested_resolution = max(
         int(plan.get("resolution_seconds") or 0),
@@ -42730,12 +43336,45 @@ def dashboard_widget_series_payload(
         "src_asn": "toString(src_asn)",
         "dst_asn": "toString(dst_asn)",
     }.get(group_by, "'Total'")
+    if group_by in {"src_prefix", "dst_prefix"}:
+        group_expression = dashboard_prefix_group_expression(
+            "src_ip" if group_by == "src_prefix" else "dst_ip",
+            context.get("prefix_grouping"),
+        )
     if group_by == "zone":
         group_expression = dashboard_widget_zone_group_expression(params)
     query_prefix = dashboard_raw_rated_source_cte(
         query_context["where"],
         ["proto", "src_asn", "dst_asn", "src_ip", "dst_ip"],
     )
+    query_source = "raw"
+    if prefix_filter_active(context.get("prefix_filter")):
+        prefix_aggregate = DASHBOARD_AGGREGATE_TABLES["prefix"]
+        if dashboard_aggregate_range_covered(
+            prefix_aggregate,
+            query_context["start"],
+            query_context["end"],
+            context.get("sensor_id"),
+            arguments["sensor"],
+        ):
+            query_prefix = dashboard_hybrid_source_cte(
+                prefix_aggregate,
+                query_context["where"],
+                query_context["start"],
+                query_context["end"],
+                params,
+                [
+                    "src_ip",
+                    "dst_ip",
+                    "src_asn",
+                    "dst_asn",
+                    "proto",
+                ],
+            )
+            query_source = dashboard_aggregate_query_source(
+                query_context["start"],
+                query_context["end"],
+            )
     factor = {
         "input": "dashboard_input_sample_rate",
         "output": "dashboard_output_sample_rate",
@@ -42895,7 +43534,7 @@ def dashboard_widget_series_payload(
             bucket_seconds=bucket_seconds,
             range_end=query_context["end"],
         ),
-        "source": "raw",
+        "source": query_source,
         "start": iso(query_context["start"]),
         "end": iso(query_context["end"]),
         "range_minutes": effective_range_minutes,
@@ -43356,6 +43995,28 @@ def dashboard_widget_query_context(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="series_limit invÃ¡lido")
 
+    raw_prefix_filter = (
+        payload.get("prefix_filter")
+        if "prefix_filter" in payload
+        else dashboard.get("prefix_filter", {})
+        if dashboard
+        else {}
+    )
+    raw_prefix_grouping = (
+        payload.get("prefix_grouping")
+        if "prefix_grouping" in payload
+        else dashboard.get("prefix_grouping", {})
+        if dashboard
+        else {}
+    )
+    try:
+        with sqlite_connection() as conn:
+            ensure_prefix_schema(conn)
+            prefix_filter = resolve_prefix_filter(conn, raw_prefix_filter)
+        prefix_grouping = normalize_prefix_grouping(raw_prefix_grouping)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=clean_text(exc))
+
     return {
         "range_minutes": range_minutes,
         "time_range": time_range,
@@ -43381,6 +44042,8 @@ def dashboard_widget_query_context(
         ),
         "sensor": clean_text(payload.get("sensor")),
         "global_filters": dashboard.get("global_filters", []) if dashboard else [],
+        "prefix_filter": prefix_filter,
+        "prefix_grouping": prefix_grouping,
     }
 
 
@@ -43444,6 +44107,8 @@ def dashboard_widget_cached_query(
             "zone_direction": query_context.get("zone_direction") or "both",
             "widget_filters": widget.get("filters") or [],
             "global_filters": query_context.get("global_filters") or [],
+            "prefix_filter": query_context.get("prefix_filter") or {},
+            "prefix_grouping": query_context.get("prefix_grouping") or {},
             "ttl_seconds": ttl,
         },
     )

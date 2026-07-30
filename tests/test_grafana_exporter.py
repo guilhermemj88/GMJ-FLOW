@@ -139,7 +139,7 @@ class GrafanaExporterTest(unittest.TestCase):
         self.assertNotIn("negative", json.dumps(target_body).lower())
         self.assertEqual(
             target_body["from"],
-            "${__timeFrom:date:iso}",
+            "$__isoFrom()",
         )
         self.assertFalse(target_body["include_partial_bucket"])
         self.assertEqual(
