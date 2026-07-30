@@ -4867,8 +4867,98 @@ class BgpMitigationTest(unittest.TestCase):
         }
         readiness = main.evaluate_bgp_connector_readiness(status)
         self.assertTrue(readiness["ready"])
+        self.assertFalse(readiness["listener_ok"])
+        self.assertTrue(readiness["transport_ready"])
+        self.assertNotIn("tcp_listener_unavailable", readiness["reasons"])
         self.assertEqual(readiness["confirmation_level"], "peer_established")
         self.assertEqual(readiness["details"]["host_agent_evidence"]["source"], "exabgp_journal")
+
+    def test_active_host_agent_flat_schema_is_ready_without_listener(self):
+        host_agent_payload = {
+            "service_ok": True,
+            "listener_ok": False,
+            "bgp_ok": True,
+            "flowspec_ok": True,
+            "pipe_ok": True,
+            "bgp_state": "established",
+            "flowspec_state": "established",
+        }
+        readiness = main.evaluate_bgp_connector_readiness(host_agent_payload)
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["peer_state"], "established")
+        self.assertFalse(readiness["listener_ok"])
+        self.assertTrue(readiness["transport_ready"])
+        self.assertEqual(readiness["reasons"], [])
+        self.assertNotIn("tcp_listener_unavailable", readiness["reasons"])
+
+    def test_readiness_accepts_pipe_and_pipes_schema_compatibility(self):
+        base = {
+            "service_ok": True,
+            "listener_ok": False,
+            "bgp_ok": True,
+            "flowspec_ok": True,
+            "bgp_state": "established",
+            "flowspec_state": "established",
+        }
+        pipe = {
+            "path": "/run/exabgp/exabgp.in",
+            "exists": True,
+            "is_fifo": True,
+            "reader_active": True,
+            "ok": True,
+        }
+        singular = main.evaluate_bgp_connector_readiness({**base, "pipe": pipe})
+        plural = main.evaluate_bgp_connector_readiness({**base, "pipes": pipe})
+        self.assertTrue(singular["ready"])
+        self.assertTrue(plural["ready"])
+        self.assertTrue(singular["details"]["pipe_ok"])
+        self.assertTrue(plural["details"]["pipe_ok"])
+
+    def test_readiness_blocks_each_required_operational_failure(self):
+        base = {
+            "service_ok": True,
+            "listener_ok": False,
+            "bgp_ok": True,
+            "flowspec_ok": True,
+            "pipe_ok": True,
+            "close_wait_ok": True,
+            "bgp_state": "established",
+            "flowspec_state": "established",
+        }
+        scenarios = (
+            ("service_ok", "exabgp_service_inactive"),
+            ("bgp_ok", "peer_bgp_not_verified"),
+            ("flowspec_ok", "flowspec_not_verified"),
+            ("pipe_ok", "exabgp_pipe_unavailable"),
+            ("close_wait_ok", "close_wait_above_threshold"),
+        )
+        for field, reason in scenarios:
+            with self.subTest(field=field):
+                readiness = main.evaluate_bgp_connector_readiness(
+                    {**base, field: False}
+                )
+                self.assertFalse(readiness["ready"])
+                self.assertIn(reason, readiness["reasons"])
+
+    def test_close_wait_session_alert_blocks_readiness(self):
+        status = {
+            "service_ok": True,
+            "listener_ok": False,
+            "bgp_ok": True,
+            "flowspec_ok": True,
+            "pipe_ok": True,
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "session": {
+                "close_wait_count": 6,
+                "close_wait_alert_threshold": 5,
+                "close_wait_alert": True,
+            },
+        }
+        readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["ready"])
+        self.assertFalse(readiness["close_wait_ok"])
+        self.assertEqual(readiness["reason"], "close_wait_above_threshold")
 
     def test_established_bgp_without_flowspec_evidence_is_not_ready(self):
         status = {
@@ -4958,6 +5048,7 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(params["log_path"], ["/var/log/exabgp-gmj-flow.log"])
         self.assertEqual(params["config_path"], ["/etc/exabgp/gmj-flow-ne8000.conf"])
         self.assertEqual(params["pipe_path"], ["/run/exabgp/gm-teste.in"])
+        self.assertEqual(params["listener_required"], ["false"])
         self.assertEqual(captured["timeout"], 5)
 
     def test_host_agent_confirmation_does_not_require_huawei_query(self):
@@ -4976,11 +5067,11 @@ class BgpMitigationTest(unittest.TestCase):
             "enabled": True,
             "available": True,
             "service": {"active": True, "raw": "active"},
-            "listener": {"listening": True},
+            "listener": {"listening": False},
             "session": {"tcp_established": True},
             "bgp_state": "established",
             "flowspec_state": "established",
-            "pipe": {
+            "pipes": {
                 "path": "/run/exabgp/exabgp.in",
                 "exists": True,
                 "is_fifo": True,
@@ -5005,6 +5096,7 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(status["bgp_state"], "established")
         self.assertEqual(status["flowspec_state"], "established")
         self.assertTrue(status["pipes"]["ok"])
+        self.assertFalse(status["listener_ok"])
         self.assertTrue(main.evaluate_bgp_connector_readiness(status)["ready"])
 
     def test_shared_service_fallback_makes_two_established_connectors_ready(self):
@@ -5055,7 +5147,7 @@ class BgpMitigationTest(unittest.TestCase):
                         "active": True,
                         "raw": "active",
                     },
-                    "listener": {"listening": True},
+                    "listener": {"listening": False},
                     "session": {
                         "tcp_established": True,
                         "query_ok": True,
@@ -5065,7 +5157,7 @@ class BgpMitigationTest(unittest.TestCase):
                     },
                     "bgp_state": "established",
                     "flowspec_state": "established",
-                    "pipe": {
+                    "pipes": {
                         "path": pipe_path,
                         "exists": True,
                         "is_fifo": True,
@@ -5100,7 +5192,7 @@ class BgpMitigationTest(unittest.TestCase):
                     "exabgp-gmj-flow.service",
                 )
                 self.assertTrue(status["service_ok"])
-                self.assertTrue(status["listener_ok"])
+                self.assertFalse(status["listener_ok"])
                 self.assertTrue(status["bgp_ok"])
                 self.assertTrue(status["flowspec_ok"])
                 self.assertTrue(status["pipe_ok"])

@@ -12097,8 +12097,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       return 'NAO VERIFICADO';
     }
 
+    function bgpPipePayload(status) {
+      return status?.pipes || status?.pipe || status?.host_agent?.pipes || status?.host_agent?.pipe || {};
+    }
+
     function bgpPipeOperationalState(status) {
-      const pipes = status.pipes || {};
+      const pipes = bgpPipePayload(status);
       return pipes.ok && pipes.is_fifo && pipes.reader_active ? 'OK' : 'DOWN';
     }
 
@@ -12116,11 +12120,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     function bgpPipeDetailedState(status, connector = null) {
       if (!status) return 'NOT_VERIFIED';
-      const pipes = status.pipes || {};
-      const configuredPath = pipes.input_path || status.host_agent?.pipe?.path || connector?.exabgp_pipe_in || '';
-      const exists = pipes.input_exists ?? status.host_agent?.pipe?.exists;
-      const isFifo = pipes.is_fifo ?? status.host_agent?.pipe?.is_fifo;
-      const readerActive = pipes.reader_active ?? status.host_agent?.pipe?.reader_active;
+      const pipes = bgpPipePayload(status);
+      const configuredPath = pipes.input_path || pipes.path || connector?.exabgp_pipe_in || '';
+      const exists = pipes.input_exists ?? pipes.exists;
+      const isFifo = pipes.is_fifo;
+      const readerActive = pipes.reader_active;
       if (exists === false || (!configuredPath && !exists)) return 'ABSENT';
       if (exists && isFifo && readerActive === false) return 'NO_READER';
       if (pipes.ok && isFifo && readerActive) return 'OK';
@@ -12135,8 +12139,14 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const bgpState = bgpPeerOperationalState(status);
       const flowspecState = bgpFlowspecOperationalState(status, connector);
       const pipeState = bgpPipeDetailedState(status, connector);
-      if (status.service?.active && status.listener?.listening && bgpState === 'UP' && flowspecState === 'UP' && pipeState === 'OK') return 'READY';
-      if (!status.service?.active || !status.listener?.listening || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
+      const checks = status.checks || {};
+      const serviceOk = checks.service_ok ?? status.service_ok ?? status.service?.active;
+      const bgpOk = checks.bgp_ok ?? status.bgp_ok ?? status.session?.tcp_established ?? bgpState === 'UP';
+      const flowspecOk = checks.flowspec_ok ?? status.flowspec_ok ?? flowspecState === 'UP';
+      const pipeOk = checks.pipe_ok ?? status.pipe_ok ?? pipeState === 'OK';
+      const closeWaitOk = checks.close_wait_ok ?? status.close_wait_ok ?? !Boolean(status.session?.close_wait_alert);
+      if (serviceOk && bgpOk && flowspecOk && pipeOk && closeWaitOk) return 'READY';
+      if (serviceOk === false || bgpOk === false || flowspecOk === false || pipeOk === false || closeWaitOk === false || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
       return 'NOT_VERIFIED';
     }
 
@@ -12193,11 +12203,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP. A instalação da rota no Huawei não foi verificada.';
       if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
       if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
-      if (!status.listener?.listening) return 'Listener TCP/179 indisponível no host.';
       if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
       if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
       if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise o bloco family e a diretiva ipv4 flow do neighbor na configuração ExaBGP.';
       if (bgpPipeDetailedState(status, connector) === 'NO_READER') return 'Inicie ou recupere o leitor persistente do FIFO deste conector.';
+      if (connector?.passive_listen_enabled && !status.listener?.listening) return 'Listener TCP/179 indisponível no host para este conector passivo.';
       return 'Verifique o FIFO configurado e as mensagens técnicas do Host Agent.';
     }
 
@@ -12206,7 +12216,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       if (!connector) return;
       const status = bgpStatusForConnector(connector);
       const evidence = status?.host_agent?.evidence || {};
-      const pipe = status?.host_agent?.pipe || status?.pipes || {};
+      const pipe = bgpPipePayload(status);
       const pipeExists = pipe.exists ?? pipe.input_exists;
       const readerActive = pipe.reader_active;
       const flowspecEnabled = status && bgpFlowspecOperationalState(status, connector) === 'UP';
@@ -12280,7 +12290,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         const readiness = bgpConnectorReadinessState(status, connector);
         const bgpKind = bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : bgpState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
         const flowKind = flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : flowspecState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
-        const pipe = status?.host_agent?.pipe || status?.pipes || {};
+        const pipe = bgpPipePayload(status);
         const fifoExists = pipe.exists ?? pipe.input_exists;
         const fifoValid = pipe.is_fifo;
         const readerActive = pipe.reader_active;

@@ -9494,7 +9494,12 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
             "listen_port": int(connector.get("listen_port") or 179),
             "pipe_path": clean_text(connector.get("exabgp_pipe_in")),
             "log_path": GMJFLOW_EXABGP_LOG_PATH,
-            "config_path": GMJFLOW_EXABGP_CONFIG_PATH,
+            "config_path": bgp_connector_config_key(connector),
+            "listener_required": (
+                "true"
+                if sqlite_bool(connector.get("passive_listen_enabled"))
+                else "false"
+            ),
         }
     )
     try:
@@ -9554,6 +9559,10 @@ def host_agent_recover_bgp_sessions(
         "service": target_service,
         "peer_ips": peer_ips,
         "listen_port": 179,
+        "listener_required": any(
+            sqlite_bool(connector.get("passive_listen_enabled"))
+            for connector in connectors
+        ),
         "close_wait_threshold": bgp_close_wait_alert_threshold(),
         "recv_q_threshold": bgp_recv_q_alert_threshold(),
     }
@@ -9675,6 +9684,56 @@ def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bgp_status_check_value(
+    status: dict[str, Any],
+    check_name: str,
+    fallback: Any = None,
+) -> Any:
+    checks = status.get("checks") if isinstance(status.get("checks"), dict) else {}
+    if isinstance(checks.get(check_name), bool):
+        return bool(checks[check_name])
+    if isinstance(status.get(check_name), bool):
+        return bool(status[check_name])
+    return fallback
+
+
+def normalize_bgp_pipe_payload(status: dict[str, Any]) -> dict[str, Any]:
+    """Normalize current `pipes` and legacy `pipe` payloads to one public schema."""
+    candidates = [status.get("pipes"), status.get("pipe")]
+    host_agent = status.get("host_agent")
+    if isinstance(host_agent, dict):
+        candidates.extend([host_agent.get("pipes"), host_agent.get("pipe")])
+    raw = next((dict(item) for item in candidates if isinstance(item, dict) and item), {})
+    if not raw:
+        return {}
+    normalized = dict(raw)
+    normalized["input_path"] = clean_text(
+        raw.get("input_path") or raw.get("path")
+    )
+    if "input_exists" not in normalized and "exists" in raw:
+        normalized["input_exists"] = bool(raw.get("exists"))
+    if "exists" not in normalized and "input_exists" in normalized:
+        normalized["exists"] = bool(normalized.get("input_exists"))
+    explicit_ok = raw.get("ok")
+    if isinstance(explicit_ok, bool):
+        pipe_ok = bool(
+            explicit_ok
+            and raw.get("is_fifo", True)
+            and raw.get("reader_active", True)
+        )
+    else:
+        pipe_ok = bool(
+            normalized.get("input_exists")
+            and normalized.get("is_fifo")
+            and normalized.get("reader_active")
+        )
+    normalized["ok"] = pipe_ok
+    normalized["status"] = (
+        clean_text(raw.get("status")) or ("ok" if pipe_ok else "down")
+    )
+    return normalized
+
+
 def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
@@ -9762,39 +9821,76 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         agent_service = agent_status.get("service") or {}
         agent_listener = agent_status.get("listener") or {}
         agent_session = agent_status.get("session") or {}
-        agent_pipe = agent_status.get("pipe") or {}
-        service_active = bool(agent_service.get("active"))
+        agent_pipe = normalize_bgp_pipe_payload(agent_status)
+        service_active = bool(
+            agent_service.get("active")
+            if "active" in agent_service
+            else bgp_status_check_value(agent_status, "service_ok", False)
+        )
         service_raw = clean_text(agent_service.get("raw")) or ("active" if service_active else "inactive")
         service_severity = "ok" if service_active else "down"
-        listening = bool(agent_listener.get("listening"))
+        listening = bool(
+            agent_listener.get("listening")
+            if "listening" in agent_listener
+            else bgp_status_check_value(agent_status, "listener_ok", False)
+        )
         listener_status = "listening" if listening else "down"
         listener_severity = "ok" if listening else "down"
-        tcp_established = bool(agent_session.get("tcp_established"))
+        tcp_established = bool(
+            agent_session.get("tcp_established")
+            if "tcp_established" in agent_session
+            else bgp_status_check_value(
+                agent_status,
+                "bgp_ok",
+                clean_text(agent_status.get("bgp_state")).lower()
+                in {"established", "up"},
+            )
+        )
         session_status = "established" if tcp_established else "not_established"
         session_severity = "ok" if tcp_established else "down"
         close_wait_count = int(agent_session.get("close_wait_count") or 0)
         close_wait_alert_threshold = int(
             agent_session.get("close_wait_alert_threshold") or 0
         )
-        close_wait_alert = bool(agent_session.get("close_wait_alert"))
+        close_wait_alert = bool(
+            agent_session.get("close_wait_alert")
+            if "close_wait_alert" in agent_session
+            else not bgp_status_check_value(
+                agent_status, "close_wait_ok", True
+            )
+        )
         recv_q_total = int(agent_session.get("recv_q_total") or 0)
         recv_q_max = int(agent_session.get("recv_q_max") or 0)
         recv_q_alert_threshold = int(
             agent_session.get("recv_q_alert_threshold") or 0
         )
         recv_q_alert = bool(agent_session.get("recv_q_alert"))
-        if agent_pipe:
-            pipe_ok = bool(
-                agent_pipe.get("exists")
-                and agent_pipe.get("is_fifo")
-                and agent_pipe.get("reader_active")
-            )
+        agent_pipe_ok = bgp_status_check_value(
+            agent_status,
+            "pipe_ok",
+            agent_pipe.get("ok") if agent_pipe else None,
+        )
+        if agent_pipe or isinstance(agent_pipe_ok, bool):
+            pipe_ok = bool(agent_pipe_ok)
             pipes = {
                 **pipes,
-                "input_path": clean_text(agent_pipe.get("path")) or pipes.get("input_path") or "",
-                "input_exists": bool(agent_pipe.get("exists")),
-                "is_fifo": bool(agent_pipe.get("is_fifo")),
-                "reader_active": bool(agent_pipe.get("reader_active")),
+                **agent_pipe,
+                "input_path": clean_text(
+                    agent_pipe.get("input_path") or agent_pipe.get("path")
+                )
+                or pipes.get("input_path")
+                or "",
+                "input_exists": bool(
+                    agent_pipe.get("input_exists", agent_pipe.get("exists"))
+                )
+                if agent_pipe
+                else pipe_ok,
+                "is_fifo": bool(agent_pipe.get("is_fifo"))
+                if agent_pipe
+                else bool(pipes.get("is_fifo", pipe_ok)),
+                "reader_active": bool(agent_pipe.get("reader_active"))
+                if agent_pipe
+                else bool(pipes.get("reader_active", pipe_ok)),
                 "reader_waiting_for_writer": bool(
                     agent_pipe.get("reader_waiting_for_writer")
                 ),
@@ -9811,6 +9907,18 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
 
     agent_bgp_state = clean_text(agent_status.get("bgp_state")).lower()
     agent_flowspec_state = clean_text(agent_status.get("flowspec_state")).lower()
+    if agent_available and not agent_bgp_state:
+        agent_bgp_state = (
+            "established"
+            if bgp_status_check_value(agent_status, "bgp_ok", False)
+            else "not_verified"
+        )
+    if agent_available and not agent_flowspec_state:
+        agent_flowspec_state = (
+            "established"
+            if bgp_status_check_value(agent_status, "flowspec_ok", False)
+            else "not_verified"
+        )
     agent_confirms_exabgp = bool(
         agent_available
         and agent_bgp_state == "established"
@@ -9921,6 +10029,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "bgp_ok": tcp_established,
         "flowspec_ok": flowspec_state == "established",
         "pipe_ok": pipes_ok,
+        "close_wait_ok": not close_wait_alert,
     }
     result = {
         "connector_id": connector["id"],
@@ -9928,6 +10037,9 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "backend": connector.get("backend_type") or connector.get("backend") or "dry_run",
         "role": connector.get("role") or "",
         "flowspec_enabled": connector.get("role") == "flowspec_mitigation",
+        "passive_listen_enabled": sqlite_bool(
+            connector.get("passive_listen_enabled")
+        ),
         "service": service_info,
         "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
         "pipes": pipes,
@@ -9945,6 +10057,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "source": "host_agent" if agent_available else "fallback",
         },
         "session": session_info,
+        "transport_ready": bool(listening or tcp_established),
         "checks": checks,
         **checks,
         "bgp_state": bgp_state,
@@ -9962,8 +10075,26 @@ def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: d
     result = dict(status)
     result["connector_id"] = int(connector["id"])
     result["name"] = connector.get("name") or ""
+    result["passive_listen_enabled"] = sqlite_bool(
+        connector.get(
+            "passive_listen_enabled",
+            result.get("passive_listen_enabled", False),
+        )
+    )
     result["last_checked_at"] = checked_at
-    result["pipe_state"] = clean_text((result.get("pipes") or {}).get("status")) or "unknown"
+    pipes = normalize_bgp_pipe_payload(result)
+    if pipes:
+        result["pipes"] = pipes
+    result.pop("pipe", None)
+    host_agent = result.get("host_agent")
+    if isinstance(host_agent, dict):
+        normalized_host_agent = dict(host_agent)
+        host_agent_pipes = normalize_bgp_pipe_payload(host_agent)
+        if host_agent_pipes:
+            normalized_host_agent["pipes"] = host_agent_pipes
+        normalized_host_agent.pop("pipe", None)
+        result["host_agent"] = normalized_host_agent
+    result["pipe_state"] = clean_text(pipes.get("status")) or "unknown"
     result["errors"] = [clean_text(error) for error in result.get("errors") or [] if clean_text(error)]
     result["messages"] = sorted({clean_text(message) for message in result.get("messages") or [] if clean_text(message)})
     result["message"] = " | ".join(result["messages"])
@@ -9971,6 +10102,20 @@ def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: d
     result["readiness"] = readiness
     result["checks"] = readiness["checks"]
     result.update(readiness["checks"])
+    if readiness["bgp_ok"] and clean_text(result.get("bgp_state")).lower() in {
+        "",
+        "unknown",
+        "not_verified",
+        "not_checked",
+    }:
+        result["bgp_state"] = "established"
+    if readiness["flowspec_ok"] and clean_text(result.get("flowspec_state")).lower() in {
+        "",
+        "unknown",
+        "not_verified",
+        "not_checked",
+    }:
+        result["flowspec_state"] = "established"
     return result
 
 
@@ -10002,6 +10147,9 @@ def persist_bgp_connector_status_snapshot(
 def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
     bgp_state = clean_text(status.get("bgp_state")).lower()
     exabgp_state = clean_text((status.get("exabgp_peer") or {}).get("state")).lower()
+    explicit_bgp_ok = bgp_status_check_value(status, "bgp_ok", None)
+    if explicit_bgp_ok is True:
+        return "established"
     if bgp_state in {"established", "up"}:
         return "established"
     if bgp_state in {"idle", "active", "connect", "down", "not_established"}:
@@ -10017,29 +10165,44 @@ def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
 
 def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
     host_agent = status.get("host_agent") or {}
-    pipes = status.get("pipes") or {}
-    checks = status.get("checks") or {}
+    pipes = normalize_bgp_pipe_payload(status)
     pipe_ok = bool(
-        checks["pipe_ok"]
-        if isinstance(checks.get("pipe_ok"), bool)
-        else pipes.get("ok")
-        and pipes.get("is_fifo", True)
-        and pipes.get("reader_active", True)
+        bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
+    )
+    service_active = bool(
+        bgp_status_check_value(
+            status, "service_ok", (status.get("service") or {}).get("active")
+        )
+    )
+    listener_ok = bool(
+        bgp_status_check_value(
+            status, "listener_ok", (status.get("listener") or {}).get("listening")
+        )
+    )
+    tcp_established = bool(
+        bgp_status_check_value(
+            status, "bgp_ok", (status.get("session") or {}).get("tcp_established")
+        )
+    )
+    host_agent_pipes = (
+        normalize_bgp_pipe_payload(host_agent)
+        if isinstance(host_agent, dict)
+        else {}
     )
     return {
         "checked_at": status.get("last_checked_at") or "",
         "bgp_state": status.get("bgp_state") or "unknown",
         "flowspec_state": status.get("flowspec_state") or "unknown",
-        "pipe_state": status.get("pipe_state") or clean_text((status.get("pipes") or {}).get("status")) or "unknown",
+        "pipe_state": status.get("pipe_state") or clean_text(pipes.get("status")) or "unknown",
         "pipe_ok": pipe_ok,
-        "tcp_established": bool((status.get("session") or {}).get("tcp_established")),
-        "service_active": bool((status.get("service") or {}).get("active")),
-        "listener_ok": bool((status.get("listener") or {}).get("listening")),
+        "tcp_established": tcp_established,
+        "service_active": service_active,
+        "listener_ok": listener_ok,
         "close_wait_count": int((status.get("session") or {}).get("close_wait_count") or 0),
         "recv_q_max": int((status.get("session") or {}).get("recv_q_max") or 0),
         "checks": status.get("checks") or {},
         "host_agent_evidence": host_agent.get("evidence") or {},
-        "host_agent_pipe": host_agent.get("pipe") or {},
+        "host_agent_pipes": host_agent_pipes,
         "messages": status.get("messages") or [],
         "errors": status.get("errors") or [],
     }
@@ -10054,57 +10217,71 @@ def bgp_readiness_reason_message(reason: str) -> str:
         "exabgp_service_inactive": "Servico ExaBGP indisponivel; anuncio nao enviado.",
         "tcp_listener_unavailable": "Listener TCP/179 indisponivel; anuncio nao enviado.",
         "exabgp_pipe_unavailable": "Pipe ExaBGP indisponivel ou sem leitor ativo; anuncio nao enviado.",
+        "close_wait_above_threshold": "CLOSE_WAIT acima do limite operacional; anuncio nao enviado.",
     }.get(clean_text(reason), clean_text(reason))
 
 
 def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     raw_peer_state = clean_text(status.get("bgp_state")).lower()
-    if raw_peer_state in {"established", "up"}:
+    service_active = bool(
+        bgp_status_check_value(
+            status, "service_ok", (status.get("service") or {}).get("active")
+        )
+    )
+    listener = status.get("listener") or {}
+    session = status.get("session") or {}
+    listener_ok = bool(
+        bgp_status_check_value(
+            status, "listener_ok", listener.get("listening", False)
+        )
+    )
+    bgp_ok = bool(
+        bgp_status_check_value(
+            status,
+            "bgp_ok",
+            session.get(
+                "tcp_established",
+                raw_peer_state in {"established", "up"},
+            ),
+        )
+    )
+    if bgp_ok or raw_peer_state in {"established", "up"}:
         peer_state = "established"
     elif raw_peer_state in {"idle", "active", "connect", "down", "not_established"}:
         peer_state = "down"
     else:
         peer_state = "not_verified"
-    status_checks = status.get("checks") or {}
-    service_active = bool(
-        status_checks.get("service_ok")
-        if isinstance(status_checks.get("service_ok"), bool)
-        else (status.get("service") or {}).get("active")
-    )
-    listener = status.get("listener") or {}
-    session = status.get("session") or {}
-    if isinstance(status_checks.get("listener_ok"), bool):
-        listener_ok = bool(status_checks["listener_ok"])
-    elif "listening" in listener:
-        listener_ok = bool(listener.get("listening"))
-    else:
-        # Compatibility for persisted snapshots from versions that did not
-        # expose listener evidence separately.
-        listener_ok = (
-            bool(session.get("tcp_established"))
-            if "tcp_established" in session
-            else peer_state == "established"
-        )
-    if isinstance(status_checks.get("bgp_ok"), bool):
-        bgp_ok = bool(status_checks["bgp_ok"])
-    elif "tcp_established" in session:
-        bgp_ok = bool(session.get("tcp_established"))
-    else:
-        bgp_ok = peer_state == "established"
     flowspec_state = clean_text(status.get("flowspec_state")).lower()
-    pipes = status.get("pipes") or {}
-    if isinstance(status_checks.get("flowspec_ok"), bool):
-        flowspec_ok = bool(status_checks["flowspec_ok"])
-    else:
-        flowspec_ok = flowspec_state == "established"
-    if isinstance(status_checks.get("pipe_ok"), bool):
-        pipe_ok = bool(status_checks["pipe_ok"])
-    else:
-        pipe_ok = bool(
-            pipes.get("ok")
-            and pipes.get("is_fifo", True)
-            and pipes.get("reader_active", True)
+    flowspec_ok = bool(
+        bgp_status_check_value(
+            status,
+            "flowspec_ok",
+            flowspec_state in {"established", "up"},
         )
+    )
+    pipes = normalize_bgp_pipe_payload(status)
+    pipe_ok = bool(
+        bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
+    )
+    close_wait_count = int(session.get("close_wait_count") or 0)
+    close_wait_threshold = int(session.get("close_wait_alert_threshold") or 0)
+    if isinstance(session.get("close_wait_alert"), bool):
+        close_wait_fallback = not bool(session["close_wait_alert"])
+    elif "close_wait_alert_threshold" in session:
+        close_wait_fallback = close_wait_count <= close_wait_threshold
+    else:
+        close_wait_fallback = True
+    close_wait_ok = bool(
+        bgp_status_check_value(
+            status, "close_wait_ok", close_wait_fallback
+        )
+    )
+    listener_required = bool(
+        status.get("listener_required")
+        if isinstance(status.get("listener_required"), bool)
+        else status.get("passive_listen_enabled")
+    )
+    transport_ready = bool(listener_ok or bgp_ok)
     failed_reasons: list[str] = []
     if not service_active:
         failed_reasons.append("exabgp_service_inactive")
@@ -10112,7 +10289,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         failed_reasons.append(
             "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
         )
-    if not listener_ok:
+    if listener_required and not transport_ready:
         failed_reasons.append("tcp_listener_unavailable")
     if not flowspec_ok:
         failed_reasons.append(
@@ -10122,6 +10299,8 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         )
     if not pipe_ok:
         failed_reasons.append("exabgp_pipe_unavailable")
+    if not close_wait_ok:
+        failed_reasons.append("close_wait_above_threshold")
     reason = failed_reasons[0] if failed_reasons else ""
     failure_status = (
         "peer_down"
@@ -10143,15 +10322,29 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "bgp_ok": bgp_ok,
         "flowspec_ok": flowspec_ok,
         "pipe_ok": pipe_ok,
+        "transport_ready": transport_ready,
+        "close_wait_ok": close_wait_ok,
     }
-    ready = all(checks.values())
+    required_checks = {
+        "service_ok": service_active,
+        "bgp_ok": bgp_ok,
+        "flowspec_ok": flowspec_ok,
+        "pipe_ok": pipe_ok,
+        "transport_ready": transport_ready,
+        "close_wait_ok": close_wait_ok,
+    }
+    ready = all(required_checks.values())
     details = compact_bgp_status_details(status)
+    details["checks"] = checks
     details["technical_reason"] = reason
     details["reason_message"] = bgp_readiness_reason_message(reason)
     details["failed_checks"] = [
-        check_name for check_name, ok in checks.items() if not ok
+        check_name for check_name, ok in required_checks.items() if not ok
     ]
     details["reasons"] = failed_reasons
+    details["listener_informational"] = not listener_required
+    details["listener_required"] = listener_required
+    details["transport_ready"] = transport_ready
     return {
         "ready": ready,
         "peer_state": peer_state,
@@ -10588,6 +10781,9 @@ def persisted_bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     result.update({
         "connector_id": connector["id"],
         "name": connector["name"],
+        "passive_listen_enabled": sqlite_bool(
+            connector.get("passive_listen_enabled")
+        ),
         "bgp_state": connector.get("bgp_state") or result.get("bgp_state") or "not_checked",
         "flowspec_state": connector.get("flowspec_state") or result.get("flowspec_state") or "not_checked",
         "pipe_state": connector.get("pipe_state") or result.get("pipe_state") or "not_checked",

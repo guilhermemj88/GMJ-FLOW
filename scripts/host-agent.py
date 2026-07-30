@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import posixpath
@@ -379,8 +380,34 @@ def read_log_file(requested_path: str, configured_path: str) -> tuple[str, datet
         return "", None, str(exc)
 
 
-def validated_config_path(requested_path: str, configured_path: str) -> str:
-    """Allow only the exact absolute config file selected by the agent operator."""
+def normalized_exabgp_config_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if (
+        not path
+        or not posixpath.isabs(path)
+        or "\x00" in path
+        or path != posixpath.normpath(path)
+    ):
+        return ""
+    return path
+
+
+def exabgp_config_paths_from_exec_start(output: str) -> list[str]:
+    """Return current ExaBGP config arguments from systemd's ExecStart value."""
+    paths: list[str] = []
+    for candidate in re.findall(r"/etc/exabgp/[A-Za-z0-9_.@%+,:/=-]+", output or ""):
+        normalized = normalized_exabgp_config_path(candidate.rstrip(";"))
+        if normalized and normalized not in paths:
+            paths.append(normalized)
+    return paths
+
+
+def validated_config_path(
+    requested_path: str,
+    configured_path: str,
+    allowed_paths: list[str] | None = None,
+) -> str:
+    """Allow the operator-selected path or a current ExaBGP ExecStart config."""
     requested = str(requested_path or configured_path or "").strip()
     configured = str(configured_path or "").strip()
     if not configured or not posixpath.isabs(configured):
@@ -393,15 +420,28 @@ def validated_config_path(requested_path: str, configured_path: str) -> str:
     normalized_configured = posixpath.normpath(configured)
     if requested != normalized_requested or configured != normalized_configured:
         raise ValueError("config_path must be normalized")
-    if normalized_requested != normalized_configured:
+    allowed = {
+        path
+        for path in (
+            normalized_exabgp_config_path(item)
+            for item in (allowed_paths or [])
+        )
+        if path.startswith("/etc/exabgp/")
+    }
+    allowed.add(normalized_configured)
+    if normalized_requested not in allowed:
         raise ValueError("config_path is not configured for this Host Agent")
     return normalized_requested
 
 
-def read_config_file(requested_path: str, configured_path: str) -> tuple[str, str, str]:
+def read_config_file(
+    requested_path: str,
+    configured_path: str,
+    allowed_paths: list[str] | None = None,
+) -> tuple[str, str, str]:
     """Read at most 1 MiB from the configured regular file without following links."""
     try:
-        path = validated_config_path(requested_path, configured_path)
+        path = validated_config_path(requested_path, configured_path, allowed_paths)
     except ValueError as exc:
         return "", str(exc), ""
     try:
@@ -546,6 +586,23 @@ def family_config_evidence(tokens: list[str], start: int, end: int) -> tuple[boo
                     and tokens[cursor + 2] == ";"
                 ):
                     ipv4_flow_configured = True
+                elif (
+                    family_depth == 0
+                    and family_token.lower() == "ipv4"
+                    and cursor + 1 < family_end
+                    and tokens[cursor + 1] == "{"
+                ):
+                    ipv4_end = matching_brace(tokens, cursor + 1, family_end + 1)
+                    if ipv4_end is None:
+                        return family_found, ipv4_flow_configured, False
+                    if any(
+                        tokens[item].lower() == "flow"
+                        and item + 1 < ipv4_end
+                        and tokens[item + 1] == ";"
+                        for item in range(cursor + 2, ipv4_end)
+                    ):
+                        ipv4_flow_configured = True
+                    cursor = ipv4_end
                 cursor += 1
             index = family_end
         index += 1
@@ -554,15 +611,24 @@ def family_config_evidence(tokens: list[str], start: int, end: int) -> tuple[boo
 
 def exabgp_config_evidence(content: str, peer_ip: str, config_path: str) -> dict[str, Any]:
     tokens = exabgp_config_tokens(content)
+    try:
+        normalized_peer = str(ipaddress.ip_address(peer_ip))
+    except ValueError:
+        normalized_peer = str(peer_ip or "").strip()
     neighbor_found = False
     family_found = False
     ipv4_flow_configured = False
     parse_valid = True
     index = 0
     while index + 2 < len(tokens):
+        candidate_peer = tokens[index + 1] if tokens[index].lower() == "neighbor" else ""
+        try:
+            normalized_candidate = str(ipaddress.ip_address(candidate_peer))
+        except ValueError:
+            normalized_candidate = candidate_peer
         if (
             tokens[index].lower() == "neighbor"
-            and tokens[index + 1] == peer_ip
+            and normalized_candidate == normalized_peer
             and tokens[index + 2] == "{"
         ):
             neighbor_found = True
@@ -751,16 +817,153 @@ def socket_line_state_and_recv_q(line: str) -> tuple[str, int]:
     return "", 0
 
 
-def socket_line_matches_peer(line: str, peer_ip: str) -> bool:
-    if not peer_ip:
-        return False
-    return (
-        re.search(
-            rf"(?<![0-9A-Fa-f:.])\[?{re.escape(peer_ip)}\]?(?=[:\s])",
-            line,
+def parse_socket_endpoint(value: str) -> tuple[str, int | None]:
+    endpoint = str(value or "").strip()
+    if not endpoint:
+        return "", None
+    if endpoint.startswith("[") and "]:" in endpoint:
+        address, port_text = endpoint[1:].rsplit("]:", 1)
+    elif ":" in endpoint:
+        address, port_text = endpoint.rsplit(":", 1)
+        address = address.strip("[]")
+    else:
+        return endpoint, None
+    address = address.split("%", 1)[0]
+    try:
+        port = int(port_text)
+    except ValueError:
+        port = None
+    try:
+        address = str(ipaddress.ip_address(address))
+    except ValueError:
+        pass
+    return address, port
+
+
+def tcp_socket_line(line: str) -> dict[str, Any] | None:
+    fields = line.split()
+    state, recv_q = socket_line_state_and_recv_q(line)
+    if not state:
+        return None
+    try:
+        state_index = next(
+            index for index, value in enumerate(fields) if value.upper() == state
         )
-        is not None
-    )
+        local_text = fields[state_index + 3]
+        peer_text = fields[state_index + 4]
+    except (StopIteration, IndexError):
+        return None
+    local_address, local_port = parse_socket_endpoint(local_text)
+    peer_address, peer_port = parse_socket_endpoint(peer_text)
+    return {
+        "state": state,
+        "recv_q": recv_q,
+        "local_address": local_address,
+        "local_port": local_port,
+        "peer_address": peer_address,
+        "peer_port": peer_port,
+    }
+
+
+def proc_tcp_address(value: str, *, ipv6: bool = False) -> str:
+    try:
+        raw = bytes.fromhex(value)
+        if ipv6:
+            raw = b"".join(
+                raw[index : index + 4][::-1] for index in range(0, len(raw), 4)
+            )
+            return str(ipaddress.IPv6Address(raw))
+        return str(ipaddress.IPv4Address(raw[::-1]))
+    except (ValueError, ipaddress.AddressValueError):
+        return ""
+
+
+def proc_tcp_socket_output(
+    paths: tuple[Path, ...] = (Path("/proc/net/tcp"), Path("/proc/net/tcp6")),
+) -> tuple[bool, str]:
+    """Convert current proc TCP rows to the small ss subset used by readiness."""
+    state_names = {
+        "01": "ESTAB",
+        "02": "SYN-SENT",
+        "03": "SYN-RECV",
+        "04": "FIN-WAIT-1",
+        "05": "FIN-WAIT-2",
+        "06": "TIME-WAIT",
+        "08": "CLOSE-WAIT",
+        "09": "LAST-ACK",
+        "0A": "LISTEN",
+        "0B": "CLOSING",
+    }
+    output: list[str] = []
+    readable = False
+    for path in paths:
+        try:
+            rows = path.read_text(encoding="ascii", errors="replace").splitlines()[1:]
+            readable = True
+        except OSError:
+            continue
+        ipv6 = path.name == "tcp6"
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 5:
+                continue
+            try:
+                local_hex, local_port_hex = fields[1].split(":", 1)
+                peer_hex, peer_port_hex = fields[2].split(":", 1)
+                state = state_names.get(fields[3].upper())
+                tx_hex, recv_hex = fields[4].split(":", 1)
+                local_address = proc_tcp_address(local_hex, ipv6=ipv6)
+                peer_address = proc_tcp_address(peer_hex, ipv6=ipv6)
+                local_port = int(local_port_hex, 16)
+                peer_port = int(peer_port_hex, 16)
+                recv_q = int(recv_hex, 16)
+                send_q = int(tx_hex, 16)
+            except (TypeError, ValueError):
+                continue
+            if state and local_address and peer_address:
+                output.append(
+                    f"{state} {recv_q} {send_q} "
+                    f"[{local_address}]:{local_port} [{peer_address}]:{peer_port}"
+                )
+    return readable, "\n".join(output)
+
+
+def current_tcp_sockets() -> tuple[bool, str, str]:
+    code, output = run(["ss", "-antp"])
+    if code == 0:
+        return True, output, "ss"
+    proc_ok, proc_output = proc_tcp_socket_output()
+    return proc_ok, proc_output, "proc" if proc_ok else "unavailable"
+
+
+def tcp_listener_in_output(output: str, listen_port: int) -> bool:
+    for line in output.splitlines():
+        socket = tcp_socket_line(line)
+        if (
+            socket is not None
+            and socket["state"] == "LISTEN"
+            and socket["local_port"] == listen_port
+        ):
+            return True
+    return False
+
+
+def socket_peer_and_direction(
+    socket: dict[str, Any],
+    peer_ip: str,
+    listen_port: int,
+) -> str:
+    try:
+        expected_peer = str(ipaddress.ip_address(peer_ip))
+    except ValueError:
+        expected_peer = str(peer_ip or "").strip()
+    if not expected_peer or socket.get("peer_address") != expected_peer:
+        return ""
+    if socket.get("peer_port") == listen_port:
+        return "active"
+    if socket.get("local_port") == listen_port:
+        return "passive"
+    return ""
 
 
 def tcp_socket_diagnostics(
@@ -784,11 +987,18 @@ def tcp_socket_diagnostics(
     recv_q_total = 0
     recv_q_max = 0
     close_wait_count = 0
+    connection_directions: dict[str, str] = {}
     for line in session_output.splitlines() if command_ok else []:
-        if f":{listen_port}" not in line:
+        socket = tcp_socket_line(line)
+        if socket is None:
             continue
-        state, recv_q = socket_line_state_and_recv_q(line)
-        matching_peers = [peer for peer in peers if socket_line_matches_peer(line, peer)]
+        state = str(socket["state"])
+        recv_q = int(socket["recv_q"])
+        matching_peers = [
+            peer
+            for peer in peers
+            if socket_peer_and_direction(socket, peer, listen_port)
+        ]
         if not matching_peers:
             continue
         recv_q_total += recv_q
@@ -797,6 +1007,9 @@ def tcp_socket_diagnostics(
             recv_q_by_peer[peer] = max(recv_q_by_peer[peer], recv_q)
             if state in {"ESTAB", "ESTABLISHED"} and peer not in established_peers:
                 established_peers.append(peer)
+                connection_directions[peer] = socket_peer_and_direction(
+                    socket, peer, listen_port
+                )
             if state in {"CLOSE-WAIT", "CLOSE_WAIT"}:
                 close_wait_by_peer[peer] += 1
         if state in {"CLOSE-WAIT", "CLOSE_WAIT"}:
@@ -821,6 +1034,13 @@ def tcp_socket_diagnostics(
     return {
         "query_ok": bool(command_ok),
         "established_peers": established_peers,
+        "connection_directions": connection_directions,
+        "active_peers": [
+            peer for peer in established_peers if connection_directions.get(peer) == "active"
+        ],
+        "passive_peers": [
+            peer for peer in established_peers if connection_directions.get(peer) == "passive"
+        ],
         "missing_peers": [peer for peer in peers if peer not in established_peers],
         "close_wait_count": close_wait_count,
         "close_wait_by_peer": close_wait_by_peer,
@@ -846,12 +1066,18 @@ def systemd_service_status(service: str) -> dict[str, Any]:
 
 def listener_status(listen_port: int) -> dict[str, Any]:
     code, output = run(["ss", "-lntp"])
-    listening = code == 0 and any(f":{listen_port}" in line for line in output.splitlines())
+    source = "ss"
+    query_ok = code == 0
+    if not query_ok:
+        query_ok, output = proc_tcp_socket_output()
+        source = "proc" if query_ok else "unavailable"
+    listening = bool(query_ok and tcp_listener_in_output(output, listen_port))
     return {
         "listening": listening,
         "expected_port": listen_port,
-        "query_ok": code == 0,
-        "raw": output if code != 0 else "",
+        "query_ok": query_ok,
+        "query_source": source,
+        "raw": output if not query_ok else "",
     }
 
 
@@ -864,6 +1090,7 @@ def bgp_status(
     configured_log_path: str = DEFAULT_EXABGP_LOG_PATH,
     config_path: str = "",
     configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
+    listener_required: bool = False,
 ) -> dict[str, object]:
     service = normalize_systemd_service_name(service)
     service_status = systemd_service_status(service)
@@ -873,19 +1100,29 @@ def bgp_status(
     started_code, started_output = (
         run(["systemctl", "show", service, "--property=ExecMainStartTimestamp", "--value"])
     )
+    exec_start_code, exec_start_output = (
+        run(["systemctl", "show", service, "--property=ExecStart", "--value"])
+    )
     listen_code, listen_output = run(["ss", "-lntp"])
-    session_code, session_output = run(["ss", "-antp"])
+    session_ok, session_output, session_source = current_tcp_sockets()
     log_code, log_output = (
         run(["journalctl", "-u", service, "-n", "1000", "--no-pager", "-o", "json"], timeout=4.0)
     )
 
     service_active = bool(service_status["active"])
-    listening = listen_code == 0 and any(f":{listen_port}" in line for line in listen_output.splitlines())
+    listener_query_ok = listen_code == 0
+    listener_source = "ss"
+    if not listener_query_ok:
+        listener_query_ok, listen_output = proc_tcp_socket_output()
+        listener_source = "proc" if listener_query_ok else "unavailable"
+    listening = bool(
+        listener_query_ok and tcp_listener_in_output(listen_output, listen_port)
+    )
     socket_status = tcp_socket_diagnostics(
         session_output,
         [peer_ip],
         listen_port,
-        command_ok=session_code == 0,
+        command_ok=session_ok,
     )
     tcp_established = peer_ip in socket_status["established_peers"]
 
@@ -911,8 +1148,27 @@ def bgp_status(
             configured_log_path if not log_error else ""
         )
     log_evidence_source = str(evidence.get("source") or "exabgp_journal")
+    current_config_paths = (
+        exabgp_config_paths_from_exec_start(exec_start_output)
+        if exec_start_code == 0
+        else []
+    )
+    requested_config_path = normalized_exabgp_config_path(config_path)
+    configured_path = normalized_exabgp_config_path(configured_config_path)
+    if requested_config_path in current_config_paths:
+        selected_config_path = requested_config_path
+        config_path_source = "request_and_systemd_exec_start"
+    elif configured_path in current_config_paths:
+        selected_config_path = configured_path
+        config_path_source = "host_agent_configuration"
+    elif len(current_config_paths) == 1:
+        selected_config_path = current_config_paths[0]
+        config_path_source = "systemd_exec_start"
+    else:
+        selected_config_path = config_path
+        config_path_source = "request"
     config_content, config_error, accepted_config_path = read_config_file(
-        config_path, configured_config_path
+        selected_config_path, configured_config_path, current_config_paths
     )
     if config_error:
         config_evidence = unavailable_config_evidence(accepted_config_path, config_error)
@@ -922,13 +1178,16 @@ def bgp_status(
         )
     evidence.update(config_evidence)
     evidence["source"] = f"{log_evidence_source} + exabgp_config"
+    evidence["requested_config_path"] = requested_config_path
+    evidence["config_path_source"] = config_path_source
+    evidence["systemd_config_paths"] = current_config_paths
 
     pipe = fifo_status(pipe_path)
     bgp_state = (
         "established"
         if tcp_established
         else "down"
-        if session_code == 0 and bool(peer_ip)
+        if session_ok and bool(peer_ip)
         else "not_verified"
     )
     config_verified = bool(
@@ -951,7 +1210,16 @@ def bgp_status(
         "bgp_ok": tcp_established,
         "flowspec_ok": flowspec_ok,
         "pipe_ok": bool(pipe["ok"]),
+        "close_wait_ok": not bool(socket_status["close_wait_alert"]),
     }
+    transport_ready = bool(listening or tcp_established)
+    ready = bool(
+        checks["service_ok"]
+        and checks["bgp_ok"]
+        and checks["flowspec_ok"]
+        and checks["pipe_ok"]
+        and checks["close_wait_ok"]
+    )
 
     return {
         "available": True,
@@ -959,18 +1227,31 @@ def bgp_status(
         "listener": {
             "listening": listening,
             "expected_port": listen_port,
-            "query_ok": listen_code == 0,
+            "query_ok": listener_query_ok,
+            "query_source": listener_source,
+            "required": bool(listener_required),
+            "blocking": False,
         },
         "session": {
             "tcp_established": tcp_established,
             "peer_ip": peer_ip,
+            "query_source": session_source,
             **socket_status,
         },
         "bgp_state": bgp_state,
         "flowspec_state": flowspec_state,
+        "transport_ready": transport_ready,
+        "listener_required": bool(listener_required),
         "checks": checks,
         **checks,
-        "pipe": pipe,
+        "ready": ready,
+        "readiness": {
+            "ready": ready,
+            "transport_ready": transport_ready,
+            "listener_informational": not bool(listener_required),
+            "checks": checks,
+        },
+        "pipes": pipe,
         "evidence": evidence,
     }
 
@@ -981,26 +1262,38 @@ def recovery_snapshot(
     listen_port: int,
     close_wait_threshold: int,
     recv_q_threshold: int,
+    listener_required: bool,
 ) -> dict[str, Any]:
     service_result = systemd_service_status(service)
     listener_result = listener_status(listen_port)
-    session_code, session_output = run(["ss", "-antp"])
+    session_ok, session_output, session_source = current_tcp_sockets()
     sockets = tcp_socket_diagnostics(
         session_output,
         peer_ips,
         listen_port,
-        command_ok=session_code == 0,
+        command_ok=session_ok,
         close_wait_threshold=close_wait_threshold,
         recv_q_threshold=recv_q_threshold,
+    )
+    sockets["query_source"] = session_source
+    all_peers_established = not sockets["missing_peers"]
+    transport_ready = bool(
+        all_peers_established
+        or (listener_required and listener_result["listening"])
     )
     return {
         "service": service_result,
         "listener": listener_result,
         "session": sockets,
+        "listener_required": bool(listener_required),
+        "transport_ready": transport_ready,
         "checks": {
             "service_ok": bool(service_result["active"]),
             "listener_ok": bool(listener_result["listening"]),
-            "all_peers_established": not sockets["missing_peers"],
+            "all_peers_established": all_peers_established,
+            "transport_ready": transport_ready,
+            "close_wait_ok": not bool(sockets["close_wait_alert"]),
+            "recv_q_ok": not bool(sockets["recv_q_alert"]),
         },
     }
 
@@ -1013,6 +1306,7 @@ def recover_bgp_sessions(
     recv_q_threshold: int | None = None,
     wait_attempts: int = 20,
     wait_interval_seconds: float = 0.5,
+    listener_required: bool = False,
 ) -> dict[str, Any]:
     normalized_service = normalize_systemd_service_name(service)
     if normalized_service != DEFAULT_EXABGP_SYSTEMD_SERVICE:
@@ -1051,11 +1345,16 @@ def recover_bgp_sessions(
         listen_port,
         close_limit,
         recv_limit,
+        listener_required,
     )
     restart_reasons: list[str] = []
     if not before["checks"]["service_ok"]:
         restart_reasons.append("service_inactive")
-    if not before["checks"]["listener_ok"]:
+    if (
+        listener_required
+        and not before["checks"]["listener_ok"]
+        and not before["checks"]["all_peers_established"]
+    ):
         restart_reasons.append("listener_unavailable")
     if not before["checks"]["all_peers_established"]:
         restart_reasons.append("peers_missing")
@@ -1083,11 +1382,13 @@ def recover_bgp_sessions(
                 listen_port,
                 close_limit,
                 recv_limit,
+                listener_required,
             )
             if (
                 after["checks"]["service_ok"]
-                and after["checks"]["listener_ok"]
                 and after["checks"]["all_peers_established"]
+                and after["checks"]["close_wait_ok"]
+                and after["checks"]["recv_q_ok"]
             ):
                 break
             if attempt + 1 < attempts and wait_interval_seconds > 0:
@@ -1095,8 +1396,9 @@ def recover_bgp_sessions(
 
     ok = bool(
         after["checks"]["service_ok"]
-        and after["checks"]["listener_ok"]
         and after["checks"]["all_peers_established"]
+        and after["checks"]["close_wait_ok"]
+        and after["checks"]["recv_q_ok"]
         and (not restart_attempted or restart_returncode == 0)
     )
     return {
@@ -1104,6 +1406,8 @@ def recover_bgp_sessions(
         "service": normalized_service,
         "peer_ips": peers,
         "listen_port": listen_port,
+        "listener_required": bool(listener_required),
+        "transport_ready": bool(after["transport_ready"]),
         "restart_needed": bool(restart_reasons),
         "restart_attempted": restart_attempted,
         "restart_reasons": restart_reasons,
@@ -1136,6 +1440,10 @@ class Handler(BaseHTTPRequestHandler):
         pipe_path = params.get("pipe_path", [""])[0]
         log_path = params.get("log_path", [self.configured_log_path])[0]
         config_path = params.get("config_path", [self.configured_config_path])[0]
+        listener_required = (
+            params.get("listener_required", ["false"])[0].strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         try:
             listen_port = int(params.get("listen_port", ["179"])[0])
         except ValueError:
@@ -1150,6 +1458,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.configured_log_path,
                 config_path,
                 self.configured_config_path,
+                listener_required,
             )
             status_code = 200
         except ValueError as exc:
@@ -1198,6 +1507,7 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
                 ),
+                bool(request_payload.get("listener_required", False)),
             )
             status_code = 200 if payload["ok"] else 503
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
