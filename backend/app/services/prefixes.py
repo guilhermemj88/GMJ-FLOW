@@ -535,11 +535,45 @@ def normalize_prefix_grouping(value: Any) -> dict[str, Any]:
     }
 
 
+def effective_prefix_filter(value: Any) -> dict[str, Any] | None:
+    """Return only prefix filters that are enabled for query planning."""
+
+    if (
+        isinstance(value, dict)
+        and "enabled" in value
+        and not _bool(value.get("enabled"))
+    ):
+        return None
+    normalized = normalize_prefix_filter(value)
+    return normalized if normalized["enabled"] else None
+
+
+def effective_prefix_grouping(value: Any) -> dict[str, Any] | None:
+    """Return only prefix grouping that is enabled for query planning."""
+
+    if (
+        isinstance(value, dict)
+        and "enabled" in value
+        and not _bool(value.get("enabled"))
+    ):
+        return None
+    normalized = normalize_prefix_grouping(value)
+    return normalized if normalized["enabled"] else None
+
+
 def resolve_prefix_filter(
     conn: sqlite3.Connection,
     value: Any,
 ) -> dict[str, Any]:
+    if (
+        isinstance(value, dict)
+        and "enabled" in value
+        and not _bool(value.get("enabled"))
+    ):
+        return normalize_prefix_filter({"enabled": False})
     normalized = normalize_prefix_filter(value)
+    if not normalized["enabled"]:
+        return normalized
     prefix_id = normalized.get("prefix_id")
     if prefix_id is not None:
         item = get_prefix(conn, int(prefix_id))
@@ -560,8 +594,8 @@ def prefix_context_signature(
     prefix_grouping: Any,
 ) -> str:
     payload = {
-        "prefix_filter": normalize_prefix_filter(prefix_filter),
-        "prefix_grouping": normalize_prefix_grouping(prefix_grouping),
+        "prefix_filter": effective_prefix_filter(prefix_filter),
+        "prefix_grouping": effective_prefix_grouping(prefix_grouping),
     }
     return json.dumps(
         payload,

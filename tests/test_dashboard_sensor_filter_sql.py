@@ -251,7 +251,8 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
             self.assertIn(group_sql, query)
         self.assertEqual(len(set(queries.values())), len(expectations))
         self.assertIn("AND proto = 6", queries["tcp_flags"])
-        self.assertIn("ORDER BY packets_s DESC", queries["tcp_flags"])
+        self.assertIn("packets_s AS value", queries["tcp_flags"])
+        self.assertIn("ORDER BY value DESC", queries["tcp_flags"])
 
     def test_hybrid_query_filters_raw_and_minute_aggregate_not_outer_cte(self):
         series_query, series_params = self.run_series(

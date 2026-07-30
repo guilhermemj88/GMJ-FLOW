@@ -184,6 +184,8 @@ from app.services.grafana_schemas import (
 )
 from app.services.prefixes import (
     create_prefix,
+    effective_prefix_filter,
+    effective_prefix_grouping,
     ensure_prefix_schema,
     get_prefix,
     list_prefixes,
@@ -37036,16 +37038,16 @@ def raw_flow_where(
 
 
 def prefix_filter_active(prefix_filter: Any) -> bool:
+    normalized = effective_prefix_filter(prefix_filter)
     return bool(
-        isinstance(prefix_filter, dict)
-        and prefix_filter.get("enabled")
+        normalized
         and (
-            prefix_filter.get("cidr")
+            normalized.get("cidr")
             or (
-                prefix_filter.get("start_ip")
-                and prefix_filter.get("end_ip")
+                normalized.get("start_ip")
+                and normalized.get("end_ip")
             )
-            or prefix_filter.get("address_family") in {"ipv4", "ipv6"}
+            or normalized.get("address_family") in {"ipv4", "ipv6"}
         )
     )
 
@@ -37381,6 +37383,18 @@ def corrected_value_expr(value_field: str, factor_expr: str) -> str:
 
 def corrected_sum_expr(value_field: str, factor_expr: str) -> str:
     return f"sum({corrected_value_expr(value_field, factor_expr)})"
+
+
+def dashboard_timeseries_order_clause() -> str:
+    """Canonical stable order for time-series rows."""
+
+    return "ORDER BY ts ASC, group_key ASC"
+
+
+def dashboard_ranking_order_clause() -> str:
+    """Canonical order for ranking rows with a selected `value` alias."""
+
+    return "ORDER BY value DESC"
 
 
 def traffic_items(
@@ -39228,6 +39242,8 @@ def top_conversations_payload(
     end_time: datetime | None = None,
     zone_id: int | None = None,
     zone_direction: str = "both",
+    include_partial_bucket: bool = False,
+    prefix_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sort_by = clean_text(sort_by).lower() or "bits_s"
     order_columns = {
@@ -39239,6 +39255,7 @@ def top_conversations_payload(
     }
     if sort_by not in order_columns:
         raise HTTPException(status_code=400, detail="sort_by invalido")
+    prefix_filter = effective_prefix_filter(prefix_filter)
     context = flow_query_context(
         range_minutes,
         start,
@@ -39259,6 +39276,7 @@ def top_conversations_payload(
         None,
         None,
         direction,
+        prefix_filter,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -39278,6 +39296,7 @@ def top_conversations_payload(
             "zone_id": zone_id,
             "zone_direction": zone_direction,
             "include_partial_bucket": bool(include_partial_bucket),
+            "prefix_filter": prefix_filter,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -39311,7 +39330,6 @@ def top_conversations_payload(
             "dst_as_name",
         ],
     ) + ","
-    source_table = "rated_source"
     first_seen_column = "flow_time"
     last_seen_column = "flow_time"
     aggregate_table = DASHBOARD_AGGREGATE_TABLES["conversations"]
@@ -39343,7 +39361,6 @@ def top_conversations_payload(
             )
             + ","
         )
-        source_table = "rated_source"
         factor_expr = {
             "input": "dashboard_input_sample_rate",
             "output": "dashboard_output_sample_rate",
@@ -39355,6 +39372,25 @@ def top_conversations_payload(
     result = query_clickhouse(
         f"""
         {query_prefix}
+            weighted_source AS (
+                SELECT
+                    src_ip,
+                    dst_ip,
+                    src_port,
+                    dst_port,
+                    proto,
+                    src_asn,
+                    dst_asn,
+                    src_as_name,
+                    dst_as_name,
+                    {bytes_value} AS weighted_bytes_value,
+                    {packets_value} AS weighted_packets_value,
+                    flow_count AS source_flow_count,
+                    {first_seen_column} AS source_first_seen,
+                    {last_seen_column} AS source_last_seen
+                FROM rated_source
+                WHERE {rated_where}
+            ),
             base AS (
                 SELECT
                     toString(src_ip) AS src_ip,
@@ -39366,25 +39402,37 @@ def top_conversations_payload(
                     any(dst_asn) AS dst_asn,
                     any(src_as_name) AS src_as_name,
                     any(dst_as_name) AS dst_as_name,
-                    sum({bytes_value}) AS bytes,
-                    sum({packets_value}) AS packets,
-                    sum(flow_count) AS flows,
-                    min({first_seen_column}) AS first_seen,
-                    max({last_seen_column}) AS last_seen
-                FROM {source_table}
-                WHERE {rated_where}
+                    sum(weighted_bytes_value) AS weighted_bytes_total,
+                    sum(weighted_packets_value) AS weighted_packets_total,
+                    sum(source_flow_count) AS flow_total,
+                    min(source_first_seen) AS first_seen,
+                    max(source_last_seen) AS last_seen
+                FROM weighted_source
                 GROUP BY src_ip, dst_ip, src_port, dst_port, proto
             ),
             totals AS (
-                SELECT sum(bytes) AS total_bytes
+                SELECT sum(weighted_bytes_total) AS total_bytes
                 FROM base
             )
         SELECT
-            base.*,
+            toString(src_ip) AS src_ip,
+            toString(dst_ip) AS dst_ip,
+            src_port,
+            dst_port,
+            proto,
+            src_asn,
+            dst_asn,
+            src_as_name,
+            dst_as_name,
+            weighted_bytes_total AS bytes,
+            weighted_packets_total AS packets,
+            flow_total AS flows,
+            first_seen,
+            last_seen,
             concat(src_ip, ':', toString(src_port), ' -> ', dst_ip, ':', toString(dst_port)) AS key,
-            bytes * 8 / {{seconds:Float64}} AS bits_s,
-            packets / {{seconds:Float64}} AS packets_s,
-            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total,
+            weighted_bytes_total * 8 / {{seconds:Float64}} AS bits_s,
+            weighted_packets_total / {{seconds:Float64}} AS packets_s,
+            if(total_bytes > 0, weighted_bytes_total / total_bytes * 100, 0) AS percent_total,
             dateDiff('second', first_seen, last_seen) AS duration_seconds
         FROM base
         CROSS JOIN totals
@@ -39432,7 +39480,12 @@ def top_conversations_payload(
         )
     return dashboard_cache_set(
         cache_key,
-        {"start": iso(start_dt), "end": iso(end_dt), "sort_by": sort_by, "items": items},
+        {
+            "start": iso(start_dt),
+            "end": iso(end_dt),
+            "sort_by": sort_by,
+            "items": items,
+        },
     )
 
 
@@ -39454,6 +39507,7 @@ def dashboard_top_conversations(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    include_partial_bucket: bool = False,
 ):
     return top_conversations_payload(
         range_minutes,
@@ -39470,6 +39524,7 @@ def dashboard_top_conversations(
         end_time,
         zone_id,
         zone_direction,
+        include_partial_bucket,
     )
 
 
@@ -39488,6 +39543,7 @@ def dashboard_top_syn(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    include_partial_bucket: bool = False,
 ):
     mode = clean_text(mode).lower()
     if mode not in {"src", "dst"}:
@@ -39602,26 +39658,44 @@ def dashboard_top_syn(
     result = query_clickhouse(
         f"""
         {query_prefix}
-            base AS (
+            weighted_source AS (
                 SELECT
                     toString({ip_col}) AS ip,
-                    any({asn_col}) AS asn,
-                    any({as_name_col}) AS as_name,
-                    sum({bytes_value}) AS bytes,
-                    sum({packets_value}) AS packets,
-                    sum(flow_count) AS flows
-                FROM {source_table}
+                    {asn_col} AS source_asn,
+                    {as_name_col} AS source_as_name,
+                    {bytes_value} AS weighted_bytes_value,
+                    {packets_value} AS weighted_packets_value,
+                    flow_count AS source_flow_count
+                FROM rated_source
                 WHERE {rated_where}
                   AND bitAnd(tcp_flags, 2) != 0
                   AND bitAnd(tcp_flags, 16) = 0
+            ),
+            base AS (
+                SELECT
+                    ip,
+                    any(source_asn) AS asn,
+                    any(source_as_name) AS as_name,
+                    sum(weighted_bytes_value) AS weighted_bytes_total,
+                    sum(weighted_packets_value) AS weighted_packets_total,
+                    sum(source_flow_count) AS flow_total
+                FROM weighted_source
                 GROUP BY ip
             ),
-            totals AS (SELECT sum(packets) AS total_packets FROM base)
+            totals AS (
+                SELECT sum(weighted_packets_total) AS total_packets
+                FROM base
+            )
         SELECT
-            base.*,
-            bytes * 8 / {{seconds:Float64}} AS bits_s,
-            packets / {{seconds:Float64}} AS packets_s,
-            if(total_packets > 0, packets / total_packets * 100, 0) AS percent_total
+            ip,
+            asn,
+            as_name,
+            weighted_bytes_total AS bytes,
+            weighted_packets_total AS packets,
+            flow_total AS flows,
+            weighted_bytes_total * 8 / {{seconds:Float64}} AS bits_s,
+            weighted_packets_total / {{seconds:Float64}} AS packets_s,
+            if(total_packets > 0, weighted_packets_total / total_packets * 100, 0) AS percent_total
         FROM base
         CROSS JOIN totals
         ORDER BY packets_s DESC
@@ -40508,6 +40582,18 @@ def top_dimension(
     metric = clean_text(metric).lower() or "bps"
     if metric not in {"bps", "pps"}:
         raise HTTPException(status_code=400, detail="metrica invalida")
+    prefix_filter = effective_prefix_filter(prefix_filter)
+    if dimension in {"src_prefix", "dst_prefix"}:
+        prefix_grouping = (
+            effective_prefix_grouping(prefix_grouping)
+            or normalize_prefix_grouping({})
+        )
+        prefix_grouping["enabled"] = True
+        prefix_grouping["side"] = (
+            "source" if dimension == "src_prefix" else "destination"
+        )
+    else:
+        prefix_grouping = effective_prefix_grouping(prefix_grouping)
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
         f"top:{dimension}",
@@ -40524,8 +40610,8 @@ def top_dimension(
             "zone_direction": zone_direction,
             "metric": metric,
             "protocol": clean_text(protocol).lower(),
-            "prefix_filter": normalize_prefix_filter(prefix_filter),
-            "prefix_grouping": normalize_prefix_grouping(prefix_grouping),
+            "prefix_filter": prefix_filter,
+            "prefix_grouping": prefix_grouping,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40617,103 +40703,79 @@ def top_dimension(
         source_table = "rated_source"
         factor_expr = "dashboard_auto_sample_rate"
         query_source = dashboard_aggregate_query_source(start_dt, end_dt)
-    bytes_sum = corrected_sum_expr("bytes", factor_expr)
-    packets_sum = corrected_sum_expr("packets", factor_expr)
     order_metric = "packets_s" if metric == "pps" else "bps"
-
     if dimension == "src_ip":
-        query = f"""
-        SELECT
-            toString(src_ip) AS ip,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY ip
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = "toString(src_ip) AS ip"
+        final_dimension_select = "ip"
+        group_by_sql = "ip"
     elif dimension == "dst_ip":
-        query = f"""
-        SELECT
-            toString(dst_ip) AS ip,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY ip
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = "toString(dst_ip) AS ip"
+        final_dimension_select = "ip"
+        group_by_sql = "ip"
     elif dimension in {"src_prefix", "dst_prefix"}:
         address_column = "src_ip" if dimension == "src_prefix" else "dst_ip"
         prefix_expression = dashboard_prefix_group_expression(
             address_column,
             prefix_grouping,
         )
-        query = f"""
-        SELECT
-            {prefix_expression} AS prefix,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY prefix
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = f"{prefix_expression} AS prefix"
+        final_dimension_select = "prefix"
+        group_by_sql = "prefix"
     elif dimension == "dst_port":
-        query = f"""
-        SELECT
-            dst_port AS port,
-            proto,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY port, proto
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = "dst_port AS port,\n            proto"
+        final_dimension_select = "port,\n            proto"
+        group_by_sql = "port, proto"
     elif dimension == "proto":
-        query = f"""
-        SELECT
-            proto,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY proto
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = "proto"
+        final_dimension_select = "proto"
+        group_by_sql = "proto"
     elif dimension == "tcp_flags":
-        query = f"""
-        SELECT
-            tcp_flags,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            {packets_sum} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where}
-        GROUP BY tcp_flags
-        ORDER BY {order_metric} DESC
-        LIMIT {{limit:UInt32}}
-        """
+        dimension_select = "tcp_flags"
+        final_dimension_select = "tcp_flags"
+        group_by_sql = "tcp_flags"
     else:
         raise HTTPException(status_code=400, detail="dimensao invalida")
 
+    query = f"""
+    ,
+        weighted_source AS (
+            SELECT
+                *,
+                {corrected_value_expr("bytes", factor_expr)} AS weighted_bytes_value,
+                {corrected_value_expr("packets", factor_expr)} AS weighted_packets_value,
+                flow_count AS source_flow_count
+            FROM {source_table}
+            WHERE {rated_where}
+        ),
+        aggregation_base AS (
+            SELECT
+            {dimension_select},
+                sum(weighted_bytes_value) AS weighted_bytes_total,
+                sum(weighted_packets_value) AS weighted_packets_total,
+                sum(source_flow_count) AS flow_total
+            FROM weighted_source
+            GROUP BY {group_by_sql}
+        ),
+        ranking_values AS (
+            SELECT
+            {final_dimension_select},
+                weighted_bytes_total * 8 / {{seconds:Float64}} AS bps,
+                weighted_packets_total AS packets,
+                weighted_packets_total / {{seconds:Float64}} AS packets_s,
+                flow_total AS flows
+            FROM aggregation_base
+        )
+    SELECT
+        {final_dimension_select},
+        bps,
+        packets,
+        packets_s,
+        flows,
+        {order_metric} AS value
+    FROM ranking_values
+    {dashboard_ranking_order_clause()}
+    LIMIT {{limit:UInt32}}
+    """
     result = query_clickhouse(query_prefix + query, params)
     items = []
     for row in rows_as_dicts(result):
@@ -40889,6 +40951,7 @@ def top_asn_dimension(
     protocol: str | None = None,
 ):
     ensure_clickhouse_schema()
+    prefix_filter = effective_prefix_filter(prefix_filter)
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
         f"top:asn-{dimension}",
@@ -40905,7 +40968,7 @@ def top_asn_dimension(
             "zone_direction": zone_direction,
             "traffic_direction": traffic_direction or "",
             "protocol": clean_text(protocol).lower(),
-            "prefix_filter": normalize_prefix_filter(prefix_filter),
+            "prefix_filter": prefix_filter,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -41047,22 +41110,66 @@ def top_asn_dimension(
                 "input": "dashboard_input_sample_rate",
                 "output": "dashboard_output_sample_rate",
             }.get(rate_direction, "dashboard_auto_sample_rate")
-    bytes_sum = corrected_sum_expr("bytes", factor_expr)
-    packets_sum = corrected_sum_expr("packets", factor_expr)
-    result = query_clickhouse(
-        query_prefix + f"""
+    def weighted_ranking_query(
+        dimension_select: str,
+        final_dimension_select: str,
+        group_by_sql: str,
+        extra_where: str,
+        extra_aggregate: str = "",
+        limit_sql: str = "LIMIT {limit:UInt32}",
+    ) -> str:
+        aggregate_fields = (
+            f"{dimension_select},\n                {extra_aggregate},"
+            if extra_aggregate
+            else f"{dimension_select},"
+        )
+        return query_prefix + f"""
+        ,
+            weighted_source AS (
+                SELECT
+                    *,
+                    {corrected_value_expr("bytes", factor_expr)} AS weighted_bytes_value,
+                    {corrected_value_expr("packets", factor_expr)} AS weighted_packets_value,
+                    flow_count AS source_flow_count
+                FROM {source_table}
+                WHERE {rated_where}{extra_where}
+            ),
+            aggregation_base AS (
+                SELECT
+                    {aggregate_fields}
+                    sum(weighted_bytes_value) AS weighted_bytes_total,
+                    sum(weighted_packets_value) AS weighted_packets_total,
+                    sum(source_flow_count) AS flow_total
+                FROM weighted_source
+                GROUP BY {group_by_sql}
+            ),
+            ranking_values AS (
+                SELECT
+                    {final_dimension_select},
+                    weighted_bytes_total * 8 / {{seconds:Float64}} AS bps,
+                    weighted_packets_total AS packets,
+                    flow_total AS flows
+                FROM aggregation_base
+            )
         SELECT
-            toUInt32({asn_col}) AS asn,
-            any({as_name_col}) AS as_name,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where} AND {asn_col} > 0
-        GROUP BY asn
-        ORDER BY bps DESC
-        LIMIT {{limit:UInt32}}
-        """,
+            {final_dimension_select},
+            bps,
+            packets,
+            flows,
+            bps AS value
+        FROM ranking_values
+        ORDER BY value DESC
+        {limit_sql}
+        """
+
+    result = query_clickhouse(
+        weighted_ranking_query(
+            f"toUInt32({asn_col}) AS asn",
+            "asn,\n                    as_name",
+            "asn",
+            f" AND {asn_col} > 0",
+            f"any({as_name_col}) AS as_name",
+        ),
         params,
     )
     items = []
@@ -41097,18 +41204,13 @@ def top_asn_dimension(
         )
 
     ip_result = query_clickhouse(
-        query_prefix + f"""
-        SELECT
-            toString({ip_col}) AS ip,
-            {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-            {packets_sum} AS packets,
-            sum(flow_count) AS flows
-        FROM {source_table}
-        WHERE {rated_where} AND {asn_col} = 0
-        GROUP BY ip
-        ORDER BY bps DESC
-        LIMIT 200
-        """,
+        weighted_ranking_query(
+            f"toString({ip_col}) AS ip",
+            "ip",
+            "ip",
+            f" AND {asn_col} = 0",
+            limit_sql="LIMIT 200",
+        ),
         params,
     )
     grouped = {int(item["asn_number"]): item for item in items}
@@ -41149,18 +41251,13 @@ def top_asn_dimension(
 
     if not items:
         ip_result = query_clickhouse(
-            query_prefix + f"""
-            SELECT
-                toString({ip_col}) AS ip,
-                {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
-                {packets_sum} AS packets,
-                sum(flow_count) AS flows
-            FROM {source_table}
-            WHERE {rated_where}
-            GROUP BY ip
-            ORDER BY bps DESC
-            LIMIT 200
-            """,
+            weighted_ranking_query(
+                f"toString({ip_col}) AS ip",
+                "ip",
+                "ip",
+                "",
+                limit_sql="LIMIT 200",
+            ),
             params,
         )
         grouped: dict[int, dict[str, Any]] = {}
@@ -41208,7 +41305,9 @@ def top_asn_dimension(
 
     total_result = query_clickhouse(
         query_prefix + f"""
-        SELECT {bytes_sum} * 8 / {{seconds:Float64}} AS bps
+        SELECT
+            {corrected_sum_expr("bytes", factor_expr)}
+            * 8 / {{seconds:Float64}} AS bps
         FROM {source_table}
         WHERE {rated_where}
         """,
@@ -43036,6 +43135,8 @@ def dashboard_widget_top_payload(
             None,
             zone_id,
             zone_direction,
+            bool(plan.get("include_partial_bucket", False)),
+            prefix_filter,
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),
@@ -43233,6 +43334,7 @@ def dashboard_widget_series_payload(
 ) -> dict[str, Any]:
     metric = plan["metric"]
     direction = plan["direction"]
+    prefix_filter = effective_prefix_filter(context.get("prefix_filter"))
     filters = plan["filters"] + list(context.get("global_filters") or [])
     arguments = dashboard_widget_filter_arguments(filters)
     range_minutes = int(context["range_minutes"])
@@ -43245,7 +43347,7 @@ def dashboard_widget_series_payload(
         metric in {"bps", "pps"}
         and supported_group
         and not filters
-        and not prefix_filter_active(context.get("prefix_filter"))
+        and not prefix_filter_active(prefix_filter)
         and not int(plan.get("resolution_seconds") or 0)
     ):
         payload = dashboard_series_payload(
@@ -43301,7 +43403,7 @@ def dashboard_widget_series_payload(
         arguments["tcp_flags"],
         None,
         "download" if direction in {"download", "receives", "input"} else "upload" if direction in {"upload", "transmits", "output"} else "both",
-        context.get("prefix_filter"),
+        prefix_filter,
     )
     requested_resolution = max(
         int(plan.get("resolution_seconds") or 0),
@@ -43327,6 +43429,15 @@ def dashboard_widget_series_payload(
     )
     params = dict(query_context["params"])
     group_by = plan.get("group_by", "total")
+    prefix_grouping = effective_prefix_grouping(
+        context.get("prefix_grouping")
+    )
+    if group_by in {"src_prefix", "dst_prefix"}:
+        prefix_grouping = prefix_grouping or normalize_prefix_grouping({})
+        prefix_grouping["enabled"] = True
+        prefix_grouping["side"] = (
+            "source" if group_by == "src_prefix" else "destination"
+        )
     group_expression = {
         "total": "'Total'",
         "protocol": decoder_label_expr(),
@@ -43339,7 +43450,7 @@ def dashboard_widget_series_payload(
     if group_by in {"src_prefix", "dst_prefix"}:
         group_expression = dashboard_prefix_group_expression(
             "src_ip" if group_by == "src_prefix" else "dst_ip",
-            context.get("prefix_grouping"),
+            prefix_grouping,
         )
     if group_by == "zone":
         group_expression = dashboard_widget_zone_group_expression(params)
@@ -43348,7 +43459,10 @@ def dashboard_widget_series_payload(
         ["proto", "src_asn", "dst_asn", "src_ip", "dst_ip"],
     )
     query_source = "raw"
-    if prefix_filter_active(context.get("prefix_filter")):
+    if (
+        prefix_filter_active(prefix_filter)
+        or group_by in {"src_prefix", "dst_prefix"}
+    ):
         prefix_aggregate = DASHBOARD_AGGREGATE_TABLES["prefix"]
         if dashboard_aggregate_range_covered(
             prefix_aggregate,
@@ -43386,20 +43500,18 @@ def dashboard_widget_series_payload(
         if metric in {"pps", "packets"}
         else "flow_count"
     )
-    def bucket_total_expression(rate_factor: str) -> str:
-        corrected = corrected_value_expr(value_field, rate_factor)
+    def bucket_total_expression(weighted_field: str) -> str:
         aggregation = {
-            "sum": "sum(%s)" % corrected,
-            "avg": "avg(%s)" % corrected,
-            "max": "max(%s)" % corrected,
-            "min": "min(%s)" % corrected,
-            "p95": "quantile(0.95)(%s)" % corrected,
+            "sum": "sum(%s)" % weighted_field,
+            "avg": "avg(%s)" % weighted_field,
+            "max": "max(%s)" % weighted_field,
+            "min": "min(%s)" % weighted_field,
+            "p95": "quantile(0.95)(%s)" % weighted_field,
         }[plan.get("aggregation", "sum")]
         if metric == "bps":
             return "%s * 8" % aggregation
         return aggregation
 
-    value_expression = bucket_total_expression(factor)
     value_alias = (
         "total_value"
         if metric in {"bps", "pps", "fps"}
@@ -43421,9 +43533,9 @@ def dashboard_widget_series_payload(
                 SELECT
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     'upload' AS group_key,
-                    {bucket_total_expression("dashboard_output_sample_rate")} AS {value_alias}
-                FROM rated_source
-                WHERE {query_context["rated_where"]} AND output_if > 0
+                    {bucket_total_expression("weighted_output_value")} AS {value_alias}
+                FROM weighted_source
+                WHERE output_if > 0
                 GROUP BY ts, group_key
                 """
             )
@@ -43433,28 +43545,50 @@ def dashboard_widget_series_payload(
                 SELECT
                     toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
                     'download' AS group_key,
-                    {bucket_total_expression("dashboard_input_sample_rate")} AS {value_alias}
-                FROM rated_source
-                WHERE {query_context["rated_where"]} AND input_if > 0
+                    {bucket_total_expression("weighted_input_value")} AS {value_alias}
+                FROM weighted_source
+                WHERE input_if > 0
                 GROUP BY ts, group_key
                 """
             )
         query_sql = (
             query_prefix
+            + f"""
+            ,
+                weighted_source AS (
+                    SELECT
+                        flow_time,
+                        input_if,
+                        output_if,
+                        {corrected_value_expr(value_field, "dashboard_output_sample_rate")} AS weighted_output_value,
+                        {corrected_value_expr(value_field, "dashboard_input_sample_rate")} AS weighted_input_value
+                    FROM rated_source
+                    WHERE {query_context["rated_where"]}
+                )
+            """
             + " UNION ALL ".join(directional_selects)
-            + " ORDER BY ts, group_key"
+            + " "
+            + dashboard_timeseries_order_clause()
         )
     else:
         query_sql = f"""
         {query_prefix}
+        ,
+            weighted_source AS (
+                SELECT
+                    flow_time,
+                    {group_expression} AS group_key,
+                    {corrected_value_expr(value_field, factor)} AS weighted_value
+                FROM rated_source
+                WHERE {query_context["rated_where"]}
+            )
         SELECT
             toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
-            {group_expression} AS group_key,
-            {value_expression} AS {value_alias}
-        FROM rated_source
-        WHERE {query_context["rated_where"]}
+            group_key,
+            {bucket_total_expression("weighted_value")} AS {value_alias}
+        FROM weighted_source
         GROUP BY ts, group_key
-        ORDER BY ts, value DESC
+        {dashboard_timeseries_order_clause()}
         """
     rows = rows_as_dicts(
         query_clickhouse(
@@ -44012,8 +44146,10 @@ def dashboard_widget_query_context(
     try:
         with sqlite_connection() as conn:
             ensure_prefix_schema(conn)
-            prefix_filter = resolve_prefix_filter(conn, raw_prefix_filter)
-        prefix_grouping = normalize_prefix_grouping(raw_prefix_grouping)
+            prefix_filter = effective_prefix_filter(
+                resolve_prefix_filter(conn, raw_prefix_filter)
+            )
+        prefix_grouping = effective_prefix_grouping(raw_prefix_grouping)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=clean_text(exc))
 
