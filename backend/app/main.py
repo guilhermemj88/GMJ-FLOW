@@ -33980,11 +33980,56 @@ def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
 def execute_grafana_ranking(request_data: dict[str, Any]) -> dict[str, Any]:
     metric_plan = GRAFANA_RANKING_QUERY_PLANS[request_data["metric"]]
     dimension = metric_plan["dimension"]
+    requested_direction = request_data["filters"]["direction"]
     direction = (
         metric_plan["direction"]
-        or request_data["filters"]["direction"]
+        or requested_direction
     )
     value_metric = metric_plan["metric"]
+    if (
+        metric_plan["direction"]
+        and requested_direction not in {"both", metric_plan["direction"]}
+    ):
+        return {
+            "kind": "ranking",
+            "dimension": dimension,
+            "metric": value_metric,
+            "unit": value_metric,
+            "total": 0.0,
+            "source": "raw",
+            "items": [],
+        }
+    query_filters = grafana_query_filters(request_data)
+    if request_data["metric"] == "top_tcp_flags":
+        requested_protocols = {
+            clean_text(value).lower()
+            for value in request_data["filters"].get("protocols") or []
+        }
+        if requested_protocols and not requested_protocols <= {"6", "tcp"}:
+            return {
+                "kind": "ranking",
+                "dimension": dimension,
+                "metric": value_metric,
+                "unit": value_metric,
+                "total": 0.0,
+                "source": "raw",
+                "items": [],
+            }
+        # For bidirectional queries the dedicated raw/1m/hybrid TCP-flags
+        # planner already enforces proto = 6. Remove the redundant filter so
+        # the aggregate path remains eligible. Directional queries use the
+        # raw planner and therefore keep an explicit TCP predicate.
+        query_filters = (
+            []
+            if direction == "both"
+            else [
+                {
+                    "field": "protocol",
+                    "operator": "eq",
+                    "value": "tcp",
+                }
+            ]
+        )
     widget = {
         "title": "Grafana API",
         "type": "top_n",
@@ -33996,7 +34041,7 @@ def execute_grafana_ranking(request_data: dict[str, Any]) -> dict[str, Any]:
             "limit": request_data["top_n"],
             "calculation": request_data["calculation"],
         },
-        "filters": grafana_query_filters(request_data),
+        "filters": query_filters,
         "visualization": {"type": "table"},
         "grid": {"x": 0, "y": 0, "w": 6, "h": 6},
         "refresh_interval_seconds": 0,
@@ -40003,9 +40048,13 @@ def top_dimension(
     if_index: int | None = None,
     zone_id: int | None = None,
     zone_direction: str = "both",
+    metric: str = "bps",
 ):
     if dimension not in {"src_ip", "dst_ip", "dst_port", "proto", "tcp_flags"}:
         raise HTTPException(status_code=400, detail="dimensao invalida")
+    metric = clean_text(metric).lower() or "bps"
+    if metric not in {"bps", "pps"}:
+        raise HTTPException(status_code=400, detail="metrica invalida")
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     cache_key = dashboard_cache_key(
         f"top:{dimension}",
@@ -40020,6 +40069,7 @@ def top_dimension(
             "limit": limit,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "metric": metric,
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40033,13 +40083,15 @@ def top_dimension(
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
+    if dimension == "tcp_flags":
+        where += " AND proto = 6"
     rated_where = dashboard_rated_source_where(where)
     dimension_columns = {
         "src_ip": ["src_ip"],
         "dst_ip": ["dst_ip"],
         "dst_port": ["dst_port", "proto"],
         "proto": ["proto"],
-        "tcp_flags": ["tcp_flags"],
+        "tcp_flags": ["tcp_flags", "proto"],
     }[dimension]
     factor_expr = "dashboard_auto_sample_rate"
     query_prefix = dashboard_raw_rated_source_cte(
@@ -40070,6 +40122,7 @@ def top_dimension(
         query_source = "aggregate_hybrid"
     bytes_sum = corrected_sum_expr("bytes", factor_expr)
     packets_sum = corrected_sum_expr("packets", factor_expr)
+    order_metric = "packets_s" if metric == "pps" else "bps"
 
     if dimension == "src_ip":
         query = f"""
@@ -40077,11 +40130,12 @@ def top_dimension(
             toString(src_ip) AS ip,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY ip
-        ORDER BY bps DESC
+        ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
     elif dimension == "dst_ip":
@@ -40090,11 +40144,12 @@ def top_dimension(
             toString(dst_ip) AS ip,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY ip
-        ORDER BY bps DESC
+        ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
     elif dimension == "dst_port":
@@ -40104,11 +40159,12 @@ def top_dimension(
             proto,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY port, proto
-        ORDER BY bps DESC
+        ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
     elif dimension == "proto":
@@ -40117,11 +40173,12 @@ def top_dimension(
             proto,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY proto
-        ORDER BY bps DESC
+        ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
     elif dimension == "tcp_flags":
@@ -40130,11 +40187,12 @@ def top_dimension(
             tcp_flags,
             {bytes_sum} * 8 / {{seconds:Float64}} AS bps,
             {packets_sum} AS packets,
+            {packets_sum} / {{seconds:Float64}} AS packets_s,
             sum(flow_count) AS flows
         FROM {source_table}
         WHERE {rated_where}
         GROUP BY tcp_flags
-        ORDER BY bps DESC
+        ORDER BY {order_metric} DESC
         LIMIT {{limit:UInt32}}
         """
     else:
@@ -40145,25 +40203,45 @@ def top_dimension(
     for row in rows_as_dicts(result):
         bps = round(float(row["bps"] or 0), 2)
         packets = int(row["packets"] or 0)
+        packets_s = round(float(row.get("packets_s") or 0), 2)
         flows = int(row["flows"] or 0)
         if dimension in {"src_ip", "dst_ip"}:
             ip = clean_ip(row["ip"])
-            item = {"ip": ip, "bps": bps, "flows": flows, "packets": packets}
+            item = {
+                "ip": ip,
+                "bps": bps,
+                "packets_s": packets_s,
+                "flows": flows,
+                "packets": packets,
+            }
         elif dimension == "dst_port":
             proto = proto_name(row["proto"])
             item = {
                 "port": int(row["port"] or 0),
                 "proto": proto,
                 "bps": bps,
+                "packets_s": packets_s,
                 "flows": flows,
                 "packets": packets,
             }
         elif dimension == "proto":
             proto = proto_name(row["proto"])
-            item = {"proto": proto, "bps": bps, "flows": flows, "packets": packets}
+            item = {
+                "proto": proto,
+                "bps": bps,
+                "packets_s": packets_s,
+                "flows": flows,
+                "packets": packets,
+            }
         else:
             flags = tcp_flags_name(row["tcp_flags"])
-            item = {"flags": flags, "bps": bps, "flows": flows, "packets": packets}
+            item = {
+                "flags": flags,
+                "bps": bps,
+                "packets_s": packets_s,
+                "flows": flows,
+                "packets": packets,
+            }
         items.append(item)
 
     return dashboard_cache_set(
@@ -40280,6 +40358,7 @@ def top_asn_dimension(
     if_index: int | None = None,
     zone_id: int | None = None,
     zone_direction: str = "both",
+    traffic_direction: str | None = None,
 ):
     ensure_clickhouse_schema()
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
@@ -40296,6 +40375,7 @@ def top_asn_dimension(
             "limit": limit,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "traffic_direction": traffic_direction or "",
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -40333,7 +40413,29 @@ def top_asn_dimension(
                 params["if_index"] = resolved_if_index
                 where += " AND input_if = {if_index:UInt32}"
     else:
-        if resolved_if_index is not None:
+        asn_col = "src_asn" if dimension == "src" else "dst_asn"
+        as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
+        ip_col = "src_ip" if dimension == "src" else "dst_ip"
+        requested_traffic_direction = clean_text(
+            traffic_direction
+        ).lower()
+        if requested_traffic_direction in {"upload", "output"}:
+            rate_direction = "output"
+            if resolved_if_index is not None:
+                params["if_index"] = resolved_if_index
+                where += " AND output_if = {if_index:UInt32}"
+            else:
+                where += " AND output_if > 0"
+        elif requested_traffic_direction in {"download", "input"}:
+            rate_direction = "input"
+            if resolved_if_index is not None:
+                params["if_index"] = resolved_if_index
+                where += " AND input_if = {if_index:UInt32}"
+            else:
+                where += " AND input_if > 0"
+        elif resolved_if_index is not None:
+            # Preserve the native dashboard's historical source/destination
+            # interface behavior when no explicit traffic direction exists.
             params["if_index"] = resolved_if_index
             if dimension == "src":
                 where += " AND output_if = {if_index:UInt32}"
@@ -40341,9 +40443,6 @@ def top_asn_dimension(
             else:
                 where += " AND input_if = {if_index:UInt32}"
                 rate_direction = "input"
-        asn_col = "src_asn" if dimension == "src" else "dst_asn"
-        as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
-        ip_col = "src_ip" if dimension == "src" else "dst_ip"
 
     rated_where = dashboard_rated_source_where(where)
     factor_expr = {
@@ -40362,6 +40461,7 @@ def top_asn_dimension(
         ],
     )
     source_table = "rated_source"
+    query_source = "raw"
     if zone_id is None:
         aggregate_key = "asn_src" if dimension == "src" else "asn_dst"
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
@@ -40381,6 +40481,7 @@ def top_asn_dimension(
                 [asn_col, as_name_col, ip_col],
             )
             source_table = "rated_source"
+            query_source = "aggregate_hybrid"
             factor_expr = {
                 "input": "dashboard_input_sample_rate",
                 "output": "dashboard_output_sample_rate",
@@ -40565,6 +40666,7 @@ def top_asn_dimension(
                 "end": iso(end_dt),
                 "asn_available": True,
                 "message": "ASN resolvido pelo flow/IPFIX ou pela base ASN local.",
+                "query_source": query_source,
                 "items": items[:limit],
             },
         )
@@ -40573,7 +40675,13 @@ def top_asn_dimension(
     if bps <= 0:
         return dashboard_cache_set(
             cache_key,
-            {"start": iso(start_dt), "end": iso(end_dt), "asn_available": False, "items": []},
+            {
+                "start": iso(start_dt),
+                "end": iso(end_dt),
+                "asn_available": False,
+                "query_source": query_source,
+                "items": [],
+            },
         )
     item = {
         "rank": 1,
@@ -40592,6 +40700,7 @@ def top_asn_dimension(
             "end": iso(end_dt),
             "asn_available": False,
             "message": "ASN ausente no flow/IPFIX e nao encontrado na base local. Use Resolver ASNs pendentes ou importe uma base de prefixos.",
+            "query_source": query_source,
             "items": [item][:limit],
         },
     )
@@ -42252,7 +42361,7 @@ def dashboard_widget_top_payload(
     aggregate_dimensions = {"src_ip", "dst_ip", "dst_port", "protocol", "tcp_flags"}
     if (
         dimension in aggregate_dimensions
-        and metric == "bps"
+        and metric in {"bps", "pps"}
         and not filters
         and plan["direction"] == "both"
     ):
@@ -42271,6 +42380,7 @@ def dashboard_widget_top_payload(
             if_index,
             zone_id,
             zone_direction,
+            metric,
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),
@@ -42282,7 +42392,7 @@ def dashboard_widget_top_payload(
         dimension in {"src_asn", "dst_asn"}
         and metric == "bps"
         and not filters
-        and plan["direction"] == "both"
+        and plan["direction"] in {"both", "upload", "download"}
     ):
         payload = top_asn_dimension(
             "src" if dimension == "src_asn" else "dst",
@@ -42298,6 +42408,7 @@ def dashboard_widget_top_payload(
             if_index,
             zone_id,
             zone_direction,
+            plan["direction"],
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),

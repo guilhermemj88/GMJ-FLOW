@@ -472,24 +472,12 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
             [column["name"] for column in result["columns"]],
             [
                 "rank",
-                "key",
                 "label",
                 "value",
-                "bps",
-                "pps",
-                "percentage",
-                "asn",
-                "asn_name",
-                "country_code",
-                "country_name",
-                "protocol",
-                "port",
-                "display_name",
-                "tcp_flags",
-                "packets",
+                "percent",
             ],
         )
-        self.assertEqual(result["rows"][0][0:7], [1, "tcp", "tcp", 80.0, 80.0, 0.0, 80.0])
+        self.assertEqual(result["rows"][0], [1, "TCP", 80.0, 80.0])
         self.assertEqual(result["meta"]["metric"], "top_protocols")
         self.assertEqual(result["meta"]["total"], 100.0)
 
@@ -535,8 +523,8 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
         self.assertEqual(item["country_name"], "Brazil")
         self.assertEqual(item["bps"], 790)
         self.assertEqual(item["pps"], 18)
-        self.assertEqual(item["percentage"], 79)
-        self.assertEqual(result["total"], 1000)
+        self.assertEqual(item["percentage"], 100)
+        self.assertEqual(result["total"], 790)
         self.assertEqual(result["timestamp"], "2026-07-28T10:10:00Z")
         self.assertNotIn("must-not-leak", str(result))
 
@@ -565,8 +553,8 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
             "port-ranking",
         )
         item = result["items"][0]
-        self.assertEqual(item["key"], "UDP/443")
-        self.assertEqual(item["display_name"], "UDP/443")
+        self.assertEqual(item["key"], "udp/443")
+        self.assertEqual(item["display_name"], "udp/443")
         self.assertEqual(item["protocol"], "UDP")
         self.assertEqual(item["port"], 443)
 
@@ -603,6 +591,158 @@ class GrafanaCanonicalResponseTest(unittest.TestCase):
         self.assertEqual(result["items"][0]["packets"], 800)
         self.assertEqual(result["items"][1]["tcp_flags"], "SYN,PSH,ACK")
         self.assertEqual(result["items"][1]["percentage"], 20)
+
+    def test_all_rankings_use_their_own_dimension_and_returned_value_total(self):
+        cases = {
+            "top_source_ips": (
+                [
+                    {"ip": "192.0.2.10", "key": "wrong", "value": 3},
+                    {"ip": "2001:db8::10", "key": "wrong", "value": 1},
+                ],
+                ["192.0.2.10", "2001:db8::10"],
+            ),
+            "top_destination_ips": (
+                [
+                    {"ip": "198.51.100.20", "key": "wrong", "value": 3},
+                    {"ip": "2001:db8:1::20", "key": "wrong", "value": 1},
+                ],
+                ["198.51.100.20", "2001:db8:1::20"],
+            ),
+            "top_ports": (
+                [
+                    {
+                        "key": "192.0.2.10",
+                        "protocol": "tcp",
+                        "port": 443,
+                        "value": 3,
+                    },
+                    {
+                        "key": "2001:db8::10",
+                        "protocol": "udp",
+                        "port": 53,
+                        "value": 1,
+                    },
+                ],
+                ["tcp/443", "udp/53"],
+            ),
+            "top_protocols": (
+                [
+                    {"key": "192.0.2.10", "proto": 6, "value": 3},
+                    {"key": "2001:db8::10", "proto": 58, "value": 1},
+                ],
+                ["TCP", "IPv6-ICMP"],
+            ),
+            "top_tcp_flags": (
+                [
+                    {"key": "192.0.2.10", "flags": 18, "value": 3},
+                    {"key": "2001:db8::10", "flags": 17, "value": 1},
+                ],
+                ["SYN,ACK", "FIN,ACK"],
+            ),
+            "top_upload_destinations": (
+                [
+                    {
+                        "key": "192.0.2.10",
+                        "asn_number": 64500,
+                        "description": "Destino SA",
+                        "country": "BR",
+                        "value": 3,
+                    },
+                    {
+                        "key": "2001:db8::10",
+                        "asn_number": 64501,
+                        "description": "Transit Inc",
+                        "country": "US",
+                        "value": 1,
+                    },
+                ],
+                [
+                    "AS64500 — Destino SA (BR)",
+                    "AS64501 — Transit Inc (US)",
+                ],
+            ),
+            "top_download_origins": (
+                [
+                    {
+                        "key": "192.0.2.10",
+                        "asn_number": 64510,
+                        "description": "Origem SA",
+                        "country": "BR",
+                        "value": 3,
+                    },
+                    {
+                        "key": "2001:db8::10",
+                        "asn_number": 64511,
+                        "description": "Origin Inc",
+                        "country": "US",
+                        "value": 1,
+                    },
+                ],
+                [
+                    "AS64510 — Origem SA (BR)",
+                    "AS64511 — Origin Inc (US)",
+                ],
+            ),
+        }
+        for metric, (items, expected_labels) in cases.items():
+            with self.subTest(metric=metric):
+                request = validate_ranking_request(
+                    {
+                        "metric": metric,
+                        "from": "2026-07-28T10:00:00Z",
+                        "to": "2026-07-28T10:10:00Z",
+                    }
+                )
+                result = canonical_ranking(
+                    {
+                        "total": 999999,
+                        "items": [
+                            {**item, "percentage": 999}
+                            for item in items
+                        ],
+                    },
+                    request,
+                    "dimension-contract",
+                )
+                self.assertEqual(
+                    [item["label"] for item in result["items"]],
+                    expected_labels,
+                )
+                self.assertEqual(result["total"], 4)
+                percentages = [
+                    item["percentage"] for item in result["items"]
+                ]
+                self.assertEqual(percentages, [75.0, 25.0])
+                self.assertTrue(
+                    all(0 <= percentage <= 100 for percentage in percentages)
+                )
+                self.assertLessEqual(sum(percentages), 100.0)
+
+    def test_ports_protocols_and_flags_never_use_an_ip_fallback(self):
+        for metric in ("top_ports", "top_protocols", "top_tcp_flags"):
+            with self.subTest(metric=metric):
+                request = validate_ranking_request(
+                    {
+                        "metric": metric,
+                        "from": "2026-07-28T10:00:00Z",
+                        "to": "2026-07-28T10:10:00Z",
+                    }
+                )
+                result = canonical_ranking(
+                    {
+                        "items": [
+                            {
+                                "key": "192.0.2.55",
+                                "label": "192.0.2.55",
+                                "value": 100,
+                            }
+                        ]
+                    },
+                    request,
+                    "no-ip-fallback",
+                )
+                self.assertEqual(result["items"], [])
+                self.assertEqual(result["total"], 0)
 
     def test_empty_ranking_is_jsonpath_safe_and_has_no_secrets(self):
         request = validate_ranking_request(

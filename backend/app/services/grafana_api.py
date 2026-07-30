@@ -11,6 +11,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from typing import Any, Callable
 
 
@@ -1345,6 +1346,41 @@ def canonical_ranking(
         match = re.search(r"(\d+)", str(value))
         return int(match.group(1)) if match else None
 
+    def normalized_ip(value: Any) -> str:
+        text = str(value or "").strip()
+        try:
+            address = ip_address(text)
+        except ValueError:
+            return ""
+        if getattr(address, "ipv4_mapped", None):
+            return str(address.ipv4_mapped)
+        return str(address)
+
+    def normalized_protocol(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        aliases = {
+            "1": "ICMP",
+            "6": "TCP",
+            "17": "UDP",
+            "47": "GRE",
+            "50": "ESP",
+            "58": "IPv6-ICMP",
+            "ICMPV6": "IPv6-ICMP",
+            "IPV6_ICMP": "IPv6-ICMP",
+            "IPV6-ICMP": "IPv6-ICMP",
+        }
+        if text in aliases:
+            return aliases[text]
+        if text in {"TCP", "UDP", "ICMP", "GRE", "ESP"}:
+            return text
+        match = re.fullmatch(r"IP(\d{1,3})", text)
+        if match and 0 <= int(match.group(1)) <= 255:
+            number_text = str(int(match.group(1)))
+            return aliases.get(number_text, "IP%s" % number_text)
+        if text.isdigit() and 0 <= int(text) <= 255:
+            return "IP%s" % int(text)
+        return ""
+
     def normalized_flags(value: Any) -> str:
         text = str(value or "").strip()
         if not text or text.upper() in {"0", "NONE", "NULL"}:
@@ -1367,17 +1403,20 @@ def canonical_ranking(
                 for token in re.split(r"[,|+ ]+", text)
                 if token.strip()
             }
+            valid_names = {name for _, name in flag_order}
+            if not requested or not requested <= valid_names:
+                return ""
             names = [
                 name
                 for _, name in flag_order
                 if name in requested
             ]
-            return ",".join(names) if names else text.upper()
+            return ",".join(names)
         names = [name for bit, name in flag_order if bits & bit]
         return ",".join(names) if names else "NONE"
 
     items = []
-    for index, item in enumerate(
+    for item in (
         payload.get("items") if isinstance(payload.get("items"), list) else []
     ):
         raw_value = item.get("value")
@@ -1394,7 +1433,7 @@ def canonical_ranking(
                     if item.get("bps") is not None
                     else item.get("bits_s")
                 )
-        value = number(raw_value)
+        value = max(0.0, number(raw_value))
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         safe_metadata = {
             key: metadata_value
@@ -1416,8 +1455,8 @@ def canonical_ranking(
             }
             and isinstance(metadata_value, (str, int, float, bool))
         }
-        key = str(item.get("key") or item.get("label") or "-")
-        label = str(item.get("label") or item.get("key") or "-")
+        key = str(item.get("key") or item.get("label") or "").strip()
+        label = str(item.get("label") or item.get("key") or "").strip()
         bps = number(
             item.get("bps")
             if item.get("bps") is not None
@@ -1470,35 +1509,84 @@ def canonical_ranking(
             or item.get("proto")
             or metadata.get("protocol")
             or ""
-        ).strip().upper()
-        port = optional_integer(item.get("port"))
+        ).strip()
+        raw_port = str(item.get("port") or "").strip()
+        port = (
+            int(raw_port)
+            if re.fullmatch(r"\d{1,5}", raw_port)
+            else None
+        )
         display_name = ""
         tcp_flags = ""
         packets = int(number(item.get("packets")))
-        if metric == "top_ports":
-            if "/" in key:
-                raw_protocol, raw_port = key.rsplit("/", 1)
-                protocol = protocol or raw_protocol.strip().upper()
-                port = port or optional_integer(raw_port)
-            display_name = (
-                "%s/%s" % (protocol, port)
-                if protocol and port is not None
-                else label
+        if metric in {"top_source_ips", "top_destination_ips"}:
+            dimension_ip = normalized_ip(
+                item.get("ip") or item.get("key") or item.get("label")
             )
+            if not dimension_ip:
+                continue
+            key = dimension_ip
+            label = dimension_ip
+        elif metric == "top_ports":
+            key_match = re.fullmatch(
+                r"\s*([^/]+)/(\d{1,5})\s*",
+                key or label,
+            )
+            if key_match:
+                protocol = protocol or key_match.group(1)
+                if port is None:
+                    port = optional_integer(key_match.group(2))
+            protocol = normalized_protocol(protocol)
+            if not protocol or port is None or port < 0 or port > 65535:
+                continue
+            display_name = "%s/%s" % (protocol.lower(), port)
             key = display_name
             label = display_name
-        elif metric == "top_tcp_flags":
-            tcp_flags = normalized_flags(
-                item.get("tcp_flags")
-                or item.get("flags")
-                or label
-                or key
+        elif metric == "top_protocols":
+            protocol = normalized_protocol(
+                protocol or item.get("key") or item.get("label")
             )
+            if not protocol:
+                continue
+            key = protocol
+            label = protocol
+        elif metric == "top_tcp_flags":
+            raw_flags = (
+                item.get("tcp_flags")
+                if item.get("tcp_flags") is not None
+                else item.get("flags")
+                if item.get("flags") is not None
+                else key or label
+            )
+            tcp_flags = normalized_flags(
+                raw_flags
+            )
+            if not tcp_flags:
+                continue
             key = tcp_flags
             label = tcp_flags
+            protocol = "TCP"
+        elif metric in {
+            "top_upload_destinations",
+            "top_download_origins",
+        }:
+            if asn is not None and asn > 0:
+                label_parts = ["AS%s" % asn]
+                if asn_name:
+                    label_parts.append(asn_name)
+                label = " — ".join(label_parts)
+                if country_code:
+                    label = "%s (%s)" % (label, country_code)
+                key = "AS%s" % asn
+            else:
+                key = "AS indisponível"
+                label = key
+        else:
+            key = key or "-"
+            label = label or key
         items.append(
             {
-                "rank": index + 1,
+                "rank": len(items) + 1,
                 "key": key,
                 "label": label,
                 "value": value,
@@ -1518,17 +1606,27 @@ def canonical_ranking(
                 "metadata": safe_metadata,
             }
         )
-    total = float(
-        payload.get("total")
-        if payload.get("total") is not None
-        else sum(item["value"] for item in items)
-    )
-    if total:
-        for item in items:
-            if item["percentage"] == 0 and item["value"] != 0:
-                percentage = round(item["value"] / total * 100, 2)
-                item["percentage"] = percentage
-                item["percent"] = percentage
+    # Percentages must use the exact same unit and the exact set of values
+    # returned to Grafana. Upstream totals/percentages may describe the
+    # unbounded query or another metric, so they are deliberately ignored.
+    total = sum(item["value"] for item in items)
+    remaining_percentage = 100.0
+    for index, item in enumerate(items):
+        if not total:
+            percentage = 0.0
+        elif index == len(items) - 1:
+            percentage = round(max(0.0, remaining_percentage), 2)
+        else:
+            percentage = min(
+                remaining_percentage,
+                round(item["value"] / total * 100, 2),
+            )
+            remaining_percentage = round(
+                max(0.0, remaining_percentage - percentage),
+                2,
+            )
+        item["percentage"] = percentage
+        item["percent"] = percentage
     response_timestamp = (
         str(payload.get("timestamp") or "").strip()
         or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1550,21 +1648,9 @@ def canonical_ranking(
     if request["format"] == "table":
         fields = [
             ("rank", "number"),
-            ("key", "string"),
             ("label", "string"),
             ("value", "number"),
-            ("bps", "number"),
-            ("pps", "number"),
-            ("percentage", "number"),
-            ("asn", "number"),
-            ("asn_name", "string"),
-            ("country_code", "string"),
-            ("country_name", "string"),
-            ("protocol", "string"),
-            ("port", "number"),
-            ("display_name", "string"),
-            ("tcp_flags", "string"),
-            ("packets", "number"),
+            ("percent", "number"),
         ]
         return {
             "columns": [

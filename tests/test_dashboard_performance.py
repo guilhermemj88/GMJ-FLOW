@@ -231,6 +231,20 @@ class DashboardAggregateRegressionTest(unittest.TestCase):
         for forbidden in ("DROP TABLE", "TRUNCATE", "OPTIMIZE FINAL", "DELETE FROM FLOW_RAW"):
             self.assertNotIn(forbidden, upper)
 
+    def test_tcp_flags_minute_aggregate_is_versioned_and_tcp_only(self):
+        statements = "\n".join(dashboard_aggregate_schema_statements())
+        self.assertEqual(
+            DASHBOARD_AGGREGATE_TABLES["tcp_flags"],
+            "flow_dashboard_tcp_flags_tcp_1m",
+        )
+        self.assertIn(
+            "CREATE TABLE IF NOT EXISTS flow_dashboard_tcp_flags_tcp_1m",
+            statements,
+        )
+        self.assertIn("tcp_flags UInt16", statements)
+        self.assertIn("proto UInt8", statements)
+        self.assertIn("WHERE proto = 6", statements)
+
     def test_sample_rate_join_expression_has_no_giant_multiif(self):
         expression = dashboard_effective_sample_rate_expr("auto")
         self.assertNotIn("multiIf", expression)

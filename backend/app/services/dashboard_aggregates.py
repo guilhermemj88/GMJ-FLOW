@@ -13,7 +13,10 @@ DASHBOARD_AGGREGATE_TABLES = {
     "protocol": "flow_dashboard_protocol_1m",
     "asn_src": "flow_dashboard_asn_src_1m",
     "asn_dst": "flow_dashboard_asn_dst_1m",
-    "tcp_flags": "flow_dashboard_tcp_flags_1m",
+    # Versioned because the original aggregate mixed flags from non-TCP
+    # traffic. A new table avoids serving already-contaminated historical
+    # rows while the corrected materialized view is populated.
+    "tcp_flags": "flow_dashboard_tcp_flags_tcp_1m",
     "syn": "flow_dashboard_syn_1m",
     "conversations": "flow_dashboard_conversations_1m",
 }
@@ -119,7 +122,7 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
         "protocol": [("proto", "UInt8")],
         "asn_src": [("src_asn", "UInt32"), ("src_as_name", "String"), ("src_ip", "IPv6")],
         "asn_dst": [("dst_asn", "UInt32"), ("dst_as_name", "String"), ("dst_ip", "IPv6")],
-        "tcp_flags": [("tcp_flags", "UInt16")],
+        "tcp_flags": [("tcp_flags", "UInt16"), ("proto", "UInt8")],
         "syn": [
             ("src_ip", "IPv6"),
             ("dst_ip", "IPv6"),
@@ -147,7 +150,10 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
             ("dst_as_name", "dst_as_name AS dst_as_name"),
             ("dst_ip", "dst_ip AS dst_ip"),
         ],
-        "tcp_flags": [("tcp_flags", "tcp_flags AS tcp_flags")],
+        "tcp_flags": [
+            ("tcp_flags", "tcp_flags AS tcp_flags"),
+            ("proto", "proto AS proto"),
+        ],
         "syn": [
             ("src_ip", "src_ip AS src_ip"),
             ("dst_ip", "dst_ip AS dst_ip"),
@@ -167,9 +173,14 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
                 f"mv_{table}",
                 table,
                 view_expressions[key],
-                where="proto = 6 AND bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0"
-                if key == "syn"
-                else "",
+                where=(
+                    "proto = 6 AND bitAnd(tcp_flags, 2) != 0 "
+                    "AND bitAnd(tcp_flags, 16) = 0"
+                    if key == "syn"
+                    else "proto = 6"
+                    if key == "tcp_flags"
+                    else ""
+                ),
             )
         )
 
