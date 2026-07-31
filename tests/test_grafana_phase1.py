@@ -118,8 +118,11 @@ class GrafanaPhase1ExportTest(unittest.TestCase):
             set(variables),
             {
                 "prefix",
+                "prefix_id",
+                "prefix_start",
+                "prefix_end",
                 "prefix_group",
-                "prefix_length",
+                "ipv4_prefix_length",
                 "ipv6_prefix_length",
                 "match_side",
                 "address_family",
@@ -149,7 +152,7 @@ class GrafanaPhase1ExportTest(unittest.TestCase):
         self.assertTrue(
             all(
                 body["prefix_grouping"]["ipv4_prefix_length"]
-                == "${prefix_length}"
+                == "${ipv4_prefix_length}"
                 for body in bodies
             )
         )

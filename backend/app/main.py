@@ -128,6 +128,10 @@ from app.services.dashboard_widgets import (
     DASHBOARD_WIDGET_METRICS,
     DashboardLayoutVersionConflict,
     MAX_DASHBOARD_WIDGETS,
+    PREFIX_WIDGET_DEFAULT_DATA_POINTS,
+    PREFIX_WIDGET_DEFAULT_TOP_N,
+    PREFIX_WIDGET_MAX_DATA_POINTS,
+    PREFIX_WIDGET_MAX_SERIES,
     build_widget_query_plan,
     canonical_dashboard_metric,
     consolidate_direction_series,
@@ -208,6 +212,10 @@ app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
 logger = logging.getLogger("gmj-flow")
 HTTP_REQUEST_ID: ContextVar[str] = ContextVar("gmjflow_http_request_id", default="")
 CLICKHOUSE_QUERY_SEQUENCE: ContextVar[int] = ContextVar("gmjflow_clickhouse_query_sequence", default=0)
+PREFIX_WIDGET_MAX_TOTAL_POINTS = 12000
+PREFIX_WIDGET_TARGET_PAYLOAD_BYTES = 2 * 1024 * 1024
+PREFIX_WIDGET_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+PREFIX_WIDGET_ESTIMATED_POINT_BYTES = 160
 
 
 async def sqlite_operational_error_handler(request: Request, exc: sqlite3.OperationalError):
@@ -34134,6 +34142,11 @@ def grafana_query_filters(request_data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
     filters = request_data["filters"]
+    prefix_metric = request_data.get("metric") in {
+        "traffic_by_prefix_bps",
+        "traffic_by_prefix_pps",
+        "prefix_timeseries",
+    }
     window_seconds = max(
         1,
         int((request_data["end"] - request_data["start"]).total_seconds()),
@@ -34169,7 +34182,26 @@ def grafana_query_context(request_data: dict[str, Any]) -> dict[str, Any]:
         ),
         "zone_id": request_data.get("zone_id"),
         "zone_direction": "both",
-        "series_limit": 50,
+        "series_limit": (
+            min(
+                PREFIX_WIDGET_MAX_SERIES,
+                int(
+                    (request_data.get("prefix_grouping") or {}).get("top_n")
+                    or request_data.get("top_n")
+                    or PREFIX_WIDGET_DEFAULT_TOP_N
+                ),
+            )
+            if prefix_metric
+            else PREFIX_WIDGET_MAX_SERIES
+        ),
+        "interval": grafana_resolution_seconds(
+            request_data.get("interval_ms") or 1000
+        ),
+        "maximum_data_points": int(
+            request_data.get("max_data_points")
+            or PREFIX_WIDGET_DEFAULT_DATA_POINTS
+        ),
+        "maximum_data_points_explicit": True,
         "global_filters": [],
         "prefix_filter": prefix_filter,
         "prefix_grouping": normalize_prefix_grouping(
@@ -34212,7 +34244,7 @@ def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
     )
     widget = {
         "title": "Grafana API",
-        "type": "timeseries",
+        "type": requested_metric if prefix_metric else "timeseries",
         "category": "traffic",
         "config": {
             "metric": value_metric,
@@ -34227,6 +34259,18 @@ def execute_grafana_timeseries(request_data: dict[str, Any]) -> dict[str, Any]:
             "include_partial_bucket": bool(
                 request_data.get("include_partial_bucket", False)
             ),
+            "top_n": int(
+                prefix_grouping.get("top_n")
+                or PREFIX_WIDGET_DEFAULT_TOP_N
+            ),
+            "maximum_data_points": min(
+                PREFIX_WIDGET_MAX_DATA_POINTS,
+                int(
+                    request_data.get("max_data_points")
+                    or PREFIX_WIDGET_DEFAULT_DATA_POINTS
+                ),
+            ),
+            "prefix_mode": prefix_grouping.get("mode") or "top_n",
         },
         "filters": grafana_query_filters(request_data),
         "visualization": {"type": "line"},
@@ -34825,6 +34869,8 @@ def grafana_timeseries_endpoint(
             exc,
             metric=metric,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise grafana_api_query_failure(
             "query.timeseries",
@@ -34870,6 +34916,8 @@ def grafana_ranking_endpoint(
             exc,
             metric=metric,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise grafana_api_query_failure(
             "query.ranking",
@@ -34948,6 +34996,8 @@ def grafana_table_endpoint(
             exc,
             metric=metric,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise grafana_api_query_failure(
             "query.table",
@@ -40212,6 +40262,13 @@ def geo_flows(
     limit: int | None = Query(None, ge=1, le=500),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
     ensure_clickhouse_schema()
     metric = clean_text(metric).lower() or "bits_s"
@@ -40223,6 +40280,25 @@ def geo_flows(
     requested_top_n = int(limit or top_n)
     src_filter = clean_text(src_cidr or src_ip)
     dst_filter = clean_text(dst_cidr or dst_ip)
+    try:
+        with sqlite_connection() as conn:
+            ensure_prefix_schema(conn)
+            global_prefix_filter = effective_prefix_filter(
+                resolve_prefix_filter(
+                    conn,
+                    {
+                        "enabled": prefix_enabled,
+                        "prefix_id": prefix_id,
+                        "cidr": prefix_cidr,
+                        "start_ip": prefix_start,
+                        "end_ip": prefix_end,
+                        "address_family": prefix_address_family,
+                        "match_side": prefix_match_side,
+                    },
+                )
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=clean_text(exc))
     context = flow_query_context(
         range_minutes,
         start,
@@ -40243,6 +40319,7 @@ def geo_flows(
         None,
         decoder,
         direction,
+        global_prefix_filter,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -40269,6 +40346,7 @@ def geo_flows(
             "top_n": requested_top_n,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "prefix_filter": global_prefix_filter or {},
         },
     )
     ttl = 10 if range_minutes <= 15 else 30 if range_minutes <= 60 else 60
@@ -43029,7 +43107,15 @@ def dashboard_widget_top_payload(
     arguments = dashboard_widget_filter_arguments(filters)
     range_minutes = int(context["range_minutes"])
     limit = int(plan["limit"])
-    query_limit = min(100, max(limit, limit * 4 if filters else limit))
+    maximum_query_limit = (
+        PREFIX_WIDGET_MAX_SERIES
+        if dashboard_widget_is_prefix_plan(plan)
+        else 100
+    )
+    query_limit = min(
+        maximum_query_limit,
+        max(limit, limit * 4 if filters else limit),
+    )
     start, end = context.get("start"), context.get("end")
     sensor_id, interface_id = context.get("sensor_id"), context.get("interface_id")
     if_index = context.get("if_index") if context.get("if_index") is not None else arguments["if_index"]
@@ -43328,6 +43414,186 @@ def dashboard_widget_zone_group_expression(
     )
 
 
+def dashboard_widget_is_prefix_plan(plan: dict[str, Any]) -> bool:
+    return bool(
+        plan.get("widget_alias")
+        in {
+            "traffic_by_prefix_bps",
+            "traffic_by_prefix_pps",
+            "prefix_timeseries",
+            "top_source_prefixes",
+            "top_destination_prefixes",
+            "top_ports_by_prefix",
+            "top_protocols_by_prefix",
+            "prefix_table",
+            "prefix_distribution",
+        }
+        or plan.get("group_by") in {"src_prefix", "dst_prefix"}
+        or plan.get("dimension") in {"src_prefix", "dst_prefix"}
+    )
+
+
+def dashboard_prefix_block_series_capacity(
+    prefix_filter: dict[str, Any] | None,
+    prefix_grouping: dict[str, Any],
+) -> int:
+    if not prefix_filter:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "O modo bloco completo exige um CIDR ou range. "
+                "Selecione um bloco ou use Top N global."
+            ),
+        )
+    network_text = clean_text(prefix_filter.get("cidr"))
+    start_text = clean_text(prefix_filter.get("start_ip"))
+    end_text = clean_text(prefix_filter.get("end_ip"))
+    try:
+        if network_text:
+            network = ip_network(network_text, strict=False)
+            prefix_length = int(
+                prefix_grouping[
+                    "ipv4_prefix_length"
+                    if network.version == 4
+                    else "ipv6_prefix_length"
+                ]
+            )
+            if prefix_length < network.prefixlen:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "O agrupamento /%s é mais amplo que o bloco %s."
+                        % (prefix_length, network)
+                    ),
+                )
+            capacity = 1 << (prefix_length - network.prefixlen)
+        elif start_text and end_text:
+            start_address = ip_address(start_text)
+            end_address = ip_address(end_text)
+            prefix_length = int(
+                prefix_grouping[
+                    "ipv4_prefix_length"
+                    if start_address.version == 4
+                    else "ipv6_prefix_length"
+                ]
+            )
+            address_bits = 32 if start_address.version == 4 else 128
+            block_size = 1 << (address_bits - prefix_length)
+            capacity = (
+                int(end_address) // block_size
+                - int(start_address) // block_size
+                + 1
+            )
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "O modo bloco completo exige um CIDR ou range. "
+                    "Selecione um bloco ou use Top N global."
+                ),
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=clean_text(exc))
+    if capacity > PREFIX_WIDGET_MAX_SERIES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "%s subprefixos excedem o limite seguro de %s séries. "
+                "Aumente o comprimento do prefixo ou use Top N."
+                % (capacity, PREFIX_WIDGET_MAX_SERIES)
+            ),
+        )
+    return max(1, capacity)
+
+
+def dashboard_prefix_series_limits(
+    plan: dict[str, Any],
+    context: dict[str, Any],
+    prefix_filter: dict[str, Any] | None,
+    prefix_grouping: dict[str, Any],
+) -> dict[str, Any]:
+    mode = clean_text(
+        prefix_grouping.get("mode") or plan.get("prefix_mode") or "top_n"
+    ).lower()
+    requested_series = min(
+        PREFIX_WIDGET_MAX_SERIES,
+        max(
+            1,
+            int(
+                prefix_grouping.get("top_n")
+                or plan.get("top_n")
+                or context.get("series_limit")
+                or PREFIX_WIDGET_DEFAULT_TOP_N
+            ),
+        ),
+    )
+    if mode == "block":
+        requested_series = dashboard_prefix_block_series_capacity(
+            prefix_filter,
+            prefix_grouping,
+        )
+    configured_points = (
+        context.get("maximum_data_points")
+        if context.get("maximum_data_points_explicit")
+        else plan.get("maximum_data_points")
+    )
+    requested_points = max(
+        1,
+        min(
+            PREFIX_WIDGET_MAX_DATA_POINTS,
+            int(configured_points or PREFIX_WIDGET_DEFAULT_DATA_POINTS),
+        ),
+    )
+    points_by_total = PREFIX_WIDGET_MAX_TOTAL_POINTS // requested_series
+    points_by_payload = (
+        PREFIX_WIDGET_TARGET_PAYLOAD_BYTES
+        // PREFIX_WIDGET_ESTIMATED_POINT_BYTES
+        // requested_series
+    )
+    points_per_series = min(
+        requested_points,
+        points_by_total,
+        points_by_payload,
+    )
+    if points_per_series < 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A consulta excede o limite seguro de pontos. "
+                "Reduza o período, Top N ou selecione um prefixo."
+            ),
+        )
+    estimated_bytes = (
+        requested_series
+        * points_per_series
+        * PREFIX_WIDGET_ESTIMATED_POINT_BYTES
+    )
+    if estimated_bytes > PREFIX_WIDGET_MAX_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "O payload estimado excede 8 MB. "
+                "Reduza o período, Top N ou selecione um prefixo."
+            ),
+        )
+    return {
+        "mode": mode,
+        "series_limit": requested_series,
+        "points_per_series": points_per_series,
+        "max_total_points": PREFIX_WIDGET_MAX_TOTAL_POINTS,
+        "estimated_payload_bytes": estimated_bytes,
+        "limited": (
+            requested_series
+            < int(
+                prefix_grouping.get("top_n")
+                or plan.get("top_n")
+                or PREFIX_WIDGET_DEFAULT_TOP_N
+            )
+            or points_per_series < requested_points
+        ),
+    }
+
+
 def dashboard_widget_series_payload(
     plan: dict[str, Any],
     context: dict[str, Any],
@@ -43409,6 +43675,31 @@ def dashboard_widget_series_payload(
         int(plan.get("resolution_seconds") or 0),
         int(context.get("interval") or 0),
     )
+    params = dict(query_context["params"])
+    group_by = plan.get("group_by", "total")
+    prefix_grouping = effective_prefix_grouping(
+        context.get("prefix_grouping")
+    )
+    if group_by in {"src_prefix", "dst_prefix"}:
+        prefix_grouping = prefix_grouping or normalize_prefix_grouping({})
+        prefix_grouping["enabled"] = True
+        prefix_grouping["side"] = (
+            "source" if group_by == "src_prefix" else "destination"
+        )
+    prefix_plan = (
+        dashboard_widget_is_prefix_plan(plan)
+        and group_by in {"src_prefix", "dst_prefix"}
+    )
+    prefix_limits = (
+        dashboard_prefix_series_limits(
+            plan,
+            context,
+            prefix_filter,
+            prefix_grouping,
+        )
+        if prefix_plan
+        else None
+    )
     effective_range_minutes = range_minutes_for_window(
         query_context["start"],
         query_context["end"],
@@ -43422,22 +43713,13 @@ def dashboard_widget_series_payload(
         query_context["start"],
         query_context["end"],
         maximum_data_points=int(
-            context.get("maximum_data_points")
+            prefix_limits["points_per_series"]
+            if prefix_limits
+            else context.get("maximum_data_points")
             or 1000
         ),
         minimum_seconds=minimum_resolution,
     )
-    params = dict(query_context["params"])
-    group_by = plan.get("group_by", "total")
-    prefix_grouping = effective_prefix_grouping(
-        context.get("prefix_grouping")
-    )
-    if group_by in {"src_prefix", "dst_prefix"}:
-        prefix_grouping = prefix_grouping or normalize_prefix_grouping({})
-        prefix_grouping["enabled"] = True
-        prefix_grouping["side"] = (
-            "source" if group_by == "src_prefix" else "destination"
-        )
     group_expression = {
         "total": "'Total'",
         "protocol": decoder_label_expr(),
@@ -43517,6 +43799,57 @@ def dashboard_widget_series_payload(
         if metric in {"bps", "pps", "fps"}
         else "value"
     )
+    selected_prefix_keys: list[str] = []
+    total_series_found = 0
+    series_filter = ""
+    if prefix_limits:
+        params["prefix_series_limit"] = int(
+            prefix_limits["series_limit"]
+        )
+        ranking_sql = f"""
+        {query_prefix}
+        ,
+            weighted_source AS (
+                SELECT
+                    {group_expression} AS group_key,
+                    {corrected_value_expr(value_field, factor)} AS weighted_value
+                FROM rated_source
+                WHERE {query_context["rated_where"]}
+            ),
+            ranked_prefixes AS (
+                SELECT
+                    group_key,
+                    {bucket_total_expression("weighted_value")} AS ranking_value
+                FROM weighted_source
+                GROUP BY group_key
+            )
+        SELECT
+            group_key,
+            ranking_value,
+            count() OVER () AS total_series_found
+        FROM ranked_prefixes
+        ORDER BY ranking_value DESC, group_key ASC
+        LIMIT {{prefix_series_limit:UInt32}}
+        """
+        ranking_rows = rows_as_dicts(
+            query_clickhouse(ranking_sql, params)
+        )
+        selected_prefix_keys = [
+            clean_text(row.get("group_key"))
+            for row in ranking_rows
+            if clean_text(row.get("group_key"))
+        ]
+        total_series_found = max(
+            [
+                int(row.get("total_series_found") or 0)
+                for row in ranking_rows
+            ]
+            or [len(selected_prefix_keys)]
+        )
+        params["prefix_series_keys"] = selected_prefix_keys
+        series_filter = (
+            " AND group_key IN {prefix_series_keys:Array(String)}"
+        )
     directional_total = group_by == "total" and metric in {"bps", "pps"}
     if directional_total:
         directional_selects = []
@@ -43581,12 +43914,17 @@ def dashboard_widget_series_payload(
                     {corrected_value_expr(value_field, factor)} AS weighted_value
                 FROM rated_source
                 WHERE {query_context["rated_where"]}
+            ),
+            selected_weighted_source AS (
+                SELECT *
+                FROM weighted_source
+                WHERE 1{series_filter}
             )
         SELECT
             toStartOfInterval(flow_time, INTERVAL {bucket_seconds} SECOND) AS ts,
             group_key,
             {bucket_total_expression("weighted_value")} AS {value_alias}
-        FROM weighted_source
+        FROM selected_weighted_source
         GROUP BY ts, group_key
         {dashboard_timeseries_order_clause()}
         """
@@ -43606,6 +43944,25 @@ def dashboard_widget_series_payload(
                 plan.get("include_partial_bucket", False)
             ),
         )
+    if prefix_limits:
+        rows_by_prefix: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            rows_by_prefix.setdefault(
+                clean_text(row.get("group_key")) or "Total",
+                [],
+            ).append(row)
+        rows = [
+            row
+            for key in sorted(rows_by_prefix)
+            for row in aggregate_temporal_points(
+                rows_by_prefix[key],
+                maximum_data_points=prefix_limits[
+                    "points_per_series"
+                ],
+                timestamp_field="ts",
+                value_field="value",
+            )
+        ]
     series: dict[str, dict[str, Any]] = {}
     for row in rows:
         key = clean_text(row.get("group_key")) or "Total"
@@ -43649,6 +44006,51 @@ def dashboard_widget_series_payload(
             normalized_series,
             normalized_direction,
         )
+    points_count = sum(
+        len(item.get("points") or [])
+        for item in normalized_series
+    )
+    if prefix_limits and (
+        len(normalized_series) > prefix_limits["series_limit"]
+        or points_count > prefix_limits["max_total_points"]
+        or any(
+            len(item.get("points") or [])
+            > prefix_limits["points_per_series"]
+            for item in normalized_series
+        )
+    ):
+        logger.warning(
+            "DASHBOARD_PREFIX_LIMIT_EXCEEDED metric=%s query_path=%s "
+            "series_count=%s points_count=%s top_n=%s",
+            metric,
+            query_source,
+            len(normalized_series),
+            points_count,
+            prefix_limits["series_limit"],
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A consulta excedeu o limite seguro de séries/pontos. "
+                "Reduza o período, Top N ou selecione um prefixo."
+            ),
+        )
+    limited = bool(
+        prefix_limits
+        and (
+            prefix_limits["limited"]
+            or total_series_found > len(normalized_series)
+        )
+    )
+    limit_message = (
+        (
+            "%s prefixos encontrados. Exibindo os %s principais. "
+            "Aplique um bloco ou aumente o Top N até 50."
+            % (total_series_found, len(normalized_series))
+        )
+        if limited
+        else None
+    )
     return {
         "kind": "timeseries",
         "data_kind": "timeseries",
@@ -43674,6 +44076,25 @@ def dashboard_widget_series_payload(
         "range_minutes": effective_range_minutes,
         "series": normalized_series,
         "items": normalized_series,
+        "series_count": len(normalized_series),
+        "points_count": points_count,
+        "total_series_found": total_series_found,
+        "limited": limited,
+        "limit_message": limit_message,
+        "limits": (
+            {
+                "series_limit": prefix_limits["series_limit"],
+                "points_per_series": prefix_limits["points_per_series"],
+                "max_total_points": prefix_limits["max_total_points"],
+                "target_payload_bytes": PREFIX_WIDGET_TARGET_PAYLOAD_BYTES,
+                "max_payload_bytes": PREFIX_WIDGET_MAX_PAYLOAD_BYTES,
+                "estimated_payload_bytes": prefix_limits[
+                    "estimated_payload_bytes"
+                ],
+            }
+            if prefix_limits
+            else None
+        ),
     }
 
 
@@ -44006,6 +44427,62 @@ def dashboard_widget_execute(
     response_bytes = len(
         json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")
     )
+    series_count = len(payload.get("series") or [])
+    points_count = sum(
+        len(item.get("points") or [])
+        for item in (payload.get("series") or [])
+    )
+    duration_ms = round((time.monotonic() - started) * 1000, 2)
+    logger.info(
+        "DASHBOARD_WIDGET_RESULT dashboard_id=%s widget_id=%s "
+        "widget_type=%s metric=%s query_path=%s duration_ms=%s "
+        "result_rows=%s series_count=%s points_count=%s "
+        "serialized_bytes=%s prefix_filter=%s prefix_length=%s top_n=%s "
+        "cache_hit=false cancelled=false",
+        query_context.get("dashboard_id"),
+        query_context.get("widget_id"),
+        plan["kind"],
+        plan.get("metric"),
+        source,
+        duration_ms,
+        len(returned_items) if isinstance(returned_items, list) else 0,
+        series_count,
+        points_count,
+        response_bytes,
+        json.dumps(
+            {
+                key: (query_context.get("prefix_filter") or {}).get(key)
+                for key in (
+                    "enabled",
+                    "address_family",
+                    "match_side",
+                )
+            },
+            separators=(",", ":"),
+        ),
+        (
+            (query_context.get("prefix_grouping") or {}).get(
+                "ipv4_prefix_length"
+            )
+        ),
+        (
+            (query_context.get("prefix_grouping") or {}).get("top_n")
+            or plan.get("top_n")
+        ),
+    )
+    if duration_ms > 5000:
+        logger.warning(
+            "DASHBOARD_WIDGET_SLOW dashboard_id=%s widget_id=%s "
+            "metric=%s query_path=%s duration_ms=%s series_count=%s "
+            "points_count=%s",
+            query_context.get("dashboard_id"),
+            query_context.get("widget_id"),
+            plan.get("metric"),
+            source,
+            duration_ms,
+            series_count,
+            points_count,
+        )
     DASHBOARD_WIDGET_METRICS.record(
         duration_seconds=time.monotonic() - started,
         source="aggregate" if "aggregate" in source else "raw",
@@ -44125,7 +44602,10 @@ def dashboard_widget_query_context(
         return max(minimum, min(maximum, parsed))
 
     try:
-        series_limit = int(payload.get("series_limit") or 12)
+        series_limit = int(
+            payload.get("series_limit")
+            or PREFIX_WIDGET_DEFAULT_TOP_N
+        )
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="series_limit invÃ¡lido")
 
@@ -44176,6 +44656,14 @@ def dashboard_widget_query_context(
             1,
             5000,
         ),
+        "maximum_data_points_explicit": any(
+            payload.get(name) not in (None, "")
+            for name in (
+                "maximum_data_points",
+                "maximumDataPoints",
+                "max_data_points",
+            )
+        ),
         "sensor": clean_text(payload.get("sensor")),
         "global_filters": dashboard.get("global_filters", []) if dashboard else [],
         "prefix_filter": prefix_filter,
@@ -44205,11 +44693,57 @@ def dashboard_widget_effective_range(
             or 0
         ),
         "maximum_data_points": int(
-            query_context.get("maximum_data_points")
+            (payload.get("limits") or {}).get("points_per_series")
+            or query_context.get("maximum_data_points")
             or 1000
         ),
         "timezone": "UTC",
     }
+
+
+def dashboard_widget_query_path_hint(
+    widget: dict[str, Any],
+    query_context: dict[str, Any],
+) -> str:
+    explicit = clean_text(query_context.get("query_path"))
+    if explicit:
+        return explicit
+    plan = build_widget_query_plan(widget)
+    if not dashboard_widget_is_prefix_plan(plan):
+        return "legacy_auto"
+    aggregate_key = "prefix"
+    if (
+        plan.get("kind") == "top_n"
+        and plan.get("dimension") not in {"src_prefix", "dst_prefix"}
+        and not prefix_filter_active(query_context.get("prefix_filter"))
+    ):
+        aggregate_key = {
+            "protocol": "protocol",
+        }.get(plan.get("dimension"), plan.get("dimension"))
+        if aggregate_key not in DASHBOARD_AGGREGATE_TABLES:
+            return "raw"
+    try:
+        start_dt, end_dt = resolve_requested_range(
+            int(query_context["range_minutes"]),
+            query_context.get("start"),
+            query_context.get("end"),
+        )
+        aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
+        if dashboard_aggregate_range_covered(
+            aggregate_table,
+            start_dt,
+            end_dt,
+            query_context.get("sensor_id"),
+            query_context.get("sensor"),
+        ):
+            return dashboard_aggregate_query_source(start_dt, end_dt)
+    except Exception as exc:
+        logger.debug(
+            "DASHBOARD_WIDGET_QUERY_PATH_FALLBACK widget_id=%s error=%s",
+            widget.get("id"),
+            clean_text(exc),
+        )
+    return "raw"
 
 
 def dashboard_widget_cached_query(
@@ -44220,16 +44754,30 @@ def dashboard_widget_cached_query(
 ) -> dict[str, Any]:
     signature = widget_data_signature(widget, query_context)
     ttl = 2 if preview else dashboard_cache_ttl(query_context["range_minutes"])
+    query_path = dashboard_widget_query_path_hint(widget, query_context)
     key = dashboard_cache_key(
         "configurable-widget",
         {
             "signature": signature,
+            "dashboard_id": (
+                query_context.get("dashboard_id")
+                or widget.get("dashboard_id")
+                or ""
+            ),
+            "widget_id": (
+                query_context.get("widget_id")
+                or widget.get("id")
+                or ""
+            ),
             "start": query_context.get("start") or "",
             "end": query_context.get("end") or "",
             "range_minutes": query_context["range_minutes"],
             "interval": query_context.get("interval") or 0,
             "maximum_data_points": (
                 query_context.get("maximum_data_points") or 1000
+            ),
+            "maximum_data_points_explicit": bool(
+                query_context.get("maximum_data_points_explicit")
             ),
             "sensor": query_context.get("sensor") or "",
             "sensor_id": query_context.get("sensor_id") or "",
@@ -44245,17 +44793,30 @@ def dashboard_widget_cached_query(
             "global_filters": query_context.get("global_filters") or [],
             "prefix_filter": query_context.get("prefix_filter") or {},
             "prefix_grouping": query_context.get("prefix_grouping") or {},
+            "metric": (widget.get("config") or {}).get("metric") or "",
+            "top_n": (
+                (query_context.get("prefix_grouping") or {}).get("top_n")
+                or (widget.get("config") or {}).get("top_n")
+                or (widget.get("config") or {}).get("limit")
+                or ""
+            ),
+            "query_path": query_path,
+            "query_strategy": "prefix_top_n_first_v2",
             "ttl_seconds": ttl,
         },
     )
+    cache_key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     cached = dashboard_cache_get(key, ttl)
     if cached is not None:
         DASHBOARD_WIDGET_METRICS.cache_event(True)
         logger.info(
-            "DASHBOARD_WIDGET_CACHE_HIT dashboard_id=%s widget_id=%s widget_type=%s request_id=%s",
+            "DASHBOARD_WIDGET_CACHE_HIT dashboard_id=%s widget_id=%s "
+            "widget_type=%s cache_hit=true cache_key_hash=%s "
+            "cancelled=false request_id=%s",
             widget.get("dashboard_id"),
             widget.get("id"),
             widget.get("type"),
+            cache_key_hash,
             HTTP_REQUEST_ID.get(),
         )
         return {
@@ -44268,10 +44829,12 @@ def dashboard_widget_cached_query(
         }
     DASHBOARD_WIDGET_METRICS.cache_event(False)
     logger.info(
-        "DASHBOARD_WIDGET_QUERY dashboard_id=%s widget_id=%s widget_type=%s cache=miss request_id=%s",
+        "DASHBOARD_WIDGET_QUERY dashboard_id=%s widget_id=%s widget_type=%s "
+        "cache=miss cache_key_hash=%s request_id=%s",
         widget.get("dashboard_id"),
         widget.get("id"),
         widget.get("type"),
+        cache_key_hash,
         HTTP_REQUEST_ID.get(),
     )
     try:
@@ -44285,6 +44848,52 @@ def dashboard_widget_cached_query(
             result,
             query_context,
         )
+        result["query_path"] = clean_text(
+            result.get("source")
+        ) or query_path
+        serialized_bytes = len(
+            json.dumps(
+                result,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        result["serialized_bytes"] = serialized_bytes
+        if (
+            dashboard_widget_is_prefix_plan(
+                build_widget_query_plan(widget)
+            )
+            and serialized_bytes > PREFIX_WIDGET_MAX_PAYLOAD_BYTES
+        ):
+            logger.warning(
+                "DASHBOARD_PREFIX_PAYLOAD_REJECTED dashboard_id=%s "
+                "widget_id=%s serialized_bytes=%s max_bytes=%s "
+                "cache_key_hash=%s",
+                widget.get("dashboard_id"),
+                widget.get("id"),
+                serialized_bytes,
+                PREFIX_WIDGET_MAX_PAYLOAD_BYTES,
+                cache_key_hash,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "O payload do widget excedeu 8 MB e não foi armazenado "
+                    "em cache. Reduza o período, Top N ou selecione um "
+                    "prefixo."
+                ),
+            )
+        if serialized_bytes > PREFIX_WIDGET_TARGET_PAYLOAD_BYTES:
+            logger.warning(
+                "DASHBOARD_WIDGET_PAYLOAD_LARGE dashboard_id=%s "
+                "widget_id=%s serialized_bytes=%s target_bytes=%s "
+                "cache_key_hash=%s",
+                widget.get("dashboard_id"),
+                widget.get("id"),
+                serialized_bytes,
+                PREFIX_WIDGET_TARGET_PAYLOAD_BYTES,
+                cache_key_hash,
+            )
         return dashboard_cache_set(key, result)
     except Exception as exc:
         DASHBOARD_CACHE.fail_flight(key, exc)
@@ -44346,6 +44955,8 @@ def query_configurable_dashboard_widget(
         context_payload.pop("end", None)
         context_payload.pop("range_minutes", None)
     context = dashboard_widget_query_context(context_payload, dashboard)
+    context["dashboard_id"] = dashboard_id
+    context["widget_id"] = widget_id
     if not widget.get("use_global_filters", True):
         context["global_filters"] = []
     inheritance = (

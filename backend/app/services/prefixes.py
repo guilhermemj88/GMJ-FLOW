@@ -34,7 +34,11 @@ def _bool(value: Any) -> bool:
 
 
 def _optional_positive_int(value: Any, field: str) -> int | None:
-    if value in (None, ""):
+    if value in (None, "") or str(value).strip().lower() in {
+        "all",
+        "*",
+        "todos",
+    }:
         return None
     try:
         parsed = int(value)
@@ -455,6 +459,10 @@ def normalize_prefix_filter(value: Any) -> dict[str, Any]:
     )
     start_text = str(source.get("start_ip") or "").strip()
     end_text = str(source.get("end_ip") or "").strip()
+    if start_text.lower() in {"all", "*", "todos"}:
+        start_text = ""
+    if end_text.lower() in {"all", "*", "todos"}:
+        end_text = ""
     if bool(start_text) != bool(end_text):
         raise ValueError(
             "prefix_filter.start_ip e end_ip devem ser informados juntos"
@@ -520,16 +528,22 @@ def normalize_prefix_grouping(value: Any) -> dict[str, Any]:
         raise ValueError("ipv4_prefix_length deve ficar entre 0 e 32")
     if not 0 <= ipv6_length <= 128:
         raise ValueError("ipv6_prefix_length deve ficar entre 0 e 128")
-    if not 1 <= top_n <= 100:
-        raise ValueError("prefix_grouping.top_n deve ficar entre 1 e 100")
+    if top_n > 50:
+        raise ValueError("prefix_grouping.top_n deve ficar entre 1 e 50")
+    if top_n < 1:
+        raise ValueError("prefix_grouping.top_n deve ficar entre 1 e 50")
     side = str(source.get("side") or "destination").strip().lower()
     if side not in PREFIX_GROUP_SIDES:
         raise ValueError("prefix_grouping.side inválido")
+    mode = str(source.get("mode") or "top_n").strip().lower()
+    if mode not in {"top_n", "block"}:
+        raise ValueError("prefix_grouping.mode deve ser top_n ou block")
     return {
         "enabled": _bool(source.get("enabled", False)),
         "ipv4_prefix_length": ipv4_length,
         "ipv6_prefix_length": ipv6_length,
         "side": side,
+        "mode": mode,
         "top_n": top_n,
         "include_empty": _bool(source.get("include_empty", False)),
     }

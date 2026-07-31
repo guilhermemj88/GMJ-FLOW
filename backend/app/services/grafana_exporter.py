@@ -265,9 +265,9 @@ def _target_body(
         prefix_filter = {
             "enabled": True,
             "cidr": "${prefix}",
-            "prefix_id": None,
-            "start_ip": None,
-            "end_ip": None,
+            "prefix_id": "${prefix_id}",
+            "start_ip": "${prefix_start}",
+            "end_ip": "${prefix_end}",
             "address_family": "${address_family}",
             "match_side": "${match_side}",
             "direction": None,
@@ -275,7 +275,7 @@ def _target_body(
         }
         prefix_grouping = {
             "enabled": True,
-            "ipv4_prefix_length": "${prefix_length}",
+            "ipv4_prefix_length": "${ipv4_prefix_length}",
             "ipv6_prefix_length": "${ipv6_prefix_length}",
             "side": (
                 "source"
@@ -283,6 +283,7 @@ def _target_body(
                 else "destination"
             ),
             "top_n": "${top_n}",
+            "mode": "top_n",
             "include_empty": False,
         }
     body["prefix_filter"] = prefix_filter
@@ -291,7 +292,7 @@ def _target_body(
         body["top_n"] = (
             "${top_n}"
             if editable
-            else max(1, min(100, int(config.get("limit") or 10)))
+            else max(1, min(50, int(config.get("limit") or 10)))
         )
     else:
         group_by = str(config.get("group_by") or "direction").lower()
@@ -742,9 +743,27 @@ def _grafana_variables(
     )
     variables = [
         _variable("prefix", [saved_cidr, "all"], current=saved_cidr),
+        _variable(
+            "prefix_id",
+            [
+                str(prefix_filter.get("prefix_id") or "all"),
+                "all",
+            ],
+            current=str(prefix_filter.get("prefix_id") or "all"),
+        ),
+        _variable(
+            "prefix_start",
+            [str(prefix_filter.get("start_ip") or "all"), "all"],
+            current=str(prefix_filter.get("start_ip") or "all"),
+        ),
+        _variable(
+            "prefix_end",
+            [str(prefix_filter.get("end_ip") or "all"), "all"],
+            current=str(prefix_filter.get("end_ip") or "all"),
+        ),
         _variable("prefix_group", ["all", "block", "subprefix"]),
         _variable(
-            "prefix_length",
+            "ipv4_prefix_length",
             ["24", "20", "21", "22", "23", "25", "26", "27", "28", "32"],
             current=str(prefix_grouping["ipv4_prefix_length"]),
             include_all=False,
@@ -786,7 +805,7 @@ def _grafana_variables(
         _variable("zone", [saved_zone, "all"], current=saved_zone),
         _variable(
             "top_n",
-            ["10", "5", "20", "50", "100"],
+            ["10", "5", "20", "50"],
             current="10",
             include_all=False,
         ),

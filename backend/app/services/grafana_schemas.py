@@ -15,7 +15,7 @@ class GrafanaQueryFilters(BaseModel):
 class GrafanaPrefixFilter(BaseModel):
     enabled: bool = True
     cidr: Optional[str] = None
-    prefix_id: Optional[int] = Field(None, ge=1)
+    prefix_id: Optional[Any] = None
     start_ip: Optional[str] = None
     end_ip: Optional[str] = None
     address_family: str = "both"
@@ -29,7 +29,8 @@ class GrafanaPrefixGrouping(BaseModel):
     ipv4_prefix_length: int = Field(24, ge=0, le=32)
     ipv6_prefix_length: int = Field(64, ge=0, le=128)
     side: str = "destination"
-    top_n: int = Field(10, ge=1, le=100)
+    mode: str = "top_n"
+    top_n: int = Field(10, ge=1, le=50)
     include_empty: bool = False
 
 
@@ -38,7 +39,7 @@ class GrafanaTimeseriesQuery(BaseModel):
     from_time: str = Field(alias="from")
     to_time: str = Field(alias="to")
     interval_ms: int = Field(60000, ge=1000, le=3600000)
-    max_data_points: int = Field(1000, ge=1, le=5000)
+    max_data_points: int = Field(300, ge=1, le=5000)
     filters: GrafanaQueryFilters = Field(default_factory=GrafanaQueryFilters)
     prefix_filter: GrafanaPrefixFilter = Field(
         default_factory=GrafanaPrefixFilter

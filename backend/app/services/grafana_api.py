@@ -490,6 +490,10 @@ def catalog() -> dict[str, Any]:
             "maximum_interval_ms": 3600000,
             "maximum_data_points": 5000,
             "maximum_top_n": 100,
+            "maximum_prefix_data_points": 1000,
+            "maximum_prefix_series": 50,
+            "default_prefix_data_points": 300,
+            "default_prefix_top_n": 10,
         },
     }
 

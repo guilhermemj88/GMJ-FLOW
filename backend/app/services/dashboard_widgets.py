@@ -40,6 +40,10 @@ DASHBOARD_EXPORT_VERSION = 1
 DASHBOARD_GRID_COLUMNS = 12
 COLLAPSED_GRID_HEIGHT = 2
 MAX_WIDGET_LIMIT = 100
+PREFIX_WIDGET_DEFAULT_TOP_N = 10
+PREFIX_WIDGET_MAX_SERIES = 50
+PREFIX_WIDGET_DEFAULT_DATA_POINTS = 300
+PREFIX_WIDGET_MAX_DATA_POINTS = 1000
 MAX_DASHBOARD_WIDGETS = 80
 ALLOWED_REFRESH_INTERVALS = {0, 5, 10, 15, 30, 60, 120, 300}
 COMPARISON_MODES = {
@@ -91,6 +95,10 @@ PREFIX_WIDGET_ALIASES = {
             "direction": "both",
             "group_by": "dst_prefix",
             "aggregation": "sum",
+            "prefix_mode": "top_n",
+            "top_n": PREFIX_WIDGET_DEFAULT_TOP_N,
+            "maximum_data_points": PREFIX_WIDGET_DEFAULT_DATA_POINTS,
+            "show_prefix_table": False,
             "visualization": "area",
         },
     },
@@ -101,6 +109,10 @@ PREFIX_WIDGET_ALIASES = {
             "direction": "both",
             "group_by": "dst_prefix",
             "aggregation": "sum",
+            "prefix_mode": "top_n",
+            "top_n": PREFIX_WIDGET_DEFAULT_TOP_N,
+            "maximum_data_points": PREFIX_WIDGET_DEFAULT_DATA_POINTS,
+            "show_prefix_table": False,
             "visualization": "area",
         },
     },
@@ -131,6 +143,10 @@ PREFIX_WIDGET_ALIASES = {
             "direction": "both",
             "group_by": "dst_prefix",
             "aggregation": "sum",
+            "prefix_mode": "top_n",
+            "top_n": PREFIX_WIDGET_DEFAULT_TOP_N,
+            "maximum_data_points": PREFIX_WIDGET_DEFAULT_DATA_POINTS,
+            "show_prefix_table": False,
             "visualization": "line",
         },
     },
@@ -1263,8 +1279,13 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
         if direction not in DIRECTIONS:
             raise ValueError("direção inválida")
         limit = int(config.get("limit") or 10)
-        if limit < 1 or limit > MAX_WIDGET_LIMIT:
-            raise ValueError("limit deve estar entre 1 e %s" % MAX_WIDGET_LIMIT)
+        maximum_limit = (
+            PREFIX_WIDGET_MAX_SERIES
+            if alias_definition is not None
+            else MAX_WIDGET_LIMIT
+        )
+        if limit < 1 or limit > maximum_limit:
+            raise ValueError("limit deve estar entre 1 e %s" % maximum_limit)
         combined_chart_kind = str(
             config.get("combined_chart_kind") or "donut"
         ).strip().lower()
@@ -1325,6 +1346,54 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
                     ),
                 }
             )
+            if (
+                config.get("widget_alias")
+                in {
+                    "traffic_by_prefix_bps",
+                    "traffic_by_prefix_pps",
+                    "prefix_timeseries",
+                }
+                or group_by in {"src_prefix", "dst_prefix"}
+            ):
+                prefix_mode = str(
+                    config.get("prefix_mode") or "top_n"
+                ).strip().lower()
+                if prefix_mode not in {"top_n", "block"}:
+                    raise ValueError(
+                        "prefix_mode deve ser top_n ou block"
+                    )
+                top_n = int(
+                    config.get("top_n")
+                    or PREFIX_WIDGET_DEFAULT_TOP_N
+                )
+                maximum_data_points = int(
+                    config.get("maximum_data_points")
+                    or PREFIX_WIDGET_DEFAULT_DATA_POINTS
+                )
+                if not 1 <= top_n <= PREFIX_WIDGET_MAX_SERIES:
+                    raise ValueError(
+                        "top_n deve estar entre 1 e %s"
+                        % PREFIX_WIDGET_MAX_SERIES
+                    )
+                if (
+                    not 1
+                    <= maximum_data_points
+                    <= PREFIX_WIDGET_MAX_DATA_POINTS
+                ):
+                    raise ValueError(
+                        "maximum_data_points deve estar entre 1 e %s"
+                        % PREFIX_WIDGET_MAX_DATA_POINTS
+                    )
+                config.update(
+                    {
+                        "prefix_mode": prefix_mode,
+                        "top_n": top_n,
+                        "maximum_data_points": maximum_data_points,
+                        "show_prefix_table": _bool(
+                            config.get("show_prefix_table", False)
+                        ),
+                    }
+                )
     elif widget_type in {"status_list", "recent_events"}:
         source = str(config.get("source") or ("anomalies" if widget_type == "recent_events" else "sensors")).strip().lower()
         if source not in STATUS_SOURCES:
@@ -2355,6 +2424,9 @@ def widget_data_signature(widget: dict[str, Any], query_context: dict[str, Any])
         "series_limit": query_context.get("series_limit"),
         "interval": query_context.get("interval"),
         "maximum_data_points": query_context.get("maximum_data_points"),
+        "maximum_data_points_explicit": bool(
+            query_context.get("maximum_data_points_explicit")
+        ),
     }
     return hashlib.sha256(_canonical_json(data_definition).encode("utf-8")).hexdigest()
 
@@ -2368,6 +2440,7 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
         dimension_plan = DIMENSION_PLANS[dimension]
         return {
             "kind": "top_n",
+            "widget_alias": config.get("widget_alias"),
             "dimension": dimension,
             "dimension_expression": dimension_plan.get("expression", ""),
             "columns": list(dimension_plan.get("columns") or []),
@@ -2382,6 +2455,7 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
     if widget_type in {"timeseries", "kpi"}:
         return {
             "kind": widget_type,
+            "widget_alias": config.get("widget_alias"),
             "metric": config["metric"],
             "direction": config["direction"],
             "group_by": config.get("group_by", "total"),
@@ -2393,6 +2467,18 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
                 "last_not_null",
             ),
             "resolution_seconds": config.get("resolution_seconds", 0),
+            "prefix_mode": config.get("prefix_mode", "top_n"),
+            "top_n": config.get(
+                "top_n",
+                PREFIX_WIDGET_DEFAULT_TOP_N,
+            ),
+            "maximum_data_points": config.get(
+                "maximum_data_points",
+                PREFIX_WIDGET_DEFAULT_DATA_POINTS,
+            ),
+            "show_prefix_table": bool(
+                config.get("show_prefix_table", False)
+            ),
             "include_partial_bucket": bool(
                 config.get("include_partial_bucket", False)
             ),

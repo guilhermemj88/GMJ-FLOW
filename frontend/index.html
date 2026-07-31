@@ -2169,7 +2169,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: none;
     }
 
-    #view-dashboard.dashboard-engine-active > section:not(#configurableDashboardGrid) {
+    #view-dashboard.dashboard-engine-active > section:not(#configurableDashboardGrid):not(#dashboardPrefixControls) {
       display: none !important;
     }
 
@@ -2927,10 +2927,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </select>
               <select id="dashboardSeriesLimit" class="form-select form-select-sm" aria-label="Limite de series">
                 <option value="5">Top 5</option>
-                <option value="8" selected>Top 8</option>
-                <option value="10">Top 10</option>
+                <option value="10" selected>Top 10</option>
                 <option value="20">Top 20</option>
-                <option value="all">Todas</option>
+                <option value="50">Top 50 (máximo)</option>
               </select>
               <button id="editDashboardButton" type="button" class="btn btn-sm btn-outline-secondary">
                 <i data-lucide="layout-template"></i><span>Editar Dashboard</span>
@@ -2956,6 +2955,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </div>
 
           <section id="dashboardPrefixControls" class="panel p-3 dashboard-prefix-controls" aria-label="Filtro global por prefixo">
+            <div class="field">
+              <label for="dashboardPrefixFilterType">Tipo de filtro</label>
+              <select id="dashboardPrefixFilterType" class="form-select form-select-sm">
+                <option value="all">Todos os IPs</option>
+                <option value="saved">Prefixo cadastrado</option>
+                <option value="cidr">CIDR personalizado</option>
+                <option value="range">Range de IP</option>
+                <option value="subprefix">Subprefixo de um bloco</option>
+              </select>
+            </div>
             <div class="field">
               <label for="dashboardPrefixFamily">Família</label>
               <select id="dashboardPrefixFamily" class="form-select form-select-sm">
@@ -3010,6 +3019,31 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <select id="dashboardPrefixGroupSide" class="form-select form-select-sm">
                 <option value="destination">Destino</option>
                 <option value="source">Origem</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixGroupingEnabled">Agrupamento</label>
+              <select id="dashboardPrefixGroupingEnabled" class="form-select form-select-sm">
+                <option value="true">Agrupar por prefixo</option>
+                <option value="false">Sem agrupamento global</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixGroupMode">Modo do widget</label>
+              <select id="dashboardPrefixGroupMode" class="form-select form-select-sm">
+                <option value="top_n">Top N global</option>
+                <option value="block">Bloco completo</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixMaxDataPoints">Pontos por série</label>
+              <input id="dashboardPrefixMaxDataPoints" type="number" min="1" max="1000" value="300" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="dashboardPrefixTemporaryScope">Escopo temporário</label>
+              <select id="dashboardPrefixTemporaryScope" class="form-select form-select-sm">
+                <option value="global">Global durante a navegação</option>
+                <option value="dashboard">Somente este dashboard</option>
               </select>
             </div>
             <div class="toolbar">
@@ -7595,6 +7629,28 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <select id="widgetConfigResolution" class="form-select form-select-sm"></select>
             </div>
             <div class="field">
+              <label for="widgetConfigPrefixMode">Modo de prefixos</label>
+              <select id="widgetConfigPrefixMode" class="form-select form-select-sm">
+                <option value="top_n">Top N global</option>
+                <option value="block">Bloco completo</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigPrefixTopN">Top N de prefixos</label>
+              <input id="widgetConfigPrefixTopN" type="number" min="1" max="50" value="10" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigMaximumDataPoints">Máximo de pontos por série</label>
+              <input id="widgetConfigMaximumDataPoints" type="number" min="1" max="1000" value="300" class="form-control form-control-sm">
+            </div>
+            <div class="field">
+              <label for="widgetConfigShowPrefixTable">Tabela complementar</label>
+              <select id="widgetConfigShowPrefixTable" class="form-select form-select-sm">
+                <option value="false">Não exibir</option>
+                <option value="true">Exibir tabela paginada</option>
+              </select>
+            </div>
+            <div class="field">
               <label for="widgetConfigIncludePartialBucket">Bucket em andamento</label>
               <select id="widgetConfigIncludePartialBucket" class="form-select form-select-sm">
                 <option value="false">Excluir (recomendado)</option>
@@ -8996,6 +9052,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurablePrefixCatalog = [];
     let configurableTemporaryPrefixFilter = null;
     let configurableTemporaryPrefixGrouping = null;
+    let configurableTemporaryPrefixScope = 'global';
+    const CONFIGURABLE_PREFIX_SESSION_KEY = 'gmjflow.configurable-prefix-filter.v2';
+    const CONFIGURABLE_WIDGET_MAX_CACHE_BYTES = 8 * 1024 * 1024;
+    const CONFIGURABLE_WIDGET_MAX_SERIES = 50;
+    const CONFIGURABLE_WIDGET_MAX_TOTAL_POINTS = 12000;
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
@@ -9004,8 +9065,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const configurableWidgetChartResizeFrames = new Map();
     const configurableWidgetAutoHeightTimers = new Map();
     const configurableWidgetTimers = new Map();
+    const configurableWidgetBlockedQueries = new Set();
     const configurableVisibleWidgets = new Set();
     const configurableWidgetPayloads = new Map();
+    const configurablePrefixTablePages = new Map();
     const configurableDeferredWidgetPayloads = new Map();
     const configurableRangeRequestGate = GMJDashboardTimeRange.createRequestGate();
     let configurableGrafanaExportPayload = null;
@@ -9475,6 +9538,14 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       query.set('direction', filters.direction);
       query.set('group_by', dashboardGeoGroupBy);
       query.set('top_n', '20');
+      const prefixFilter = configurableActivePrefixFilter();
+      query.set('prefix_enabled', String(Boolean(prefixFilter.enabled)));
+      if (prefixFilter.prefix_id) query.set('prefix_id', String(prefixFilter.prefix_id));
+      if (prefixFilter.cidr) query.set('prefix_cidr', prefixFilter.cidr);
+      if (prefixFilter.start_ip) query.set('prefix_start', prefixFilter.start_ip);
+      if (prefixFilter.end_ip) query.set('prefix_end', prefixFilter.end_ip);
+      query.set('prefix_address_family', prefixFilter.address_family || 'both');
+      query.set('prefix_match_side', prefixFilter.match_side || 'either');
       return query.toString();
     }
 
@@ -19489,6 +19560,48 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         };
     }
 
+    function persistConfigurableTemporaryPrefix() {
+      try {
+        if (
+          configurableTemporaryPrefixScope === 'global'
+          && configurableTemporaryPrefixFilter
+        ) {
+          sessionStorage.setItem(
+            CONFIGURABLE_PREFIX_SESSION_KEY,
+            JSON.stringify({
+              filter: configurableTemporaryPrefixFilter,
+              grouping: configurableTemporaryPrefixGrouping,
+              scope: configurableTemporaryPrefixScope
+            })
+          );
+        } else {
+          sessionStorage.removeItem(CONFIGURABLE_PREFIX_SESSION_KEY);
+        }
+      } catch (error) {
+        console.debug('Estado temporário do filtro de rede indisponível.', error);
+      }
+    }
+
+    function restoreConfigurableTemporaryPrefix() {
+      try {
+        const saved = JSON.parse(
+          sessionStorage.getItem(CONFIGURABLE_PREFIX_SESSION_KEY) || 'null'
+        );
+        if (!saved || saved.scope !== 'global') return;
+        configurableTemporaryPrefixFilter = saved.filter || null;
+        configurableTemporaryPrefixGrouping = saved.grouping || null;
+        configurableTemporaryPrefixScope = 'global';
+      } catch {
+        sessionStorage.removeItem(CONFIGURABLE_PREFIX_SESSION_KEY);
+      }
+    }
+
+    function cancelConfigurableWidgetQueries() {
+      configurableWidgetControllers.forEach(controller => controller.abort());
+      configurableWidgetControllers.clear();
+      configurableDeferredWidgetPayloads.clear();
+    }
+
     function configurableActivePrefixGrouping() {
       return configurableTemporaryPrefixGrouping
         || configurableDashboard?.prefix_grouping
@@ -19525,24 +19638,30 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function configurablePrefixControlsValue({ temporary = true } = {}) {
+      const filterType = document.getElementById('dashboardPrefixFilterType').value;
       const selectedId = Number(document.getElementById('dashboardPrefixSaved').value || 0);
       const selectedPrefix = configurablePrefixCatalog.find(item => Number(item.id) === selectedId);
       const subnet = document.getElementById('dashboardPrefixSubnet').value.trim();
       const customCidr = document.getElementById('dashboardPrefixCidr').value.trim();
       const startIp = document.getElementById('dashboardPrefixStart').value.trim();
       const endIp = document.getElementById('dashboardPrefixEnd').value.trim();
-      const rangeActive = Boolean(startIp || endIp);
-      const cidr = rangeActive
-        ? null
-        : customCidr || subnet || selectedPrefix?.cidr || null;
+      const rangeActive = filterType === 'range';
+      const cidr = (
+        filterType === 'cidr'
+          ? customCidr || null
+          : filterType === 'subprefix'
+            ? subnet || selectedPrefix?.cidr || null
+            : filterType === 'saved'
+              ? selectedPrefix?.cidr || null
+              : null
+      );
       const prefixId = (
-        !rangeActive
-        && !customCidr
+        ['saved', 'subprefix'].includes(filterType)
         && !subnet
         && selectedPrefix
       ) ? selectedPrefix.id : null;
       const filter = {
-        enabled: Boolean(cidr || (startIp && endIp)),
+        enabled: filterType !== 'all' && Boolean(cidr || (startIp && endIp)),
         cidr,
         prefix_id: prefixId,
         start_ip: rangeActive ? startIp || null : null,
@@ -19553,10 +19672,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         temporary
       };
       const grouping = {
-        enabled: true,
+        enabled: document.getElementById('dashboardPrefixGroupingEnabled').value === 'true',
         ipv4_prefix_length: Number(document.getElementById('dashboardPrefixIpv4Length').value || 24),
         ipv6_prefix_length: Number(document.getElementById('dashboardPrefixIpv6Length').value || 64),
         side: document.getElementById('dashboardPrefixGroupSide').value,
+        mode: document.getElementById('dashboardPrefixGroupMode').value,
         top_n: Number(document.getElementById('dashboardSeriesLimit').value || 10) || 10,
         include_empty: false
       };
@@ -19585,6 +19705,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         + `Agrupamento: IPv4 /${grouping.ipv4_prefix_length || 24} · `
         + `IPv6 /${grouping.ipv6_prefix_length || 64}`
       );
+      if (configurableTemporaryPrefixFilter) {
+        document.getElementById('dashboardPrefixSummary').textContent +=
+          ` · Filtro temporário (${configurableTemporaryPrefixScope})`;
+      } else if (filter.enabled) {
+        document.getElementById('dashboardPrefixSummary').textContent +=
+          ' · Filtro salvo no dashboard';
+      }
       const manager = document.getElementById('dashboardManagerPrefixSummary');
       if (manager) manager.textContent = document.getElementById('dashboardPrefixSummary').textContent;
     }
@@ -19597,6 +19724,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('dashboardPrefixIpv4Length').value = String(grouping.ipv4_prefix_length ?? 24);
       document.getElementById('dashboardPrefixIpv6Length').value = String(grouping.ipv6_prefix_length ?? 64);
       document.getElementById('dashboardPrefixGroupSide').value = grouping.side || 'destination';
+      document.getElementById('dashboardPrefixGroupMode').value = grouping.mode || 'top_n';
+      document.getElementById('dashboardPrefixGroupingEnabled').value =
+        String(grouping.enabled !== false);
+      document.getElementById('dashboardPrefixTemporaryScope').value =
+        configurableTemporaryPrefixScope;
       const saved = document.getElementById('dashboardPrefixSaved');
       saved.value = filter.prefix_id ? String(filter.prefix_id) : '';
       document.getElementById('dashboardPrefixCidr').value = (
@@ -19604,6 +19736,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       );
       document.getElementById('dashboardPrefixStart').value = filter.start_ip || '';
       document.getElementById('dashboardPrefixEnd').value = filter.end_ip || '';
+      document.getElementById('dashboardPrefixFilterType').value = (
+        !filter.enabled
+          ? 'all'
+          : filter.start_ip && filter.end_ip
+            ? 'range'
+            : filter.prefix_id
+              ? 'saved'
+              : 'cidr'
+      );
       document.getElementById('dashboardPrefixSubnet').innerHTML = '<option value="">Bloco completo</option>';
       document.getElementById('dashboardPrefixSubnet').disabled = !filter.prefix_id;
       updateConfigurablePrefixSummary();
@@ -19659,10 +19800,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableDashboard.prefix_grouping = updated.prefix_grouping;
         configurableTemporaryPrefixFilter = null;
         configurableTemporaryPrefixGrouping = null;
+        configurableTemporaryPrefixScope = 'global';
+        sessionStorage.removeItem(CONFIGURABLE_PREFIX_SESSION_KEY);
       } else {
         configurableTemporaryPrefixFilter = filter;
         configurableTemporaryPrefixGrouping = grouping;
+        configurableTemporaryPrefixScope =
+          document.getElementById('dashboardPrefixTemporaryScope').value;
+        persistConfigurableTemporaryPrefix();
       }
+      cancelConfigurableWidgetQueries();
       updateConfigurablePrefixSummary();
       configurableWidgetPayloads.clear();
       configurableDeferredWidgetPayloads.clear();
@@ -19686,9 +19833,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ipv4_prefix_length: 24,
         ipv6_prefix_length: 64,
         side: 'destination',
+        mode: 'top_n',
         top_n: 10,
         include_empty: false
       };
+      configurableTemporaryPrefixScope =
+        document.getElementById('dashboardPrefixTemporaryScope').value;
+      persistConfigurableTemporaryPrefix();
+      cancelConfigurableWidgetQueries();
       syncConfigurablePrefixControls();
       await refreshConfigurableDashboard();
     }
@@ -19705,26 +19857,45 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         zone_id: selectedDashboardZoneId(),
         zone_direction: document.getElementById('dashboardZoneDirection')?.value || 'both',
         prefix_filter: configurableActivePrefixFilter(),
-        prefix_grouping: configurableActivePrefixGrouping(),
-        series_limit: document.getElementById('dashboardSeriesLimit')?.value === 'all'
-          ? 50
-          : Number(document.getElementById('dashboardSeriesLimit')?.value || 8)
+        prefix_grouping: {
+          ...configurableActivePrefixGrouping(),
+          mode: document.getElementById('dashboardPrefixGroupMode')?.value || 'top_n',
+          top_n: Math.min(
+            50,
+            Number(document.getElementById('dashboardSeriesLimit')?.value || 10)
+          )
+        },
+        series_limit: Math.min(
+          50,
+          Number(document.getElementById('dashboardSeriesLimit')?.value || 10)
+        )
       };
       return context;
     }
 
     function configurableWidgetQueryContext(widget, globalContext = configurableDashboardContext()) {
-      const configuredMaximum = Number(
-        widget?.config?.maximum_data_points
-        ?? widget?.config?.maximumDataPoints
-        ?? 1000
-      );
+      const prefixWidget = [
+        'traffic_by_prefix_bps',
+        'traffic_by_prefix_pps',
+        'prefix_timeseries'
+      ].includes(widget?.config?.widget_alias)
+        || ['src_prefix', 'dst_prefix'].includes(widget?.config?.group_by);
+      const configuredMaximum = Number(prefixWidget
+        ? document.getElementById('dashboardPrefixMaxDataPoints')?.value || 300
+        : widget?.config?.maximum_data_points
+          ?? widget?.config?.maximumDataPoints
+          ?? 1000);
       return {
         ...globalContext,
         interval: Math.max(0, Number(widget?.config?.resolution_seconds || 0)),
         maximum_data_points: Math.max(
           1,
-          Math.min(5000, Number.isFinite(configuredMaximum) ? configuredMaximum : 1000)
+          Math.min(
+            prefixWidget ? 1000 : 5000,
+            Number.isFinite(configuredMaximum)
+              ? configuredMaximum
+              : prefixWidget ? 300 : 1000
+          )
         )
       };
     }
@@ -19735,6 +19906,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableWidgetControllers.forEach(controller => controller.abort());
         configurableWidgetControllers.clear();
         configurableDeferredWidgetPayloads.clear();
+        configurableWidgetBlockedQueries.clear();
       }
       return token;
     }
@@ -19763,10 +19935,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function writeConfigurableWidgetCache(widget, payload, context) {
       try {
-        localStorage.setItem(configurableWidgetCacheKey(widget, context), JSON.stringify({
+        const serialized = JSON.stringify({
           saved_at: Date.now(),
           payload
-        }));
+        });
+        if (new Blob([serialized]).size > CONFIGURABLE_WIDGET_MAX_CACHE_BYTES) {
+          console.warn('DASHBOARD_WIDGET_LOCAL_CACHE_REJECTED', {
+            dashboard_id: configurableDashboard?.id,
+            widget_id: widget.id,
+            serialized_bytes: new Blob([serialized]).size
+          });
+          return;
+        }
+        localStorage.setItem(configurableWidgetCacheKey(widget, context), serialized);
       } catch (error) {
         console.debug('Cache local do widget indisponível.', error);
       }
@@ -20190,8 +20371,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('widgetConfigLegend').value = String(appearance.show_legend);
     }
 
+    function configurableWidgetBaseType(type) {
+      return configurableWidgetCatalog?.widget_type_aliases?.[type]?.type
+        || type;
+    }
+
     function configurableWidgetDefinitionFromForm() {
       const type = document.getElementById('widgetConfigType').value;
+      const baseType = configurableWidgetBaseType(type);
       const metric = document.getElementById('widgetConfigMetric').value || 'bps';
       const editingWidget = editingConfigurableWidgetId
         ? (configurableDashboard?.widgets || []).find(
@@ -20225,9 +20412,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         direction: document.getElementById('widgetConfigDirection').value || 'both',
         visualization: visualizationKind,
         visualization_kind: visualizationKind,
-        data_kind: GMJDashboardVisualizations.dataKindForWidget({ type }),
+        data_kind: GMJDashboardVisualizations.dataKindForWidget({ type: baseType }),
         calculation: document.getElementById('widgetConfigCalculation').value || (
-          type === 'top_n' ? 'current' : 'last_not_null'
+          baseType === 'top_n' ? 'current' : 'last_not_null'
         ),
         legend_calculation: document.getElementById('widgetConfigLegendCalculation').value || 'last_not_null',
         traffic_orientation: document.getElementById('widgetConfigTrafficOrientation').value || 'positive_both',
@@ -20248,7 +20435,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           overrides: fieldOverrides
         }
       };
-      if (type === 'top_n') {
+      if (baseType === 'top_n') {
         config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
         config.combined_chart_kind =
@@ -20261,16 +20448,36 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           2,
           Math.min(20, Number(document.getElementById('widgetConfigSliceLimit').value || 8))
         );
-      } else if (type === 'timeseries') {
+      } else if (baseType === 'timeseries') {
         config.group_by = document.getElementById('widgetConfigGroupBy').value || 'total';
         config.aggregation = document.getElementById('widgetConfigAggregation').value || 'sum';
         config.resolution_seconds = Number(document.getElementById('widgetConfigResolution').value || 0);
         config.include_partial_bucket =
           document.getElementById('widgetConfigIncludePartialBucket').value === 'true';
-      } else if (type === 'recent_events') {
+        if (['src_prefix', 'dst_prefix'].includes(config.group_by)) {
+          config.prefix_mode =
+            document.getElementById('widgetConfigPrefixMode').value || 'top_n';
+          config.top_n = Math.max(
+            1,
+            Math.min(
+              50,
+              Number(document.getElementById('widgetConfigPrefixTopN').value || 10)
+            )
+          );
+          config.maximum_data_points = Math.max(
+            1,
+            Math.min(
+              1000,
+              Number(document.getElementById('widgetConfigMaximumDataPoints').value || 300)
+            )
+          );
+          config.show_prefix_table =
+            document.getElementById('widgetConfigShowPrefixTable').value === 'true';
+        }
+      } else if (baseType === 'recent_events') {
         config.source = document.getElementById('widgetConfigSource').value || 'anomalies';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
-      } else if (type === 'status_list') {
+      } else if (baseType === 'status_list') {
         config.source = document.getElementById('widgetConfigSource').value || 'sensors';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
       }
@@ -20370,9 +20577,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function syncConfigurableWidgetTypeFields() {
       const type = document.getElementById('widgetConfigType').value;
+      const baseType = configurableWidgetBaseType(type);
       const visualizationSelect = document.getElementById('widgetConfigVisualization');
       const selectedVisualization = visualizationSelect.value;
-      const dataKind = GMJDashboardVisualizations.dataKindForWidget({ type });
+      const dataKind = GMJDashboardVisualizations.dataKindForWidget({ type: baseType });
       const visualizationLabels = {
         table: 'Tabela',
         horizontal_bar: 'Barras horizontais',
@@ -20399,21 +20607,29 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!visualizationSelect.value) {
         visualizationSelect.value = GMJDashboardVisualizations.visualizationChoices(dataKind)[0];
       }
+      const prefixTimeseries = baseType === 'timeseries'
+        && ['src_prefix', 'dst_prefix'].includes(
+          document.getElementById('widgetConfigGroupBy').value
+        );
       const visibility = {
-        widgetConfigDimension: type === 'top_n',
-        widgetConfigMetric: ['top_n', 'timeseries', 'kpi'].includes(type),
-        widgetConfigDirection: ['top_n', 'timeseries', 'kpi'].includes(type),
-        widgetConfigGroupBy: type === 'timeseries',
-        widgetConfigAggregation: type === 'timeseries',
-        widgetConfigSource: ['recent_events', 'status_list'].includes(type),
-        widgetConfigResolution: type === 'timeseries',
-        widgetConfigIncludePartialBucket: type === 'timeseries',
-        widgetConfigLimit: ['top_n', 'recent_events', 'status_list'].includes(type),
-        widgetConfigCombinedChartKind: type === 'top_n'
+        widgetConfigDimension: baseType === 'top_n',
+        widgetConfigMetric: ['top_n', 'timeseries', 'kpi'].includes(baseType),
+        widgetConfigDirection: ['top_n', 'timeseries', 'kpi'].includes(baseType),
+        widgetConfigGroupBy: baseType === 'timeseries',
+        widgetConfigAggregation: baseType === 'timeseries',
+        widgetConfigSource: ['recent_events', 'status_list'].includes(baseType),
+        widgetConfigResolution: baseType === 'timeseries',
+        widgetConfigPrefixMode: prefixTimeseries,
+        widgetConfigPrefixTopN: prefixTimeseries,
+        widgetConfigMaximumDataPoints: prefixTimeseries,
+        widgetConfigShowPrefixTable: prefixTimeseries,
+        widgetConfigIncludePartialBucket: baseType === 'timeseries',
+        widgetConfigLimit: ['top_n', 'recent_events', 'status_list'].includes(baseType),
+        widgetConfigCombinedChartKind: baseType === 'top_n'
           && visualizationSelect.value === 'chart_table',
-        widgetConfigChartTableRatio: type === 'top_n'
+        widgetConfigChartTableRatio: baseType === 'top_n'
           && visualizationSelect.value === 'chart_table',
-        widgetConfigSliceLimit: type === 'top_n'
+        widgetConfigSliceLimit: baseType === 'top_n'
           && ['pie', 'donut', 'chart_table'].includes(visualizationSelect.value)
       };
       Object.entries(visibility).forEach(([id, visible]) => {
@@ -20547,6 +20763,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         Number(item.config?.slice_limit || 8);
       document.getElementById('widgetConfigIncludePartialBucket').value =
         String(Boolean(item.config?.include_partial_bucket));
+      document.getElementById('widgetConfigPrefixMode').value =
+        item.config?.prefix_mode || 'top_n';
+      document.getElementById('widgetConfigPrefixTopN').value =
+        Number(item.config?.top_n || 10);
+      document.getElementById('widgetConfigMaximumDataPoints').value =
+        Number(item.config?.maximum_data_points || 300);
+      document.getElementById('widgetConfigShowPrefixTable').value =
+        String(Boolean(item.config?.show_prefix_table));
       document.getElementById('widgetConfigFilters').value = JSON.stringify(item.filters || [], null, 2);
       document.getElementById('widgetConfigLegend').value = String(item.visualization?.show_legend !== false);
       populateConfigurableAppearance(item.config?.appearance || {
@@ -20963,7 +21187,64 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `${configurableTimestampLabel(range.start)} → ${configurableTimestampLabel(range.end)}${bucket}`;
     }
 
+    function configurableLegendLabel(value, maximum = 48) {
+      const label = String(value || '-');
+      return label.length > maximum
+        ? `${label.slice(0, maximum - 1)}…`
+        : label;
+    }
+
+    function configurablePrefixSeriesTable(widget, payload) {
+      const series = Array.isArray(payload.series) ? payload.series : [];
+      const pageSize = 10;
+      const totalPages = Math.max(1, Math.ceil(series.length / pageSize));
+      const page = Math.max(
+        1,
+        Math.min(
+          totalPages,
+          Number(configurablePrefixTablePages.get(widget.id) || 1)
+        )
+      );
+      configurablePrefixTablePages.set(widget.id, page);
+      const rows = series
+        .slice((page - 1) * pageSize, page * pageSize)
+        .map(item => {
+          const points = Array.isArray(item.points) ? item.points : [];
+          const value = points.length ? points[points.length - 1].value : null;
+          return `<tr><td>${escapeHtml(item.label || item.name || item.group || '-')}</td><td class="text-end">${escapeHtml(configurableMetricValue(value, payload.metric))}</td></tr>`;
+        })
+        .join('');
+      return `
+        <div class="table-wrap">
+          <table class="table table-sm mb-1"><tbody>${rows || '<tr><td>Sem séries</td></tr>'}</tbody></table>
+        </div>
+        <div class="d-flex justify-content-between align-items-center">
+          <button type="button" class="btn btn-sm btn-outline-secondary configurable-prefix-table-page" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''}>Anterior</button>
+          <span class="subtle">Página ${page} de ${totalPages}</span>
+          <button type="button" class="btn btn-sm btn-outline-secondary configurable-prefix-table-page" data-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''}>Próxima</button>
+        </div>`;
+    }
+
     function renderConfigurableWidget(widget, payload) {
+      if (payload?.kind === 'timeseries') {
+        const responseSeries = Array.isArray(payload.series) ? payload.series : [];
+        const responsePoints = responseSeries.reduce(
+          (total, item) => total + (Array.isArray(item.points) ? item.points.length : 0),
+          0
+        );
+        if (
+          responseSeries.length > CONFIGURABLE_WIDGET_MAX_SERIES
+          || responsePoints > CONFIGURABLE_WIDGET_MAX_TOTAL_POINTS
+        ) {
+          renderConfigurableWidgetError(
+            widget,
+            new Error(
+              'Resposta acima do limite seguro. Reduza o período, Top N ou selecione um prefixo.'
+            )
+          );
+          return;
+        }
+      }
       configurableWidgetPayloads.set(Number(widget.id), payload);
       if (configurableLayoutInteractionActive) {
         configurableDeferredWidgetPayloads.set(Number(widget.id), payload);
@@ -20982,7 +21263,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       status.textContent = configurableEffectiveRangeDebugEnabled() && effectiveRangeDebug
         ? `${baseStatus} · ${effectiveRangeDebug}`
         : baseStatus;
+      if (payload.limited) {
+        status.textContent += ` · ${Number(payload.series_count || 0)}/${Number(payload.total_series_found || 0)} séries`;
+      }
       status.title = [qualityStatus?.title, effectiveRangeDebug].filter(Boolean).join(' · ');
+      if (payload.limit_message) {
+        status.title = [status.title, payload.limit_message].filter(Boolean).join(' · ');
+      }
       status.dataset.qualityState = qualityStatus?.state || '';
       const existingChart = configurableWidgetCharts.get(widget.id);
       const selectedVisualization = GMJDashboardVisualizations.visualizationKind(widget);
@@ -21093,14 +21380,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           chart?.off?.();
           chart?.dispose?.();
           if (!combinedRanking) {
-            body.innerHTML = '<div class="configurable-dashboard-widget-chart"></div>';
-            chartContainer = body.firstElementChild;
+            body.innerHTML = `
+              ${payload.limit_message ? `<div class="subtle configurable-widget-limit-message">${escapeHtml(payload.limit_message)}</div>` : ''}
+              <div class="configurable-dashboard-widget-chart"></div>
+              ${widget.config?.show_prefix_table ? `<div class="configurable-prefix-series-table">${configurablePrefixSeriesTable(widget, payload)}</div>` : ''}`;
+            chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
           } else {
             chartContainer = body.querySelector('.configurable-dashboard-widget-chart');
           }
           chart = echarts.init(chartContainer);
         }
         configurableWidgetCharts.set(widget.id, chart);
+        const prefixTable = body.querySelector('.configurable-prefix-series-table');
+        if (prefixTable && payload.kind === 'timeseries') {
+          prefixTable.innerHTML = configurablePrefixSeriesTable(widget, payload);
+        }
         const initialChartBounds = chartContainer.getBoundingClientRect();
         chartContainer.classList.toggle(
           'chart-size-insufficient',
@@ -21121,7 +21415,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ['upload', 'download'].includes(item.direction || item.key)
           );
           const canonicalMetric = GMJDashboardCharts.canonicalMetric(metric);
-          const payloadSeries = (
+          const selectedPayloadSeries = (
             ['bits_s', 'packets_s'].includes(canonicalMetric)
             && (widget.config?.group_by || 'total') === 'total'
             && hasDirectionalSeries
@@ -21132,6 +21426,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               widget.config?.direction || 'both'
             )
             : rawSeries;
+          const payloadSeries = selectedPayloadSeries
+            .slice(0, CONFIGURABLE_WIDGET_MAX_SERIES)
+            .map(item => ({
+              ...item,
+              name: configurableLegendLabel(
+                item.name || item.label || item.group
+              ),
+              label: configurableLegendLabel(
+                item.label || item.name || item.group
+              )
+            }));
           const metricScale = GMJDashboardFormatters.selectMetricScale(
             configurableSeriesMaximum(payloadSeries),
             metric
@@ -21500,7 +21805,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         || activateConfigurableDashboardContext(activeGlobalContext);
       const queryContext = configurableWidgetQueryContext(widget, activeGlobalContext);
       const dashboardId = Number(configurableDashboard?.id || 0);
-      configurableWidgetControllers.get(widget.id)?.abort();
+      if (configurableWidgetControllers.has(widget.id)) return null;
       const controller = new AbortController();
       configurableWidgetControllers.set(widget.id, controller);
       const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
@@ -21531,6 +21836,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           || configurableWidgetControllers.get(widget.id) !== controller
           || !configurableRangeRequestGate.isCurrent(activeRangeToken)
         ) return null;
+        if (error.status === 422) {
+          configurableWidgetBlockedQueries.add(widget.id);
+          const timer = configurableWidgetTimers.get(widget.id);
+          if (timer) clearTimeout(timer);
+          configurableWidgetTimers.delete(widget.id);
+        }
         renderConfigurableWidgetError(widget, error);
         throw error;
       } finally {
@@ -21547,13 +21858,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetControllers.clear();
       configurableWidgetTimers.forEach(timer => clearTimeout(timer));
       configurableWidgetTimers.clear();
+      configurableWidgetBlockedQueries.clear();
       configurableVisibleWidgets.clear();
       disposeConfigurableWidgetCharts();
     }
 
     function scheduleConfigurableWidgetRefresh(widget) {
       const intervalSeconds = Number(widget?.refresh_interval_seconds || 0);
-      if (intervalSeconds <= 0 || configurableWidgetTimers.has(widget.id)) return;
+      if (
+        intervalSeconds <= 0
+        || configurableWidgetTimers.has(widget.id)
+        || configurableWidgetBlockedQueries.has(widget.id)
+      ) return;
       const timer = setTimeout(async () => {
         configurableWidgetTimers.delete(widget.id);
         if (document.visibilityState === 'visible' && activeView === 'dashboard' && configurableVisibleWidgets.has(widget.id)) {
@@ -21574,12 +21890,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           const widget = widgetsById.get(id);
           if (!widget) return;
           if (entry.isIntersecting) {
+            if (configurableVisibleWidgets.has(id)) return;
             configurableVisibleWidgets.add(id);
             queryConfigurableWidget(widget).catch(console.error);
             scheduleConfigurableWidgetRefresh(widget);
           } else {
             configurableVisibleWidgets.delete(id);
             configurableWidgetControllers.get(id)?.abort();
+            configurableWidgetControllers.delete(id);
+            const timer = configurableWidgetTimers.get(id);
+            if (timer) clearTimeout(timer);
+            configurableWidgetTimers.delete(id);
           }
         });
       };
@@ -21659,6 +21980,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function loadConfigurableDashboard(dashboardId) {
+      if (
+        Number(configurableDashboard?.id || 0) !== Number(dashboardId)
+      ) {
+        clearConfigurableWidgetRuntime();
+        if (configurableTemporaryPrefixScope === 'dashboard') {
+          configurableTemporaryPrefixFilter = null;
+          configurableTemporaryPrefixGrouping = null;
+        }
+      }
       const loadSequence = ++configurableDashboardLoadSequence;
       const interactionSequenceAtStart = configurableLayoutInteractionSequence;
       let dashboard = await apiRequest(`/api/dashboards/${dashboardId}`);
@@ -21691,7 +22021,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetPayloads.clear();
       configurableDeferredWidgetPayloads.clear();
       const dashboardChanged = Number(configurableDashboard?.id || 0) !== Number(dashboard.id);
-      if (dashboardChanged) {
+      if (dashboardChanged && configurableTemporaryPrefixScope === 'dashboard') {
         configurableTemporaryPrefixFilter = null;
         configurableTemporaryPrefixGrouping = null;
       }
@@ -21725,6 +22055,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function initializeConfigurableDashboards() {
       try {
+        restoreConfigurableTemporaryPrefix();
         const [listPayload, catalog] = await Promise.all([
           apiRequest('/api/dashboards'),
           apiRequest('/api/dashboards/widget-catalog'),
@@ -22370,7 +22701,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (!widget) return;
         if (target.closest('.configurable-admin-action') && !dashboardEditMode) return;
         try {
-          if (target.closest('.configurable-widget-inspect')) openConfigurableWidgetInspector(widget);
+          if (target.closest('.configurable-prefix-table-page')) {
+            configurablePrefixTablePages.set(
+              widget.id,
+              Number(target.closest('.configurable-prefix-table-page').dataset.page || 1)
+            );
+            const pane = element.querySelector('.configurable-prefix-series-table');
+            const payload = configurableWidgetPayloads.get(Number(widget.id));
+            if (pane && payload) {
+              pane.innerHTML = configurablePrefixSeriesTable(widget, payload);
+            }
+          } else if (target.closest('.configurable-widget-inspect')) openConfigurableWidgetInspector(widget);
           else if (target.closest('.configurable-widget-edit')) openConfigurableWidgetModal(widget);
           else if (target.closest('.configurable-widget-duplicate')) {
             await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets`, {
@@ -22401,13 +22742,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             element.classList.toggle('fullscreen-widget');
             setTimeout(() => configurableWidgetCharts.get(widget.id)?.resize(), 50);
           } else if (target.closest('.configurable-widget-hide')) {
+            configurableWidgetControllers.get(widget.id)?.abort();
             await patchConfigurableWidget(widget, { hidden: !widget.hidden });
           } else if (target.closest('.configurable-widget-delete')) {
             if (window.confirm(`Excluir o widget “${widget.title}”?`)) {
+              configurableWidgetControllers.get(widget.id)?.abort();
               await apiRequest(`/api/dashboards/${configurableDashboard.id}/widgets/${widget.id}`, { method: 'DELETE' });
               await loadConfigurableDashboard(configurableDashboard.id);
             }
           } else if (target.closest('.configurable-widget-retry')) {
+            configurableWidgetBlockedQueries.delete(widget.id);
             configurableVisibleWidgets.add(widget.id);
             await queryConfigurableWidget(widget, { force: true });
           } else if (target.closest('.configurable-drilldown')) {
@@ -24508,7 +24852,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('newDashboardButton').addEventListener('click', () => createConfigurableDashboardFromPrompt().catch(console.error));
     document.getElementById('dashboardManagerButton').addEventListener('click', openDashboardManager);
     document.getElementById('dashboardPrefixSaved').addEventListener('change', () => {
+      document.getElementById('dashboardPrefixFilterType').value = 'saved';
       loadConfigurablePrefixSubnets().catch(console.error);
+    });
+    document.getElementById('dashboardPrefixSubnet').addEventListener('change', () => {
+      document.getElementById('dashboardPrefixFilterType').value = 'subprefix';
+    });
+    document.getElementById('dashboardPrefixCidr').addEventListener('input', event => {
+      if (event.target.value.trim()) {
+        document.getElementById('dashboardPrefixFilterType').value = 'cidr';
+      }
+    });
+    ['dashboardPrefixStart', 'dashboardPrefixEnd'].forEach(id => {
+      document.getElementById(id).addEventListener('input', event => {
+        if (event.target.value.trim()) {
+          document.getElementById('dashboardPrefixFilterType').value = 'range';
+        }
+      });
+    });
+    ['dashboardPrefixGroupMode', 'dashboardPrefixMaxDataPoints'].forEach(id => {
+      document.getElementById(id).addEventListener('change', () => {
+        refreshConfigurableDashboard().catch(console.error);
+      });
     });
     document.getElementById('dashboardPrefixIpv4Length').addEventListener('change', () => {
       if (document.getElementById('dashboardPrefixSaved').value) {
@@ -24544,6 +24909,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('previewDashboardWidgetButton').addEventListener('click', () => previewConfigurableWidget().catch(console.error));
     document.getElementById('widgetConfigType').addEventListener('change', syncConfigurableWidgetTypeFields);
     document.getElementById('widgetConfigVisualization').addEventListener('change', syncConfigurableWidgetTypeFields);
+    document.getElementById('widgetConfigGroupBy').addEventListener('change', syncConfigurableWidgetTypeFields);
     document.getElementById('copyDashboardWidgetInspectorButton').addEventListener('click', async () => {
       await navigator.clipboard.writeText(
         document.getElementById('dashboardWidgetInspectorBody').textContent || '{}'
