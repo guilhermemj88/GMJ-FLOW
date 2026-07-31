@@ -29,6 +29,10 @@
     wide: 900,
     tiny: 420
   });
+  const ACCESSIBLE_SERIES_BASE = Object.freeze([
+    '#56b4e9', '#e69f00', '#00c896', '#f0e442', '#4ea1d3',
+    '#f4773b', '#cc79a7', '#e5e7eb', '#8dd3c7', '#fb8072'
+  ]);
   const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
   function finiteNumber(value, fallback) {
@@ -52,6 +56,176 @@
   function colorValue(value, fallback) {
     const color = String(value || '').trim();
     return HEX_COLOR.test(color) ? color.toLowerCase() : fallback;
+  }
+
+  function hslToHex(hue, saturation, lightness) {
+    const h = ((Number(hue) % 360) + 360) % 360;
+    const s = clamp(Number(saturation) / 100, 0, 1);
+    const l = clamp(Number(lightness) / 100, 0, 1);
+    const chroma = (1 - Math.abs(2 * l - 1)) * s;
+    const component = chroma * (1 - Math.abs((h / 60) % 2 - 1));
+    const offset = l - chroma / 2;
+    let rgb;
+    if (h < 60) rgb = [chroma, component, 0];
+    else if (h < 120) rgb = [component, chroma, 0];
+    else if (h < 180) rgb = [0, chroma, component];
+    else if (h < 240) rgb = [0, component, chroma];
+    else if (h < 300) rgb = [component, 0, chroma];
+    else rgb = [chroma, 0, component];
+    return `#${rgb.map(value => Math.round((value + offset) * 255)
+      .toString(16).padStart(2, '0')).join('')}`;
+  }
+
+  function buildDistinctSeriesPalette(size = 50) {
+    const maximum = Math.max(1, Math.trunc(finiteNumber(size, 50)));
+    const colors = [...ACCESSIBLE_SERIES_BASE];
+    let index = 0;
+    while (colors.length < maximum) {
+      const hue = (19 + index * 137.508) % 360;
+      const saturation = [72, 84, 66, 78][index % 4];
+      const lightness = [62, 70, 58, 66][Math.floor(index / 4) % 4];
+      const color = hslToHex(hue, saturation, lightness);
+      if (!colors.includes(color)) colors.push(color);
+      index += 1;
+    }
+    return Object.freeze(colors.slice(0, maximum));
+  }
+
+  const DISTINCT_SERIES_PALETTE = buildDistinctSeriesPalette(50);
+
+  function stableSeriesHash(value) {
+    const text = String(value ?? '');
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function seriesIdentity(value, fallbackIndex = 0) {
+    if (value && typeof value === 'object') {
+      return String(
+        value.key ?? value.name ?? value.label ?? value.group
+        ?? `series-${fallbackIndex}`
+      );
+    }
+    return String(value ?? `series-${fallbackIndex}`);
+  }
+
+  function assignSeriesColors(values = [], registry = new Map(), palette = DISTINCT_SERIES_PALETTE) {
+    const colors = Array.isArray(palette) && palette.length
+      ? palette
+      : DISTINCT_SERIES_PALETTE;
+    const keys = [...new Set(
+      (Array.isArray(values) ? values : []).map(seriesIdentity)
+    )];
+    const assignments = new Map();
+    const used = new Set();
+    keys.slice().sort().forEach(key => {
+      const existing = registry?.get?.(key);
+      if (colors.includes(existing) && !used.has(existing)) {
+        assignments.set(key, existing);
+        used.add(existing);
+      }
+    });
+    keys.filter(key => !assignments.has(key))
+      .sort((left, right) => (
+        stableSeriesHash(left) - stableSeriesHash(right)
+        || left.localeCompare(right)
+      ))
+      .forEach(key => {
+        const initial = stableSeriesHash(key) % colors.length;
+        let selected = colors[initial];
+        for (let probe = 0; probe < colors.length; probe += 1) {
+          const candidate = colors[(initial + probe * 17) % colors.length];
+          if (!used.has(candidate)) {
+            selected = candidate;
+            break;
+          }
+        }
+        assignments.set(key, selected);
+        used.add(selected);
+        registry?.set?.(key, selected);
+      });
+    return assignments;
+  }
+
+  function colorLuminance(color) {
+    if (!HEX_COLOR.test(String(color || ''))) return 0;
+    const channels = String(color).slice(1).match(/.{2}/g).map(part => {
+      const value = Number.parseInt(part, 16) / 255;
+      return value <= 0.03928
+        ? value / 12.92
+        : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  }
+
+  function seriesContrastRatio(left, right = '#0f172a') {
+    const first = colorLuminance(left);
+    const second = colorLuminance(right);
+    return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+  }
+
+  function tooltipNumericValue(item) {
+    const value = Array.isArray(item?.value)
+      ? item.value[item.value.length - 1]
+      : item?.value;
+    return finiteNumber(value, 0);
+  }
+
+  function sortTooltipRows(rows = []) {
+    return (Array.isArray(rows) ? [...rows] : [])
+      .sort((left, right) => (
+        Math.abs(tooltipNumericValue(right)) - Math.abs(tooltipNumericValue(left))
+        || String(left?.seriesName || left?.name || '')
+          .localeCompare(String(right?.seriesName || right?.name || ''))
+      ));
+  }
+
+  function positionFloatingTooltip(point = [], size = {}, options = {}) {
+    const gap = Math.max(0, finiteNumber(options.gap, 14));
+    const padding = Math.max(0, finiteNumber(options.padding, 8));
+    const viewWidth = Math.max(0, finiteNumber(size?.viewSize?.[0], 0));
+    const viewHeight = Math.max(0, finiteNumber(size?.viewSize?.[1], 0));
+    const contentWidth = Math.max(0, finiteNumber(size?.contentSize?.[0], 0));
+    const contentHeight = Math.max(0, finiteNumber(size?.contentSize?.[1], 0));
+    const anchorX = finiteNumber(point?.[0], 0);
+    const anchorY = finiteNumber(point?.[1], 0);
+    let x = anchorX + gap;
+    let y = anchorY + gap;
+    if (x + contentWidth + padding > viewWidth) x = anchorX - contentWidth - gap;
+    if (y + contentHeight + padding > viewHeight) y = anchorY - contentHeight - gap;
+    return [
+      clamp(x, padding, Math.max(padding, viewWidth - contentWidth - padding)),
+      clamp(y, padding, Math.max(padding, viewHeight - contentHeight - padding))
+    ];
+  }
+
+  function externalTooltipOptions(options = {}) {
+    const maxWidth = clamp(finiteNumber(options.maxWidth, 440), 180, 720);
+    const maxHeight = clamp(finiteNumber(options.maxHeight, 360), 120, 600);
+    return {
+      renderMode: 'html',
+      appendToBody: true,
+      confine: false,
+      enterable: true,
+      order: 'valueDesc',
+      className: 'gmj-dashboard-chart-tooltip',
+      position: (point, _params, _dom, _rect, size) => (
+        positionFloatingTooltip(point, size, options)
+      ),
+      extraCssText: [
+        `max-width:min(${maxWidth}px,calc(100vw - 16px))`,
+        `max-height:min(${maxHeight}px,50vh)`,
+        'overflow-x:hidden',
+        'overflow-y:auto',
+        'white-space:normal',
+        'overflow-wrap:anywhere',
+        'z-index:10000'
+      ].join(';')
+    };
   }
 
   function normalizeAppearance(value = {}) {
@@ -296,25 +470,34 @@
     const layout = getWidgetResponsiveLayout(width, options);
     const safeHeight = Math.max(0, finiteNumber(height, 0));
     const compact = layout.mode !== 'wide' || safeHeight < 280;
-    const position = layout.mode === 'wide' && safeHeight >= 220
-      ? 'top'
-      : 'bottom';
+    const normalizedPreference = ['top', 'bottom', 'right'].includes(preferredPosition)
+      ? preferredPosition
+      : 'top';
+    const position = normalizedPreference === 'right'
+      && layout.mode === 'wide'
+      && safeHeight >= 280
+      ? 'right'
+      : layout.mode === 'wide' && safeHeight >= 220
+        ? 'top'
+        : 'bottom';
     return Object.freeze({
       position,
-      preferredPosition: ['top', 'bottom', 'right'].includes(preferredPosition)
-        ? preferredPosition
-        : 'top',
-      orient: 'horizontal',
+      preferredPosition: normalizedPreference,
+      orient: position === 'right' ? 'vertical' : 'horizontal',
       type: 'scroll',
       compact,
       fontSize: compact ? 10 : 12,
       itemWidth: compact ? 10 : 14,
       itemHeight: compact ? 7 : 10,
       nameLimit: layout.mode === 'wide' ? 32 : layout.mode === 'medium' ? 22 : 14,
-      top: position === 'top' ? 0 : null,
+      maxRows: 1,
+      height: position === 'right' ? Math.max(80, safeHeight - 24) : compact ? 22 : 26,
+      width: position === 'right' ? Math.min(190, Math.max(120, layout.width * 0.24)) : null,
+      top: ['top', 'right'].includes(position) ? 0 : null,
       bottom: position === 'bottom' ? 0 : null,
-      left: 8,
-      right: 8
+      left: position === 'right' ? null : 8,
+      right: 8,
+      pageIconSize: compact ? 10 : 12
     });
   }
 
@@ -340,7 +523,7 @@
         ? `${outerRadius}%`
         : [`${innerRadius}%`, `${outerRadius}%`],
       center: [
-        '50%',
+        legend.position === 'right' ? '42%' : '50%',
         legend.position === 'top' ? '56%' : legend.position === 'bottom' ? '44%' : '50%'
       ],
       outerRadius,
@@ -387,7 +570,15 @@
     DEFAULT_APPEARANCE,
     DEFAULT_WIDGET_BREAKPOINTS,
     DIRECTION_ORDER,
+    DISTINCT_SERIES_PALETTE,
     normalizeAppearance,
+    stableSeriesHash,
+    seriesIdentity,
+    assignSeriesColors,
+    seriesContrastRatio,
+    sortTooltipRows,
+    positionFloatingTooltip,
+    externalTooltipOptions,
     canonicalMetric,
     consolidateDirectionSeries,
     getChartDensityMode,

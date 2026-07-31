@@ -9,14 +9,17 @@
   <script src="../frontend/dashboard-visualizations.js"></script>
   <script src="../frontend/dashboard-layout.js"></script>
   <script src="../frontend/dashboard-resize.js"></script>
+  <script src="../frontend/dashboard-prefix-controls.js"></script>
 </head>
 <body>
   <div id="result" data-status="running">Executando</div>
   <div id="grid" style="display:grid;width:1212px;column-gap:12px;row-gap:12px">
     <article class="configurable-dashboard-widget" data-widget-id="1">
       <div class="widget-resize-badge"></div>
-      <button data-widget-drag-handle type="button">Mover</button>
+      <div data-widget-drag-handle tabindex="0"><span id="moveTitle">Widget de teste</span></div>
+      <button id="widgetSettings" type="button">Configurar</button>
       <div class="widget-resize-handle" data-resize-handle="se"></div>
+      <div id="chartSurface" class="configurable-dashboard-widget-chart">Gráfico</div>
       <div class="widget-content scroll-container">
         <table><tbody><tr><td><a id="rankingLink" href="#asn">AS15169</a></td></tr></tbody></table>
       </div>
@@ -211,12 +214,26 @@
 
        const wideLegend = chartHelpers.getResponsiveLegendLayout(920, 360, 'right');
        const narrowLegend = chartHelpers.getResponsiveLegendLayout(480, 260, 'top');
-       assertEqual(wideLegend.position, 'top', 'wide legend moves to top');
+       assertEqual(wideLegend.position, 'right', 'wide preferred legend moves laterally');
        assertEqual(narrowLegend.position, 'bottom', 'narrow legend moves below chart');
        assertEqual(narrowLegend.type, 'scroll', 'narrow legend paginates');
+       assertEqual(narrowLegend.maxRows, 1, 'small legend is limited to one visible row');
        assert(
          narrowLegend.nameLimit < wideLegend.nameLimit,
          'narrow legend truncates labels more aggressively'
+       );
+       const longLegendLabel = chartHelpers.truncateCategory(
+         '186.232.160.0/24 · valor muito longo para o card',
+         narrowLegend.nameLimit
+       );
+       assert(
+         longLegendLabel.length <= narrowLegend.nameLimit,
+         'long legend label remains inside its responsive limit'
+       );
+       assertEqual(
+         chartHelpers.truncateCategory('TCP', narrowLegend.nameLimit),
+         'TCP',
+         'small legend label remains unchanged'
        );
 
        const wideDonut = chartHelpers.getResponsivePieGeometry(600, 360, {
@@ -231,7 +248,7 @@
          narrowDonut.outerRadius < wideDonut.outerRadius,
          'donut radius shrinks with available space'
        );
-       assertEqual(wideDonut.center[0], '50%', 'wide donut remains horizontally centered');
+       assertEqual(wideDonut.center[0], '42%', 'wide donut leaves room for lateral legend');
        assertEqual(narrowDonut.center[0], '50%', 'narrow donut remains horizontally centered');
        assert(
          Number.parseInt(narrowDonut.radius[1], 10) <= 56,
@@ -249,6 +266,157 @@
        await new Promise(resolve => setTimeout(resolve, 50));
        assertEqual(resizeRenderCount, 1, 'continuous resize is debounced');
        responsiveFixture.remove();
+
+       assertEqual(chartHelpers.DISTINCT_SERIES_PALETTE.length, 50, 'palette has 50 colors');
+       assertEqual(
+         new Set(chartHelpers.DISTINCT_SERIES_PALETTE).size,
+         50,
+         'palette does not repeat colors'
+       );
+       assert(
+         chartHelpers.DISTINCT_SERIES_PALETTE.every(
+           color => chartHelpers.seriesContrastRatio(color, '#0f172a') >= 3
+         ),
+         'palette keeps graphical contrast on dark theme'
+       );
+       const prefixKeys = Array.from(
+         { length: 50 },
+         (_, index) => `186.232.${160 + index}.0/24`
+       );
+       const tenColors = chartHelpers.assignSeriesColors(prefixKeys.slice(0, 10));
+       assertEqual(new Set(tenColors.values()).size, 10, '10 series receive 10 colors');
+       const colorRegistry = new Map();
+       const fiftyColors = chartHelpers.assignSeriesColors(prefixKeys, colorRegistry);
+       assertEqual(new Set(fiftyColors.values()).size, 50, '50 series receive unique colors');
+       const refreshedColors = chartHelpers.assignSeriesColors(prefixKeys, colorRegistry);
+       assertEqual(
+         refreshedColors.get(prefixKeys[7]),
+         fiftyColors.get(prefixKeys[7]),
+         'same key keeps color after refresh'
+       );
+       const reorderedColors = chartHelpers.assignSeriesColors(
+         [...prefixKeys].reverse(),
+         colorRegistry
+       );
+       assertEqual(
+         reorderedColors.get(prefixKeys[7]),
+         fiftyColors.get(prefixKeys[7]),
+         'series reorder keeps the same color'
+       );
+       const colorsAfterPageRefresh = chartHelpers.assignSeriesColors(
+         [...prefixKeys].reverse(),
+         new Map()
+       );
+       assertEqual(
+         colorsAfterPageRefresh.get(prefixKeys[7]),
+         fiftyColors.get(prefixKeys[7]),
+         'deterministic hash keeps color after page refresh'
+       );
+       const rightTooltip = chartHelpers.positionFloatingTooltip(
+         [980, 200],
+         { viewSize: [1000, 700], contentSize: [260, 180] }
+       );
+       const bottomTooltip = chartHelpers.positionFloatingTooltip(
+         [400, 680],
+         { viewSize: [1000, 700], contentSize: [260, 180] }
+       );
+       assert(rightTooltip[0] < 980, 'tooltip opens left near right viewport edge');
+       assert(bottomTooltip[1] < 680, 'tooltip opens above near bottom viewport edge');
+       const tooltipOptions = chartHelpers.externalTooltipOptions();
+       assert(tooltipOptions.appendToBody, 'tooltip is portaled to body');
+       assertEqual(tooltipOptions.confine, false, 'tooltip is not confined by widget overflow');
+       assert(tooltipOptions.extraCssText.includes('overflow-y:auto'), 'large tooltip scrolls internally');
+       const tooltipRows = chartHelpers.sortTooltipRows(
+         Array.from({ length: 50 }, (_, index) => ({
+           seriesName: `Série ${index}`,
+           value: ['2026-07-30T10:00:00Z', index]
+         }))
+       );
+       assertEqual(tooltipRows.length, 50, 'tooltip keeps all 50 series available');
+       assertEqual(tooltipRows[0].value[1], 49, 'tooltip initially shows largest series');
+
+       const prefixFixture = document.createElement('section');
+       prefixFixture.className = 'dashboard-prefix-controls panel is-collapsed';
+       prefixFixture.style.width = '320px';
+       prefixFixture.innerHTML = `
+         <div class="dashboard-prefix-controls-header" role="button" tabindex="0">
+           <div class="dashboard-prefix-summary">Todos os IPs</div>
+           <button type="button" data-toggle><span data-prefix-toggle-label>Expandir</span></button>
+         </div>
+         <div class="dashboard-prefix-controls-body" hidden>
+           <input value="2001:db8:1234:5678:90ab:cdef:1234:5678/128">
+           <button type="button" data-collapse>Recolher filtros</button>
+         </div>`;
+       document.body.appendChild(prefixFixture);
+       const prefixStorageValues = new Map();
+       const prefixStorage = {
+         getItem(key) { return prefixStorageValues.has(key) ? prefixStorageValues.get(key) : null; },
+         setItem(key, value) { prefixStorageValues.set(key, value); }
+       };
+       let activeDashboardId = 8;
+       const prefixControllerOptions = {
+         panel: prefixFixture,
+         body: prefixFixture.querySelector('.dashboard-prefix-controls-body'),
+         header: prefixFixture.querySelector('.dashboard-prefix-controls-header'),
+         toggleButton: prefixFixture.querySelector('[data-toggle]'),
+         collapseButton: prefixFixture.querySelector('[data-collapse]'),
+         storage: prefixStorage,
+         getDashboardId: () => activeDashboardId
+       };
+       let prefixController = GMJDashboardPrefixControls.createController(
+         prefixControllerOptions
+       );
+       assert(prefixController.collapsed, 'prefix panel starts collapsed');
+       assert(prefixControllerOptions.body.hidden, 'collapsed panel hides only its form body');
+       prefixControllerOptions.header.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+       assert(!prefixController.collapsed, 'prefix header expands panel');
+       prefixControllerOptions.collapseButton.click();
+       assert(prefixController.collapsed, 'collapse button minimizes panel');
+       prefixController.setCollapsed(false);
+       prefixController.destroy();
+       prefixController = GMJDashboardPrefixControls.createController(
+         prefixControllerOptions
+       );
+       assert(!prefixController.collapsed, 'dashboard 8 restores expanded preference');
+       activeDashboardId = 9;
+       prefixController.restore();
+       assert(prefixController.collapsed, 'dashboard 9 starts collapsed independently');
+       prefixController.setCollapsed(false);
+       activeDashboardId = 8;
+       prefixController.restore();
+       assert(!prefixController.collapsed, 'dashboard 8 preference is not mixed with dashboard 9');
+       activeDashboardId = 101;
+       prefixController.restore();
+       assert(prefixController.collapsed, 'new dashboard starts collapsed');
+       prefixController.expandForError();
+       assert(!prefixController.collapsed, 'validation error keeps filters expanded');
+       const temporarySummary = GMJDashboardPrefixControls.prefixSummaryState(
+         { enabled: true, cidr: '186.232.162.0/24', match_side: 'either' },
+         { ipv4_prefix_length: 24, ipv6_prefix_length: 64 },
+         { temporary: true, scope: 'global' }
+       );
+       const savedSummary = GMJDashboardPrefixControls.prefixSummaryState(
+         { enabled: true, cidr: '186.232.162.0/24', match_side: 'either' },
+         { ipv4_prefix_length: 24, ipv6_prefix_length: 64 },
+         { temporary: false }
+       );
+       const emptySummary = GMJDashboardPrefixControls.prefixSummaryState(
+         { enabled: false },
+         { ipv4_prefix_length: 24, ipv6_prefix_length: 64 }
+       );
+       assertEqual(temporarySummary.badge, 'Filtro temporário', 'temporary filter badge');
+       assert(temporarySummary.text.includes('Temporário global'), 'temporary filter summary');
+       assertEqual(savedSummary.badge, 'Filtro salvo', 'saved filter badge');
+       assert(savedSummary.hasFilter, 'active summary exposes clear action state');
+       assertEqual(emptySummary.badge, 'Sem filtro', 'empty filter badge');
+       assert(emptySummary.text.includes('Todos os IPs'), 'empty filter summary');
+       assert(
+         getComputedStyle(prefixControllerOptions.body).gridTemplateColumns.includes('1fr')
+         || prefixFixture.scrollWidth <= prefixFixture.clientWidth,
+         'prefix controls avoid horizontal overflow'
+       );
+       prefixController.destroy();
+       prefixFixture.remove();
 
       const brtLabel = timeRange.formatUtcTimestamp(
         '2026-07-29T11:55:00Z',
@@ -571,6 +739,8 @@
       const handle = grid.querySelector('[data-resize-handle]');
       const moveHandle = grid.querySelector('[data-widget-drag-handle]');
       const rankingLink = grid.querySelector('#rankingLink');
+      const settingsButton = grid.querySelector('#widgetSettings');
+      const chartSurface = grid.querySelector('#chartSurface');
       const widget = {
         id: 1,
         grid: { x: 0, y: 0, w: 4, h: 4 },
@@ -661,6 +831,25 @@
         null,
         'link and table content do not start drag'
       );
+      settingsButton.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 98,
+        pointerType: 'mouse',
+        button: 0,
+        clientX: 0,
+        clientY: 0
+      }));
+      chartSurface.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 97,
+        pointerType: 'mouse',
+        button: 0,
+        clientX: 0,
+        clientY: 0
+      }));
+      assertEqual(moveController.activeSession, null, 'buttons and chart do not start drag');
 
       const pointer = (type, pointerId, x, y) => handle.dispatchEvent(
         new PointerEvent(type, {
@@ -722,6 +911,12 @@
       await new Promise(resolve => setTimeout(resolve, 10));
       assertEqual(persisted, 1, 'readonly does not resize');
       assertEqual(controller.activeSession, null, 'readonly creates no session');
+      movePointer('pointerdown', 91, 0, 0);
+      movePointer('pointermove', 91, 204, 0);
+      movePointer('pointerup', 91, 204, 0);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assertEqual(movePersisted, 0, 'view mode does not move widget');
+      assertEqual(moveController.activeSession, null, 'view mode creates no move session');
 
       editable = true;
       responsiveColumns = 1;
@@ -792,12 +987,15 @@
         'lost pointer capture rolls back'
       );
 
+      const beforeMoveSize = new Map(layout.map(item => [item.id, item])).get(1);
       movePointer('pointerdown', 13, 0, 0);
       movePointer('pointermove', 13, 204, 0);
       movePointer('pointerup', 13, 204, 0);
       await new Promise(resolve => setTimeout(resolve, 20));
       const afterMove = new Map(layout.map(item => [item.id, item]));
       assertEqual(afterMove.get(1).x, 2, 'pointer move snaps active widget');
+      assertEqual(afterMove.get(1).w, beforeMoveSize.w, 'move preserves resized width');
+      assertEqual(afterMove.get(1).h, beforeMoveSize.h, 'move preserves resized height');
       assertEqual(movePersisted, 1, 'pointer move persists once');
       assert(GMJDashboardLayout.validateLayout(layout).valid, 'move preview has no collisions');
       assert(!article.classList.contains('is-dragging'), 'move class removed');

@@ -352,11 +352,9 @@
       if (!handle) return;
       const cancelledTarget = event.target?.closest?.(
         options.cancelSelector
-        || 'button, a, input, select, textarea, table, .widget-content, .scroll-container'
+        || 'button, a, input, select, textarea, table, [data-resize-handle], .widget-actions, .configurable-dashboard-widget-body, .configurable-dashboard-widget-chart, .gmj-dashboard-chart-tooltip, .widget-content, .scroll-container'
       );
-      if (cancelledTarget && !cancelledTarget.closest?.(
-        options.handleSelector || '[data-widget-drag-handle]'
-      )) return;
+      if (cancelledTarget) return;
       if (event.defaultPrevented) return;
       const element = widgetElement(handle);
       const widget = options.getWidget?.(Number(element?.dataset.widgetId));

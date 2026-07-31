@@ -1,4 +1,5 @@
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -19,6 +20,9 @@ TIME_RANGE = (ROOT / "frontend" / "dashboard-time-range.js").read_text(
 )
 VISUALIZATIONS = (
     ROOT / "frontend" / "dashboard-visualizations.js"
+).read_text(encoding="utf-8")
+PREFIX_CONTROLS = (
+    ROOT / "frontend" / "dashboard-prefix-controls.js"
 ).read_text(encoding="utf-8")
 FRONTEND = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 BACKEND = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
@@ -141,10 +145,17 @@ class DashboardResizeContractTest(unittest.TestCase):
             "overflow: auto",
             "position: sticky",
             'draggable="false"',
+            "configurable-dashboard-widget-drag-surface",
+            "data-widget-drag-handle",
         ):
             self.assertIn(token, FRONTEND)
         self.assertNotIn("grid.addEventListener('dragstart'", FRONTEND)
         self.assertNotIn("'text/widget-id'", FRONTEND)
+        self.assertNotIn("configurable-widget-drag-handle", FRONTEND)
+        self.assertNotIn("configurable-widget-left", FRONTEND)
+        self.assertIsNone(
+            re.search(r"<button[^>]+data-widget-drag-handle", FRONTEND)
+        )
 
     def test_resize_persists_desktop_grid_and_preserves_height_fields(self):
         for token in (
@@ -216,9 +227,66 @@ class DashboardResizeContractTest(unittest.TestCase):
         ):
             self.assertIn(token, FRONTEND)
         self.assertIn(
-            "button, a, input, select, textarea, table, .widget-content, .scroll-container",
+            "button, a, input, select, textarea, table, [data-resize-handle]",
             RESIZE,
         )
+        for protected_target in (
+            ".widget-actions",
+            ".configurable-dashboard-widget-body",
+            ".configurable-dashboard-widget-chart",
+            ".gmj-dashboard-chart-tooltip",
+        ):
+            self.assertIn(protected_target, FRONTEND)
+
+    def test_distinct_colors_external_tooltip_and_bounded_legend(self):
+        for token in (
+            "DISTINCT_SERIES_PALETTE",
+            "assignSeriesColors",
+            "stableSeriesHash",
+            "seriesContrastRatio",
+            "positionFloatingTooltip",
+            "externalTooltipOptions",
+            "appendToBody: true",
+            "confine: false",
+            "sortTooltipRows",
+            "maxRows: 1",
+        ):
+            self.assertIn(token, CHARTS)
+        for token in (
+            "configurableWidgetSeriesColorRegistries",
+            "configurableSeriesColorAssignments",
+            "gmj-dashboard-chart-tooltip",
+            "GMJDashboardCharts.externalTooltipOptions()",
+            "GMJDashboardCharts.sortTooltipRows(",
+            "type: 'scroll'",
+            "renderConfigurableLegendMore",
+            "Ver mais (${items.length})",
+        ):
+            self.assertIn(token, FRONTEND)
+
+    def test_prefix_controls_are_collapsible_persistent_and_responsive(self):
+        for token in (
+            '<script src="dashboard-prefix-controls.js"></script>',
+            "dashboardPrefixControlsHeader",
+            "dashboardPrefixControlsBody",
+            "dashboardPrefixStateBadge",
+            "dashboardPrefixClearCompact",
+            "collapseDashboardPrefixFilter",
+            "is-collapsed",
+            "grid-template-columns: minmax(0, 1fr)",
+            "expandForError()",
+        ):
+            self.assertIn(token, FRONTEND)
+        for token in (
+            "gmjflow.dashboard-prefix-controls.collapsed.v1",
+            "storageKey",
+            "readCollapsed",
+            "writeCollapsed",
+            "prefixSummaryState",
+            "createController",
+            "fallback = true",
+        ):
+            self.assertIn(token, PREFIX_CONTROLS)
 
 
 class DashboardChartContractTest(unittest.TestCase):

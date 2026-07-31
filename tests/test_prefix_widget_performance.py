@@ -412,6 +412,20 @@ class PrefixCacheTest(unittest.TestCase):
 
 
 class PrefixFrontendContractTest(unittest.TestCase):
+    def test_prefix_widget_query_uses_its_configured_top_n(self):
+        query_context = HTML[
+            HTML.find("function configurableWidgetQueryContext("):
+            HTML.find("function activateConfigurableDashboardContext(")
+        ]
+        for contract in (
+            "const configuredPrefixTopN = Number(widget?.config?.top_n);",
+            "Math.trunc(configuredPrefixTopN)",
+            "top_n: seriesLimit",
+            "series_limit: seriesLimit",
+        ):
+            with self.subTest(contract=contract):
+                self.assertIn(contract, query_context)
+
     def test_controls_are_visible_and_complete(self):
         self.assertIn(
             ":not(#configurableDashboardGrid):not(#dashboardPrefixControls)",

@@ -578,6 +578,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="dashboard-visualizations.js"></script>
   <script src="dashboard-layout.js"></script>
   <script src="dashboard-resize.js"></script>
+  <script src="dashboard-prefix-controls.js"></script>
   <style>
     :root {
       --background: #f3f5f7;
@@ -861,19 +862,149 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .dashboard-prefix-controls {
+      display: block;
+      min-width: 0;
+      margin-bottom: 1rem;
+      overflow: hidden;
+    }
+
+    .dashboard-prefix-controls-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+      gap: .75rem;
+      padding: .8rem 1rem;
+      cursor: pointer;
+    }
+
+    .dashboard-prefix-controls-header:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .dashboard-prefix-header-main {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      flex: 1 1 auto;
+      gap: .7rem;
+    }
+
+    .dashboard-prefix-header-copy {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .dashboard-prefix-header-copy .panel-title {
+      margin-bottom: .15rem;
+    }
+
+    .dashboard-prefix-controls-actions {
+      display: flex;
+      align-items: center;
+      flex: 0 0 auto;
+      gap: .45rem;
+    }
+
+    .dashboard-prefix-controls-body {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: .65rem;
-      margin-bottom: 1rem;
       align-items: end;
+      padding: 0 1rem 1rem;
     }
 
-    .dashboard-prefix-controls .field {
+    .dashboard-prefix-controls-body[hidden],
+    .dashboard-prefix-controls.is-collapsed .dashboard-prefix-controls-body {
+      display: none !important;
+    }
+
+    .dashboard-prefix-controls-body .field {
       min-width: 0;
     }
 
     .dashboard-prefix-summary {
-      grid-column: 1 / -1;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .dashboard-prefix-state-badge {
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      min-height: 24px;
+      padding: .15rem .5rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--text-secondary);
+      background: var(--surface-secondary);
+      font-size: .72rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .dashboard-prefix-state-badge[data-state="temporary"] {
+      color: var(--warning);
+      border-color: color-mix(in srgb, var(--warning) 46%, var(--border));
+      background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+    }
+
+    .dashboard-prefix-state-badge[data-state="saved"] {
+      color: var(--success);
+      border-color: color-mix(in srgb, var(--success) 46%, var(--border));
+      background: color-mix(in srgb, var(--success) 12%, var(--surface));
+    }
+
+    .dashboard-prefix-controls:not(.is-collapsed) .dashboard-prefix-controls-header {
+      padding-bottom: .65rem;
+    }
+
+    #dashboardPrefixToggle svg {
+      transition: transform .15s ease;
+    }
+
+    .dashboard-prefix-controls:not(.is-collapsed) #dashboardPrefixToggle svg {
+      transform: rotate(180deg);
+    }
+
+    @media (max-width: 639.98px) {
+      .dashboard-prefix-controls-header {
+        align-items: stretch;
+        flex-direction: column;
+        padding: .7rem .8rem;
+      }
+
+      .dashboard-prefix-header-main {
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .dashboard-prefix-state-badge {
+        order: 2;
+      }
+
+      .dashboard-prefix-controls-actions {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+
+      .dashboard-prefix-controls-actions .btn {
+        flex: 1 1 auto;
+      }
+
+      .dashboard-prefix-controls-body {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 0 .8rem .8rem;
+      }
+
+      .dashboard-prefix-controls-body .toolbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+      }
     }
 
     .layout-save-status {
@@ -2281,11 +2412,35 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     [data-widget-drag-handle] {
+      min-width: 0;
+      cursor: default;
+    }
+
+    #view-dashboard.dashboard-editing [data-widget-drag-handle] {
+      position: relative;
+      padding: .25rem .35rem .25rem 1.2rem;
+      border-radius: 6px;
       touch-action: none;
       cursor: grab;
     }
 
-    .is-dragging [data-widget-drag-handle] {
+    #view-dashboard.dashboard-editing [data-widget-drag-handle]::before {
+      position: absolute;
+      top: 50%;
+      left: .2rem;
+      color: var(--text-secondary);
+      content: "⋮⋮";
+      font-size: .68rem;
+      letter-spacing: -.22rem;
+      opacity: .68;
+      transform: translateY(-50%);
+    }
+
+    #view-dashboard.dashboard-editing [data-widget-drag-handle]:hover {
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+    }
+
+    #view-dashboard.dashboard-editing .is-dragging [data-widget-drag-handle] {
       cursor: grabbing;
     }
 
@@ -2372,12 +2527,97 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       overflow: hidden;
     }
 
+    .configurable-dashboard-widget-header {
+      min-width: 0;
+      flex: 0 0 auto;
+    }
+
+    .configurable-dashboard-widget-drag-surface {
+      min-width: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+
+    .configurable-dashboard-widget-drag-surface .panel-title,
+    .configurable-dashboard-widget-drag-surface .configurable-dashboard-widget-status {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .configurable-dashboard-widget-header .widget-actions {
+      flex: 0 0 auto;
+    }
+
     .configurable-dashboard-widget-body {
+      position: relative;
       min-height: 0;
       min-width: 0;
       flex: 1 1 auto;
       overflow: hidden;
       overflow: clip;
+    }
+
+    .configurable-legend-more {
+      position: absolute;
+      top: 2px;
+      right: 4px;
+      z-index: 5;
+      max-width: min(280px, calc(100% - 8px));
+      color: var(--text-primary);
+      font-size: .72rem;
+    }
+
+    .configurable-legend-more > summary {
+      width: max-content;
+      max-width: 100%;
+      margin-left: auto;
+      padding: .2rem .45rem;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      box-shadow: 0 2px 8px rgb(15 23 42 / 10%);
+      cursor: pointer;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .configurable-legend-more-list {
+      width: min(280px, calc(100vw - 28px));
+      max-height: min(260px, 45vh);
+      margin-top: .3rem;
+      padding: .4rem;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--surface);
+      box-shadow: 0 10px 24px rgb(15 23 42 / 20%);
+    }
+
+    .configurable-legend-more-row {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: .4rem;
+      padding: .18rem .1rem;
+    }
+
+    .configurable-legend-more-swatch {
+      width: .65rem;
+      height: .65rem;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--series-color);
+    }
+
+    .configurable-legend-more-label {
+      min-width: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .configurable-dashboard-widget-body .table-wrap,
@@ -2403,6 +2643,42 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .gmj-dashboard-chart-tooltip {
+      max-width: min(440px, calc(100vw - 16px)) !important;
+      max-height: min(360px, 50vh) !important;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      overscroll-behavior: contain;
+      overflow-wrap: anywhere;
+      white-space: normal !important;
+      z-index: 10000 !important;
+    }
+
+    .gmj-dashboard-tooltip-heading {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      padding-bottom: .25rem;
+      background: inherit;
+      font-weight: 700;
+    }
+
+    .gmj-dashboard-tooltip-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+      gap: .8rem;
+      padding-block: .12rem;
+    }
+
+    .gmj-dashboard-tooltip-series {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .configurable-ranking-combined {
@@ -2954,7 +3230,28 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </div>
 
-          <section id="dashboardPrefixControls" class="panel p-3 dashboard-prefix-controls" aria-label="Filtro global por prefixo">
+          <section id="dashboardPrefixControls" class="panel dashboard-prefix-controls is-collapsed" aria-label="Filtro global por prefixo">
+            <div id="dashboardPrefixControlsHeader" class="dashboard-prefix-controls-header"
+              role="button" tabindex="0" aria-expanded="false" aria-controls="dashboardPrefixControlsBody">
+              <div class="dashboard-prefix-header-main">
+                <div class="dashboard-prefix-header-copy">
+                  <div class="panel-title">Filtro de IPs / Prefixos</div>
+                  <div id="dashboardPrefixSummary" class="subtle dashboard-prefix-summary" aria-live="polite"
+                    title="Todos os IPs · Agrupamento: IPv4 /24 · IPv6 /64">
+                    Todos os IPs · Agrupamento: IPv4 /24 · IPv6 /64
+                  </div>
+                </div>
+                <span id="dashboardPrefixStateBadge" class="dashboard-prefix-state-badge" data-state="none">Sem filtro</span>
+              </div>
+              <div class="dashboard-prefix-controls-actions">
+                <button id="dashboardPrefixClearCompact" type="button" class="btn btn-sm btn-outline-secondary" hidden>Limpar</button>
+                <button id="dashboardPrefixToggle" type="button" class="btn btn-sm btn-outline-secondary"
+                  aria-expanded="false" aria-controls="dashboardPrefixControlsBody">
+                  <i data-lucide="chevron-down"></i><span data-prefix-toggle-label>Expandir</span>
+                </button>
+              </div>
+            </div>
+            <div id="dashboardPrefixControlsBody" class="dashboard-prefix-controls-body" hidden>
             <div class="field">
               <label for="dashboardPrefixFilterType">Tipo de filtro</label>
               <select id="dashboardPrefixFilterType" class="form-select form-select-sm">
@@ -3050,9 +3347,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <button id="applyDashboardPrefixFilter" type="button" class="btn btn-sm btn-success">Aplicar temporariamente</button>
               <button id="saveDashboardPrefixFilter" type="button" class="btn btn-sm btn-outline-secondary">Salvar no dashboard</button>
               <button id="clearDashboardPrefixFilter" type="button" class="btn btn-sm btn-outline-secondary">Limpar filtro</button>
+              <button id="collapseDashboardPrefixFilter" type="button" class="btn btn-sm btn-outline-secondary">Recolher filtros</button>
             </div>
-            <div id="dashboardPrefixSummary" class="subtle dashboard-prefix-summary" aria-live="polite">
-              Filtro ativo: nenhum · Agrupamento: IPv4 /24 · IPv6 /64
             </div>
           </section>
 
@@ -9053,6 +9349,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableTemporaryPrefixFilter = null;
     let configurableTemporaryPrefixGrouping = null;
     let configurableTemporaryPrefixScope = 'global';
+    let configurablePrefixControlsController = null;
     const CONFIGURABLE_PREFIX_SESSION_KEY = 'gmjflow.configurable-prefix-filter.v2';
     const CONFIGURABLE_WIDGET_MAX_CACHE_BYTES = 8 * 1024 * 1024;
     const CONFIGURABLE_WIDGET_MAX_SERIES = 50;
@@ -9060,6 +9357,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let configurableDrilldownContext = null;
     const configurableWidgetControllers = new Map();
     const configurableWidgetCharts = new Map();
+    const configurableWidgetSeriesColorRegistries = new Map();
     const configurableWidgetChartResponsiveContexts = new Map();
     const configurableWidgetResizeObservers = new Map();
     const configurableWidgetChartResizeFrames = new Map();
@@ -19615,6 +19913,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         };
     }
 
+    function ensureConfigurablePrefixControlsController() {
+      if (configurablePrefixControlsController) {
+        return configurablePrefixControlsController;
+      }
+      configurablePrefixControlsController = GMJDashboardPrefixControls.createController({
+        panel: document.getElementById('dashboardPrefixControls'),
+        body: document.getElementById('dashboardPrefixControlsBody'),
+        header: document.getElementById('dashboardPrefixControlsHeader'),
+        toggleButton: document.getElementById('dashboardPrefixToggle'),
+        collapseButton: document.getElementById('collapseDashboardPrefixFilter'),
+        storage: localStorage,
+        getDashboardId: () => configurableDashboard?.id || 'global'
+      });
+      return configurablePrefixControlsController;
+    }
+
     function renderConfigurablePrefixCatalog() {
       const selector = document.getElementById('dashboardPrefixSaved');
       const selected = selector.value;
@@ -19686,34 +20000,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function updateConfigurablePrefixSummary() {
       const filter = configurableActivePrefixFilter();
       const grouping = configurableActivePrefixGrouping();
-      const active = filter.enabled
-        ? filter.cidr
-          || (
-            filter.start_ip && filter.end_ip
-              ? `${filter.start_ip}–${filter.end_ip}`
-              : 'família selecionada'
-          )
-        : 'nenhum';
-      const matchLabel = {
-        source: 'origem',
-        destination: 'destino',
-        either: 'origem ou destino',
-        both: 'origem e destino'
-      }[filter.match_side] || 'origem ou destino';
-      document.getElementById('dashboardPrefixSummary').textContent = (
-        `Filtro ativo: ${active} · Aplicação: ${matchLabel} · `
-        + `Agrupamento: IPv4 /${grouping.ipv4_prefix_length || 24} · `
-        + `IPv6 /${grouping.ipv6_prefix_length || 64}`
+      const state = GMJDashboardPrefixControls.prefixSummaryState(
+        filter,
+        grouping,
+        {
+          temporary: Boolean(configurableTemporaryPrefixFilter?.enabled),
+          scope: configurableTemporaryPrefixScope
+        }
       );
-      if (configurableTemporaryPrefixFilter) {
-        document.getElementById('dashboardPrefixSummary').textContent +=
-          ` · Filtro temporário (${configurableTemporaryPrefixScope})`;
-      } else if (filter.enabled) {
-        document.getElementById('dashboardPrefixSummary').textContent +=
-          ' · Filtro salvo no dashboard';
-      }
+      const summary = document.getElementById('dashboardPrefixSummary');
+      summary.textContent = state.text;
+      summary.title = state.text;
+      const badge = document.getElementById('dashboardPrefixStateBadge');
+      badge.textContent = state.badge;
+      badge.dataset.state = state.badgeKind;
+      document.getElementById('dashboardPrefixClearCompact').hidden = !state.hasFilter;
       const manager = document.getElementById('dashboardManagerPrefixSummary');
-      if (manager) manager.textContent = document.getElementById('dashboardPrefixSummary').textContent;
+      if (manager) manager.textContent = state.text;
     }
 
     function syncConfigurablePrefixControls() {
@@ -19813,6 +20116,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       updateConfigurablePrefixSummary();
       configurableWidgetPayloads.clear();
       configurableDeferredWidgetPayloads.clear();
+      ensureConfigurablePrefixControlsController().setCollapsed(true);
       await refreshConfigurableDashboard();
     }
 
@@ -19880,6 +20184,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         'prefix_timeseries'
       ].includes(widget?.config?.widget_alias)
         || ['src_prefix', 'dst_prefix'].includes(widget?.config?.group_by);
+      const globalSeriesLimit = Math.max(
+        1,
+        Math.min(50, Number(globalContext?.series_limit) || 10)
+      );
+      const configuredPrefixTopN = Number(widget?.config?.top_n);
+      const seriesLimit = (
+        prefixWidget && Number.isFinite(configuredPrefixTopN)
+          ? Math.max(1, Math.min(50, Math.trunc(configuredPrefixTopN)))
+          : globalSeriesLimit
+      );
       const configuredMaximum = Number(prefixWidget
         ? document.getElementById('dashboardPrefixMaxDataPoints')?.value || 300
         : widget?.config?.maximum_data_points
@@ -19887,6 +20201,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ?? 1000);
       return {
         ...globalContext,
+        prefix_grouping: prefixWidget
+          ? {
+              ...(globalContext?.prefix_grouping || {}),
+              mode: widget?.config?.prefix_mode
+                || globalContext?.prefix_grouping?.mode
+                || 'top_n',
+              top_n: seriesLimit
+            }
+          : globalContext?.prefix_grouping,
+        series_limit: seriesLimit,
         interval: Math.max(0, Number(widget?.config?.resolution_seconds || 0)),
         maximum_data_points: Math.max(
           1,
@@ -20032,6 +20356,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       ) ? widget.config.combined_chart_kind : 'donut';
     }
 
+    function configurableSeriesColorAssignments(widget, values = []) {
+      const registryKey = `${Number(configurableDashboard?.id || 0)}:${Number(widget?.id || 0)}`;
+      let registry = configurableWidgetSeriesColorRegistries.get(registryKey);
+      if (!registry) {
+        registry = new Map();
+        configurableWidgetSeriesColorRegistries.set(registryKey, registry);
+      }
+      return GMJDashboardCharts.assignSeriesColors(values, registry);
+    }
+
     function disposeConfigurableWidgetCharts() {
       configurableWidgetCharts.forEach(chart => chart.dispose());
       configurableWidgetCharts.clear();
@@ -20095,6 +20429,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           orient: layout.orient,
           itemWidth: layout.itemWidth,
           itemHeight: layout.itemHeight,
+          width: layout.width,
+          height: layout.height,
+          pageIconSize: layout.pageIconSize,
+          pageButtonItemGap: 7,
           formatter: name => GMJDashboardCharts.truncateCategory(
             labelForName(name),
             layout.nameLimit
@@ -20159,7 +20497,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const legendVisible = responsiveLegend.option.show;
         responsiveOption.grid = {
           left: 12,
-          right: 18,
+          right: legendVisible && responsiveLegend.layout.position === 'right'
+            ? Number(responsiveLegend.layout.width || 150) + 18
+            : 18,
           top: legendVisible && responsiveLegend.layout.position === 'top' ? 38 : 12,
           bottom: legendVisible && responsiveLegend.layout.position === 'bottom' ? 42 : 28,
           containLabel: true
@@ -21142,6 +21482,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return lines.filter(Boolean).join('<br>');
     }
 
+    function renderConfigurableLegendMore(body, entries = []) {
+      body?.querySelector('.configurable-legend-more')?.remove();
+      const items = Array.isArray(entries) ? entries.slice(0, 50) : [];
+      if (!body || items.length <= 6) return;
+      const details = document.createElement('details');
+      details.className = 'configurable-legend-more';
+      details.innerHTML = `
+        <summary title="Exibir todas as ${items.length} séries">Ver mais (${items.length})</summary>
+        <div class="configurable-legend-more-list" role="list">
+          ${items.map(item => `
+            <div class="configurable-legend-more-row" role="listitem" title="${escapeHtml(item.label || item.key || '-')}">
+              <span class="configurable-legend-more-swatch" style="--series-color:${escapeHtml(item.color || '#94a3b8')}"></span>
+              <span class="configurable-legend-more-label">${escapeHtml(item.label || item.key || '-')}</span>
+              ${item.value ? `<strong>${escapeHtml(item.value)}</strong>` : ''}
+            </div>
+          `).join('')}
+        </div>`;
+      body.appendChild(details);
+    }
+
     function configurableEffectiveRange(payload = {}) {
       const effective = payload.effective_range && typeof payload.effective_range === 'object'
         ? payload.effective_range
@@ -21446,6 +21806,29 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             widget.config || {},
             appearance
           );
+          const assignedSeriesColors = configurableSeriesColorAssignments(
+            widget,
+            trafficModel.series
+          );
+          const directionalSeries = trafficModel.series.filter(item => (
+            ['upload', 'download'].includes(item.direction)
+          ));
+          const keepDirectionalColors = directionalSeries.length === trafficModel.series.length
+            && new Set(directionalSeries.map(item => item.properties.color || item.color)).size
+              === directionalSeries.length;
+          const visibleSeriesColors = new Map(
+            trafficModel.series.map(item => {
+              const seriesKey = GMJDashboardCharts.seriesIdentity(item);
+              return [
+                seriesKey,
+                keepDirectionalColors
+                  ? item.properties.color || item.color
+                  : assignedSeriesColors.get(seriesKey)
+                    || item.properties.color
+                    || item.color
+              ];
+            })
+          );
           const visualization = configurableChartKind(widget);
           const latestBySeries = new Map(
             trafficModel.series.map(item => [
@@ -21456,7 +21839,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ])
           );
           const series = trafficModel.series.map(item => {
-            const color = item.properties.color || item.color;
+            const seriesKey = GMJDashboardCharts.seriesIdentity(item);
+            const color = visibleSeriesColors.get(seriesKey);
             const chartType = visualization === 'time_bars' ? 'bar' : 'line';
             const areaEnabled = ['area', 'line_area'].includes(visualization)
               || (!widget.config?.visualization_kind && appearance.show_area);
@@ -21500,27 +21884,31 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           GMJDashboardCharts.replaceChartOption(chart, {
             useUTC: false,
             tooltip: {
+              ...GMJDashboardCharts.externalTooltipOptions(),
               trigger: 'axis',
               axisPointer: { type: 'line' },
               formatter: params => {
-                const rows = Array.isArray(params) ? params : [params];
+                const rows = GMJDashboardCharts.sortTooltipRows(
+                  Array.isArray(params) ? params : [params]
+                );
                 const pointTimestamp = Array.isArray(rows[0]?.value)
                   ? rows[0].value[0]
                   : rows[0]?.axisValue;
                 const heading = configurableTimestampLabel(pointTimestamp);
                 return [
-                  heading,
+                  `<div class="gmj-dashboard-tooltip-heading">${escapeHtml(heading)}</div>`,
                   ...rows.map(item => {
                     const value = Array.isArray(item.value)
                       ? item.value[item.value.length - 1]
                       : item.value;
-                    return `${item.marker || ''}${escapeHtml(item.seriesName || '')}: ${GMJDashboardFormatters.formatTooltipValue(Math.abs(value), metric, metricScale)}`;
+                    return `<div class="gmj-dashboard-tooltip-row"><span class="gmj-dashboard-tooltip-series">${item.marker || ''}${escapeHtml(item.seriesName || '')}</span><strong>${GMJDashboardFormatters.formatTooltipValue(Math.abs(value), metric, metricScale)}</strong></div>`;
                   })
-                ].filter(Boolean).join('<br>');
+                ].filter(Boolean).join('');
               }
             },
             legend: {
               show: appearance.show_legend,
+              type: 'scroll',
               top: legendPosition === 'top' ? 0 : undefined,
               bottom: legendPosition === 'bottom' ? 0 : undefined,
               right: legendPosition === 'right' ? 0 : undefined,
@@ -21580,6 +21968,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             },
             series
           });
+          renderConfigurableLegendMore(
+            body,
+            appearance.show_legend
+              ? trafficModel.series.map(item => ({
+                key: GMJDashboardCharts.seriesIdentity(item),
+                label: item.name || item.label,
+                color: visibleSeriesColors.get(
+                  GMJDashboardCharts.seriesIdentity(item)
+                ),
+                value: configurableMetricValue(
+                  item.legend_value,
+                  metric,
+                  { scale: metricScale }
+                )
+              }))
+              : []
+          );
         } else {
           const appearance = GMJDashboardCharts.normalizeAppearance(widget.config?.appearance);
           const bounds = chartContainer.getBoundingClientRect();
@@ -21607,6 +22012,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           const valuesByName = new Map(
             items.map(item => [String(item.label), Number(item.value) || 0])
           );
+          const assignedItemColors = configurableSeriesColorAssignments(
+            widget,
+            items.map(item => item.key || item.label)
+          );
+          renderConfigurableLegendMore(
+            body,
+            appearance.show_legend && ['donut', 'pie'].includes(visualization)
+              ? items.map(item => ({
+                key: item.key,
+                label: item.label,
+                color: assignedItemColors.get(
+                  GMJDashboardCharts.seriesIdentity(item.key || item.label)
+                ),
+                value: GMJDashboardFormatters.formatTooltipValue(
+                  item.value,
+                  metric,
+                  metricScale
+                )
+              }))
+              : []
+          );
           configurableWidgetChartResponsiveContexts.set(widget.id, {
             showLegend: ['donut', 'pie'].includes(visualization),
             legendLabel: name => `${name}: ${GMJDashboardFormatters.formatTooltipValue(
@@ -21627,6 +22053,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 subtextStyle: { fontSize: 11 }
               } : undefined,
               tooltip: {
+                ...GMJDashboardCharts.externalTooltipOptions(),
                 trigger: 'item',
                 formatter: params => `${params.marker || ''}${configurableRankingTooltip(
                   items[Number(params.dataIndex || 0)] || {},
@@ -21656,7 +22083,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 data: items.map(item => ({
                   name: item.label,
                   value: item.value,
-                  rankingKey: item.key
+                  rankingKey: item.key,
+                  itemStyle: {
+                    color: assignedItemColors.get(
+                      GMJDashboardCharts.seriesIdentity(item.key || item.label)
+                    )
+                  }
                 }))
               }]
             });
@@ -21664,6 +22096,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
             GMJDashboardCharts.replaceChartOption(chart, {
               tooltip: {
+                ...GMJDashboardCharts.externalTooltipOptions(),
                 trigger: 'axis',
                 formatter: params => {
                   const rows = Array.isArray(params) ? params : [params];
@@ -21740,7 +22173,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                 type: 'bar',
                 data: items.map(item => ({
                   value: item.value,
-                  rankingKey: item.key
+                  rankingKey: item.key,
+                  itemStyle: {
+                    color: assignedItemColors.get(
+                      GMJDashboardCharts.seriesIdentity(item.key || item.label)
+                    )
+                  }
                 })),
                 label: {
                   show: appearance.show_value_labels && densityMode !== 'compact',
@@ -21752,7 +22190,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
                     metricScale
                   )
                 },
-                itemStyle: { color: appearance.bar_color, borderRadius: 3 }
+                itemStyle: { borderRadius: 3 }
                 ,
                 showBackground: visualization === 'bar_gauge',
                 backgroundStyle: {
@@ -21937,13 +22375,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             data-grid-w="${Number(widget.grid?.w || 4)}" data-grid-h="${Number(widget.grid?.h || 4)}"
             style="height:${gridHeight}px;grid-column:${Number(displayGrid?.x || 0) + 1} / span ${Number(displayGrid?.w || 1)};grid-row:${Number(displayGrid?.y || 0) + 1} / span ${Number(displayGrid?.h || 1)}">
             <div class="panel p-3">
-              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-                <div><div class="panel-title">${escapeHtml(widget.title)}</div><div class="configurable-dashboard-widget-status subtle">${cached ? 'cache local' : 'aguardando visibilidade'}</div></div>
+              <div class="configurable-dashboard-widget-header d-flex align-items-center justify-content-between gap-2 mb-2">
+                <div class="configurable-dashboard-widget-drag-surface" data-widget-drag-handle
+                  tabindex="${resizeEnabled ? '0' : '-1'}" role="button"
+                  aria-label="Mover ${escapeHtml(widget.title)} no grid">
+                  <div class="panel-title">${escapeHtml(widget.title)}</div>
+                  <div class="configurable-dashboard-widget-status subtle">${cached ? 'cache local' : 'aguardando visibilidade'}</div>
+                </div>
                 <div class="widget-actions">
-                  <button type="button" class="icon-button configurable-admin-action configurable-widget-drag-handle" data-widget-drag-handle title="Mover no grid" aria-label="Mover ${escapeHtml(widget.title)}" ${actionsDisabled}><i data-lucide="grip-horizontal"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-edit" ${actionsDisabled} title="Configurar"><i data-lucide="settings"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-duplicate" ${actionsDisabled} title="Duplicar"><i data-lucide="copy"></i></button>
-                  <button class="icon-button configurable-admin-action configurable-widget-left" ${actionsDisabled} title="Mover"><i data-lucide="arrow-left"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-wider" ${actionsDisabled} title="Redimensionar"><i data-lucide="chevrons-right"></i></button>
                   <button class="icon-button configurable-admin-action configurable-widget-collapse" ${actionsDisabled} title="Recolher"><i data-lucide="chevron-up"></i></button>
                   <button class="icon-button configurable-widget-inspect" title="Inspecionar dados"><i data-lucide="braces"></i></button>
@@ -22026,6 +22467,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableTemporaryPrefixGrouping = null;
       }
       configurableDashboard = dashboard;
+      ensureConfigurablePrefixControlsController().restore(dashboard.id);
       syncConfigurablePersistentLayout(configurableWidgetLayoutItems(dashboard.widgets || []));
       const clientLayoutRepaired = repairConfigurableDashboardClientLayout();
       if (clientLayoutRepaired && dashboard.permissions?.can_edit) {
@@ -22646,7 +23088,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         getWidget: widgetId => (configurableDashboard?.widgets || [])
           .find(widget => Number(widget.id) === Number(widgetId)),
         canMove: configurableWidgetCanResize,
-        cancelSelector: 'button, a, input, select, textarea, table, .widget-content, .scroll-container',
+        cancelSelector: 'button, a, input, select, textarea, table, [data-resize-handle], .widget-actions, .configurable-dashboard-widget-body, .configurable-dashboard-widget-chart, .gmj-dashboard-chart-tooltip, .widget-content, .scroll-container',
         onStart: session => {
           beginConfigurableLayoutInteraction(session);
           configurableInteractionLayout = cloneConfigurableLayout(session.originalLayout);
@@ -22677,6 +23119,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function installConfigurableDashboardEvents() {
+      ensureConfigurablePrefixControlsController();
       const grid = document.getElementById('configurableDashboardGrid');
       if (grid.dataset.eventsInstalled) return;
       grid.dataset.eventsInstalled = 'true';
@@ -22720,14 +23163,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               body: JSON.stringify({ ...widget, title: `${widget.title} (cópia)`, widget_key: undefined, grid: { ...widget.grid, y: widget.grid.y + widget.grid.h } })
             });
             await loadConfigurableDashboard(configurableDashboard.id);
-          } else if (target.closest('.configurable-widget-left')) {
-            const repaired = GMJDashboardLayout.moveItemAndPush(
-              configurableLayoutItems(),
-              widget.id,
-              Math.max(0, widget.grid.x - 1),
-              widget.grid.y
-            );
-            await persistConfigurableLayoutAction(widget, repaired);
           } else if (target.closest('.configurable-widget-wider')) {
             const repaired = GMJDashboardLayout.resizeItemAndPush(
               configurableLayoutItems(),
@@ -24887,15 +25322,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
     document.getElementById('applyDashboardPrefixFilter').addEventListener('click', () => {
       applyConfigurablePrefixFilter().catch(error => {
+        ensureConfigurablePrefixControlsController().expandForError();
         setText('dashboardPrefixSummary', `Falha: ${error.message}`);
       });
     });
     document.getElementById('saveDashboardPrefixFilter').addEventListener('click', () => {
       applyConfigurablePrefixFilter({ save: true }).catch(error => {
+        ensureConfigurablePrefixControlsController().expandForError();
         setText('dashboardPrefixSummary', `Falha: ${error.message}`);
       });
     });
     document.getElementById('clearDashboardPrefixFilter').addEventListener('click', () => {
+      clearConfigurablePrefixFilter().catch(console.error);
+    });
+    document.getElementById('dashboardPrefixClearCompact').addEventListener('click', () => {
       clearConfigurablePrefixFilter().catch(console.error);
     });
     document.getElementById('retryDashboardLayoutSave').addEventListener('click', () => {

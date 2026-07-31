@@ -572,7 +572,8 @@ class DashboardLayoutFrontendContractTest(unittest.TestCase):
         self.assertIn("height: auto !important", FRONTEND)
 
     def test_interactions_use_push_engine_and_fullscreen_is_not_persisted(self):
-        self.assertIn("GMJDashboardLayout.moveItemAndPush(", FRONTEND)
+        self.assertIn("GMJDashboardResize.createDashboardMoveController", FRONTEND)
+        self.assertIn("layoutEngine: GMJDashboardLayout", FRONTEND)
         self.assertIn("GMJDashboardLayout.resizeItemAndPush(", FRONTEND)
         self.assertIn("repairConfigurableDashboardClientLayout", FRONTEND)
         fullscreen_branch = FRONTEND[
