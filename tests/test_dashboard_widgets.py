@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from backend.app.services.dashboard_widgets import (
     DASHBOARD_EXPORT_VERSION,
     DASHBOARD_SCHEMA_VERSION,
     DASHBOARD_WIDGET_METRICS,
+    CORE_TOP_WIDGET_KEYS,
     DEFAULT_WIDGET_APPEARANCE,
     GENERAL_WIDGETS,
     SYSTEM_TEMPLATES,
@@ -125,6 +127,149 @@ class DashboardWidgetSchemaTest(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+    def test_core_top_widgets_have_stable_unique_keys_and_editable_defaults(self):
+        widgets = {
+            item["widget_key"]: item
+            for item in GENERAL_WIDGETS
+            if item["widget_key"] in CORE_TOP_WIDGET_KEYS
+        }
+        self.assertEqual(set(widgets), set(CORE_TOP_WIDGET_KEYS))
+        self.assertEqual(len(widgets), 3)
+        expected_dimensions = {
+            "top-src-ip": "src_ip",
+            "top-dst-ip": "dst_ip",
+            "top-ports": "dst_port",
+        }
+        for widget_key, dimension in expected_dimensions.items():
+            widget = widgets[widget_key]
+            self.assertEqual(widget["type"], "top_n")
+            self.assertEqual(widget["config"]["dimension"], dimension)
+            self.assertEqual(widget["config"]["metric"], "bps")
+            self.assertIn("appearance", widget["config"])
+            self.assertIn("type", widget["visualization"])
+            self.assertEqual(set(widget["grid"]), {"x", "y", "w", "h"})
+
+    def test_legacy_default_reconciles_core_top_widgets_once_without_overwriting(self):
+        dashboard = ensure_user_default_dashboard(self.conn, 2)
+        source = next(
+            widget
+            for widget in dashboard["widgets"]
+            if widget["widget_key"] == "top-src-ip"
+        )
+        customized_config = copy.deepcopy(source["config"])
+        customized_config["appearance"]["bar_color"] = "#123456"
+        self.conn.execute(
+            """
+            UPDATE dashboard_widgets
+            SET title = 'Origem personalizada', config_json = ?, hidden = 1,
+                grid_x = 2, grid_y = 19, grid_w = 7, grid_h = 9
+            WHERE id = ?
+            """,
+            (json.dumps(customized_config), source["id"]),
+        )
+        self.conn.execute(
+            """
+            DELETE FROM dashboard_widgets
+            WHERE dashboard_id = ? AND widget_key IN ('top-dst-ip', 'top-ports')
+            """,
+            (dashboard["id"],),
+        )
+        self.conn.execute(
+            """
+            UPDATE dashboards
+            SET core_top_widgets_migrated = 0, legacy_layout_migrated = 1
+            WHERE id = ?
+            """,
+            (dashboard["id"],),
+        )
+
+        ensure_dashboard_schema(self.conn)
+        migrated = get_dashboard(self.conn, dashboard["id"])
+        migrated_core = {
+            widget["widget_key"]: widget
+            for widget in migrated["widgets"]
+            if widget["widget_key"] in CORE_TOP_WIDGET_KEYS
+        }
+        self.assertEqual(set(migrated_core), set(CORE_TOP_WIDGET_KEYS))
+        self.assertEqual(len({widget["id"] for widget in migrated_core.values()}), 3)
+        preserved = migrated_core["top-src-ip"]
+        self.assertEqual(preserved["id"], source["id"])
+        self.assertEqual(preserved["title"], "Origem personalizada")
+        self.assertEqual(preserved["config"]["appearance"]["bar_color"], "#123456")
+        self.assertTrue(preserved["hidden"])
+        self.assertEqual(preserved["grid"]["w"], 7)
+        self.assertTrue(migrated["core_top_widgets_migrated"])
+        stable_ids = {
+            key: widget["id"]
+            for key, widget in migrated_core.items()
+        }
+        ensure_dashboard_schema(self.conn)
+        reloaded = get_dashboard(self.conn, dashboard["id"])
+        self.assertEqual(
+            stable_ids,
+            {
+                widget["widget_key"]: widget["id"]
+                for widget in reloaded["widgets"]
+                if widget["widget_key"] in CORE_TOP_WIDGET_KEYS
+            },
+        )
+        duplicate_counts = self.conn.execute(
+            """
+            SELECT widget_key, COUNT(*) AS total
+            FROM dashboard_widgets
+            WHERE dashboard_id = ?
+              AND widget_key IN ('top-src-ip', 'top-dst-ip', 'top-ports')
+            GROUP BY widget_key
+            """,
+            (dashboard["id"],),
+        ).fetchall()
+        self.assertEqual(
+            {row["widget_key"]: row["total"] for row in duplicate_counts},
+            {key: 1 for key in CORE_TOP_WIDGET_KEYS},
+        )
+
+        self.conn.execute(
+            """
+            DELETE FROM dashboard_widgets
+            WHERE dashboard_id = ? AND widget_key = 'top-ports'
+            """,
+            (dashboard["id"],),
+        )
+        ensure_dashboard_schema(self.conn)
+        keys_after_user_removal = {
+            widget["widget_key"]
+            for widget in get_dashboard(self.conn, dashboard["id"])["widgets"]
+        }
+        self.assertNotIn("top-ports", keys_after_user_removal)
+
+    def test_sparse_custom_dashboard_is_not_populated_by_compatibility_migration(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Somente taxas",
+                "is_default": False,
+                "is_shared": False,
+                "refresh_interval_seconds": 30,
+            },
+            2,
+            widgets=copy.deepcopy(GENERAL_WIDGETS[:2]),
+        )
+        self.conn.execute(
+            """
+            UPDATE dashboards
+            SET core_top_widgets_migrated = 0
+            WHERE id = ?
+            """,
+            (dashboard["id"],),
+        )
+        ensure_dashboard_schema(self.conn)
+        loaded = get_dashboard(self.conn, dashboard["id"])
+        self.assertEqual(
+            {widget["widget_key"] for widget in loaded["widgets"]},
+            {"traffic-bps", "traffic-pps"},
+        )
+        self.assertTrue(loaded["core_top_widgets_migrated"])
 
     def test_create_duplicate_and_load_dashboard(self):
         source = create_dashboard(

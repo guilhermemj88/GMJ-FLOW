@@ -34282,6 +34282,9 @@ def migrate_legacy_dashboard_layout_endpoint(
     legacy_to_widget = {
         "bps-chart": "traffic-bps",
         "pps-chart": "traffic-pps",
+        "top-src-ip": "top-src-ip",
+        "top-dst-ip": "top-dst-ip",
+        "top-ports": "top-ports",
         "top-conversations": "top-conversations",
         "syn-src": "top-syn-src",
         "syn-dst": "top-syn-dst",

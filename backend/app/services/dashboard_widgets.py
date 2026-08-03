@@ -863,6 +863,17 @@ GENERAL_WIDGETS = [
     ),
 ]
 
+CORE_TOP_WIDGET_KEYS = (
+    "top-src-ip",
+    "top-dst-ip",
+    "top-ports",
+)
+CORE_TOP_WIDGETS = tuple(
+    copy.deepcopy(widget)
+    for widget in GENERAL_WIDGETS
+    if widget["widget_key"] in CORE_TOP_WIDGET_KEYS
+)
+
 SYSTEM_TEMPLATES = (
     {"key": "general", "name": "Visão Geral", "description": "Tráfego, conversas, segurança e operação.", "widgets": GENERAL_WIDGETS},
     {
@@ -1543,6 +1554,7 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
             refresh_interval_seconds INTEGER NOT NULL DEFAULT 30,
             layout_version INTEGER NOT NULL DEFAULT 1,
             legacy_layout_migrated INTEGER NOT NULL DEFAULT 0,
+            core_top_widgets_migrated INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1605,6 +1617,12 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(
         conn,
+        "dashboards",
+        "core_top_widgets_migrated",
+        "core_top_widgets_migrated INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
         "dashboard_widgets",
         "use_global_filters",
         "use_global_filters INTEGER NOT NULL DEFAULT 1",
@@ -1651,6 +1669,7 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
     )
     _seed_system_templates(conn)
     _migrate_legacy_asn_ranking_widgets(conn)
+    _migrate_core_top_widgets(conn)
 
 
 def insert_widget(conn: sqlite3.Connection, dashboard_id: int, widget: dict[str, Any], now: str | None = None) -> int:
@@ -1813,6 +1832,136 @@ def _migrate_legacy_asn_ranking_widgets(
             )
 
 
+def _migrate_core_top_widgets(conn: sqlite3.Connection) -> None:
+    """Reconcile the three legacy traffic rankings without duplicating widgets.
+
+    System templates are authoritative.  User dashboards are migrated only when
+    they match the server-created legacy default, so intentionally sparse custom
+    dashboards keep their widget selection.  The per-dashboard marker makes the
+    compatibility migration one-shot and preserves later removals.
+    """
+
+    defaults_by_key = {
+        str(widget["widget_key"]): widget
+        for widget in CORE_TOP_WIDGETS
+    }
+    timestamp = _utc_now()
+    dashboards = conn.execute(
+        """
+        SELECT id, name, description, owner_user_id, is_default, is_system,
+               template_key, legacy_layout_migrated,
+               core_top_widgets_migrated, layout_version
+        FROM dashboards
+        WHERE core_top_widgets_migrated = 0
+        ORDER BY id
+        """
+    ).fetchall()
+    for dashboard in dashboards:
+        dashboard_id = int(dashboard["id"])
+        existing_keys = {
+            str(row["widget_key"])
+            for row in conn.execute(
+                """
+                SELECT widget_key
+                FROM dashboard_widgets
+                WHERE dashboard_id = ?
+                """,
+                (dashboard_id,),
+            ).fetchall()
+        }
+        system_template = (
+            _bool(dashboard["is_system"])
+            and str(dashboard["template_key"] or "") in {"general", "noc"}
+        )
+        legacy_user_default = (
+            dashboard["owner_user_id"] is not None
+            and _bool(dashboard["is_default"])
+            and {"traffic-bps", "traffic-pps"}.issubset(existing_keys)
+            and (
+                not _bool(dashboard["legacy_layout_migrated"])
+                or str(dashboard["name"] or "") == "Meu Dashboard"
+            )
+        )
+        inserted = False
+        if system_template or legacy_user_default:
+            for widget_key in CORE_TOP_WIDGET_KEYS:
+                if widget_key in existing_keys:
+                    continue
+                insert_widget(
+                    conn,
+                    dashboard_id,
+                    copy.deepcopy(defaults_by_key[widget_key]),
+                    timestamp,
+                )
+                existing_keys.add(widget_key)
+                inserted = True
+        if inserted:
+            conn.execute(
+                """
+                UPDATE dashboards
+                SET core_top_widgets_migrated = 1,
+                    layout_version = layout_version + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, dashboard_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE dashboards
+                SET core_top_widgets_migrated = 1
+                WHERE id = ?
+                """,
+                (dashboard_id,),
+            )
+
+    # Old rows may predate appearance/visualization defaults.  Merge only absent
+    # keys so titles, palettes, colors, visibility and layout remain untouched.
+    rows = conn.execute(
+        """
+        SELECT id, widget_key, config_json, visualization_json
+        FROM dashboard_widgets
+        WHERE widget_key IN ('top-src-ip', 'top-dst-ip', 'top-ports')
+        """
+    ).fetchall()
+    for row in rows:
+        default_widget = defaults_by_key[str(row["widget_key"])]
+        current_config = _json_loads(row["config_json"], {})
+        merged_config = copy.deepcopy(default_widget["config"])
+        merged_config.update(current_config)
+        merged_config["appearance"] = {
+            **copy.deepcopy(DEFAULT_WIDGET_APPEARANCE),
+            **(
+                current_config.get("appearance")
+                if isinstance(current_config.get("appearance"), dict)
+                else {}
+            ),
+        }
+        current_visualization = _json_loads(row["visualization_json"], {})
+        merged_visualization = {
+            **copy.deepcopy(default_widget["visualization"]),
+            **current_visualization,
+        }
+        if (
+            merged_config != current_config
+            or merged_visualization != current_visualization
+        ):
+            conn.execute(
+                """
+                UPDATE dashboard_widgets
+                SET config_json = ?, visualization_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _canonical_json(merged_config),
+                    _canonical_json(merged_visualization),
+                    timestamp,
+                    int(row["id"]),
+                ),
+            )
+
+
 def widget_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
@@ -1887,6 +2036,9 @@ def dashboard_row_to_dict(
         "layout_version": int(row["layout_version"]),
         "revision": int(row["layout_version"]),
         "legacy_layout_migrated": _bool(row["legacy_layout_migrated"]),
+        "core_top_widgets_migrated": _bool(
+            row["core_top_widgets_migrated"]
+        ),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -2309,8 +2461,9 @@ def create_dashboard(
             name, description, owner_user_id, is_default, is_shared, is_system,
             template_key, global_filters_json, prefix_filter_json,
             prefix_grouping_json, time_range_json,
-            refresh_interval_seconds, layout_version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            refresh_interval_seconds, layout_version,
+            core_top_widgets_migrated, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             normalized["name"],

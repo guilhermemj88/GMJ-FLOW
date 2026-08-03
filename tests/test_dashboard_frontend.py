@@ -1,8 +1,12 @@
 import pathlib
+import json
 import re
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -156,6 +160,100 @@ class DashboardResizeContractTest(unittest.TestCase):
         self.assertIsNone(
             re.search(r"<button[^>]+data-widget-drag-handle", FRONTEND)
         )
+
+    def test_core_top_rankings_use_editable_widget_controls(self):
+        legacy_section_start = FRONTEND.index(
+            'data-dashboard-legacy-fallback="top-rankings"'
+        )
+        legacy_section_end = FRONTEND.index(
+            '<section class="row g-3 mt-1">',
+            legacy_section_start,
+        )
+        legacy_section = FRONTEND[legacy_section_start:legacy_section_end]
+        for widget_key in ("top-src-ip", "top-dst-ip", "top-ports"):
+            self.assertIn(
+                'dashboard-widget legacy-dashboard-widget" '
+                f'data-widget-id="{widget_key}"',
+                legacy_section,
+            )
+            widget_start = legacy_section.index(
+                f'data-widget-id="{widget_key}"'
+            )
+            next_widget = legacy_section.find(
+                'class="col-12 col-xl-4 dashboard-widget',
+                widget_start + 1,
+            )
+            widget_source = legacy_section[
+                widget_start:next_widget if next_widget >= 0 else None
+            ]
+            self.assertIn('class="widget-actions"', widget_source)
+            for action in (
+                "widget-narrower",
+                "widget-wider",
+                "widget-shorter",
+                "widget-taller",
+                "widget-expand",
+                "widget-up",
+                "widget-down",
+                "widget-hide",
+            ):
+                self.assertIn(action, widget_source)
+
+        renderer = FRONTEND[
+            FRONTEND.index("function renderConfigurableDashboard()"):
+            FRONTEND.index("function syncConfigurableDashboardSelector(")
+        ]
+        for token in (
+            'class="configurable-dashboard-widget',
+            'data-widget-id="${widget.id}"',
+            'data-widget-key="${escapeHtml(widget.widget_key || \'\')}"',
+            'data-widget-editable="${Boolean(configurableDashboard.permissions?.can_edit)}"',
+            "configurable-dashboard-widget-drag-surface",
+            "configurable-widget-edit",
+            "configurable-widget-wider",
+            "configurable-widget-hide",
+            "configurable-widget-delete",
+            'data-resize-handle="e"',
+            'data-resize-handle="s"',
+            'data-resize-handle="se"',
+        ):
+            self.assertIn(token, renderer)
+        self.assertIn(
+            "#view-dashboard.dashboard-engine-active > section:not(#configurableDashboardGrid):not(#dashboardPrefixControls)",
+            FRONTEND,
+        )
+        self.assertIn("function setLegacyTopRankingsFallbackVisible(visible)", FRONTEND)
+        self.assertIn("setLegacyTopRankingsFallbackVisible(false)", FRONTEND)
+        self.assertIn("setLegacyTopRankingsFallbackVisible(true)", FRONTEND)
+        self.assertIn(".dashboard-editing .widget-actions", FRONTEND)
+        self.assertIn(
+            "#view-dashboard.dashboard-engine-active:not(.dashboard-editing)",
+            FRONTEND,
+        )
+
+    def test_core_top_rankings_keep_configurable_appearance_and_refresh_paths(self):
+        for token in (
+            'id="widgetConfigTitle"',
+            'id="widgetConfigVisualization"',
+            'id="widgetConfigPaletteMode"',
+            'id="widgetConfigBarColor"',
+            "refresh_interval_seconds",
+            "scheduleConfigurableWidgetRefresh(widget)",
+            "queryConfigurableWidget(widget, { force: true })",
+            "configurableRankingIdentity(item)",
+            "configurable-drilldown",
+        ):
+            self.assertIn(token, FRONTEND)
+        migration_block = BACKEND[
+            BACKEND.index('legacy_to_widget = {'):
+            BACKEND.index('width_map = {', BACKEND.index('legacy_to_widget = {'))
+        ]
+        for mapping in (
+            '"top-src-ip": "top-src-ip"',
+            '"top-dst-ip": "top-dst-ip"',
+            '"top-ports": "top-ports"',
+        ):
+            self.assertIn(mapping, migration_block)
 
     def test_resize_persists_desktop_grid_and_preserves_height_fields(self):
         for token in (
@@ -410,6 +508,203 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
             completed.stdout[-4000:],
         )
         self.assertIn("DASHBOARD_FRONTEND_TESTS_OK", completed.stdout)
+
+    def test_real_browser_renders_core_top_widget_actions_in_edit_mode(self):
+        edge = next((path for path in EDGE_CANDIDATES if path.exists()), None)
+        if edge is None:
+            self.skipTest("Microsoft Edge nÃ£o estÃ¡ disponÃ­vel")
+
+        widgets = [
+            {
+                "id": index,
+                "dashboard_id": 1,
+                "widget_key": widget_key,
+                "type": "top_n",
+                "title": title,
+                "description": "",
+                "category": "traffic",
+                "config": {
+                    "dimension": dimension,
+                    "metric": "bps",
+                    "direction": direction,
+                    "limit": 10,
+                    "visualization": visualization,
+                    "appearance": {"palette_mode": "default"},
+                },
+                "filters": [],
+                "visualization": {
+                    "type": visualization,
+                    "show_legend": True,
+                },
+                "grid": {"x": (index - 1) * 4, "y": 0, "w": 4, "h": 6},
+                "collapsed": False,
+                "hidden": False,
+                "height_mode": "fixed",
+                "refresh_interval_seconds": 30,
+                "use_global_filters": True,
+                "use_global_time_range": True,
+                "inheritance": {},
+                "custom_time_range": {},
+            }
+            for index, (widget_key, title, dimension, direction, visualization) in enumerate(
+                (
+                    ("top-src-ip", "Top IP origem", "src_ip", "source", "horizontal_bar"),
+                    ("top-dst-ip", "Top IP destino", "dst_ip", "destination", "horizontal_bar"),
+                    ("top-ports", "Top portas", "dst_port", "both", "bar"),
+                ),
+                start=1,
+            )
+        ]
+        dashboard = {
+            "id": 1,
+            "name": "Meu Dashboard",
+            "owner_user_id": 1,
+            "is_default": True,
+            "is_shared": False,
+            "is_system": False,
+            "legacy_layout_migrated": True,
+            "core_top_widgets_migrated": True,
+            "layout_mode": "custom",
+            "compact_mode": "none",
+            "time_range": {"mode": "relative", "minutes": 10},
+            "refresh_interval_seconds": 30,
+            "layout_version": 3,
+            "revision": 3,
+            "permissions": {"can_view": True, "can_edit": True, "can_delete": True},
+            "widgets": widgets,
+        }
+        served_html = FRONTEND.replace(
+            "<title>GMJ-FLOW</title>",
+            "<script>localStorage.setItem('gmjFlowAuthToken','dashboard-test');</script><title>GMJ-FLOW</title>",
+        ).replace(
+            "</body>",
+            """
+            <script>
+              setTimeout(() => document.getElementById('editDashboardButton')?.click(), 1200);
+              setTimeout(() => {
+                (configurableDashboard?.widgets || []).forEach(widget => configurableVisibleWidgets.add(widget.id));
+                refreshConfigurableDashboard();
+              }, 2200);
+            </script>
+            </body>
+            """,
+        )
+        widget_queries = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def send_json(self, payload):
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                path = urlparse(self.path).path
+                if path == "/api/auth/me":
+                    return self.send_json({
+                        "user": {
+                            "id": 1,
+                            "username": "dashboard-test",
+                            "role": "admin",
+                            "must_change_password": False,
+                        }
+                    })
+                if path == "/api/dashboards":
+                    return self.send_json({
+                        "items": [{"id": 1, "name": "Meu Dashboard", "is_system": False}],
+                        "default_dashboard_id": 1,
+                    })
+                if path == "/api/dashboards/1":
+                    return self.send_json(dashboard)
+                if path == "/api/dashboards/widget-catalog":
+                    return self.send_json({"presets": [], "types": [], "dimensions": [], "metrics": []})
+                if path in {"/", "/index.html"}:
+                    body = served_html.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                asset = ROOT / "frontend" / path.lstrip("/")
+                if asset.is_file():
+                    body = asset.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                return self.send_json({"items": []})
+
+            def do_POST(self):
+                path = urlparse(self.path).path
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                if path == "/api/dashboard-widgets/query":
+                    widget_queries.append(path)
+                    return self.send_json({
+                        "kind": "ranking",
+                        "metric": "bps",
+                        "items": [],
+                        "quality": {},
+                    })
+                return self.send_json({})
+
+            def log_message(self, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="gmj-dashboard-widgets-edge-") as profile:
+                completed = subprocess.run(
+                    [
+                        str(edge),
+                        "--headless=new",
+                        "--disable-gpu",
+                        "--disable-extensions",
+                        "--no-first-run",
+                        "--force-time-zone=America/Sao_Paulo",
+                        "--virtual-time-budget=6000",
+                        "--user-data-dir=%s" % profile,
+                        "--dump-dom",
+                        "http://127.0.0.1:%s/#dashboard" % server.server_port,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=40,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr[-4000:])
+        self.assertIn('id="view-dashboard" class="app-view active dashboard-engine-active dashboard-editing"', completed.stdout)
+        fallback_start = completed.stdout.index(
+            'data-dashboard-legacy-fallback="top-rankings"'
+        )
+        fallback_open_end = completed.stdout.index(">", fallback_start)
+        fallback_opening = completed.stdout[fallback_start:fallback_open_end]
+        self.assertIn('hidden=""', fallback_opening)
+        self.assertIn('aria-hidden="true"', fallback_opening)
+        grid_start = completed.stdout.index('<section id="configurableDashboardGrid"')
+        grid_end = completed.stdout.index('</section>', grid_start)
+        rendered_grid = completed.stdout[grid_start:grid_end]
+        for widget_key in ("top-src-ip", "top-dst-ip", "top-ports"):
+            self.assertEqual(rendered_grid.count(f'data-widget-key="{widget_key}"'), 1)
+        self.assertEqual(rendered_grid.count("configurable-widget-edit"), 3)
+        self.assertEqual(rendered_grid.count("configurable-widget-hide"), 3)
+        self.assertEqual(rendered_grid.count("configurable-widget-delete"), 3)
+        self.assertGreaterEqual(len(widget_queries), 3)
 
 
 if __name__ == "__main__":

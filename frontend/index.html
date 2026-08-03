@@ -3419,10 +3419,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
-          <section class="row g-3 mt-1">
-            <div class="col-12 col-xl-4">
+          <section class="row g-3 mt-1" data-dashboard-legacy-fallback="top-rankings">
+            <div class="col-12 col-xl-4 dashboard-widget legacy-dashboard-widget" data-widget-id="top-src-ip" data-widget-width="small" data-widget-height="low">
               <div class="panel p-3 h-100">
-                <div id="srcIpTitle" class="panel-title mb-2">Top IP origem</div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div id="srcIpTitle" class="panel-title">Top IP origem</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
                 <div id="srcIpChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -3432,9 +3444,21 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 </div>
               </div>
             </div>
-            <div class="col-12 col-xl-4">
+            <div class="col-12 col-xl-4 dashboard-widget legacy-dashboard-widget" data-widget-id="top-dst-ip" data-widget-width="small" data-widget-height="low">
               <div class="panel p-3 h-100">
-                <div id="dstIpTitle" class="panel-title mb-2">Top IP destino</div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div id="dstIpTitle" class="panel-title">Top IP destino</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
                 <div id="dstIpChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -3444,9 +3468,21 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 </div>
               </div>
             </div>
-            <div class="col-12 col-xl-4">
+            <div class="col-12 col-xl-4 dashboard-widget legacy-dashboard-widget" data-widget-id="top-ports" data-widget-width="small" data-widget-height="low">
               <div class="panel p-3 h-100">
-                <div id="portsTitle" class="panel-title mb-2">Top portas</div>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div id="portsTitle" class="panel-title">Top portas</div>
+                  <div class="widget-actions">
+                    <button type="button" class="icon-button widget-narrower" title="Reduzir largura"><i data-lucide="chevrons-left"></i></button>
+                    <button type="button" class="icon-button widget-wider" title="Aumentar largura"><i data-lucide="chevrons-right"></i></button>
+                    <button type="button" class="icon-button widget-shorter" title="Reduzir altura"><i data-lucide="chevron-up"></i></button>
+                    <button type="button" class="icon-button widget-taller" title="Aumentar altura"><i data-lucide="chevron-down"></i></button>
+                    <button type="button" class="icon-button widget-expand" title="Expandir widget"><i data-lucide="maximize-2"></i></button>
+                    <button type="button" class="icon-button widget-up" title="Mover para cima"><i data-lucide="arrow-up"></i></button>
+                    <button type="button" class="icon-button widget-down" title="Mover para baixo"><i data-lucide="arrow-down"></i></button>
+                    <button type="button" class="icon-button widget-hide" title="Remover"><i data-lucide="x"></i></button>
+                  </div>
+                </div>
                 <div id="portsChart" class="top-chart"></div>
                 <div class="table-wrap">
                   <table class="table table-sm align-middle mb-0">
@@ -22716,7 +22752,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         return `
           <article class="configurable-dashboard-widget ${widget.collapsed ? 'collapsed' : ''} ${widget.hidden ? 'is-hidden' : ''}" draggable="false"
             data-resize-enabled="${resizeEnabled}"
-            data-widget-id="${widget.id}" data-grid-x="${Number(widget.grid?.x || 0)}" data-grid-y="${Number(widget.grid?.y || 0)}"
+            data-widget-id="${widget.id}" data-widget-key="${escapeHtml(widget.widget_key || '')}"
+            data-widget-editable="${Boolean(configurableDashboard.permissions?.can_edit)}"
+            data-grid-x="${Number(widget.grid?.x || 0)}" data-grid-y="${Number(widget.grid?.y || 0)}"
             data-grid-w="${Number(widget.grid?.w || 4)}" data-grid-h="${Number(widget.grid?.h || 4)}"
             style="height:${gridHeight}px;grid-column:${Number(displayGrid?.x || 0) + 1} / span ${Number(displayGrid?.w || 1)};grid-row:${Number(displayGrid?.y || 0) + 1} / span ${Number(displayGrid?.h || 1)}">
             <div class="panel p-3">
@@ -22763,6 +22801,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         <option value="${item.id}">${item.is_system ? 'Modelo · ' : ''}${escapeHtml(item.name)}</option>
       `).join('');
       if (selectedId) selector.value = String(selectedId);
+    }
+
+    function setLegacyTopRankingsFallbackVisible(visible) {
+      const fallback = document.querySelector(
+        '[data-dashboard-legacy-fallback="top-rankings"]'
+      );
+      if (!fallback) return;
+      fallback.hidden = !visible;
+      fallback.setAttribute('aria-hidden', String(!visible));
     }
 
     async function loadConfigurableDashboard(dashboardId) {
@@ -22824,6 +22871,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         dashboard = configurableDashboard;
       }
       configurableDashboardActive = true;
+      setLegacyTopRankingsFallbackVisible(false);
       if (!dashboard.permissions?.can_edit) dashboardEditMode = false;
       document.getElementById('view-dashboard').classList.add('dashboard-engine-active');
       document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditMode);
@@ -22859,6 +22907,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         await loadConfigurableDashboard(dashboardId);
       } catch (error) {
         configurableDashboardActive = false;
+        setLegacyTopRankingsFallbackVisible(true);
         document.getElementById('view-dashboard').classList.remove('dashboard-engine-active');
         console.error('Motor de dashboards configuráveis indisponível; usando layout legado.', error);
       }
@@ -23568,6 +23617,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const defaults = {
         'bps-chart': { width: 'medium', height: 'low' },
         'pps-chart': { width: 'medium', height: 'low' },
+        'top-src-ip': { width: 'small', height: 'low' },
+        'top-dst-ip': { width: 'small', height: 'low' },
+        'top-ports': { width: 'small', height: 'low' },
         'top-conversations': { width: 'medium', height: 'low' },
         'syn-src': { width: 'small', height: 'low' },
         'syn-dst': { width: 'small', height: 'low' },
