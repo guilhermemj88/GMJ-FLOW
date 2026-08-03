@@ -20298,7 +20298,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (configurablePrefixControlsController) {
         return configurablePrefixControlsController;
       }
-      configurablePrefixControlsController = GMJDashboardPrefixControls.createController({
+      const prefixControlsApi = window.GMJDashboardPrefixControls;
+      if (!prefixControlsApi || typeof prefixControlsApi.createController !== 'function') {
+        throw new Error('dashboard-prefix-controls.js não foi carregado.');
+      }
+      configurablePrefixControlsController = prefixControlsApi.createController({
         panel: document.getElementById('dashboardPrefixControls'),
         body: document.getElementById('dashboardPrefixControlsBody'),
         header: document.getElementById('dashboardPrefixControlsHeader'),
@@ -22871,7 +22875,6 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         dashboard = configurableDashboard;
       }
       configurableDashboardActive = true;
-      setLegacyTopRankingsFallbackVisible(false);
       if (!dashboard.permissions?.can_edit) dashboardEditMode = false;
       document.getElementById('view-dashboard').classList.add('dashboard-engine-active');
       document.getElementById('view-dashboard').classList.toggle('dashboard-editing', dashboardEditMode);
@@ -22884,7 +22887,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       syncConfigurableDashboardSelector(dashboard.id);
       renderConfigurablePrefixCatalog();
       syncConfigurablePrefixControls();
-      renderConfigurableDashboard();
+      try {
+        renderConfigurableDashboard();
+        setLegacyTopRankingsFallbackVisible(false);
+      } catch (error) {
+        configurableDashboardActive = false;
+        setLegacyTopRankingsFallbackVisible(true);
+        document.getElementById('view-dashboard').classList.remove('dashboard-engine-active');
+        console.error('Falha ao renderizar dashboard configurável; usando layout legado.', error);
+        throw error;
+      }
       return dashboard;
     }
 
@@ -26602,7 +26614,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     mountDetectionTemplateSection();
     initializeAppearanceTheme();
     applyDashboardLayout();
-    installConfigurableDashboardEvents();
+    try {
+      installConfigurableDashboardEvents();
+    } catch (error) {
+      console.error('Falha ao instalar controles configuráveis do dashboard.', error);
+    }
     updateMapFilterBadge();
     resetPeakHunterForm();
     installHelpTooltips();

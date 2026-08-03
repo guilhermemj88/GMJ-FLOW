@@ -386,6 +386,41 @@ class DashboardResizeContractTest(unittest.TestCase):
         ):
             self.assertIn(token, PREFIX_CONTROLS)
 
+        controller_source = FRONTEND[
+            FRONTEND.index("function ensureConfigurablePrefixControlsController()"):
+            FRONTEND.index("function renderConfigurablePrefixCatalog()")
+        ]
+        self.assertIn("const prefixControlsApi = window.GMJDashboardPrefixControls;", controller_source)
+        self.assertIn("typeof prefixControlsApi.createController !== 'function'", controller_source)
+        self.assertIn("dashboard-prefix-controls.js não foi carregado.", controller_source)
+
+        load_source = FRONTEND[
+            FRONTEND.index("async function loadConfigurableDashboard("):
+            FRONTEND.index("async function initializeConfigurableDashboards()")
+        ]
+        self.assertLess(
+            load_source.index("renderConfigurableDashboard();"),
+            load_source.index("setLegacyTopRankingsFallbackVisible(false);")
+        )
+        for token in (
+            "configurableDashboardActive = false;",
+            "setLegacyTopRankingsFallbackVisible(true);",
+            "classList.remove('dashboard-engine-active')",
+            "Falha ao renderizar dashboard configurável; usando layout legado.",
+        ):
+            self.assertIn(token, load_source)
+
+        bootstrap_source = FRONTEND[
+            FRONTEND.index("mountDetectionTemplateSection();"):
+            FRONTEND.index("window.addEventListener('beforeunload'")
+        ]
+        self.assertIn("try {\n      installConfigurableDashboardEvents();", bootstrap_source)
+        self.assertIn("Falha ao instalar controles configuráveis do dashboard.", bootstrap_source)
+        self.assertLess(
+            bootstrap_source.index("installConfigurableDashboardEvents();"),
+            bootstrap_source.index("initAuth().then(")
+        )
+
 
 class DashboardChartContractTest(unittest.TestCase):
     def test_safe_refresh_density_and_appearance_contract(self):
@@ -581,15 +616,79 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
             """
             <script>
               setTimeout(() => document.getElementById('editDashboardButton')?.click(), 1200);
+              setTimeout(() => document.getElementById('dashboardPrefixToggle')?.click(), 1800);
               setTimeout(() => {
                 (configurableDashboard?.widgets || []).forEach(widget => configurableVisibleWidgets.add(widget.id));
                 refreshConfigurableDashboard();
               }, 2200);
+              setTimeout(() => {
+                const editButtons = Array.from(document.querySelectorAll('.configurable-widget-edit'));
+                const prefixBody = document.getElementById('dashboardPrefixControlsBody');
+                const prefixToggle = document.getElementById('dashboardPrefixToggle');
+                document.body.dataset.configurableEditButtonsVisible = String(
+                  editButtons.length === 3
+                  && editButtons.every(button => getComputedStyle(button).display !== 'none' && !button.disabled)
+                );
+                document.body.dataset.dashboardPrefixExpanded = String(
+                  prefixToggle?.getAttribute('aria-expanded') === 'true'
+                  && prefixBody
+                  && !prefixBody.hidden
+                );
+              }, 3500);
+            </script>
+            </body>
+            """,
+        )
+        authenticated_html = FRONTEND.replace(
+            "<title>GMJ-FLOW</title>",
+            "<script>localStorage.setItem('gmjFlowAuthToken','dashboard-test');</script><title>GMJ-FLOW</title>",
+        )
+        renderer_failure_html = authenticated_html.replace(
+            "function renderConfigurableDashboard() {",
+            "function renderConfigurableDashboard() { throw new Error('renderer failure test');",
+        ).replace(
+            "</body>",
+            """
+            <script>
+              setTimeout(() => {
+                const view = document.getElementById('view-dashboard');
+                const fallback = document.querySelector('[data-dashboard-legacy-fallback="top-rankings"]');
+                document.body.dataset.rendererFailureHandled = String(
+                  configurableDashboardActive === false
+                  && !view.classList.contains('dashboard-engine-active')
+                  && fallback
+                  && !fallback.hidden
+                  && fallback.getAttribute('aria-hidden') === 'false'
+                );
+                document.body.dataset.rendererFailureAuthReady = String(currentAuthUser?.id === 1);
+              }, 3500);
+            </script>
+            </body>
+            """,
+        )
+        missing_module_html = authenticated_html.replace(
+            "</body>",
+            """
+            <script>
+              setTimeout(() => {
+                const view = document.getElementById('view-dashboard');
+                const fallback = document.querySelector('[data-dashboard-legacy-fallback="top-rankings"]');
+                document.body.dataset.missingModuleBootstrapContinued = String(
+                  currentAuthUser?.id === 1
+                  && !document.getElementById('appShell').classList.contains('auth-hidden')
+                  && configurableDashboardActive === false
+                  && !view.classList.contains('dashboard-engine-active')
+                  && fallback
+                  && !fallback.hidden
+                );
+              }, 3500);
             </script>
             </body>
             """,
         )
         widget_queries = []
+        prefix_asset_requests = []
+        missing_module_auth_requests = []
 
         class Handler(BaseHTTPRequestHandler):
             def send_json(self, payload):
@@ -601,8 +700,11 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                 self.wfile.write(body)
 
             def do_GET(self):
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
                 if path == "/api/auth/me":
+                    if "missing_module=1" in (self.headers.get("Referer") or ""):
+                        missing_module_auth_requests.append(path)
                     return self.send_json({
                         "user": {
                             "id": 1,
@@ -621,15 +723,28 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                 if path == "/api/dashboards/widget-catalog":
                     return self.send_json({"presets": [], "types": [], "dimensions": [], "metrics": []})
                 if path in {"/", "/index.html"}:
-                    body = served_html.encode("utf-8")
+                    if "renderer_failure=1" in parsed.query:
+                        selected_html = renderer_failure_html
+                    elif "missing_module=1" in parsed.query:
+                        selected_html = missing_module_html
+                    else:
+                        selected_html = served_html
+                    body = selected_html.encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                if path == "/dashboard-prefix-controls.js":
+                    referer = self.headers.get("Referer") or ""
+                    if "missing_module=1" in referer:
+                        self.send_error(404)
+                        return
                 asset = ROOT / "frontend" / path.lstrip("/")
                 if asset.is_file():
+                    if path == "/dashboard-prefix-controls.js":
+                        prefix_asset_requests.append((path, 200))
                     body = asset.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/javascript; charset=utf-8")
@@ -660,9 +775,10 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
-        try:
-            with tempfile.TemporaryDirectory(prefix="gmj-dashboard-widgets-edge-") as profile:
-                completed = subprocess.run(
+
+        def run_edge_page(query, profile_prefix):
+            with tempfile.TemporaryDirectory(prefix=profile_prefix) as profile:
+                return subprocess.run(
                     [
                         str(edge),
                         "--headless=new",
@@ -673,7 +789,8 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                         "--virtual-time-budget=6000",
                         "--user-data-dir=%s" % profile,
                         "--dump-dom",
-                        "http://127.0.0.1:%s/#dashboard" % server.server_port,
+                        "http://127.0.0.1:%s/%s#dashboard"
+                        % (server.server_port, query),
                     ],
                     check=False,
                     capture_output=True,
@@ -682,6 +799,17 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                     errors="replace",
                     timeout=40,
                 )
+
+        try:
+            completed = run_edge_page("", "gmj-dashboard-widgets-edge-")
+            renderer_failure_completed = run_edge_page(
+                "?renderer_failure=1",
+                "gmj-dashboard-renderer-failure-edge-",
+            )
+            missing_module_completed = run_edge_page(
+                "?missing_module=1",
+                "gmj-dashboard-missing-module-edge-",
+            )
         finally:
             server.shutdown()
             server.server_close()
@@ -704,7 +832,46 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
         self.assertEqual(rendered_grid.count("configurable-widget-edit"), 3)
         self.assertEqual(rendered_grid.count("configurable-widget-hide"), 3)
         self.assertEqual(rendered_grid.count("configurable-widget-delete"), 3)
+        self.assertIn('data-configurable-edit-buttons-visible="true"', completed.stdout)
+        self.assertIn('data-dashboard-prefix-expanded="true"', completed.stdout)
+        self.assertIn(
+            ("/dashboard-prefix-controls.js", 200),
+            prefix_asset_requests,
+        )
         self.assertGreaterEqual(len(widget_queries), 3)
+
+        self.assertEqual(
+            renderer_failure_completed.returncode,
+            0,
+            renderer_failure_completed.stderr[-4000:],
+        )
+        self.assertIn(
+            'data-renderer-failure-handled="true"',
+            renderer_failure_completed.stdout,
+        )
+        self.assertIn(
+            'data-renderer-failure-auth-ready="true"',
+            renderer_failure_completed.stdout,
+        )
+        self.assertNotIn(
+            'id="view-dashboard" class="app-view active dashboard-engine-active',
+            renderer_failure_completed.stdout,
+        )
+
+        self.assertEqual(
+            missing_module_completed.returncode,
+            0,
+            missing_module_completed.stderr[-4000:],
+        )
+        self.assertIn(
+            'data-missing-module-bootstrap-continued="true"',
+            missing_module_completed.stdout,
+        )
+        self.assertGreaterEqual(len(missing_module_auth_requests), 1)
+        self.assertNotIn(
+            'id="view-dashboard" class="app-view active dashboard-engine-active',
+            missing_module_completed.stdout,
+        )
 
 
 if __name__ == "__main__":
