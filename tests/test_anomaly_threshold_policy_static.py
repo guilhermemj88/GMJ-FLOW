@@ -494,7 +494,7 @@ class AnomalySeverityUiStaticTest(unittest.TestCase):
         self.assertIn("criticalBadge.hidden = criticalCount <= 0", HTML)
 
     def test_cards_and_menu_share_the_existing_ops_summary_poll(self):
-        self.assertEqual(1, HTML.count("apiRequest('/api/ops/summary')"))
+        self.assertEqual(1, HTML.count("apiRequest('/api/ops/summary', { cache: 'no-store' })"))
         self.assertNotIn("apiRequest('/api/anomalies/summary')", HTML)
         self.assertIn("setText('anomalyActiveCount'", HTML)
         self.assertIn("setText('anomalyCriticalCount'", HTML)

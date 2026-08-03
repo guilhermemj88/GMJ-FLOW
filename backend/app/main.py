@@ -27,6 +27,10 @@ from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
 from typing import Any, Union
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - production image uses Python 3.12.
+    ZoneInfo = None  # type: ignore[assignment,misc]
 
 import clickhouse_connect
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -515,6 +519,12 @@ SAMPLE_RATE_MODES = {"sensor_default", "per_interface", "snmp_auto"}
 WHOIS_CACHE_TTL_SECONDS = 24 * 60 * 60
 WHOIS_CACHE: dict[str, dict[str, Any]] = {}
 MAX_RANGE_MINUTES = int(os.getenv("GMJFLOW_MAX_RANGE_MINUTES", "259200"))
+ANOMALY_TIME_ZONE_NAME = "America/Sao_Paulo"
+ANOMALY_TIME_ZONE = ZoneInfo(ANOMALY_TIME_ZONE_NAME) if ZoneInfo is not None else timezone(timedelta(hours=-3), ANOMALY_TIME_ZONE_NAME)
+ANOMALY_ACTIVE_STATUSES = ("active",)
+ANOMALY_HISTORY_STATUSES = ("acknowledged", "ended", "closed", "resolved", "archived")
+ANOMALY_HISTORY_DEFAULT_PAGE_SIZE = 100
+ANOMALY_HISTORY_MAX_PAGE_SIZE = 200
 RUNTIME_DIR = Path(os.getenv("GMJFLOW_RUNTIME_DIR", "/app/runtime"))
 GMJFLOW_PROJECT_DIR = os.getenv("GMJFLOW_PROJECT_DIR", "").strip()
 COLLECTORS_DIR = Path(os.getenv("GMJFLOW_COLLECTORS_DIR", str(RUNTIME_DIR / "data" / "collectors")))
@@ -1732,6 +1742,20 @@ def parse_datetime_text(value: Any) -> datetime | None:
     except ValueError:
         return None
     return utc_dt(parsed)
+
+
+def parse_anomaly_filter_datetime(value: Any, field_name: str) -> datetime | None:
+    """Parse anomaly filters once, treating naive wall-clock values as Sao Paulo time."""
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} invalido") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ANOMALY_TIME_ZONE)
+    return parsed.astimezone(timezone.utc)
 
 
 def rows_as_dicts(result: Any) -> list[dict[str, Any]]:
@@ -4490,6 +4514,9 @@ async def http_observability_middleware(request: Request, call_next):
         elif isinstance(getattr(response, "body", None), (bytes, bytearray)):
             response_bytes = len(response.body)
         response.headers["X-Request-ID"] = request_id
+        if request.url.path.startswith(("/api/anomalies", "/api/security/anomalies")):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
         if (
             request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and status_code < 400
@@ -27160,18 +27187,19 @@ def list_security_anomalies(
 ) -> dict[str, Any]:
     ensure_sensor_db()
     extra_where, values = security_anomaly_filters(zone_id, prefix_id, vector, severity, protocol, src_ip, dst_ip)
-    status_where = "status = 'active'" if status_group == "active" else "status <> 'active'"
+    statuses = ANOMALY_ACTIVE_STATUSES if status_group == "active" else ANOMALY_HISTORY_STATUSES
+    status_placeholders = ",".join("?" for _ in statuses)
     with sqlite_connection() as conn:
         rows = conn.execute(
             f"""
             SELECT *
             FROM security_anomalies
-            WHERE {status_where}
+            WHERE lower(status) IN ({status_placeholders})
               {extra_where}
             ORDER BY last_seen DESC, id DESC
             LIMIT ?
             """,
-            [*values, limit],
+            [*statuses, *values, limit],
         ).fetchall()
     return {"items": [security_anomaly_row_to_dict(row) for row in rows]}
 
@@ -31596,15 +31624,17 @@ def security_consolidation_key(item: dict[str, Any], include_status: bool = Fals
 
 
 def consolidated_security_anomaly_groups(status_filter: str) -> list[dict[str, Any]]:
-    status_where = "status = 'active'" if status_filter == "active" else "status <> 'active'"
+    statuses = ANOMALY_ACTIVE_STATUSES if status_filter == "active" else ANOMALY_HISTORY_STATUSES
+    status_placeholders = ",".join("?" for _ in statuses)
     with sqlite_connection() as conn:
         rows = conn.execute(
             f"""
             SELECT *
             FROM security_anomalies
-            WHERE {status_where}
+            WHERE lower(status) IN ({status_placeholders})
             ORDER BY last_seen DESC, updated_at DESC, id DESC
-            """
+            """,
+            statuses,
         ).fetchall()
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
@@ -31927,13 +31957,129 @@ def enrich_anomalies_with_responses(items: list[dict[str, Any]]) -> list[dict[st
     return items
 
 
-def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = None, source_engine: str | None = None) -> list[dict[str, Any]]:
+def anomaly_sort_key(item: dict[str, Any]) -> tuple[datetime, int, str]:
+    return (
+        parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        int(item.get("id") or 0),
+        clean_text(item.get("source")),
+    )
+
+
+def anomaly_item_matches_filters(
+    item: dict[str, Any],
+    *,
+    anomaly_id: int | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    anomaly_type: str | None = None,
+    target: str | None = None,
+    anomaly_source: str | None = None,
+    source_engine: str | None = None,
+) -> bool:
+    if anomaly_id is not None:
+        identifiers = {
+            int(value)
+            for value in (item.get("id"), item.get("action_id"), item.get("security_anomaly_id"), item.get("legacy_event_id"))
+            if int_or_none(value) is not None
+        }
+        if anomaly_id not in identifiers:
+            return False
+    item_time = parse_datetime_text(item.get("last_seen_at"))
+    if start_at is not None and (item_time is None or item_time < start_at):
+        return False
+    if end_at is not None and (item_time is None or item_time > end_at):
+        return False
+    if clean_text(status) and clean_text(item.get("status")).lower() != clean_text(status).lower():
+        return False
+    if clean_text(severity) and clean_text(item.get("severity")).lower() != clean_text(severity).lower():
+        return False
+    if clean_text(anomaly_type):
+        needle = clean_text(anomaly_type).lower()
+        type_values = (
+            item.get("vector_name"), item.get("attack_vector_name"), item.get("display_name"),
+            item.get("friendly_name"), item.get("decoder"), item.get("source_name"),
+        )
+        if not any(needle in clean_text(value).lower() for value in type_values):
+            return False
+    if clean_text(target):
+        needle = clean_text(target).lower()
+        target_values = (
+            item.get("target_ip"), item.get("target_cidr"), item.get("top_src_ip"),
+            item.get("top_dst_ip"), item.get("zone_name"),
+        )
+        if not any(needle in clean_text(value).lower() for value in target_values):
+            return False
+    if clean_text(anomaly_source) and clean_text(item.get("anomaly_source")) != clean_text(anomaly_source):
+        return False
+    if clean_text(source_engine) and clean_text(item.get("source_engine")) != clean_text(source_engine):
+        return False
+    return True
+
+
+def anomaly_sql_like_value(value: Any) -> str:
+    escaped = clean_text(value).lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def anomaly_page(
+    status_filter: str,
+    page: int,
+    page_size: int,
+    *,
+    anomaly_id: int | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    anomaly_type: str | None = None,
+    target: str | None = None,
+    anomaly_source: str | None = None,
+    source_engine: str | None = None,
+) -> dict[str, Any]:
     ensure_sensor_db()
+    if status_filter not in {"active", "history"}:
+        raise ValueError("status_filter invalido")
+    statuses = ANOMALY_ACTIVE_STATUSES if status_filter == "active" else ANOMALY_HISTORY_STATUSES
+    requested_status = clean_text(status).lower()
+    if requested_status and requested_status not in statuses:
+        return {"items": [], "page": page, "page_size": page_size, "total": 0, "has_more": False}
+    offset = (page - 1) * page_size
+    source_limit = offset + page_size
     values: list[Any] = []
-    if status_filter == "active":
-        filters = ["e.status = 'active'"]
-    else:
-        filters = ["e.status <> 'active'"]
+    status_placeholders = ",".join("?" for _ in statuses)
+    filters = [f"lower(e.status) IN ({status_placeholders})"]
+    values.extend(statuses)
+    if anomaly_id is not None:
+        filters.append("e.id = ?")
+        values.append(anomaly_id)
+    if start_at is not None:
+        filters.append("e.last_seen_at >= ?")
+        values.append(iso(start_at))
+    if end_at is not None:
+        filters.append("e.last_seen_at <= ?")
+        values.append(iso(end_at))
+    if requested_status:
+        filters.append("lower(e.status) = ?")
+        values.append(requested_status)
+    if clean_text(severity):
+        filters.append("lower(e.severity) = ?")
+        values.append(clean_text(severity).lower())
+    if clean_text(anomaly_type):
+        filters.append(
+            "lower(COALESCE(e.vector_name, '') || ' ' || COALESCE(v.display_name, '') || ' ' || "
+            "COALESCE(v.name, '') || ' ' || COALESCE(e.decoder, '') || ' ' || COALESCE(e.source_name, '')) "
+            "LIKE ? ESCAPE '\\'"
+        )
+        values.append(anomaly_sql_like_value(anomaly_type))
+    if clean_text(target):
+        filters.append(
+            "lower(COALESCE(e.target_ip, '') || ' ' || COALESCE(e.target_cidr, '') || ' ' || "
+            "COALESCE(e.top_src_ip, '') || ' ' || COALESCE(e.top_dst_ip, '') || ' ' || COALESCE(e.zone_name, '')) "
+            "LIKE ? ESCAPE '\\'"
+        )
+        values.append(anomaly_sql_like_value(target))
     if clean_text(anomaly_source):
         filters.append("e.anomaly_source = ?")
         values.append(clean_text(anomaly_source))
@@ -31942,6 +32088,15 @@ def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = No
         values.append(clean_text(source_engine))
     where = " AND ".join(filters)
     with sqlite_connection() as conn:
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            WHERE {where}
+            """,
+            values,
+        ).fetchone()
         rows = conn.execute(
             f"""
             SELECT
@@ -31954,24 +32109,49 @@ def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = No
             LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
             LEFT JOIN sensors s ON s.id = e.sensor_id
             WHERE {where}
-            ORDER BY e.last_seen_at DESC
-            LIMIT ?
+            ORDER BY e.last_seen_at DESC, e.id DESC
+            LIMIT ? OFFSET ?
             """,
-            (*values, limit),
+            (*values, source_limit, 0),
         ).fetchall()
     items = [anomaly_event_row_to_dict(row) for row in rows]
     consolidated = [group["event"] for group in consolidated_security_anomaly_groups(status_filter)]
-    if clean_text(anomaly_source):
-        consolidated = [item for item in consolidated if clean_text(item.get("anomaly_source")) == clean_text(anomaly_source)]
-    if clean_text(source_engine):
-        consolidated = [item for item in consolidated if clean_text(item.get("source_engine")) == clean_text(source_engine)]
+    consolidated = [
+        item for item in consolidated
+        if anomaly_item_matches_filters(
+            item,
+            anomaly_id=anomaly_id,
+            start_at=start_at,
+            end_at=end_at,
+            status=requested_status,
+            severity=severity,
+            anomaly_type=anomaly_type,
+            target=target,
+            anomaly_source=anomaly_source,
+            source_engine=source_engine,
+        )
+    ]
     items.extend(consolidated)
-    if status_filter == "active":
-        items = [item for item in items if clean_text(item.get("status")).lower() == "active"]
-    else:
-        items = [item for item in items if clean_text(item.get("status")).lower() != "active"]
-    page = sorted(items, key=lambda item: parse_datetime_text(item.get("last_seen_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:limit]
-    return enrich_anomalies_with_responses(page)
+    ordered = sorted(items, key=anomaly_sort_key, reverse=True)
+    total = int(total_row["count"] or 0) + len(consolidated)
+    page_items = enrich_anomalies_with_responses(ordered[offset : offset + page_size])
+    return {
+        "items": page_items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": offset + len(page_items) < total,
+    }
+
+
+def anomaly_list(status_filter: str, limit: int, anomaly_source: str | None = None, source_engine: str | None = None) -> list[dict[str, Any]]:
+    return anomaly_page(
+        status_filter,
+        1,
+        limit,
+        anomaly_source=anomaly_source,
+        source_engine=source_engine,
+    )["items"]
 
 
 def anomaly_detail_payload(
@@ -32449,9 +32629,128 @@ def active_anomalies(request: Request, limit: int = Query(200, ge=1, le=1000), a
 
 
 @app.get("/api/anomalies/history")
-def anomaly_history(request: Request, limit: int = Query(200, ge=1, le=1000), anomaly_source: str | None = None, source_engine: str | None = None):
+def anomaly_history(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(ANOMALY_HISTORY_DEFAULT_PAGE_SIZE, ge=1, le=ANOMALY_HISTORY_MAX_PAGE_SIZE),
+    anomaly_id: int | None = Query(None, alias="id"),
+    start_at: str | None = None,
+    end_at: str | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    anomaly_type: str | None = Query(None, alias="type"),
+    target: str | None = None,
+    anomaly_source: str | None = None,
+    source_engine: str | None = None,
+    limit: int | None = Query(None, ge=1, le=1000),
+):
     require_admin(request)
-    return {"items": anomaly_list("history", limit, anomaly_source, source_engine)}
+    effective_page_size = min(limit, ANOMALY_HISTORY_MAX_PAGE_SIZE) if limit is not None else page_size
+    start_dt = parse_anomaly_filter_datetime(start_at, "start_at")
+    end_dt = parse_anomaly_filter_datetime(end_at, "end_at")
+    if start_dt is not None and end_dt is not None and start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start_at deve ser anterior ou igual a end_at")
+    result = anomaly_page(
+        "history",
+        page,
+        effective_page_size,
+        anomaly_id=anomaly_id,
+        start_at=start_dt,
+        end_at=end_dt,
+        status=status,
+        severity=severity,
+        anomaly_type=anomaly_type,
+        target=target,
+        anomaly_source=anomaly_source,
+        source_engine=source_engine,
+    )
+    return {
+        **result,
+        "time_field": "last_seen_at",
+        "timezone": ANOMALY_TIME_ZONE_NAME,
+        "end_at_inclusive": True,
+        "sort": ["last_seen_at:desc", "id:desc"],
+        "applied_filters": {
+            "id": anomaly_id,
+            "start_at": iso(start_dt) if start_dt is not None else None,
+            "end_at": iso(end_dt) if end_dt is not None else None,
+            "status": clean_text(status).lower() or None,
+            "severity": clean_text(severity).lower() or None,
+            "type": clean_text(anomaly_type) or None,
+            "target": clean_text(target) or None,
+        },
+        "filter_options": {
+            "statuses": list(ANOMALY_HISTORY_STATUSES),
+            "severities": ["critical", "warning", "info"],
+        },
+    }
+
+
+@app.get("/api/anomalies/diagnostics")
+def anomaly_diagnostics(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        regular = dict(conn.execute(
+            """
+            SELECT COUNT(*) AS total, MIN(id) AS min_id, MAX(id) AS max_id,
+                   MIN(created_at) AS first_created_at, MAX(created_at) AS last_created_at,
+                   MAX(last_seen_at) AS last_seen_at
+            FROM anomaly_events
+            """
+        ).fetchone())
+        regular_statuses = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT status, COUNT(*) AS total, MAX(id) AS max_id, MAX(last_seen_at) AS last_seen_at
+                FROM anomaly_events GROUP BY status ORDER BY total DESC, status
+                """
+            ).fetchall()
+        ]
+        latest = [
+            anomaly_event_row_to_dict(row) for row in conn.execute(
+                "SELECT * FROM anomaly_events ORDER BY last_seen_at DESC, id DESC LIMIT 100"
+            ).fetchall()
+        ]
+        security = dict(conn.execute(
+            """
+            SELECT COUNT(*) AS total, MIN(id) AS min_id, MAX(id) AS max_id,
+                   MIN(created_at) AS first_created_at, MAX(created_at) AS last_created_at,
+                   MAX(last_seen) AS last_seen_at
+            FROM security_anomalies
+            """
+        ).fetchone())
+        security_statuses = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT status, COUNT(*) AS total, MAX(id) AS max_id, MAX(last_seen) AS last_seen_at
+                FROM security_anomalies GROUP BY status ORDER BY total DESC, status
+                """
+            ).fetchall()
+        ]
+        latest_security = [
+            security_anomaly_row_to_dict(row) for row in conn.execute(
+                "SELECT * FROM security_anomalies ORDER BY last_seen DESC, id DESC LIMIT 100"
+            ).fetchall()
+        ]
+    with DETECTION_SCHEDULER_LOCK:
+        detector = dict(DETECTION_SCHEDULER_STATUS)
+    return {
+        "database": "sqlite",
+        "database_path": str(sqlite_path()),
+        "tables": ["anomaly_events", "security_anomalies"],
+        "anomaly_events": regular,
+        "security_anomalies": security,
+        "statuses": regular_statuses,
+        "security_statuses": security_statuses,
+        "latest": latest,
+        "latest_security": latest_security,
+        "detector": {
+            "enabled": anomaly_detection_enabled(),
+            "scheduler_running": bool(ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive()),
+            **detector,
+        },
+    }
 
 
 def consolidated_security_anomaly_detail_payload(group: dict[str, Any]) -> dict[str, Any]:

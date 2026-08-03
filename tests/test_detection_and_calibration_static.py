@@ -1279,7 +1279,11 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
         self.assertIn("function syncAnomalyListItemFromDetail", FRONTEND)
         self.assertIn("anomalyItems.splice(index, 1)", FRONTEND)
         self.assertNotIn("event.status = rowSnapshot.status", FRONTEND)
-        self.assertIn('clean_text(item.get("status")).lower() == "active"', SOURCE)
+        self.assertIn('ANOMALY_ACTIVE_STATUSES = ("active",)', SOURCE)
+        self.assertIn(
+            'statuses = ANOMALY_ACTIVE_STATUSES if status_filter == "active" else ANOMALY_HISTORY_STATUSES',
+            SOURCE,
+        )
         self.assertEqual(
             backend_main.security_anomaly_items_status([{"status": "acknowledged"}], "active"),
             "acknowledged",

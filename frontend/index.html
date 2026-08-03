@@ -1528,10 +1528,19 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     .attack-vector-form-grid,
     .peak-hunter-form-grid,
     .ip-zone-form-grid,
-    .detection-rule-form-grid {
+    .detection-rule-form-grid,
+    .anomaly-filter-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(150px, 1fr));
       gap: .75rem;
+    }
+
+    .anomaly-filter-actions {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: .5rem;
     }
 
     .grid-span-3 {
@@ -2246,6 +2255,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       .attack-vector-form-grid,
       .ip-zone-form-grid,
       .detection-rule-form-grid,
+      .anomaly-filter-grid,
       .database-metrics-grid {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
       }
@@ -2280,6 +2290,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       .attack-vector-form-grid,
       .ip-zone-form-grid,
       .detection-rule-form-grid,
+      .anomaly-filter-grid,
       .anomaly-detail-grid,
       .database-metrics-grid,
       .database-actions-grid,
@@ -5544,7 +5555,6 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div id="anomalyStatus" class="subtle">Eventos detectados pelos vetores ativos</div>
             </div>
             <div class="toolbar">
-              <input id="anomalyIdSearch" class="form-control form-control-sm" style="max-width:140px" placeholder="#ID">
               <div class="tab-strip" role="tablist" aria-label="Filtro de anomalias">
                 <button id="anomalyTabActive" type="button" class="active">Ativas</button>
                 <button id="anomalyTabHistory" type="button">Histórico</button>
@@ -5554,6 +5564,72 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </button>
             </div>
           </div>
+
+          <div id="anomalyErrorAlert" class="alert alert-danger d-none" role="alert">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+              <span id="anomalyErrorMessage"></span>
+              <button id="anomalyRetryButton" type="button" class="btn btn-sm btn-outline-danger">Tentar novamente</button>
+            </div>
+          </div>
+
+          <section id="anomalyHistoryControls" class="panel p-3 d-none">
+            <div class="panel-title mb-3">Filtros do histórico</div>
+            <div class="anomaly-filter-grid">
+              <div class="field">
+                <label for="anomalyIdSearch">ID</label>
+                <input id="anomalyIdSearch" type="number" min="1" class="form-control form-control-sm" placeholder="3088">
+              </div>
+              <div class="field">
+                <label for="anomalyStartAt">Data/hora inicial</label>
+                <input id="anomalyStartAt" type="datetime-local" step="1" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="anomalyEndAt">Data/hora final (inclusiva)</label>
+                <input id="anomalyEndAt" type="datetime-local" step="1" class="form-control form-control-sm">
+              </div>
+              <div class="field">
+                <label for="anomalyRangePreset">Atalho de período</label>
+                <select id="anomalyRangePreset" class="form-select form-select-sm">
+                  <option value="custom">Personalizado</option>
+                  <option value="1h">Última hora</option>
+                  <option value="4h">Últimas 4 horas</option>
+                  <option value="12h">Últimas 12 horas</option>
+                  <option value="24h">Últimas 24 horas</option>
+                  <option value="today">Hoje</option>
+                  <option value="yesterday">Ontem</option>
+                  <option value="7d">Últimos 7 dias</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="anomalyStatusFilter">Status</label>
+                <select id="anomalyStatusFilter" class="form-select form-select-sm">
+                  <option value="">Todos os encerrados</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="anomalySeverityFilter">Severidade</label>
+                <select id="anomalySeverityFilter" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="critical">critical</option>
+                  <option value="warning">warning</option>
+                  <option value="info">info</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="anomalyTypeFilter">Tipo de anomalia</label>
+                <input id="anomalyTypeFilter" class="form-control form-control-sm" placeholder="DNS">
+              </div>
+              <div class="field">
+                <label for="anomalyTargetFilter">Alvo/IP</label>
+                <input id="anomalyTargetFilter" class="form-control form-control-sm" placeholder="186.232.172.231">
+              </div>
+              <div class="anomaly-filter-actions">
+                <button id="anomalySearchButton" type="button" class="btn btn-sm btn-success">Buscar</button>
+                <button id="anomalyClearButton" type="button" class="btn btn-sm btn-outline-secondary">Limpar</button>
+                <span id="anomalyAppliedPeriod" class="subtle">Mais recentes • America/Sao_Paulo</span>
+              </div>
+            </div>
+          </section>
 
           <section class="panel p-3">
             <div class="database-metrics-grid">
@@ -5607,6 +5683,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 </thead>
                 <tbody id="anomaliesTable"></tbody>
               </table>
+            </div>
+            <div id="anomalyPagination" class="d-none d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+              <div id="anomalyPageInfo" class="subtle">0 resultados</div>
+              <div class="toolbar">
+                <label for="anomalyPageSize" class="subtle mb-0">Por página</label>
+                <select id="anomalyPageSize" class="form-select form-select-sm" style="width:auto">
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
+                  <option value="200">200</option>
+                </select>
+                <button id="anomalyPreviousPage" type="button" class="btn btn-sm btn-outline-secondary">Anterior</button>
+                <button id="anomalyNextPage" type="button" class="btn btn-sm btn-outline-secondary">Próxima</button>
+              </div>
             </div>
           </section>
 
@@ -9276,6 +9366,18 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let currentAttackVectorTestId = null;
     let anomalyActiveTab = 'active';
     let anomalyItems = [];
+    let anomalyLoadSequence = 0;
+    let anomalyLoadInFlight = false;
+    let anomalyLastAutoRefreshAt = 0;
+    const ANOMALY_AUTO_REFRESH_MS = 15000;
+    const ANOMALY_TIME_ZONE = 'America/Sao_Paulo';
+    const anomalyHistoryState = {
+      page: 1,
+      pageSize: 100,
+      total: 0,
+      hasMore: false,
+      lastSuccessfulAt: null
+    };
     let currentAnomalyDetailId = null;
     let currentAnomalyDetailEvent = null;
     let currentAnomalyDetailPayload = null;
@@ -12326,7 +12428,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       status.textContent = 'Atualizando deteccoes IP Zone...';
       try {
         const path = tab === 'history' ? '/api/security/anomalies/history' : '/api/security/anomalies/active';
-        const payload = await apiRequest(path);
+        const payload = await apiRequest(path, { cache: 'no-store' });
         const items = Array.isArray(payload.items) ? payload.items : [];
         renderSecurityAnomaliesMain(items);
         status.textContent = `${formatNumber(items.length)} eventos IP Zone ${tab === 'history' ? 'no histórico' : 'ativos'}`;
@@ -16889,15 +16991,31 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderMitigationBadge(summary);
     }
 
+    function requestOpsSummary() {
+      return apiRequest('/api/ops/summary', { cache: 'no-store' });
+    }
+
     async function refreshOpsSummary() {
       if (currentAuthUser?.role !== 'admin' || opsSummaryRefreshInFlight) return;
       opsSummaryRefreshInFlight = true;
       try {
-        const summary = await apiRequest('/api/ops/summary');
-        renderOpsSummary(summary);
-        if (document.getElementById('view-anomalies')?.classList.contains('active')) {
-          await refreshAnomalyResponseRows();
+        let summaryError = null;
+        try {
+          const summary = await requestOpsSummary();
+          renderOpsSummary(summary);
+        } catch (error) {
+          summaryError = error;
         }
+        if (document.getElementById('view-anomalies')?.classList.contains('active')) {
+          const now = Date.now();
+          if (!anomalyLoadInFlight && now - anomalyLastAutoRefreshAt >= ANOMALY_AUTO_REFRESH_MS) {
+            anomalyLastAutoRefreshAt = now;
+            await loadAnomalies(anomalyActiveTab, { background: true, skipSummary: true, skipAuxiliary: true });
+          } else {
+            await refreshAnomalyResponseRows();
+          }
+        }
+        if (summaryError) throw summaryError;
       } finally {
         opsSummaryRefreshInFlight = false;
       }
@@ -16921,7 +17039,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function updateAnomalySummary() {
       if (currentAuthUser?.role !== 'admin') return;
-      await refreshOpsSummary();
+      const summary = await requestOpsSummary();
+      renderOpsSummary(summary);
     }
 
     async function loadAnomalyDashboard() {
@@ -17621,7 +17740,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!anomalyItems.length) return;
       if (anomalyResponseRefreshPromise) return anomalyResponseRefreshPromise;
       anomalyResponseRefreshPromise = (async () => {
-        const payload = await apiRequest(anomalyActiveTab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
+        const payload = await apiRequest(anomalyListEndpoint(anomalyActiveTab), { cache: 'no-store' });
         const freshItems = Array.isArray(payload.items) ? payload.items : [];
         const freshByKey = new Map();
         freshItems.forEach(item => {
@@ -17668,6 +17787,131 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return String(event?.operational_status || event?.status || '').toLowerCase();
     }
 
+    function anomalyFilterValue(id) {
+      return String(document.getElementById(id)?.value || '').trim();
+    }
+
+    function anomalySaoPauloDateTime(date) {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: ANOMALY_TIME_ZONE,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+      }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+      return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+    }
+
+    function anomalyShiftCalendarDate(dateText, days) {
+      const [year, month, day] = dateText.split('-').map(Number);
+      const shifted = new Date(Date.UTC(year, month - 1, day + days));
+      return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+    }
+
+    function applyAnomalyRangePreset(value, now = new Date()) {
+      if (!value || value === 'custom') return;
+      const end = anomalySaoPauloDateTime(now);
+      let start = '';
+      const durationHours = { '1h': 1, '4h': 4, '12h': 12, '24h': 24, '7d': 24 * 7 }[value];
+      if (durationHours) {
+        start = anomalySaoPauloDateTime(new Date(now.getTime() - durationHours * 3600000));
+      } else {
+        const today = end.slice(0, 10);
+        if (value === 'today') start = `${today}T00:00:00`;
+        if (value === 'yesterday') {
+          const yesterday = anomalyShiftCalendarDate(today, -1);
+          start = `${yesterday}T00:00:00`;
+          document.getElementById('anomalyEndAt').value = `${yesterday}T23:59:59`;
+        }
+      }
+      document.getElementById('anomalyStartAt').value = start;
+      if (value !== 'yesterday') document.getElementById('anomalyEndAt').value = end;
+    }
+
+    function anomalyHistoryFilters() {
+      return {
+        id: anomalyFilterValue('anomalyIdSearch'),
+        start_at: anomalyFilterValue('anomalyStartAt'),
+        end_at: anomalyFilterValue('anomalyEndAt'),
+        status: anomalyFilterValue('anomalyStatusFilter'),
+        severity: anomalyFilterValue('anomalySeverityFilter'),
+        type: anomalyFilterValue('anomalyTypeFilter'),
+        target: anomalyFilterValue('anomalyTargetFilter')
+      };
+    }
+
+    function validateAnomalyHistoryFilters(filters) {
+      if (filters.start_at && filters.end_at && filters.start_at > filters.end_at) {
+        return 'A data/hora inicial deve ser anterior ou igual à data/hora final.';
+      }
+      return '';
+    }
+
+    function anomalyListEndpoint(tab = anomalyActiveTab) {
+      if (tab === 'active') return '/api/anomalies/active?limit=200';
+      const filters = anomalyHistoryFilters();
+      const params = new URLSearchParams({
+        id: filters.id,
+        start_at: filters.start_at,
+        end_at: filters.end_at,
+        status: filters.status,
+        severity: filters.severity,
+        type: filters.type,
+        target: filters.target,
+        page: String(anomalyHistoryState.page),
+        page_size: String(anomalyHistoryState.pageSize)
+      });
+      return `/api/anomalies/history?${params.toString()}`;
+    }
+
+    function setAnomalyError(message = '') {
+      const alert = document.getElementById('anomalyErrorAlert');
+      const lastSuccess = anomalyHistoryState.lastSuccessfulAt
+        ? ` Última atualização bem-sucedida: ${anomalyHistoryState.lastSuccessfulAt.toLocaleString('pt-BR', { timeZone: ANOMALY_TIME_ZONE })}.`
+        : ' Ainda não houve atualização bem-sucedida nesta sessão.';
+      alert.classList.toggle('d-none', !message);
+      setText('anomalyErrorMessage', message ? `${message}${lastSuccess}` : '');
+    }
+
+    function populateAnomalyStatusOptions(statuses = []) {
+      const select = document.getElementById('anomalyStatusFilter');
+      const selected = select.value;
+      select.innerHTML = '<option value="">Todos os encerrados</option>' + statuses.map(status => `<option value="${escapeHtml(status)}">${escapeHtml(status)}</option>`).join('');
+      if ([...select.options].some(option => option.value === selected)) select.value = selected;
+    }
+
+    function updateAnomalyAppliedPeriod() {
+      const filters = anomalyHistoryFilters();
+      let text = 'Mais recentes';
+      if (filters.start_at || filters.end_at) {
+        text = `${filters.start_at ? filters.start_at.replace('T', ' ') : 'início'} → ${filters.end_at ? filters.end_at.replace('T', ' ') : 'agora'}`;
+      }
+      setText('anomalyAppliedPeriod', `${text} • ${ANOMALY_TIME_ZONE} • fim inclusivo`);
+    }
+
+    function renderAnomalyPagination(payload = {}) {
+      const pagination = document.getElementById('anomalyPagination');
+      pagination.classList.toggle('d-none', anomalyActiveTab !== 'history');
+      if (anomalyActiveTab !== 'history') return;
+      anomalyHistoryState.page = Number(payload.page || anomalyHistoryState.page || 1);
+      anomalyHistoryState.pageSize = Number(payload.page_size || anomalyHistoryState.pageSize || 100);
+      anomalyHistoryState.total = Number(payload.total || 0);
+      anomalyHistoryState.hasMore = Boolean(payload.has_more);
+      const first = anomalyHistoryState.total ? (anomalyHistoryState.page - 1) * anomalyHistoryState.pageSize + 1 : 0;
+      const last = Math.min(anomalyHistoryState.total, first + (payload.items?.length || 0) - 1);
+      setText('anomalyPageInfo', `${first}-${Math.max(first, last)} de ${anomalyHistoryState.total} • página ${anomalyHistoryState.page}`);
+      document.getElementById('anomalyPreviousPage').disabled = anomalyHistoryState.page <= 1;
+      document.getElementById('anomalyNextPage').disabled = !anomalyHistoryState.hasMore;
+      document.getElementById('anomalyPageSize').value = String(anomalyHistoryState.pageSize);
+    }
+
+    function clearAnomalyHistoryFilters() {
+      ['anomalyIdSearch', 'anomalyStartAt', 'anomalyEndAt', 'anomalyStatusFilter', 'anomalySeverityFilter', 'anomalyTypeFilter', 'anomalyTargetFilter'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      document.getElementById('anomalyRangePreset').value = 'custom';
+      anomalyHistoryState.page = 1;
+      updateAnomalyAppliedPeriod();
+    }
+
     function displayAnomalyItems(items) {
       const rows = Array.isArray(items) ? items : [];
       return anomalyActiveTab === 'active'
@@ -17688,7 +17932,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function renderAnomalyTable(items) {
       const tbody = document.getElementById('anomaliesTable');
-      const idSearch = String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim();
+      const idSearch = anomalyActiveTab === 'history' ? String(document.getElementById('anomalyIdSearch')?.value || '').replace('#', '').trim() : '';
       const tabItems = displayAnomalyItems(items);
       const visibleItems = idSearch ? tabItems.filter(event => [event.id, anomalyActionId(event)].some(value => String(value || '') === idSearch)) : tabItems;
       tbody.innerHTML = visibleItems.map(event => {
@@ -17726,22 +17970,65 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
-    async function loadAnomalies(tab = anomalyActiveTab) {
+    async function loadAnomalies(tab = anomalyActiveTab, options = {}) {
+      const previousTab = anomalyActiveTab;
       anomalyActiveTab = tab;
+      if (previousTab !== tab) anomalyHistoryState.page = 1;
       document.getElementById('anomalyTabActive').classList.toggle('active', tab === 'active');
       document.getElementById('anomalyTabHistory').classList.toggle('active', tab === 'history');
+      document.getElementById('anomalyHistoryControls').classList.toggle('d-none', tab !== 'history');
       setText('anomalyCurrentTab', tab === 'active' ? 'Ativas' : 'Histórico');
-      document.getElementById('anomalyStatus').textContent = 'Atualizando anomalias...';
+      const filters = anomalyHistoryFilters();
+      const validationError = tab === 'history' ? validateAnomalyHistoryFilters(filters) : '';
+      if (validationError) {
+        setAnomalyError(validationError);
+        anomalyItems = [];
+        renderAnomalyTable([]);
+        document.getElementById('anomalyStatus').textContent = 'Filtro inválido';
+        return;
+      }
+      const requestSequence = ++anomalyLoadSequence;
+      anomalyLoadInFlight = true;
+      document.getElementById('refreshAnomaliesButton').disabled = true;
+      if (!options.background) document.getElementById('anomalyStatus').textContent = 'Atualizando anomalias...';
+      setAnomalyError('');
       try {
-        await updateAnomalySummary();
-        const payload = await apiRequest(tab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history');
+        const [, payload] = await Promise.all([
+          options.skipSummary ? Promise.resolve() : updateAnomalySummary(),
+          apiRequest(anomalyListEndpoint(tab), { cache: 'no-store' })
+        ]);
+        if (requestSequence !== anomalyLoadSequence) return;
+        if (!payload || !Array.isArray(payload.items)) throw new Error('Formato de resposta incompatível: items ausente');
         anomalyItems = displayAnomalyItems(Array.isArray(payload.items) ? payload.items : []);
         renderAnomalyTable(anomalyItems);
-        await loadAnomalyDashboard();
-        await loadSecurityAnomaliesForAnomalyView(tab);
-        document.getElementById('anomalyStatus').textContent = tab === 'active' ? 'Anomalias ativas' : 'Histórico de anomalias';
+        renderAnomalyPagination(payload);
+        if (tab === 'history') {
+          populateAnomalyStatusOptions(payload.filter_options?.statuses || []);
+          updateAnomalyAppliedPeriod();
+        }
+        anomalyHistoryState.lastSuccessfulAt = new Date();
+        const updatedText = anomalyHistoryState.lastSuccessfulAt.toLocaleString('pt-BR', { timeZone: ANOMALY_TIME_ZONE });
+        const totalText = tab === 'history' ? ` • ${Number(payload.total || 0)} registro(s)` : '';
+        document.getElementById('anomalyStatus').textContent = `${tab === 'active' ? 'Anomalias ativas' : 'Histórico de anomalias'}${totalText} • atualizado em ${updatedText}`;
+        if (!options.skipAuxiliary) {
+          const auxiliary = await Promise.allSettled([loadAnomalyDashboard(), loadSecurityAnomaliesForAnomalyView(tab)]);
+          const failures = auxiliary.filter(result => result.status === 'rejected');
+          failures.forEach(result => console.error('Falha em painel auxiliar de anomalias', result.reason));
+          if (failures.length) setAnomalyError('A lista foi atualizada, mas um painel auxiliar falhou. Tente novamente.');
+        }
       } catch (error) {
+        if (requestSequence !== anomalyLoadSequence) return;
+        console.error('Falha ao atualizar anomalias', error);
+        anomalyItems = [];
+        renderAnomalyTable([]);
+        renderAnomalyPagination({ items: [], page: anomalyHistoryState.page, page_size: anomalyHistoryState.pageSize, total: 0, has_more: false });
         document.getElementById('anomalyStatus').textContent = `Falha: ${error.message}`;
+        setAnomalyError(`Não foi possível atualizar as anomalias: ${error.message}.`);
+      } finally {
+        if (requestSequence === anomalyLoadSequence) {
+          anomalyLoadInFlight = false;
+          document.getElementById('refreshAnomaliesButton').disabled = false;
+        }
       }
     }
 
@@ -25546,7 +25833,46 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('modalVectorName').addEventListener('input', () => syncFriendlyNameFromTechnical('modalVectorName', 'modalVectorDisplayName'));
     document.getElementById('modalVectorSensor').addEventListener('change', () => populateAttackVectorInterfaces());
     document.getElementById('refreshAnomaliesButton').addEventListener('click', () => loadAnomalies().catch(console.error));
-    document.getElementById('anomalyIdSearch').addEventListener('input', () => renderAnomalyTable(anomalyItems));
+    document.getElementById('anomalySearchButton').addEventListener('click', () => {
+      anomalyHistoryState.page = 1;
+      loadAnomalies('history').catch(console.error);
+    });
+    document.getElementById('anomalyClearButton').addEventListener('click', () => {
+      clearAnomalyHistoryFilters();
+      loadAnomalies('history').catch(console.error);
+    });
+    document.getElementById('anomalyRetryButton').addEventListener('click', () => loadAnomalies(anomalyActiveTab).catch(console.error));
+    document.getElementById('anomalyRangePreset').addEventListener('change', event => {
+      applyAnomalyRangePreset(event.target.value);
+      if (event.target.value !== 'custom') {
+        anomalyHistoryState.page = 1;
+        loadAnomalies('history').catch(console.error);
+      }
+    });
+    ['anomalyStartAt', 'anomalyEndAt'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+      document.getElementById('anomalyRangePreset').value = 'custom';
+    }));
+    ['anomalyIdSearch', 'anomalyTypeFilter', 'anomalyTargetFilter'].forEach(id => document.getElementById(id).addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        anomalyHistoryState.page = 1;
+        loadAnomalies('history').catch(console.error);
+      }
+    }));
+    document.getElementById('anomalyPageSize').addEventListener('change', event => {
+      anomalyHistoryState.pageSize = Number(event.target.value || 100);
+      anomalyHistoryState.page = 1;
+      loadAnomalies('history').catch(console.error);
+    });
+    document.getElementById('anomalyPreviousPage').addEventListener('click', () => {
+      if (anomalyHistoryState.page <= 1) return;
+      anomalyHistoryState.page -= 1;
+      loadAnomalies('history').catch(console.error);
+    });
+    document.getElementById('anomalyNextPage').addEventListener('click', () => {
+      if (!anomalyHistoryState.hasMore) return;
+      anomalyHistoryState.page += 1;
+      loadAnomalies('history').catch(console.error);
+    });
     document.getElementById('refreshSystemButton').addEventListener('click', () => loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`)));
     document.getElementById('clearDashboardCacheButton').addEventListener('click', () => clearDashboardCache().catch(console.error));
     document.getElementById('refreshCgnatButton').addEventListener('click', () => loadCgnatWorkspace().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));

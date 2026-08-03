@@ -125,7 +125,7 @@ class FrontendBgpProfilesTest(unittest.TestCase):
 
     def test_ops_summary_polling_updates_anomaly_badge_every_five_seconds(self):
         self.assertIn("function refreshOpsSummary()", HTML)
-        self.assertIn("apiRequest('/api/ops/summary')", HTML)
+        self.assertIn("apiRequest('/api/ops/summary', { cache: 'no-store' })", HTML)
         self.assertIn("renderAnomalyBadge({", HTML)
         self.assertIn("active_count: summary.active_anomalies", HTML)
         self.assertIn("setInterval(() =>", HTML)
@@ -348,7 +348,8 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         refresh_start = HTML.index("async function refreshAnomalyResponseRows")
         refresh_end = HTML.index("function anomalyActionId", refresh_start)
         refresh_source = HTML[refresh_start:refresh_end]
-        self.assertIn("anomalyActiveTab === 'active' ? '/api/anomalies/active' : '/api/anomalies/history'", refresh_source)
+        self.assertIn("anomalyListEndpoint(anomalyActiveTab)", refresh_source)
+        self.assertIn("cache: 'no-store'", refresh_source)
         self.assertIn("mergeAnomalyResponseFields(item, fresh)", refresh_source)
         self.assertIn("patchAnomalyResponseCell(merged)", refresh_source)
         self.assertNotIn("loadAnomalies(", refresh_source)
