@@ -17838,7 +17838,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       };
     }
 
+    function isValidAnomalyHistoryId(value) {
+      return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= 1;
+    }
+
     function validateAnomalyHistoryFilters(filters) {
+      if (filters.id && !isValidAnomalyHistoryId(filters.id)) {
+        return 'O ID da anomalia deve ser um número inteiro.';
+      }
       if (filters.start_at && filters.end_at && filters.start_at > filters.end_at) {
         return 'A data/hora inicial deve ser anterior ou igual à data/hora final.';
       }
@@ -17848,16 +17855,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function anomalyListEndpoint(tab = anomalyActiveTab) {
       if (tab === 'active') return '/api/anomalies/active?limit=200';
       const filters = anomalyHistoryFilters();
-      const params = new URLSearchParams({
-        id: filters.id,
-        start_at: filters.start_at,
-        end_at: filters.end_at,
-        status: filters.status,
-        severity: filters.severity,
-        type: filters.type,
-        target: filters.target,
-        page: String(anomalyHistoryState.page),
-        page_size: String(anomalyHistoryState.pageSize)
+      const params = new URLSearchParams();
+      params.set('page', String(anomalyHistoryState.page));
+      params.set('page_size', String(anomalyHistoryState.pageSize));
+      Object.entries(filters).forEach(([key, value]) => {
+        if (!value) return;
+        if (key === 'id' && !isValidAnomalyHistoryId(value)) return;
+        params.set(key, value);
       });
       return `/api/anomalies/history?${params.toString()}`;
     }

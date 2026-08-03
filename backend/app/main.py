@@ -1758,6 +1758,16 @@ def parse_anomaly_filter_datetime(value: Any, field_name: str) -> datetime | Non
     return parsed.astimezone(timezone.utc)
 
 
+def parse_anomaly_filter_id(value: Any) -> int | None:
+    """Keep FastAPI from turning an optional empty ID into an opaque HTTP 422."""
+    text = clean_text(value)
+    if not text:
+        return None
+    if not re.fullmatch(r"[+-]?\d+", text):
+        raise HTTPException(status_code=400, detail="O ID da anomalia deve ser um número inteiro.")
+    return int(text)
+
+
 def rows_as_dicts(result: Any) -> list[dict[str, Any]]:
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
@@ -32633,7 +32643,7 @@ def anomaly_history(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(ANOMALY_HISTORY_DEFAULT_PAGE_SIZE, ge=1, le=ANOMALY_HISTORY_MAX_PAGE_SIZE),
-    anomaly_id: int | None = Query(None, alias="id"),
+    anomaly_id: str | None = Query(None, alias="id"),
     start_at: str | None = None,
     end_at: str | None = None,
     status: str | None = None,
@@ -32645,6 +32655,7 @@ def anomaly_history(
     limit: int | None = Query(None, ge=1, le=1000),
 ):
     require_admin(request)
+    parsed_anomaly_id = parse_anomaly_filter_id(anomaly_id)
     effective_page_size = min(limit, ANOMALY_HISTORY_MAX_PAGE_SIZE) if limit is not None else page_size
     start_dt = parse_anomaly_filter_datetime(start_at, "start_at")
     end_dt = parse_anomaly_filter_datetime(end_at, "end_at")
@@ -32654,7 +32665,7 @@ def anomaly_history(
         "history",
         page,
         effective_page_size,
-        anomaly_id=anomaly_id,
+        anomaly_id=parsed_anomaly_id,
         start_at=start_dt,
         end_at=end_dt,
         status=status,
@@ -32671,7 +32682,7 @@ def anomaly_history(
         "end_at_inclusive": True,
         "sort": ["last_seen_at:desc", "id:desc"],
         "applied_filters": {
-            "id": anomaly_id,
+            "id": parsed_anomaly_id,
             "start_at": iso(start_dt) if start_dt is not None else None,
             "end_at": iso(end_dt) if end_dt is not None else None,
             "status": clean_text(status).lower() or None,

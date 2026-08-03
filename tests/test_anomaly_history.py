@@ -75,6 +75,72 @@ class AnomalyHistoryTest(unittest.TestCase):
             conn.commit()
             return int(cursor.lastrowid)
 
+    def history_endpoint(self, **overrides):
+        parameters = {
+            "page": 1,
+            "page_size": 100,
+            "anomaly_id": None,
+            "start_at": None,
+            "end_at": None,
+            "status": None,
+            "severity": None,
+            "anomaly_type": None,
+            "target": None,
+            "anomaly_source": None,
+            "source_engine": None,
+            "limit": None,
+        }
+        parameters.update(overrides)
+        with mock.patch.object(main, "require_admin", return_value=None):
+            return main.anomaly_history(object(), **parameters)
+
+    def test_history_endpoint_without_filters(self):
+        event_id = self.insert_event()
+
+        payload = self.history_endpoint()
+
+        self.assertEqual([event_id], [item["id"] for item in payload["items"]])
+        self.assertEqual(1, payload["total"])
+        self.assertIsNone(payload["applied_filters"]["id"])
+
+    def test_empty_id_is_treated_as_an_absent_filter(self):
+        event_id = self.insert_event()
+
+        payload = self.history_endpoint(anomaly_id="")
+
+        self.assertEqual([event_id], [item["id"] for item in payload["items"]])
+        self.assertIsNone(payload["applied_filters"]["id"])
+
+    def test_valid_id_is_converted_and_applied(self):
+        expected = self.insert_event(last_seen="2026-08-03T12:01:00Z")
+        self.insert_event(last_seen="2026-08-03T12:00:00Z")
+
+        payload = self.history_endpoint(anomaly_id=str(expected))
+
+        self.assertEqual([expected], [item["id"] for item in payload["items"]])
+        self.assertEqual(expected, payload["applied_filters"]["id"])
+
+    def test_non_numeric_id_returns_a_friendly_bad_request(self):
+        with self.assertRaises(main.HTTPException) as raised:
+            self.history_endpoint(anomaly_id="abc")
+
+        self.assertEqual(400, raised.exception.status_code)
+        self.assertEqual("O ID da anomalia deve ser um número inteiro.", raised.exception.detail)
+
+    def test_pagination_works_without_filters(self):
+        ids = [
+            self.insert_event(last_seen=f"2026-08-03T12:0{index}:00Z")
+            for index in range(3)
+        ]
+
+        payload = self.history_endpoint(page=2, page_size=2)
+
+        self.assertEqual([ids[0]], [item["id"] for item in payload["items"]])
+        self.assertEqual(3, payload["total"])
+        self.assertEqual(2, payload["page"])
+        self.assertEqual(2, payload["page_size"])
+        self.assertFalse(payload["has_more"])
+
     def test_history_orders_by_last_seen_then_id_descending(self):
         older = self.insert_event(last_seen="2026-08-03T11:59:00Z")
         first_tie = self.insert_event(last_seen="2026-08-03T12:00:00Z")
@@ -285,8 +351,17 @@ class AnomalyHistoryFrontendStaticTest(unittest.TestCase):
             "anomalyPageSize", "anomalyPreviousPage", "anomalyNextPage",
         ):
             self.assertIn(f'id="{element_id}"', HTML)
+        query_source = HTML[HTML.index("function anomalyHistoryFilters"):HTML.index("function setAnomalyError")]
         for query_field in ("id", "start_at", "end_at", "status", "severity", "type", "target", "page", "page_size"):
-            self.assertIn(query_field, HTML[HTML.index("function anomalyListEndpoint"):HTML.index("function setAnomalyError")])
+            self.assertIn(query_field, query_source)
+
+    def test_empty_filters_are_omitted_and_pagination_is_always_preserved(self):
+        endpoint_source = HTML[HTML.index("function anomalyListEndpoint"):HTML.index("function setAnomalyError")]
+        self.assertIn("const params = new URLSearchParams();", endpoint_source)
+        self.assertIn("params.set('page',", endpoint_source)
+        self.assertIn("params.set('page_size',", endpoint_source)
+        self.assertIn("if (!value) return;", endpoint_source)
+        self.assertNotIn("id: filters.id", endpoint_source)
 
     def test_presets_cover_requested_ranges_and_manual_refetch_disables_cache(self):
         preset_source = HTML[HTML.index("function applyAnomalyRangePreset"):HTML.index("function anomalyHistoryFilters")]
@@ -406,6 +481,7 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                     "<title>GMJ-FLOW</title>",
                     "<script>localStorage.setItem('gmjFlowAuthToken','integration-test');</script><title>GMJ-FLOW</title>",
                 ).replace("let anomalyActiveTab = 'active';", "let anomalyActiveTab = 'history';")
+                history_requests = []
 
                 class Handler(BaseHTTPRequestHandler):
                     def send_json(self, payload):
@@ -424,6 +500,7 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                         if parsed.path == "/api/ops/summary":
                             return self.send_json({"active_anomalies": 0, "active_total": 0, "active_critical": 0, "active_warning": 0})
                         if parsed.path == "/api/anomalies/history":
+                            history_requests.append(self.path)
                             payload = main.anomaly_history(
                                 object(),
                                 page=int(query.get("page", ["1"])[0]),
@@ -498,6 +575,11 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                 self.assertEqual(0, completed.returncode, completed.stderr[-4000:])
                 self.assertIn(f"#{event_id}", completed.stdout)
                 self.assertIn(main.DNS_SINGLE_FLOW_OUTBOUND_VECTOR, completed.stdout)
+                self.assertIn(
+                    "/api/anomalies/history?page=1&page_size=100",
+                    history_requests,
+                    "O navegador não deve enviar filtros vazios ao endpoint do histórico.",
+                )
             gc.collect()
 
 
