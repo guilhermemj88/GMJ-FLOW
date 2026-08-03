@@ -1284,6 +1284,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       font-weight: 800;
     }
 
+    .sortable-header[data-anomaly-sort].is-active-sort {
+      color: var(--accent);
+    }
+
     .flow-subview {
       display: none;
     }
@@ -1567,7 +1571,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     .anomaly-table {
       table-layout: fixed;
-      min-width: 1200px;
+      min-width: 1780px;
     }
 
     .anomaly-table th,
@@ -1591,6 +1595,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     .anomaly-col-peak { width: 96px; }
     .anomaly-col-total { width: 112px; }
     .anomaly-col-last { width: 134px; }
+    .anomaly-col-time { width: 134px; }
     .anomaly-col-response { width: 174px; }
     .anomaly-col-actions { width: 112px; }
 
@@ -5654,7 +5659,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="panel p-3 mt-3">
             <div class="table-wrap">
-              <table class="table table-sm table-hover align-middle mb-0 anomaly-table">
+              <table id="anomalyHistoryTable" class="table table-sm table-hover align-middle mb-0 anomaly-table">
                 <colgroup>
                   <col class="anomaly-col-status">
                   <col class="anomaly-col-severity">
@@ -5664,20 +5669,28 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                   <col class="anomaly-col-peak">
                   <col class="anomaly-col-total">
                   <col class="anomaly-col-last">
+                  <col class="anomaly-col-time">
+                  <col class="anomaly-col-time">
+                  <col class="anomaly-col-time">
+                  <col class="anomaly-col-time">
                   <col class="anomaly-col-response">
                   <col class="anomaly-col-actions">
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>Status</th>
-                    <th>Severidade</th>
-                    <th>ID</th>
-                    <th>Tipo</th>
-                    <th>Alvo</th>
-                    <th class="text-end">Pico</th>
-                    <th class="text-end">Total estimado</th>
-                    <th>Ultima detecção</th>
-                    <th>Resposta</th>
+                    <th class="sortable-header" data-anomaly-sort="status">Status <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="severity">Severidade <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="id">ID <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="type">Tipo <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="target">Alvo <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header text-end" data-anomaly-sort="peak_value">Pico <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header text-end" data-anomaly-sort="estimated_bytes">Total estimado <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="last_seen">Última detecção <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="acknowledged_at">Reconhecida em <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="ended_at">Encerrada em <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="updated_at">Atualizada em <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="event_time">Movimentação <span class="sort-indicator">↕</span></th>
+                    <th class="sortable-header" data-anomaly-sort="response">Resposta <span class="sort-indicator">↕</span></th>
                     <th>Ações</th>
                   </tr>
                 </thead>
@@ -9377,6 +9390,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       total: 0,
       hasMore: false,
       lastSuccessfulAt: null
+    };
+    const anomalySortStates = {
+      active: { sortBy: 'event_time', sortDir: 'desc' },
+      history: { sortBy: 'event_time', sortDir: 'desc' }
     };
     let currentAnomalyDetailId = null;
     let currentAnomalyDetailEvent = null;
@@ -17852,8 +17869,34 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return '';
     }
 
+    function anomalySortState(tab = anomalyActiveTab) {
+      return anomalySortStates[tab] || anomalySortStates.history;
+    }
+
+    function appendAnomalySortParams(params, tab = anomalyActiveTab) {
+      const sort = anomalySortState(tab);
+      if (sort.sortBy === 'event_time' && sort.sortDir === 'desc') return;
+      params.set('sort_by', sort.sortBy);
+      params.set('sort_dir', sort.sortDir);
+    }
+
+    function updateAnomalySortIndicators() {
+      const sort = anomalySortState();
+      document.querySelectorAll('[data-anomaly-sort]').forEach(header => {
+        const active = header.dataset.anomalySort === sort.sortBy;
+        const indicator = header.querySelector('.sort-indicator');
+        if (indicator) indicator.textContent = active ? (sort.sortDir === 'asc' ? '↑' : '↓') : '↕';
+        header.classList.toggle('is-active-sort', active);
+        header.setAttribute('aria-sort', active ? (sort.sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
+      });
+    }
+
     function anomalyListEndpoint(tab = anomalyActiveTab) {
-      if (tab === 'active') return '/api/anomalies/active?limit=200';
+      if (tab === 'active') {
+        const params = new URLSearchParams({ limit: '200' });
+        appendAnomalySortParams(params, tab);
+        return `/api/anomalies/active?${params.toString()}`;
+      }
       const filters = anomalyHistoryFilters();
       const params = new URLSearchParams();
       params.set('page', String(anomalyHistoryState.page));
@@ -17863,6 +17906,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (key === 'id' && !isValidAnomalyHistoryId(value)) return;
         params.set(key, value);
       });
+      appendAnomalySortParams(params, tab);
       return `/api/anomalies/history?${params.toString()}`;
     }
 
@@ -17955,6 +17999,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end">${formatMetricValue(event.peak_value, event.metric_unit)}</td>
           <td class="text-end">${formatBytes(event.estimated_bytes)}</td>
           <td>${formatDateTime(event.last_seen_at)}<div class="subtle">${anomalyDuration(event)}</div></td>
+          <td>${formatDateTime(event.acknowledged_at) || '-'}</td>
+          <td>${formatDateTime(event.ended_at) || '-'}</td>
+          <td>${formatDateTime(event.updated_at) || '-'}</td>
+          <td>${formatDateTime(event.event_time) || '-'}</td>
           <td class="anomaly-response-cell">${anomalyResponseCellHtml(event)}</td>
           <td>
             <div class="anomaly-actions" role="group">
@@ -17970,7 +18018,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           </td>
         </tr>
       `;
-      }).join('') || '<tr><td colspan="10" class="text-muted">Sem anomalias</td></tr>';
+      }).join('') || '<tr><td colspan="14" class="text-muted">Sem anomalias</td></tr>';
       createIcons();
     }
 
@@ -17982,6 +18030,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('anomalyTabHistory').classList.toggle('active', tab === 'history');
       document.getElementById('anomalyHistoryControls').classList.toggle('d-none', tab !== 'history');
       setText('anomalyCurrentTab', tab === 'active' ? 'Ativas' : 'Histórico');
+      updateAnomalySortIndicators();
       const filters = anomalyHistoryFilters();
       const validationError = tab === 'history' ? validateAnomalyHistoryFilters(filters) : '';
       if (validationError) {
@@ -18003,8 +18052,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ]);
         if (requestSequence !== anomalyLoadSequence) return;
         if (!payload || !Array.isArray(payload.items)) throw new Error('Formato de resposta incompatível: items ausente');
+        anomalySortStates[tab] = {
+          sortBy: payload.sort_by || anomalySortState(tab).sortBy,
+          sortDir: payload.sort_dir || anomalySortState(tab).sortDir
+        };
         anomalyItems = displayAnomalyItems(Array.isArray(payload.items) ? payload.items : []);
         renderAnomalyTable(anomalyItems);
+        updateAnomalySortIndicators();
         renderAnomalyPagination(payload);
         if (tab === 'history') {
           populateAnomalyStatusOptions(payload.filter_options?.statuses || []);
@@ -26238,6 +26292,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       } else if (close) {
         closeAnomalyEvent(Number(close.dataset.anomalyId)).catch(console.error);
       }
+    });
+    document.querySelector('#anomalyHistoryTable thead').addEventListener('click', event => {
+      const header = event.target.closest('[data-anomaly-sort]');
+      if (!header) return;
+      const column = header.dataset.anomalySort;
+      const current = anomalySortState();
+      anomalySortStates[anomalyActiveTab] = {
+        sortBy: column,
+        sortDir: current.sortBy === column && current.sortDir === 'desc' ? 'asc' : 'desc'
+      };
+      anomalyHistoryState.page = 1;
+      updateAnomalySortIndicators();
+      loadAnomalies(anomalyActiveTab).catch(console.error);
     });
 
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));

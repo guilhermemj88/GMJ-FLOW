@@ -45,31 +45,43 @@ class AnomalyHistoryTest(unittest.TestCase):
         vector="DNS_ABUSE_OUTBOUND",
         target="186.232.172.231",
         last_seen="2026-08-03T12:00:00Z",
+        acknowledged_at=None,
+        ended_at="__auto__",
+        updated_at=None,
+        peak_value=300,
+        estimated_bytes=1000,
+        response_status="",
     ):
+        ended_value = last_seen if ended_at == "__auto__" and status != "active" else (None if ended_at == "__auto__" else ended_at)
+        updated_value = updated_at or last_seen
         with main.sqlite_connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO anomaly_events (
                     target_ip, target_cidr, vector_name, direction, decoder, severity,
                     metric_unit, threshold_value, observed_value, peak_value, started_at,
-                    last_seen_at, ended_at, status, estimated_bytes, estimated_packets,
-                    flow_count, summary, dedupe_key, created_at, updated_at
-                ) VALUES (?, ?, ?, 'transmits', 'DNS', ?, 'packets_s', 100, 200, 300,
-                          ?, ?, ?, ?, 1000, 100, 10, ?, ?, ?, ?)
+                    last_seen_at, acknowledged_at, ended_at, status, estimated_bytes, estimated_packets,
+                    flow_count, summary, dedupe_key, created_at, updated_at, auto_mitigation_status
+                ) VALUES (?, ?, ?, 'transmits', 'DNS', ?, 'packets_s', 100, 200, ?,
+                          ?, ?, ?, ?, ?, ?, 100, 10, ?, ?, ?, ?, ?)
                 """,
                 (
                     target,
                     f"{target}/32",
                     vector,
                     severity,
+                    peak_value,
                     last_seen,
                     last_seen,
-                    last_seen if status != "active" else None,
+                    acknowledged_at,
+                    ended_value,
                     status,
+                    estimated_bytes,
                     vector,
                     f"{vector}|{target}|{status}|{last_seen}",
                     last_seen,
-                    last_seen,
+                    updated_value,
+                    response_status,
                 ),
             )
             conn.commit()
@@ -140,6 +152,140 @@ class AnomalyHistoryTest(unittest.TestCase):
         self.assertEqual(2, payload["page"])
         self.assertEqual(2, payload["page_size"])
         self.assertFalse(payload["has_more"])
+
+    def test_id_sort_supports_descending_and_ascending(self):
+        ids = [self.insert_event(last_seen=f"2026-08-03T12:0{index}:00Z") for index in range(3)]
+
+        descending = main.anomaly_page("history", 1, 100, sort_by="id", sort_dir="desc")
+        ascending = main.anomaly_page("history", 1, 100, sort_by="id", sort_dir="asc")
+
+        self.assertEqual(list(reversed(ids)), [item["id"] for item in descending["items"]])
+        self.assertEqual(ids, [item["id"] for item in ascending["items"]])
+
+    def test_event_time_and_last_seen_have_distinct_semantics(self):
+        newest_detection = self.insert_event(
+            last_seen="2026-08-03T14:00:00Z",
+            updated_at="2026-08-03T14:01:00Z",
+        )
+        newest_movement = self.insert_event(
+            last_seen="2026-08-03T13:00:00Z",
+            updated_at="2026-08-03T15:00:00Z",
+        )
+
+        by_event_time = main.anomaly_page("history", 1, 100, sort_by="event_time", sort_dir="desc")
+        by_last_seen = main.anomaly_page("history", 1, 100, sort_by="last_seen", sort_dir="desc")
+
+        self.assertEqual([newest_movement, newest_detection], [item["id"] for item in by_event_time["items"]])
+        self.assertEqual([newest_detection, newest_movement], [item["id"] for item in by_last_seen["items"]])
+
+    def test_acknowledged_ended_and_updated_dates_sort_descending_with_nulls_last(self):
+        older = self.insert_event(
+            acknowledged_at="2026-08-03T12:10:00Z",
+            ended_at="2026-08-03T12:20:00Z",
+            updated_at="2026-08-03T12:30:00Z",
+        )
+        newer = self.insert_event(
+            acknowledged_at="2026-08-03T13:10:00Z",
+            ended_at="2026-08-03T13:20:00Z",
+            updated_at="2026-08-03T13:30:00Z",
+        )
+        missing = self.insert_event(
+            acknowledged_at=None,
+            ended_at=None,
+            updated_at="2026-08-03T11:30:00Z",
+        )
+
+        for sort_by in ("acknowledged_at", "ended_at", "updated_at"):
+            items = main.anomaly_page("history", 1, 100, sort_by=sort_by, sort_dir="desc")["items"]
+            expected = [newer, older, missing] if sort_by != "updated_at" else [newer, older, missing]
+            self.assertEqual(expected, [item["id"] for item in items], sort_by)
+        ascending_ack = main.anomaly_page("history", 1, 100, sort_by="acknowledged_at", sort_dir="asc")["items"]
+        self.assertEqual([older, newer, missing], [item["id"] for item in ascending_ack])
+
+    def test_peak_total_and_response_sort_descending(self):
+        low = self.insert_event(peak_value=100, estimated_bytes=1000, response_status="failed")
+        high = self.insert_event(peak_value=900, estimated_bytes=9000, response_status="queued")
+
+        for sort_by in ("peak_value", "estimated_bytes", "response"):
+            items = main.anomaly_page("history", 1, 100, sort_by=sort_by, sort_dir="desc")["items"]
+            self.assertEqual([high, low], [item["id"] for item in items], sort_by)
+
+    def test_type_and_target_sort_over_the_complete_filtered_set(self):
+        zulu = self.insert_event(vector="ZULU", target="10.0.0.20")
+        alpha = self.insert_event(vector="ALPHA", target="10.0.0.10")
+
+        by_type = main.anomaly_page("history", 1, 100, sort_by="type", sort_dir="asc")["items"]
+        by_target = main.anomaly_page("history", 1, 100, sort_by="target", sort_dir="desc")["items"]
+
+        self.assertEqual([alpha, zulu], [item["id"] for item in by_type])
+        self.assertEqual([zulu, alpha], [item["id"] for item in by_target])
+
+    def test_severity_and_status_use_semantic_order(self):
+        info = self.insert_event(severity="info", status="archived")
+        warning = self.insert_event(severity="warning", status="ended")
+        critical = self.insert_event(severity="critical", status="acknowledged")
+
+        severity_desc = main.anomaly_page("history", 1, 100, sort_by="severity", sort_dir="desc")["items"]
+        severity_asc = main.anomaly_page("history", 1, 100, sort_by="severity", sort_dir="asc")["items"]
+        status_desc = main.anomaly_page("history", 1, 100, sort_by="status", sort_dir="desc")["items"]
+
+        self.assertEqual([critical, warning, info], [item["id"] for item in severity_desc])
+        self.assertEqual([info, warning, critical], [item["id"] for item in severity_asc])
+        self.assertEqual([critical, warning, info], [item["id"] for item in status_desc])
+
+    def test_sort_ties_always_use_id_descending(self):
+        first = self.insert_event(peak_value=500)
+        second = self.insert_event(peak_value=500)
+
+        for direction in ("asc", "desc"):
+            items = main.anomaly_page("history", 1, 100, sort_by="peak_value", sort_dir=direction)["items"]
+            self.assertEqual([second, first], [item["id"] for item in items])
+
+    def test_sort_is_applied_before_limit_and_offset(self):
+        by_peak = {}
+        for peak in (10, 50, 30, 40, 20):
+            by_peak[peak] = self.insert_event(peak_value=peak)
+
+        first = main.anomaly_page("history", 1, 2, sort_by="peak_value", sort_dir="desc")
+        second = main.anomaly_page("history", 2, 2, sort_by="peak_value", sort_dir="desc")
+
+        self.assertEqual([by_peak[50], by_peak[40]], [item["id"] for item in first["items"]])
+        self.assertEqual([by_peak[30], by_peak[20]], [item["id"] for item in second["items"]])
+
+    def test_invalid_sort_field_and_direction_return_friendly_400(self):
+        with self.assertRaises(main.HTTPException) as invalid_field:
+            self.history_endpoint(sort_by="drop_table", sort_dir="desc")
+        with self.assertRaises(main.HTTPException) as invalid_direction:
+            self.history_endpoint(sort_by="id", sort_dir="sideways")
+
+        self.assertEqual(400, invalid_field.exception.status_code)
+        self.assertEqual("Campo de ordenação de anomalias inválido.", invalid_field.exception.detail)
+        self.assertEqual(400, invalid_direction.exception.status_code)
+        self.assertEqual("A direção de ordenação deve ser 'asc' ou 'desc'.", invalid_direction.exception.detail)
+
+    def test_allowed_sort_map_is_closed_and_acknowledgement_records_its_own_time(self):
+        self.assertEqual(
+            {
+                "event_time", "last_seen", "acknowledged_at", "ended_at", "updated_at",
+                "id", "status", "severity", "type", "target", "peak_value",
+                "estimated_bytes", "response",
+            },
+            set(main.ANOMALY_SORT_SQL_FIELDS),
+        )
+        event_id = self.insert_event(status="active", ended_at=None)
+
+        with mock.patch.object(main, "require_admin", return_value=None):
+            main.acknowledge_anomaly(object(), event_id)
+        with main.sqlite_connection() as conn:
+            row = conn.execute(
+                "SELECT status, acknowledged_at, ended_at, updated_at FROM anomaly_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+
+        self.assertEqual("acknowledged", row["status"])
+        self.assertTrue(row["acknowledged_at"])
+        self.assertEqual(row["acknowledged_at"], row["ended_at"])
+        self.assertEqual(row["acknowledged_at"], row["updated_at"])
 
     def test_history_orders_by_last_seen_then_id_descending(self):
         older = self.insert_event(last_seen="2026-08-03T11:59:00Z")
@@ -241,6 +387,32 @@ class AnomalyHistoryTest(unittest.TestCase):
             {ids[status] for status in main.ANOMALY_HISTORY_STATUSES},
             {item["id"] for item in history["items"]},
         )
+
+    def test_security_acknowledgement_records_acknowledged_and_ended_times(self):
+        timestamp = "2026-08-03T12:00:00Z"
+        with main.sqlite_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO security_anomalies (
+                    vector, severity, status, last_seen, dedupe_key, created_at, updated_at
+                ) VALUES ('DNS_TEST', 'warning', 'active', ?, 'security-ack', ?, ?)
+                """,
+                (timestamp, timestamp, timestamp),
+            )
+            anomaly_id = int(cursor.lastrowid)
+            conn.commit()
+
+        main.acknowledge_security_anomaly(anomaly_id)
+        with main.sqlite_connection() as conn:
+            row = conn.execute(
+                "SELECT status, acknowledged_at, ended_at, updated_at FROM security_anomalies WHERE id = ?",
+                (anomaly_id,),
+            ).fetchone()
+
+        self.assertEqual("acknowledged", row["status"])
+        self.assertTrue(row["acknowledged_at"])
+        self.assertEqual(row["acknowledged_at"], row["ended_at"])
+        self.assertEqual(row["acknowledged_at"], row["updated_at"])
 
     def test_period_without_results_returns_empty_page(self):
         self.insert_event(last_seen="2026-08-03T12:00:00Z")
@@ -363,6 +535,39 @@ class AnomalyHistoryFrontendStaticTest(unittest.TestCase):
         self.assertIn("if (!value) return;", endpoint_source)
         self.assertNotIn("id: filters.id", endpoint_source)
 
+    def test_all_requested_history_columns_are_server_sortable(self):
+        expected = (
+            "status", "severity", "id", "type", "target", "peak_value", "estimated_bytes",
+            "last_seen", "acknowledged_at", "ended_at", "updated_at", "event_time", "response",
+        )
+        for field in expected:
+            self.assertIn(f'data-anomaly-sort="{field}"', HTML)
+            self.assertIn(field, main.ANOMALY_SORT_SQL_FIELDS)
+
+    def test_sort_click_resets_page_preserves_filters_and_refetches(self):
+        endpoint_source = HTML[HTML.index("function anomalyListEndpoint"):HTML.index("function setAnomalyError")]
+        click_source = HTML[HTML.index("document.querySelector('#anomalyHistoryTable thead')"):HTML.index("document.getElementById('refreshBgpButton')")]
+        self.assertIn("const filters = anomalyHistoryFilters();", endpoint_source)
+        self.assertIn("appendAnomalySortParams(params, tab);", endpoint_source)
+        self.assertIn("anomalyHistoryState.page = 1;", click_source)
+        self.assertIn("loadAnomalies(anomalyActiveTab)", click_source)
+        self.assertIn("sortDir: current.sortBy === column && current.sortDir === 'desc' ? 'asc' : 'desc'", click_source)
+
+    def test_sort_state_is_per_tab_and_has_accessible_visual_indicators(self):
+        state_source = HTML[HTML.index("const anomalySortStates"):HTML.index("let currentAnomalyDetailId")]
+        indicator_source = HTML[HTML.index("function updateAnomalySortIndicators"):HTML.index("function anomalyListEndpoint")]
+        self.assertIn("active: { sortBy: 'event_time', sortDir: 'desc' }", state_source)
+        self.assertIn("history: { sortBy: 'event_time', sortDir: 'desc' }", state_source)
+        self.assertIn("'↑' : '↓'", indicator_source)
+        self.assertIn(": '↕'", indicator_source)
+        self.assertIn("header.setAttribute('aria-sort'", indicator_source)
+
+    def test_manual_and_automatic_refresh_reuse_the_current_sort_url(self):
+        auto_source = HTML[HTML.index("async function refreshOpsSummary"):HTML.index("function startOpsSummaryPolling")]
+        self.assertIn("loadAnomalies(anomalyActiveTab", auto_source)
+        self.assertIn("anomalyListEndpoint(tab)", HTML[HTML.index("async function loadAnomalies"):HTML.index("function niceAnomalyAxisMax")])
+        self.assertIn("loadAnomalies()", HTML[HTML.index("refreshAnomaliesButton"):])
+
     def test_presets_cover_requested_ranges_and_manual_refetch_disables_cache(self):
         preset_source = HTML[HTML.index("function applyAnomalyRangePreset"):HTML.index("function anomalyHistoryFilters")]
         for value in ("'1h'", "'4h'", "'12h'", "'24h'", "'7d'", "'today'", "'yesterday'"):
@@ -480,7 +685,19 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                 served_html = HTML.replace(
                     "<title>GMJ-FLOW</title>",
                     "<script>localStorage.setItem('gmjFlowAuthToken','integration-test');</script><title>GMJ-FLOW</title>",
-                ).replace("let anomalyActiveTab = 'active';", "let anomalyActiveTab = 'history';")
+                ).replace(
+                    "let anomalyActiveTab = 'active';",
+                    "let anomalyActiveTab = 'history';",
+                ).replace(
+                    "</body>",
+                    """
+                    <script>
+                      setTimeout(() => document.querySelector('[data-anomaly-sort="id"]')?.click(), 1200);
+                      setTimeout(() => document.querySelector('[data-anomaly-sort="id"]')?.click(), 3200);
+                    </script>
+                    </body>
+                    """,
+                )
                 history_requests = []
 
                 class Handler(BaseHTTPRequestHandler):
@@ -514,6 +731,8 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                                 target=query.get("target", [None])[0],
                                 anomaly_source=None,
                                 source_engine=None,
+                                sort_by=query.get("sort_by", [main.ANOMALY_DEFAULT_SORT_BY])[0],
+                                sort_dir=query.get("sort_dir", [main.ANOMALY_DEFAULT_SORT_DIR])[0],
                                 limit=None,
                             )
                             return self.send_json(payload)
@@ -579,6 +798,14 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                     "/api/anomalies/history?page=1&page_size=100",
                     history_requests,
                     "O navegador não deve enviar filtros vazios ao endpoint do histórico.",
+                )
+                self.assertIn(
+                    "/api/anomalies/history?page=1&page_size=100&sort_by=id&sort_dir=desc",
+                    history_requests,
+                )
+                self.assertIn(
+                    "/api/anomalies/history?page=1&page_size=100&sort_by=id&sort_dir=asc",
+                    history_requests,
                 )
             gc.collect()
 

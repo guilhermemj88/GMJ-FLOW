@@ -1246,7 +1246,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
 
     def test_anomaly_main_table_is_compact_and_keeps_technical_names_in_detail(self):
         anomaly_header = FRONTEND[
-            FRONTEND.find('<tbody id="anomaliesTable"></tbody>') - 1400:
+            FRONTEND.find('<table id="anomalyHistoryTable"'):
             FRONTEND.find('<tbody id="anomaliesTable"></tbody>')
         ]
         render_source = FRONTEND[
@@ -1257,12 +1257,12 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
             FRONTEND.find("function anomalyScopeHtml"):
             FRONTEND.find("function normalizedAnomalyMetricPoints")
         ]
-        self.assertIn("<th>Tipo</th>", anomaly_header)
-        self.assertIn("<th>Alvo</th>", anomaly_header)
+        self.assertIn('data-anomaly-sort="type">Tipo', anomaly_header)
+        self.assertIn('data-anomaly-sort="target">Alvo', anomaly_header)
         self.assertNotIn("Regra/Vetor", anomaly_header)
-        self.assertEqual(anomaly_header.count("<th>Status</th>"), 1)
-        self.assertEqual(anomaly_header.count("<th>Severidade</th>"), 1)
-        self.assertEqual(anomaly_header.count("<th>ID</th>"), 1)
+        self.assertEqual(anomaly_header.count('data-anomaly-sort="status"'), 1)
+        self.assertEqual(anomaly_header.count('data-anomaly-sort="severity"'), 1)
+        self.assertEqual(anomaly_header.count('data-anomaly-sort="id"'), 1)
         self.assertIn("anomalyTypeLabel(event)", render_source)
         self.assertIn("anomalyCompactSummary(event)", render_source)
         self.assertIn("['Nome', anomalyTypeLabel(event)]", detail_source)

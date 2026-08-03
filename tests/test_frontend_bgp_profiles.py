@@ -230,15 +230,15 @@ class FrontendBgpProfilesTest(unittest.TestCase):
         self.assertIn("updateBgpAnnouncement(withdraw.dataset.id, 'withdraw')", handler_source)
 
     def test_anomaly_active_and_history_table_has_response_before_actions(self):
-        table_start = HTML.index('<table class="table table-sm table-hover align-middle mb-0 anomaly-table">')
+        table_start = HTML.index('<table id="anomalyHistoryTable" class="table table-sm table-hover align-middle mb-0 anomaly-table">')
         table_end = HTML.index('</table>', table_start)
         table_source = HTML[table_start:table_end]
-        self.assertEqual(table_source.count('<col class="anomaly-col-'), 10)
+        self.assertEqual(table_source.count('<col class="anomaly-col-'), 14)
         self.assertLess(table_source.index('<col class="anomaly-col-response">'), table_source.index('<col class="anomaly-col-actions">'))
-        self.assertLess(table_source.index('<th>Resposta</th>'), table_source.index('<th>Ações</th>'))
+        self.assertLess(table_source.index('data-anomaly-sort="response"'), table_source.index('<th>Ações</th>'))
         self.assertIn('id="anomalyTabActive"', HTML)
         self.assertIn('id="anomalyTabHistory"', HTML)
-        self.assertIn('<tr><td colspan="10" class="text-muted">Sem anomalias</td></tr>', HTML)
+        self.assertIn('<tr><td colspan="14" class="text-muted">Sem anomalias</td></tr>', HTML)
 
     def test_anomaly_response_has_complete_operator_status_map(self):
         map_start = HTML.index("const ANOMALY_RESPONSE_STATUS_PRESENTATION")
