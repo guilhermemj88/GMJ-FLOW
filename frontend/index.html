@@ -2567,12 +2567,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .configurable-dashboard-widget-body {
+      --widget-scale: 1;
+      --widget-font-size: 13px;
+      --widget-label-size: 12px;
+      --widget-gap: 8px;
+      --widget-row-height: 34px;
+      --widget-chart-min-height: 100%;
+      --widget-chart-min-width: 100%;
       position: relative;
       min-height: 0;
       min-width: 0;
       flex: 1 1 auto;
       overflow: hidden;
       overflow: clip;
+      font-size: var(--widget-font-size);
     }
 
     .configurable-legend-more {
@@ -2643,6 +2651,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       height: 100%;
       min-height: 0;
       overflow: auto;
+      scrollbar-gutter: stable;
     }
 
     .configurable-dashboard-widget-body .table-wrap thead {
@@ -2659,6 +2668,25 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       min-width: 0;
       min-height: 0;
       overflow: hidden;
+    }
+
+    .configurable-dashboard-widget-body[data-chart-scroll="vertical"],
+    .configurable-dashboard-widget-body[data-chart-scroll="horizontal"] {
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .configurable-dashboard-widget-body[data-chart-scroll="vertical"]
+      > .configurable-dashboard-widget-chart {
+      height: var(--widget-chart-min-height);
+      min-height: var(--widget-chart-min-height);
+    }
+
+    .configurable-dashboard-widget-body[data-chart-scroll="horizontal"]
+      > .configurable-dashboard-widget-chart {
+      width: var(--widget-chart-min-width);
+      min-width: var(--widget-chart-min-width);
     }
 
     .gmj-dashboard-chart-tooltip {
@@ -2702,7 +2730,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       grid-template-columns:
         minmax(0, var(--ranking-chart-ratio, 55%))
         minmax(0, 1fr);
-      gap: 12px;
+      gap: var(--widget-gap);
       align-items: stretch;
       width: 100%;
       max-width: 100%;
@@ -2757,11 +2785,15 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     .configurable-ranking-table th,
     .configurable-ranking-table td {
+      height: var(--widget-row-height);
+      padding: clamp(.16rem, calc(var(--widget-gap) * .42), .5rem);
       min-width: 0;
       max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       vertical-align: middle;
+      font-size: var(--widget-label-size);
+      line-height: 1.2;
     }
 
     .configurable-ranking-table .ranking-cell-position,
@@ -2856,6 +2888,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     .configurable-dashboard-widget-body[data-responsive-table-density="tiny"]
       .configurable-ranking-table .ranking-col-position {
       width: 0;
+    }
+
+    .configurable-dashboard-widget-body[data-responsive-overflow="scroll"]
+      .table-wrap {
+      overscroll-behavior: contain;
     }
 
     .configurable-dashboard-widget-chart.chart-size-insufficient::after {
@@ -8046,6 +8083,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="field">
               <label for="widgetConfigDirection">Direção</label>
               <select id="widgetConfigDirection" class="form-select form-select-sm"></select>
+            </div>
+            <div class="field">
+              <label for="widgetConfigFlowOrientation">Orientação src/dst</label>
+              <select id="widgetConfigFlowOrientation" class="form-select form-select-sm">
+                <option value="canonical">Canônica (upload: src interno → dst externo)</option>
+                <option value="reversed">Invertida (upload: dst interno → src externo)</option>
+              </select>
             </div>
             <div class="field">
               <label for="widgetConfigGroupBy">Agrupar série por</label>
@@ -20763,10 +20807,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetAutoHeightTimers.clear();
     }
 
-    function configurableWidgetResponsiveOptions(widget = {}) {
+    function configurableWidgetResponsiveOptions(widget = {}, body = null) {
+      const payload = configurableWidgetPayloads.get(Number(widget.id)) || {};
+      const itemCount = Array.isArray(payload.items)
+        ? payload.items.length
+        : Array.isArray(payload.series)
+          ? payload.series.length
+          : 0;
       return {
         breakpoints: widget.config?.responsive_breakpoints,
-        chartRatio: Number(widget.config?.chart_table_ratio || 55)
+        chartRatio: Number(widget.config?.chart_table_ratio || 55),
+        height: body?.getBoundingClientRect?.().height,
+        itemCount,
+        visualization: configurableChartKind(widget),
+        combined: GMJDashboardVisualizations.visualizationKind(widget) === 'chart_table'
       };
     }
 
@@ -20782,7 +20836,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return GMJDashboardCharts.applyWidgetResponsiveLayout(
         body,
         measuredWidth,
-        configurableWidgetResponsiveOptions(widget)
+        configurableWidgetResponsiveOptions(widget, body)
       );
     }
 
@@ -20843,8 +20897,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function updateConfigurableChartResponsiveness(widget, body, chart) {
-      if (!body || !chart || chart.isDisposed?.()) return;
-      applyConfigurableWidgetResponsiveLayout(widget, body);
+      if (!body) return;
+      const responsiveState = applyConfigurableWidgetResponsiveLayout(widget, body);
+      if (!chart || chart.isDisposed?.()) return;
       const chartElement = body.querySelector('.configurable-dashboard-widget-chart');
       if (!chartElement) return;
       const bounds = chartElement.getBoundingClientRect();
@@ -20863,6 +20918,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         appearance.axis_label_density
       );
       const density = GMJDashboardCharts.densitySettings(densityMode);
+      const contentMetrics = responsiveState?.metrics
+        || GMJDashboardCharts.getWidgetContentMetrics(bounds.width, bounds.height);
       const context = configurableWidgetChartResponsiveContexts.get(widget.id) || {};
       const widgetWidth = (
         body.closest('.configurable-dashboard-widget') || body
@@ -20881,12 +20938,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const seriesCount = Math.max(1, chart.getOption?.().series?.length || 0);
         const legendVisible = responsiveLegend.option.show;
         responsiveOption.grid = {
-          left: 12,
+          left: Math.round(contentMetrics.gap + 4),
           right: legendVisible && responsiveLegend.layout.position === 'right'
             ? Number(responsiveLegend.layout.width || 150) + 18
-            : 18,
-          top: legendVisible && responsiveLegend.layout.position === 'top' ? 38 : 12,
-          bottom: legendVisible && responsiveLegend.layout.position === 'bottom' ? 42 : 28,
+            : Math.round(contentMetrics.gap + 10),
+          top: legendVisible && responsiveLegend.layout.position === 'top'
+            ? Math.round(30 + contentMetrics.gap)
+            : Math.round(contentMetrics.gap + 4),
+          bottom: legendVisible && responsiveLegend.layout.position === 'bottom'
+            ? Math.round(34 + contentMetrics.gap)
+            : Math.round(20 + contentMetrics.gap),
           containLabel: true
         };
         responsiveOption.xAxis = {
@@ -20973,23 +21034,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         } else {
           const horizontal = ['horizontal_bar', 'bar_gauge'].includes(visualization);
           responsiveOption.grid = {
-            left: 12,
-            right: 18,
-            top: 12,
-            bottom: 18,
+            left: Math.round(contentMetrics.gap + 4),
+            right: Math.round(contentMetrics.gap + 10),
+            top: Math.round(contentMetrics.gap + 4),
+            bottom: Math.round(contentMetrics.gap + 10),
             containLabel: true
           };
           responsiveOption.xAxis = {
             splitNumber: density.splitNumber,
             axisLabel: {
-              hideOverlap: true,
+              hideOverlap: horizontal,
               rotate: horizontal || densityMode !== 'compact' ? 0 : 35,
-              fontSize: density.fontSize
+              fontSize: Math.min(density.fontSize, contentMetrics.labelSize)
             }
           };
           responsiveOption.yAxis = {
             splitNumber: density.splitNumber,
-            axisLabel: { hideOverlap: true, fontSize: density.fontSize }
+            axisLabel: {
+              hideOverlap: !horizontal,
+              fontSize: Math.min(density.fontSize, contentMetrics.labelSize)
+            }
           };
           responsiveOption.series = [{
             clip: true,
@@ -21162,6 +21226,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       };
       if (baseType === 'top_n') {
         config.dimension = document.getElementById('widgetConfigDimension').value || 'src_ip';
+        config.flow_orientation =
+          document.getElementById('widgetConfigFlowOrientation').value || 'canonical';
         config.limit = Number(document.getElementById('widgetConfigLimit').value || 10);
         config.combined_chart_kind =
           document.getElementById('widgetConfigCombinedChartKind').value || 'donut';
@@ -21338,6 +21404,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         );
       const visibility = {
         widgetConfigDimension: baseType === 'top_n',
+        widgetConfigFlowOrientation: baseType === 'top_n'
+          && ['src_asn', 'dst_asn'].includes(
+            document.getElementById('widgetConfigDimension').value
+          ),
         widgetConfigMetric: ['top_n', 'timeseries', 'kpi'].includes(baseType),
         widgetConfigDirection: ['top_n', 'timeseries', 'kpi'].includes(baseType),
         widgetConfigGroupBy: baseType === 'timeseries',
@@ -21399,6 +21469,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           dimension: 'src_ip',
           metric: 'bps',
           direction: 'both',
+          flow_orientation: 'canonical',
           group_by: 'total',
           aggregation: 'sum',
           limit: 10,
@@ -21419,6 +21490,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       fillConfigurableSelect('widgetConfigDimension', catalog.dimensions || [], item.config?.dimension || 'src_ip');
       fillConfigurableSelect('widgetConfigMetric', catalog.metrics || [], item.config?.metric || 'bps');
       fillConfigurableSelect('widgetConfigDirection', catalog.directions || [], item.config?.direction || 'both');
+      document.getElementById('widgetConfigFlowOrientation').value =
+        item.config?.flow_orientation || 'canonical';
       fillConfigurableSelect('widgetConfigGroupBy', catalog.group_by || [], item.config?.group_by || 'total');
       fillConfigurableSelect('widgetConfigAggregation', catalog.aggregations || [], item.config?.aggregation || 'sum');
       fillConfigurableSelect(
@@ -21774,7 +21847,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         : payload;
       const rows = Array.isArray(normalized.items) ? normalized.items : [];
       return `
-        <div class="table-wrap">
+        <div class="table-wrap" tabindex="0" data-ranking-item-count="${rows.length}"
+          aria-label="Ranking com ${rows.length} itens; use a rolagem interna quando necessario">
           <table class="table table-sm align-middle mb-0 configurable-ranking-table">
             <colgroup>
               <col class="ranking-col-position">
@@ -24505,6 +24579,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function openModal(id) {
+      configurableMoveController?.cancel();
+      configurableResizeController?.cancel();
       document.getElementById(id).classList.add('open');
       createIcons();
     }
@@ -25759,6 +25835,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('widgetConfigType').addEventListener('change', syncConfigurableWidgetTypeFields);
     document.getElementById('widgetConfigVisualization').addEventListener('change', syncConfigurableWidgetTypeFields);
     document.getElementById('widgetConfigGroupBy').addEventListener('change', syncConfigurableWidgetTypeFields);
+    document.getElementById('widgetConfigDimension').addEventListener('change', syncConfigurableWidgetTypeFields);
     document.getElementById('copyDashboardWidgetInspectorButton').addEventListener('click', async () => {
       await navigator.clipboard.writeText(
         document.getElementById('dashboardWidgetInspectorBody').textContent || '{}'

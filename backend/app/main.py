@@ -41495,6 +41495,7 @@ def top_asn_dimension(
     traffic_direction: str | None = None,
     prefix_filter: dict[str, Any] | None = None,
     protocol: str | None = None,
+    flow_orientation: str = "canonical",
 ):
     ensure_clickhouse_schema()
     prefix_filter = effective_prefix_filter(prefix_filter)
@@ -41514,6 +41515,7 @@ def top_asn_dimension(
             "zone_direction": zone_direction,
             "traffic_direction": traffic_direction or "",
             "protocol": clean_text(protocol).lower(),
+            "flow_orientation": clean_text(flow_orientation).lower() or "canonical",
             "prefix_filter": prefix_filter,
         },
     )
@@ -41538,58 +41540,84 @@ def top_asn_dimension(
         if parsed_protocol is not None:
             params["asn_protocol"] = parsed_protocol
             where += " AND proto = {asn_protocol:UInt8}"
+    requested_traffic_direction = clean_text(traffic_direction).lower()
+    normalized_flow_orientation = clean_text(flow_orientation).lower() or "canonical"
+    if normalized_flow_orientation not in {"canonical", "reversed"}:
+        raise HTTPException(status_code=400, detail="flow_orientation invalida")
+    direction_reversed = normalized_flow_orientation == "reversed"
+    physical_dimension = (
+        "dst" if dimension == "src" else "src"
+    ) if direction_reversed else dimension
+    asn_col = "src_asn" if physical_dimension == "src" else "dst_asn"
+    as_name_col = (
+        "src_as_name" if physical_dimension == "src" else "dst_as_name"
+    )
+    ip_col = "src_ip" if physical_dimension == "src" else "dst_ip"
     rate_direction = "auto"
     if zone_id is not None:
         requested_zone_direction = normalize_zone_direction(zone_direction)
-        if requested_zone_direction == "both":
-            asn_zone_direction = "transmits" if dimension == "src" else "receives"
+        if requested_traffic_direction in {"upload", "output", "transmits"}:
+            asn_zone_direction = "receives" if direction_reversed else "transmits"
+        elif requested_traffic_direction in {"download", "input", "receives"}:
+            asn_zone_direction = "transmits" if direction_reversed else "receives"
+        elif requested_traffic_direction == "both":
+            asn_zone_direction = requested_zone_direction
+        elif requested_zone_direction == "both":
+            # Preserve the public legacy top-ASN endpoints, which did not pass
+            # an explicit traffic direction and used their semantic endpoint
+            # name to choose the edge of the zone.
+            asn_zone_direction = (
+                "transmits" if physical_dimension == "src" else "receives"
+            )
         else:
             asn_zone_direction = requested_zone_direction
         zone_filter = build_zone_flow_filter(zone_id, asn_zone_direction, params, "asn_zone")
         if zone_filter:
             where += f" AND {zone_filter}"
         if asn_zone_direction == "transmits":
-            asn_col = "dst_asn"
-            as_name_col = "dst_as_name"
-            ip_col = "dst_ip"
             rate_direction = "output"
             if resolved_if_index is not None:
                 params["if_index"] = resolved_if_index
                 where += " AND output_if = {if_index:UInt32}"
-        else:
-            asn_col = "src_asn"
-            as_name_col = "src_as_name"
-            ip_col = "src_ip"
+        elif asn_zone_direction == "receives":
             rate_direction = "input"
             if resolved_if_index is not None:
                 params["if_index"] = resolved_if_index
                 where += " AND input_if = {if_index:UInt32}"
+        elif resolved_if_index is not None:
+            params["if_index"] = resolved_if_index
+            where += (
+                " AND (input_if = {if_index:UInt32} "
+                "OR output_if = {if_index:UInt32})"
+            )
     else:
-        asn_col = "src_asn" if dimension == "src" else "dst_asn"
-        as_name_col = "src_as_name" if dimension == "src" else "dst_as_name"
-        ip_col = "src_ip" if dimension == "src" else "dst_ip"
-        requested_traffic_direction = clean_text(
-            traffic_direction
-        ).lower()
         if requested_traffic_direction in {"upload", "output"}:
-            rate_direction = "output"
+            rate_direction = "input" if direction_reversed else "output"
             if resolved_if_index is not None:
                 params["if_index"] = resolved_if_index
-                where += " AND output_if = {if_index:UInt32}"
+                where += (
+                    " AND input_if = {if_index:UInt32}"
+                    if direction_reversed
+                    else " AND output_if = {if_index:UInt32}"
+                )
             else:
-                where += " AND output_if > 0"
+                where += " AND input_if > 0" if direction_reversed else " AND output_if > 0"
         elif requested_traffic_direction in {"download", "input"}:
-            rate_direction = "input"
+            rate_direction = "output" if direction_reversed else "input"
             if resolved_if_index is not None:
                 params["if_index"] = resolved_if_index
-                where += " AND input_if = {if_index:UInt32}"
+                where += (
+                    " AND output_if = {if_index:UInt32}"
+                    if direction_reversed
+                    else " AND input_if = {if_index:UInt32}"
+                )
             else:
-                where += " AND input_if > 0"
+                where += " AND output_if > 0" if direction_reversed else " AND input_if > 0"
         elif resolved_if_index is not None:
             # Preserve the native dashboard's historical source/destination
             # interface behavior when no explicit traffic direction exists.
             params["if_index"] = resolved_if_index
-            if dimension == "src":
+            if physical_dimension == "src":
                 where += " AND output_if = {if_index:UInt32}"
                 rate_direction = "output"
             else:
@@ -41619,7 +41647,7 @@ def top_asn_dimension(
             "prefix"
             if prefix_filter_active(prefix_filter)
             else "asn_src"
-            if dimension == "src"
+            if physical_dimension == "src"
             else "asn_dst"
         )
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
@@ -43661,6 +43689,7 @@ def dashboard_widget_top_payload(
             plan["direction"],
             prefix_filter,
             arguments["proto"],
+            flow_orientation=plan.get("flow_orientation", "canonical"),
         )
         items = dashboard_widget_normalize_top_items(
             payload.get("items", []),

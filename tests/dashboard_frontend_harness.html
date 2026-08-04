@@ -212,6 +212,75 @@
          'widget contains external horizontal overflow'
        );
 
+       const smallTop20 = chartHelpers.getWidgetContentMetrics(320, 210, {
+         itemCount: 20,
+         visualization: 'horizontal_bar'
+       });
+       const mediumTop10 = chartHelpers.getWidgetContentMetrics(620, 340, {
+         itemCount: 10,
+         visualization: 'horizontal_bar'
+       });
+       const largeTop5 = chartHelpers.getWidgetContentMetrics(1100, 620, {
+         itemCount: 5,
+         visualization: 'horizontal_bar'
+       });
+       assert(smallTop20.scale >= .82, 'small widget keeps minimum readable scale');
+       assert(largeTop5.scale <= 1.16, 'large widget scale remains bounded');
+       assert(
+         smallTop20.fontSize <= mediumTop10.fontSize
+           && mediumTop10.fontSize <= largeTop5.fontSize,
+         'small medium and large fonts grow in a controlled order'
+       );
+       assertEqual(smallTop20.rankingOverflow, true, 'Top 20 reports necessary internal scroll');
+       assertEqual(smallTop20.chartScroll, 'vertical', 'horizontal Top 20 keeps all bars via vertical scroll');
+       assertEqual(largeTop5.rankingOverflow, false, 'large Top 5 fits without scroll');
+       const appliedTop20 = chartHelpers.applyWidgetResponsiveLayout(
+         responsiveBody,
+         320,
+         {
+           height: 210,
+           itemCount: 20,
+           visualization: 'horizontal_bar'
+         }
+       );
+       assertEqual(responsiveBody.dataset.responsiveOverflow, 'scroll', 'overflow state is explicit');
+       assertEqual(responsiveBody.dataset.chartScroll, 'vertical', 'chart scroll state reaches DOM');
+       assert(
+         Number.parseFloat(responsiveBody.style.getPropertyValue('--widget-font-size')) >= 11,
+         'responsive font CSS variable is readable'
+       );
+       assert(
+         Number.parseFloat(responsiveBody.style.getPropertyValue('--widget-row-height')) >= 27,
+         'responsive row CSS variable is readable'
+       );
+       assert(
+         appliedTop20.metrics.visibleRows < 20,
+         'Top 20 never pretends hidden rows fit'
+       );
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 1100, {
+         height: 620,
+         itemCount: 5,
+         visualization: 'horizontal_bar'
+       });
+       chartHelpers.applyWidgetResponsiveLayout(responsiveBody, 320, {
+         height: 210,
+         itemCount: 20,
+         visualization: 'horizontal_bar'
+       });
+       assertEqual(
+         responsiveBody.dataset.responsiveOverflow,
+         'scroll',
+         'repeated size changes recompute content metrics'
+       );
+       const longIdentity = '2001:db8:abcd:1234:5678:90ab:cdef:1234 · AS64500 Example Telecommunications International';
+       responsiveFixture.querySelector('.ranking-cell-item').textContent = longIdentity;
+       responsiveFixture.querySelector('.ranking-cell-item').title = longIdentity;
+       assertEqual(
+         responsiveFixture.querySelector('.ranking-cell-item').title,
+         longIdentity,
+         'IPv6 and long ASN identity remain accessible through tooltip'
+       );
+
        const wideLegend = chartHelpers.getResponsiveLegendLayout(920, 360, 'right');
        const narrowLegend = chartHelpers.getResponsiveLegendLayout(480, 260, 'top');
        assertEqual(wideLegend.position, 'right', 'wide preferred legend moves laterally');
@@ -790,6 +859,7 @@
       let moveRolledBack = 0;
       let movePersistErrors = 0;
       let rejectNextMovePersist = false;
+      let movePersistBarrier = null;
       const moveController = GMJDashboardResize.createDashboardMoveController({
         grid,
         layoutEngine: GMJDashboardLayout,
@@ -806,6 +876,7 @@
             rejectNextMovePersist = false;
             throw new Error('PATCH de movimento rejeitado');
           }
+          if (movePersistBarrier) await movePersistBarrier;
           movePersisted += 1;
         },
         onRollback: payload => {
@@ -863,6 +934,17 @@
         })
       );
       const movePointer = (type, pointerId, x, y) => moveHandle.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId,
+          pointerType: 'mouse',
+          button: 0,
+          clientX: x,
+          clientY: y
+        })
+      );
+      const globalPointer = (type, pointerId, x, y) => document.dispatchEvent(
         new PointerEvent(type, {
           bubbles: true,
           cancelable: true,
@@ -1015,6 +1097,111 @@
         'failed move PATCH preserves exact local drop'
       );
 
+      const beforeOutsidePersist = movePersisted;
+      movePointer('pointerdown', 18, 0, 0);
+      movePointer('pointermove', 18, 204, 0);
+      globalPointer('pointerup', 18, 204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, beforeOutsidePersist + 1, 'pointerup outside widget persists once');
+      assertEqual(moveController.activeSession, null, 'outside pointerup clears move session');
+      assert(!article.classList.contains('is-dragging'), 'outside pointerup clears drag class');
+
+      const beforeGlobalCancel = GMJDashboardLayout.layoutSignature(layout);
+      movePointer('pointerdown', 19, 0, 0);
+      movePointer('pointermove', 19, -204, 0);
+      globalPointer('pointercancel', 19, -204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(
+        GMJDashboardLayout.layoutSignature(layout),
+        beforeGlobalCancel,
+        'global pointercancel restores layout'
+      );
+      assertEqual(moveController.activeSession, null, 'global pointercancel clears session');
+
+      const beforeBlur = GMJDashboardLayout.layoutSignature(layout);
+      movePointer('pointerdown', 20, 0, 0);
+      movePointer('pointermove', 20, 204, 0);
+      window.dispatchEvent(new Event('blur'));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(GMJDashboardLayout.layoutSignature(layout), beforeBlur, 'window blur restores layout');
+      assertEqual(moveController.activeSession, null, 'window blur clears session');
+
+      const originalVisibility = document.visibilityState;
+      let visibilityOverridden = false;
+      try {
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          value: 'hidden'
+        });
+        visibilityOverridden = true;
+      } catch (_) {}
+      if (visibilityOverridden) {
+        const beforeHidden = GMJDashboardLayout.layoutSignature(layout);
+        movePointer('pointerdown', 21, 0, 0);
+        movePointer('pointermove', 21, -204, 0);
+        document.dispatchEvent(new Event('visibilitychange'));
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assertEqual(GMJDashboardLayout.layoutSignature(layout), beforeHidden, 'hidden page restores layout');
+        assertEqual(moveController.activeSession, null, 'hidden page clears session');
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          value: originalVisibility
+        });
+      }
+
+      const beforeMouseFallback = movePersisted;
+      movePointer('pointerdown', 22, 0, 0);
+      movePointer('pointermove', 22, 204, 0);
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, beforeMouseFallback + 1, 'global mouseup fallback persists once');
+      assertEqual(moveController.activeSession, null, 'global mouseup fallback clears session');
+
+      let releaseMovePersist;
+      movePersistBarrier = new Promise(resolve => {
+        releaseMovePersist = resolve;
+      });
+      const beforeSlowPersist = movePersisted;
+      movePointer('pointerdown', 26, 0, 0);
+      movePointer('pointermove', 26, 204, 0);
+      globalPointer('pointerup', 26, 204, 0);
+      const layoutAtSlowDrop = GMJDashboardLayout.layoutSignature(layout);
+      assertEqual(moveController.activeSession, null, 'slow PATCH does not retain move session');
+      assert(!article.classList.contains('is-dragging'), 'slow PATCH clears drag class immediately');
+      globalPointer('pointermove', 26, 408, 120);
+      assertEqual(
+        GMJDashboardLayout.layoutSignature(layout),
+        layoutAtSlowDrop,
+        'pointermove after drop cannot change layout while PATCH is pending'
+      );
+      assertEqual(movePersisted, beforeSlowPersist, 'slow PATCH remains pending in test barrier');
+      releaseMovePersist();
+      movePersistBarrier = null;
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, beforeSlowPersist + 1, 'slow PATCH persists exactly once');
+
+      const beforeResizeAfterDrag = persisted;
+      pointer('pointerdown', 23, 0, 0);
+      pointer('pointermove', 23, 0, 60);
+      globalPointer('pointerup', 23, 0, 60);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(persisted, beforeResizeAfterDrag + 1, 'drag followed by resize remains usable');
+      const beforeDragAfterResize = movePersisted;
+      movePointer('pointerdown', 24, 0, 0);
+      movePointer('pointermove', 24, -204, 0);
+      globalPointer('pointerup', 24, -204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, beforeDragAfterResize + 1, 'resize followed by drag remains usable');
+
+      const beforeRerenderPersist = movePersisted;
+      movePointer('pointerdown', 25, 0, 0);
+      movePointer('pointermove', 25, 204, 0);
+      article.replaceChildren(document.createTextNode('widget re-rendered'));
+      globalPointer('pointerup', 25, 204, 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assertEqual(movePersisted, beforeRerenderPersist + 1, 're-render during drag still commits once');
+      assertEqual(moveController.activeSession, null, 're-render during drag clears session');
+
       const upward = GMJDashboardLayout.resolveDropLayout([
         { id: 1, x: 0, y: 8, w: 4, h: 4 },
         { id: 2, x: 0, y: 4, w: 4, h: 4 }
@@ -1023,13 +1210,14 @@
       assertEqual(upwardById.get(1).y, 0, 'active widget moves upward into free slot');
       assertEqual(upwardById.get(2).y, 4, 'passive widget keeps slot without compaction');
 
+      const beforeDestroyPersist = persisted;
       moveController.destroy();
       controller.destroy();
       pointer('pointerdown', 12, 0, 0);
       pointer('pointermove', 12, 204, 120);
       pointer('pointerup', 12, 204, 120);
       await new Promise(resolve => setTimeout(resolve, 10));
-      assertEqual(persisted, 3, 'destroy releases listeners');
+      assertEqual(persisted, beforeDestroyPersist, 'destroy releases listeners');
 
       const result = document.getElementById('result');
       result.dataset.status = failures.length ? 'failed' : 'passed';

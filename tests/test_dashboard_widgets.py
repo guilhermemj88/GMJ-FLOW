@@ -294,7 +294,7 @@ class DashboardWidgetSchemaTest(unittest.TestCase):
         self.assertFalse(loaded["is_shared"])
         self.assertNotEqual(source["id"], duplicate["id"])
 
-    def test_legacy_asn_rankings_are_corrected_without_restyling_user_widget(self):
+    def test_legacy_asn_rankings_are_corrected_for_system_template_once(self):
         legacy = copy.deepcopy(GENERAL_WIDGETS[10])
         legacy["config"].update(
             {
@@ -318,11 +318,67 @@ class DashboardWidgetSchemaTest(unittest.TestCase):
             2,
             widgets=[legacy],
         )
+        self.conn.execute(
+            """
+            UPDATE dashboards
+            SET is_system = 1, asn_ranking_dimensions_migrated = 0
+            WHERE id = ?
+            """,
+            (dashboard["id"],),
+        )
         ensure_dashboard_schema(self.conn)
         migrated = get_dashboard(self.conn, dashboard["id"])
         widget = migrated["widgets"][0]
         self.assertEqual(widget["config"]["dimension"], "dst_asn")
-        self.assertEqual(widget["visualization"]["type"], "table")
+        self.assertEqual(widget["visualization"]["type"], "chart_table")
+
+    def test_explicit_asn_dimension_survives_repeated_schema_checks_and_duplicate(self):
+        dashboard = create_dashboard(
+            self.conn,
+            {
+                "name": "Persistência ASN",
+                "is_default": False,
+                "is_shared": False,
+            },
+            2,
+            widgets=[copy.deepcopy(GENERAL_WIDGETS[10])],
+        )
+        widget = dashboard["widgets"][0]
+        self.conn.execute(
+            """
+            UPDATE dashboards
+            SET asn_ranking_dimensions_migrated = 0
+            WHERE id = ?
+            """,
+            (dashboard["id"],),
+        )
+        for dimension in ("src_asn", "dst_asn", "src_asn"):
+            saved = validate_widget_definition(
+                {
+                    **copy.deepcopy(widget),
+                    "config": {
+                        **copy.deepcopy(widget["config"]),
+                        "dimension": dimension,
+                    },
+                }
+            )
+            self.conn.execute(
+                "UPDATE dashboard_widgets SET config_json = ? WHERE id = ?",
+                (json.dumps(saved["config"]), widget["id"]),
+            )
+            ensure_dashboard_schema(self.conn)
+            widget = get_dashboard(self.conn, dashboard["id"])["widgets"][0]
+            self.assertEqual(widget["config"]["dimension"], dimension)
+
+        duplicate = duplicate_dashboard(
+            self.conn,
+            get_dashboard(self.conn, dashboard["id"]),
+            2,
+        )
+        self.assertEqual(
+            duplicate["widgets"][0]["config"]["dimension"],
+            "src_asn",
+        )
 
 
 class DashboardWidgetValidationTest(unittest.TestCase):
@@ -362,6 +418,10 @@ class DashboardWidgetValidationTest(unittest.TestCase):
         self.assertIn("bits_per_second", catalog["metrics"])
         self.assertIn("input_interface", catalog["dimensions"])
         self.assertIn("ingress", catalog["directions"])
+        self.assertEqual(
+            set(catalog["flow_orientations"]),
+            {"canonical", "reversed"},
+        )
         self.assertIn("not_in", catalog["filter_operators"])
         self.assertIn("between", catalog["filter_operators"])
         self.assertIn("clickhouse", catalog["status_sources"])
@@ -444,6 +504,25 @@ class DashboardWidgetValidationTest(unittest.TestCase):
                     },
                 }
             )
+
+    def test_asn_flow_orientation_is_explicit_and_reaches_query_plan(self):
+        default_widget = validate_widget_definition(
+            copy.deepcopy(GENERAL_WIDGETS[10])
+        )
+        self.assertEqual(default_widget["config"]["dimension"], "dst_asn")
+        self.assertEqual(default_widget["config"]["direction"], "upload")
+        self.assertEqual(
+            default_widget["config"]["flow_orientation"],
+            "canonical",
+        )
+        widget = copy.deepcopy(GENERAL_WIDGETS[10])
+        widget["config"]["dimension"] = "src_asn"
+        widget["config"]["flow_orientation"] = "reversed"
+        normalized = validate_widget_definition(widget)
+        plan = build_widget_query_plan(normalized)
+        self.assertEqual(normalized["config"]["dimension"], "src_asn")
+        self.assertEqual(normalized["config"]["flow_orientation"], "reversed")
+        self.assertEqual(plan["flow_orientation"], "reversed")
 
     def test_grid_is_normalized(self):
         self.assertEqual(

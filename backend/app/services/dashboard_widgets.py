@@ -262,6 +262,7 @@ DIRECTIONS = {
     "transmits",
     "receives",
 }
+FLOW_ORIENTATIONS = {"canonical", "reversed"}
 DIRECTION_ALIASES = {
     "ingress": "download",
     "egress": "upload",
@@ -1000,6 +1001,7 @@ def widget_catalog() -> dict[str, Any]:
         "metrics": sorted(METRICS | set(METRIC_ALIASES)),
         "metric_aliases": dict(METRIC_ALIASES),
         "directions": sorted(DIRECTIONS | set(DIRECTION_ALIASES)),
+        "flow_orientations": sorted(FLOW_ORIENTATIONS),
         "direction_aliases": dict(DIRECTION_ALIASES),
         "group_by": sorted(TIME_GROUPS),
         "aggregations": sorted(AGGREGATIONS),
@@ -1280,6 +1282,9 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
         dimension = str(config.get("dimension") or "").strip().lower()
         metric = str(config.get("metric") or "").strip().lower()
         direction = str(config.get("direction") or "both").strip().lower()
+        flow_orientation = str(
+            config.get("flow_orientation") or "canonical"
+        ).strip().lower()
         dimension = DIMENSION_ALIASES.get(dimension, dimension)
         metric = METRIC_ALIASES.get(metric, metric)
         direction = DIRECTION_ALIASES.get(direction, direction)
@@ -1289,6 +1294,8 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
             raise ValueError("métrica inválida")
         if direction not in DIRECTIONS:
             raise ValueError("direção inválida")
+        if flow_orientation not in FLOW_ORIENTATIONS:
+            raise ValueError("orientação src/dst inválida")
         limit = int(config.get("limit") or 10)
         maximum_limit = (
             PREFIX_WIDGET_MAX_SERIES
@@ -1311,6 +1318,7 @@ def validate_widget_definition(payload: Any, partial: bool = False) -> dict[str,
                 "dimension": dimension,
                 "metric": metric,
                 "direction": direction,
+                "flow_orientation": flow_orientation,
                 "limit": limit,
                 "combined_chart_kind": combined_chart_kind,
                 "slice_limit": max(
@@ -1555,6 +1563,7 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
             layout_version INTEGER NOT NULL DEFAULT 1,
             legacy_layout_migrated INTEGER NOT NULL DEFAULT 0,
             core_top_widgets_migrated INTEGER NOT NULL DEFAULT 0,
+            asn_ranking_dimensions_migrated INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1620,6 +1629,12 @@ def ensure_dashboard_schema(conn: sqlite3.Connection) -> None:
         "dashboards",
         "core_top_widgets_migrated",
         "core_top_widgets_migrated INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "dashboards",
+        "asn_ranking_dimensions_migrated",
+        "asn_ranking_dimensions_migrated INTEGER NOT NULL DEFAULT 0",
     )
     _ensure_column(
         conn,
@@ -1767,11 +1782,12 @@ def _migrate_legacy_asn_ranking_widgets(
     }
     rows = conn.execute(
         """
-        SELECT w.id, w.widget_key, w.config_json, w.visualization_json,
-               d.is_system
+        SELECT w.id, w.widget_key, w.config_json, w.visualization_json
         FROM dashboard_widgets AS w
         JOIN dashboards AS d ON d.id = w.dashboard_id
         WHERE w.widget_key IN ('top-asn-src', 'top-asn-dst')
+          AND d.is_system = 1
+          AND d.asn_ranking_dimensions_migrated = 0
         """
     ).fetchall()
     timestamp = _utc_now()
@@ -1785,51 +1801,46 @@ def _migrate_legacy_asn_ranking_widgets(
             continue
         config["dimension"] = migration["dimension"]
         visualization = _json_loads(row["visualization_json"], {})
-        if _bool(row["is_system"]):
-            config.update(
-                {
-                    "visualization": "chart_table",
-                    "visualization_kind": "chart_table",
-                    "combined_chart_kind": "donut",
-                    "slice_limit": 8,
-                    "chart_table_ratio": 55,
-                }
-            )
-            visualization.update(
-                {
-                    "type": "chart_table",
-                    "visualization_kind": "chart_table",
-                }
-            )
-            conn.execute(
-                """
-                UPDATE dashboard_widgets
-                SET config_json = ?, visualization_json = ?,
-                    grid_x = ?, grid_w = 6, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    _canonical_json(config),
-                    _canonical_json(visualization),
-                    0 if row["widget_key"] == "top-asn-src" else 6,
-                    timestamp,
-                    int(row["id"]),
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE dashboard_widgets
-                SET config_json = ?, visualization_json = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    _canonical_json(config),
-                    _canonical_json(visualization),
-                    timestamp,
-                    int(row["id"]),
-                ),
-            )
+        config.update(
+            {
+                "visualization": "chart_table",
+                "visualization_kind": "chart_table",
+                "combined_chart_kind": "donut",
+                "slice_limit": 8,
+                "chart_table_ratio": 55,
+            }
+        )
+        visualization.update(
+            {
+                "type": "chart_table",
+                "visualization_kind": "chart_table",
+            }
+        )
+        conn.execute(
+            """
+            UPDATE dashboard_widgets
+            SET config_json = ?, visualization_json = ?,
+                grid_x = ?, grid_w = 6, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                _canonical_json(config),
+                _canonical_json(visualization),
+                0 if row["widget_key"] == "top-asn-src" else 6,
+                timestamp,
+                int(row["id"]),
+            ),
+        )
+    # This compatibility rewrite is restricted to immutable system templates
+    # and must be one-shot. A user choice can look exactly like the legacy
+    # signature, so user-owned dashboards are marked without being rewritten.
+    conn.execute(
+        """
+        UPDATE dashboards
+        SET asn_ranking_dimensions_migrated = 1
+        WHERE asn_ranking_dimensions_migrated = 0
+        """
+    )
 
 
 def _migrate_core_top_widgets(conn: sqlite3.Connection) -> None:
@@ -2462,8 +2473,9 @@ def create_dashboard(
             template_key, global_filters_json, prefix_filter_json,
             prefix_grouping_json, time_range_json,
             refresh_interval_seconds, layout_version,
-            core_top_widgets_migrated, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            core_top_widgets_migrated, asn_ranking_dimensions_migrated,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
         """,
         (
             normalized["name"],
@@ -2601,6 +2613,7 @@ def build_widget_query_plan(widget: dict[str, Any]) -> dict[str, Any]:
             "resolver": dimension_plan.get("resolver"),
             "metric": config["metric"],
             "direction": config["direction"],
+            "flow_orientation": config.get("flow_orientation", "canonical"),
             "limit": config["limit"],
             "calculation": config.get("calculation", "current"),
             "filters": normalized["filters"],

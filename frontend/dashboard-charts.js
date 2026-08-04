@@ -444,12 +444,83 @@
     });
   }
 
+  function getWidgetContentMetrics(width, height, options = {}) {
+    const safeWidth = Math.max(1, finiteNumber(width, 1));
+    const safeHeight = Math.max(1, finiteNumber(height, 1));
+    const itemCount = Math.max(0, Math.trunc(finiteNumber(options.itemCount, 0)));
+    const scale = clamp(
+      Math.min(safeWidth / 520, safeHeight / 340),
+      0.82,
+      1.16
+    );
+    const fontSize = clamp(13 * scale, 11, 15);
+    const labelSize = clamp(12 * scale, 10, 14);
+    const gap = clamp(8 * scale, 5, 11);
+    const tableHeaderHeight = clamp(31 * scale, 27, 36);
+    const availableRowsHeight = Math.max(0, safeHeight - tableHeaderHeight);
+    const idealRowHeight = itemCount > 0
+      ? availableRowsHeight / itemCount
+      : 34 * scale;
+    const rowHeight = clamp(idealRowHeight, 27, 44);
+    const visibleRows = itemCount > 0
+      ? Math.max(1, Math.floor(availableRowsHeight / rowHeight))
+      : 0;
+    const rankingOverflow = itemCount > visibleRows && itemCount > 0;
+    const visualization = String(options.visualization || '').toLowerCase();
+    const combined = Boolean(options.combined);
+    const horizontalRanking = ['horizontal_bar', 'bar_gauge'].includes(
+      visualization
+    );
+    const verticalRanking = ['bar', 'vertical_bar'].includes(visualization);
+    const chartRowHeight = clamp(30 * scale, 25, 36);
+    return Object.freeze({
+      width: safeWidth,
+      height: safeHeight,
+      scale,
+      fontSize,
+      labelSize,
+      gap,
+      rowHeight,
+      visibleRows,
+      itemCount,
+      rankingOverflow,
+      chartScroll: !combined && rankingOverflow
+        ? horizontalRanking
+          ? 'vertical'
+          : verticalRanking
+            ? 'horizontal'
+            : 'none'
+        : 'none',
+      chartMinHeight: horizontalRanking && !combined
+        ? Math.max(safeHeight, itemCount * chartRowHeight + 54)
+        : safeHeight,
+      chartMinWidth: verticalRanking && !combined
+        ? Math.max(safeWidth, itemCount * clamp(54 * scale, 46, 64) + 70)
+        : safeWidth
+    });
+  }
+
   function applyWidgetResponsiveLayout(element, width, options = {}) {
     const layout = getWidgetResponsiveLayout(width, options);
     if (!element) return layout;
+    const metrics = getWidgetContentMetrics(
+      width,
+      options.height ?? element.getBoundingClientRect?.().height,
+      options
+    );
     element.dataset.responsiveLayout = layout.mode;
     element.dataset.responsiveTableDensity = layout.tableDensity;
+    element.dataset.responsiveOverflow = metrics.rankingOverflow ? 'scroll' : 'fit';
+    element.dataset.chartScroll = metrics.chartScroll;
     element.style?.setProperty('--ranking-chart-ratio', `${layout.chartRatio}%`);
+    element.style?.setProperty('--widget-scale', metrics.scale.toFixed(3));
+    element.style?.setProperty('--widget-font-size', `${metrics.fontSize.toFixed(2)}px`);
+    element.style?.setProperty('--widget-label-size', `${metrics.labelSize.toFixed(2)}px`);
+    element.style?.setProperty('--widget-gap', `${metrics.gap.toFixed(2)}px`);
+    element.style?.setProperty('--widget-row-height', `${metrics.rowHeight.toFixed(2)}px`);
+    element.style?.setProperty('--widget-chart-min-height', `${Math.ceil(metrics.chartMinHeight)}px`);
+    element.style?.setProperty('--widget-chart-min-width', `${Math.ceil(metrics.chartMinWidth)}px`);
+    element.style?.setProperty('--widget-visible-rows', String(metrics.visibleRows));
     element.style?.setProperty(
       '--widget-stacked-breakpoint',
       `${layout.breakpoints.stacked}px`
@@ -458,7 +529,7 @@
       '--widget-wide-breakpoint',
       `${layout.breakpoints.wide}px`
     );
-    return layout;
+    return Object.freeze({ ...layout, metrics });
   }
 
   function getResponsiveLegendLayout(
@@ -585,6 +656,7 @@
     densitySettings,
     normalizeWidgetBreakpoints,
     getWidgetResponsiveLayout,
+    getWidgetContentMetrics,
     applyWidgetResponsiveLayout,
     getResponsiveLegendLayout,
     getResponsivePieGeometry,

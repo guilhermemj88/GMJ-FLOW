@@ -155,6 +155,7 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
         dimension,
         *,
         aggregate_covered=False,
+        flow_orientation="canonical",
     ):
         queries = []
         patches = self.common_patches(
@@ -174,6 +175,7 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
                 traffic_direction=(
                     "download" if dimension == "src" else "upload"
                 ),
+                flow_orientation=flow_orientation,
             )
         return queries
 
@@ -339,6 +341,65 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
                 self.assertIn("FROM flow_raw", hybrid_query)
                 self.assertIn(aggregate_sql, hybrid_query)
                 self.assertIn(direction_sql, hybrid_query)
+
+        reversed_query, _params = self.run_asn_ranking(
+            "dst",
+            aggregate_covered=True,
+            flow_orientation="reversed",
+        )[0]
+        self.assertIn("toUInt32(src_asn) AS asn", reversed_query)
+        self.assertIn("FROM flow_dashboard_asn_src_1m", reversed_query)
+        self.assertIn("input_if > 0", reversed_query)
+
+    def test_zone_direction_respects_selected_asn_dimension_and_orientation(self):
+        cases = (
+            ("dst", "upload", "canonical", "transmits", "dst_asn"),
+            ("src", "upload", "canonical", "transmits", "src_asn"),
+            ("src", "download", "canonical", "receives", "src_asn"),
+            ("dst", "download", "canonical", "receives", "dst_asn"),
+            ("src", "upload", "reversed", "receives", "dst_asn"),
+            ("dst", "download", "reversed", "transmits", "src_asn"),
+        )
+        for dimension, direction, orientation, zone_edge, asn_column in cases:
+            with self.subTest(
+                dimension=dimension,
+                direction=direction,
+                orientation=orientation,
+            ):
+                queries = []
+                patches = self.common_patches(queries)
+                zone_directions = []
+
+                def zone_filter(_zone_id, zone_direction, _params, _prefix):
+                    zone_directions.append(zone_direction)
+                    return "zone_%s" % zone_direction
+
+                with patches[0], patches[1], patches[2], patches[3], \
+                        patches[4], patches[5], patches[6], patches[7], \
+                        patches[8], mock.patch.object(
+                            backend_main,
+                            "build_zone_flow_filter",
+                            side_effect=zone_filter,
+                        ):
+                    backend_main.top_asn_dimension(
+                        dimension=dimension,
+                        range_minutes=60,
+                        sensor=None,
+                        sensor_id=None,
+                        limit=10,
+                        start=START,
+                        end=END,
+                        zone_id=9,
+                        zone_direction="both",
+                        traffic_direction=direction,
+                        flow_orientation=orientation,
+                    )
+                self.assertEqual(zone_directions, [zone_edge])
+                self.assertIn("zone_%s" % zone_edge, queries[0][0])
+                self.assertIn(
+                    "toUInt32(%s) AS asn" % asn_column,
+                    queries[0][0],
+                )
 
     def test_generic_configurable_series_uses_rated_filter(self):
         queries = []

@@ -124,6 +124,43 @@
     };
   }
 
+  function addTemporaryGestureListeners(eventRoot, handle, handlers) {
+    const view = eventRoot?.defaultView || (
+      typeof window !== 'undefined' ? window : null
+    );
+    const pointerTarget = view || eventRoot;
+    const registrations = [];
+    const add = (target, type, listener, options) => {
+      if (!target?.addEventListener || typeof listener !== 'function') return;
+      target.addEventListener(type, listener, options);
+      registrations.push([target, type, listener, options]);
+    };
+
+    // These listeners live only for the current gesture. Window-level pointer
+    // events cover release outside the grid; blur/visibility are the last-resort
+    // exits when the browser can no longer deliver a pointerup.
+    add(pointerTarget, 'pointermove', handlers.pointermove, true);
+    add(pointerTarget, 'pointerup', handlers.pointerup, true);
+    add(pointerTarget, 'pointercancel', handlers.pointercancel, true);
+    add(pointerTarget, 'lostpointercapture', handlers.lostpointercapture, true);
+    if (handle !== pointerTarget) {
+      add(handle, 'lostpointercapture', handlers.lostpointercapture);
+    }
+    add(view, 'mouseup', handlers.mouseup, true);
+    add(view, 'blur', handlers.blur, true);
+    add(eventRoot, 'visibilitychange', handlers.visibilitychange, true);
+
+    let removed = false;
+    return () => {
+      if (removed) return;
+      removed = true;
+      registrations.forEach(([target, type, listener, listenerOptions]) => {
+        target.removeEventListener(type, listener, listenerOptions);
+      });
+      registrations.length = 0;
+    };
+  }
+
   function createDashboardMoveController(options) {
     if (!options?.grid) throw new Error('A grade do dashboard é obrigatória.');
     if (!options?.layoutEngine?.moveItemAndPush) {
@@ -195,6 +232,7 @@
         keyboardY: Number(item.y),
         changed: false,
         persisting: false,
+        ending: false,
         activated: false,
         previewFrame: null,
         pendingPosition: null,
@@ -203,6 +241,19 @@
         ...geometry()
       };
       if (!keyboard) {
+        session.removeTemporaryListeners = addTemporaryGestureListeners(
+          eventRoot,
+          handle,
+          {
+            pointermove: onMovePointerMove,
+            pointerup: onMovePointerUp,
+            pointercancel: onMovePointerCancel,
+            lostpointercapture: onLostPointerCapture,
+            mouseup: onGlobalMouseUp,
+            blur: onWindowBlur,
+            visibilitychange: onVisibilityChange
+          }
+        );
         event.preventDefault();
         event.stopPropagation();
         try {
@@ -211,7 +262,12 @@
           // Synthetic events and older browsers can reject pointer capture.
         }
       }
-      if (keyboard) activate();
+      try {
+        if (keyboard) activate();
+      } catch (error) {
+        fail(error);
+        return false;
+      }
       return true;
     }
 
@@ -261,16 +317,20 @@
       });
     }
 
-    function cleanup() {
-      if (!session) return;
-      const current = session;
-      session = null;
+    function cleanup(current = session) {
+      if (!current || current.cleaned) return;
+      current.cleaned = true;
+      if (session === current) session = null;
+      current.removeTemporaryListeners?.();
+      current.removeTemporaryListeners = null;
       if (current.previewFrame !== null) {
         const cancelFrame = eventRoot.defaultView?.cancelAnimationFrame
           || (typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : null);
         cancelFrame?.(current.previewFrame);
       }
       current.element.classList.remove('is-dragging');
+      current.element.style.removeProperty('cursor');
+      current.element.style.removeProperty('user-select');
       grid.classList.remove('has-widget-interaction');
       eventRoot.body?.classList.remove('dashboard-widget-interacting');
       try {
@@ -283,33 +343,51 @@
       } catch {
         // The browser may have released capture after pointercancel.
       }
-      if (current.activated) options.onFinish?.(current);
+      if (current.activated) {
+        try {
+          options.onFinish?.(current);
+        } catch (error) {
+          options.onError?.(error, current);
+        }
+      }
     }
 
     async function cancel(event) {
-      if (!session || session.persisting) return;
+      if (!session || session.ending) return;
       const current = session;
+      current.ending = true;
       event?.preventDefault?.();
       if (!current.activated) {
-        cleanup();
+        cleanup(current);
         return;
       }
-      await options.onRollback?.({
-        widget: current.widget,
-        layout: layoutEngine.rollbackLayoutInteraction
-          ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
-          : current.originalLayout,
-        session: current,
-        cancelled: true
-      });
-      cleanup();
+      cleanup(current);
+      try {
+        await options.onRollback?.({
+          widget: current.widget,
+          layout: layoutEngine.rollbackLayoutInteraction
+            ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
+            : current.originalLayout,
+          session: current,
+          cancelled: true
+        });
+      } catch (error) {
+        options.onError?.(error, current);
+      }
     }
 
     async function commit(event) {
-      if (!session || session.persisting) return;
-      flushPreview();
+      if (!session || session.ending) return;
+      try {
+        flushPreview();
+      } catch (error) {
+        fail(error);
+        return;
+      }
       if (!session?.activated) {
-        cleanup();
+        const current = session;
+        current.ending = true;
+        cleanup(current);
         return;
       }
       if (!session.changed) {
@@ -317,33 +395,59 @@
         return;
       }
       const current = session;
+      current.ending = true;
       current.persisting = true;
       event?.preventDefault?.();
-      const finalLayout = layoutEngine.commitLayoutInteraction
-        ? layoutEngine.commitLayoutInteraction(current.interactionLayout)
-        : layoutEngine.repairDashboardLayout(
-          current.interactionLayout,
-          current.widget.id
-        );
-      options.onPreview?.({
-        widget: current.widget,
-        layout: finalLayout,
-        session: current,
-        final: true
-      });
+      let finalLayout;
+      try {
+        finalLayout = layoutEngine.commitLayoutInteraction
+          ? layoutEngine.commitLayoutInteraction(current.interactionLayout)
+          : layoutEngine.repairDashboardLayout(
+            current.interactionLayout,
+            current.widget.id
+          );
+        options.onPreview?.({
+          widget: current.widget,
+          layout: finalLayout,
+          session: current,
+          final: true
+        });
+      } catch (error) {
+        cleanup(current);
+        options.onError?.(error, current);
+        return;
+      }
+      // End the local gesture before waiting for persistence. Otherwise a slow
+      // PATCH leaves the drag classes/session alive and later pointermove events
+      // continue to move the widget after pointerup.
+      cleanup(current);
       try {
         await options.onPersist?.({
           widget: current.widget,
           layout: finalLayout,
           session: current
         });
-        cleanup();
       } catch (error) {
         // A failed save keeps the committed preview in place. The host owns
         // retry feedback; rollback is reserved for Escape/pointer cancel.
         options.onError?.(error, current);
-        cleanup();
       }
+    }
+
+    function fail(error) {
+      if (!session || session.ending) return;
+      const current = session;
+      current.ending = true;
+      cleanup(current);
+      options.onError?.(error, current);
+      Promise.resolve(options.onRollback?.({
+        widget: current.widget,
+        layout: layoutEngine.rollbackLayoutInteraction
+          ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
+          : current.originalLayout,
+        session: current,
+        cancelled: true
+      })).catch(rollbackError => options.onError?.(rollbackError, current));
     }
 
     function onMovePointerDown(event) {
@@ -362,7 +466,7 @@
     }
 
     function onMovePointerMove(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
       const currentScroll = scrollPosition();
       const deltaX = Number(event.clientX) - session.startX
         + currentScroll.x - session.startScroll.x;
@@ -374,13 +478,18 @@
         8
       );
       if (!session.activated && Math.hypot(deltaX, deltaY) < threshold) return;
-      activate();
-      event.preventDefault();
-      session.pendingPosition = pointerDeltaToGridPosition(
-        session,
-        event.clientX,
-        event.clientY
-      );
+      try {
+        activate();
+        event.preventDefault();
+        session.pendingPosition = pointerDeltaToGridPosition(
+          session,
+          event.clientX,
+          event.clientY
+        );
+      } catch (error) {
+        fail(error);
+        return;
+      }
       if (session.previewFrame !== null) return;
       const requestFrame = eventRoot.defaultView?.requestAnimationFrame
         || (typeof requestAnimationFrame === 'function'
@@ -401,21 +510,41 @@
     }
 
     function onMovePointerUp(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
       commit(event);
     }
 
     function onMovePointerCancel(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
       cancel(event);
     }
 
     function onLostPointerCapture(event) {
       if (
         !session
+        || session.ending
         || session.keyboard
         || event.pointerId !== session.pointerId
-        || session.persisting
+      ) return;
+      cancel(event);
+    }
+
+    function onGlobalMouseUp(event) {
+      if (!session || session.ending || session.keyboard) return;
+      commit(event);
+    }
+
+    function onWindowBlur(event) {
+      if (!session || session.ending || session.keyboard) return;
+      cancel(event);
+    }
+
+    function onVisibilityChange(event) {
+      if (
+        !session
+        || session.ending
+        || session.keyboard
+        || eventRoot.visibilityState !== 'hidden'
       ) return;
       cancel(event);
     }
@@ -449,10 +578,6 @@
     }
 
     grid.addEventListener('pointerdown', onMovePointerDown);
-    grid.addEventListener('pointermove', onMovePointerMove);
-    grid.addEventListener('pointerup', onMovePointerUp);
-    grid.addEventListener('pointercancel', onMovePointerCancel);
-    grid.addEventListener('lostpointercapture', onLostPointerCapture);
     grid.addEventListener('keydown', onKeyDown);
 
     return Object.freeze({
@@ -465,10 +590,6 @@
         destroyed = true;
         if (session) cancel();
         grid.removeEventListener('pointerdown', onMovePointerDown);
-        grid.removeEventListener('pointermove', onMovePointerMove);
-        grid.removeEventListener('pointerup', onMovePointerUp);
-        grid.removeEventListener('pointercancel', onMovePointerCancel);
-        grid.removeEventListener('lostpointercapture', onLostPointerCapture);
         grid.removeEventListener('keydown', onKeyDown);
       }
     });
@@ -537,12 +658,26 @@
         constraints: options.getConstraints?.(widget) || {},
         lockWidth: geometry.responsiveColumns === 1,
         ...geometry,
-        persisting: false
+        persisting: false,
+        ending: false
       };
       element.classList.add('is-resizing');
       grid.classList.add('has-widget-resizing');
       eventRoot.body?.classList.add('dashboard-widget-resizing');
       if (!keyboard) {
+        session.removeTemporaryListeners = addTemporaryGestureListeners(
+          eventRoot,
+          handle,
+          {
+            pointermove: onPointerMove,
+            pointerup: onPointerUp,
+            pointercancel: onPointerCancel,
+            lostpointercapture: onResizeLostPointerCapture,
+            mouseup: onGlobalMouseUp,
+            blur: onWindowBlur,
+            visibilitychange: onVisibilityChange
+          }
+        );
         event.preventDefault();
         event.stopPropagation();
         try {
@@ -551,7 +686,12 @@
           // Synthetic events and older browsers can reject pointer capture.
         }
       }
-      options.onStart?.(session);
+      try {
+        options.onStart?.(session);
+      } catch (error) {
+        fail(error);
+        return false;
+      }
       return true;
     }
 
@@ -595,10 +735,15 @@
       });
     }
 
-    function cleanup() {
-      if (!session) return;
-      const current = session;
+    function cleanup(current = session) {
+      if (!current || current.cleaned) return;
+      current.cleaned = true;
+      if (session === current) session = null;
+      current.removeTemporaryListeners?.();
+      current.removeTemporaryListeners = null;
       current.element.classList.remove('is-resizing');
+      current.element.style.removeProperty('cursor');
+      current.element.style.removeProperty('user-select');
       grid.classList.remove('has-widget-resizing');
       eventRoot.body?.classList.remove('dashboard-widget-resizing');
       try {
@@ -611,28 +756,40 @@
       } catch {
         // The browser may have released capture after pointercancel.
       }
-      session = null;
-      options.onFinish?.(current);
+      try {
+        options.onFinish?.(current);
+      } catch (error) {
+        options.onError?.(error, current);
+      }
     }
 
     async function commit(event) {
-      if (!session || session.persisting) return;
+      if (!session || session.ending) return;
       const current = session;
+      current.ending = true;
       current.persisting = true;
       event?.preventDefault?.();
-      const finalLayout = layoutEngine.commitLayoutInteraction
-        ? layoutEngine.commitLayoutInteraction(current.interactionLayout)
-        : layoutEngine.repairDashboardLayout(
-          current.interactionLayout,
-          current.widget.id
-        );
-      options.onPreview?.({
-        widget: current.widget,
-        layout: finalLayout,
-        size: current.previewSize || { w: current.initialW, h: current.initialH },
-        session: current,
-        final: true
-      });
+      let finalLayout;
+      try {
+        finalLayout = layoutEngine.commitLayoutInteraction
+          ? layoutEngine.commitLayoutInteraction(current.interactionLayout)
+          : layoutEngine.repairDashboardLayout(
+            current.interactionLayout,
+            current.widget.id
+          );
+        options.onPreview?.({
+          widget: current.widget,
+          layout: finalLayout,
+          size: current.previewSize || { w: current.initialW, h: current.initialH },
+          session: current,
+          final: true
+        });
+      } catch (error) {
+        cleanup(current);
+        options.onError?.(error, current);
+        return;
+      }
+      cleanup(current);
       try {
         await options.onPersist?.({
           widget: current.widget,
@@ -640,28 +797,47 @@
           size: current.previewSize || { w: current.initialW, h: current.initialH },
           session: current
         });
-        cleanup();
       } catch (error) {
         // Preserve the final local size on persistence failure. A retry can
         // send the same stable widget-id layout without another interaction.
         options.onError?.(error, current);
-        cleanup();
       }
     }
 
     async function cancel(event) {
-      if (!session || session.persisting) return;
+      if (!session || session.ending) return;
       const current = session;
+      current.ending = true;
       event?.preventDefault?.();
-      await options.onRollback?.({
+      cleanup(current);
+      try {
+        await options.onRollback?.({
+          widget: current.widget,
+          layout: layoutEngine.rollbackLayoutInteraction
+            ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
+            : current.originalLayout,
+          session: current,
+          cancelled: true
+        });
+      } catch (error) {
+        options.onError?.(error, current);
+      }
+    }
+
+    function fail(error) {
+      if (!session || session.ending) return;
+      const current = session;
+      current.ending = true;
+      cleanup(current);
+      options.onError?.(error, current);
+      Promise.resolve(options.onRollback?.({
         widget: current.widget,
         layout: layoutEngine.rollbackLayoutInteraction
           ? layoutEngine.rollbackLayoutInteraction(current.originalLayout)
           : current.originalLayout,
         session: current,
         cancelled: true
-      });
-      cleanup();
+      })).catch(rollbackError => options.onError?.(rollbackError, current));
     }
 
     function onPointerDown(event) {
@@ -673,27 +849,51 @@
     }
 
     function onPointerMove(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
-      event.preventDefault();
-      preview(pointerDeltaToGridSize(session, event.clientX, event.clientY));
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
+      try {
+        event.preventDefault();
+        preview(pointerDeltaToGridSize(session, event.clientX, event.clientY));
+      } catch (error) {
+        fail(error);
+      }
     }
 
     function onPointerUp(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
       commit(event);
     }
 
     function onPointerCancel(event) {
-      if (!session || session.keyboard || event.pointerId !== session.pointerId) return;
+      if (!session || session.ending || session.keyboard || event.pointerId !== session.pointerId) return;
       cancel(event);
     }
 
     function onResizeLostPointerCapture(event) {
       if (
         !session
+        || session.ending
         || session.keyboard
         || event.pointerId !== session.pointerId
-        || session.persisting
+      ) return;
+      cancel(event);
+    }
+
+    function onGlobalMouseUp(event) {
+      if (!session || session.ending || session.keyboard) return;
+      commit(event);
+    }
+
+    function onWindowBlur(event) {
+      if (!session || session.ending || session.keyboard) return;
+      cancel(event);
+    }
+
+    function onVisibilityChange(event) {
+      if (
+        !session
+        || session.ending
+        || session.keyboard
+        || eventRoot.visibilityState !== 'hidden'
       ) return;
       cancel(event);
     }
@@ -731,10 +931,6 @@
     }
 
     grid.addEventListener('pointerdown', onPointerDown);
-    grid.addEventListener('pointermove', onPointerMove);
-    grid.addEventListener('pointerup', onPointerUp);
-    grid.addEventListener('pointercancel', onPointerCancel);
-    grid.addEventListener('lostpointercapture', onResizeLostPointerCapture);
     grid.addEventListener('keydown', onKeyDown);
 
     return Object.freeze({
@@ -747,10 +943,6 @@
         destroyed = true;
         if (session) cancel();
         grid.removeEventListener('pointerdown', onPointerDown);
-        grid.removeEventListener('pointermove', onPointerMove);
-        grid.removeEventListener('pointerup', onPointerUp);
-        grid.removeEventListener('pointercancel', onPointerCancel);
-        grid.removeEventListener('lostpointercapture', onResizeLostPointerCapture);
         grid.removeEventListener('keydown', onKeyDown);
       }
     });

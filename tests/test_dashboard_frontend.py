@@ -119,10 +119,14 @@ class DashboardResizeContractTest(unittest.TestCase):
             "setPointerCapture",
             "releasePointerCapture",
             "'lostpointercapture'",
+            "'mouseup'",
+            "'blur'",
+            "'visibilitychange'",
+            "addTemporaryGestureListeners",
             "DEFAULT_DRAG_THRESHOLD",
             "Math.hypot(deltaX, deltaY) < threshold",
             "requestAnimationFrame",
-            "session.persisting",
+            "current.persisting",
             "await options.onPersist?.(",
             "await options.onRollback?.(",
         ):
@@ -292,6 +296,13 @@ class DashboardResizeContractTest(unittest.TestCase):
             "overflow-x: hidden",
             "updateConfigurableChartResponsiveness",
             "configurableWidgetChartResponsiveContexts",
+            "getWidgetContentMetrics",
+            "--widget-scale",
+            "--widget-font-size",
+            "--widget-label-size",
+            "--widget-gap",
+            "--widget-row-height",
+            "data-chart-scroll",
             "textBorderWidth",
             "opacity: 1",
         ):
@@ -304,6 +315,17 @@ class DashboardResizeContractTest(unittest.TestCase):
         self.assertIn("GMJDashboardCharts.debounce", observer_block)
         self.assertNotIn("patchConfigurableWidget(", observer_block)
         self.assertNotIn("@media (max-width: 820px)", FRONTEND)
+
+    def test_asn_dimension_orientation_round_trip_contract(self):
+        for token in (
+            'id="widgetConfigDimension"',
+            'id="widgetConfigFlowOrientation"',
+            "config.dimension = document.getElementById('widgetConfigDimension').value",
+            "config.flow_orientation =",
+            "item.config?.flow_orientation || 'canonical'",
+            "widgetConfigFlowOrientation: baseType === 'top_n'",
+        ):
+            self.assertIn(token, FRONTEND)
 
     def test_ranking_quality_identity_and_layout_race_contracts(self):
         for token in (
