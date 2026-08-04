@@ -713,7 +713,7 @@ class AnomalyHistoryBrowserSmokeTest(unittest.TestCase):
                         parsed = urlparse(self.path)
                         query = parse_qs(parsed.query)
                         if parsed.path == "/api/auth/me":
-                            return self.send_json({"user": {"id": 1, "username": "test", "role": "admin", "must_change_password": False}})
+                            return self.send_json({"user": {"id": 1, "username": "test", "role": "admin", "permissions": ["anomalies.view", "anomalies.manage"], "must_change_password": False}})
                         if parsed.path == "/api/ops/summary":
                             return self.send_json({"active_anomalies": 0, "active_total": 0, "active_critical": 0, "active_warning": 0})
                         if parsed.path == "/api/anomalies/history":

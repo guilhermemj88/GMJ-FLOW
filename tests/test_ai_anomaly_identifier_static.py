@@ -15,7 +15,11 @@ class AiAnomalyIdentifierTest(unittest.TestCase):
         try:
             db_path = str(Path(tmpdir) / "gmjflow.db")
             env = {"GMJFLOW_DB_PATH": db_path}
-            request = types.SimpleNamespace(state=types.SimpleNamespace(user={"role": "admin"}))
+            request = types.SimpleNamespace(
+                state=types.SimpleNamespace(
+                    user={"role": "admin", "permissions": list(backend_main.PERMISSION_CATALOG)}
+                )
+            )
             anomaly_id = 24
             now = "2026-01-01T00:00:00Z"
             with mock.patch.dict(os.environ, env, clear=False), \

@@ -732,6 +732,7 @@ class DashboardBrowserHarnessTest(unittest.TestCase):
                             "id": 1,
                             "username": "dashboard-test",
                             "role": "admin",
+                            "permissions": ["dashboard.view", "dashboard.edit", "dashboard.manage"],
                             "must_change_password": False,
                         }
                     })

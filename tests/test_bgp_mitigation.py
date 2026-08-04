@@ -172,7 +172,15 @@ class BgpMitigationTest(unittest.TestCase):
         self.addCleanup(self._automatic_ai_gate_patch.stop)
 
     def _admin_request(self):
-        return types.SimpleNamespace(state=types.SimpleNamespace(user={"role": "admin", "username": "tester"}))
+        return types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                user={
+                    "role": "admin",
+                    "username": "tester",
+                    "permissions": list(main.PERMISSION_CATALOG),
+                }
+            )
+        )
 
     def _connector_and_profile(self, max_duration=3600):
         conn = main.sqlite_connection()
@@ -1461,7 +1469,13 @@ class BgpMitigationTest(unittest.TestCase):
             def __init__(self, payload):
                 self._payload = payload
                 self.method = "POST"
-                self.state = types.SimpleNamespace(user={"role": "admin", "username": "tester"})
+                self.state = types.SimpleNamespace(
+                    user={
+                        "role": "admin",
+                        "username": "tester",
+                        "permissions": list(main.PERMISSION_CATALOG),
+                    }
+                )
 
             async def json(self):
                 return self._payload

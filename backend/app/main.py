@@ -118,6 +118,18 @@ from app.services.automatic_mitigation import (
     execution_row_to_dict,
     normalized_match_from_candidate,
 )
+from app.services.auth_access import (
+    PERMISSION_CATALOG,
+    ROLE_TEMPLATES,
+    active_admin_ids,
+    audit_action,
+    effective_permissions,
+    ensure_auth_schema,
+    permission_details,
+    revoke_user_sessions,
+    session_is_active,
+    token_hash as auth_token_hash,
+)
 from app.services.dashboard_cache import DashboardCacheConfig, MemoryDashboardCache
 from app.services.dashboard_aggregates import (
     DASHBOARD_AGGREGATE_TABLES,
@@ -571,11 +583,30 @@ DEFAULT_DOCKER_NETWORK = "gmj-flow_default"
 SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AUTH_ALGORITHM = "HS256"
 AUTH_TOKEN_EXPIRE_HOURS = 8
+AUTH_PASSWORD_MIN_LENGTH = max(
+    10,
+    int(os.getenv("GMJFLOW_AUTH_PASSWORD_MIN_LENGTH", "10")),
+)
+AUTH_MAX_FAILED_ATTEMPTS = max(
+    3,
+    int(os.getenv("GMJFLOW_AUTH_MAX_FAILED_ATTEMPTS", "5")),
+)
+AUTH_LOCK_MINUTES = max(1, int(os.getenv("GMJFLOW_AUTH_LOCK_MINUTES", "15")))
+AUTH_RATE_LIMIT_ATTEMPTS = max(
+    AUTH_MAX_FAILED_ATTEMPTS,
+    int(os.getenv("GMJFLOW_AUTH_RATE_LIMIT_ATTEMPTS", "10")),
+)
+AUTH_RATE_LIMIT_WINDOW_SECONDS = max(
+    30,
+    int(os.getenv("GMJFLOW_AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")),
+)
 AUTH_SECRET = os.getenv("GMJFLOW_AUTH_SECRET")
 if not AUTH_SECRET:
     AUTH_SECRET = "gmj-flow-dev-secret-change-me"
     logger.warning("GMJFLOW_AUTH_SECRET nao definido; usando segredo de desenvolvimento.")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+AUTH_LOGIN_RATE_LOCK = threading.Lock()
+AUTH_LOGIN_RATE_STATE: dict[str, list[float]] = {}
 DATABASE_RETENTION_STOP = threading.Event()
 DATABASE_RETENTION_THREAD: threading.Thread | None = None
 ANOMALY_DETECTION_STOP = threading.Event()
@@ -1053,6 +1084,55 @@ class LoginPayload(BaseModel):
 class ChangePasswordPayload(BaseModel):
     current_password: str
     new_password: str
+
+
+class UserCreatePayload(BaseModel):
+    username: str
+    display_name: str
+    email: str = ""
+    role: str = "viewer"
+    temporary_password: str
+    must_change_password: bool = True
+    active: bool = True
+    permission_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+class UserUpdatePayload(BaseModel):
+    display_name: str | None = None
+    email: str | None = None
+    role: str | None = None
+    active: bool | None = None
+    must_change_password: bool | None = None
+    permission_overrides: dict[str, str] | None = None
+
+
+class UserResetPasswordPayload(BaseModel):
+    temporary_password: str
+    must_change_password: bool = True
+
+
+class UserDeletePayload(BaseModel):
+    confirmation: str
+
+
+class MyAccountUpdatePayload(BaseModel):
+    display_name: str
+    email: str = ""
+
+
+class RoleCreatePayload(BaseModel):
+    key: str
+    name: str
+    description: str = ""
+    active: bool = True
+    permissions: list[str] = Field(default_factory=list)
+
+
+class RoleUpdatePayload(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    active: bool | None = None
+    permissions: list[str] | None = None
 
 
 class DatabaseRetentionPayload(BaseModel):
@@ -3988,6 +4068,7 @@ def ensure_sensor_db() -> None:
             )
             """
         )
+        ensure_auth_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sensor_interfaces (
@@ -4070,22 +4151,37 @@ def ensure_sensor_db() -> None:
         ensure_ai_schema(conn, get_system_settings(conn))
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
-            now = utc_now_iso()
-            conn.execute(
-                """
-                INSERT INTO users (
-                    username,
-                    password_hash,
-                    role,
-                    must_change_password,
-                    active,
-                    created_at,
-                    updated_at
+            initial_password = os.getenv("GMJFLOW_INITIAL_ADMIN_PASSWORD", "")
+            if initial_password:
+                if len(initial_password) < AUTH_PASSWORD_MIN_LENGTH:
+                    raise RuntimeError(
+                        "GMJFLOW_INITIAL_ADMIN_PASSWORD deve respeitar o tamanho mínimo configurado."
+                    )
+                now = utc_now_iso()
+                conn.execute(
+                    """
+                    INSERT INTO users (
+                        username, display_name, password_hash, role,
+                        must_change_password, active, password_changed_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "admin",
+                        "Administrador",
+                        hash_password(initial_password),
+                        "admin",
+                        1,
+                        1,
+                        now,
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("admin", hash_password("admin"), "admin", 1, 1, now, now),
-            )
+            else:
+                logger.error(
+                    "Nenhum usuário existe. Defina GMJFLOW_INITIAL_ADMIN_PASSWORD para criar o administrador inicial."
+                )
         try:
             ensure_dashboard_schema(conn)
         except Exception as exc:
@@ -4431,13 +4527,55 @@ def validate_active_sensor_listener(
         )
 
 
-def user_row_to_public(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    return {
+def user_row_to_public(
+    row: sqlite3.Row | dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+    *,
+    include_permission_details: bool = False,
+) -> dict[str, Any]:
+    keys = set(row.keys())
+    permissions = sorted(effective_permissions(conn, row)) if conn is not None else []
+    locked_until = row["locked_until"] if "locked_until" in keys else None
+    locked = False
+    if locked_until:
+        try:
+            locked_at = datetime.fromisoformat(str(locked_until))
+            if locked_at.tzinfo is None:
+                locked_at = locked_at.replace(tzinfo=timezone.utc)
+            locked = locked_at > datetime.now(timezone.utc)
+        except ValueError:
+            locked = False
+    result = {
         "id": int(row["id"]),
         "username": row["username"],
+        "display_name": row["display_name"] if "display_name" in keys else row["username"],
+        "email": row["email"] if "email" in keys else "",
         "role": row["role"],
+        "active": bool(row["active"]) if "active" in keys else True,
+        "status": (
+            "disabled"
+            if "active" in keys and not bool(row["active"])
+            else "locked" if locked else "active"
+        ),
         "must_change_password": bool(row["must_change_password"]),
+        "last_login_at": row["last_login_at"] if "last_login_at" in keys else None,
+        "locked_until": locked_until,
+        "permissions": permissions,
     }
+    if conn is not None:
+        result["active_sessions"] = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM auth_sessions
+                WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+                """,
+                (int(row["id"]), utc_now_iso()),
+            ).fetchone()[0]
+        )
+    if include_permission_details and conn is not None:
+        result["permission_details"] = permission_details(conn, row)
+    return result
 
 
 def fetch_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.Row | None:
@@ -4445,7 +4583,7 @@ def fetch_user_by_username(conn: sqlite3.Connection, username: str) -> sqlite3.R
         """
         SELECT *
         FROM users
-        WHERE username = ?
+        WHERE lower(username) = lower(?) AND deleted_at IS NULL
         """,
         (username,),
     ).fetchone()
@@ -4462,22 +4600,65 @@ def fetch_user_by_id(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row | No
     ).fetchone()
 
 
-def create_access_token(user: sqlite3.Row | dict[str, Any]) -> str:
+def request_ip(request: Request | None) -> str:
+    if request is None:
+        return ""
+    forwarded = clean_text(request.headers.get("X-Forwarded-For"))
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()[:200]
+    return clean_text(getattr(request.client, "host", ""))[:200]
+
+
+def request_user_agent(request: Request | None) -> str:
+    return clean_text(request.headers.get("User-Agent"))[:500] if request is not None else ""
+
+
+def create_access_token(
+    user: sqlite3.Row | dict[str, Any],
+    conn: sqlite3.Connection | None = None,
+    request: Request | None = None,
+) -> str:
+    issued_at = datetime.now(timezone.utc)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=AUTH_TOKEN_EXPIRE_HOURS)
+    session_id = str(uuid.uuid4()) if conn is not None else ""
     payload = {
         "sub": str(user["id"]),
         "username": user["username"],
         "role": user["role"],
+        "ver": int(user["auth_version"] if "auth_version" in set(user.keys()) else 0),
+        "iat": issued_at,
         "exp": expires_at,
     }
-    return jwt.encode(payload, AUTH_SECRET, algorithm=AUTH_ALGORITHM)
+    if session_id:
+        payload["jti"] = session_id
+    encoded = jwt.encode(payload, AUTH_SECRET, algorithm=AUTH_ALGORITHM)
+    if conn is not None:
+        conn.execute(
+            """
+            INSERT INTO auth_sessions(
+                id, user_id, token_hash, created_at, expires_at,
+                last_seen_at, ip, user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                int(user["id"]),
+                auth_token_hash(encoded),
+                issued_at.isoformat(),
+                expires_at.isoformat(),
+                issued_at.isoformat(),
+                request_ip(request),
+                request_user_agent(request),
+            ),
+        )
+    return encoded
 
 
 def unauthorized_response() -> JSONResponse:
     return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
 
-def token_user_from_request(request: Request) -> sqlite3.Row | None:
+def token_user_from_request(request: Request) -> dict[str, Any] | None:
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
@@ -4490,9 +4671,24 @@ def token_user_from_request(request: Request) -> sqlite3.Row | None:
     ensure_sensor_db()
     with sqlite_connection() as conn:
         user = fetch_user_by_id(conn, user_id)
-    if user is None or not bool(user["active"]):
-        return None
-    return user
+        if user is None or not bool(user["active"]):
+            return None
+        if int(payload.get("ver") or 0) != int(user["auth_version"] or 0):
+            return None
+        session_id = clean_text(payload.get("jti"))
+        if session_id and not session_is_active(
+            conn,
+            session_id,
+            user_id,
+            token,
+            utc_now_iso(),
+        ):
+            return None
+        request.state.auth_session_id = session_id
+        request.state.auth_token_payload = payload
+        public = user_row_to_public(user, conn)
+        conn.commit()
+    return public
 
 
 def dashboard_cache_invalidate_for_http_mutation(path: str) -> int:
@@ -4539,7 +4735,7 @@ async def auth_middleware(request: Request, call_next):
     if (
         request.method == "OPTIONS"
         or path == "/health"
-        or path == "/api/auth/login"
+        or path in {"/api/auth/login", "/api/v1/auth/login"}
         or not path.startswith("/api/")
         or is_grafana_api_path(path)
     ):
@@ -4549,15 +4745,90 @@ async def auth_middleware(request: Request, call_next):
     if user is None:
         return unauthorized_response()
 
-    request.state.user = user_row_to_public(user)
+    request.state.user = user
     if bool(user["must_change_password"]) and path not in {
         "/api/auth/me",
         "/api/auth/logout",
         "/api/auth/change-password",
+        "/api/auth/revoke-sessions",
+        "/api/v1/auth/me",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/change-password",
+        "/api/v1/auth/revoke-sessions",
+        "/api/v1/auth/sessions",
     }:
         return JSONResponse({"detail": "Password change required"}, status_code=403)
 
-    return await call_next(request)
+    required_permission = permission_for_protected_api_route(request)
+    if required_permission and required_permission not in set(user.get("permissions") or []):
+        try:
+            with sqlite_connection() as conn:
+                audit_action(
+                    conn,
+                    user_id=int(user["id"]),
+                    actor_username=clean_text(user.get("username")),
+                    action="auth.access.denied",
+                    resource_type="api",
+                    resource_id=path,
+                    success=False,
+                    ip=request_ip(request),
+                    user_agent=request_user_agent(request),
+                    correlation_id=HTTP_REQUEST_ID.get(),
+                    metadata={"method": request.method, "required_permission": required_permission},
+                )
+                conn.commit()
+        except Exception as exc:  # pragma: no cover - auditing must not mask authorization.
+            logger.warning("Falha ao registrar acesso negado: %s", exc)
+        return JSONResponse(
+            {
+                "detail": {
+                    "message": "Acesso negado",
+                    "required_permission": required_permission,
+                }
+            },
+            status_code=403,
+        )
+
+    response = await call_next(request)
+    audited_prefixes = (
+        "/api/v1/users",
+        "/api/v1/roles",
+        "/api/bgp",
+        "/api/mitigation",
+        "/api/anomalies",
+        "/api/security/anomalies",
+        "/api/detection",
+        "/api/attack-vector",
+        "/api/collectors",
+        "/api/sensors",
+        "/api/cgnat",
+        "/api/system",
+        "/api/database",
+        "/api/ai",
+        "/api/dashboards",
+        "/api/prefixes",
+        "/api/ip-zones",
+    )
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and path.startswith(audited_prefixes):
+        try:
+            with sqlite_connection() as conn:
+                audit_action(
+                    conn,
+                    user_id=int(user["id"]),
+                    actor_username=clean_text(user.get("username")),
+                    action=f"http.{request.method.lower()}",
+                    resource_type=path.split("/", 3)[2] if path.count("/") >= 2 else "api",
+                    resource_id=path,
+                    success=int(response.status_code) < 400,
+                    ip=request_ip(request),
+                    user_agent=request_user_agent(request),
+                    correlation_id=HTTP_REQUEST_ID.get(),
+                    metadata={"status_code": int(response.status_code)},
+                )
+                conn.commit()
+        except Exception as exc:  # pragma: no cover - auditing must not mask the API response.
+            logger.warning("Falha ao registrar auditoria HTTP: %s", exc)
+    return response
 
 
 @app.middleware("http")
@@ -4623,10 +4894,124 @@ async def http_observability_middleware(request: Request, call_next):
         HTTP_REQUEST_ID.reset(request_token)
 
 
+def current_user(request: Request) -> dict[str, Any] | None:
+    return getattr(request.state, "user", None)
+
+
+def require_authenticated(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def require_permission(request: Request, permission_key: str) -> dict[str, Any]:
+    if permission_key not in PERMISSION_CATALOG:
+        raise RuntimeError(f"Permissão desconhecida: {permission_key}")
+    user = require_authenticated(request)
+    if permission_key not in set(user.get("permissions") or []):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Acesso negado",
+                "required_permission": permission_key,
+            },
+        )
+    return user
+
+
+def permission_for_legacy_admin_route(request: Request) -> str:
+    path = request.url.path
+    method = request.method.upper()
+    if path.startswith("/api/bgp"):
+        if "/announcements" in path and method != "GET" and "dry-run" not in path:
+            return "bgp.apply"
+        return "bgp.view" if method == "GET" else "bgp.manage"
+    if "/mitigation/withdraw" in path:
+        return "mitigations.withdraw"
+    if "/mitigation/apply" in path:
+        return "mitigations.apply"
+    if "/mitigation/reject" in path:
+        return "mitigations.apply"
+    if "/mitigation/evaluate" in path or path.rstrip("/") == "/api/mitigation/analyze":
+        return "mitigations.view"
+    if "/mitigation" in path:
+        return "mitigations.view" if method == "GET" else "mitigations.configure"
+    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/detection", "/api/attack-vector")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith(("/api/peak-hunter", "/api/ops")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith("/api/collectors"):
+        return "collectors.view" if method == "GET" else "collectors.manage"
+    if path.startswith("/api/sensors"):
+        return "sensors.view" if method == "GET" else "sensors.manage"
+    if path.startswith("/api/cgnat"):
+        if method != "GET" and (path.rstrip("/") == "/api/cgnat/imports" or path.endswith("/parse")):
+            return "cgnat.import"
+        return "cgnat.view" if method == "GET" else "cgnat.manage"
+    if path.startswith("/api/dashboards"):
+        return "dashboard.view" if method == "GET" else "dashboard.manage"
+    if path.startswith(("/api/prefixes", "/api/ip-zones")):
+        return "dashboard.view" if method == "GET" else "dashboard.manage"
+    if path.startswith("/api/ai"):
+        return "settings.view" if method == "GET" else "settings.manage"
+    return "settings.view" if method == "GET" else "settings.manage"
+
+
+def permission_for_protected_api_route(request: Request) -> str:
+    """Classify existing API routes without changing their endpoint signatures."""
+
+    path = request.url.path
+    method = request.method.upper()
+    if path.startswith(("/api/auth", "/api/v1/auth", "/api/v1/users", "/api/v1/roles", "/api/v1/permissions", "/api/v1/audit")):
+        return ""
+    if path.startswith("/api/bgp"):
+        return permission_for_legacy_admin_route(request)
+    if "/mitigation" in path:
+        return permission_for_legacy_admin_route(request)
+    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/detection", "/api/attack-vector")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith(("/api/peak-hunter", "/api/ops")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith("/api/collectors"):
+        return "collectors.view" if method == "GET" else "collectors.manage"
+    if path.startswith("/api/sensors"):
+        return "sensors.view" if method == "GET" else "sensors.manage"
+    if path.startswith("/api/cgnat"):
+        return permission_for_legacy_admin_route(request)
+    if path.startswith(("/api/dashboards", "/api/dashboard")):
+        return "dashboard.view" if method == "GET" else "dashboard.edit"
+    if path.startswith("/api/prefixes"):
+        return "dashboard.view" if method == "GET" else "dashboard.manage"
+    if path.startswith("/api/ip-zones"):
+        return "dashboard.view" if method == "GET" else "dashboard.manage"
+    if path.startswith(("/api/flows", "/api/tops", "/api/traffic", "/api/map")):
+        return "dashboard.view"
+    if path.startswith("/api/grafana"):
+        return "grafana.view" if method == "GET" else "grafana.manage"
+    if path.startswith(("/api/system", "/api/database")):
+        return "settings.view" if method == "GET" else "settings.manage"
+    if path.startswith("/api/ai"):
+        return "settings.view" if method == "GET" else "settings.manage"
+    return ""
+
+
 def require_admin(request: Request) -> None:
-    user = getattr(request.state, "user", None)
-    if not user or user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin required")
+    """Compatibility shim for existing routes, now backed by RBAC."""
+
+    actor = require_authenticated(request)
+    if set(PERMISSION_CATALOG).issubset(set(actor.get("permissions") or [])):
+        return
+    require_permission(request, permission_for_legacy_admin_route(request))
+
+
+def can_manage_target(actor: dict[str, Any], target: sqlite3.Row | dict[str, Any]) -> bool:
+    if not actor or not target:
+        return False
+    return (
+        int(actor["id"]) == int(target["id"])
+        or "users.edit" in set(actor.get("permissions") or [])
+    )
 
 
 def cgnat_actor(request: Request) -> str:
@@ -7760,76 +8145,847 @@ def health(
     return {"status": "ok", "clickhouse": "ok" if alive else "failed"}
 
 
+AUTH_DUMMY_PASSWORD_HASH = hash_password("gmj-flow-invalid-credential-sentinel")
+
+
+def validate_password_candidate(password: str, current_hash: str = "") -> None:
+    if not password or len(password) < AUTH_PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A senha deve ter pelo menos {AUTH_PASSWORD_MIN_LENGTH} caracteres.",
+        )
+    if current_hash and verify_password(password, current_hash):
+        raise HTTPException(
+            status_code=422,
+            detail="A nova senha deve ser diferente da senha atual.",
+        )
+
+
+def validate_username(username: str) -> str:
+    normalized = clean_text(username).lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,63}", normalized):
+        raise HTTPException(
+            status_code=422,
+            detail="Username deve ter 3 a 64 caracteres e usar letras, números, ponto, hífen ou sublinhado.",
+        )
+    return normalized
+
+
+def validate_email(email: str) -> str:
+    normalized = clean_text(email).lower()
+    if normalized and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+        raise HTTPException(status_code=422, detail="E-mail inválido.")
+    return normalized
+
+
+def login_rate_key(request: Request, username: str) -> str:
+    return hashlib.sha256(
+        f"{request_ip(request)}|{username.lower()}".encode("utf-8")
+    ).hexdigest()
+
+
+def login_rate_limited(key: str, *, record: bool = True) -> bool:
+    now = time.monotonic()
+    with AUTH_LOGIN_RATE_LOCK:
+        attempts = [
+            value
+            for value in AUTH_LOGIN_RATE_STATE.get(key, [])
+            if now - value <= AUTH_RATE_LIMIT_WINDOW_SECONDS
+        ]
+        limited = len(attempts) >= AUTH_RATE_LIMIT_ATTEMPTS
+        if record and not limited:
+            attempts.append(now)
+        if attempts:
+            AUTH_LOGIN_RATE_STATE[key] = attempts
+        else:
+            AUTH_LOGIN_RATE_STATE.pop(key, None)
+        return limited
+
+
+def clear_login_rate(key: str) -> None:
+    with AUTH_LOGIN_RATE_LOCK:
+        AUTH_LOGIN_RATE_STATE.pop(key, None)
+
+
+def audit_request_action(
+    conn: sqlite3.Connection,
+    request: Request,
+    user: dict[str, Any] | sqlite3.Row | None,
+    action: str,
+    *,
+    resource_type: str = "auth",
+    resource_id: str | int = "",
+    success: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    audit_action(
+        conn,
+        user_id=int(user["id"]) if user is not None else None,
+        actor_username=clean_text(user["username"] if user is not None else ""),
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        success=success,
+        ip=request_ip(request),
+        user_agent=request_user_agent(request),
+        correlation_id=HTTP_REQUEST_ID.get(),
+        metadata=metadata or {},
+    )
+
+
+@app.post("/api/v1/auth/login")
 @app.post("/api/auth/login")
-def auth_login(payload: LoginPayload):
-    username = clean_text(payload.username)
-    if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+def auth_login(payload: LoginPayload, request: Request):
+    ensure_sensor_db()
+    username = clean_text(payload.username).lower()
+    rate_key = login_rate_key(request, username)
+    if login_rate_limited(rate_key):
+        try:
+            with sqlite_connection() as conn:
+                user = fetch_user_by_username(conn, username) if username else None
+                audit_request_action(
+                    conn,
+                    request,
+                    user,
+                    "auth.login.rate_limited",
+                    success=False,
+                    metadata={"username_supplied": bool(username)},
+                )
+                conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        raise HTTPException(status_code=429, detail="Muitas tentativas. Tente novamente mais tarde.")
     try:
         with sqlite_connection() as conn:
-            user = fetch_user_by_username(conn, username)
+            user = fetch_user_by_username(conn, username) if username else None
+            password_hash = user["password_hash"] if user is not None else AUTH_DUMMY_PASSWORD_HASH
+            password_valid = verify_password(payload.password or "", password_hash)
+            now = datetime.now(timezone.utc)
+            locked_until = None
+            if user is not None and user["locked_until"]:
+                try:
+                    locked_until = datetime.fromisoformat(str(user["locked_until"]))
+                    if locked_until.tzinfo is None:
+                        locked_until = locked_until.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    locked_until = None
+            accepted = bool(
+                user is not None
+                and bool(user["active"])
+                and password_valid
+                and (locked_until is None or locked_until <= now)
+            )
+            if not accepted:
+                if user is not None and bool(user["active"]):
+                    failures = int(user["failed_login_attempts"] or 0) + 1
+                    next_locked_until = None
+                    if failures >= AUTH_MAX_FAILED_ATTEMPTS:
+                        next_locked_until = (
+                            now + timedelta(minutes=AUTH_LOCK_MINUTES)
+                        ).isoformat()
+                    conn.execute(
+                        """
+                        UPDATE users
+                        SET failed_login_attempts = ?, locked_until = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (failures, next_locked_until, now.isoformat(), int(user["id"])),
+                    )
+                audit_request_action(
+                    conn,
+                    request,
+                    user,
+                    "auth.login.denied",
+                    success=False,
+                    metadata={"username_supplied": bool(username)},
+                )
+                conn.commit()
+                raise HTTPException(status_code=401, detail="Usuário ou senha inválidos.")
+
+            conn.execute(
+                """
+                UPDATE users
+                SET failed_login_attempts = 0, locked_until = NULL,
+                    last_login_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now.isoformat(), now.isoformat(), int(user["id"])),
+            )
+            updated = fetch_user_by_id(conn, int(user["id"]))
+            token = create_access_token(updated, conn, request)
+            audit_request_action(conn, request, updated, "auth.login.succeeded")
+            public = user_row_to_public(updated, conn)
+            conn.commit()
+        clear_login_rate(rate_key)
+        return {"ok": True, "user": public, "token": token}
     except sqlite3.OperationalError as exc:
         message = str(exc).lower()
         if "locked" in message or "no such table" in message:
-            raise HTTPException(status_code=503, detail="Banco local temporariamente indisponivel; tente novamente.") from exc
+            raise HTTPException(
+                status_code=503,
+                detail="Banco local temporariamente indisponível; tente novamente.",
+            ) from exc
         raise
-    if user is None or not bool(user["active"]) or not verify_password(payload.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {
-        "ok": True,
-        "user": user_row_to_public(user),
-        "token": create_access_token(user),
-    }
 
 
+@app.get("/api/v1/auth/me")
 @app.get("/api/auth/me")
 def auth_me(request: Request):
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"ok": True, "user": user}
+    actor = require_authenticated(request)
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, int(actor["id"]))
+        public = user_row_to_public(row, conn, include_permission_details=True)
+    return {"ok": True, "user": public}
 
 
+@app.patch("/api/v1/auth/me")
+def auth_update_me(request: Request, payload: MyAccountUpdatePayload):
+    actor = require_authenticated(request)
+    display_name = clean_text(payload.display_name)
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Nome de exibição é obrigatório.")
+    email = validate_email(payload.email)
+    with sqlite_connection() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = ?, email = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+            (display_name, email, int(actor["id"]), utc_now_iso(), int(actor["id"])),
+        )
+        updated = fetch_user_by_id(conn, int(actor["id"]))
+        audit_request_action(conn, request, updated, "user.self.updated", resource_type="user", resource_id=actor["id"])
+        public = user_row_to_public(updated, conn, include_permission_details=True)
+        conn.commit()
+    return {"ok": True, "user": public}
+
+
+@app.post("/api/v1/auth/logout")
 @app.post("/api/auth/logout")
-def auth_logout():
+def auth_logout(request: Request):
+    actor = require_authenticated(request)
+    session_id = clean_text(getattr(request.state, "auth_session_id", ""))
+    with sqlite_connection() as conn:
+        if session_id:
+            conn.execute(
+                "UPDATE auth_sessions SET revoked_at = ?, revoked_reason = 'logout' WHERE id = ? AND revoked_at IS NULL",
+                (utc_now_iso(), session_id),
+            )
+        else:
+            # Tokens issued before persistent sessions had no jti. Invalidate
+            # their version so logout remains effective during the migration.
+            revoke_user_sessions(conn, int(actor["id"]), "legacy_token_logout")
+            conn.execute(
+                "UPDATE users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+                (utc_now_iso(), int(actor["id"])),
+            )
+        audit_request_action(conn, request, actor, "auth.logout")
+        conn.commit()
     return {"ok": True}
 
 
+@app.get("/api/v1/auth/sessions")
+def auth_sessions(request: Request):
+    actor = require_authenticated(request)
+    current_session_id = clean_text(getattr(request.state, "auth_session_id", ""))
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, expires_at, revoked_at, last_seen_at, ip, user_agent
+            FROM auth_sessions
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (int(actor["id"]),),
+        ).fetchall()
+    return {
+        "items": [
+            {
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+                "revoked_at": row["revoked_at"],
+                "last_seen_at": row["last_seen_at"],
+                "ip": row["ip"],
+                "user_agent": row["user_agent"],
+                "current": row["id"] == current_session_id,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/v1/auth/revoke-sessions")
+@app.post("/api/auth/revoke-sessions")
+def auth_revoke_sessions(request: Request):
+    actor = require_authenticated(request)
+    with sqlite_connection() as conn:
+        revoked = revoke_user_sessions(conn, int(actor["id"]), "self_revoke_all")
+        conn.execute(
+            "UPDATE users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+            (utc_now_iso(), int(actor["id"])),
+        )
+        audit_request_action(
+            conn,
+            request,
+            actor,
+            "auth.sessions.revoked",
+            resource_type="user",
+            resource_id=actor["id"],
+            metadata={"revoked_sessions": revoked},
+        )
+        conn.commit()
+    return {"ok": True, "revoked_sessions": revoked}
+
+
+@app.post("/api/v1/auth/change-password")
 @app.post("/api/auth/change-password")
 def auth_change_password(request: Request, payload: ChangePasswordPayload):
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    new_password = payload.new_password or ""
-    if len(new_password) < 8:
-        raise HTTPException(status_code=400, detail="Nova senha deve ter pelo menos 8 caracteres")
+    actor = require_authenticated(request)
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        row = fetch_user_by_id(conn, int(user["id"]))
+        row = fetch_user_by_id(conn, int(actor["id"]))
         if row is None or not bool(row["active"]):
             raise HTTPException(status_code=401, detail="Unauthorized")
         if not verify_password(payload.current_password, row["password_hash"]):
-            raise HTTPException(status_code=400, detail="Senha atual invalida")
+            audit_request_action(conn, request, row, "auth.password_change.denied", success=False)
+            conn.commit()
+            raise HTTPException(status_code=422, detail="Senha atual inválida.")
+        validate_password_candidate(payload.new_password or "", row["password_hash"])
         now = utc_now_iso()
+        revoke_user_sessions(conn, int(actor["id"]), "password_changed")
         conn.execute(
             """
             UPDATE users
-            SET password_hash = ?,
-                must_change_password = 0,
-                updated_at = ?
+            SET password_hash = ?, must_change_password = 0,
+                password_changed_at = ?, failed_login_attempts = 0,
+                locked_until = NULL, auth_version = auth_version + 1,
+                updated_by = ?, updated_at = ?
             WHERE id = ?
             """,
-            (hash_password(new_password), now, int(user["id"])),
+            (
+                hash_password(payload.new_password),
+                now,
+                int(actor["id"]),
+                now,
+                int(actor["id"]),
+            ),
+        )
+        updated = fetch_user_by_id(conn, int(actor["id"]))
+        token = create_access_token(updated, conn, request)
+        audit_request_action(conn, request, updated, "auth.password.changed", resource_type="user", resource_id=actor["id"])
+        public = user_row_to_public(updated, conn)
+        conn.commit()
+    return {"ok": True, "user": public, "token": token}
+
+
+def role_row_to_public(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    permissions = [
+        str(item[0])
+        for item in conn.execute(
+            "SELECT permission_key FROM role_permissions WHERE role_id = ? AND allowed = 1 ORDER BY permission_key",
+            (int(row["id"]),),
+        ).fetchall()
+        if str(item[0]) in PERMISSION_CATALOG
+    ]
+    return {
+        "id": int(row["id"]),
+        "key": row["key"],
+        "name": row["name"],
+        "description": row["description"],
+        "system_role": bool(row["system_role"]),
+        "active": bool(row["active"]),
+        "permissions": permissions,
+    }
+
+
+def fetch_role(conn: sqlite3.Connection, role_key: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM roles WHERE key = ?", (clean_text(role_key),)).fetchone()
+
+
+def validate_role(conn: sqlite3.Connection, role_key: str) -> str:
+    normalized = clean_text(role_key).lower()
+    row = fetch_role(conn, normalized)
+    if row is None or not bool(row["active"]):
+        raise HTTPException(status_code=422, detail="Perfil inválido ou inativo.")
+    return normalized
+
+
+def normalize_permission_overrides(value: dict[str, str] | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for permission_key, effect in (value or {}).items():
+        key = clean_text(permission_key)
+        normalized_effect = clean_text(effect).lower()
+        if key not in PERMISSION_CATALOG or normalized_effect not in {"allow", "deny"}:
+            raise HTTPException(status_code=422, detail=f"Override de permissão inválido: {key}")
+        result[key] = normalized_effect
+    return result
+
+
+def replace_user_permission_overrides(
+    conn: sqlite3.Connection,
+    user_id: int,
+    overrides: dict[str, str],
+) -> None:
+    now = utc_now_iso()
+    conn.execute("DELETE FROM user_permission_overrides WHERE user_id = ?", (int(user_id),))
+    conn.executemany(
+        """
+        INSERT INTO user_permission_overrides(user_id, permission_key, effect, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [(int(user_id), key, effect, now, now) for key, effect in sorted(overrides.items())],
+    )
+
+
+def require_active_admin_remaining(conn: sqlite3.Connection) -> None:
+    if not active_admin_ids(conn):
+        raise HTTPException(
+            status_code=409,
+            detail="A operação deixaria o sistema sem administrador ativo.",
+        )
+
+
+def get_user_or_404(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
+    row = fetch_user_by_id(conn, user_id)
+    if row is None or row["deleted_at"]:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    return row
+
+
+@app.get("/api/v1/permissions")
+def permissions_list(request: Request):
+    require_permission(request, "users.view")
+    return {"items": list(PERMISSION_CATALOG.values())}
+
+
+@app.get("/api/v1/roles")
+def roles_list(request: Request):
+    require_permission(request, "users.view")
+    with sqlite_connection() as conn:
+        rows = conn.execute("SELECT * FROM roles ORDER BY system_role DESC, name, key").fetchall()
+        return {"items": [role_row_to_public(conn, row) for row in rows]}
+
+
+@app.post("/api/v1/roles", status_code=201)
+def roles_create(request: Request, payload: RoleCreatePayload):
+    actor = require_permission(request, "users.manage_permissions")
+    key = clean_text(payload.key).lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", key):
+        raise HTTPException(status_code=422, detail="Chave de perfil inválida.")
+    name = clean_text(payload.name)
+    if not name:
+        raise HTTPException(status_code=422, detail="Nome do perfil é obrigatório.")
+    permissions = set(payload.permissions)
+    unknown = sorted(permissions - set(PERMISSION_CATALOG))
+    if unknown:
+        raise HTTPException(status_code=422, detail={"permissoes_invalidas": unknown})
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO roles(key, name, description, system_role, active, created_at, updated_at)
+                VALUES (?, ?, ?, 0, ?, ?, ?)
+                """,
+                (key, name, clean_text(payload.description), int(payload.active), now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="Já existe um perfil com esta chave.") from exc
+        role_id = int(cursor.lastrowid)
+        conn.executemany(
+            "INSERT INTO role_permissions(role_id, permission_key, allowed) VALUES (?, ?, 1)",
+            [(role_id, permission) for permission in sorted(permissions)],
+        )
+        row = fetch_role(conn, key)
+        audit_request_action(
+            conn, request, actor, "role.created", resource_type="role", resource_id=role_id,
+            metadata={"key": key, "permissions": sorted(permissions)},
+        )
+        result = role_row_to_public(conn, row)
+        conn.commit()
+    return {"ok": True, "role": result}
+
+
+@app.patch("/api/v1/roles/{role_id}")
+def roles_update(role_id: int, request: Request, payload: RoleUpdatePayload):
+    actor = require_permission(request, "users.manage_permissions")
+    fields_set = set(payload.__fields_set__)
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT * FROM roles WHERE id = ?", (role_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Perfil não encontrado.")
+        name = clean_text(payload.name) if "name" in fields_set else row["name"]
+        description = clean_text(payload.description) if "description" in fields_set else row["description"]
+        active = bool(payload.active) if "active" in fields_set else bool(row["active"])
+        if not name:
+            raise HTTPException(status_code=422, detail="Nome do perfil é obrigatório.")
+        if bool(row["system_role"]) and not active:
+            raise HTTPException(status_code=409, detail="Perfis padrão não podem ser desativados.")
+        permissions: set[str] | None = None
+        if "permissions" in fields_set:
+            permissions = set(payload.permissions or [])
+            unknown = sorted(permissions - set(PERMISSION_CATALOG))
+            if unknown:
+                raise HTTPException(status_code=422, detail={"permissoes_invalidas": unknown})
+        conn.execute(
+            "UPDATE roles SET name = ?, description = ?, active = ?, updated_at = ? WHERE id = ?",
+            (name, description, int(active), utc_now_iso(), role_id),
+        )
+        if permissions is not None:
+            for permission_key in PERMISSION_CATALOG:
+                conn.execute(
+                    """
+                    INSERT INTO role_permissions(role_id, permission_key, allowed)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(role_id, permission_key) DO UPDATE SET allowed = excluded.allowed
+                    """,
+                    (role_id, permission_key, int(permission_key in permissions)),
+                )
+        require_active_admin_remaining(conn)
+        updated = conn.execute("SELECT * FROM roles WHERE id = ?", (role_id,)).fetchone()
+        audit_request_action(
+            conn, request, actor, "role.updated", resource_type="role", resource_id=role_id,
+            metadata={"key": row["key"], "permissions_changed": permissions is not None},
+        )
+        result = role_row_to_public(conn, updated)
+        conn.commit()
+    return {"ok": True, "role": result}
+
+
+@app.get("/api/v1/users")
+def users_list(
+    request: Request,
+    search: str = "",
+    status: str = "",
+    role: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=200),
+):
+    require_permission(request, "users.view")
+    filters = ["deleted_at IS NULL"]
+    params: list[Any] = []
+    search = clean_text(search)
+    if search:
+        filters.append("(lower(username) LIKE ? OR lower(display_name) LIKE ? OR lower(email) LIKE ?)")
+        pattern = f"%{search.lower()}%"
+        params.extend([pattern, pattern, pattern])
+    if status in {"active", "disabled"}:
+        filters.append("active = ?")
+        params.append(int(status == "active"))
+    if clean_text(role):
+        filters.append("role = ?")
+        params.append(clean_text(role).lower())
+    where = " AND ".join(filters)
+    with sqlite_connection() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) FROM users WHERE {where}", params).fetchone()[0])
+        rows = conn.execute(
+            f"SELECT * FROM users WHERE {where} ORDER BY lower(username) LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+        items = [user_row_to_public(row, conn) for row in rows]
+    return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+
+@app.post("/api/v1/users", status_code=201)
+def users_create(request: Request, payload: UserCreatePayload):
+    actor = require_permission(request, "users.create")
+    username = validate_username(payload.username)
+    display_name = clean_text(payload.display_name)
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Nome de exibição é obrigatório.")
+    email = validate_email(payload.email)
+    validate_password_candidate(payload.temporary_password)
+    overrides = normalize_permission_overrides(payload.permission_overrides)
+    if overrides or clean_text(payload.role).lower() != "viewer":
+        require_permission(request, "users.manage_permissions")
+    now = utc_now_iso()
+    with sqlite_connection() as conn:
+        role = validate_role(conn, payload.role)
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO users(
+                    username, display_name, email, password_hash, role,
+                    must_change_password, active, password_changed_at,
+                    created_at, updated_at, created_by, updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username, display_name, email, hash_password(payload.temporary_password), role,
+                    int(payload.must_change_password), int(payload.active), now,
+                    now, now, int(actor["id"]), int(actor["id"]),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="Username já está em uso.") from exc
+        user_id = int(cursor.lastrowid)
+        replace_user_permission_overrides(conn, user_id, overrides)
+        row = get_user_or_404(conn, user_id)
+        audit_request_action(
+            conn, request, actor, "user.created", resource_type="user", resource_id=user_id,
+            metadata={"username": username, "role": role, "active": bool(payload.active)},
+        )
+        public = user_row_to_public(row, conn, include_permission_details=True)
+        conn.commit()
+    return {"ok": True, "user": public}
+
+
+@app.get("/api/v1/users/{user_id}")
+def users_get(user_id: int, request: Request):
+    require_permission(request, "users.view")
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, user_id)
+        return {"user": user_row_to_public(row, conn, include_permission_details=True)}
+
+
+@app.patch("/api/v1/users/{user_id}")
+def users_update(user_id: int, request: Request, payload: UserUpdatePayload):
+    actor = require_permission(request, "users.edit")
+    fields_set = set(payload.__fields_set__)
+    permissions_change = bool({"role", "permission_overrides"} & fields_set)
+    if permissions_change:
+        require_permission(request, "users.manage_permissions")
+    if "active" in fields_set:
+        require_permission(request, "users.disable")
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, user_id)
+        if int(actor["id"]) == user_id and "active" in fields_set and not bool(payload.active):
+            raise HTTPException(status_code=409, detail="Não é permitido desativar o próprio usuário.")
+        display_name = clean_text(payload.display_name) if "display_name" in fields_set else row["display_name"]
+        email = validate_email(payload.email or "") if "email" in fields_set else row["email"]
+        role = validate_role(conn, payload.role or "") if "role" in fields_set else row["role"]
+        active = bool(payload.active) if "active" in fields_set else bool(row["active"])
+        must_change = bool(payload.must_change_password) if "must_change_password" in fields_set else bool(row["must_change_password"])
+        if not display_name:
+            raise HTTPException(status_code=422, detail="Nome de exibição é obrigatório.")
+        conn.execute(
+            """
+            UPDATE users
+            SET display_name = ?, email = ?, role = ?, active = ?, must_change_password = ?,
+                updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (display_name, email, role, int(active), int(must_change), int(actor["id"]), utc_now_iso(), user_id),
+        )
+        if "permission_overrides" in fields_set:
+            replace_user_permission_overrides(
+                conn, user_id, normalize_permission_overrides(payload.permission_overrides),
+            )
+        if bool(row["active"]) and not active:
+            revoke_user_sessions(conn, user_id, "user_disabled")
+            conn.execute("UPDATE users SET auth_version = auth_version + 1 WHERE id = ?", (user_id,))
+        elif not bool(row["active"]) and active:
+            conn.execute(
+                "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?",
+                (user_id,),
+            )
+        if permissions_change or "active" in fields_set:
+            require_active_admin_remaining(conn)
+        updated = get_user_or_404(conn, user_id)
+        action = "user.disabled" if bool(row["active"]) and not active else "user.enabled" if not bool(row["active"]) and active else "user.updated"
+        audit_request_action(
+            conn, request, actor, action, resource_type="user", resource_id=user_id,
+            metadata={"role_before": row["role"], "role_after": role, "permissions_changed": permissions_change},
+        )
+        public = user_row_to_public(updated, conn, include_permission_details=True)
+        conn.commit()
+    return {"ok": True, "user": public}
+
+
+@app.post("/api/v1/users/{user_id}/reset-password")
+def users_reset_password(user_id: int, request: Request, payload: UserResetPasswordPayload):
+    actor = require_permission(request, "users.reset_password")
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, user_id)
+        validate_password_candidate(payload.temporary_password, row["password_hash"])
+        now = utc_now_iso()
+        revoked = revoke_user_sessions(conn, user_id, "password_reset_by_admin")
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = ?, password_changed_at = ?,
+                failed_login_attempts = 0, locked_until = NULL,
+                auth_version = auth_version + 1, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (hash_password(payload.temporary_password), int(payload.must_change_password), now, int(actor["id"]), now, user_id),
+        )
+        audit_request_action(
+            conn, request, actor, "user.password.reset", resource_type="user", resource_id=user_id,
+            metadata={"must_change_password": bool(payload.must_change_password), "revoked_sessions": revoked},
         )
         conn.commit()
-        updated = fetch_user_by_id(conn, int(user["id"]))
-        if updated is None:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-    return {
-        "ok": True,
-        "user": user_row_to_public(updated),
-        "token": create_access_token(updated),
-    }
+    return {"ok": True, "revoked_sessions": revoked}
+
+
+@app.post("/api/v1/users/{user_id}/revoke-sessions")
+def users_revoke_sessions(user_id: int, request: Request):
+    actor = require_permission(request, "users.edit")
+    with sqlite_connection() as conn:
+        get_user_or_404(conn, user_id)
+        revoked = revoke_user_sessions(conn, user_id, "revoked_by_admin")
+        conn.execute(
+            "UPDATE users SET auth_version = auth_version + 1, updated_by = ?, updated_at = ? WHERE id = ?",
+            (int(actor["id"]), utc_now_iso(), user_id),
+        )
+        audit_request_action(
+            conn, request, actor, "user.sessions.revoked", resource_type="user", resource_id=user_id,
+            metadata={"revoked_sessions": revoked},
+        )
+        conn.commit()
+    return {"ok": True, "revoked_sessions": revoked}
+
+
+def set_user_active(user_id: int, request: Request, active: bool):
+    actor = require_permission(request, "users.disable")
+    if int(actor["id"]) == user_id and not active:
+        raise HTTPException(status_code=409, detail="Não é permitido desativar o próprio usuário.")
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, user_id)
+        conn.execute(
+            """
+            UPDATE users
+            SET active = ?,
+                failed_login_attempts = CASE WHEN ? = 1 THEN 0 ELSE failed_login_attempts END,
+                locked_until = CASE WHEN ? = 1 THEN NULL ELSE locked_until END,
+                updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (int(active), int(active), int(active), int(actor["id"]), utc_now_iso(), user_id),
+        )
+        revoked = 0
+        if not active:
+            revoked = revoke_user_sessions(conn, user_id, "user_disabled")
+            conn.execute("UPDATE users SET auth_version = auth_version + 1 WHERE id = ?", (user_id,))
+        require_active_admin_remaining(conn)
+        updated = get_user_or_404(conn, user_id)
+        audit_request_action(
+            conn, request, actor, "user.enabled" if active else "user.disabled",
+            resource_type="user", resource_id=user_id,
+            metadata={"previous_active": bool(row["active"]), "revoked_sessions": revoked},
+        )
+        public = user_row_to_public(updated, conn)
+        conn.commit()
+    return {"ok": True, "user": public, "revoked_sessions": revoked}
+
+
+@app.post("/api/v1/users/{user_id}/enable")
+def users_enable(user_id: int, request: Request):
+    return set_user_active(user_id, request, True)
+
+
+@app.post("/api/v1/users/{user_id}/disable")
+def users_disable(user_id: int, request: Request):
+    return set_user_active(user_id, request, False)
+
+
+@app.delete("/api/v1/users/{user_id}")
+def users_delete(user_id: int, request: Request, payload: UserDeletePayload):
+    actor = require_permission(request, "users.delete")
+    if int(actor["id"]) == user_id:
+        raise HTTPException(status_code=409, detail="Não é permitido excluir o próprio usuário.")
+    with sqlite_connection() as conn:
+        row = get_user_or_404(conn, user_id)
+        if payload.confirmation != row["username"]:
+            raise HTTPException(status_code=422, detail="Digite exatamente o username para confirmar a exclusão.")
+        now = utc_now_iso()
+        revoke_user_sessions(conn, user_id, "user_deleted")
+        conn.execute(
+            """
+            UPDATE users
+            SET active = 0, deleted_at = ?, auth_version = auth_version + 1,
+                updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, int(actor["id"]), now, user_id),
+        )
+        require_active_admin_remaining(conn)
+        audit_request_action(
+            conn, request, actor, "user.deleted", resource_type="user", resource_id=user_id,
+            metadata={"username": row["username"], "soft_delete": True},
+        )
+        conn.commit()
+    return {"ok": True, "deleted": True}
+
+
+def audit_rows_response(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        result.append(
+            {
+                "id": int(row["id"]),
+                "user_id": row["user_id"],
+                "actor_username": row["actor_username"],
+                "action": row["action"],
+                "resource_type": row["resource_type"],
+                "resource_id": row["resource_id"],
+                "success": bool(row["success"]),
+                "ip": row["ip"],
+                "user_agent": row["user_agent"],
+                "correlation_id": row["correlation_id"],
+                "metadata": metadata,
+                "created_at": row["created_at"],
+            }
+        )
+    return result
+
+
+def query_audit_log(
+    request: Request,
+    *,
+    user_id: int | None = None,
+    action: str = "",
+    resource_type: str = "",
+    offset: int = 0,
+    limit: int = 100,
+) -> dict[str, Any]:
+    require_permission(request, "audit.view")
+    filters = ["1 = 1"]
+    params: list[Any] = []
+    if user_id is not None:
+        filters.append("user_id = ?")
+        params.append(user_id)
+    if clean_text(action):
+        filters.append("action = ?")
+        params.append(clean_text(action))
+    if clean_text(resource_type):
+        filters.append("resource_type = ?")
+        params.append(clean_text(resource_type))
+    where = " AND ".join(filters)
+    with sqlite_connection() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) FROM audit_log WHERE {where}", params).fetchone()[0])
+        rows = conn.execute(
+            f"SELECT * FROM audit_log WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+    return {"items": audit_rows_response(rows), "total": total, "offset": offset, "limit": limit}
+
+
+@app.get("/api/v1/audit")
+def audit_list(
+    request: Request,
+    user_id: int | None = None,
+    action: str = "",
+    resource_type: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    return query_audit_log(
+        request, user_id=user_id, action=action, resource_type=resource_type, offset=offset, limit=limit,
+    )
+
+
+@app.get("/api/v1/audit/users/{user_id}")
+def audit_user_list(
+    user_id: int,
+    request: Request,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    return query_audit_log(request, user_id=user_id, offset=offset, limit=limit)
 
 
 def sqlite_bool(value: Any) -> bool:
@@ -19527,7 +20683,7 @@ def ai_request_history(request: Request, limit: int = Query(200, ge=1, le=1000))
     with sqlite_connection() as conn:
         items = ai_history(conn, limit)
     user = getattr(request.state, "user", None) or {}
-    if clean_text(user.get("role")) != "admin":
+    if "audit.view" not in set(user.get("permissions") or []):
         items = [
             {
                 **item,
@@ -33763,8 +34919,11 @@ def dashboard_request_user(request: Request) -> dict[str, Any]:
 
 
 def dashboard_can_view(dashboard: dict[str, Any], user: dict[str, Any]) -> bool:
+    permissions = set(user.get("permissions") or [])
+    if "dashboard.view" not in permissions:
+        return False
     return bool(
-        user.get("role") == "admin"
+        "dashboard.manage" in permissions
         or dashboard.get("owner_user_id") == int(user["id"])
         or dashboard.get("is_shared")
         or dashboard.get("is_system")
@@ -33772,9 +34931,12 @@ def dashboard_can_view(dashboard: dict[str, Any], user: dict[str, Any]) -> bool:
 
 
 def dashboard_can_edit(dashboard: dict[str, Any], user: dict[str, Any]) -> bool:
-    if user.get("role") == "admin":
+    permissions = set(user.get("permissions") or [])
+    if "dashboard.manage" in permissions:
         return True
     return bool(
+        "dashboard.edit" in permissions
+        and
         not dashboard.get("is_system")
         and dashboard.get("owner_user_id") == int(user["id"])
     )
@@ -34022,6 +35184,7 @@ def reimport_grafana_dashboard_endpoint(
     payload: dict[str, Any],
     request: Request,
 ):
+    require_permission(request, "grafana.manage")
     user = dashboard_request_user(request)
     try:
         source = dashboard_from_grafana_export(payload)
@@ -34079,7 +35242,7 @@ def list_configurable_dashboards(request: Request):
             """
             SELECT *
             FROM dashboards
-            WHERE owner_user_id = ? OR is_shared = 1 OR is_system = 1 OR ? = 'admin'
+            WHERE owner_user_id = ? OR is_shared = 1 OR is_system = 1 OR ? = 1
             ORDER BY
                 CASE WHEN owner_user_id = ? AND is_default = 1 THEN 0
                      WHEN owner_user_id = ? THEN 1
@@ -34087,7 +35250,12 @@ def list_configurable_dashboards(request: Request):
                      ELSE 3 END,
                 name
             """,
-            (int(user["id"]), user.get("role"), int(user["id"]), int(user["id"])),
+            (
+                int(user["id"]),
+                int("dashboard.manage" in set(user.get("permissions") or [])),
+                int(user["id"]),
+                int(user["id"]),
+            ),
         ).fetchall()
         items = [dashboard_with_permissions(dashboard_row_to_dict(row), user) for row in rows]
         conn.commit()
@@ -35512,6 +36680,7 @@ def export_configurable_dashboard_to_grafana_endpoint(
     default_from: str = "",
     default_to: str = "",
 ):
+    require_permission(request, "grafana.view")
     user = dashboard_request_user(request)
     if str(grafana_version) not in {"10", "11", "12"}:
         raise HTTPException(

@@ -41,6 +41,11 @@ class _FastAPI:
             return func
         return decorator
 
+    def patch(self, *args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
     def delete(self, *args, **kwargs):
         def decorator(func):
             return func
@@ -98,6 +103,12 @@ class _Field:
 class _CryptContext:
     def __init__(self, *args, **kwargs):
         pass
+
+    def hash(self, value):
+        return f"test-hash:{value}"
+
+    def verify(self, value, hashed):
+        return hashed == f"test-hash:{value}"
 
 
 class _JSONResponse:

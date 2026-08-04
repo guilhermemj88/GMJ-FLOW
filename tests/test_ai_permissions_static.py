@@ -63,7 +63,8 @@ class AiPermissionsStaticTest(unittest.TestCase):
 
     def test_operator_history_is_sanitized(self):
         source = function_source("ai_request_history")
-        self.assertIn('user.get("role")', source)
+        self.assertIn('user.get("permissions")', source)
+        self.assertIn('"audit.view"', source)
         self.assertIn("sanitize_ai_content", source)
         self.assertIn('external_provider=True', source)
 

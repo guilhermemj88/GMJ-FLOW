@@ -1845,6 +1845,48 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       color: var(--muted);
     }
 
+    .access-denied-banner {
+      display: none;
+      margin-bottom: 1rem;
+      padding: .75rem 1rem;
+      border: 1px solid #fecaca;
+      border-radius: var(--radius);
+      background: #fef2f2;
+      color: #991b1b;
+    }
+
+    .access-denied-banner.visible { display: block; }
+
+    .permission-matrix {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: .75rem;
+    }
+
+    .permission-category {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: .75rem;
+    }
+
+    .permission-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 130px;
+      align-items: center;
+      gap: .5rem;
+      padding: .4rem 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .permission-row:last-child { border-bottom: 0; }
+
+    .permission-state {
+      display: inline-block;
+      margin-top: .2rem;
+      color: var(--muted);
+      font-size: .76rem;
+    }
+
     .gmj-modal {
       position: fixed;
       inset: 0;
@@ -3105,11 +3147,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         </div>
         <div class="field">
           <label for="newPassword">Nova senha</label>
-          <input id="newPassword" type="password" minlength="8" class="form-control" autocomplete="new-password">
+          <input id="newPassword" type="password" minlength="10" class="form-control" autocomplete="new-password">
         </div>
         <div class="field">
           <label for="confirmPassword">Confirmar nova senha</label>
-          <input id="confirmPassword" type="password" minlength="8" class="form-control" autocomplete="new-password">
+          <input id="confirmPassword" type="password" minlength="10" class="form-control" autocomplete="new-password">
         </div>
         <button id="changePasswordButton" type="submit" class="btn btn-success w-100">
           <i data-lucide="key-round"></i><span>Trocar senha</span>
@@ -3129,57 +3171,63 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         </div>
       </div>
       <nav class="side-nav" aria-label="Menu principal">
-        <button type="button" class="active" data-nav-view="dashboard">
+        <button type="button" class="active" data-nav-view="dashboard" data-required-permission="dashboard.view">
           <i data-lucide="layout-dashboard"></i><span>Dashboard</span>
         </button>
-        <button type="button" data-nav-view="flows">
+        <button type="button" data-nav-view="flows" data-required-permission="dashboard.view">
           <i data-lucide="search"></i><span>Flows</span>
         </button>
-        <button id="globalMapNavButton" type="button" data-nav-view="global-map">
+        <button id="globalMapNavButton" type="button" data-nav-view="global-map" data-required-permission="dashboard.view">
           <i data-lucide="globe-2"></i><span>Mapa Global</span>
         </button>
-        <button type="button" data-nav-view="sensors">
+        <button type="button" data-nav-view="sensors" data-required-permission="sensors.view">
           <i data-lucide="radio-tower"></i><span>Sensores</span>
         </button>
-        <button id="databaseNavButton" type="button" data-nav-view="database">
+        <button id="databaseNavButton" type="button" data-nav-view="database" data-required-permission="settings.view">
           <i data-lucide="database"></i><span>Banco de Dados</span>
         </button>
-        <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors">
+        <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors" data-required-permission="anomalies.view">
           <i data-lucide="shield-alert"></i><span>Vetores de Ataque</span>
         </button>
-        <button id="anomaliesNavButton" type="button" data-nav-view="anomalies">
+        <button id="anomaliesNavButton" type="button" data-nav-view="anomalies" data-required-permission="anomalies.view">
           <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
           <span id="anomalyNavSeverity" class="nav-anomaly-severity" aria-hidden="true">
             <span id="anomalyNavWarningBadge" class="nav-severity-count severity-warning" title="Avisos ativos">0</span>
             <span id="anomalyNavCriticalBadge" class="nav-severity-count severity-critical" title="Anomalias críticas ativas">0</span>
           </span>
         </button>
-        <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter">
+        <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter" data-required-permission="anomalies.view">
           <i data-lucide="activity"></i><span>Peak Hunter</span>
         </button>
-        <button id="mitigationNavButton" type="button" data-nav-view="mitigation">
+        <button id="mitigationNavButton" type="button" data-nav-view="mitigation" data-required-permission="mitigations.view">
           <i data-lucide="shield-check"></i><span>Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
         </button>
-        <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors">
+        <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors" data-required-permission="bgp.view">
           <i data-lucide="network"></i><span>BGP / Conectores</span>
         </button>
-        <button id="aiNavButton" type="button" data-nav-view="ai">
+        <button id="aiNavButton" type="button" data-nav-view="ai" data-required-permission="settings.view">
           <i data-lucide="brain-circuit"></i><span>IA</span>
         </button>
-        <button id="systemNavButton" type="button" data-nav-view="system">
+        <button id="systemNavButton" type="button" data-nav-view="system" data-required-permission="settings.view">
           <i data-lucide="activity"></i><span>Sistema</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces">
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces" data-required-permission="sensors.view">
           <i data-lucide="panel-top"></i><span>Interfaces</span>
         </button>
-        <button type="button" data-nav-view="ip-zones">
+        <button type="button" data-nav-view="ip-zones" data-required-permission="dashboard.view">
           <i data-lucide="network"></i><span>Clientes/Prefixos</span>
         </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas">
+        <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas" data-required-permission="anomalies.view">
           <i data-lucide="bell"></i><span>Alertas</span>
         </button>
-        <button id="cgnatNavButton" type="button" data-nav-view="cgnat">
+        <button id="cgnatNavButton" type="button" data-nav-view="cgnat" data-required-permission="cgnat.view">
           <i data-lucide="settings"></i><span>Configurações / CGNAT</span>
+        </button>
+        <button id="usersNavButton" type="button" data-nav-view="users" data-required-permission="users.view">
+          <i data-lucide="users"></i><span>Usuários e Acessos</span>
+        </button>
+        <button id="myAccountNavButton" type="button" data-nav-view="my-account">
+          <i data-lucide="circle-user-round"></i><span>Minha conta</span>
         </button>
         <button id="logoutButton" type="button">
           <i data-lucide="log-out"></i><span>Sair</span>
@@ -3189,6 +3237,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     <div class="content-shell">
       <main class="content">
+        <div id="accessDeniedBanner" class="access-denied-banner" role="alert"></div>
         <section id="view-dashboard" class="app-view active">
           <div class="view-header">
             <div>
@@ -7161,6 +7210,71 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
         </section>
 
+        <section id="view-users" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Usuários e Acessos</h1>
+              <div class="subtle">Contas, perfis, permissões efetivas, sessões e auditoria administrativa.</div>
+            </div>
+            <div class="toolbar">
+              <button id="usersAuditButton" type="button" class="btn btn-sm btn-outline-secondary" data-required-permission="audit.view"><i data-lucide="scroll-text"></i><span>Auditoria</span></button>
+              <button id="newUserButton" type="button" class="btn btn-sm btn-success" data-required-permission="users.create"><i data-lucide="user-plus"></i><span>Novo usuário</span></button>
+            </div>
+          </div>
+          <section class="panel p-3 mb-3">
+            <div class="flow-search-grid">
+              <div class="field"><label for="usersSearch">Pesquisar</label><input id="usersSearch" class="form-control form-control-sm" placeholder="Username, nome ou e-mail"></div>
+              <div class="field"><label for="usersStatusFilter">Status</label><select id="usersStatusFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="active">Ativos</option><option value="disabled">Desativados</option></select></div>
+              <div class="field"><label for="usersRoleFilter">Perfil</label><select id="usersRoleFilter" class="form-select form-select-sm"><option value="">Todos</option></select></div>
+              <div class="field"><label>&nbsp;</label><button id="usersFilterButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="search"></i><span>Filtrar</span></button></div>
+            </div>
+            <div id="usersStatus" class="subtle mt-2">Carregando usuários...</div>
+          </section>
+          <section class="panel p-3">
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>Usuário</th><th>Nome</th><th>Perfil</th><th>Status</th><th>Último login</th><th>Troca obrigatória</th><th>Sessões</th><th>Ações</th></tr></thead>
+                <tbody id="usersTable"><tr><td colspan="8" class="text-muted">Nenhum usuário carregado.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="d-flex justify-content-between align-items-center gap-2 mt-3">
+              <button id="usersPreviousButton" type="button" class="btn btn-sm btn-outline-secondary">Anterior</button>
+              <span id="usersPageLabel" class="subtle">0 usuários</span>
+              <button id="usersNextButton" type="button" class="btn btn-sm btn-outline-secondary">Próxima</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-my-account" class="app-view">
+          <div class="view-header">
+            <div><h1 class="view-title">Minha conta</h1><div class="subtle">Dados pessoais, senha, permissões efetivas e sessões.</div></div>
+          </div>
+          <div class="row g-3">
+            <div class="col-lg-5">
+              <section class="panel p-3 mb-3">
+                <div class="panel-title mb-2">Dados da conta</div>
+                <div class="field mb-2"><label>Usuário</label><input id="accountUsername" class="form-control form-control-sm" disabled></div>
+                <div class="field mb-2"><label for="accountDisplayName">Nome</label><input id="accountDisplayName" class="form-control form-control-sm"></div>
+                <div class="field mb-2"><label for="accountEmail">E-mail</label><input id="accountEmail" type="email" class="form-control form-control-sm"></div>
+                <div class="field mb-2"><label>Perfil</label><input id="accountRole" class="form-control form-control-sm" disabled></div>
+                <button id="saveAccountButton" type="button" class="btn btn-sm btn-success">Salvar dados</button>
+              </section>
+              <section class="panel p-3">
+                <div class="panel-title mb-2">Alterar senha</div>
+                <div class="field mb-2"><label for="accountCurrentPassword">Senha atual</label><input id="accountCurrentPassword" type="password" class="form-control form-control-sm" autocomplete="current-password"></div>
+                <div class="field mb-2"><label for="accountNewPassword">Nova senha</label><input id="accountNewPassword" type="password" minlength="10" class="form-control form-control-sm" autocomplete="new-password"></div>
+                <div class="field mb-2"><label for="accountConfirmPassword">Confirmar</label><input id="accountConfirmPassword" type="password" minlength="10" class="form-control form-control-sm" autocomplete="new-password"></div>
+                <button id="accountChangePasswordButton" type="button" class="btn btn-sm btn-success">Alterar senha</button>
+                <div id="accountStatus" class="subtle mt-2"></div>
+              </section>
+            </div>
+            <div class="col-lg-7">
+              <section class="panel p-3 mb-3"><div class="panel-title mb-2">Permissões efetivas</div><div id="accountPermissions" class="permission-matrix"></div></section>
+              <section class="panel p-3"><div class="d-flex justify-content-between align-items-center mb-2"><div class="panel-title">Sessões</div><button id="revokeMySessionsButton" type="button" class="btn btn-sm btn-outline-danger">Revogar todas</button></div><div id="accountSessions" class="subtle">Carregando...</div></section>
+            </div>
+          </div>
+        </section>
+
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -7170,6 +7284,37 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="userEditorModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="userEditorTitle">
+    <div class="gmj-dialog wide">
+      <div class="gmj-dialog-header"><h2 id="userEditorTitle" class="view-title">Novo usuário</h2><button type="button" class="icon-button" data-close-modal="userEditorModal" aria-label="Fechar"><i data-lucide="x"></i></button></div>
+      <div class="gmj-dialog-body">
+        <input id="userEditorId" type="hidden">
+        <div class="flow-search-grid mb-3">
+          <div class="field"><label for="userEditorUsername">Username</label><input id="userEditorUsername" class="form-control form-control-sm" minlength="3" maxlength="64"></div>
+          <div class="field"><label for="userEditorDisplayName">Nome</label><input id="userEditorDisplayName" class="form-control form-control-sm"></div>
+          <div class="field"><label for="userEditorEmail">E-mail opcional</label><input id="userEditorEmail" type="email" class="form-control form-control-sm"></div>
+          <div class="field"><label for="userEditorRole">Perfil</label><select id="userEditorRole" class="form-select form-select-sm"></select></div>
+          <div id="userEditorPasswordField" class="field"><label for="userEditorPassword">Senha temporária</label><div class="input-group"><input id="userEditorPassword" type="text" minlength="10" class="form-control form-control-sm" autocomplete="new-password"><button id="generateUserPasswordButton" type="button" class="btn btn-sm btn-outline-secondary">Gerar</button></div></div>
+          <div class="field"><label for="userEditorActive">Status</label><select id="userEditorActive" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+          <div class="field"><label for="userEditorMustChange">Primeiro acesso</label><select id="userEditorMustChange" class="form-select form-select-sm"><option value="true">Exigir troca de senha</option><option value="false">Não exigir troca</option></select></div>
+        </div>
+        <div class="panel-title mb-2">Permissões individuais</div>
+        <div class="subtle mb-2">Escolha Herdada, Concedida diretamente ou Negada diretamente. A permissão efetiva aparece em cada item.</div>
+        <div id="userPermissionMatrix" class="permission-matrix"></div>
+        <div id="userEditorStatus" class="subtle mt-3"></div>
+      </div>
+      <div class="gmj-dialog-footer"><button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="userEditorModal">Cancelar</button><button id="saveUserButton" type="button" class="btn btn-sm btn-success">Salvar usuário</button></div>
+    </div>
+  </div>
+
+  <div id="usersAuditModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="usersAuditTitle">
+    <div class="gmj-dialog wide">
+      <div class="gmj-dialog-header"><h2 id="usersAuditTitle" class="view-title">Auditoria administrativa</h2><button type="button" class="icon-button" data-close-modal="usersAuditModal" aria-label="Fechar"><i data-lucide="x"></i></button></div>
+      <div class="gmj-dialog-body"><div id="usersAuditStatus" class="subtle mb-2"></div><div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Recurso</th><th>Resultado</th><th>IP / correlação</th></tr></thead><tbody id="usersAuditTable"></tbody></table></div></div>
+      <div class="gmj-dialog-footer"><button type="button" class="btn btn-sm btn-success" data-close-modal="usersAuditModal">Fechar</button></div>
     </div>
   </div>
 
@@ -9306,6 +9451,105 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const APPEARANCE_THEME_KEY = 'gmjFlowAppearanceTheme';
     const APPEARANCE_THEMES = ['auto', 'light', 'dark', 'noc-dark'];
     let currentAuthUser = null;
+    let accessUsers = [];
+    let accessRoles = [];
+    let accessPermissions = [];
+    let usersOffset = 0;
+    const usersPageSize = 25;
+    let usersTotal = 0;
+
+    function hasPermission(permissionKey) {
+      return Boolean(permissionKey) && Array.isArray(currentAuthUser?.permissions)
+        && currentAuthUser.permissions.includes(permissionKey);
+    }
+
+    function showAccessDenied(message = 'Acesso negado para esta operação.') {
+      const banner = document.getElementById('accessDeniedBanner');
+      if (!banner) return;
+      banner.textContent = message;
+      banner.classList.add('visible');
+      window.clearTimeout(showAccessDenied.timer);
+      showAccessDenied.timer = window.setTimeout(() => banner.classList.remove('visible'), 7000);
+    }
+
+    function applyPermissionVisibility() {
+      document.querySelectorAll('[data-required-permission]').forEach(element => {
+        element.classList.toggle('auth-hidden', !hasPermission(element.dataset.requiredPermission));
+      });
+      const controls = {
+        applyCollectorsButton: 'collectors.manage',
+        newSensorButton: 'sensors.manage',
+        openSnmpButton: 'sensors.manage',
+        saveSensorButton: 'sensors.manage',
+        deleteSensorButton: 'sensors.manage',
+        addInterfaceButton: 'sensors.manage',
+        editInterfaceButton: 'sensors.manage',
+        deleteInterfaceButton: 'sensors.manage',
+        manageInterfacesButton: 'sensors.manage',
+        calibrateSampleRateButton: 'sensors.manage',
+        sensorSampleRate1Button: 'sensors.manage',
+        sensorSampleRate1000Button: 'sensors.manage',
+        applySensorRateToInterfacesButton: 'sensors.manage',
+        resetInterfaceRateInheritanceButton: 'sensors.manage',
+        newDashboardButton: 'dashboard.edit',
+        dashboardManagerButton: 'dashboard.edit',
+        addDashboardWidgetButton: 'dashboard.edit',
+        exportGrafanaDashboardButton: 'grafana.view',
+        testGrafanaExportButton: 'grafana.view',
+        copyGrafanaApiConfigButton: 'grafana.view',
+        copyGrafanaExportButton: 'grafana.view',
+        downloadGrafanaExportButton: 'grafana.view',
+        newIpZoneButton: 'dashboard.manage',
+        saveIpZoneButton: 'dashboard.manage',
+        disableIpZoneButton: 'dashboard.manage',
+        activateIpZoneButton: 'dashboard.manage',
+        testIpZoneDetectionButton: 'dashboard.manage',
+        editAssociatedTemplateButton: 'dashboard.manage',
+        purgeIpZoneButton: 'dashboard.manage',
+        runZoneDetectionButton: 'anomalies.manage',
+        createSecurityAnomaliesButton: 'anomalies.manage',
+        newTemplateButton: 'anomalies.manage',
+        saveTemplateButton: 'anomalies.manage',
+        renameTemplateButton: 'anomalies.manage',
+        duplicateTemplateButton: 'anomalies.manage',
+        deleteTemplateButton: 'anomalies.manage',
+        learnAttackVectorsButton: 'anomalies.manage',
+        addVectorButton: 'anomalies.manage',
+        applySuggestionsButton: 'anomalies.manage',
+        saveDatabaseRetentionButton: 'settings.manage',
+        applyDatabaseTtlButton: 'settings.manage',
+        customDatabaseCleanupButton: 'settings.manage',
+        databaseOptimizeButton: 'settings.manage',
+        clearDashboardCacheButton: 'settings.manage',
+        saveAiRouteButton: 'settings.manage',
+        saveAiPromptButton: 'settings.manage',
+        saveBgpConnectorButton: 'bgp.manage',
+        saveBgpProfileButton: 'bgp.manage',
+        attachLegacyBgpProfilesButton: 'bgp.manage',
+        saveBgpPolicyButton: 'bgp.manage',
+        saveBgpProtectedButton: 'bgp.manage',
+        previewBgpDryRunButton: 'bgp.manage',
+        runBgpDryRunButton: 'bgp.manage',
+        withdrawBgpDryRunButton: 'bgp.apply',
+        checkAllBgpConnectorsButton: 'bgp.manage',
+        recoverBgpSessionsButton: 'bgp.manage',
+        checkBgpStatusButton: 'bgp.manage',
+        processCgnatFileButton: 'cgnat.import',
+        approveCgnatBatchButton: 'cgnat.manage',
+        approveActivateCgnatBatchButton: 'cgnat.manage',
+        replaceActivateCgnatBatchButton: 'cgnat.manage',
+        rejectCgnatBatchButton: 'cgnat.manage'
+      };
+      Object.entries(controls).forEach(([id, permission]) => {
+        document.getElementById(id)?.classList.toggle('auth-hidden', !hasPermission(permission));
+      });
+      document.querySelectorAll('.ai-admin-control').forEach(element => {
+        element.classList.toggle('auth-hidden', !hasPermission('settings.manage'));
+      });
+      document.querySelectorAll('.database-cleanup-button').forEach(element => {
+        element.classList.toggle('auth-hidden', !hasPermission('settings.manage'));
+      });
+    }
 
     function resolvedAppearanceTheme(preference) {
       if (preference !== 'auto') return APPEARANCE_THEMES.includes(preference) ? preference : 'light';
@@ -9776,6 +10020,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         const payload = await response.clone().json().catch(() => ({}));
         if (payload.detail === 'Password change required') {
           showPasswordChange(currentAuthUser);
+        } else {
+          showAccessDenied(apiDetailMessage(payload.detail) || 'Acesso negado: sua conta não possui a permissão necessária.');
         }
       }
       return response;
@@ -9799,7 +10045,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       document.getElementById('loginForm').classList.add('auth-hidden');
       document.getElementById('changePasswordForm').classList.remove('auth-hidden');
       document.getElementById('loginSubtitle').textContent = 'Troque a senha inicial para continuar';
-      setLoginStatus('A nova senha precisa ter pelo menos 8 caracteres.');
+      setLoginStatus('A nova senha precisa ter pelo menos 10 caracteres.');
       createIcons();
     }
 
@@ -9807,18 +10053,16 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       currentAuthUser = user || currentAuthUser;
       document.getElementById('loginView').classList.add('auth-hidden');
       document.getElementById('appShell').classList.remove('auth-hidden');
-      document.getElementById('applyCollectorsButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('databaseNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('attackVectorsNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('anomaliesNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('bgpNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('mitigationNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.getElementById('cgnatNavButton').classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      document.querySelectorAll('.ai-admin-control').forEach(element => {
-        element.classList.toggle('auth-hidden', currentAuthUser?.role !== 'admin');
-      });
+      applyPermissionVisibility();
       setLoginStatus('');
       const requestedView = viewFromLocationHash();
+      const requestedPermission = requiredPermissionForView(requestedView);
+      if (requestedPermission && !hasPermission(requestedPermission)) {
+        showAccessDenied(`Acesso negado. Permissão necessária: ${requestedPermission}.`);
+        showView('my-account');
+        createIcons();
+        return;
+      }
       if (requestedView !== 'dashboard') {
         showView(requestedView);
       } else {
@@ -9872,8 +10116,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const currentPassword = document.getElementById('currentPassword').value;
       const newPassword = document.getElementById('newPassword').value;
       const confirmPassword = document.getElementById('confirmPassword').value;
-      if (newPassword.length < 8) {
-        setLoginStatus('A nova senha precisa ter pelo menos 8 caracteres.', 'error');
+      if (newPassword.length < 10) {
+        setLoginStatus('A nova senha precisa ter pelo menos 10 caracteres.', 'error');
         return;
       }
       if (newPassword !== confirmPassword) {
@@ -10123,7 +10367,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const body = options.body;
       if (!body) return '';
       const redact = value => String(value || '')
-        .replace(/("[^"]*(?:api[_-]?key|authorization|credential|secret|token)[^"]*"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2')
+        .replace(/("[^"]*(?:password|passphrase|hash|api[_-]?key|authorization|credential|secret|token)[^"]*"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2')
         .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, '$1[REDACTED]');
       if (typeof body === 'string') {
         const safeBody = redact(body);
@@ -10866,7 +11110,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     async function loadDatabaseStatus() {
-      if (currentAuthUser?.role !== 'admin') return;
+      if (!hasPermission('settings.view')) return;
       document.getElementById('databaseStatusText').textContent = 'Atualizando...';
       try {
         const payload = await apiRequest('/api/database/status');
@@ -12013,13 +12257,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td>${rule.use_global_whitelist ? 'Global ON' : 'Global OFF'}</td>
           <td>${detectionRuleRuntimeHtml(rule)}</td>
           <td><span class="badge-soft ${rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'ok' : 'warn'}">${escapeHtml(rule.enabled && (!rule.mitigation_enabled || rule.profile_status === 'valid') ? 'safe' : (rule.profile_status_reason || 'review'))}</span></td>
-          <td>
+          <td>${hasPermission('anomalies.manage') ? `
             <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary detection-rule-edit" data-rule-id="${rule.id}" aria-label="Editar regra"><i data-lucide="pencil"></i><span>Editar</span></button>
               <button type="button" class="btn btn-outline-success detection-rule-test" data-rule-id="${rule.id}" aria-label="Testar regra agora"><i data-lucide="play-circle"></i><span>Testar agora</span></button>
               <button type="button" class="btn btn-outline-danger detection-rule-disable" data-rule-id="${rule.id}" aria-label="Desativar regra"><i data-lucide="ban"></i><span>Desativar</span></button>
             </div>
-          </td>
+          ` : '<span class="subtle">Somente leitura</span>'}</td>
         </tr>
       `).join('') || '<tr><td colspan="13" class="text-muted">Sem regras</td></tr>';
       createIcons();
@@ -13463,6 +13707,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function bgpInFlightActions(item) {
+      if (!hasPermission('bgp.apply')) return '<span class="subtle">Somente leitura</span>';
       const status = String(item?.status || '').toLowerCase();
       const confirmation = String(item?.confirmation_level || '').toLowerCase();
       const details = item?.status_details && typeof item.status_details === 'object' ? item.status_details : {};
@@ -13586,9 +13831,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
-          <td>
+          <td>${hasPermission('bgp.apply') ? `
             <button type="button" class="btn btn-sm btn-outline-success bgp-ann-approve" data-id="${item.id}"><i data-lucide="radio-tower"></i></button>
-            <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>
+            <button type="button" class="btn btn-sm btn-outline-danger bgp-ann-reject" data-id="${item.id}"><i data-lucide="x"></i></button>` : '<span class="subtle">Somente leitura</span>'}
           </td>
         </tr>
       `).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma sugestão aguardando aprovação.</td></tr>';
@@ -13619,9 +13864,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${formatDateTime(item.expires_at)}<br><span class="subtle">UTC: ${escapeHtml(item.expires_at || '-')}</span></td>
           <td>${bgpCommandDetails(item)}</td>
-          <td>
-            <button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>
-          </td>
+          <td>${hasPermission('bgp.apply') ? `<button type="button" class="btn btn-sm btn-outline-secondary bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i></button>` : '<span class="subtle">Somente leitura</span>'}</td>
         </tr>
       `).join('') || '<tr><td colspan="10" class="text-muted">Nenhum FlowSpec ativo.</td></tr>';
       document.getElementById('bgpFailedAnnouncementsTable').innerHTML = failures.map(item => `
@@ -14050,7 +14293,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${escapeHtml(provider.default_model || '-')}</td><td>${aiBadge(provider.enabled ? provider.status : 'disabled')}</td>
           <td>${Number(provider.last_latency_ms || 0)} ms</td><td>${Number(provider.priority || 0)}</td>
           <td><div class="toolbar">
-            ${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="test" data-id="${provider.id}">Testar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="edit" data-id="${provider.id}">Editar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="duplicate" data-id="${provider.id}">Duplicar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="toggle" data-id="${provider.id}">${provider.enabled ? 'Desativar' : 'Ativar'}</button><button type="button" class="btn btn-sm btn-outline-danger ai-provider-action" data-action="delete" data-id="${provider.id}">Excluir</button>` : ''}
+            ${hasPermission('settings.manage') ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="test" data-id="${provider.id}">Testar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="edit" data-id="${provider.id}">Editar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="duplicate" data-id="${provider.id}">Duplicar</button><button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="toggle" data-id="${provider.id}">${provider.enabled ? 'Desativar' : 'Ativar'}</button><button type="button" class="btn btn-sm btn-outline-danger ai-provider-action" data-action="delete" data-id="${provider.id}">Excluir</button>` : ''}
             <button type="button" class="btn btn-sm btn-outline-secondary ai-provider-action" data-action="history" data-id="${provider.id}">Histórico</button>
           </div></td>
         </tr>`).join('') || '<tr><td colspan="8" class="subtle">Nenhum provedor configurado.</td></tr>';
@@ -14137,7 +14380,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const recommended = aiModels.filter(item => item.provider_type === 'ollama').sort((a, b) => Number(a.estimated_ram_bytes || a.size_bytes) - Number(b.estimated_ram_bytes || b.size_bytes))[0];
       setText('aiModelsRecommendation', recommended?.name || 'Sem modelo local catalogado');
       document.getElementById('aiModelsTable').innerHTML = aiModels.map(model => `
-        <tr><td>${escapeHtml(model.provider_name)}</td><td>${escapeHtml(model.name)}</td><td>${model.size_bytes ? formatBytes(model.size_bytes) : '-'}</td><td>${model.estimated_ram_bytes ? formatBytes(model.estimated_ram_bytes) : '-'}</td><td>${escapeHtml(model.downloaded_at || model.modified_at || '-')}</td><td>${aiBadge(model.loaded ? 'available' : model.state)}</td><td>${currentAuthUser?.role === 'admin' && (model.provider_type === 'ollama' || model.manually_configured) ? `<button type="button" class="btn btn-sm btn-outline-danger ai-model-remove" data-provider-id="${model.provider_id}" data-model="${escapeHtml(model.name)}">Remover</button>` : '-'}</td></tr>
+        <tr><td>${escapeHtml(model.provider_name)}</td><td>${escapeHtml(model.name)}</td><td>${model.size_bytes ? formatBytes(model.size_bytes) : '-'}</td><td>${model.estimated_ram_bytes ? formatBytes(model.estimated_ram_bytes) : '-'}</td><td>${escapeHtml(model.downloaded_at || model.modified_at || '-')}</td><td>${aiBadge(model.loaded ? 'available' : model.state)}</td><td>${hasPermission('settings.manage') && (model.provider_type === 'ollama' || model.manually_configured) ? `<button type="button" class="btn btn-sm btn-outline-danger ai-model-remove" data-provider-id="${model.provider_id}" data-model="${escapeHtml(model.name)}">Remover</button>` : '-'}</td></tr>
       `).join('') || '<tr><td colspan="7" class="subtle">Nenhum modelo catalogado. Selecione um provider e atualize a lista.</td></tr>';
     }
 
@@ -14246,7 +14489,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function renderAiPrompts() {
       document.getElementById('aiPromptsTable').innerHTML = aiPrompts.map(prompt => `
-        <tr><td>${escapeHtml(prompt.name)}</td><td>${escapeHtml(prompt.function_key)}</td><td>${prompt.version}</td><td>${escapeHtml(prompt.recommended_model || '-')}</td><td>${escapeHtml(formatDateTime(prompt.updated_at) || '-')}</td><td>${aiBadge(prompt.enabled ? 'available' : 'disabled')}</td><td><div class="toolbar">${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="edit" data-id="${prompt.id}">Editar</button>` : ''}<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="versions" data-id="${prompt.id}">Versões</button>${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="duplicate" data-id="${prompt.id}">Duplicar</button>` : ''}</div></td></tr>
+        <tr><td>${escapeHtml(prompt.name)}</td><td>${escapeHtml(prompt.function_key)}</td><td>${prompt.version}</td><td>${escapeHtml(prompt.recommended_model || '-')}</td><td>${escapeHtml(formatDateTime(prompt.updated_at) || '-')}</td><td>${aiBadge(prompt.enabled ? 'available' : 'disabled')}</td><td><div class="toolbar">${hasPermission('settings.manage') ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="edit" data-id="${prompt.id}">Editar</button>` : ''}<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="versions" data-id="${prompt.id}">Versões</button>${hasPermission('settings.manage') ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-action" data-action="duplicate" data-id="${prompt.id}">Duplicar</button>` : ''}</div></td></tr>
       `).join('') || '<tr><td colspan="7" class="subtle">Nenhum prompt cadastrado.</td></tr>';
     }
 
@@ -14281,7 +14524,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function showAiPromptVersions(promptId) {
       const result = await apiRequest(`/api/ai/prompts/${promptId}/versions`);
-      document.getElementById('aiPromptPreview').innerHTML = (result.items || []).map(item => `<div class="d-flex justify-content-between gap-2"><span>Versão ${item.version} — ${escapeHtml(formatDateTime(item.created_at) || '-')} — ${escapeHtml(item.changed_by || '-')}</span>${currentAuthUser?.role === 'admin' ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-restore" data-id="${promptId}" data-version="${item.version}">Restaurar</button>` : ''}</div>`).join('') || 'Nenhuma versão.';
+      document.getElementById('aiPromptPreview').innerHTML = (result.items || []).map(item => `<div class="d-flex justify-content-between gap-2"><span>Versão ${item.version} — ${escapeHtml(formatDateTime(item.created_at) || '-')} — ${escapeHtml(item.changed_by || '-')}</span>${hasPermission('settings.manage') ? `<button type="button" class="btn btn-sm btn-outline-secondary ai-prompt-restore" data-id="${promptId}" data-version="${item.version}">Restaurar</button>` : ''}</div>`).join('') || 'Nenhuma versão.';
     }
 
     async function handleAiPromptAction(action, promptId) {
@@ -15089,10 +15332,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           : null;
         const automaticExecutionStatus = String(automaticExecution?.status || '').toLowerCase();
         const automaticAlreadyHandled = ['generated', 'queued', 'applying', 'active', 'withdraw_pending'].includes(automaticExecutionStatus);
-        const canSubmitApproval = actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
+        const canSubmitApproval = hasPermission('mitigations.apply') && actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
           Object.prototype.hasOwnProperty.call(candidate, 'can_submit_approval') ? Boolean(candidate.can_submit_approval) : legacyCanApply
         );
-        const canAnnounceNow = actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
+        const canAnnounceNow = hasPermission('mitigations.apply') && actionable && !selectionPending && !equivalentAnnouncement && !automaticAlreadyHandled && (
           Object.prototype.hasOwnProperty.call(candidate, 'can_announce_now') ? Boolean(candidate.can_announce_now) : legacyCanApply
         );
         const automaticExecutionPanel = automaticExecution ? `
@@ -15157,7 +15400,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               ${!canSubmitApproval && !canAnnounceNow && !selectionPending && !equivalentAnnouncement ? '<span class="subtle">Informativo: sem ação de mitigação.</span>' : ''}
               ${candidate.rejection_persisted
                 ? '<button type="button" class="btn btn-sm btn-outline-danger" disabled><i data-lucide="x"></i><span>Rejeitado</span></button>'
-                : `<button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>`}
+                : hasPermission('mitigations.apply') ? `<button type="button" class="btn btn-sm btn-outline-danger bgp-mitigation-reject" data-index="${index}"><i data-lucide="x"></i><span>Rejeitar</span></button>` : ''}
             </div>
           </div>
         `;
@@ -17093,7 +17336,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function refreshOpsSummary() {
-      if (currentAuthUser?.role !== 'admin' || opsSummaryRefreshInFlight) return;
+      if ((!hasPermission('anomalies.view') && !hasPermission('mitigations.view')) || opsSummaryRefreshInFlight) return;
       opsSummaryRefreshInFlight = true;
       try {
         let summaryError = null;
@@ -17135,7 +17378,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function updateAnomalySummary() {
-      if (currentAuthUser?.role !== 'admin') return;
+      if (!hasPermission('anomalies.view') && !hasPermission('mitigations.view')) return;
       const summary = await requestOpsSummary();
       renderOpsSummary(summary);
     }
@@ -18089,11 +18332,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
               <button type="button" class="btn btn-outline-secondary anomaly-detail" data-anomaly-id="${actionId}" title="Ver detalhes" aria-label="Ver detalhes">
                 <i data-lucide="eye"></i>
               </button>
-              ${legacyDns ? '' : `<button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}" title="Mitigar" aria-label="Mitigar">
+              ${legacyDns || !hasPermission('mitigations.view') ? '' : `<button type="button" class="btn btn-outline-success anomaly-mitigate" data-anomaly-id="${actionId}" title="Mitigar" aria-label="Mitigar">
                 <i data-lucide="shield-check"></i>
               </button>`}
-              <button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" title="Reconhecer" aria-label="Reconhecer"><i data-lucide="check"></i></button>
-              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" title="Encerrar" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+              ${hasPermission('anomalies.manage') ? `<button type="button" class="btn btn-outline-secondary anomaly-ack" data-anomaly-id="${actionId}" title="Reconhecer" aria-label="Reconhecer"><i data-lucide="check"></i></button>
+              <button type="button" class="btn btn-outline-danger anomaly-close" data-anomaly-id="${actionId}" title="Encerrar" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>` : ''}
             </div>
           </td>
         </tr>
@@ -23826,7 +24069,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadIngestionStatus() {
       const tbody = document.getElementById('ingestionStatusTable');
-      if (!tbody || currentAuthUser?.role !== 'admin') return;
+      if (!tbody || !hasPermission('collectors.view')) return;
       try {
         const payload = await apiRequest('/api/collectors/ingestion/status');
         const items = Array.isArray(payload.items) ? payload.items : [];
@@ -25508,6 +25751,290 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function permissionGroups(items) {
+      return (items || []).reduce((groups, item) => {
+        const category = item.category || 'Outras';
+        (groups[category] ||= []).push(item);
+        return groups;
+      }, {});
+    }
+
+    function renderReadOnlyPermissions(elementId, items) {
+      const container = document.getElementById(elementId);
+      const effectiveItems = (items || []).filter(item => item.effective !== false);
+      const groups = permissionGroups(effectiveItems);
+      container.innerHTML = Object.entries(groups).map(([category, permissions]) => `
+        <div class="permission-category">
+          <div class="panel-title">${escapeHtml(category)}</div>
+          ${permissions.map(item => `<div class="permission-row"><div><strong>${escapeHtml(item.name || item.code)}</strong><div class="subtle">${escapeHtml(item.description || item.code)}</div></div><span class="badge-soft on">Ativa</span></div>`).join('')}
+        </div>
+      `).join('') || '<div class="subtle">Nenhuma permissão efetiva.</div>';
+    }
+
+    function roleByKey(key) {
+      return accessRoles.find(role => role.key === key) || null;
+    }
+
+    function renderUserPermissionMatrix(details = []) {
+      const existing = Object.fromEntries((details || []).map(item => [item.code, item]));
+      const role = roleByKey(document.getElementById('userEditorRole').value);
+      const groups = permissionGroups(accessPermissions);
+      const canManage = hasPermission('users.manage_permissions');
+      document.getElementById('userPermissionMatrix').innerHTML = Object.entries(groups).map(([category, permissions]) => `
+        <div class="permission-category">
+          <div class="panel-title">${escapeHtml(category)}</div>
+          ${permissions.map(permission => {
+            const detail = existing[permission.code] || {};
+            const inherited = detail.inherited ?? Boolean(role?.permissions?.includes(permission.code));
+            const override = detail.override || '';
+            const effective = override === 'deny' ? false : (override === 'allow' || inherited);
+            return `<div class="permission-row">
+              <div><strong>${escapeHtml(permission.name)}</strong><div class="subtle">${escapeHtml(permission.description)}</div><span class="permission-state" data-permission-state="${escapeHtml(permission.code)}">${inherited ? 'Herdada' : 'Não herdada'} · ${effective ? 'Efetiva' : 'Sem acesso'} · risco ${escapeHtml(permission.risk)}</span></div>
+              <select class="form-select form-select-sm user-permission-override" data-permission-key="${escapeHtml(permission.code)}" ${canManage ? '' : 'disabled'}>
+                <option value="" ${override ? '' : 'selected'}>Herdada</option>
+                <option value="allow" ${override === 'allow' ? 'selected' : ''}>Concedida</option>
+                <option value="deny" ${override === 'deny' ? 'selected' : ''}>Negada</option>
+              </select>
+            </div>`;
+          }).join('')}
+        </div>
+      `).join('');
+      document.querySelectorAll('.user-permission-override').forEach(select => {
+        select.addEventListener('change', () => updatePermissionState(select));
+      });
+    }
+
+    function updatePermissionState(select) {
+      const key = select.dataset.permissionKey;
+      const inherited = Boolean(roleByKey(document.getElementById('userEditorRole').value)?.permissions?.includes(key));
+      const effective = select.value === 'allow' || (select.value !== 'deny' && inherited);
+      const label = document.querySelector(`[data-permission-state="${CSS.escape(key)}"]`);
+      if (label) label.textContent = `${inherited ? 'Herdada' : 'Não herdada'} · ${select.value === 'allow' ? 'Concedida diretamente' : select.value === 'deny' ? 'Negada diretamente' : effective ? 'Efetiva' : 'Sem acesso'}`;
+    }
+
+    async function loadAccessCatalogs() {
+      const [rolesPayload, permissionsPayload] = await Promise.all([
+        apiRequest('/api/v1/roles'),
+        apiRequest('/api/v1/permissions')
+      ]);
+      accessRoles = rolesPayload.items || [];
+      accessPermissions = permissionsPayload.items || [];
+      const options = accessRoles.filter(role => role.active).map(role => `<option value="${escapeHtml(role.key)}">${escapeHtml(role.name)}</option>`).join('');
+      document.getElementById('usersRoleFilter').innerHTML = `<option value="">Todos</option>${options}`;
+      document.getElementById('userEditorRole').innerHTML = options;
+    }
+
+    function renderUsersTable() {
+      const tbody = document.getElementById('usersTable');
+      if (!accessUsers.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-muted">Nenhum usuário encontrado.</td></tr>';
+      } else {
+        tbody.innerHTML = accessUsers.map(user => {
+          const actions = [
+            hasPermission('users.edit') ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-user-action="edit" data-user-id="${user.id}">Editar</button>` : '',
+            hasPermission('users.disable') ? `<button type="button" class="btn btn-sm btn-outline-${user.active ? 'warning' : 'success'}" data-user-action="toggle" data-user-id="${user.id}">${user.active ? 'Desativar' : 'Ativar'}</button>` : '',
+            hasPermission('users.reset_password') ? `<button type="button" class="btn btn-sm btn-outline-warning" data-user-action="reset" data-user-id="${user.id}">Redefinir senha</button>` : '',
+            hasPermission('users.edit') ? `<button type="button" class="btn btn-sm btn-outline-danger" data-user-action="revoke" data-user-id="${user.id}">Revogar sessões</button>` : '',
+            hasPermission('audit.view') ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-user-action="audit" data-user-id="${user.id}">Auditoria</button>` : '',
+            hasPermission('users.delete') ? `<button type="button" class="btn btn-sm btn-outline-danger" data-user-action="delete" data-user-id="${user.id}">Excluir</button>` : ''
+          ].join(' ');
+          return `<tr>
+            <td><strong>${escapeHtml(user.username)}</strong><div class="subtle">${escapeHtml(user.email || '')}</div></td>
+            <td>${escapeHtml(user.display_name)}</td><td>${escapeHtml(roleByKey(user.role)?.name || user.role)}</td>
+            <td><span class="badge-soft ${user.status === 'active' ? 'on' : 'off'}">${user.status === 'locked' ? 'Bloqueado' : user.active ? 'Ativo' : 'Desativado'}</span></td>
+            <td>${escapeHtml(formatDateTime(user.last_login_at))}</td><td>${user.must_change_password ? 'Sim' : 'Não'}</td>
+            <td>${Number(user.active_sessions || 0)}</td><td><div class="toolbar">${actions || '-'}</div></td>
+          </tr>`;
+        }).join('');
+      }
+      const end = Math.min(usersOffset + usersPageSize, usersTotal);
+      document.getElementById('usersPageLabel').textContent = usersTotal ? `${usersOffset + 1}-${end} de ${usersTotal}` : '0 usuários';
+      document.getElementById('usersPreviousButton').disabled = usersOffset <= 0;
+      document.getElementById('usersNextButton').disabled = usersOffset + usersPageSize >= usersTotal;
+      createIcons();
+    }
+
+    async function loadUsers() {
+      if (!hasPermission('users.view')) return;
+      document.getElementById('usersStatus').textContent = 'Carregando usuários...';
+      if (!accessRoles.length || !accessPermissions.length) await loadAccessCatalogs();
+      const params = new URLSearchParams({ offset: String(usersOffset), limit: String(usersPageSize) });
+      const search = document.getElementById('usersSearch').value.trim();
+      const status = document.getElementById('usersStatusFilter').value;
+      const role = document.getElementById('usersRoleFilter').value;
+      if (search) params.set('search', search);
+      if (status) params.set('status', status);
+      if (role) params.set('role', role);
+      const payload = await apiRequest(`/api/v1/users?${params}`);
+      accessUsers = payload.items || [];
+      usersTotal = Number(payload.total || 0);
+      document.getElementById('usersStatus').textContent = `${usersTotal} usuário(s) encontrado(s).`;
+      renderUsersTable();
+    }
+
+    async function openUserEditor(userId = null) {
+      if (!accessRoles.length || !accessPermissions.length) await loadAccessCatalogs();
+      document.getElementById('userEditorId').value = userId || '';
+      document.getElementById('userEditorTitle').textContent = userId ? 'Editar usuário' : 'Novo usuário';
+      document.getElementById('userEditorUsername').disabled = Boolean(userId);
+      document.getElementById('userEditorPasswordField').classList.toggle('auth-hidden', Boolean(userId));
+      document.getElementById('userEditorActive').disabled = Boolean(userId) && !hasPermission('users.disable');
+      document.getElementById('userEditorStatus').textContent = '';
+      let details = [];
+      if (userId) {
+        const payload = await apiRequest(`/api/v1/users/${userId}`);
+        const user = payload.user;
+        document.getElementById('userEditorUsername').value = user.username;
+        document.getElementById('userEditorDisplayName').value = user.display_name || '';
+        document.getElementById('userEditorEmail').value = user.email || '';
+        document.getElementById('userEditorRole').value = user.role;
+        document.getElementById('userEditorActive').value = String(Boolean(user.active));
+        document.getElementById('userEditorMustChange').value = String(Boolean(user.must_change_password));
+        document.getElementById('userEditorRole').disabled = !hasPermission('users.manage_permissions');
+        details = user.permission_details || [];
+      } else {
+        document.getElementById('userEditorUsername').value = '';
+        document.getElementById('userEditorDisplayName').value = '';
+        document.getElementById('userEditorEmail').value = '';
+        document.getElementById('userEditorRole').value = accessRoles.some(role => role.key === 'viewer') ? 'viewer' : accessRoles[0]?.key || '';
+        document.getElementById('userEditorActive').value = 'true';
+        document.getElementById('userEditorMustChange').value = 'true';
+        document.getElementById('userEditorPassword').value = generateStrongPassword();
+        document.getElementById('userEditorRole').disabled = !hasPermission('users.manage_permissions');
+      }
+      renderUserPermissionMatrix(details);
+      openModal('userEditorModal');
+    }
+
+    function generateStrongPassword() {
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*+-_';
+      const bytes = new Uint32Array(20);
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes, value => alphabet[value % alphabet.length]).join('');
+    }
+
+    function permissionOverridesFromEditor() {
+      return Object.fromEntries(Array.from(document.querySelectorAll('.user-permission-override'))
+        .filter(select => select.value)
+        .map(select => [select.dataset.permissionKey, select.value]));
+    }
+
+    async function saveUserEditor() {
+      const userId = Number(document.getElementById('userEditorId').value || 0);
+      const username = document.getElementById('userEditorUsername').value.trim();
+      const displayName = document.getElementById('userEditorDisplayName').value.trim();
+      const email = document.getElementById('userEditorEmail').value.trim();
+      const role = document.getElementById('userEditorRole').value;
+      const active = document.getElementById('userEditorActive').value === 'true';
+      const mustChange = document.getElementById('userEditorMustChange').value === 'true';
+      const overrides = permissionOverridesFromEditor();
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$/.test(username) || !displayName) {
+        document.getElementById('userEditorStatus').textContent = 'Informe username válido e nome de exibição.';
+        return;
+      }
+      const originalUser = accessUsers.find(user => Number(user.id) === userId);
+      const rolePermissions = new Set(roleByKey(role)?.permissions || []);
+      const keepsAdministrativeAccess = overrides['users.manage_permissions'] !== 'deny'
+        && (overrides['users.manage_permissions'] === 'allow' || rolePermissions.has('users.manage_permissions'));
+      const removesAdministrativeAccess = Boolean(
+        originalUser?.permissions?.includes('users.manage_permissions') && !keepsAdministrativeAccess
+      );
+      if ((overrides['users.manage_permissions'] === 'deny' || removesAdministrativeAccess)
+          && window.prompt(`Confirme digitando ${username}`) !== username) return;
+      const payload = { display_name: displayName, email, must_change_password: mustChange };
+      let path = `/api/v1/users/${userId}`;
+      let method = 'PATCH';
+      if (!userId) {
+        const password = document.getElementById('userEditorPassword').value;
+        if (password.length < 10) {
+          document.getElementById('userEditorStatus').textContent = 'A senha temporária precisa ter ao menos 10 caracteres.';
+          return;
+        }
+        Object.assign(payload, { username, temporary_password: password, role, active, permission_overrides: overrides });
+        path = '/api/v1/users';
+        method = 'POST';
+      } else {
+        if (hasPermission('users.manage_permissions')) Object.assign(payload, { role, permission_overrides: overrides });
+        if (hasPermission('users.disable')) payload.active = active;
+      }
+      document.getElementById('userEditorStatus').textContent = 'Salvando...';
+      try {
+        await apiRequest(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        document.getElementById('userEditorPassword').value = '';
+        closeModal('userEditorModal');
+        await loadUsers();
+      } catch (error) {
+        document.getElementById('userEditorStatus').textContent = error.message;
+      }
+    }
+
+    async function resetUserPassword(user) {
+      if (window.prompt(`Digite ${user.username} para confirmar a redefinição`) !== user.username) return;
+      const temporaryPassword = window.prompt('Informe a nova senha temporária (mínimo de 10 caracteres):') || '';
+      if (temporaryPassword.length < 10) throw new Error('Senha temporária inválida.');
+      await apiRequest(`/api/v1/users/${user.id}/reset-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ temporary_password: temporaryPassword, must_change_password: true }) });
+    }
+
+    async function handleUserAction(button) {
+      const user = accessUsers.find(item => Number(item.id) === Number(button.dataset.userId));
+      if (!user) return;
+      const action = button.dataset.userAction;
+      if (action === 'edit') return openUserEditor(user.id);
+      if (action === 'audit') return loadUsersAudit(user.id);
+      if (window.prompt(`Digite ${user.username} para confirmar`) !== user.username) return;
+      if (action === 'toggle') await apiRequest(`/api/v1/users/${user.id}/${user.active ? 'disable' : 'enable'}`, { method: 'POST' });
+      if (action === 'revoke') await apiRequest(`/api/v1/users/${user.id}/revoke-sessions`, { method: 'POST' });
+      if (action === 'delete') await apiRequest(`/api/v1/users/${user.id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirmation: user.username }) });
+      if (action === 'reset') {
+        const temporaryPassword = window.prompt('Informe a nova senha temporária (mínimo de 10 caracteres):') || '';
+        if (temporaryPassword.length < 10) throw new Error('Senha temporária inválida.');
+        await apiRequest(`/api/v1/users/${user.id}/reset-password`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ temporary_password: temporaryPassword, must_change_password: true }) });
+      }
+      await loadUsers();
+    }
+
+    async function loadUsersAudit(userId = null) {
+      const path = userId ? `/api/v1/audit/users/${userId}?limit=200` : '/api/v1/audit?limit=200';
+      openModal('usersAuditModal');
+      document.getElementById('usersAuditStatus').textContent = 'Carregando auditoria...';
+      const payload = await apiRequest(path);
+      const items = payload.items || [];
+      document.getElementById('usersAuditStatus').textContent = `${payload.total || items.length} evento(s).`;
+      document.getElementById('usersAuditTable').innerHTML = items.map(item => `<tr><td>${escapeHtml(formatDateTime(item.created_at))}</td><td>${escapeHtml(item.actor_username || '-')}</td><td>${escapeHtml(item.action)}</td><td>${escapeHtml(`${item.resource_type || ''} ${item.resource_id || ''}`)}</td><td>${item.success ? 'Sucesso' : 'Recusado'}</td><td>${escapeHtml(item.ip || '-')}<div class="subtle">${escapeHtml(item.correlation_id || '-')}</div></td></tr>`).join('') || '<tr><td colspan="6" class="text-muted">Nenhum evento.</td></tr>';
+    }
+
+    async function loadMyAccount() {
+      const [mePayload, sessionsPayload] = await Promise.all([apiRequest('/api/v1/auth/me'), apiRequest('/api/v1/auth/sessions')]);
+      currentAuthUser = mePayload.user;
+      applyPermissionVisibility();
+      document.getElementById('accountUsername').value = currentAuthUser.username || '';
+      document.getElementById('accountDisplayName').value = currentAuthUser.display_name || '';
+      document.getElementById('accountEmail').value = currentAuthUser.email || '';
+      document.getElementById('accountRole').value = currentAuthUser.role || '';
+      const details = currentAuthUser.permission_details || (currentAuthUser.permissions || []).map(code => ({ code, name: code, description: '', category: code.split('.')[0], effective: true }));
+      renderReadOnlyPermissions('accountPermissions', details);
+      document.getElementById('accountSessions').innerHTML = (sessionsPayload.items || []).map(session => `<div class="permission-row"><div><strong>${session.current ? 'Sessão atual' : 'Sessão'}</strong><div class="subtle">${escapeHtml(session.ip || '-')} · ${escapeHtml(session.user_agent || '-')}<br>Criada: ${escapeHtml(formatDateTime(session.created_at))} · Último uso: ${escapeHtml(formatDateTime(session.last_seen_at))}</div></div><span class="badge-soft ${session.revoked_at ? 'off' : 'on'}">${session.revoked_at ? 'Revogada' : 'Ativa'}</span></div>`).join('') || 'Nenhuma sessão registrada.';
+    }
+
+    async function saveMyAccount() {
+      const payload = await apiRequest('/api/v1/auth/me', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ display_name: document.getElementById('accountDisplayName').value.trim(), email: document.getElementById('accountEmail').value.trim() }) });
+      currentAuthUser = payload.user;
+      document.getElementById('accountStatus').textContent = 'Dados atualizados.';
+    }
+
+    async function changeMyAccountPassword() {
+      const currentPassword = document.getElementById('accountCurrentPassword').value;
+      const newPassword = document.getElementById('accountNewPassword').value;
+      const confirmation = document.getElementById('accountConfirmPassword').value;
+      if (newPassword.length < 10 || newPassword !== confirmation) throw new Error('A nova senha deve ter ao menos 10 caracteres e a confirmação deve coincidir.');
+      const payload = await apiRequest('/api/v1/auth/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
+      if (payload.token) localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+      currentAuthUser = payload.user;
+      ['accountCurrentPassword', 'accountNewPassword', 'accountConfirmPassword'].forEach(id => { document.getElementById(id).value = ''; });
+      document.getElementById('accountStatus').textContent = 'Senha alterada e sessões anteriores revogadas.';
+      await loadMyAccount();
+    }
+
     function canonicalNavigationView(view) {
       const value = String(view || '').replace(/^#/, '').trim();
       if (value === 'bgp' || value === 'bgp-mitigation') return 'mitigation';
@@ -25516,12 +26043,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return value || 'dashboard';
     }
 
+    function requiredPermissionForView(view) {
+      const requirements = {
+        dashboard: 'dashboard.view', flows: 'dashboard.view', 'global-map': 'dashboard.view',
+        sensors: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
+        'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'peak-hunter': 'anomalies.view',
+        mitigation: 'mitigations.view', 'bgp-connectors': 'bgp.view', ai: 'settings.view',
+        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view'
+      };
+      return requirements[canonicalNavigationView(view)] || '';
+    }
+
     function viewFromLocationHash() {
       return canonicalNavigationView(window.location.hash);
     }
 
     function showView(view, placeholderTitle = '') {
       view = canonicalNavigationView(view);
+      const requiredPermission = requiredPermissionForView(view);
+      if (requiredPermission && !hasPermission(requiredPermission)) {
+        showAccessDenied(`Acesso negado. Permissão necessária: ${requiredPermission}.`);
+        view = 'my-account';
+      }
       if (view !== 'flows') {
         flowSearchAbortController?.abort();
         flowSearchAbortController = null;
@@ -25631,6 +26174,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-system').classList.add('active');
         document.querySelector('[data-nav-view="system"]').classList.add('active');
         loadSystemView().catch(error => setText('systemStatus', `Falha: ${error.message}`));
+      } else if (view === 'users') {
+        document.getElementById('view-users').classList.add('active');
+        document.querySelector('[data-nav-view="users"]').classList.add('active');
+        loadUsers().catch(error => setText('usersStatus', `Falha: ${error.message}`));
+      } else if (view === 'my-account') {
+        document.getElementById('view-my-account').classList.add('active');
+        document.querySelector('[data-nav-view="my-account"]').classList.add('active');
+        loadMyAccount().catch(error => setText('accountStatus', `Falha: ${error.message}`));
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
@@ -25711,6 +26262,28 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('loginForm').addEventListener('submit', event => login(event).catch(console.error));
     document.getElementById('changePasswordForm').addEventListener('submit', event => changePassword(event).catch(console.error));
     document.getElementById('logoutButton').addEventListener('click', () => logout().catch(console.error));
+    document.getElementById('newUserButton').addEventListener('click', () => openUserEditor().catch(error => setText('usersStatus', `Falha: ${error.message}`)));
+    document.getElementById('saveUserButton').addEventListener('click', () => saveUserEditor().catch(error => setText('userEditorStatus', `Falha: ${error.message}`)));
+    document.getElementById('generateUserPasswordButton').addEventListener('click', () => { document.getElementById('userEditorPassword').value = generateStrongPassword(); });
+    document.getElementById('userEditorRole').addEventListener('change', () => {
+      const overrides = permissionOverridesFromEditor();
+      renderUserPermissionMatrix(Object.entries(overrides).map(([code, override]) => ({ code, override })));
+    });
+    document.getElementById('usersFilterButton').addEventListener('click', () => { usersOffset = 0; loadUsers().catch(error => setText('usersStatus', `Falha: ${error.message}`)); });
+    document.getElementById('usersSearch').addEventListener('keydown', event => { if (event.key === 'Enter') { usersOffset = 0; loadUsers().catch(error => setText('usersStatus', `Falha: ${error.message}`)); } });
+    document.getElementById('usersPreviousButton').addEventListener('click', () => { usersOffset = Math.max(0, usersOffset - usersPageSize); loadUsers().catch(console.error); });
+    document.getElementById('usersNextButton').addEventListener('click', () => { usersOffset += usersPageSize; loadUsers().catch(console.error); });
+    document.getElementById('usersTable').addEventListener('click', event => {
+      const button = event.target.closest('[data-user-action]');
+      if (button) handleUserAction(button).catch(error => setText('usersStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('usersAuditButton').addEventListener('click', () => loadUsersAudit().catch(error => setText('usersAuditStatus', `Falha: ${error.message}`)));
+    document.getElementById('saveAccountButton').addEventListener('click', () => saveMyAccount().catch(error => setText('accountStatus', `Falha: ${error.message}`)));
+    document.getElementById('accountChangePasswordButton').addEventListener('click', () => changeMyAccountPassword().catch(error => setText('accountStatus', `Falha: ${error.message}`)));
+    document.getElementById('revokeMySessionsButton').addEventListener('click', () => {
+      if (window.prompt(`Digite ${currentAuthUser?.username || ''} para revogar todas as sessões`) !== currentAuthUser?.username) return;
+      apiRequest('/api/v1/auth/revoke-sessions', { method: 'POST' }).then(() => handleUnauthorized('Sessões revogadas. Entre novamente.')).catch(error => setText('accountStatus', `Falha: ${error.message}`));
+    });
     document.getElementById('flowSearchButton').addEventListener('click', () => searchFlows().catch(console.error));
     document.getElementById('flowExportButton').addEventListener('click', () => exportFlowsCsv().catch(console.error));
     document.getElementById('flowPdfButton').addEventListener('click', () => exportFlowsPdf().catch(console.error));
