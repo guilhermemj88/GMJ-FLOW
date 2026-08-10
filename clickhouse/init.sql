@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS flow_raw
 ENGINE = MergeTree
 PARTITION BY toDate(flow_time)
 ORDER BY (sensor, flow_time, src_ip, dst_ip, proto, dst_port)
-TTL toDateTime(flow_time) + INTERVAL 7 DAY DELETE
+TTL toDateTime(flow_time) + INTERVAL 168 HOUR DELETE
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS flow_1m
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS flow_1m
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
 ORDER BY (sensor, minute, exporter_ip, input_if, output_if, proto)
-TTL toDateTime(minute) + INTERVAL 30 DAY DELETE;
+TTL toDateTime(minute) + INTERVAL 720 HOUR DELETE;
 
 CREATE TABLE IF NOT EXISTS flow_tops_1m
 (
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS flow_tops_1m
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
 ORDER BY (dimension, sensor, minute, key)
-TTL toDateTime(minute) + INTERVAL 15 DAY DELETE;
+TTL toDateTime(minute) + INTERVAL 360 HOUR DELETE;
 
 CREATE TABLE IF NOT EXISTS prefix_traffic_1m
 (
@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS anomaly_events
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (sensor, event_time, severity, kind);
+ORDER BY (sensor, event_time, severity, kind)
+TTL toDateTime(event_time) + INTERVAL 2160 HOUR DELETE;
 
 CREATE TABLE IF NOT EXISTS sensors
 (

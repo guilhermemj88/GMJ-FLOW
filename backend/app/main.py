@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import socket
 import subprocess
 import re
@@ -609,6 +610,21 @@ AUTH_LOGIN_RATE_LOCK = threading.Lock()
 AUTH_LOGIN_RATE_STATE: dict[str, list[float]] = {}
 DATABASE_RETENTION_STOP = threading.Event()
 DATABASE_RETENTION_THREAD: threading.Thread | None = None
+DATABASE_MAINTENANCE_LOCK = threading.Lock()
+DISK_GUARD_STOP = threading.Event()
+DISK_GUARD_THREAD: threading.Thread | None = None
+DISK_GUARD_STATUS_LOCK = threading.Lock()
+DISK_GUARD_RUNTIME: dict[str, Any] = {
+    "state": "NORMAL",
+    "cleanup_running": False,
+    "last_check_at": "",
+    "last_cleanup_at": "",
+    "last_cleanup_reason": "",
+    "last_cleanup_freed_bytes": 0,
+    "last_cleanup_tables": [],
+    "last_cleanup_cutoff": "",
+    "last_error": "",
+}
 ANOMALY_DETECTION_STOP = threading.Event()
 ANOMALY_DETECTION_THREAD: threading.Thread | None = None
 DETECTION_SCHEDULER_LOCK = threading.Lock()
@@ -641,8 +657,41 @@ SYSTEM_SETTING_DEFAULTS = {
     "flow_1m_retention_days": "30",
     "flow_tops_1m_retention_days": "15",
     "snmp_retention_days": "90",
+    "anomaly_retention_days": "90",
+    "flow_raw_retention_hours": "168",
+    "flow_1m_retention_hours": "720",
+    "flow_tops_1m_retention_hours": "360",
+    "snmp_retention_hours": "2160",
+    "anomaly_retention_hours": "2160",
+    "flow_raw_retention_unit": "days",
+    "flow_1m_retention_unit": "days",
+    "flow_tops_1m_retention_unit": "days",
+    "snmp_retention_unit": "days",
+    "anomaly_retention_unit": "days",
+    "flow_raw_retention_enabled": "1",
+    "flow_1m_retention_enabled": "1",
+    "flow_tops_1m_retention_enabled": "1",
+    "snmp_retention_enabled": "1",
+    "anomaly_retention_enabled": "1",
     "database_last_cleanup_at": "",
+    "database_last_ttl_applied_at": "",
+    "database_last_ttl_error": "",
     "database_cleanup_hour": "3",
+    "disk_guard_enabled": "1",
+    "disk_guard_warning_free_gb": "15",
+    "disk_guard_cleanup_free_gb": "10",
+    "disk_guard_emergency_free_gb": "7",
+    "disk_guard_absolute_floor_gb": "5",
+    "disk_guard_target_free_gb": "15",
+    "disk_guard_check_seconds": "60",
+    "disk_guard_last_state": "NORMAL",
+    "disk_guard_last_check_at": "",
+    "disk_guard_last_cleanup_at": "",
+    "disk_guard_last_cleanup_reason": "",
+    "disk_guard_last_cleanup_freed_bytes": "0",
+    "disk_guard_last_cleanup_tables": "[]",
+    "disk_guard_last_cleanup_cutoff": "",
+    "disk_guard_last_error": "",
     "ai_mitigation_enabled": os.getenv("AI_MITIGATION_ENABLED", "false"),
     "ai_provider": os.getenv("AI_PROVIDER", "ollama"),
     "ai_base_url": os.getenv("AI_BASE_URL", "http://gmj-flow-ollama:11434"),
@@ -655,6 +704,14 @@ SYSTEM_SETTING_DEFAULTS = {
     "ai_keep_alive": os.getenv("AI_KEEP_ALIVE", "30m"),
     "ai_allow_auto": os.getenv("AI_ALLOW_AUTO", "false"),
     "ai_require_policy_validation": os.getenv("AI_REQUIRE_POLICY_VALIDATION", "true"),
+}
+
+RETENTION_HOURS_MIGRATIONS = {
+    "flow_raw_retention_hours": ("flow_raw_retention_days", "flow_retention_days"),
+    "flow_1m_retention_hours": ("flow_1m_retention_days",),
+    "flow_tops_1m_retention_hours": ("flow_tops_1m_retention_days",),
+    "snmp_retention_hours": ("snmp_retention_days",),
+    "anomaly_retention_hours": ("anomaly_retention_days",),
 }
 
 ATTACK_DOMAIN_TYPES = {"any", "internal_ip", "external_ip", "prefix", "sensor", "interface"}
@@ -1135,19 +1192,53 @@ class RoleUpdatePayload(BaseModel):
     permissions: list[str] | None = None
 
 
+class RetentionValuePayload(BaseModel):
+    value: int = Field(..., ge=1, le=87600)
+    unit: str = "hours"
+    enabled: bool | None = None
+
+
 class DatabaseRetentionPayload(BaseModel):
     enabled: bool
+    flow_raw: RetentionValuePayload | None = None
+    flow_1m: RetentionValuePayload | None = None
+    flow_tops_1m: RetentionValuePayload | None = None
+    snmp: RetentionValuePayload | None = None
+    anomalies: RetentionValuePayload | None = None
     retention_days: int | None = Field(None, ge=1, le=3650)
     flow_raw_days: int | None = Field(None, ge=1, le=3650)
     flow_1m_days: int | None = Field(None, ge=1, le=3650)
     flow_tops_1m_days: int | None = Field(None, ge=1, le=3650)
     snmp_days: int | None = Field(None, ge=1, le=3650)
+    anomaly_days: int | None = Field(None, ge=1, le=3650)
+    retention_hours: int | None = Field(None, ge=1, le=87600)
+    flow_raw_hours: int | None = Field(None, ge=1, le=87600)
+    flow_1m_hours: int | None = Field(None, ge=1, le=87600)
+    flow_tops_1m_hours: int | None = Field(None, ge=1, le=87600)
+    snmp_hours: int | None = Field(None, ge=1, le=87600)
+    anomaly_hours: int | None = Field(None, ge=1, le=87600)
+    flow_raw_retention_hours: int | None = Field(None, ge=1, le=87600)
+    flow_1m_retention_hours: int | None = Field(None, ge=1, le=87600)
+    flow_tops_1m_retention_hours: int | None = Field(None, ge=1, le=87600)
+    snmp_retention_hours: int | None = Field(None, ge=1, le=87600)
+    anomaly_retention_hours: int | None = Field(None, ge=1, le=87600)
     cleanup_hour_utc: int | None = Field(None, ge=0, le=23)
     flow_raw_retention_days: int | None = Field(None, ge=1, le=3650)
     flow_1m_retention_days: int | None = Field(None, ge=1, le=3650)
     flow_tops_1m_retention_days: int | None = Field(None, ge=1, le=3650)
     snmp_retention_days: int | None = Field(None, ge=1, le=3650)
+    anomaly_retention_days: int | None = Field(None, ge=1, le=3650)
     cleanup_hour: int | None = Field(None, ge=0, le=23)
+
+
+class DiskGuardPayload(BaseModel):
+    enabled: bool = True
+    warning_free_gb: float = Field(..., ge=0)
+    cleanup_free_gb: float = Field(..., ge=0)
+    emergency_free_gb: float = Field(..., ge=0)
+    absolute_floor_gb: float = Field(..., ge=0)
+    target_free_gb: float = Field(..., ge=0)
+    check_seconds: int = Field(..., ge=1, le=86400)
 
 
 class DatabaseCleanupPayload(BaseModel):
@@ -1971,6 +2062,36 @@ def sqlite_insert_dict(conn: sqlite3.Connection, table: str, values: dict[str, A
     )
 
 
+def migrate_retention_hours_settings(conn: sqlite3.Connection, now: str) -> None:
+    """Create hour settings from persisted legacy days without overwriting either."""
+
+    for hours_key, legacy_keys in RETENTION_HOURS_MIGRATIONS.items():
+        existing_hours = conn.execute(
+            "SELECT value FROM system_settings WHERE key = ?",
+            (hours_key,),
+        ).fetchone()
+        if existing_hours is not None:
+            continue
+        hours_value = int(SYSTEM_SETTING_DEFAULTS[hours_key])
+        for legacy_key in legacy_keys:
+            legacy_row = conn.execute(
+                "SELECT value FROM system_settings WHERE key = ?",
+                (legacy_key,),
+            ).fetchone()
+            if legacy_row is None:
+                continue
+            try:
+                legacy_value = legacy_row["value"] if isinstance(legacy_row, sqlite3.Row) else legacy_row[0]
+                hours_value = max(1, min(int(legacy_value) * 24, 87600))
+            except (TypeError, ValueError):
+                pass
+            break
+        conn.execute(
+            "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (hours_key, str(hours_value), now),
+        )
+
+
 def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
     db_key = sqlite_database_key(conn)
     if db_key in SYSTEM_SETTINGS_READY_KEYS:
@@ -1988,6 +2109,9 @@ def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
             """
         )
         now = utc_now_iso()
+        # Hours are derived before generic defaults are inserted, otherwise a
+        # new default would take precedence over an operator's legacy days.
+        migrate_retention_hours_settings(conn, now)
         for key, value in SYSTEM_SETTING_DEFAULTS.items():
             if key.startswith("ai_"):
                 continue
@@ -2042,6 +2166,20 @@ def setting_bool(settings: dict[str, str], key: str) -> bool:
 def setting_int(settings: dict[str, str], key: str, default: int, minimum: int = 1, maximum: int = 3650) -> int:
     try:
         value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def setting_float(
+    settings: dict[str, str],
+    key: str,
+    default: float,
+    minimum: float = 0.0,
+    maximum: float = 1_000_000.0,
+) -> float:
+    try:
+        value = float(settings.get(key, default))
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(value, maximum))
@@ -4199,10 +4337,18 @@ def startup() -> None:
     DASHBOARD_CACHE.start_monitor()
     try:
         ensure_clickhouse_schema()
+        apply_configured_retention_ttl()
     except Exception as exc:
         logger.warning("Nao foi possivel aplicar migracoes ClickHouse no startup: %s", exc)
+        try:
+            with sqlite_connection() as conn:
+                set_system_settings(conn, {"database_last_ttl_error": str(exc)})
+                conn.commit()
+        except Exception:
+            pass
     start_snmp_polling_thread()
     start_database_retention_thread()
+    start_disk_guard_thread()
     start_bgp_expiration_thread()
     start_bgp_status_check_executor()
     start_bgp_status_check_thread()
@@ -4218,6 +4364,7 @@ def shutdown() -> None:
     DASHBOARD_CACHE.stop_monitor()
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
+    DISK_GUARD_STOP.set()
     BGP_EXPIRATION_STOP.set()
     stop_automatic_mitigation_thread()
     stop_bgp_status_check_thread()
@@ -6521,23 +6668,136 @@ def clickhouse_table_name(table: str) -> str:
 
 
 FLOW_RETENTION_TABLES = {
-    "flow_raw": {"time_column": "flow_time", "setting": "flow_raw_retention_days", "default": 7},
-    "flow_1m": {"time_column": "minute", "setting": "flow_1m_retention_days", "default": 30},
-    "flow_tops_1m": {"time_column": "minute", "setting": "flow_tops_1m_retention_days", "default": 15},
+    "flow_raw": {
+        "label": "Flow Raw",
+        "time_column": "flow_time",
+        "hours_setting": "flow_raw_retention_hours",
+        "days_setting": "flow_raw_retention_days",
+        "enabled_setting": "flow_raw_retention_enabled",
+        "unit_setting": "flow_raw_retention_unit",
+        "default_hours": 168,
+        "importance_weight": 3.0,
+        "recent_floor_hours": 1,
+    },
+    "flow_1m": {
+        "label": "Flow agregado 1 minuto",
+        "time_column": "minute",
+        "hours_setting": "flow_1m_retention_hours",
+        "days_setting": "flow_1m_retention_days",
+        "enabled_setting": "flow_1m_retention_enabled",
+        "unit_setting": "flow_1m_retention_unit",
+        "default_hours": 720,
+        "importance_weight": 1.0,
+        "recent_floor_hours": 24,
+    },
+    "flow_tops_1m": {
+        "label": "Flow Tops / Rankings",
+        "time_column": "minute",
+        "hours_setting": "flow_tops_1m_retention_hours",
+        "days_setting": "flow_tops_1m_retention_days",
+        "enabled_setting": "flow_tops_1m_retention_enabled",
+        "unit_setting": "flow_tops_1m_retention_unit",
+        "default_hours": 360,
+        "importance_weight": 2.0,
+        "recent_floor_hours": 6,
+    },
+    "anomaly_events": {
+        "label": "Anomalias / eventos auxiliares",
+        "time_column": "event_time",
+        "hours_setting": "anomaly_retention_hours",
+        "days_setting": "anomaly_retention_days",
+        "enabled_setting": "anomaly_retention_enabled",
+        "unit_setting": "anomaly_retention_unit",
+        "default_hours": 2160,
+        "importance_weight": 0.25,
+        "recent_floor_hours": 72,
+    },
 }
 
 
-def table_retention_days(settings: dict[str, str], table: str) -> int | None:
+def retention_hours_from_settings(
+    settings: dict[str, str],
+    hours_key: str,
+    days_key: str,
+    default_hours: int,
+    legacy_fallback_keys: tuple[str, ...] = (),
+) -> int:
+    raw_hours = clean_text(settings.get(hours_key))
+    if raw_hours:
+        return setting_int(settings, hours_key, default_hours, 1, 87600)
+    for key in (days_key, *legacy_fallback_keys):
+        raw_days = clean_text(settings.get(key))
+        if raw_days:
+            return setting_int(settings, key, max(1, default_hours // 24), 1, 3650) * 24
+    return default_hours
+
+
+def table_retention_hours(settings: dict[str, str], table: str) -> int | None:
     config = FLOW_RETENTION_TABLES.get(table)
     if not config:
         return None
-    if table == "flow_raw":
-        return setting_int(
-            settings,
-            "flow_raw_retention_days",
-            setting_int(settings, "flow_retention_days", int(config["default"])),
-        )
-    return setting_int(settings, str(config["setting"]), int(config["default"]))
+    fallback = ("flow_retention_days",) if table == "flow_raw" else ()
+    return retention_hours_from_settings(
+        settings,
+        str(config["hours_setting"]),
+        str(config["days_setting"]),
+        int(config["default_hours"]),
+        fallback,
+    )
+
+
+def table_retention_days(settings: dict[str, str], table: str) -> int | float | None:
+    hours = table_retention_hours(settings, table)
+    if hours is None:
+        return None
+    days = hours / 24
+    return int(days) if days.is_integer() else days
+
+
+def sqlite_retention_hours(settings: dict[str, str], name: str) -> int:
+    defaults = {"snmp": 2160, "anomaly": 2160}
+    if name not in defaults:
+        raise ValueError(f"retention item invalido: {name}")
+    return retention_hours_from_settings(
+        settings,
+        f"{name}_retention_hours",
+        f"{name}_retention_days",
+        defaults[name],
+    )
+
+
+def retention_item_enabled(settings: dict[str, str], name: str) -> bool:
+    return setting_bool(settings, "database_retention_enabled") and setting_bool(
+        settings,
+        f"{name}_retention_enabled",
+    )
+
+
+def normalize_retention_unit(unit: Any) -> str:
+    normalized = clean_text(unit).lower()
+    if normalized in {"hour", "hours", "hora", "horas"}:
+        return "hours"
+    if normalized in {"day", "days", "dia", "dias"}:
+        return "days"
+    raise HTTPException(status_code=422, detail="Unidade de retencao deve ser 'hours' ou 'days'.")
+
+
+def retention_value_to_hours(value: Any, unit: Any) -> int:
+    try:
+        amount = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Quantidade de retencao invalida.") from exc
+    if amount < 1:
+        raise HTTPException(status_code=422, detail="Quantidade de retencao deve ser maior que zero.")
+    hours = amount * 24 if normalize_retention_unit(unit) == "days" else amount
+    if hours > 87600:
+        raise HTTPException(status_code=422, detail="Retencao maxima e 87600 horas (3650 dias).")
+    return hours
+
+
+def retention_display_value(hours: int, unit: str) -> int | float:
+    value = hours / 24 if normalize_retention_unit(unit) == "days" else hours
+    return int(value) if float(value).is_integer() else value
 
 
 def clickhouse_table_sizes() -> list[dict[str, Any]]:
@@ -6567,6 +6827,7 @@ def clickhouse_table_sizes() -> list[dict[str, Any]]:
         size_bytes = int(row["size_bytes"] or 0)
         first_record = None
         last_record = None
+        retention_hours = table_retention_hours(settings, table)
         retention_days = table_retention_days(settings, table)
         config = FLOW_RETENTION_TABLES.get(table)
         if config:
@@ -6593,7 +6854,16 @@ def clickhouse_table_sizes() -> list[dict[str, Any]]:
                 "size_human": human_bytes(size_bytes),
                 "first_record": first_record,
                 "last_record": last_record,
+                "retention_hours": retention_hours,
                 "retention_days": retention_days,
+                "retention_enabled": bool(
+                    config
+                    and setting_bool(settings, "database_retention_enabled")
+                    and setting_bool(settings, str(config["enabled_setting"]))
+                ),
+                "retention_unit": (
+                    clean_text(settings.get(str(config["unit_setting"]))) or "days"
+                ) if config else None,
                 "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
             }
         )
@@ -6627,7 +6897,13 @@ def clickhouse_table_sizes() -> list[dict[str, Any]]:
                 "size_human": human_bytes(0),
                 "first_record": first_record,
                 "last_record": last_record,
+                "retention_hours": table_retention_hours(settings, table),
                 "retention_days": table_retention_days(settings, table),
+                "retention_enabled": bool(
+                    setting_bool(settings, "database_retention_enabled")
+                    and setting_bool(settings, str(config["enabled_setting"]))
+                ),
+                "retention_unit": clean_text(settings.get(str(config["unit_setting"]))) or "days",
                 "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
             }
         )
@@ -6717,61 +6993,246 @@ def normalize_clickhouse_ddl(value: str) -> str:
     return re.sub(r"\s+", "", clean_text(value).lower())
 
 
-def clickhouse_ttl_matches(table: str, time_column: str, enabled: bool, days: int) -> bool:
-    create_query = clickhouse_table_create_query(table)
+def clickhouse_ttl_matches(
+    table: str,
+    time_column: str,
+    enabled: bool,
+    hours: int,
+    create_query: str | None = None,
+) -> bool:
+    create_query = clickhouse_table_create_query(table) if create_query is None else create_query
     normalized = normalize_clickhouse_ddl(create_query)
     has_ttl = bool(re.search(r"\bTTL\b", create_query, flags=re.IGNORECASE))
     if not enabled:
         return not has_ttl
     expected_variants = (
+        f"ttl todatetime({time_column}) + interval {hours} hour delete",
+        f"ttl todatetime({time_column}) + interval {hours} hour",
+        f"ttl todatetime({time_column}) + tointervalhour({hours}) delete",
+        f"ttl todatetime({time_column}) + tointervalhour({hours})",
+        f"ttl {time_column} + interval {hours} hour delete",
+        f"ttl {time_column} + interval {hours} hour",
+        f"ttl {time_column} + tointervalhour({hours}) delete",
+        f"ttl {time_column} + tointervalhour({hours})",
+    )
+    if any(normalize_clickhouse_ddl(variant) in normalized for variant in expected_variants):
+        return True
+    if hours % 24:
+        return False
+    days = hours // 24
+    legacy_day_variants = (
         f"ttl todatetime({time_column}) + interval {days} day delete",
         f"ttl todatetime({time_column}) + interval {days} day",
-        f"ttl todatetime({time_column}) + tointervalday({days}) delete",
-        f"ttl todatetime({time_column}) + tointervalday({days})",
         f"ttl {time_column} + interval {days} day delete",
         f"ttl {time_column} + interval {days} day",
-        f"ttl {time_column} + tointervalday({days}) delete",
-        f"ttl {time_column} + tointervalday({days})",
     )
-    return any(normalize_clickhouse_ddl(variant) in normalized for variant in expected_variants)
+    return any(normalize_clickhouse_ddl(variant) in normalized for variant in legacy_day_variants)
 
 
-def apply_clickhouse_table_ttl(table: str, time_column: str, enabled: bool, days: int) -> str:
-    days = setting_int({"days": str(days)}, "days", 30)
-    if clickhouse_ttl_matches(table, time_column, enabled, days):
+def apply_clickhouse_table_ttl(table: str, time_column: str, enabled: bool, hours: int) -> str:
+    hours = setting_int({"hours": str(hours)}, "hours", 720, 1, 87600)
+    if clickhouse_ttl_matches(table, time_column, enabled, hours):
         return "unchanged"
+    full_table = clickhouse_table_name(table)
     if enabled:
         command = (
-            f"ALTER TABLE IF EXISTS {table} "
-            f"MODIFY TTL toDateTime({time_column}) + INTERVAL {days} DAY DELETE "
+            f"ALTER TABLE IF EXISTS {full_table} "
+            f"MODIFY TTL toDateTime({time_column}) + INTERVAL {hours} HOUR DELETE "
             "SETTINGS materialize_ttl_after_modify = 0"
         )
     else:
-        command = f"ALTER TABLE IF EXISTS {table} REMOVE TTL"
+        command = f"ALTER TABLE IF EXISTS {full_table} REMOVE TTL"
     command_clickhouse(command, admin=True)
     return command
 
 
 def apply_flow_retention_ttl(
     enabled: bool,
-    flow_raw_days: int,
-    flow_1m_days: int | None = None,
-    flow_tops_1m_days: int | None = None,
+    flow_raw_hours: int,
+    flow_1m_hours: int | None = None,
+    flow_tops_1m_hours: int | None = None,
+    *,
+    retention_hours_by_table: dict[str, int] | None = None,
+    enabled_by_table: dict[str, bool] | None = None,
 ) -> dict[str, str]:
-    days_by_table = {
-        "flow_raw": flow_raw_days,
-        "flow_1m": flow_1m_days if flow_1m_days is not None else 30,
-        "flow_tops_1m": flow_tops_1m_days if flow_tops_1m_days is not None else 15,
+    hours_by_table = {
+        "flow_raw": flow_raw_hours,
+        "flow_1m": flow_1m_hours if flow_1m_hours is not None else 720,
+        "flow_tops_1m": flow_tops_1m_hours if flow_tops_1m_hours is not None else 360,
+        "anomaly_events": 2160,
     }
+    hours_by_table.update(retention_hours_by_table or {})
     commands = {}
-    for table, config in FLOW_RETENTION_TABLES.items():
-        commands[table] = apply_clickhouse_table_ttl(
+    with DATABASE_MAINTENANCE_LOCK:
+        for table, config in FLOW_RETENTION_TABLES.items():
+            table_enabled = enabled and (enabled_by_table or {}).get(table, True)
+            commands[table] = apply_clickhouse_table_ttl(
+                table,
+                str(config["time_column"]),
+                table_enabled,
+                int(hours_by_table[table]),
+            )
+    return commands
+
+
+def configured_retention_hours_by_table(settings: dict[str, str]) -> dict[str, int]:
+    return {
+        table: table_retention_hours(settings, table) or int(config["default_hours"])
+        for table, config in FLOW_RETENTION_TABLES.items()
+    }
+
+
+def configured_retention_enabled_by_table(settings: dict[str, str]) -> dict[str, bool]:
+    return {
+        table: setting_bool(settings, str(config["enabled_setting"]))
+        for table, config in FLOW_RETENTION_TABLES.items()
+    }
+
+
+def apply_configured_retention_ttl(settings: dict[str, str] | None = None) -> dict[str, str]:
+    if settings is None:
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
+    hours = configured_retention_hours_by_table(settings)
+    commands = apply_flow_retention_ttl(
+        setting_bool(settings, "database_retention_enabled"),
+        hours["flow_raw"],
+        hours["flow_1m"],
+        hours["flow_tops_1m"],
+        retention_hours_by_table=hours,
+        enabled_by_table=configured_retention_enabled_by_table(settings),
+    )
+    with sqlite_connection() as conn:
+        set_system_settings(
+            conn,
+            {"database_last_ttl_applied_at": utc_now_iso(), "database_last_ttl_error": ""},
+        )
+        conn.commit()
+    return commands
+
+
+def clickhouse_ttl_effective_status(
+    table: str,
+    config: dict[str, Any],
+    enabled: bool,
+    hours: int,
+) -> dict[str, Any]:
+    try:
+        create_query = clickhouse_table_create_query(table)
+        has_ttl = bool(re.search(r"\bTTL\b", create_query, flags=re.IGNORECASE))
+        matches = clickhouse_ttl_matches(
             table,
             str(config["time_column"]),
             enabled,
-            int(days_by_table[table]),
+            hours,
+            create_query=create_query,
         )
-    return commands
+        expression_match = re.search(
+            r"\bTTL\s+(.+?)(?:\s+SETTINGS\b|$)",
+            create_query,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if enabled:
+            status = "applied" if has_ttl and matches else "mismatch" if has_ttl else "not_applied"
+        else:
+            status = "disabled" if not has_ttl else "remove_pending"
+        return {
+            "status": status,
+            "applied": has_ttl,
+            "matches_config": matches,
+            "expression": clean_text(expression_match.group(1)) if expression_match else "",
+        }
+    except Exception as exc:
+        return {"status": "unavailable", "applied": False, "matches_config": False, "expression": "", "error": str(exc)}
+
+
+def retention_policy_response(
+    settings: dict[str, str],
+    ttl_commands: dict[str, str] | None = None,
+    *,
+    include_ttl_status: bool = True,
+) -> dict[str, Any]:
+    global_enabled = setting_bool(settings, "database_retention_enabled")
+    items: dict[str, dict[str, Any]] = {}
+    response_names = {
+        "flow_raw": "flow_raw",
+        "flow_1m": "flow_1m",
+        "flow_tops_1m": "flow_tops_1m",
+        "anomalies": "anomaly_events",
+    }
+    for response_name, table in response_names.items():
+        config = FLOW_RETENTION_TABLES[table]
+        hours = table_retention_hours(settings, table) or int(config["default_hours"])
+        try:
+            unit = normalize_retention_unit(settings.get(str(config["unit_setting"])) or "days")
+        except HTTPException:
+            unit = "days"
+        configured_enabled = setting_bool(settings, str(config["enabled_setting"]))
+        item = {
+            "enabled": configured_enabled,
+            "effective_enabled": global_enabled and configured_enabled,
+            "value": retention_display_value(hours, unit),
+            "unit": unit,
+            "hours": hours,
+            "days": table_retention_days(settings, table),
+            "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+        }
+        if include_ttl_status:
+            item["ttl"] = clickhouse_ttl_effective_status(
+                table,
+                config,
+                global_enabled and configured_enabled,
+                hours,
+            )
+        if ttl_commands is not None:
+            item["ttl_command"] = ttl_commands.get(table, "")
+        items[response_name] = item
+
+    for response_name, setting_name in (("snmp", "snmp"),):
+        hours = sqlite_retention_hours(settings, setting_name)
+        try:
+            unit = normalize_retention_unit(settings.get(f"{setting_name}_retention_unit") or "days")
+        except HTTPException:
+            unit = "days"
+        configured_enabled = setting_bool(settings, f"{setting_name}_retention_enabled")
+        items[response_name] = {
+            "enabled": configured_enabled,
+            "effective_enabled": global_enabled and configured_enabled,
+            "value": retention_display_value(hours, unit),
+            "unit": unit,
+            "hours": hours,
+            "days": int(hours / 24) if hours % 24 == 0 else hours / 24,
+            "ttl": {"status": "periodic_cleanup", "applied": False, "matches_config": True, "expression": ""},
+            "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+        }
+
+    raw_days = items["flow_raw"]["days"]
+    return {
+        "retention_enabled": global_enabled,
+        "retention": items,
+        "retention_days": raw_days,
+        "flow_raw_days": raw_days,
+        "flow_1m_days": items["flow_1m"]["days"],
+        "flow_tops_1m_days": items["flow_tops_1m"]["days"],
+        "snmp_days": items["snmp"]["days"],
+        "anomaly_days": items["anomalies"]["days"],
+        "flow_raw_retention_days": raw_days,
+        "flow_1m_retention_days": items["flow_1m"]["days"],
+        "flow_tops_1m_retention_days": items["flow_tops_1m"]["days"],
+        "snmp_retention_days": items["snmp"]["days"],
+        "anomaly_retention_days": items["anomalies"]["days"],
+        "flow_raw_retention_hours": items["flow_raw"]["hours"],
+        "flow_1m_retention_hours": items["flow_1m"]["hours"],
+        "flow_tops_1m_retention_hours": items["flow_tops_1m"]["hours"],
+        "snmp_retention_hours": items["snmp"]["hours"],
+        "anomaly_retention_hours": items["anomalies"]["hours"],
+        "cleanup_hour_utc": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
+        "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
+        "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+        "last_ttl_applied_at": settings.get("database_last_ttl_applied_at") or None,
+        "last_ttl_error": settings.get("database_last_ttl_error") or "",
+        "ttl_command": ttl_commands or {},
+    }
 
 
 def ttl_update_status_from_exception(exc: Exception) -> str:
@@ -6880,10 +7341,31 @@ def clickhouse_optimize_guard() -> dict[str, Any]:
     }
 
 
-def ensure_optimize_allowed(force: bool = False) -> dict[str, Any]:
+def ensure_optimize_allowed(force: bool = False, *, automatic: bool = False) -> dict[str, Any]:
     guard = clickhouse_optimize_guard()
-    if guard["low_disk"] and not force:
-        reason = "; ".join(guard["reasons"]) or "disco livre baixo"
+    try:
+        disk_guard = disk_guard_status()
+    except Exception as exc:
+        logger.warning("Falha ao consultar Disk Guard para OPTIMIZE: %s", exc)
+        disk_guard = {"state": "UNKNOWN"}
+    state = clean_text(disk_guard.get("state")).upper() or "UNKNOWN"
+    guard["disk_guard_state"] = state
+    guard["disk_guard"] = disk_guard
+    if state == "ABSOLUTE_DANGER":
+        raise HTTPException(
+            status_code=409,
+            detail="OPTIMIZE FINAL bloqueado no estado ABSOLUTE_DANGER do Disk Guard.",
+        )
+    if automatic and state != "NORMAL":
+        raise HTTPException(
+            status_code=409,
+            detail=f"OPTIMIZE FINAL automatico bloqueado no estado {state} do Disk Guard.",
+        )
+    if (guard["low_disk"] or state not in {"NORMAL", "UNKNOWN"}) and not force:
+        reasons = list(guard["reasons"])
+        if state not in {"NORMAL", "UNKNOWN"}:
+            reasons.append(f"Disk Guard em {state}")
+        reason = "; ".join(reasons) or "disco livre baixo"
         raise HTTPException(
             status_code=409,
             detail=(
@@ -6895,16 +7377,29 @@ def ensure_optimize_allowed(force: bool = False) -> dict[str, Any]:
     return guard
 
 
-def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int, optimize: bool = False) -> dict[str, Any]:
-    days = setting_int({"days": str(older_than_days)}, "days", 90)
+def cleanup_clickhouse_table(
+    table: str,
+    time_column: str,
+    older_than_days: int | None = None,
+    optimize: bool = False,
+    *,
+    older_than_hours: int | None = None,
+) -> dict[str, Any]:
+    hours = (
+        setting_int({"hours": str(older_than_hours)}, "hours", 2160, 1, 87600)
+        if older_than_hours is not None
+        else setting_int({"days": str(older_than_days or 90)}, "days", 90, 1, 3650) * 24
+    )
+    days = hours / 24
     full_table = clickhouse_table_name(table)
-    cutoff_expression = f"(now() - toIntervalDay({days}))"
-    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_expression = f"(now() - toIntervalHour({hours}))"
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
     if not clickhouse_table_exists(table):
         return {
             "table": table,
             "approximate_before": 0,
             "approximate_deleted": 0,
+            "older_than_hours": hours,
             "older_than_days": days,
             "period_start": None,
             "period_end": iso(cutoff_dt),
@@ -6925,7 +7420,7 @@ def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int,
     )
     rows = rows_as_dicts(count_result)
     approximate_before = int(rows[0]["count"] or 0) if rows else 0
-    command = f"ALTER TABLE {full_table} DELETE WHERE {time_column} < {cutoff_expression} SETTINGS mutations_sync = 0"
+    command = f"ALTER TABLE {full_table} DELETE WHERE {time_column} < {cutoff_expression} SETTINGS mutations_sync = 1"
     command_clickhouse(command, admin=True)
     optimize_command = ""
     if optimize:
@@ -6935,6 +7430,7 @@ def cleanup_clickhouse_table(table: str, time_column: str, older_than_days: int,
         "table": table,
         "approximate_before": approximate_before,
         "approximate_deleted": approximate_before,
+        "older_than_hours": hours,
         "older_than_days": days,
         "period_start": None,
         "period_end": iso(cutoff_dt),
@@ -6955,15 +7451,19 @@ def cleanup_clickhouse_flows(older_than_days: int, optimize: bool = False) -> di
     return cleanup_clickhouse_table("flow_raw", "flow_time", older_than_days, optimize)
 
 
-def cleanup_sqlite_snmp_samples(older_than_days: int) -> int:
-    days = setting_int({"days": str(older_than_days)}, "days", 90)
+def cleanup_sqlite_snmp_samples(older_than_days: int | None = None, *, older_than_hours: int | None = None) -> int:
+    hours = (
+        setting_int({"hours": str(older_than_hours)}, "hours", 2160, 1, 87600)
+        if older_than_hours is not None
+        else setting_int({"days": str(older_than_days or 90)}, "days", 90, 1, 3650) * 24
+    )
     with sqlite_connection() as conn:
         cursor = conn.execute(
             """
             DELETE FROM interface_snmp_samples
             WHERE sample_time < datetime('now', ?)
             """,
-            (f"-{days} days",),
+            (f"-{hours} hours",),
         )
         deleted = int(cursor.rowcount or 0)
         conn.commit()
@@ -6974,9 +7474,17 @@ def sqlite_older_than_expr(column: str) -> str:
     return f"julianday(replace(replace({column}, 'T', ' '), 'Z', '')) < julianday('now', ?)"
 
 
-def cleanup_sqlite_learning_anomalies(older_than_days: int) -> dict[str, int]:
-    days = setting_int({"days": str(older_than_days)}, "days", 90)
-    cutoff = f"-{days} days"
+def cleanup_sqlite_learning_anomalies(
+    older_than_days: int | None = None,
+    *,
+    older_than_hours: int | None = None,
+) -> dict[str, int]:
+    hours = (
+        setting_int({"hours": str(older_than_hours)}, "hours", 2160, 1, 87600)
+        if older_than_hours is not None
+        else setting_int({"days": str(older_than_days or 90)}, "days", 90, 1, 3650) * 24
+    )
+    cutoff = f"-{hours} hours"
     with sqlite_connection() as conn:
         ensure_attack_vector_db(conn)
         flows_cursor = conn.execute(
@@ -7013,7 +7521,7 @@ def cleanup_sqlite_learning_anomalies(older_than_days: int) -> dict[str, int]:
 
 
 def run_database_cleanup(
-    flow_retention_days: int,
+    flow_retention_days: int | None = None,
     snmp_retention_days: int | None = None,
     optimize: bool = False,
     force_optimize_low_disk: bool = False,
@@ -7021,53 +7529,85 @@ def run_database_cleanup(
     scope: str = "raw",
     flow_1m_retention_days: int | None = None,
     flow_tops_1m_retention_days: int | None = None,
+    *,
+    flow_retention_hours: int | None = None,
+    flow_1m_retention_hours: int | None = None,
+    flow_tops_1m_retention_hours: int | None = None,
+    snmp_retention_hours: int | None = None,
+    anomaly_retention_hours: int | None = None,
+    enabled_by_table: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     scope = clean_text(scope).lower() or "raw"
     if scope not in {"raw", "raw_aggregates", "aggregates", "aggregates_only", "all"}:
         raise HTTPException(status_code=400, detail="scope invalido")
-    optimize_guard = ensure_optimize_allowed(force_optimize_low_disk) if optimize else clickhouse_optimize_guard()
-    clickhouse_results = {}
-    if scope in {"raw", "raw_aggregates", "all"}:
-        clickhouse_results["flow_raw"] = cleanup_clickhouse_table("flow_raw", "flow_time", flow_retention_days, optimize=optimize)
-    if scope in {"raw_aggregates", "aggregates", "aggregates_only", "all"}:
-        clickhouse_results["flow_1m"] = cleanup_clickhouse_table(
-            "flow_1m",
-            "minute",
-            flow_1m_retention_days if flow_1m_retention_days is not None else flow_retention_days,
-            optimize=optimize,
+    if optimize and source != "manual":
+        raise HTTPException(status_code=409, detail="OPTIMIZE FINAL nunca e executado por limpeza automatica.")
+    raw_hours = flow_retention_hours or ((flow_retention_days or 7) * 24)
+    flow_1m_hours = flow_1m_retention_hours or ((flow_1m_retention_days or flow_retention_days or 30) * 24)
+    tops_hours = flow_tops_1m_retention_hours or ((flow_tops_1m_retention_days or flow_retention_days or 15) * 24)
+    snmp_hours = snmp_retention_hours or ((snmp_retention_days or 90) * 24)
+    anomaly_hours = anomaly_retention_hours or snmp_hours
+    table_enabled = enabled_by_table or {}
+
+    if not DATABASE_MAINTENANCE_LOCK.acquire(timeout=300):
+        raise HTTPException(status_code=409, detail="Outra manutencao de banco esta em andamento.")
+    try:
+        optimize_guard = (
+            ensure_optimize_allowed(force_optimize_low_disk, automatic=source != "manual")
+            if optimize
+            else clickhouse_optimize_guard()
         )
-        clickhouse_results["flow_tops_1m"] = cleanup_clickhouse_table(
-            "flow_tops_1m",
-            "minute",
-            flow_tops_1m_retention_days if flow_tops_1m_retention_days is not None else flow_retention_days,
-            optimize=optimize,
+        clickhouse_results = {}
+        if scope in {"raw", "raw_aggregates", "all"} and table_enabled.get("flow_raw", True):
+            clickhouse_results["flow_raw"] = cleanup_clickhouse_table(
+                "flow_raw", "flow_time", optimize=optimize, older_than_hours=raw_hours
+            )
+        if scope in {"raw_aggregates", "aggregates", "aggregates_only", "all"}:
+            if table_enabled.get("flow_1m", True):
+                clickhouse_results["flow_1m"] = cleanup_clickhouse_table(
+                    "flow_1m", "minute", optimize=optimize, older_than_hours=flow_1m_hours
+                )
+            if table_enabled.get("flow_tops_1m", True):
+                clickhouse_results["flow_tops_1m"] = cleanup_clickhouse_table(
+                    "flow_tops_1m", "minute", optimize=optimize, older_than_hours=tops_hours
+                )
+        if scope == "all" and table_enabled.get("anomaly_events", True):
+            clickhouse_results["anomaly_events"] = cleanup_clickhouse_table(
+                "anomaly_events", "event_time", optimize=False, older_than_hours=anomaly_hours
+            )
+        snmp_deleted = (
+            cleanup_sqlite_snmp_samples(older_than_hours=snmp_hours)
+            if scope == "all" and table_enabled.get("snmp", True)
+            else None
         )
-    snmp_deleted = cleanup_sqlite_snmp_samples(snmp_retention_days) if scope == "all" and snmp_retention_days is not None else None
-    learning_anomaly_deleted = (
-        cleanup_sqlite_learning_anomalies(snmp_retention_days or flow_retention_days)
-        if scope == "all"
-        else None
-    )
-    cleanup_at = utc_now_iso()
-    with sqlite_connection() as conn:
-        set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
-        conn.commit()
-    primary_result = clickhouse_results.get("flow_raw") or next(iter(clickhouse_results.values()), {})
-    return {
-        "ok": True,
-        "source": source,
-        "scope": scope,
-        "cleanup_at": cleanup_at,
-        "older_than_days": flow_retention_days,
-        "period_end": primary_result.get("period_end"),
-        "optimize_executed": any(bool(item.get("optimize_command")) for item in clickhouse_results.values()),
-        "tables": list(clickhouse_results.values()),
-        "flow": primary_result,
-        "clickhouse": clickhouse_results,
-        "optimize_guard": optimize_guard,
-        "snmp_deleted": snmp_deleted,
-        "learning_anomaly_deleted": learning_anomaly_deleted,
-    }
+        learning_anomaly_deleted = (
+            cleanup_sqlite_learning_anomalies(older_than_hours=anomaly_hours)
+            if scope == "all" and table_enabled.get("anomaly_events", True)
+            else None
+        )
+        cleanup_at = utc_now_iso()
+        with sqlite_connection() as conn:
+            set_system_settings(conn, {"database_last_cleanup_at": cleanup_at})
+            conn.commit()
+        primary_result = clickhouse_results.get("flow_raw") or next(iter(clickhouse_results.values()), {})
+        return {
+            "ok": True,
+            "source": source,
+            "scope": scope,
+            "cleanup_at": cleanup_at,
+            "older_than_hours": raw_hours,
+            "older_than_days": raw_hours / 24,
+            "period_end": primary_result.get("period_end"),
+            "optimize_executed": any(bool(item.get("optimize_command")) for item in clickhouse_results.values()),
+            "tables": list(clickhouse_results.values()),
+            "flow": primary_result,
+            "clickhouse": clickhouse_results,
+            "optimize_guard": optimize_guard,
+            "snmp_deleted": snmp_deleted,
+            "learning_anomaly_deleted": learning_anomaly_deleted,
+        }
+    finally:
+        DATABASE_MAINTENANCE_LOCK.release()
 
 
 def database_retention_loop() -> None:
@@ -7086,13 +7626,19 @@ def database_retention_loop() -> None:
             if last_cleanup is not None and last_cleanup.date() == now.date():
                 continue
             run_database_cleanup(
-                flow_retention_days=table_retention_days(settings, "flow_raw") or 7,
-                flow_1m_retention_days=table_retention_days(settings, "flow_1m") or 30,
-                flow_tops_1m_retention_days=table_retention_days(settings, "flow_tops_1m") or 15,
-                snmp_retention_days=setting_int(settings, "snmp_retention_days", 90),
+                flow_retention_hours=table_retention_hours(settings, "flow_raw") or 168,
+                flow_1m_retention_hours=table_retention_hours(settings, "flow_1m") or 720,
+                flow_tops_1m_retention_hours=table_retention_hours(settings, "flow_tops_1m") or 360,
+                snmp_retention_hours=sqlite_retention_hours(settings, "snmp"),
+                anomaly_retention_hours=sqlite_retention_hours(settings, "anomaly"),
                 optimize=False,
                 source="automatic",
                 scope="all",
+                enabled_by_table={
+                    table: setting_bool(settings, str(config["enabled_setting"]))
+                    for table, config in FLOW_RETENTION_TABLES.items()
+                }
+                | {"snmp": setting_bool(settings, "snmp_retention_enabled")},
             )
         except Exception as exc:  # pragma: no cover - background resilience.
             logger.warning("Falha na retencao automatica: %s", exc)
@@ -7109,6 +7655,426 @@ def start_database_retention_thread() -> None:
         daemon=True,
     )
     DATABASE_RETENTION_THREAD.start()
+
+
+GIB = 1024 ** 3
+DISK_GUARD_CLEANUP_STATES = {"CRITICAL", "EMERGENCY", "ABSOLUTE_DANGER"}
+
+
+def disk_guard_config(settings: dict[str, str]) -> dict[str, Any]:
+    return {
+        "enabled": setting_bool(settings, "disk_guard_enabled"),
+        "warning_free_gb": setting_float(settings, "disk_guard_warning_free_gb", 15),
+        "cleanup_free_gb": setting_float(settings, "disk_guard_cleanup_free_gb", 10),
+        "emergency_free_gb": setting_float(settings, "disk_guard_emergency_free_gb", 7),
+        "absolute_floor_gb": setting_float(settings, "disk_guard_absolute_floor_gb", 5),
+        "target_free_gb": setting_float(settings, "disk_guard_target_free_gb", 15),
+        "check_seconds": setting_int(settings, "disk_guard_check_seconds", 60, 1, 86400),
+    }
+
+
+def validate_disk_guard_config(config: dict[str, Any]) -> None:
+    warning = float(config["warning_free_gb"])
+    cleanup = float(config["cleanup_free_gb"])
+    emergency = float(config["emergency_free_gb"])
+    absolute = float(config["absolute_floor_gb"])
+    target = float(config["target_free_gb"])
+    if not all(math.isfinite(value) and value >= 0 for value in (warning, cleanup, emergency, absolute, target)):
+        raise HTTPException(status_code=422, detail="Limites do Disk Guard devem ser numeros finitos e nao negativos.")
+    if target <= cleanup:
+        raise HTTPException(status_code=422, detail="target_free_gb deve ser maior que cleanup_free_gb.")
+    if warning < cleanup:
+        raise HTTPException(status_code=422, detail="warning_free_gb deve ser maior ou igual a cleanup_free_gb.")
+    if cleanup <= emergency:
+        raise HTTPException(status_code=422, detail="cleanup_free_gb deve ser maior que emergency_free_gb.")
+    if emergency <= absolute:
+        raise HTTPException(status_code=422, detail="emergency_free_gb deve ser maior que absolute_floor_gb.")
+
+
+def disk_guard_state_for_free_gb(free_gb: float, config: dict[str, Any]) -> str:
+    if free_gb < float(config["absolute_floor_gb"]):
+        return "ABSOLUTE_DANGER"
+    if free_gb < float(config["emergency_free_gb"]):
+        return "EMERGENCY"
+    if free_gb < float(config["cleanup_free_gb"]):
+        return "CRITICAL"
+    if free_gb < float(config["warning_free_gb"]):
+        return "WARNING"
+    return "NORMAL"
+
+
+def disk_guard_disk_usage() -> dict[str, Any]:
+    try:
+        rows = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT name, path, total_space, free_space
+                FROM system.disks
+                WHERE total_space > 0
+                ORDER BY free_space ASC
+                LIMIT 1
+                """
+            )
+        )
+        if rows:
+            row = rows[0]
+            total = int(row.get("total_space") or 0)
+            free = int(row.get("free_space") or 0)
+            if total > 0:
+                return {
+                    "total_bytes": total,
+                    "used_bytes": max(0, total - free),
+                    "free_bytes": max(0, free),
+                    "source": "clickhouse_system_disks",
+                    "disk_name": clean_text(row.get("name")),
+                    "disk_path": clean_text(row.get("path")),
+                }
+    except Exception as exc:
+        logger.warning("Falha ao medir system.disks do ClickHouse; usando filesystem do backend: %s", exc)
+    configured_path = clean_text(os.getenv("GMJFLOW_DISK_GUARD_PATH"))
+    disk_root = Path(configured_path) if configured_path else sqlite_path().parent
+    usage = shutil.disk_usage(disk_root if disk_root.exists() else Path("."))
+    return {
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "source": "backend_filesystem_fallback",
+        "disk_name": "",
+        "disk_path": str(disk_root),
+    }
+
+
+def parse_json_list(value: Any) -> list[Any]:
+    try:
+        payload = json.loads(clean_text(value) or "[]")
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def disk_guard_status(
+    settings: dict[str, str] | None = None,
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if settings is None:
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
+    config = disk_guard_config(settings)
+    validate_disk_guard_config(config)
+    usage = usage or disk_guard_disk_usage()
+    total = int(usage.get("total_bytes") or 0)
+    used = int(usage.get("used_bytes") or 0)
+    free = int(usage.get("free_bytes") or 0)
+    free_gb = free / GIB
+    state = disk_guard_state_for_free_gb(free_gb, config)
+    with DISK_GUARD_STATUS_LOCK:
+        runtime = dict(DISK_GUARD_RUNTIME)
+    last_tables = runtime.get("last_cleanup_tables") or parse_json_list(
+        settings.get("disk_guard_last_cleanup_tables")
+    )
+    return {
+        **config,
+        "state": state,
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "free_gb": round(free_gb, 3),
+        "used_percent": round((used / total) * 100, 2) if total else 0.0,
+        "free_percent": round((free / total) * 100, 2) if total else 0.0,
+        "measurement_source": usage.get("source") or "",
+        "disk_name": usage.get("disk_name") or "",
+        "disk_path": usage.get("disk_path") or "",
+        "cleanup_running": bool(runtime.get("cleanup_running")),
+        "last_check_at": runtime.get("last_check_at") or settings.get("disk_guard_last_check_at") or None,
+        "last_cleanup_at": runtime.get("last_cleanup_at") or settings.get("disk_guard_last_cleanup_at") or None,
+        "last_cleanup_reason": runtime.get("last_cleanup_reason") or settings.get("disk_guard_last_cleanup_reason") or "",
+        "last_cleanup_freed_bytes": int(
+            runtime.get("last_cleanup_freed_bytes") or settings.get("disk_guard_last_cleanup_freed_bytes") or 0
+        ),
+        "last_cleanup_tables": last_tables,
+        "last_cleanup_cutoff": runtime.get("last_cleanup_cutoff") or settings.get("disk_guard_last_cleanup_cutoff") or "",
+        "last_error": runtime.get("last_error") or settings.get("disk_guard_last_error") or "",
+    }
+
+
+def log_disk_guard_event(event: str, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    log_method = logger.error if event == "DISK_GUARD_CLEANUP_ERROR" else logger.warning
+    if event == "DISK_GUARD_CLEANUP_FINISH" and not fields.get("last_error"):
+        log_method = logger.info
+    log_method("%s", json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True))
+
+
+def persist_disk_guard_runtime(values: dict[str, Any]) -> None:
+    with DISK_GUARD_STATUS_LOCK:
+        DISK_GUARD_RUNTIME.update(values)
+    persisted: dict[str, Any] = {}
+    mapping = {
+        "state": "disk_guard_last_state",
+        "last_check_at": "disk_guard_last_check_at",
+        "last_cleanup_at": "disk_guard_last_cleanup_at",
+        "last_cleanup_reason": "disk_guard_last_cleanup_reason",
+        "last_cleanup_freed_bytes": "disk_guard_last_cleanup_freed_bytes",
+        "last_cleanup_cutoff": "disk_guard_last_cleanup_cutoff",
+        "last_error": "disk_guard_last_error",
+    }
+    for runtime_key, setting_key in mapping.items():
+        if runtime_key in values:
+            persisted[setting_key] = values[runtime_key]
+    if "last_cleanup_tables" in values:
+        persisted["disk_guard_last_cleanup_tables"] = json.dumps(values["last_cleanup_tables"], separators=(",", ":"))
+    if not persisted:
+        return
+    try:
+        with sqlite_connection() as conn:
+            set_system_settings(conn, persisted)
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Falha ao persistir estado do Disk Guard: %s", exc)
+
+
+def disk_guard_table_candidates(excluded: set[str] | None = None) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    excluded = excluded or set()
+    candidates = []
+    for item in clickhouse_table_sizes():
+        table = clean_text(item.get("table"))
+        config = FLOW_RETENTION_TABLES.get(table)
+        if not config or table in excluded:
+            continue
+        oldest = parse_datetime_text(item.get("first_record"))
+        newest = parse_datetime_text(item.get("last_record"))
+        if oldest is None:
+            continue
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        recent_limit = now - timedelta(hours=int(config["recent_floor_hours"]))
+        if oldest >= recent_limit:
+            continue
+        age_hours = max(0.0, (now - oldest).total_seconds() / 3600)
+        size_bytes = max(1, int(item.get("size_bytes") or 0))
+        score = size_bytes * (1.0 + age_hours / 24.0) * float(config["importance_weight"])
+        candidates.append(
+            {
+                **item,
+                "table": table,
+                "time_column": str(config["time_column"]),
+                "oldest": oldest,
+                "newest": newest,
+                "recent_limit": recent_limit,
+                "score": score,
+            }
+        )
+    return sorted(candidates, key=lambda item: float(item["score"]), reverse=True)
+
+
+def disk_guard_cleanup_batch(candidate: dict[str, Any], window_hours: int) -> dict[str, Any] | None:
+    table = clean_text(candidate["table"])
+    time_column = clickhouse_identifier(clean_text(candidate["time_column"]))
+    oldest = candidate["oldest"]
+    cutoff = min(oldest + timedelta(hours=window_hours), candidate["recent_limit"])
+    if cutoff <= oldest:
+        return None
+    full_table = clickhouse_table_name(table)
+    parameters = {"cutoff": cutoff.astimezone(timezone.utc).replace(tzinfo=None)}
+    count_sql = f"SELECT count() AS count FROM {full_table} WHERE {time_column} < {{cutoff:DateTime}}"
+    before_rows = rows_as_dicts(query_clickhouse(count_sql, parameters, admin=True))
+    rows_before = int(before_rows[0].get("count") or 0) if before_rows else 0
+    if rows_before <= 0:
+        return None
+    command = (
+        f"ALTER TABLE {full_table} DELETE WHERE {time_column} < {{cutoff:DateTime}} "
+        "SETTINGS mutations_sync = 1"
+    )
+    command_clickhouse(command, parameters, admin=True)
+    after_rows = rows_as_dicts(query_clickhouse(count_sql, parameters, admin=True))
+    rows_after = int(after_rows[0].get("count") or 0) if after_rows else 0
+    return {
+        "table": table,
+        "cutoff": iso(cutoff),
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "rows_deleted": max(0, rows_before - rows_after),
+        "command": command,
+    }
+
+
+def run_disk_guard_cleanup(
+    settings: dict[str, str] | None = None,
+    initial_usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if settings is None:
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
+    config = disk_guard_config(settings)
+    validate_disk_guard_config(config)
+    usage = initial_usage or disk_guard_disk_usage()
+    free_start = int(usage.get("free_bytes") or 0)
+    state_start = disk_guard_state_for_free_gb(free_start / GIB, config)
+    if state_start not in DISK_GUARD_CLEANUP_STATES:
+        return {"ok": True, "status": "not_required", "state": state_start, "batches": []}
+    if not DATABASE_MAINTENANCE_LOCK.acquire(blocking=False):
+        return {"ok": False, "status": "maintenance_busy", "state": state_start, "batches": []}
+
+    started = time.monotonic()
+    cleanup_at = utc_now_iso()
+    target_bytes = int(float(config["target_free_gb"]) * GIB)
+    reason = f"free_bytes={free_start} below cleanup threshold; state={state_start}"
+    batches: list[dict[str, Any]] = []
+    affected_tables: list[str] = []
+    excluded: set[str] = set()
+    last_cutoff = ""
+    last_error = ""
+    persist_disk_guard_runtime(
+        {
+            "cleanup_running": True,
+            "last_cleanup_at": cleanup_at,
+            "last_cleanup_reason": reason,
+            "last_error": "",
+        }
+    )
+    log_disk_guard_event(
+        "DISK_GUARD_CLEANUP_START",
+        state=state_start,
+        free_bytes=free_start,
+        target_bytes=target_bytes,
+    )
+    try:
+        current_usage = usage
+        for _ in range(48):
+            free_before = int(current_usage.get("free_bytes") or 0)
+            if free_before >= target_bytes:
+                break
+            current_state = disk_guard_state_for_free_gb(free_before / GIB, config)
+            window_hours = 6 if current_state == "ABSOLUTE_DANGER" else 3 if current_state == "EMERGENCY" else 1
+            candidates = disk_guard_table_candidates(excluded)
+            if not candidates:
+                last_error = "Nenhum dado antigo elegivel permanece sem violar a protecao de dados recentes."
+                break
+            candidate = candidates[0]
+            batch_started = time.monotonic()
+            batch = disk_guard_cleanup_batch(candidate, window_hours)
+            if batch is None:
+                excluded.add(clean_text(candidate["table"]))
+                continue
+            current_usage = disk_guard_disk_usage()
+            free_after = int(current_usage.get("free_bytes") or 0)
+            batch.update(
+                {
+                    "state": current_state,
+                    "free_before": free_before,
+                    "free_after": free_after,
+                    "freed_bytes": max(0, free_after - free_before),
+                    "duration_ms": round((time.monotonic() - batch_started) * 1000, 2),
+                }
+            )
+            batches.append(batch)
+            table = clean_text(batch["table"])
+            if table not in affected_tables:
+                affected_tables.append(table)
+            last_cutoff = clean_text(batch["cutoff"])
+            log_disk_guard_event("DISK_GUARD_CLEANUP_BATCH", **batch)
+        final_usage = disk_guard_disk_usage()
+        free_final = int(final_usage.get("free_bytes") or 0)
+        if free_final < target_bytes and not last_error:
+            last_error = "Limite de 48 lotes atingido; a limpeza continuara na proxima verificacao."
+        result = {
+            "ok": free_final >= target_bytes,
+            "status": "target_reached" if free_final >= target_bytes else "partial",
+            "state": disk_guard_state_for_free_gb(free_final / GIB, config),
+            "free_before": free_start,
+            "free_after": free_final,
+            "freed_bytes": max(0, free_final - free_start),
+            "target_bytes": target_bytes,
+            "tables": affected_tables,
+            "cutoff": last_cutoff,
+            "batches": batches,
+            "last_error": last_error,
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        }
+        persist_disk_guard_runtime(
+            {
+                "state": result["state"],
+                "last_cleanup_at": cleanup_at,
+                "last_cleanup_reason": reason,
+                "last_cleanup_freed_bytes": result["freed_bytes"],
+                "last_cleanup_tables": affected_tables,
+                "last_cleanup_cutoff": last_cutoff,
+                "last_error": last_error,
+            }
+        )
+        log_disk_guard_event("DISK_GUARD_CLEANUP_FINISH", **result)
+        return result
+    except Exception as exc:
+        last_error = str(exc)
+        persist_disk_guard_runtime({"last_error": last_error})
+        log_disk_guard_event(
+            "DISK_GUARD_CLEANUP_ERROR",
+            state=state_start,
+            free_bytes=free_start,
+            target_bytes=target_bytes,
+            error=last_error,
+            duration_ms=round((time.monotonic() - started) * 1000, 2),
+        )
+        raise
+    finally:
+        with DISK_GUARD_STATUS_LOCK:
+            DISK_GUARD_RUNTIME["cleanup_running"] = False
+        DATABASE_MAINTENANCE_LOCK.release()
+
+
+def run_disk_guard_check() -> dict[str, Any]:
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        settings = get_system_settings(conn)
+    config = disk_guard_config(settings)
+    validate_disk_guard_config(config)
+    usage = disk_guard_disk_usage()
+    checked_at = utc_now_iso()
+    state = disk_guard_state_for_free_gb(int(usage.get("free_bytes") or 0) / GIB, config)
+    persist_disk_guard_runtime({"state": state, "last_check_at": checked_at})
+    log_disk_guard_event(
+        "DISK_GUARD_STATE",
+        enabled=config["enabled"],
+        state=state,
+        free_bytes=int(usage.get("free_bytes") or 0),
+        target_bytes=int(float(config["target_free_gb"]) * GIB),
+    )
+    cleanup = None
+    if config["enabled"] and state in DISK_GUARD_CLEANUP_STATES:
+        cleanup = run_disk_guard_cleanup(settings=settings, initial_usage=usage)
+    final_usage = disk_guard_disk_usage() if cleanup is not None else usage
+    return {**disk_guard_status(settings=settings, usage=final_usage), "cleanup": cleanup}
+
+
+def database_disk_guard_loop() -> None:
+    while True:
+        try:
+            with sqlite_connection() as conn:
+                settings = get_system_settings(conn)
+            check_seconds = disk_guard_config(settings)["check_seconds"]
+        except Exception:
+            check_seconds = 60
+        if DISK_GUARD_STOP.wait(check_seconds):
+            return
+        try:
+            run_disk_guard_check()
+        except Exception as exc:  # pragma: no cover - background resilience.
+            persist_disk_guard_runtime({"last_check_at": utc_now_iso(), "last_error": str(exc)})
+            log_disk_guard_event("DISK_GUARD_CLEANUP_ERROR", state="UNKNOWN", error=str(exc))
+
+
+def start_disk_guard_thread() -> None:
+    global DISK_GUARD_THREAD
+    if DISK_GUARD_THREAD is not None and DISK_GUARD_THREAD.is_alive():
+        return
+    DISK_GUARD_STOP.clear()
+    DISK_GUARD_THREAD = threading.Thread(
+        target=database_disk_guard_loop,
+        name="gmj-flow-disk-guard",
+        daemon=True,
+    )
+    DISK_GUARD_THREAD.start()
 
 
 def upsert_discovered_interfaces(conn: sqlite3.Connection, sensor_id: int, interfaces: list[dict[str, Any]]) -> None:
@@ -37196,11 +38162,7 @@ def database_status(request: Request):
     sqlite_size_bytes = db_path.stat().st_size if db_path.exists() else 0
     disk_root = db_path.parent if db_path.parent.exists() else Path(".")
     disk_usage = shutil.disk_usage(disk_root)
-    flow_raw_retention_days = table_retention_days(settings, "flow_raw") or 7
-    flow_1m_retention_days = table_retention_days(settings, "flow_1m") or 30
-    flow_tops_1m_retention_days = table_retention_days(settings, "flow_tops_1m") or 15
-    retention_days = flow_raw_retention_days
-    snmp_retention_days = setting_int(settings, "snmp_retention_days", 90)
+    retention_status = retention_policy_response(settings)
     return {
         "clickhouse_ok": clickhouse_ok,
         "sqlite_ok": sqlite_ok,
@@ -37223,19 +38185,8 @@ def database_status(request: Request):
         "disk_used_human": human_bytes(disk_usage.used),
         "disk_free_human": human_bytes(disk_usage.free),
         "disk_total_human": human_bytes(disk_usage.total),
-        "retention_days": retention_days,
-        "flow_raw_days": flow_raw_retention_days,
-        "flow_1m_days": flow_1m_retention_days,
-        "flow_tops_1m_days": flow_tops_1m_retention_days,
-        "snmp_days": snmp_retention_days,
-        "cleanup_hour_utc": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
-        "flow_raw_retention_days": flow_raw_retention_days,
-        "flow_1m_retention_days": flow_1m_retention_days,
-        "flow_tops_1m_retention_days": flow_tops_1m_retention_days,
-        "snmp_retention_days": snmp_retention_days,
-        "retention_enabled": setting_bool(settings, "database_retention_enabled"),
-        "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
-        "last_cleanup_at": settings.get("database_last_cleanup_at") or None,
+        "disk_used_percent": round((disk_usage.used / disk_usage.total) * 100, 2) if disk_usage.total else 0.0,
+        **retention_status,
         "optimize_guard": clickhouse_optimize_guard(),
     }
 
@@ -37263,13 +38214,89 @@ def database_tables(request: Request):
     return {"items": items}
 
 
+def resolve_retention_payload(
+    payload: DatabaseRetentionPayload,
+    settings: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    specs = {
+        "flow_raw": {
+            "payload": "flow_raw",
+            "hours": ("flow_raw_hours", "flow_raw_retention_hours", "retention_hours"),
+            "days": ("flow_raw_days", "flow_raw_retention_days", "retention_days"),
+            "table": "flow_raw",
+            "setting": "flow_raw",
+        },
+        "flow_1m": {
+            "payload": "flow_1m",
+            "hours": ("flow_1m_hours", "flow_1m_retention_hours"),
+            "days": ("flow_1m_days", "flow_1m_retention_days"),
+            "table": "flow_1m",
+            "setting": "flow_1m",
+        },
+        "flow_tops_1m": {
+            "payload": "flow_tops_1m",
+            "hours": ("flow_tops_1m_hours", "flow_tops_1m_retention_hours"),
+            "days": ("flow_tops_1m_days", "flow_tops_1m_retention_days"),
+            "table": "flow_tops_1m",
+            "setting": "flow_tops_1m",
+        },
+        "snmp": {
+            "payload": "snmp",
+            "hours": ("snmp_hours", "snmp_retention_hours"),
+            "days": ("snmp_days", "snmp_retention_days"),
+            "table": None,
+            "setting": "snmp",
+        },
+        "anomaly": {
+            "payload": "anomalies",
+            "hours": ("anomaly_hours", "anomaly_retention_hours"),
+            "days": ("anomaly_days", "anomaly_retention_days"),
+            "table": "anomaly_events",
+            "setting": "anomaly",
+        },
+    }
+    resolved: dict[str, dict[str, Any]] = {}
+    for name, spec in specs.items():
+        setting_name = str(spec["setting"])
+        table = spec["table"]
+        current_hours = (
+            table_retention_hours(settings, str(table))
+            if table
+            else sqlite_retention_hours(settings, setting_name)
+        ) or 24
+        current_unit = clean_text(settings.get(f"{setting_name}_retention_unit")) or "days"
+        current_enabled = setting_bool(settings, f"{setting_name}_retention_enabled")
+        nested = getattr(payload, str(spec["payload"]))
+        if nested is not None:
+            unit = normalize_retention_unit(nested.unit)
+            hours = retention_value_to_hours(nested.value, unit)
+            item_enabled = current_enabled if nested.enabled is None else bool(nested.enabled)
+        else:
+            explicit_hours = next(
+                (getattr(payload, field) for field in spec["hours"] if getattr(payload, field) is not None),
+                None,
+            )
+            explicit_days = next(
+                (getattr(payload, field) for field in spec["days"] if getattr(payload, field) is not None),
+                None,
+            )
+            if explicit_hours is not None:
+                unit = "hours"
+                hours = retention_value_to_hours(explicit_hours, unit)
+            elif explicit_days is not None:
+                unit = "days"
+                hours = retention_value_to_hours(explicit_days, unit)
+            else:
+                unit = normalize_retention_unit(current_unit)
+                hours = int(current_hours)
+            item_enabled = current_enabled
+        resolved[name] = {"hours": hours, "unit": unit, "enabled": item_enabled}
+    return resolved
+
+
 @app.post("/api/database/retention")
 def database_retention(request: Request, payload: DatabaseRetentionPayload):
     require_admin(request)
-    flow_raw_days = payload.flow_raw_days or payload.flow_raw_retention_days or payload.retention_days or 7
-    flow_1m_days = payload.flow_1m_days or payload.flow_1m_retention_days or 30
-    flow_tops_days = payload.flow_tops_1m_days or payload.flow_tops_1m_retention_days or 15
-    snmp_days = payload.snmp_days or payload.snmp_retention_days or 90
     cleanup_hour = (
         payload.cleanup_hour_utc
         if payload.cleanup_hour_utc is not None
@@ -37277,51 +38304,47 @@ def database_retention(request: Request, payload: DatabaseRetentionPayload):
     )
 
     ensure_sensor_db()
-    policy_saved = False
     with sqlite_connection() as conn:
+        current_settings = get_system_settings(conn)
+        resolved = resolve_retention_payload(payload, current_settings)
+        values: dict[str, Any] = {
+            "database_retention_enabled": "1" if payload.enabled else "0",
+            "database_cleanup_hour": cleanup_hour,
+        }
+        for name, item in resolved.items():
+            values[f"{name}_retention_hours"] = item["hours"]
+            values[f"{name}_retention_days"] = max(1, (int(item["hours"]) + 23) // 24)
+            values[f"{name}_retention_unit"] = item["unit"]
+            values[f"{name}_retention_enabled"] = "1" if item["enabled"] else "0"
+        values["flow_retention_days"] = values["flow_raw_retention_days"]
         set_system_settings(
             conn,
-            {
-                "database_retention_enabled": "1" if payload.enabled else "0",
-                "flow_retention_days": flow_raw_days,
-                "flow_raw_retention_days": flow_raw_days,
-                "flow_1m_retention_days": flow_1m_days,
-                "flow_tops_1m_retention_days": flow_tops_days,
-                "snmp_retention_days": snmp_days,
-                "database_cleanup_hour": cleanup_hour,
-            },
+            values,
         )
         conn.commit()
         settings = get_system_settings(conn)
-        policy_saved = True
 
     ttl_command: dict[str, str] = {}
     ttl_update_status = "success"
     error_message = ""
     try:
-        ttl_command = apply_flow_retention_ttl(payload.enabled, flow_raw_days, flow_1m_days, flow_tops_days)
+        ttl_command = apply_configured_retention_ttl(settings)
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
     except Exception as exc:
         ttl_update_status = ttl_update_status_from_exception(exc)
         error_message = f"Falha ao atualizar TTL no ClickHouse: {exc}"
         logger.warning("%s", error_message)
+        with sqlite_connection() as conn:
+            set_system_settings(conn, {"database_last_ttl_error": error_message})
+            conn.commit()
+            settings = get_system_settings(conn)
     return {
-        "ok": True,
-        "policy_saved": policy_saved,
+        "ok": ttl_update_status == "success",
+        "policy_saved": True,
         "ttl_update_status": ttl_update_status,
         "error_message": error_message,
-        "retention_enabled": setting_bool(settings, "database_retention_enabled"),
-        "retention_days": table_retention_days(settings, "flow_raw") or 7,
-        "flow_raw_days": table_retention_days(settings, "flow_raw") or 7,
-        "flow_1m_days": table_retention_days(settings, "flow_1m") or 30,
-        "flow_tops_1m_days": table_retention_days(settings, "flow_tops_1m") or 15,
-        "snmp_days": setting_int(settings, "snmp_retention_days", 90),
-        "cleanup_hour_utc": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
-        "flow_raw_retention_days": table_retention_days(settings, "flow_raw") or 7,
-        "flow_1m_retention_days": table_retention_days(settings, "flow_1m") or 30,
-        "flow_tops_1m_retention_days": table_retention_days(settings, "flow_tops_1m") or 15,
-        "snmp_retention_days": setting_int(settings, "snmp_retention_days", 90),
-        "database_cleanup_hour": setting_int(settings, "database_cleanup_hour", 3, 0, 23),
-        "ttl_command": ttl_command,
+        **retention_policy_response(settings, ttl_command),
     }
 
 
@@ -37331,33 +38354,61 @@ def database_apply_retention_ttl(request: Request):
     ensure_sensor_db()
     with sqlite_connection() as conn:
         settings = get_system_settings(conn)
-    flow_raw_days = table_retention_days(settings, "flow_raw") or 7
-    flow_1m_days = table_retention_days(settings, "flow_1m") or 30
-    flow_tops_days = table_retention_days(settings, "flow_tops_1m") or 15
-    enabled = setting_bool(settings, "database_retention_enabled")
     ttl_update_status = "success"
     error_message = ""
     ttl_command: dict[str, str] = {}
     try:
-        ttl_command = apply_flow_retention_ttl(enabled, flow_raw_days, flow_1m_days, flow_tops_days)
+        ttl_command = apply_configured_retention_ttl(settings)
+        with sqlite_connection() as conn:
+            settings = get_system_settings(conn)
     except Exception as exc:
         ttl_update_status = ttl_update_status_from_exception(exc)
         error_message = f"Falha ao atualizar TTL no ClickHouse: {exc}"
         logger.warning("%s", error_message)
+        with sqlite_connection() as conn:
+            set_system_settings(conn, {"database_last_ttl_error": error_message})
+            conn.commit()
+            settings = get_system_settings(conn)
     return {
         "ok": ttl_update_status == "success",
         "policy_saved": True,
         "ttl_update_status": ttl_update_status,
         "error_message": error_message,
-        "retention_enabled": enabled,
-        "flow_raw_days": flow_raw_days,
-        "flow_1m_days": flow_1m_days,
-        "flow_tops_1m_days": flow_tops_days,
-        "flow_raw_retention_days": flow_raw_days,
-        "flow_1m_retention_days": flow_1m_days,
-        "flow_tops_1m_retention_days": flow_tops_days,
-        "ttl_command": ttl_command,
+        **retention_policy_response(settings, ttl_command),
     }
+
+
+@app.get("/api/system/disk-guard")
+def system_disk_guard(request: Request):
+    require_admin(request)
+    try:
+        return disk_guard_status()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Falha ao consultar Disk Guard: {exc}") from exc
+
+
+@app.put("/api/system/disk-guard")
+def update_system_disk_guard(request: Request, payload: DiskGuardPayload):
+    require_admin(request)
+    config = dump_model(payload)
+    validate_disk_guard_config(config)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        set_system_settings(
+            conn,
+            {
+                "disk_guard_enabled": "1" if payload.enabled else "0",
+                "disk_guard_warning_free_gb": payload.warning_free_gb,
+                "disk_guard_cleanup_free_gb": payload.cleanup_free_gb,
+                "disk_guard_emergency_free_gb": payload.emergency_free_gb,
+                "disk_guard_absolute_floor_gb": payload.absolute_floor_gb,
+                "disk_guard_target_free_gb": payload.target_free_gb,
+                "disk_guard_check_seconds": payload.check_seconds,
+            },
+        )
+        conn.commit()
+        settings = get_system_settings(conn)
+    return {"ok": True, **disk_guard_status(settings=settings)}
 
 
 @app.post("/api/database/cleanup")
@@ -37388,14 +38439,18 @@ def database_optimize(request: Request, payload: DatabaseOptimizePayload):
     require_admin(request)
     if payload.confirm != "OTIMIZAR":
         raise HTTPException(status_code=400, detail="Digite OTIMIZAR para confirmar")
-    optimize_guard = ensure_optimize_allowed(payload.force_low_disk)
     command = "OPTIMIZE TABLE flow_raw FINAL"
+    if not DATABASE_MAINTENANCE_LOCK.acquire(timeout=30):
+        raise HTTPException(status_code=409, detail="Outra manutencao de banco esta em andamento.")
     try:
+        optimize_guard = ensure_optimize_allowed(payload.force_low_disk, automatic=False)
         command_clickhouse(command, admin=True)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Falha ao executar OPTIMIZE: {exc}") from exc
+    finally:
+        DATABASE_MAINTENANCE_LOCK.release()
     return {
         "ok": True,
         "command_executed": command,

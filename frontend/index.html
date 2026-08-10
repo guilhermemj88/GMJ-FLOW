@@ -4645,9 +4645,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
 
           <section class="row g-3 mt-1">
-            <div class="col-12 col-xl-5">
+            <div class="col-12">
               <div class="panel p-3 h-100">
-                <div class="panel-title mb-3">Politica de retencao</div>
+                <div class="panel-title mb-1">Retenção de Dados</div>
+                <div class="subtle mb-3">O TTL do ClickHouse é a política normal; a manutenção periódica usa os mesmos tempos.</div>
                 <div class="sensor-form-grid">
                   <div class="field">
                     <label for="databaseRetentionEnabled">Retencao automatica</label>
@@ -4657,60 +4658,67 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                     </select>
                   </div>
                   <div class="field">
-                    <label for="flowRawRetentionDays">flow_raw</label>
-                    <select id="flowRawRetentionDays" class="form-select form-select-sm">
-                      <option value="7">7 dias</option>
-                      <option value="15">15 dias</option>
-                      <option value="30">30 dias</option>
-                      <option value="60">60 dias</option>
-                      <option value="90">90 dias</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="flow1mRetentionDays">flow_1m</label>
-                    <select id="flow1mRetentionDays" class="form-select form-select-sm">
-                      <option value="15">15 dias</option>
-                      <option value="30">30 dias</option>
-                      <option value="60">60 dias</option>
-                      <option value="90">90 dias</option>
-                      <option value="180">180 dias</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="flowTopsRetentionDays">flow_tops_1m</label>
-                    <select id="flowTopsRetentionDays" class="form-select form-select-sm">
-                      <option value="7">7 dias</option>
-                      <option value="15">15 dias</option>
-                      <option value="30">30 dias</option>
-                      <option value="60">60 dias</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="snmpRetentionDays">SNMP</label>
-                    <select id="snmpRetentionDays" class="form-select form-select-sm">
-                      <option value="30">30 dias</option>
-                      <option value="60">60 dias</option>
-                      <option value="90">90 dias</option>
-                      <option value="180">180 dias</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="databaseCleanupHour">Hora UTC</label>
+                    <label for="databaseCleanupHour">Limpeza periódica (hora UTC)</label>
                     <input id="databaseCleanupHour" type="number" min="0" max="23" class="form-control form-control-sm" value="3">
                   </div>
                 </div>
+                <div class="table-wrap mt-3">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Tipo</th><th>Ativa</th><th>Quantidade</th><th>Unidade</th><th>Retenção efetiva</th><th>TTL ClickHouse</th><th>Última limpeza</th><th>Status</th></tr></thead>
+                    <tbody>
+                      <tr><td>Flow Raw</td><td><select id="flowRawRetentionEnabled" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></td><td><input id="flowRawRetentionValue" type="number" min="1" max="87600" class="form-control form-control-sm" value="7"></td><td><select id="flowRawRetentionUnit" class="form-select form-select-sm"><option value="hours">Horas</option><option value="days" selected>Dias</option></select></td><td id="flowRawRetentionEffective">-</td><td id="flowRawRetentionTtl">-</td><td id="flowRawRetentionCleanup">-</td><td id="flowRawRetentionStatus">-</td></tr>
+                      <tr><td>Flow agregado 1 minuto</td><td><select id="flow1mRetentionEnabled" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></td><td><input id="flow1mRetentionValue" type="number" min="1" max="87600" class="form-control form-control-sm" value="30"></td><td><select id="flow1mRetentionUnit" class="form-select form-select-sm"><option value="hours">Horas</option><option value="days" selected>Dias</option></select></td><td id="flow1mRetentionEffective">-</td><td id="flow1mRetentionTtl">-</td><td id="flow1mRetentionCleanup">-</td><td id="flow1mRetentionStatus">-</td></tr>
+                      <tr><td>Flow Tops / Rankings</td><td><select id="flowTopsRetentionEnabled" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></td><td><input id="flowTopsRetentionValue" type="number" min="1" max="87600" class="form-control form-control-sm" value="15"></td><td><select id="flowTopsRetentionUnit" class="form-select form-select-sm"><option value="hours">Horas</option><option value="days" selected>Dias</option></select></td><td id="flowTopsRetentionEffective">-</td><td id="flowTopsRetentionTtl">-</td><td id="flowTopsRetentionCleanup">-</td><td id="flowTopsRetentionStatus">-</td></tr>
+                      <tr><td>SNMP</td><td><select id="snmpRetentionEnabled" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></td><td><input id="snmpRetentionValue" type="number" min="1" max="87600" class="form-control form-control-sm" value="90"></td><td><select id="snmpRetentionUnit" class="form-select form-select-sm"><option value="hours">Horas</option><option value="days" selected>Dias</option></select></td><td id="snmpRetentionEffective">-</td><td id="snmpRetentionTtl">Limpeza periódica</td><td id="snmpRetentionCleanup">-</td><td id="snmpRetentionStatus">-</td></tr>
+                      <tr><td>Anomalias / eventos auxiliares</td><td><select id="anomalyRetentionEnabled" class="form-select form-select-sm"><option value="true">Sim</option><option value="false">Não</option></select></td><td><input id="anomalyRetentionValue" type="number" min="1" max="87600" class="form-control form-control-sm" value="90"></td><td><select id="anomalyRetentionUnit" class="form-select form-select-sm"><option value="hours">Horas</option><option value="days" selected>Dias</option></select></td><td id="anomalyRetentionEffective">-</td><td id="anomalyRetentionTtl">-</td><td id="anomalyRetentionCleanup">-</td><td id="anomalyRetentionStatus">-</td></tr>
+                    </tbody>
+                  </table>
+                </div>
                 <div class="toolbar mt-3">
                   <button id="saveDatabaseRetentionButton" type="button" class="btn btn-sm btn-success">
-                    <i data-lucide="save"></i><span>Salvar politica</span>
+                    <i data-lucide="save"></i><span>Salvar e aplicar retenção</span>
                   </button>
                   <button id="applyDatabaseTtlButton" type="button" class="btn btn-sm btn-outline-secondary">
                     <i data-lucide="clock"></i><span>Aplicar TTL</span>
                   </button>
                 </div>
+                <pre id="databaseRetentionActionResult" class="result-box mt-3">Nenhuma alteração de retenção executada.</pre>
               </div>
             </div>
 
-            <div class="col-12 col-xl-7">
+            <div class="col-12">
+              <div class="panel p-3 h-100">
+                <div class="d-flex justify-content-between align-items-start gap-2 mb-3"><div><div class="panel-title">Proteção de Disco</div><div class="subtle">Limpeza emergencial independente da retenção configurada, sempre em pequenos lotes dos dados mais antigos.</div></div><div id="diskGuardState" class="badge text-bg-secondary">-</div></div>
+                <div class="database-metrics-grid mb-3">
+                  <div class="metric-card"><div class="metric-label">Espaço total</div><div id="diskGuardTotal" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Espaço usado</div><div id="diskGuardUsed" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Espaço livre</div><div id="diskGuardFree" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Percentual livre</div><div id="diskGuardFreePercent" class="metric-value">-</div></div>
+                </div>
+                <div class="sensor-form-grid">
+                  <div class="field"><label for="diskGuardEnabled">Disk Guard</label><select id="diskGuardEnabled" class="form-select form-select-sm"><option value="true">Ativado</option><option value="false">Desativado</option></select></div>
+                  <div class="field"><label for="diskGuardWarningGb">Avisar abaixo de (GB)</label><input id="diskGuardWarningGb" type="number" min="0" step="0.1" class="form-control form-control-sm" value="15"></div>
+                  <div class="field"><label for="diskGuardCleanupGb">Iniciar limpeza abaixo de (GB)</label><input id="diskGuardCleanupGb" type="number" min="0" step="0.1" class="form-control form-control-sm" value="10"></div>
+                  <div class="field"><label for="diskGuardEmergencyGb">Emergência abaixo de (GB)</label><input id="diskGuardEmergencyGb" type="number" min="0" step="0.1" class="form-control form-control-sm" value="7"></div>
+                  <div class="field"><label for="diskGuardAbsoluteGb">Limite absoluto (GB)</label><input id="diskGuardAbsoluteGb" type="number" min="0" step="0.1" class="form-control form-control-sm" value="5"></div>
+                  <div class="field"><label for="diskGuardTargetGb">Liberar até (GB)</label><input id="diskGuardTargetGb" type="number" min="0" step="0.1" class="form-control form-control-sm" value="15"></div>
+                  <div class="field"><label for="diskGuardCheckSeconds">Verificar a cada (segundos)</label><input id="diskGuardCheckSeconds" type="number" min="1" max="86400" class="form-control form-control-sm" value="60"></div>
+                </div>
+                <div class="database-metrics-grid mt-3">
+                  <div class="metric-card"><div class="metric-label">Última verificação</div><div id="diskGuardLastCheck" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Última limpeza</div><div id="diskGuardLastCleanup" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Motivo</div><div id="diskGuardLastReason" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Espaço liberado</div><div id="diskGuardLastFreed" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Tabelas afetadas</div><div id="diskGuardLastTables" class="metric-value">-</div></div>
+                  <div class="metric-card"><div class="metric-label">Cutoff utilizado</div><div id="diskGuardLastCutoff" class="metric-value">-</div></div>
+                </div>
+                <div id="diskGuardLastError" class="text-danger mt-2"></div>
+                <div class="toolbar mt-3"><button id="saveDiskGuardButton" type="button" class="btn btn-sm btn-success"><i data-lucide="shield"></i><span>Salvar proteção de disco</span></button></div>
+                <pre id="diskGuardActionResult" class="result-box mt-3">Nenhuma alteração executada.</pre>
+              </div>
+            </div>
+
+            <div class="col-12">
               <div class="panel p-3 h-100">
                 <div class="panel-title mb-3">Limpeza manual</div>
                 <div class="database-actions-grid">
@@ -9518,6 +9526,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         applySuggestionsButton: 'anomalies.manage',
         saveDatabaseRetentionButton: 'settings.manage',
         applyDatabaseTtlButton: 'settings.manage',
+        saveDiskGuardButton: 'settings.manage',
         customDatabaseCleanupButton: 'settings.manage',
         databaseOptimizeButton: 'settings.manage',
         clearDashboardCacheButton: 'settings.manage',
@@ -11039,7 +11048,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td>${formatDateTime(item.last_record)}</td>
           <td class="text-end">${formatNumber(item.rows)}</td>
           <td class="text-end">${escapeHtml(item.size_human || formatBytes(item.size_bytes))}</td>
-          <td class="text-end">${item.retention_days ? `${formatNumber(item.retention_days)}d` : '-'}</td>
+          <td class="text-end">${item.retention_hours ? `${formatNumber(item.retention_hours)}h` : (item.retention_days ? `${formatNumber(item.retention_days)}d` : '-')}</td>
           <td>${formatDateTime(item.last_cleanup_at)}</td>
         </tr>
       `).join('');
@@ -11085,18 +11094,63 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       setText('dbSqliteSize', payload.sqlite_size_human || formatBytes(payload.sqlite_size_bytes));
       setText('dbDiskUsed', `${payload.disk_used_human || formatBytes(payload.disk_used_bytes)} / ${payload.disk_total_human || formatBytes(payload.disk_total_bytes)}`);
       setText('dbDiskFree', payload.disk_free_human || formatBytes(payload.disk_free_bytes));
-      setText(
-        'dbRetentionPolicy',
-        `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - raw ${formatNumber(payload.flow_raw_days || payload.flow_raw_retention_days || payload.retention_days || 7)}d / 1m ${formatNumber(payload.flow_1m_days || payload.flow_1m_retention_days || 30)}d / tops ${formatNumber(payload.flow_tops_1m_days || payload.flow_tops_1m_retention_days || 15)}d / SNMP ${formatNumber(payload.snmp_days || payload.snmp_retention_days || 90)}d`
-      );
+      const retention = payload.retention || {};
+      const retentionText = item => item ? `${formatNumber(item.value)} ${item.unit === 'hours' ? 'h' : 'd'}` : '-';
+      setText('dbRetentionPolicy', `${payload.retention_enabled ? 'Ativa' : 'Desativada'} - raw ${retentionText(retention.flow_raw)} / 1m ${retentionText(retention.flow_1m)} / tops ${retentionText(retention.flow_tops_1m)} / SNMP ${retentionText(retention.snmp)}`);
       setText('dbLastCleanup', formatDateTime(payload.last_cleanup_at));
       document.getElementById('databaseRetentionEnabled').value = payload.retention_enabled ? 'true' : 'false';
-      document.getElementById('flowRawRetentionDays').value = String(payload.flow_raw_days || payload.flow_raw_retention_days || payload.retention_days || 7);
-      document.getElementById('flow1mRetentionDays').value = String(payload.flow_1m_days || payload.flow_1m_retention_days || 30);
-      document.getElementById('flowTopsRetentionDays').value = String(payload.flow_tops_1m_days || payload.flow_tops_1m_retention_days || 15);
-      document.getElementById('snmpRetentionDays').value = String(payload.snmp_days || payload.snmp_retention_days || 90);
+      renderRetentionConfigItem('flowRaw', retention.flow_raw);
+      renderRetentionConfigItem('flow1m', retention.flow_1m);
+      renderRetentionConfigItem('flowTops', retention.flow_tops_1m);
+      renderRetentionConfigItem('snmp', retention.snmp);
+      renderRetentionConfigItem('anomaly', retention.anomalies);
       document.getElementById('databaseCleanupHour').value = String(payload.cleanup_hour_utc ?? payload.database_cleanup_hour ?? 3);
       renderDatabaseOptimizeGuard(payload.optimize_guard || {});
+    }
+
+    function renderRetentionConfigItem(prefix, item = {}) {
+      const enabled = document.getElementById(`${prefix}RetentionEnabled`);
+      const value = document.getElementById(`${prefix}RetentionValue`);
+      const unit = document.getElementById(`${prefix}RetentionUnit`);
+      if (enabled) enabled.value = item.enabled === false ? 'false' : 'true';
+      if (value) value.value = String(item.value ?? 1);
+      if (unit) unit.value = item.unit === 'hours' ? 'hours' : 'days';
+      setText(`${prefix}RetentionEffective`, item.hours ? `${formatNumber(item.hours)} horas (${formatNumber(item.days)} dias)` : '-');
+      const ttl = item.ttl || {};
+      setText(`${prefix}RetentionTtl`, ttl.expression || ttl.status || '-');
+      setText(`${prefix}RetentionCleanup`, formatDateTime(item.last_cleanup_at));
+      setText(`${prefix}RetentionStatus`, item.effective_enabled ? (ttl.status || 'ativa') : 'desativada');
+    }
+
+    function renderDiskGuard(payload = {}) {
+      const state = String(payload.state || '-');
+      const stateNode = document.getElementById('diskGuardState');
+      stateNode.textContent = state.replaceAll('_', ' ');
+      stateNode.className = `badge ${state === 'NORMAL' ? 'text-bg-success' : state === 'WARNING' ? 'text-bg-warning' : 'text-bg-danger'}`;
+      setText('diskGuardTotal', formatBytes(payload.total_bytes));
+      setText('diskGuardUsed', `${formatBytes(payload.used_bytes)} (${formatNumber(payload.used_percent)}%)`);
+      setText('diskGuardFree', `${formatBytes(payload.free_bytes)} (${formatNumber(payload.free_gb)} GB)`);
+      setText('diskGuardFreePercent', `${formatNumber(payload.free_percent)}%`);
+      document.getElementById('diskGuardEnabled').value = payload.enabled ? 'true' : 'false';
+      document.getElementById('diskGuardWarningGb').value = String(payload.warning_free_gb ?? 15);
+      document.getElementById('diskGuardCleanupGb').value = String(payload.cleanup_free_gb ?? 10);
+      document.getElementById('diskGuardEmergencyGb').value = String(payload.emergency_free_gb ?? 7);
+      document.getElementById('diskGuardAbsoluteGb').value = String(payload.absolute_floor_gb ?? 5);
+      document.getElementById('diskGuardTargetGb').value = String(payload.target_free_gb ?? 15);
+      document.getElementById('diskGuardCheckSeconds').value = String(payload.check_seconds ?? 60);
+      setText('diskGuardLastCheck', formatDateTime(payload.last_check_at));
+      setText('diskGuardLastCleanup', formatDateTime(payload.last_cleanup_at));
+      setText('diskGuardLastReason', payload.last_cleanup_reason || '-');
+      setText('diskGuardLastFreed', formatBytes(payload.last_cleanup_freed_bytes));
+      setText('diskGuardLastTables', Array.isArray(payload.last_cleanup_tables) && payload.last_cleanup_tables.length ? payload.last_cleanup_tables.join(', ') : '-');
+      setText('diskGuardLastCutoff', formatDateTime(payload.last_cleanup_cutoff));
+      setText('diskGuardLastError', payload.last_error || (payload.cleanup_running ? 'Limpeza emergencial em andamento.' : ''));
+    }
+
+    async function loadDiskGuard() {
+      const payload = await apiRequest('/api/system/disk-guard');
+      renderDiskGuard(payload);
+      return payload;
     }
 
     async function loadDatabaseTables() {
@@ -11120,8 +11174,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           .then(renderClickHouseOperations)
           .catch(error => {
             document.getElementById('databaseOperationsStatus').textContent = `Merges/Mutations em andamento: falha ao consultar (${error.message})`;
-          });
+        });
         await loadDatabaseTables();
+        await loadDiskGuard();
       } catch (error) {
         document.getElementById('databaseStatusText').textContent = `Falha: ${error.message}`;
       }
@@ -11148,25 +11203,26 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     async function saveDatabaseRetention() {
-      const result = document.getElementById('databaseActionResult');
+      const result = document.getElementById('databaseRetentionActionResult');
       result.textContent = 'Salvando politica...';
       try {
-        const flowRawDays = Number(document.getElementById('flowRawRetentionDays').value);
-        const flow1mDays = Number(document.getElementById('flow1mRetentionDays').value);
-        const flowTopsDays = Number(document.getElementById('flowTopsRetentionDays').value);
-        const snmpDays = Number(document.getElementById('snmpRetentionDays').value);
         const cleanupHourUtc = Number(document.getElementById('databaseCleanupHour').value);
+        const retentionItem = prefix => ({
+          enabled: document.getElementById(`${prefix}RetentionEnabled`).value === 'true',
+          value: Number(document.getElementById(`${prefix}RetentionValue`).value),
+          unit: document.getElementById(`${prefix}RetentionUnit`).value
+        });
         const payload = await apiRequest('/api/database/retention', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: document.getElementById('databaseRetentionEnabled').value === 'true',
-            flow_raw_days: flowRawDays,
-            flow_1m_days: flow1mDays,
-            flow_tops_1m_days: flowTopsDays,
-            snmp_days: snmpDays,
-            cleanup_hour_utc: cleanupHourUtc,
-            retention_days: flowRawDays
+            flow_raw: retentionItem('flowRaw'),
+            flow_1m: retentionItem('flow1m'),
+            flow_tops_1m: retentionItem('flowTops'),
+            snmp: retentionItem('snmp'),
+            anomalies: retentionItem('anomaly'),
+            cleanup_hour_utc: cleanupHourUtc
           })
         });
         result.textContent = databaseRetentionResultText(payload);
@@ -11177,7 +11233,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     async function applyDatabaseTtl() {
-      const result = document.getElementById('databaseActionResult');
+      const result = document.getElementById('databaseRetentionActionResult');
       result.textContent = 'Aplicando TTL no ClickHouse...';
       try {
         const payload = await apiRequest('/api/database/retention/apply-ttl', { method: 'POST' });
@@ -11185,6 +11241,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         await loadDatabaseStatus();
       } catch (error) {
         result.textContent = `Falha ao aplicar TTL: ${error.message}`;
+      }
+    }
+
+    async function saveDiskGuard() {
+      const result = document.getElementById('diskGuardActionResult');
+      result.textContent = 'Salvando proteção de disco...';
+      try {
+        const payload = await apiRequest('/api/system/disk-guard', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: document.getElementById('diskGuardEnabled').value === 'true',
+            warning_free_gb: Number(document.getElementById('diskGuardWarningGb').value),
+            cleanup_free_gb: Number(document.getElementById('diskGuardCleanupGb').value),
+            emergency_free_gb: Number(document.getElementById('diskGuardEmergencyGb').value),
+            absolute_floor_gb: Number(document.getElementById('diskGuardAbsoluteGb').value),
+            target_free_gb: Number(document.getElementById('diskGuardTargetGb').value),
+            check_seconds: Number(document.getElementById('diskGuardCheckSeconds').value)
+          })
+        });
+        renderDiskGuard(payload);
+        result.textContent = `Proteção de disco salva. Estado efetivo: ${payload.state}.`;
+      } catch (error) {
+        result.textContent = `Falha ao salvar proteção de disco: ${error.message}`;
       }
     }
 
@@ -26540,6 +26620,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('refreshIngestionButton').addEventListener('click', () => loadIngestionStatus().catch(console.error));
     document.getElementById('saveDatabaseRetentionButton').addEventListener('click', () => saveDatabaseRetention().catch(console.error));
     document.getElementById('applyDatabaseTtlButton').addEventListener('click', () => applyDatabaseTtl().catch(console.error));
+    document.getElementById('saveDiskGuardButton').addEventListener('click', () => saveDiskGuard().catch(console.error));
     document.querySelectorAll('.database-cleanup-button').forEach(button => {
       button.addEventListener('click', () => cleanupDatabase(Number(button.dataset.days)).catch(console.error));
     });

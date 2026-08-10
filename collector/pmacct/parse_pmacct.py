@@ -4,6 +4,7 @@ import csv
 import gzip
 import json
 import os
+import re
 import shutil
 import time
 from datetime import datetime, timezone
@@ -420,30 +421,89 @@ def compress_file(path: Path) -> Path:
     return gz_path
 
 
-def cleanup_old_rotations(directory: Path, keep_days: int) -> int:
+def rotation_checkpoint_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.processed.json")
+
+
+def rotation_cleanup_eligible(path: Path, checkpoint: dict[str, Any]) -> bool:
+    name = path.name.lower()
+    if "backlog" in name or not re.search(r"-\d{8}-\d{6}\.csv(?:\.gz)?$", name):
+        return False
+    try:
+        offset = int(checkpoint.get("offset"))
+        file_size = int(checkpoint.get("file_size"))
+        lag_bytes = int(checkpoint.get("lag_bytes"))
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        checkpoint.get("checkpoint_valid") is True
+        and checkpoint.get("ingestion_complete") is True
+        and checkpoint.get("archive") == str(path)
+        and file_size >= 0
+        and offset >= file_size
+        and lag_bytes == 0
+    )
+
+
+def cleanup_old_rotations(directory: Path, keep_days: int, active_file: Path | None = None) -> int:
     if keep_days <= 0 or not directory.exists():
         return 0
     cutoff = time.time() - keep_days * 86400
     deleted = 0
-    for path in directory.glob("*.csv*.gz"):
+    candidates = [*directory.glob("*.csv"), *directory.glob("*.csv.gz")]
+    for path in candidates:
         try:
-            if path.stat().st_mtime < cutoff:
+            if active_file is not None and path.resolve() == active_file.resolve():
+                continue
+            checkpoint_path = rotation_checkpoint_path(path)
+            try:
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if path.stat().st_mtime < cutoff and rotation_cleanup_eligible(path, checkpoint):
                 path.unlink()
+                if checkpoint_path.exists():
+                    checkpoint_path.unlink()
                 deleted += 1
-        except OSError:
+        except (OSError, RuntimeError):
             continue
     return deleted
 
 
 def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_days: int) -> dict[str, Any]:
+    if not output_file.exists():
+        raise RuntimeError("active pmacct CSV does not exist")
+    source_size = output_file.stat().st_size
+    try:
+        checkpoint = json.loads(tailer.state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("pmacct rotation requires a valid parser checkpoint") from exc
+    checkpoint_offset = safe_int(checkpoint.get("offset"), default=-1, minimum=-1)
+    if checkpoint.get("file") != str(output_file) or checkpoint_offset < source_size or tailer.offset < source_size:
+        raise RuntimeError("pmacct rotation blocked: active CSV ingestion is not complete")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     rotated = output_file.with_name(f"{output_file.stem}-{timestamp}{output_file.suffix}")
     shutil.copy2(output_file, rotated)
+    if output_file.stat().st_size != source_size:
+        raise RuntimeError("pmacct rotation blocked: active CSV changed while it was copied")
     with output_file.open("w", encoding="utf-8"):
         pass
     final_path = compress_file(rotated) if compress else rotated
+    write_status(
+        rotation_checkpoint_path(final_path),
+        {
+            "archive": str(final_path),
+            "source_file": str(output_file),
+            "file_size": source_size,
+            "offset": checkpoint_offset,
+            "lag_bytes": 0,
+            "checkpoint_valid": True,
+            "ingestion_complete": True,
+            "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
     tailer.reset_for_new_file()
-    deleted = cleanup_old_rotations(output_file.parent, keep_days)
+    deleted = cleanup_old_rotations(output_file.parent, keep_days, active_file=output_file)
     return {
         "rotated_to": str(final_path),
         "method": "copytruncate",
