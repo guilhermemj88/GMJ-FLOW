@@ -7036,12 +7036,12 @@ def apply_clickhouse_table_ttl(table: str, time_column: str, enabled: bool, hour
     full_table = clickhouse_table_name(table)
     if enabled:
         command = (
-            f"ALTER TABLE IF EXISTS {full_table} "
+            f"ALTER TABLE {full_table} "
             f"MODIFY TTL toDateTime({time_column}) + INTERVAL {hours} HOUR DELETE "
             "SETTINGS materialize_ttl_after_modify = 0"
         )
     else:
-        command = f"ALTER TABLE IF EXISTS {full_table} REMOVE TTL"
+        command = f"ALTER TABLE {full_table} REMOVE TTL"
     command_clickhouse(command, admin=True)
     return command
 

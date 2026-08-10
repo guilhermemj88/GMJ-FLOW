@@ -148,7 +148,26 @@ class RetentionCompatibilityTest(unittest.TestCase):
         ns["clickhouse_table_name"] = lambda table: f"flowdb.{table}"
         ns["command_clickhouse"] = lambda command, **_kwargs: commands.append(command)
         command = ns["apply_clickhouse_table_ttl"]("flow_raw", "flow_time", True, 12)
+        self.assertTrue(command.startswith("ALTER TABLE flowdb.flow_raw MODIFY TTL "))
+        self.assertNotIn("ALTER TABLE IF EXISTS", command)
         self.assertIn("INTERVAL 12 HOUR DELETE", command)
+        self.assertIn("SETTINGS materialize_ttl_after_modify = 0", command)
+        self.assertNotIn("OPTIMIZE", command.upper())
+        self.assertEqual([command], commands)
+
+    def test_generated_remove_ttl_is_clickhouse_24_8_compatible(self):
+        ns = load_definitions(
+            MAIN_SOURCE,
+            functions=("setting_int", "apply_clickhouse_table_ttl"),
+        )
+        commands = []
+        ns["clickhouse_ttl_matches"] = lambda *_args, **_kwargs: False
+        ns["clickhouse_table_name"] = lambda table: f"flowdb.{table}"
+        ns["command_clickhouse"] = lambda command, **_kwargs: commands.append(command)
+        command = ns["apply_clickhouse_table_ttl"]("anomaly_events", "event_time", False, 720)
+        self.assertEqual("ALTER TABLE flowdb.anomaly_events REMOVE TTL", command)
+        self.assertNotIn("ALTER TABLE IF EXISTS", command)
+        self.assertNotIn("MATERIALIZE TTL", command.upper())
         self.assertNotIn("OPTIMIZE", command.upper())
         self.assertEqual([command], commands)
 
