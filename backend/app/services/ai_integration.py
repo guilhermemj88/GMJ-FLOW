@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from app.services.threat_contracts import THREAT_CLASSIFICATION_SCHEMA
+
 
 AI_PROVIDER_TYPES = {
     "ollama",
@@ -37,6 +39,7 @@ AI_FUNCTIONS = (
     ("flowspec_explanation", "Explicação de regra FlowSpec"),
     ("attack_summary", "Resumo de ataque"),
     ("severity_classification", "Classificação de severidade"),
+    ("threat_classification", "Classificação de vetor/campanha de ameaça"),
     ("report_generation", "Geração de relatório"),
     ("daily_summary", "Resumo diário"),
     ("bgp_diagnosis", "Diagnóstico BGP"),
@@ -87,6 +90,16 @@ DEFAULT_PROMPTS = {
         "user_template": "Analise as evidencias da anomalia {{anomaly_id}} e responda somente apply_mitigation e reason.",
         "variables": ["anomaly_id", "sensor_name", "connector_name", "flows", "bgp_status"],
         "schema": MITIGATION_SCHEMA,
+    },
+    "threat_classification": {
+        "name": "Classificação de vetor/campanha de ameaça",
+        "system_prompt": (
+            "Classifique apenas o Attack Vector ou Campaign Vector agregado recebido. "
+            "Nunca solicite nem infira flows brutos, nunca gere regra de bloqueio e retorne somente JSON valido."
+        ),
+        "user_template": "Classifique o vetor agregado {{vector}} sem alterar seus campos determinísticos.",
+        "variables": ["vector"],
+        "schema": THREAT_CLASSIFICATION_SCHEMA,
     },
     "notification_text": {
         "name": "Texto de notificação",

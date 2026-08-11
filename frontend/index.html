@@ -25,6 +25,7 @@
   <title>GMJ-FLOW</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet">
+  <link href="threat-intelligence.css" rel="stylesheet">
   <style id="geo-flow-map-styles">
 /* GeoFlowMap styles:start */
 .geo-flow-map {
@@ -3225,6 +3226,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         </button>
         <button id="usersNavButton" type="button" data-nav-view="users" data-required-permission="users.view">
           <i data-lucide="users"></i><span>Usuários e Acessos</span>
+        </button>
+        <button id="threatIntelligenceNavButton" type="button" data-nav-view="threat-intelligence" data-required-permission="anomalies.view">
+          <i data-lucide="radar"></i><span>Threat Intelligence</span>
         </button>
         <button id="myAccountNavButton" type="button" data-nav-view="my-account">
           <i data-lucide="circle-user-round"></i><span>Minha conta</span>
@@ -7218,6 +7222,73 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
         </section>
 
+        <section id="view-threat-intelligence" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Threat Intelligence</h1>
+              <div id="threatWorkspaceStatus" class="subtle">Inteligência externa, vetores comportamentais, campanhas e decisões determinísticas.</div>
+            </div>
+            <div class="toolbar">
+              <button id="runThreatEngineButton" type="button" class="btn btn-sm btn-outline-secondary" data-required-permission="anomalies.manage"><i data-lucide="scan-search"></i><span>Executar detecção</span></button>
+              <button id="refreshThreatWorkspaceButton" type="button" class="btn btn-sm btn-success"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+            </div>
+          </div>
+
+          <section class="panel p-3 mb-3">
+            <div class="database-metrics-grid mb-0">
+              <div class="metric-card"><div class="metric-label">Providers online</div><div id="threatSummaryOnline" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Indicadores ativos</div><div id="threatSummaryRecords" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Vetores recentes</div><div id="threatSummaryVectors" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Campanhas recentes</div><div id="threatSummaryCampaigns" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Autorizações automáticas</div><div id="threatSummaryAllowed" class="metric-value">0</div></div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+              <div><div class="panel-title">Providers</div><div class="subtle">Credenciais nunca são exibidas; apenas o estado configurado.</div></div>
+              <div class="threat-source-legend" aria-label="Legenda de origem">
+                <span class="threat-source-badge source-gmj">GMJ-FLOW</span>
+                <span class="threat-source-badge source-external">External Threat Intel</span>
+                <span class="threat-source-badge source-manual">Manual</span>
+                <span class="threat-source-badge source-allowlist">Allowlist/Exception</span>
+              </div>
+            </div>
+            <div id="threatProviderCards" class="threat-provider-grid"><div class="subtle">Carregando providers...</div></div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="flow-search-grid mb-3">
+              <div class="field"><label for="threatProviderFilter">Provider</label><select id="threatProviderFilter" class="form-select form-select-sm"><option value="">Todos</option></select></div>
+              <div class="field"><label for="threatClassificationFilter">Classificação</label><select id="threatClassificationFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="malicious">Malicious</option><option value="suspicious">Suspicious</option><option value="c2">C2</option></select></div>
+              <div class="field"><label for="threatTagFilter">Tag</label><select id="threatTagFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="botnet">Botnet</option><option value="mirai">Mirai</option><option value="telnet">Telnet</option><option value="ssh">SSH brute force</option><option value="port scan">Port scan</option><option value="iot">IoT</option></select></div>
+              <div class="field"><label for="threatGroupFilter">Agrupar mapa</label><select id="threatGroupFilter" class="form-select form-select-sm"><option value="country">País</option><option value="asn">ASN</option><option value="organization">Organização</option><option value="ip">IP</option></select></div>
+              <div class="field"><label>&nbsp;</label><button id="applyThreatFiltersButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="filter"></i><span>Aplicar</span></button></div>
+            </div>
+            <div id="threatGlobalMap" class="threat-global-map"></div>
+          </section>
+
+          <div class="row g-3 mb-3">
+            <div class="col-xl-7">
+              <section class="panel p-3 h-100">
+                <div class="panel-title mb-2">Attack Vectors</div>
+                <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Tipo / direção</th><th>Origem → alvo</th><th>Score</th><th>Evidências</th><th>Threat Intel</th><th>Campanha</th><th>Última ocorrência</th></tr></thead><tbody id="threatVectorRows"><tr><td colspan="7" class="text-muted">Nenhum vetor carregado.</td></tr></tbody></table></div>
+              </section>
+            </div>
+            <div class="col-xl-5">
+              <section class="panel p-3 h-100">
+                <div class="panel-title mb-2">Campaign Vectors</div>
+                <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Campanha</th><th>Classe / alvo</th><th>Coordenação</th><th>Fontes / ASNs</th><th>Intel</th></tr></thead><tbody id="threatCampaignRows"><tr><td colspan="5" class="text-muted">Nenhuma campanha carregada.</td></tr></tbody></table></div>
+              </section>
+            </div>
+          </div>
+
+          <section class="panel p-3">
+            <div class="panel-title mb-2">Decisões, FlowSpec e TTL</div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Decisão</th><th>Classificação</th><th>Policy / Groq</th><th>Origem</th><th>FlowSpec proposto</th><th>TTL</th><th>Motivo</th><th>Data</th></tr></thead><tbody id="threatDecisionRows"><tr><td colspan="8" class="text-muted">Nenhuma decisão registrada.</td></tr></tbody></table></div>
+          </section>
+        </section>
+
         <section id="view-users" class="app-view">
           <div class="view-header">
             <div>
@@ -9453,6 +9524,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
 /* GeoFlowMap component:end */
   </script>
+  <script src="threat-intelligence.js"></script>
   <script>
     const API_BASE = '';
     const AUTH_TOKEN_KEY = 'gmjFlowAuthToken';
@@ -13863,7 +13935,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td>#${escapeHtml(item.id)}</td>
             <td>#${escapeHtml(item.anomaly_id)}</td>
             <td>${escapeHtml(item.vector || '-')}<br><span class="subtle">${escapeHtml(item.profile || '-')}</span></td>
-            <td>${automaticMitigationStatusBadge(item)}<br><span class="subtle">${item.automatic ? 'Automática' : 'Manual'}</span></td>
+            <td>${automaticMitigationStatusBadge(item)}<br><span class="subtle">${item.automatic ? 'Automática' : 'Manual'}</span><br>${window.threatDecisionSourceBadge?.(item) || ''}</td>
             <td>${mitigationConnectorLink(item)}</td>
             <td><span class="subtle">${escapeHtml(match)}</span><details><summary>Comando</summary><pre class="mb-0">${escapeHtml(item.command || '-')}</pre></details></td>
             <td>${formatDateTime(item.applied_at)}</td>
@@ -13907,7 +13979,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${item.anomaly_id ? `#${escapeHtml(item.anomaly_id)}` : '-'}</td>
           <td>${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}</td>
           <td>${mitigationConnectorLink(item)}</td>
-          <td>${bgpAnnouncementStatusBadge(item)}<br>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${bgpAnnouncementStatusBadge(item)}<br>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br>${window.threatDecisionSourceBadge?.(item) || ''}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
@@ -13939,7 +14011,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${bgpAnnouncementStatusBadge(item)}</td>
           <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br>${window.threatDecisionSourceBadge?.(item) || ''}<br><span class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</span></td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${formatDateTime(item.expires_at)}<br><span class="subtle">UTC: ${escapeHtml(item.expires_at || '-')}</span></td>
@@ -13954,7 +14026,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${bgpAnnouncementStatusBadge(item)}</td>
           <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}</td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br>${window.threatDecisionSourceBadge?.(item) || ''}</td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</td>
           <td>${escapeHtml(item.last_error || '-')}</td>
@@ -13970,7 +14042,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td>${bgpAnnouncementStatusBadge(item)}</td>
           <td>${mitigationConnectorLink(item)}</td>
           <td>${escapeHtml(item.response_profile_name || item.response_profile_id || '-')}</td>
-          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}</td>
+          <td>${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<br>${window.threatDecisionSourceBadge?.(item) || ''}</td>
           <td>${escapeHtml(bgpActionLabel(item))}</td>
           <td>${escapeHtml(item.last_error || '-')}</td>
           <td>${bgpCommandDetails(item)}</td>
@@ -26127,7 +26199,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const requirements = {
         dashboard: 'dashboard.view', flows: 'dashboard.view', 'global-map': 'dashboard.view',
         sensors: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
-        'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'peak-hunter': 'anomalies.view',
+        'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'threat-intelligence': 'anomalies.view', 'peak-hunter': 'anomalies.view',
         mitigation: 'mitigations.view', 'bgp-connectors': 'bgp.view', ai: 'settings.view',
         system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view'
       };
@@ -26222,6 +26294,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-anomalies').classList.add('active');
         document.querySelector('[data-nav-view="anomalies"]').classList.add('active');
         loadAnomalies(anomalyActiveTab).catch(console.error);
+      } else if (view === 'threat-intelligence') {
+        document.getElementById('view-threat-intelligence').classList.add('active');
+        document.querySelector('[data-nav-view="threat-intelligence"]').classList.add('active');
+        window.loadThreatIntelligenceWorkspace?.().catch(console.error);
       } else if (view === 'peak-hunter') {
         document.getElementById('view-peak-hunter').classList.add('active');
         document.querySelector('[data-nav-view="peak-hunter"]').classList.add('active');

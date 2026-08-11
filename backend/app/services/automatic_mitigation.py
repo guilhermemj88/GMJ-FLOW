@@ -168,6 +168,8 @@ class MitigationCandidate:
     policy_authorized: bool = False
     anomaly_status: str = "active"
     metadata: dict[str, Any] = field(default_factory=dict)
+    decision_source: str = "GMJ_FLOW"
+    intel_sources: list[str] = field(default_factory=list)
 
     @classmethod
     def from_mapping(cls, item: Mapping[str, Any]) -> "MitigationCandidate":
@@ -221,6 +223,8 @@ class MitigationCandidate:
             ),
             anomaly_status=clean_text(item.get("anomaly_status") or "active").lower(),
             metadata=dict(metadata),
+            decision_source=clean_text(item.get("decision_source") or "GMJ_FLOW"),
+            intel_sources=[clean_text(value) for value in item.get("intel_sources") or [] if clean_text(value)],
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -347,6 +351,8 @@ def ensure_automatic_mitigation_schema(conn: sqlite3.Connection) -> None:
             candidate_json TEXT NOT NULL DEFAULT '{}',
             gates_json TEXT NOT NULL DEFAULT '{}',
             metadata_json TEXT NOT NULL DEFAULT '{}',
+            decision_source TEXT NOT NULL DEFAULT 'GMJ_FLOW',
+            intel_sources_json TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL
         )
         """
@@ -404,6 +410,11 @@ def ensure_automatic_mitigation_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_automatic_mitigation_jobs_status "
         "ON automatic_mitigation_jobs(status, requested_at)"
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mitigation_executions)").fetchall()}
+    if "decision_source" not in columns:
+        conn.execute("ALTER TABLE mitigation_executions ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'GMJ_FLOW'")
+    if "intel_sources_json" not in columns:
+        conn.execute("ALTER TABLE mitigation_executions ADD COLUMN intel_sources_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def execution_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
@@ -415,6 +426,7 @@ def execution_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any
     item["candidate"] = json_load(item.pop("candidate_json", "{}"), {})
     item["gates"] = json_load(item.pop("gates_json", "{}"), {})
     item["metadata"] = json_load(item.pop("metadata_json", "{}"), {})
+    item["intel_sources"] = json_load(item.pop("intel_sources_json", "[]"), [])
     return item
 
 
@@ -490,9 +502,10 @@ class AutomaticMitigationOrchestrator:
                     anomaly_id, vector, profile_id, profile, candidate_kind, idempotency_key,
                     connector_id, connector_type, command, withdraw_command, normalized_match,
                     action, status, automatic, policy_reason, ttl_seconds, created_at,
-                    error_code, error_message, candidate_json, gates_json, metadata_json, updated_at
+                    error_code, error_message, candidate_json, gates_json, metadata_json,
+                    decision_source, intel_sources_json, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate.anomaly_id,
@@ -515,6 +528,8 @@ class AutomaticMitigationOrchestrator:
                     json_dump(candidate.as_dict()),
                     json_dump(candidate.gates),
                     json_dump(candidate.metadata),
+                    candidate.decision_source,
+                    json_dump(candidate.intel_sources),
                     now,
                 ),
             )
@@ -569,9 +584,10 @@ class AutomaticMitigationOrchestrator:
                             anomaly_id, vector, profile_id, profile, candidate_kind, idempotency_key,
                             connector_id, connector_type, command, withdraw_command, normalized_match,
                             action, status, automatic, policy_reason, ttl_seconds, created_at, queued_at,
-                            max_retries, candidate_json, gates_json, metadata_json, updated_at
+                            max_retries, candidate_json, gates_json, metadata_json,
+                            decision_source, intel_sources_json, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             candidate.anomaly_id,
@@ -594,6 +610,8 @@ class AutomaticMitigationOrchestrator:
                             json_dump(candidate.as_dict()),
                             json_dump(candidate.gates),
                             json_dump(candidate.metadata),
+                            candidate.decision_source,
+                            json_dump(candidate.intel_sources),
                             now,
                         ),
                     )

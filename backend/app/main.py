@@ -44,6 +44,8 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.api.threat_intelligence import router as threat_intelligence_router
+from app.api.threat_engine import router as threat_engine_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
@@ -224,6 +226,21 @@ from app.services.time_buckets import (
     range_minutes_for_window,
     series_data_quality,
 )
+from app.services.threat_intelligence import THREAT_INTEL_MANAGER, ensure_threat_intel_schema
+from app.services.behavioral_detection import (
+    AttackVector,
+    BEHAVIORAL_THREAT_RUNTIME,
+    CampaignVector,
+    behavioral_clickhouse_schema_statements,
+    ensure_behavioral_schema,
+)
+from app.services.threat_policy import (
+    MitigationProposal,
+    PolicyDecision,
+    compact_attack_vector,
+    compact_campaign_vector,
+    ensure_threat_policy_schema,
+)
 
 
 app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
@@ -269,6 +286,8 @@ app.add_middleware(
 )
 app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
+app.include_router(threat_intelligence_router)
+app.include_router(threat_engine_router)
 
 PROTO_LABELS = {
     "1": "ICMP",
@@ -1783,6 +1802,8 @@ def ensure_clickhouse_schema() -> None:
             "ALTER TABLE flow_raw ADD COLUMN IF NOT EXISTS duration_ms UInt64 DEFAULT 0",
         )
         for command in commands:
+            command_clickhouse(command)
+        for command in behavioral_clickhouse_schema_statements():
             command_clickhouse(command)
         for command in dashboard_aggregate_schema_statements():
             command_clickhouse(command)
@@ -3975,6 +3996,8 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             mitigation_key TEXT NOT NULL DEFAULT '',
             attack_vector_name TEXT NOT NULL DEFAULT '',
             anomaly_source TEXT NOT NULL DEFAULT '',
+            decision_source TEXT NOT NULL DEFAULT 'MANUAL',
+            intel_sources_json TEXT NOT NULL DEFAULT '[]',
             created_by TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -4027,6 +4050,8 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_announcements", "rate_limit_bps", "rate_limit_bps INTEGER")
     ensure_sqlite_column(conn, "bgp_announcements", "rate_limit_value_raw", "rate_limit_value_raw TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "bgp_announcements", "rate_limit_unit", "rate_limit_unit TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_announcements", "decision_source", "decision_source TEXT NOT NULL DEFAULT 'MANUAL'")
+    ensure_sqlite_column(conn, "bgp_announcements", "intel_sources_json", "intel_sources_json TEXT NOT NULL DEFAULT '[]'")
     ensure_sqlite_column(conn, "bgp_response_profiles", "default_action", "default_action TEXT NOT NULL DEFAULT 'discard'")
     ensure_sqlite_column(conn, "bgp_response_profiles", "mitigation_target_mode", "mitigation_target_mode TEXT NOT NULL DEFAULT 'sensor_origin'")
     ensure_sqlite_column(conn, "bgp_response_profiles", "selected_connector_ids", "selected_connector_ids TEXT NOT NULL DEFAULT '[]'")
@@ -4287,6 +4312,9 @@ def ensure_sensor_db() -> None:
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
         ensure_ai_schema(conn, get_system_settings(conn))
+        ensure_threat_intel_schema(conn)
+        ensure_behavioral_schema(conn)
+        ensure_threat_policy_schema(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
             initial_password = os.getenv("GMJFLOW_INITIAL_ADMIN_PASSWORD", "")
@@ -4334,6 +4362,9 @@ def ensure_sensor_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     ensure_sensor_db()
+    THREAT_INTEL_MANAGER.start()
+    BEHAVIORAL_THREAT_RUNTIME.set_mitigation_handler(apply_behavioral_policy_decision)
+    BEHAVIORAL_THREAT_RUNTIME.start()
     DASHBOARD_CACHE.start_monitor()
     try:
         ensure_clickhouse_schema()
@@ -4362,6 +4393,8 @@ def startup() -> None:
 @app.on_event("shutdown")
 def shutdown() -> None:
     DASHBOARD_CACHE.stop_monitor()
+    THREAT_INTEL_MANAGER.stop()
+    BEHAVIORAL_THREAT_RUNTIME.stop()
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
     DISK_GUARD_STOP.set()
@@ -4952,6 +4985,8 @@ async def auth_middleware(request: Request, call_next):
         "/api/system",
         "/api/database",
         "/api/ai",
+        "/api/threat-intelligence",
+        "/api/threat-engine",
         "/api/dashboards",
         "/api/prefixes",
         "/api/ip-zones",
@@ -5102,6 +5137,8 @@ def permission_for_legacy_admin_route(request: Request) -> str:
         return "dashboard.view" if method == "GET" else "dashboard.manage"
     if path.startswith("/api/ai"):
         return "settings.view" if method == "GET" else "settings.manage"
+    if path.startswith(("/api/threat-intelligence", "/api/threat-engine")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
     return "settings.view" if method == "GET" else "settings.manage"
 
 
@@ -5140,6 +5177,8 @@ def permission_for_protected_api_route(request: Request) -> str:
         return "settings.view" if method == "GET" else "settings.manage"
     if path.startswith("/api/ai"):
         return "settings.view" if method == "GET" else "settings.manage"
+    if path.startswith(("/api/threat-intelligence", "/api/threat-engine")):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
     return ""
 
 
@@ -11083,6 +11122,8 @@ def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
 def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_events: bool = False, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
     item = dict(row)
     raw_payload = bgp_json_loads(item.get("raw_payload"), {})
+    threat_vector = raw_payload.get("threat_vector") if isinstance(raw_payload.get("threat_vector"), dict) else {}
+    threat_policy = raw_payload.get("policy") if isinstance(raw_payload.get("policy"), dict) else {}
     announce_command = clean_text(item.get("announce_command") or item.get("rendered_command"))
     withdraw_command = clean_text(item.get("withdraw_command")) or render_bgp_withdraw_command({**item, "announce_command": announce_command, "rendered_command": announce_command})
     action = item.get("action") or raw_payload.get("then_action") or raw_payload.get("action") or ""
@@ -11139,6 +11180,13 @@ def bgp_announcement_row_to_dict(row: sqlite3.Row | dict[str, Any], include_even
         "policy_warnings": bgp_json_loads(item.get("policy_warnings"), []),
         "policy_required_scope": bgp_json_loads(item.get("policy_required_scope"), []),
         "policy_matched_port_policies": bgp_json_loads(item.get("policy_matched_port_policies"), []),
+        "decision_source": item.get("decision_source") or ("MANUAL" if item.get("source") == "manual" else "GMJ_FLOW"),
+        "intel_sources": bgp_json_loads(item.get("intel_sources_json"), []),
+        "direction": clean_text(threat_vector.get("direction")),
+        "affected_customer": clean_text(raw_payload.get("affected_customer")),
+        "threat_score": int_or_none(threat_policy.get("policy_score") or threat_vector.get("detector_score") or threat_vector.get("coordination_score")),
+        "threat_confidence": threat_vector.get("confidence") or (threat_policy.get("ai_result") or {}).get("confidence"),
+        "threat_hits": int_or_none((threat_vector.get("threat_intel") or {}).get("match_count")) or len(bgp_json_loads(item.get("intel_sources_json"), [])),
         "raw_payload": raw_payload,
         "source": item.get("source") or "manual",
         "source_id": item.get("source_id") or "",
@@ -22352,6 +22400,7 @@ def insert_bgp_mitigation_announcement(
         "announce_command", "withdraw_command", "pipe_path", "rendered_command", "match_json", "then_json",
         "validation_errors", "validation_warnings",
         "raw_payload", "source", "source_id", "mitigation_key", "attack_vector_name", "anomaly_source", "last_error",
+        "decision_source", "intel_sources_json",
         "policy_decision", "policy_severity", "policy_reasons", "policy_warnings",
         "policy_required_scope", "policy_matched_port_policies", "created_by", "created_at", "updated_at",
         "approved_at", "rejected_at", "withdrawn_at",
@@ -22404,6 +22453,8 @@ def insert_bgp_mitigation_announcement(
         candidate.get("attack_vector_name") or "",
         candidate.get("anomaly_source") or "",
         last_error,
+        clean_text(candidate.get("decision_source") or ("MANUAL" if clean_text(candidate.get("source")).lower() == "manual" else "GMJ_FLOW")),
+        json.dumps(candidate.get("intel_sources") or [], sort_keys=True, default=str),
         policy.get("decision") or "",
         policy.get("severity") or "",
         json.dumps(policy.get("reasons") or [], sort_keys=True, default=str),
@@ -22928,6 +22979,198 @@ def dns_multi_target_child_candidates(candidate: dict[str, Any], selected_dns_ta
         child["mitigation_key"] = mitigation_key_for_candidate(child)
         children.append(child)
     return children or [candidate]
+
+
+def record_behavioral_flowspec_audit(
+    conn: sqlite3.Connection,
+    vector: AttackVector | CampaignVector,
+    decision: PolicyDecision,
+    candidate: dict[str, Any],
+    result: dict[str, Any],
+    reason: str = "",
+) -> None:
+    ensure_behavioral_schema(conn)
+    is_attack = isinstance(vector, AttackVector)
+    conn.execute(
+        """
+        INSERT INTO threat_engine_audit (
+            event_type, detector, attack_vector_json, campaign_vector_json,
+            threat_intel_json, groq_result_json, policy_result_json,
+            mitigation_decision_json, flowspec_json, router_response_json,
+            reason, non_mitigation_reason, ttl_seconds, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "FLOWSPEC_RESULT",
+            vector.detector if is_attack else "campaign_engine",
+            json.dumps(compact_attack_vector(vector), sort_keys=True, default=str) if is_attack else "{}",
+            json.dumps(compact_campaign_vector(vector), sort_keys=True, default=str) if not is_attack else "{}",
+            json.dumps({"intel_sources": decision.intel_sources}, sort_keys=True, default=str),
+            json.dumps(decision.ai_result, sort_keys=True, default=str),
+            json.dumps(decision.as_dict(), sort_keys=True, default=str),
+            json.dumps({"decision": decision.decision, "allowed": decision.allowed}, sort_keys=True),
+            json.dumps(candidate, sort_keys=True, default=str),
+            json.dumps(result, sort_keys=True, default=str),
+            decision.reason if not reason else "",
+            reason,
+            int((decision.proposal or MitigationProposal(action="discard", ttl_seconds=0)).ttl_seconds),
+            utc_now_iso(),
+        ),
+    )
+
+
+def behavioral_affected_customer(conn: sqlite3.Connection, vector: AttackVector | CampaignVector) -> str:
+    target = vector.target_prefix if isinstance(vector, CampaignVector) else vector.target_prefix or vector.target_ip
+    if not clean_text(target):
+        return ""
+    try:
+        target_network = ip_network(clean_text(target), strict=False)
+    except ValueError:
+        return ""
+    rows = conn.execute(
+        """
+        SELECT z.name AS zone_name, p.name AS prefix_name, p.cidr
+        FROM ip_zone_prefixes p
+        JOIN ip_zones z ON z.id = p.zone_id
+        WHERE p.active=1 AND z.active=1
+        ORDER BY p.id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            customer_network = ip_network(clean_text(row["cidr"]), strict=False)
+        except ValueError:
+            continue
+        if target_network.version == customer_network.version and target_network.overlaps(customer_network):
+            return clean_text(row["prefix_name"]) or clean_text(row["zone_name"])
+    return ""
+
+
+def apply_behavioral_policy_decision(
+    vector: AttackVector | CampaignVector,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Bridge an authorized aggregate vector into the existing FlowSpec lifecycle."""
+    proposal = decision.proposal
+    if not decision.allowed or proposal is None:
+        return {"status": "not_applied", "reason": "policy_not_authorized"}
+
+    with sqlite_connection() as conn:
+        ensure_bgp_db(conn)
+        configured_profile_id = int_or_none(os.getenv("GMJFLOW_THREAT_RESPONSE_PROFILE_ID"))
+        if configured_profile_id is not None:
+            profile_rows = conn.execute(
+                """
+                SELECT id FROM bgp_response_profiles
+                WHERE id = ? AND enabled = 1 AND response_type = 'flowspec'
+                  AND approval_mode IN ('auto', 'automatic')
+                  AND mitigation_target_mode = 'fixed_connector'
+                  AND connector_id IS NOT NULL
+                """,
+                (configured_profile_id,),
+            ).fetchall()
+        else:
+            profile_rows = conn.execute(
+                """
+                SELECT id FROM bgp_response_profiles
+                WHERE enabled = 1 AND response_type = 'flowspec'
+                  AND approval_mode IN ('auto', 'automatic')
+                  AND mitigation_target_mode = 'fixed_connector'
+                  AND connector_id IS NOT NULL
+                ORDER BY id
+                """
+            ).fetchall()
+        if len(profile_rows) != 1:
+            reason = "flowspec_profile_not_configured" if not profile_rows else "flowspec_profile_ambiguous"
+            result = {"status": "not_applied", "reason": reason}
+            record_behavioral_flowspec_audit(conn, vector, decision, {}, result, reason)
+            conn.commit()
+            return result
+        profile = fetch_bgp_profile(conn, int(profile_rows[0]["id"]))
+        if profile is None:
+            result = {"status": "not_applied", "reason": "flowspec_profile_not_found"}
+            record_behavioral_flowspec_audit(conn, vector, decision, {}, result, result["reason"])
+            conn.commit()
+            return result
+
+        compact_vector = compact_attack_vector(vector) if isinstance(vector, AttackVector) else compact_campaign_vector(vector)
+        affected_customer = behavioral_affected_customer(conn, vector)
+        source_id = vector.campaign_id if isinstance(vector, CampaignVector) else event_key_for_behavioral_vector(vector)
+        candidate = {
+            "response_profile_id": int(profile["id"]),
+            "response_profile_name": clean_text(profile.get("name")),
+            "connector_id": int_or_none(profile.get("connector_id")),
+            "response_type": "flowspec",
+            "action": proposal.action,
+            "then_action": proposal.action,
+            "target_prefix": proposal.dst_prefix or proposal.src_prefix,
+            "src_prefix": proposal.src_prefix,
+            "dst_prefix": proposal.dst_prefix,
+            "protocol": clean_text(proposal.protocol).lower(),
+            "src_port": clean_text(proposal.src_port),
+            "dst_port": clean_text(proposal.dst_port),
+            "tcp_flags": clean_text(proposal.tcp_flags).lower(),
+            "duration_seconds": int(proposal.ttl_seconds),
+            "mitigation_mode": "automatic",
+            "requested_mode": "automatic",
+            "candidate_role": AUTOMATIC_PRIMARY,
+            "auto_allowed": True,
+            "eligible": True,
+            "eligible_for_automatic": True,
+            "_automatic_orchestrator": True,
+            "source": "gmj_threat_engine",
+            "source_id": source_id,
+            "anomaly_source": "threat_engine",
+            "attack_vector_name": decision.classification,
+            "decision_source": decision.decision_source,
+            "intel_sources": list(decision.intel_sources),
+            "confidence": float(vector.confidence) if isinstance(vector, AttackVector) else float(vector.coordination_score) / 100.0,
+            "policy_score": decision.policy_score,
+            "cooldown_seconds": max(0, int(os.getenv("GMJFLOW_THREAT_POLICY_COOLDOWN_SECONDS", "300"))),
+            "require_protected_prefix": bool(profile.get("require_protected_prefix")),
+            "max_auto_prefixlen_v4": int_or_none(profile.get("max_prefixlen_v4")),
+            "max_auto_prefixlen_v6": int_or_none(profile.get("max_prefixlen_v6")),
+            "raw_payload": {
+                "threat_vector": compact_vector,
+                "policy": decision.as_dict(),
+                "affected_customer": affected_customer,
+            },
+        }
+        # The safety gate is deliberately repeated after profile resolution and
+        # directly before entering the existing FlowSpec creation lifecycle.
+        safety = BEHAVIORAL_THREAT_RUNTIME.get_policy_engine().safety_guard.evaluate(proposal)
+        if not safety.get("passed"):
+            result = {"status": "blocked", "reason": "safety_revalidation_failed", "safety": safety}
+            record_behavioral_flowspec_audit(conn, vector, decision, candidate, result, result["reason"])
+            conn.commit()
+            return result
+        try:
+            result = apply_mitigation_candidate(conn, candidate, "automatic", "gmj-threat-engine")
+        except HTTPException as exc:
+            result = {"status": "failed", "reason": clean_text(exc.detail), "http_status": exc.status_code}
+            record_behavioral_flowspec_audit(conn, vector, decision, candidate, result, result["reason"])
+            conn.commit()
+            return result
+        record_behavioral_flowspec_audit(conn, vector, decision, candidate, result)
+        if clean_text(result.get("status")) in {"advertised", "active", "announced"}:
+            entity_type = "PREFIX" if isinstance(vector, CampaignVector) else "IP"
+            entity_key = vector.target_prefix if isinstance(vector, CampaignVector) else vector.src_ip or vector.target_ip or vector.target_prefix
+            if entity_key:
+                conn.execute(
+                    """
+                    UPDATE gmj_threat_history
+                    SET prior_mitigations=prior_mitigations+1, updated_at=?
+                    WHERE entity_type=? AND entity_key=?
+                    """,
+                    (utc_now_iso(), entity_type, entity_key),
+                )
+        conn.commit()
+        return result
+
+
+def event_key_for_behavioral_vector(vector: AttackVector) -> str:
+    raw = f"{vector.attack_type}|{vector.src_ip}|{vector.target_prefix or vector.target_ip}|{vector.last_seen}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def apply_mitigation_candidates(
