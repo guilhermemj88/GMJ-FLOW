@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -34,6 +35,7 @@ from app.services.behavioral_detection import (  # noqa: E402
     PortScanDetector,
     SynFloodDetector,
     UdpFloodDetector,
+    cached_intel_lookup,
     ensure_behavioral_schema,
 )
 
@@ -130,6 +132,85 @@ class BehavioralDetectorTest(unittest.TestCase):
         match = next(item for item in SynFloodDetector().detect(rows, bogon_lookup) if item.target_prefix.endswith("/32"))
         self.assertEqual(SPOOFED_SYN_FLOOD, match.attack_type)
         self.assertGreaterEqual(match.features["spoofing_likelihood"], 60)
+
+    def test_syn_flood_c2_enriches_but_does_not_replace_behavior(self):
+        rows = [flow(source="198.18.2.90", destination="203.0.113.60", flags=0x02, packets=1200, bytes_count=72000)]
+        plain = next(item for item in SynFloodDetector().detect(rows, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
+
+        def c2_lookup(ip, context=None):
+            return {"matches": [{"provider": "CEREAL2", "indicator_type": "C2", "classification": "c2", "botnet_family": "Mirai"}]}
+
+        enriched = next(item for item in SynFloodDetector().detect(rows, c2_lookup) if item.target_prefix.endswith("/32"))
+        self.assertEqual(SYN_FLOOD, enriched.attack_type)
+        self.assertEqual(1, enriched.threat_intel["source_intel"]["c2_sources"])
+        self.assertIn("CEREAL2", enriched.intel_sources)
+        self.assertGreater(enriched.detector_score, plain.detector_score)
+        self.assertLessEqual(enriched.features["source_intel_score_boost"], 10)
+
+    def test_distributed_syn_mixed_providers_has_bounded_intel_boost(self):
+        rows = [
+            flow(source=f"198.18.7.{index}", destination="203.0.113.61", flags=0x02, packets=100, bytes_count=6000)
+            for index in range(1, 26)
+        ]
+
+        def mixed_lookup(ip, context=None):
+            last = int(ip.rsplit(".", 1)[1])
+            if last % 3 == 0:
+                return {"matches": [{"provider": "TEAM_CYMRU", "indicator_type": "BOGON", "classification": "anomalous_source"}]}
+            if last % 2 == 0:
+                return {"matches": [{"provider": "FEODO", "indicator_type": "C2", "classification": "c2"}]}
+            return {"matches": [{"provider": "GREYNOISE", "indicator_type": "IP", "classification": "malicious", "tags": [{"name": "scanner"}]}]}
+
+        match = next(item for item in SynFloodDetector().detect(rows, mixed_lookup) if item.target_prefix.endswith("/32"))
+        self.assertEqual({"TEAM_CYMRU", "FEODO", "GREYNOISE"}, set(match.intel_sources))
+        self.assertLessEqual(match.features["source_intel_score_boost"], 10)
+        self.assertGreater(match.threat_intel["source_intel"]["match_count"], 0)
+
+    def test_scanner_source_intel_greynoise_and_c2_is_post_detection(self):
+        rows = [flow(source="198.18.8.10", destination_port=port, flags=0x02) for port in range(1, 26)]
+        plain = next(item for item in PortScanDetector().detect(rows) if item.attack_type == PORT_SCAN_VERTICAL)
+
+        def greynoise(ip, context=None):
+            return {"matches": [{"provider": "GREYNOISE", "indicator_type": "IP", "classification": "malicious", "tags": [{"name": "scanner"}]}]}
+
+        enriched = next(item for item in PortScanDetector().detect(rows, greynoise) if item.attack_type == PORT_SCAN_VERTICAL)
+        self.assertGreater(enriched.detector_score, plain.detector_score)
+        self.assertEqual(["GREYNOISE"], enriched.intel_sources)
+        self.assertEqual(1, enriched.threat_intel["source_intel"]["scanner_sources"])
+
+        def c2(ip, context=None):
+            return {"matches": [{"provider": "FEODO", "indicator_type": "C2", "classification": "c2"}]}
+
+        c2_match = next(item for item in PortScanDetector().detect(rows, c2) if item.attack_type == PORT_SCAN_VERTICAL)
+        self.assertEqual(1, c2_match.threat_intel["source_intel"]["c2_sources"])
+        self.assertIn("FEODO", c2_match.intel_sources)
+
+    def test_intel_alone_creates_neither_scan_nor_syn_flood(self):
+        rows = [flow(source="198.18.9.10", destination_port=443, flags=0x02, packets=1)]
+
+        def hostile(ip, context=None):
+            return {"matches": [{"provider": "GREYNOISE", "indicator_type": "C2", "classification": "malicious"}]}
+
+        self.assertEqual([], PortScanDetector().detect(rows, hostile))
+        self.assertEqual([], SynFloodDetector().detect(rows, hostile))
+
+    def test_intel_lookup_limit_is_deterministic_and_deduplicated(self):
+        rows = [
+            flow(source=f"198.18.10.{index}", destination="203.0.113.62", flags=0x02, packets=100)
+            for index in range(1, 31)
+        ]
+        calls = []
+
+        def lookup(ip, context=None):
+            calls.append(ip)
+            return {"matches": []}
+
+        with mock.patch.dict(os.environ, {"GMJFLOW_BEHAVIOR_MAX_INTEL_LOOKUPS_PER_VECTOR": "5"}, clear=False):
+            match = next(item for item in SynFloodDetector().detect(rows, cached_intel_lookup(lookup)) if item.target_prefix.endswith("/32"))
+        self.assertEqual(5, len(calls))
+        self.assertEqual(5, len(set(calls)))
+        self.assertEqual(5, match.threat_intel["source_intel"]["lookup_count"])
+        self.assertTrue(match.threat_intel["source_intel"]["lookup_truncated"])
 
     def test_distributed_udp_flood(self):
         rows = [
@@ -235,7 +316,9 @@ class BehavioralPersistenceTest(unittest.TestCase):
         vectors, campaigns = self.engine.detect(rows, ["10.10.0.0/24"])
         match = next(item for item in vectors if item.attack_type == PORT_SCAN_VERTICAL)
         self.assertEqual("OUTBOUND", match.direction)
-        self.assertGreaterEqual(match.compromised_host_score, 60)
+        self.assertGreaterEqual(match.compromised_host_score, 70)
+        self.assertEqual("COMPROMISED_CUSTOMER", match.features["host_classification"])
+        self.assertEqual(1, match.threat_intel["source_intel"]["c2_sources"])
         stats = self.engine.persist(vectors, campaigns)
         self.assertGreater(stats["vectors"], 0)
         history = self.conn.execute("SELECT * FROM gmj_threat_history WHERE entity_key='10.10.0.10'").fetchone()
@@ -268,6 +351,51 @@ class BehavioralPersistenceTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(baseline)
         self.assertGreaterEqual(baseline["sample_count"], 1)
+
+    def test_source_intel_and_target_campaign_correlation_are_separate(self):
+        class CorrelatedIntelManager:
+            def __init__(self):
+                self.lookup_calls = []
+
+            def lookup_ip(self, ip, context=None):
+                self.lookup_calls.append(ip)
+                return {
+                    "matches": [
+                        {
+                            "provider": "GREYNOISE", "indicator_type": "IP",
+                            "classification": "malicious", "tags": [{"name": "scanner"}],
+                        }
+                    ]
+                }
+
+            def external_attack_matches(self, target, protocol, observed_at):
+                return [
+                    {
+                        "provider": "CEREAL2", "target_prefix": "203.0.113.10/32",
+                        "method": "coordinated scan", "protocol": protocol,
+                    }
+                ]
+
+        intel = CorrelatedIntelManager()
+        engine = BehavioralDetectionEngine(lambda: self.conn, intel)
+        rows = [
+            {
+                "flow_time": NOW.isoformat(), "src_ip": "198.18.30.10", "dst_ip": "203.0.113.10",
+                "src_port": 45000, "dst_port": port, "proto": 6, "tcp_flags": 2,
+                "packets": 1, "bytes": 60,
+            }
+            for port in range(1, 26)
+        ]
+        vectors, _ = engine.detect(rows)
+        match = next(item for item in vectors if item.attack_type == PORT_SCAN_VERTICAL)
+        source_intel = match.threat_intel["source_intel"]
+        target_intel = match.threat_intel["target_campaign_intel"]
+        self.assertEqual(["GREYNOISE"], source_intel["intel_sources"])
+        self.assertEqual("GREYNOISE", source_intel["sources"]["198.18.30.10"][0]["provider"])
+        self.assertEqual(["CEREAL2"], target_intel["intel_sources"])
+        self.assertEqual("CEREAL2", target_intel["observations"][0]["provider"])
+        self.assertNotIn("external_attack_observations", match.threat_intel)
+        self.assertEqual(1, intel.lookup_calls.count("198.18.30.10"))
 
 
 if __name__ == "__main__":

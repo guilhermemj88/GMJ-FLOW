@@ -21,13 +21,21 @@ from typing import Any, Callable, Iterable, Mapping
 
 LOGGER = logging.getLogger("gmj-flow")
 
-ONLINE = "ONLINE"
+ACTIVE = "ACTIVE"
+WAITING_SYNC = "WAITING_SYNC"
 DEGRADED = "DEGRADED"
 AUTH_ERROR = "AUTH_ERROR"
 RATE_LIMITED = "RATE_LIMITED"
-OFFLINE = "OFFLINE"
+ERROR = "ERROR"
 DISABLED = "DISABLED"
-PROVIDER_STATUSES = {ONLINE, DEGRADED, AUTH_ERROR, RATE_LIMITED, OFFLINE, DISABLED}
+# Kept as import-compatible legacy names. New persisted/provider-facing states use
+# ACTIVE/WAITING_SYNC/ERROR and never infer liveness from a separate health-check.
+ONLINE = "ONLINE"
+OFFLINE = "OFFLINE"
+PROVIDER_STATUSES = {
+    ACTIVE, WAITING_SYNC, DEGRADED, AUTH_ERROR, RATE_LIMITED, ERROR, DISABLED,
+    ONLINE, OFFLINE,
+}
 
 GREYNOISE = "GREYNOISE"
 CEREAL2 = "CEREAL2"
@@ -182,6 +190,8 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
             pages INTEGER NOT NULL DEFAULT 0,
             items_processed INTEGER NOT NULL DEFAULT 0,
             items_active INTEGER NOT NULL DEFAULT 0,
+            phase TEXT NOT NULL DEFAULT '',
+            endpoint TEXT NOT NULL DEFAULT '',
             error_message TEXT NOT NULL DEFAULT '',
             duration_ms INTEGER NOT NULL DEFAULT 0
         );
@@ -214,6 +224,26 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
             ON threat_network_contexts(enabled, sensor_name, exporter_ip, input_if, output_if);
         """
     )
+    audit_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(threat_intel_sync_audit)").fetchall()
+    }
+    if "phase" not in audit_columns:
+        conn.execute("ALTER TABLE threat_intel_sync_audit ADD COLUMN phase TEXT NOT NULL DEFAULT ''")
+    if "endpoint" not in audit_columns:
+        conn.execute("ALTER TABLE threat_intel_sync_audit ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''")
+    conn.execute("UPDATE threat_intel_providers SET status=? WHERE status='ONLINE'", (ACTIVE,))
+    conn.execute(
+        """
+        UPDATE threat_intel_providers
+        SET status=CASE
+            WHEN last_sync IS NULL AND last_error='' THEN ?
+            WHEN last_error<>'' THEN ?
+            ELSE ? END
+        WHERE status='OFFLINE'
+        """,
+        (WAITING_SYNC, ERROR, WAITING_SYNC),
+    )
     now = utc_now_iso()
     defaults = (
         (GREYNOISE, "GreyNoise", int(bool(os.getenv("GREYNOISE_API_KEY", "").strip()))),
@@ -240,12 +270,27 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
                     ELSE threat_intel_providers.sync_interval_seconds END,
                 updated_at = excluded.updated_at
             """,
-            (provider, display_name, enabled, DISABLED if not enabled else OFFLINE, credential, interval, now),
+            (provider, display_name, enabled, DISABLED if not enabled else WAITING_SYNC, credential, interval, now),
         )
 
 
 class ThreatIntelError(RuntimeError):
     status = DEGRADED
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str = "",
+        endpoint: str = "",
+        pages: int = 0,
+        items_processed: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.phase = clean_text(phase)
+        self.endpoint = clean_text(endpoint)
+        self.pages = max(0, int(pages))
+        self.items_processed = max(0, int(items_processed))
 
 
 class ThreatIntelAuthError(ThreatIntelError):
@@ -257,7 +302,7 @@ class ThreatIntelRateLimitError(ThreatIntelError):
 
 
 class ThreatIntelOfflineError(ThreatIntelError):
-    status = OFFLINE
+    status = ERROR
 
 
 @dataclass
@@ -269,6 +314,8 @@ class SyncResult:
     item_count: int = 0
     duration_ms: int = 0
     error: str = ""
+    phase: str = ""
+    endpoint: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -279,6 +326,8 @@ class SyncResult:
             "item_count": self.item_count,
             "duration_ms": self.duration_ms,
             "error": self.error,
+            "phase": self.phase,
+            "endpoint": self.endpoint,
         }
 
 
@@ -293,7 +342,7 @@ class ThreatIntelProvider(ABC):
 
     @property
     def provider_status(self) -> str:
-        return clean_text(self.status().get("status")) or OFFLINE
+        return clean_text(self.status().get("status")) or WAITING_SYNC
 
     @property
     def last_success(self) -> str | None:
@@ -531,7 +580,7 @@ class GreyNoiseProvider(ThreatIntelProvider):
         page = self._query_page('last_seen:1d classification:"malicious"')
         return {
             "ok": True,
-            "status": ONLINE,
+            "status": ACTIVE,
             "latency_ms": int((time.monotonic() - started) * 1000),
             "sample_count": len(page.get("data") or []),
         }
@@ -561,7 +610,7 @@ class GreyNoiseProvider(ThreatIntelProvider):
                 seen_scrolls.add(next_scroll)
                 scroll = next_scroll
         active = self._complete_indicator_sync(token)
-        return SyncResult(self.provider, ONLINE, pages, processed, active, int((time.monotonic() - started) * 1000))
+        return SyncResult(self.provider, ACTIVE, pages, processed, active, int((time.monotonic() - started) * 1000))
 
 
 class Cereal2Provider(ThreatIntelProvider):
@@ -664,43 +713,170 @@ class Cereal2Provider(ThreatIntelProvider):
     def health_check(self) -> dict[str, Any]:
         started = time.monotonic()
         payload = self._request_json(f"{self.base_url}/api/v1/c2")
+        required = {"schema_version", "last_updated", "count", "entries"}
+        if not isinstance(payload, Mapping) or not required.issubset(payload) or not isinstance(payload.get("entries"), list):
+            raise ThreatIntelError("Resposta Cereal2 C2 incompleta", phase="health_check", endpoint="/api/v1/c2")
         return {
-            "ok": isinstance(payload, Mapping) and isinstance(payload.get("entries"), list),
-            "status": ONLINE,
+            "ok": True,
+            "status": ACTIVE,
             "latency_ms": int((time.monotonic() - started) * 1000),
         }
+
+    def _phase_json(
+        self,
+        url: str,
+        *,
+        phase: str,
+        endpoint: str,
+        pages: int,
+        items_processed: int,
+    ) -> Any:
+        try:
+            return self._request_json(url)
+        except ThreatIntelError as exc:
+            exc.phase = exc.phase or phase
+            exc.endpoint = exc.endpoint or endpoint
+            exc.pages = max(exc.pages, pages)
+            exc.items_processed = max(exc.items_processed, items_processed)
+            raise
+
+    @staticmethod
+    def _invalid_response(
+        message: str,
+        *,
+        phase: str,
+        endpoint: str,
+        pages: int,
+        items_processed: int,
+    ) -> ThreatIntelError:
+        return ThreatIntelError(
+            message,
+            phase=phase,
+            endpoint=endpoint,
+            pages=pages,
+            items_processed=items_processed,
+        )
 
     def sync(self) -> SyncResult:
         started = time.monotonic()
         token = uuid.uuid4().hex
-        pages = processed = 0
-        c2_payload = self._request_json(f"{self.base_url}/api/v1/c2")
-        c2_entries = c2_payload.get("entries") if isinstance(c2_payload, Mapping) else None
-        if not isinstance(c2_entries, list):
-            raise ThreatIntelError("Resposta Cereal2 C2 invalida")
-        processed += self._upsert_indicators(
-            [item for item in (self.normalize(raw) for raw in c2_entries if isinstance(raw, Mapping)) if item], token
+        pages = staged = 0
+        c2_endpoint = "/api/v1/c2"
+        c2_payload = self._phase_json(
+            f"{self.base_url}{c2_endpoint}",
+            phase="c2_snapshot",
+            endpoint=c2_endpoint,
+            pages=pages,
+            items_processed=staged,
         )
+        required_c2 = {"schema_version", "last_updated", "count", "entries"}
+        if not isinstance(c2_payload, Mapping) or not required_c2.issubset(c2_payload):
+            raise self._invalid_response(
+                "Resposta Cereal2 C2 incompleta",
+                phase="c2_snapshot",
+                endpoint=c2_endpoint,
+                pages=pages,
+                items_processed=staged,
+            )
+        c2_entries = c2_payload["entries"]
+        try:
+            expected_c2_count = int(c2_payload["count"])
+        except (TypeError, ValueError):
+            expected_c2_count = -1
+        if not isinstance(c2_entries, list) or expected_c2_count != len(c2_entries):
+            raise self._invalid_response(
+                "Snapshot Cereal2 C2 inconsistente",
+                phase="c2_snapshot",
+                endpoint=c2_endpoint,
+                pages=pages,
+                items_processed=staged,
+            )
+        normalized_c2 = [self.normalize(raw) for raw in c2_entries if isinstance(raw, Mapping)]
+        if len(normalized_c2) != len(c2_entries) or any(item is None for item in normalized_c2):
+            raise self._invalid_response(
+                "Snapshot Cereal2 C2 contem entrada invalida",
+                phase="c2_snapshot",
+                endpoint=c2_endpoint,
+                pages=pages,
+                items_processed=staged,
+            )
+        c2_items = [item for item in normalized_c2 if item is not None]
+        staged += len(c2_items)
         pages += 1
+
         cursor = ""
         seen: set[str] = set()
-        max_pages = max(0, int(os.getenv("GMJFLOW_CEREAL2_ATTACK_MAX_PAGES", "0")))
-        while True:
-            params = {"limit": "250"}
+        attack_items: dict[str, dict[str, Any]] = {}
+        attack_endpoint = "/api/v1/attacks"
+        configured_page_size = int(os.getenv("GMJFLOW_CEREAL2_ATTACK_PAGE_SIZE", "200"))
+        configured_max_pages = int(os.getenv("GMJFLOW_CEREAL2_ATTACK_MAX_PAGES", "20"))
+        page_size = 200 if configured_page_size <= 0 else min(configured_page_size, 200)
+        max_pages = 20 if configured_max_pages <= 0 else min(configured_max_pages, 1000)
+        watermark = ""
+        for attack_page in range(1, max_pages + 1):
+            params = {"limit": str(page_size)}
             if cursor:
                 params["cursor"] = cursor
-            payload = self._request_json(f"{self.base_url}/api/v1/attacks?{urllib.parse.urlencode(params)}")
-            events = payload.get("events") if isinstance(payload, Mapping) else None
-            if not isinstance(events, list):
-                raise ThreatIntelError("Resposta Cereal2 attacks invalida")
-            normalized = [item for item in (self.normalize_attack(raw) for raw in events if isinstance(raw, Mapping)) if item]
-            processed += self._upsert_attacks(normalized, token)
+            phase = f"attacks_page_{attack_page}"
+            payload = self._phase_json(
+                f"{self.base_url}{attack_endpoint}?{urllib.parse.urlencode(params)}",
+                phase=phase,
+                endpoint=attack_endpoint,
+                pages=pages,
+                items_processed=staged,
+            )
+            required_attack = {"events", "next_cursor", "watermark"}
+            if not isinstance(payload, Mapping) or not required_attack.issubset(payload):
+                raise self._invalid_response(
+                    "Resposta Cereal2 attacks incompleta",
+                    phase=phase,
+                    endpoint=attack_endpoint,
+                    pages=pages,
+                    items_processed=staged,
+                )
+            events = payload["events"]
+            current_watermark = clean_text(payload["watermark"])
+            if not isinstance(events, list) or not current_watermark or (watermark and watermark != current_watermark):
+                raise self._invalid_response(
+                    "Resposta Cereal2 attacks inconsistente",
+                    phase=phase,
+                    endpoint=attack_endpoint,
+                    pages=pages,
+                    items_processed=staged,
+                )
+            watermark = current_watermark
+            normalized = [self.normalize_attack(raw) for raw in events if isinstance(raw, Mapping)]
+            if len(normalized) != len(events) or any(item is None for item in normalized):
+                raise self._invalid_response(
+                    "Pagina Cereal2 attacks contem evento invalido",
+                    phase=phase,
+                    endpoint=attack_endpoint,
+                    pages=pages,
+                    items_processed=staged,
+                )
+            for item in normalized:
+                if item is not None:
+                    attack_items[item["external_id"]] = item
+            staged += len(normalized)
             pages += 1
-            next_cursor = clean_text(payload.get("next_cursor"))
-            if not next_cursor or not events or next_cursor in seen or (max_pages and pages - 1 >= max_pages):
+            next_cursor = clean_text(payload["next_cursor"])
+            if not next_cursor or not events:
                 break
+            if next_cursor == cursor or next_cursor in seen:
+                raise self._invalid_response(
+                    "Cursor Cereal2 attacks repetido",
+                    phase=phase,
+                    endpoint=attack_endpoint,
+                    pages=pages,
+                    items_processed=staged,
+                )
             seen.add(next_cursor)
             cursor = next_cursor
+
+        # No provider state is mutated until the complete snapshot and all accepted
+        # attack pages have passed structural validation.
+        processed = self._upsert_indicators(c2_items, token)
+        processed += self._upsert_attacks(attack_items.values(), token)
         active_indicators = self._complete_indicator_sync(token)
         with self.connection_factory() as conn:
             # Attack telemetry is append-oriented. Retain a bounded operational history.
@@ -708,7 +884,7 @@ class Cereal2Provider(ThreatIntelProvider):
             conn.execute("UPDATE external_attack_observations SET active = 0 WHERE provider = ? AND observed_at < ?", (self.provider, cutoff))
             attack_count = int(conn.execute("SELECT COUNT(*) FROM external_attack_observations WHERE provider = ? AND active = 1", (self.provider,)).fetchone()[0])
             conn.commit()
-        return SyncResult(self.provider, ONLINE, pages, processed, active_indicators + attack_count, int((time.monotonic() - started) * 1000))
+        return SyncResult(self.provider, ACTIVE, pages, processed, active_indicators + attack_count, int((time.monotonic() - started) * 1000))
 
 
 class FeodoProvider(ThreatIntelProvider):
@@ -746,7 +922,7 @@ class FeodoProvider(ThreatIntelProvider):
     def health_check(self) -> dict[str, Any]:
         started = time.monotonic()
         payload = self._request_json(self.feed_url)
-        return {"ok": isinstance(payload, list), "status": ONLINE, "latency_ms": int((time.monotonic() - started) * 1000)}
+        return {"ok": isinstance(payload, list), "status": ACTIVE, "latency_ms": int((time.monotonic() - started) * 1000)}
 
     def sync(self) -> SyncResult:
         started = time.monotonic()
@@ -757,7 +933,7 @@ class FeodoProvider(ThreatIntelProvider):
         items = [item for item in (self.normalize(raw) for raw in payload if isinstance(raw, Mapping)) if item]
         processed = self._upsert_indicators(items, token)
         active = self._complete_indicator_sync(token)
-        return SyncResult(self.provider, ONLINE, 1, processed, active, int((time.monotonic() - started) * 1000))
+        return SyncResult(self.provider, ACTIVE, 1, processed, active, int((time.monotonic() - started) * 1000))
 
 
 class TeamCymruProvider(ThreatIntelProvider):
@@ -789,7 +965,7 @@ class TeamCymruProvider(ThreatIntelProvider):
         started = time.monotonic()
         payload = self._request(self.FEEDS[0][1])
         ok = any(line and not line.startswith(b"#") for line in payload.splitlines())
-        return {"ok": ok, "status": ONLINE if ok else DEGRADED, "latency_ms": int((time.monotonic() - started) * 1000)}
+        return {"ok": ok, "status": ACTIVE if ok else DEGRADED, "latency_ms": int((time.monotonic() - started) * 1000)}
 
     def sync(self) -> SyncResult:
         started = time.monotonic()
@@ -821,7 +997,7 @@ class TeamCymruProvider(ThreatIntelProvider):
             conn.execute("UPDATE threat_intel_bogons SET active = 0 WHERE provider = ? AND sync_token <> ?", (self.provider, token))
             active = int(conn.execute("SELECT COUNT(*) FROM threat_intel_bogons WHERE provider = ? AND active = 1", (self.provider,)).fetchone()[0])
             conn.commit()
-        return SyncResult(self.provider, ONLINE, pages, processed, active, int((time.monotonic() - started) * 1000))
+        return SyncResult(self.provider, ACTIVE, pages, processed, active, int((time.monotonic() - started) * 1000))
 
     def _upsert_bogons(self, rows: list[tuple[Any, ...]]) -> int:
         if not rows:
@@ -922,35 +1098,82 @@ class ThreatIntelManager:
             raise KeyError(f"provider desconhecido: {key}")
         return self.providers[key]
 
+    @staticmethod
+    def _usable_item_count(conn: sqlite3.Connection, provider: str) -> int:
+        if provider == TEAM_CYMRU:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM threat_intel_bogons WHERE provider=? AND active=1",
+                (provider,),
+            ).fetchone()[0])
+        indicator_count = int(conn.execute(
+            "SELECT COUNT(*) FROM threat_intel_indicators WHERE provider=? AND active=1",
+            (provider,),
+        ).fetchone()[0])
+        if provider != CEREAL2:
+            return indicator_count
+        attack_count = int(conn.execute(
+            "SELECT COUNT(*) FROM external_attack_observations WHERE provider=? AND active=1",
+            (provider,),
+        ).fetchone()[0])
+        return indicator_count + attack_count
+
+    @staticmethod
+    def _semantic_status(item: Mapping[str, Any], usable_count: int) -> str:
+        if not bool(item.get("enabled")):
+            return DISABLED
+        stored = clean_text(item.get("status")).upper()
+        if stored == AUTH_ERROR:
+            return AUTH_ERROR
+        if stored == RATE_LIMITED:
+            return RATE_LIMITED
+        if clean_text(item.get("last_error")):
+            return DEGRADED if usable_count > 0 else ERROR
+        if usable_count > 0:
+            return ACTIVE
+        return WAITING_SYNC
+
     def statuses(self) -> list[dict[str, Any]]:
         self.ensure_schema()
         with self.connection_factory() as conn:
             rows = conn.execute("SELECT * FROM threat_intel_providers ORDER BY provider").fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["enabled"] = bool(item.get("enabled"))
-            item["credential_configured"] = bool(item.get("credential_configured"))
-            item["config"] = safe_json(item.pop("config_json", "{}"), {})
-            items.append(item)
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["enabled"] = bool(item.get("enabled"))
+                item["credential_configured"] = bool(item.get("credential_configured"))
+                item["config"] = safe_json(item.pop("config_json", "{}"), {})
+                usable_count = self._usable_item_count(conn, clean_text(item.get("provider")))
+                item["item_count"] = usable_count
+                item["data_usable"] = usable_count > 0
+                item["status"] = self._semantic_status(item, usable_count)
+                items.append(item)
         return items
 
     def _persist_outcome(self, result: SyncResult, started_at: str, error_status: str = "") -> SyncResult:
         completed = utc_now_iso()
-        status = error_status or result.status
+        requested_status = error_status or result.status
         next_sync = (utc_now() + timedelta(seconds=self.interval_seconds(result.provider))).isoformat().replace("+00:00", "Z")
+        credential_configured = int(self.provider(result.provider).credential_configured())
         with self.connection_factory() as conn:
+            usable_count = self._usable_item_count(conn, result.provider)
+            if requested_status in {ACTIVE, ONLINE}:
+                status = ACTIVE
+            elif requested_status in {AUTH_ERROR, RATE_LIMITED}:
+                status = requested_status
+            else:
+                status = DEGRADED if usable_count > 0 else ERROR
+            result.item_count = usable_count
             conn.execute(
                 """
                 UPDATE threat_intel_providers SET
-                    status=?, last_sync=?, last_success=CASE WHEN ? = 'ONLINE' THEN ? ELSE last_success END,
+                    status=?, last_sync=?, last_success=CASE WHEN ? = 'ACTIVE' THEN ? ELSE last_success END,
                     last_error=?, last_sync_duration_ms=?, next_sync=?, item_count=?,
                     credential_configured=?, updated_at=?
                 WHERE provider=?
                 """,
                 (
                     status, completed, status, completed, result.error, result.duration_ms, next_sync,
-                    result.item_count, int(self.provider(result.provider).credential_configured()), completed,
+                    result.item_count, credential_configured, completed,
                     result.provider,
                 ),
             )
@@ -958,12 +1181,13 @@ class ThreatIntelManager:
                 """
                 INSERT INTO threat_intel_sync_audit (
                     provider, started_at, completed_at, status, pages, items_processed,
-                    items_active, error_message, duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    items_active, phase, endpoint, error_message, duration_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.provider, started_at, completed, status, result.pages,
-                    result.items_processed, result.item_count, result.error, result.duration_ms,
+                    result.items_processed, result.item_count, result.phase, result.endpoint,
+                    result.error, result.duration_ms,
                 ),
             )
             conn.commit()
@@ -978,7 +1202,7 @@ class ThreatIntelManager:
     def sync(self, provider: str) -> dict[str, Any]:
         self.ensure_schema()
         instance = self.provider(provider)
-        status = instance.status()
+        status = next(item for item in self.statuses() if item["provider"] == instance.provider)
         if not bool(status.get("enabled")):
             return SyncResult(instance.provider, DISABLED, error="provider desabilitado", item_count=int(status.get("item_count") or 0)).as_dict()
         if instance.requires_credential and not instance.credential_configured():
@@ -994,18 +1218,21 @@ class ThreatIntelManager:
             return self._persist_outcome(result, started_at).as_dict()
         except ThreatIntelError as exc:
             result = SyncResult(
-                instance.provider, exc.status, duration_ms=int((time.monotonic() - started) * 1000),
+                instance.provider, exc.status, pages=exc.pages, items_processed=exc.items_processed,
+                duration_ms=int((time.monotonic() - started) * 1000),
                 error=clean_text(exc), item_count=int(status.get("item_count") or 0),
+                phase=exc.phase, endpoint=exc.endpoint,
             )
             LOGGER.warning("THREAT_INTEL_SYNC_FAILED provider=%s status=%s error=%s", instance.provider, exc.status, exc)
             return self._persist_outcome(result, started_at, exc.status).as_dict()
         except Exception as exc:  # A provider failure must never escape into the threat engine.
             result = SyncResult(
-                instance.provider, DEGRADED, duration_ms=int((time.monotonic() - started) * 1000),
+                instance.provider, ERROR, duration_ms=int((time.monotonic() - started) * 1000),
                 error=clean_text(exc) or exc.__class__.__name__, item_count=int(status.get("item_count") or 0),
+                phase="provider_sync",
             )
             LOGGER.exception("THREAT_INTEL_SYNC_FAILED provider=%s", instance.provider)
-            return self._persist_outcome(result, started_at, DEGRADED).as_dict()
+            return self._persist_outcome(result, started_at, ERROR).as_dict()
         finally:
             lock.release()
 
@@ -1019,21 +1246,26 @@ class ThreatIntelManager:
         try:
             return {"provider": instance.provider, **instance.health_check(), "error": ""}
         except ThreatIntelError as exc:
-            return {"provider": instance.provider, "ok": False, "status": exc.status, "error": clean_text(exc)}
+            cached = next(item for item in self.statuses() if item["provider"] == instance.provider)
+            check_status = exc.status if exc.status in {AUTH_ERROR, RATE_LIMITED} else DEGRADED if cached["data_usable"] else ERROR
+            return {"provider": instance.provider, "ok": False, "status": check_status, "error": clean_text(exc)}
         except Exception as exc:
-            return {"provider": instance.provider, "ok": False, "status": DEGRADED, "error": clean_text(exc)}
+            cached = next(item for item in self.statuses() if item["provider"] == instance.provider)
+            return {"provider": instance.provider, "ok": False, "status": DEGRADED if cached["data_usable"] else ERROR, "error": clean_text(exc)}
 
     def set_enabled(self, provider: str, enabled: bool) -> dict[str, Any]:
         instance = self.provider(provider)
         now = utc_now_iso()
         with self.connection_factory() as conn:
             ensure_threat_intel_schema(conn)
+            usable_count = self._usable_item_count(conn, instance.provider)
+            next_status = ACTIVE if enabled and usable_count > 0 else WAITING_SYNC if enabled else DISABLED
             conn.execute(
                 "UPDATE threat_intel_providers SET enabled=?, status=?, updated_at=? WHERE provider=?",
-                (int(enabled), OFFLINE if enabled else DISABLED, now, instance.provider),
+                (int(enabled), next_status, now, instance.provider),
             )
             conn.commit()
-        return instance.status()
+        return next(item for item in self.statuses() if item["provider"] == instance.provider)
 
     def resolve_network_context(self, context: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
         supplied = dict(context or {})
@@ -1132,12 +1364,12 @@ class ThreatIntelManager:
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         dimensions = {
-            "country": ("country_code", "country"),
-            "asn": ("CAST(asn AS TEXT)", "organization"),
-            "organization": ("organization", "organization"),
-            "ip": ("ip", "ip"),
+            "country": "country_code",
+            "asn": "CAST(asn AS TEXT)",
+            "organization": "organization",
+            "ip": "ip",
         }
-        key_expr, label_expr = dimensions.get(group_by, dimensions["country"])
+        key_expr = dimensions.get(group_by, dimensions["country"])
         filters = ["active = 1"]
         values: list[Any] = []
         if clean_text(provider):
@@ -1149,22 +1381,131 @@ class ThreatIntelManager:
         if clean_text(tag):
             filters.append("lower(tags_json) LIKE ?")
             values.append(f"%{clean_text(tag).lower()}%")
+        filters.append(f"TRIM({key_expr}) <> ''")
+        where_clause = " AND ".join(filters)
+        result_limit = max(1, min(int(limit), 2000))
         with self.connection_factory() as conn:
             rows = conn.execute(
                 f"""
-                SELECT {key_expr} AS key, MAX({label_expr}) AS label,
-                       country_code, country, asn, organization,
-                       COUNT(*) AS count, COUNT(DISTINCT ip) AS unique_ips,
-                       GROUP_CONCAT(DISTINCT provider) AS providers
+                SELECT {key_expr} AS key,
+                       COUNT(*) AS count,
+                       COUNT(DISTINCT CASE WHEN ip <> '' THEN ip ELSE network END) AS unique_ips
                 FROM threat_intel_indicators
-                WHERE {' AND '.join(filters)}
+                WHERE {where_clause}
                 GROUP BY {key_expr}
                 ORDER BY count DESC, key
                 LIMIT ?
                 """,
-                (*values, max(1, min(int(limit), 2000))),
+                (*values, result_limit),
             ).fetchall()
-        return [{**dict(row), "providers": clean_text(row["providers"]).split(",") if row["providers"] else []} for row in rows]
+            if not rows:
+                return []
+            keys = [clean_text(row["key"]) for row in rows]
+            detail_rows: list[sqlite3.Row] = []
+            for start in range(0, len(keys), 500):
+                key_batch = keys[start:start + 500]
+                placeholders = ",".join("?" for _ in key_batch)
+                detail_rows.extend(
+                    conn.execute(
+                        f"""
+                        SELECT {key_expr} AS key, country_code, country, city, asn,
+                               organization, provider, classification, botnet_family, tags_json,
+                               COUNT(*) AS count,
+                               COUNT(DISTINCT CASE WHEN ip <> '' THEN ip ELSE network END) AS unique_ips
+                        FROM threat_intel_indicators
+                        WHERE {where_clause} AND {key_expr} IN ({placeholders})
+                        GROUP BY {key_expr}, country_code, country, city, asn, organization,
+                                 provider, classification, botnet_family, tags_json
+                        """,
+                        (*values, *key_batch),
+                    ).fetchall()
+                )
+
+        details: dict[str, dict[str, Any]] = {}
+        for row in detail_rows:
+            key = clean_text(row["key"])
+            bucket = details.setdefault(
+                key,
+                {
+                    "locations": {},
+                    "organizations": {},
+                    "tags": {},
+                    "providers": {},
+                    "classifications": {},
+                    "asns": {},
+                },
+            )
+            weight = max(1, int(row["unique_ips"] or row["count"] or 0))
+            location = (
+                clean_text(row["country_code"]).upper(),
+                clean_text(row["country"]),
+                clean_text(row["city"]),
+            )
+            bucket["locations"][location] = bucket["locations"].get(location, 0) + weight
+            organization = clean_text(row["organization"]) or "Desconhecida"
+            bucket["organizations"][organization] = bucket["organizations"].get(organization, 0) + weight
+            provider_name = clean_text(row["provider"]).upper()
+            bucket["providers"][provider_name] = bucket["providers"].get(provider_name, 0) + weight
+            classification_name = clean_text(row["classification"]).lower() or "unknown"
+            bucket["classifications"][classification_name] = bucket["classifications"].get(classification_name, 0) + weight
+            asn = int(row["asn"] or 0)
+            if asn:
+                bucket["asns"][asn] = bucket["asns"].get(asn, 0) + weight
+            tags = safe_json(row["tags_json"], [])
+            for tag_item in tags if isinstance(tags, list) else []:
+                if isinstance(tag_item, Mapping):
+                    tag_name = clean_text(tag_item.get("name") or tag_item.get("slug"))
+                else:
+                    tag_name = clean_text(tag_item)
+                if tag_name:
+                    bucket["tags"][tag_name] = bucket["tags"].get(tag_name, 0) + weight
+            family = clean_text(row["botnet_family"])
+            if family:
+                bucket["tags"][family] = bucket["tags"].get(family, 0) + weight
+
+        def top_values(counter: Mapping[Any, int], maximum: int = 5) -> list[dict[str, Any]]:
+            return [
+                {"name": str(name), "count": int(count)}
+                for name, count in sorted(counter.items(), key=lambda item: (-item[1], str(item[0]).lower()))[:maximum]
+            ]
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            key = clean_text(item["key"])
+            bucket = details.get(key, {})
+            locations = bucket.get("locations", {})
+            location = max(locations, key=lambda value: (locations[value], value)) if locations else ("", "", "")
+            organizations = bucket.get("organizations", {})
+            classifications = bucket.get("classifications", {})
+            asns = bucket.get("asns", {})
+            predominant = max(classifications, key=lambda value: (classifications[value], value)) if classifications else "unknown"
+            predominant_org = max(organizations, key=lambda value: (organizations[value], value)) if organizations else ""
+            predominant_asn = max(asns, key=lambda value: (asns[value], value)) if asns else 0
+            if group_by == "country":
+                label = location[1] or location[0] or key
+            elif group_by == "asn":
+                label = f"AS{key} — {predominant_org}" if predominant_org else f"AS{key}"
+            else:
+                label = key
+            items.append(
+                {
+                    **item,
+                    "label": label,
+                    "country_code": location[0],
+                    "country": location[1],
+                    "city": location[2],
+                    "asn": int(key) if group_by == "asn" and key.isdigit() else predominant_asn,
+                    "organization": key if group_by == "organization" else predominant_org,
+                    "providers": [entry["name"] for entry in top_values(bucket.get("providers", {}), 10)],
+                    "top_organizations": top_values(organizations),
+                    "top_tags": top_values(bucket.get("tags", {})),
+                    "classification": predominant,
+                    "predominant_classification": predominant,
+                    "classification_breakdown": top_values(classifications),
+                }
+            )
+        return items
 
     def audit(self, provider: str = "", limit: int = 100) -> list[dict[str, Any]]:
         with self.connection_factory() as conn:

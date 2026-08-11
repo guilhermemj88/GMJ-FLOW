@@ -288,7 +288,11 @@ class PortScanDetector:
     def __init__(self, thresholds: DetectorThresholds | None = None) -> None:
         self.thresholds = thresholds or DetectorThresholds()
 
-    def detect(self, observations: Sequence[FlowObservation]) -> list[AttackVector]:
+    def detect(
+        self,
+        observations: Sequence[FlowObservation],
+        intel_lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]] | None = None,
+    ) -> list[AttackVector]:
         if not observations:
             return []
         now = max(item.observed_at for item in observations)
@@ -339,10 +343,25 @@ class PortScanDetector:
                     window_seconds=window,
                     features=features,
                 )
+                vector.features["behavioral_score"] = score
                 key = (source, attack_type)
                 if key not in best or best[key].detector_score < score:
                     best[key] = vector
-        return list(best.values())
+        vectors = list(best.values())
+        if intel_lookup is None:
+            return vectors
+        rows_by_source: dict[str, list[FlowObservation]] = defaultdict(list)
+        for row in observations:
+            rows_by_source[row.src_ip].append(row)
+        for vector in vectors:
+            intel = source_intel_stats(rows_by_source.get(vector.src_ip, []), intel_lookup, maximum_lookups=1)
+            attach_source_intel(vector, intel)
+            boost = source_intel_score_boost(intel, maximum=10)
+            if boost:
+                vector.detector_score = int(clamp(vector.detector_score + boost))
+                vector.confidence = round(clamp(vector.confidence + boost / 100.0, 0, 1), 3)
+                vector.features["source_intel_score_boost"] = boost
+        return vectors
 
 
 def target_prefixes(ip_text: str) -> Iterable[str]:
@@ -354,49 +373,154 @@ def target_prefixes(ip_text: str) -> Iterable[str]:
         yield str(ip_network(f"{parsed}/128", strict=False))
 
 
-def source_intel_stats(rows: Sequence[FlowObservation], intel_lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]] | None) -> dict[str, Any]:
+def normalized_intel_match(match: Mapping[str, Any]) -> dict[str, Any]:
+    tags = []
+    for item in match.get("tags") or []:
+        if isinstance(item, Mapping):
+            label = clean_text(item.get("name") or item.get("slug"))
+        else:
+            label = clean_text(item)
+        if label and label not in tags:
+            tags.append(label)
+    return {
+        "provider": clean_text(match.get("provider")).upper(),
+        "indicator_type": clean_text(match.get("indicator_type")).upper(),
+        "classification": clean_text(match.get("classification")).lower(),
+        "tags": tags[:20],
+        "botnet_family": clean_text(match.get("botnet_family")),
+        "network": clean_text(match.get("network")),
+        "spoofing_likelihood": safe_int(match.get("spoofing_likelihood")),
+    }
+
+
+def source_intel_stats(
+    rows: Sequence[FlowObservation],
+    intel_lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]] | None,
+    maximum_lookups: int | None = None,
+) -> dict[str, Any]:
     if intel_lookup is None:
-        return {"matches": 0, "bogon_sources": 0, "c2_sources": 0, "sources": {}, "intel_sources": []}
+        return {
+            "matches": 0, "match_count": 0, "matched_source_count": 0,
+            "bogon_sources": 0, "c2_sources": 0, "malicious_sources": 0,
+            "scanner_sources": 0, "sources": {}, "intel_sources": [],
+            "indicator_types": [], "classifications": [], "tags": [],
+            "lookup_count": 0, "lookup_truncated": False,
+        }
     sources: dict[str, Any] = {}
-    seen_sources: set[str] = set()
     providers: set[str] = set()
-    bogon = c2 = 0
-    maximum_lookups = max(1, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_INTEL_LOOKUPS_PER_VECTOR", "500")))
-    unique_candidates = len({row.src_ip for row in rows})
+    indicator_types: set[str] = set()
+    classifications: set[str] = set()
+    tag_names: set[str] = set()
+    bogon_sources: set[str] = set()
+    c2_sources: set[str] = set()
+    malicious_sources: set[str] = set()
+    scanner_sources: set[str] = set()
+    representatives: dict[str, FlowObservation] = {}
     for row in rows:
-        if row.src_ip in seen_sources:
+        representatives.setdefault(row.src_ip, row)
+    candidates = sorted(
+        representatives,
+        key=lambda value: (hashlib.sha256(value.encode("utf-8")).hexdigest(), value),
+    )
+    configured_maximum = max(1, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_INTEL_LOOKUPS_PER_VECTOR", "500")))
+    lookup_limit = configured_maximum if maximum_lookups is None else max(1, min(configured_maximum, maximum_lookups))
+    selected = candidates[:lookup_limit]
+    match_count = 0
+    for source in selected:
+        row = representatives[source]
+        try:
+            result = intel_lookup(
+                source,
+                {
+                    "sensor": row.sensor,
+                    "exporter_ip": row.exporter_ip,
+                    "input_if": row.input_if,
+                    "output_if": row.output_if,
+                    "context_type": "UNKNOWN",
+                },
+            )
+        except Exception as exc:
+            LOGGER.debug("THREAT_INTEL_LOOKUP_FAILED source=%s error=%s", source, exc)
             continue
-        if len(seen_sources) >= maximum_lookups:
-            break
-        seen_sources.add(row.src_ip)
-        result = intel_lookup(
-            row.src_ip,
-            {
-                "sensor": row.sensor,
-                "exporter_ip": row.exporter_ip,
-                "input_if": row.input_if,
-                "output_if": row.output_if,
-                "context_type": "UNKNOWN",
-            },
-        )
-        matches = list(result.get("matches") or [])
+        matches = [normalized_intel_match(item) for item in (result.get("matches") or []) if isinstance(item, Mapping)]
+        matches = [item for item in matches if item["provider"] or item["indicator_type"]]
         if matches:
-            sources[row.src_ip] = matches
+            sources[source] = matches
+        match_count += len(matches)
         for match in matches:
-            providers.add(clean_text(match.get("provider")))
-            if clean_text(match.get("indicator_type")) in {"BOGON", "FULLBOGON"} and match.get("classification") == "anomalous_source":
-                bogon += 1
-            if clean_text(match.get("indicator_type")) == "C2":
-                c2 += 1
+            provider = match["provider"]
+            indicator_type = match["indicator_type"]
+            classification = match["classification"]
+            tags = {clean_text(item).lower() for item in match["tags"]}
+            providers.add(provider)
+            indicator_types.add(indicator_type)
+            classifications.add(classification)
+            tag_names.update(match["tags"])
+            if indicator_type in {"BOGON", "FULLBOGON"} and classification == "anomalous_source":
+                bogon_sources.add(source)
+            if indicator_type == "C2" or classification == "c2":
+                c2_sources.add(source)
+            if classification == "malicious":
+                malicious_sources.add(source)
+            if classification in {"scanner", "malicious"} or any("scan" in tag for tag in tags):
+                scanner_sources.add(source)
     return {
         "matches": len(sources),
-        "bogon_sources": bogon,
-        "c2_sources": c2,
+        "match_count": match_count,
+        "matched_source_count": len(sources),
+        "bogon_sources": len(bogon_sources),
+        "c2_sources": len(c2_sources),
+        "malicious_sources": len(malicious_sources),
+        "scanner_sources": len(scanner_sources),
         "sources": sources,
         "intel_sources": sorted(providers - {""}),
-        "lookup_count": len(seen_sources),
-        "lookup_truncated": unique_candidates > len(seen_sources),
+        "indicator_types": sorted(indicator_types - {""}),
+        "classifications": sorted(classifications - {""}),
+        "tags": sorted(tag_names - {""})[:50],
+        "lookup_count": len(selected),
+        "lookup_truncated": len(candidates) > len(selected),
     }
+
+
+def source_intel_score_boost(intel: Mapping[str, Any], maximum: int = 10) -> int:
+    if safe_int(intel.get("matched_source_count") or intel.get("matches")) <= 0:
+        return 0
+    boost = 2
+    boost += 3 if safe_int(intel.get("c2_sources")) else 0
+    boost += 3 if safe_int(intel.get("bogon_sources")) else 0
+    boost += 2 if safe_int(intel.get("malicious_sources")) else 0
+    boost += 1 if safe_int(intel.get("scanner_sources")) else 0
+    return min(max(0, int(maximum)), boost)
+
+
+def attach_source_intel(vector: AttackVector, intel: Mapping[str, Any]) -> None:
+    source = dict(intel)
+    vector.threat_intel["source_intel"] = source
+    vector.threat_intel.setdefault("target_campaign_intel", {"matches": 0, "observations": []})
+    # Compatibility summaries for campaign aggregation and existing consumers.
+    for key in ("matches", "match_count", "bogon_sources", "c2_sources", "lookup_count", "lookup_truncated"):
+        vector.threat_intel[key] = source.get(key, 0)
+    vector.intel_sources = sorted(set(vector.intel_sources) | set(source.get("intel_sources") or []))
+
+
+def cached_intel_lookup(
+    lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]],
+) -> Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]]:
+    cache: dict[tuple[Any, ...], Mapping[str, Any]] = {}
+
+    def cached(ip: str, context: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+        supplied = dict(context or {})
+        key = (
+            normalized_ip(ip), clean_text(supplied.get("sensor")),
+            normalized_ip(supplied.get("exporter_ip")), supplied.get("input_if"),
+            supplied.get("output_if"), clean_text(supplied.get("context_type")).upper(),
+        )
+        if key not in cache:
+            cache[key] = lookup(ip, supplied)
+        return cache[key]
+
+    setattr(cached, "cache", cache)
+    return cached
 
 
 class SynFloodDetector:
@@ -442,7 +566,9 @@ class SynFloodDetector:
                 attack_type = SPOOFED_SYN_FLOOD
             current_baseline = float((baseline or {}).get(prefix) or 0)
             deviation = ratio(pps, current_baseline) if current_baseline else 0.0
-            score = int(clamp(45 + min(25, math.log10(max(10, syn_packets)) * 6) + min(15, unique_sources / 5) + min(15, max(0, syn_ack_ratio - 1))))
+            behavioral_score = int(clamp(45 + min(25, math.log10(max(10, syn_packets)) * 6) + min(15, unique_sources / 5) + min(15, max(0, syn_ack_ratio - 1))))
+            intel_boost = source_intel_score_boost(intel, maximum=10)
+            score = int(clamp(behavioral_score + intel_boost))
             features.update(
                 {
                     "syn_count": syn_packets,
@@ -454,24 +580,28 @@ class SynFloodDetector:
                     "pps": round(features["packets_per_second"], 4),
                     "bps": round(features["bits_per_second"], 4),
                     "spoofing_likelihood": spoofing_likelihood,
+                    "behavioral_score": behavioral_score,
+                    "source_intel_score_boost": intel_boost,
                 }
             )
+            vector_intel: dict[str, Any] = {}
+            vector = AttackVector(
+                attack_type=attack_type,
+                detector=self.name,
+                detector_score=score,
+                confidence=round(clamp(behavioral_score / 100.0 + intel_boost / 100.0, 0, 1), 3),
+                first_seen=features["first_seen"],
+                last_seen=features["last_seen"],
+                target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
+                target_prefix=prefix,
+                window_seconds=window_seconds,
+                baseline_deviation=round(deviation, 3),
+                features=features,
+                threat_intel=vector_intel,
+            )
+            attach_source_intel(vector, intel)
             vectors.append(
-                AttackVector(
-                    attack_type=attack_type,
-                    detector=self.name,
-                    detector_score=score,
-                    confidence=round(score / 100.0, 3),
-                    first_seen=features["first_seen"],
-                    last_seen=features["last_seen"],
-                    target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
-                    target_prefix=prefix,
-                    window_seconds=window_seconds,
-                    baseline_deviation=round(deviation, 3),
-                    features=features,
-                    threat_intel=intel,
-                    intel_sources=intel["intel_sources"],
-                )
+                vector
             )
         return suppress_contained_vectors(vectors)
 
@@ -525,7 +655,9 @@ class UdpFloodDetector:
             current_baseline = float((baseline or {}).get(prefix) or 0)
             deviation = ratio(pps, current_baseline) if current_baseline else 0.0
             intel = source_intel_stats(rows, intel_lookup)
-            score = int(clamp(45 + min(25, math.log10(max(10, features["packet_count"])) * 6) + min(20, unique_sources / 5) + (10 if reflection else 0)))
+            behavioral_score = int(clamp(45 + min(25, math.log10(max(10, features["packet_count"])) * 6) + min(20, unique_sources / 5) + (10 if reflection else 0)))
+            intel_boost = source_intel_score_boost(intel, maximum=8)
+            score = int(clamp(behavioral_score + intel_boost))
             features.update(
                 {
                     "unique_sources": unique_sources,
@@ -540,24 +672,26 @@ class UdpFloodDetector:
                     "temporal_burst": round(ratio(pps, current_baseline), 3) if current_baseline else 0.0,
                     "amplification_port_signal": dominant_src_port in AMPLIFICATION_PORTS,
                     "reflection_evidence_satisfied": reflection,
+                    "behavioral_score": behavioral_score,
+                    "source_intel_score_boost": intel_boost,
                 }
             )
+            vector = AttackVector(
+                attack_type=attack_type,
+                detector=self.name,
+                detector_score=score,
+                confidence=round(clamp(behavioral_score / 100.0 + intel_boost / 100.0, 0, 1), 3),
+                first_seen=features["first_seen"],
+                last_seen=features["last_seen"],
+                target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
+                target_prefix=prefix,
+                window_seconds=window_seconds,
+                baseline_deviation=round(deviation, 3),
+                features=features,
+            )
+            attach_source_intel(vector, intel)
             vectors.append(
-                AttackVector(
-                    attack_type=attack_type,
-                    detector=self.name,
-                    detector_score=score,
-                    confidence=round(score / 100.0, 3),
-                    first_seen=features["first_seen"],
-                    last_seen=features["last_seen"],
-                    target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
-                    target_prefix=prefix,
-                    window_seconds=window_seconds,
-                    baseline_deviation=round(deviation, 3),
-                    features=features,
-                    threat_intel=intel,
-                    intel_sources=intel["intel_sources"],
-                )
+                vector
             )
         return suppress_contained_vectors(vectors)
 
@@ -691,6 +825,34 @@ class CampaignEngine:
             source_churn_rate = min(1.0, ratio(unique_sources, max(1, sum(safe_int(item.features.get("flow_count")) for item in items))))
             intel_sources = sorted({source for item in items for source in item.intel_sources})
             c2_common = sum(safe_int(item.threat_intel.get("c2_sources")) for item in items)
+            source_match_count = sum(
+                safe_int((item.threat_intel.get("source_intel") or {}).get("match_count"))
+                for item in items
+            )
+            source_matched_count = sum(
+                safe_int((item.threat_intel.get("source_intel") or {}).get("matched_source_count") or (item.threat_intel.get("source_intel") or {}).get("matches"))
+                for item in items
+            )
+            source_indicator_types = sorted({
+                value
+                for item in items
+                for value in ((item.threat_intel.get("source_intel") or {}).get("indicator_types") or [])
+            })
+            source_classifications = sorted({
+                value
+                for item in items
+                for value in ((item.threat_intel.get("source_intel") or {}).get("classifications") or [])
+            })
+            source_tags = sorted({
+                value
+                for item in items
+                for value in ((item.threat_intel.get("source_intel") or {}).get("tags") or [])
+            })[:50]
+            target_observations = [
+                observation
+                for item in items
+                for observation in ((item.threat_intel.get("target_campaign_intel") or {}).get("observations") or [])
+            ][:20]
             score = int(
                 clamp(
                     25
@@ -745,7 +907,29 @@ class CampaignEngine:
                         "historical_recurrence": max((safe_int(item.features.get("historical_recurrence") or item.features.get("recurrence_count")) for item in items), default=0),
                         "attack_types": sorted(types),
                     },
-                    threat_intel={"matches": sum(safe_int(item.threat_intel.get("matches")) for item in items)},
+                    threat_intel={
+                        "matches": sum(safe_int(item.threat_intel.get("matches")) for item in items),
+                        "source_intel": {
+                            "matched_source_count": source_matched_count,
+                            "match_count": source_match_count,
+                            "indicator_types": source_indicator_types,
+                            "classifications": source_classifications,
+                            "tags": source_tags,
+                            "intel_sources": sorted({
+                                source
+                                for item in items
+                                for source in ((item.threat_intel.get("source_intel") or {}).get("intel_sources") or [])
+                            }),
+                        },
+                        "target_campaign_intel": {
+                            "matches": sum(
+                                safe_int((item.threat_intel.get("target_campaign_intel") or {}).get("matches"))
+                                for item in items
+                            ),
+                            "observations": target_observations,
+                            "intel_sources": sorted({clean_text(item.get("provider")) for item in target_observations} - {""}),
+                        },
+                    },
                     intel_sources=intel_sources,
                 )
             )
@@ -776,7 +960,7 @@ def compromised_host_score(vectors: Sequence[AttackVector], c2_match: bool, recu
     score = 45 if c2_match else 0
     types = {item.attack_type for item in vectors}
     if types & {PORT_SCAN_VERTICAL, PORT_SCAN_HORIZONTAL, NETWORK_SWEEP, LOW_SLOW_SCAN}:
-        score += 20
+        score += 25
     if types & {SYN_FLOOD, DISTRIBUTED_SYN_FLOOD, UDP_FLOOD, DISTRIBUTED_UDP_FLOOD, UDP_REFLECTION_SUSPECTED}:
         score += 25
     if any(item.campaign_id for item in vectors):
@@ -998,18 +1182,23 @@ class BehavioralDetectionEngine:
             if len(observations) >= limit:
                 break
         self._last_observations = observations
-        lookup = self.intel_manager.lookup_ip
+        lookup = cached_intel_lookup(self.intel_manager.lookup_ip)
         tcp_baseline = self.prefix_baselines("tcp")
         udp_baseline = self.prefix_baselines("udp")
         carpet_baseline = {**tcp_baseline}
         for prefix, value in udp_baseline.items():
             carpet_baseline[prefix] = carpet_baseline.get(prefix, 0) + value
-        vectors = self.port_scan.detect(observations)
+        vectors = self.port_scan.detect(observations, lookup)
         vectors += self.syn_flood.detect(observations, lookup, tcp_baseline)
         vectors += self.udp_flood.detect(observations, lookup, udp_baseline)
         vectors += self.carpet.detect(observations, carpet_baseline)
         by_source: dict[str, list[AttackVector]] = defaultdict(list)
         for vector in vectors:
+            vector.threat_intel.setdefault("source_intel", {
+                "matches": 0, "match_count": 0, "sources": {}, "intel_sources": [],
+                "lookup_count": 0, "lookup_truncated": False,
+            })
+            vector.threat_intel.setdefault("target_campaign_intel", {"matches": 0, "observations": []})
             if vector.src_ip:
                 by_source[vector.src_ip].append(vector)
             evidence_rows = [row for row in observations if (vector.src_ip and row.src_ip == vector.src_ip) or (vector.target_ip and row.dst_ip == vector.target_ip)]
@@ -1022,13 +1211,19 @@ class BehavioralDetectionEngine:
                     vector.external_correlation = True
                     vector.detector_score = int(clamp(vector.detector_score + 8))
                     vector.confidence = round(clamp(vector.confidence + 0.08, 0, 1), 3)
-                    vector.threat_intel["external_attack_observations"] = correlations[:20]
-                    vector.intel_sources = sorted(set(vector.intel_sources) | {clean_text(item.get("provider")) for item in correlations})
+                    vector.threat_intel["target_campaign_intel"] = {
+                        "matches": len(correlations),
+                        "observations": correlations[:20],
+                        "intel_sources": sorted({clean_text(item.get("provider")) for item in correlations} - {""}),
+                    }
+                    vector.intel_sources = sorted((set(vector.intel_sources) | {clean_text(item.get("provider")) for item in correlations}) - {""})
         self.enrich_internal_history(vectors)
         campaigns = self.campaigns.correlate(vectors)
         for source, items in by_source.items():
-            lookup_result = self.intel_manager.lookup_ip(source)
-            c2 = any(item.get("indicator_type") == "C2" for item in lookup_result.get("matches") or [])
+            source_matches = []
+            for item in items:
+                source_matches.extend((item.threat_intel.get("source_intel") or {}).get("sources", {}).get(source, []))
+            c2 = any(clean_text(match.get("indicator_type")).upper() == "C2" for match in source_matches)
             recurrence = max((safe_int(item.features.get("historical_recurrence")) for item in items), default=0)
             score = compromised_host_score(items, c2, recurrence)
             for item in items:

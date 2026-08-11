@@ -85,6 +85,8 @@ def ensure_threat_policy_schema(conn: sqlite3.Connection) -> None:
 
 def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
     features = dict(vector.features or {})
+    source_intel = vector.threat_intel.get("source_intel") if isinstance(vector.threat_intel.get("source_intel"), Mapping) else {}
+    target_intel = vector.threat_intel.get("target_campaign_intel") if isinstance(vector.threat_intel.get("target_campaign_intel"), Mapping) else {}
     allowed_features = {
         "flow_count", "packet_count", "byte_count", "unique_dst_ips", "unique_dst_ports",
         "unique_src_ips", "unique_sources", "unique_source_asns", "syn_flows", "ack_flows",
@@ -110,8 +112,19 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
         "features": {key: value for key, value in features.items() if key in allowed_features},
         "threat_intel": {
             "intel_sources": list(vector.intel_sources),
-            "match_count": safe_int(vector.threat_intel.get("matches")),
-            "external_correlation": bool(vector.external_correlation),
+            "source_intel": {
+                "matched_source_count": safe_int(source_intel.get("matched_source_count") or source_intel.get("matches")),
+                "match_count": safe_int(source_intel.get("match_count")),
+                "indicator_types": list(source_intel.get("indicator_types") or [])[:20],
+                "classifications": list(source_intel.get("classifications") or [])[:20],
+                "tags": list(source_intel.get("tags") or [])[:30],
+                "lookup_count": safe_int(source_intel.get("lookup_count")),
+                "lookup_truncated": bool(source_intel.get("lookup_truncated")),
+            },
+            "target_campaign_intel": {
+                "match_count": safe_int(target_intel.get("matches")),
+                "intel_sources": list(target_intel.get("intel_sources") or [])[:10],
+            },
         },
         "compromised_host_score": vector.compromised_host_score,
     }
@@ -119,6 +132,8 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
 
 def compact_campaign_vector(vector: CampaignVector) -> dict[str, Any]:
     features = dict(vector.features or {})
+    source_intel = vector.threat_intel.get("source_intel") if isinstance(vector.threat_intel.get("source_intel"), Mapping) else {}
+    target_intel = vector.threat_intel.get("target_campaign_intel") if isinstance(vector.threat_intel.get("target_campaign_intel"), Mapping) else {}
     allowed_features = {
         "concurrent_sources", "source_arrival_rate", "source_churn_rate",
         "temporal_correlation", "protocol_similarity", "port_similarity",
@@ -139,7 +154,20 @@ def compact_campaign_vector(vector: CampaignVector) -> dict[str, Any]:
         "first_seen": vector.first_seen,
         "last_seen": vector.last_seen,
         "features": {key: value for key, value in features.items() if key in allowed_features},
-        "threat_intel": {"intel_sources": list(vector.intel_sources)},
+        "threat_intel": {
+            "intel_sources": list(vector.intel_sources),
+            "source_intel": {
+                "matched_source_count": safe_int(source_intel.get("matched_source_count") or source_intel.get("matches")),
+                "match_count": safe_int(source_intel.get("match_count")),
+                "indicator_types": list(source_intel.get("indicator_types") or [])[:20],
+                "classifications": list(source_intel.get("classifications") or [])[:20],
+                "tags": list(source_intel.get("tags") or [])[:30],
+            },
+            "target_campaign_intel": {
+                "match_count": safe_int(target_intel.get("matches")),
+                "intel_sources": list(target_intel.get("intel_sources") or [])[:10],
+            },
+        },
     }
 
 
@@ -381,7 +409,11 @@ class ThreatPolicyEngine:
         coordination_score = int(vector.coordination_score) if is_campaign else 0
         baseline_deviation = 0.0 if is_campaign else float(vector.baseline_deviation)
         intel_sources = list(vector.intel_sources)
-        external_matches = len(intel_sources) + (1 if not is_campaign and vector.external_correlation else 0)
+        source_intel = vector.threat_intel.get("source_intel") or {}
+        target_intel = vector.threat_intel.get("target_campaign_intel") or {}
+        source_intel_present = safe_int(source_intel.get("matched_source_count") or source_intel.get("matches")) > 0
+        target_intel_present = safe_int(target_intel.get("matches")) > 0 or (not is_campaign and vector.external_correlation)
+        external_bonus = min(8, (4 if source_intel_present else 0) + (3 if target_intel_present else 0) + (1 if source_intel_present and target_intel_present else 0))
         recurrence = safe_int((vector.features or {}).get("historical_recurrence") or (vector.features or {}).get("recurrence_count"))
         automatic_enabled = os.getenv("GMJFLOW_THREAT_POLICY_AUTO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         shadow_ai_enabled = os.getenv("GMJFLOW_THREAT_AI_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -405,7 +437,7 @@ class ThreatPolicyEngine:
         score = (
             evidence_score * 0.75
             + min(10, baseline_deviation * 2)
-            + min(10, external_matches * 3)
+            + external_bonus
             + min(10, recurrence * 2)
             + (ai_confidence * 5 if ai_agrees else 0)
         )

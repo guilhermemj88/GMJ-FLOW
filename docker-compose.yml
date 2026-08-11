@@ -74,7 +74,8 @@ services:
       GMJFLOW_THREAT_INTEL_CEREAL2_ENABLED: "${GMJFLOW_THREAT_INTEL_CEREAL2_ENABLED-true}"
       GMJFLOW_THREAT_INTEL_CEREAL2_INTERVAL_SECONDS: "${GMJFLOW_THREAT_INTEL_CEREAL2_INTERVAL_SECONDS-900}"
       CEREAL2_BASE_URL: "${CEREAL2_BASE_URL-https://cereal2.botnet.cl}"
-      GMJFLOW_CEREAL2_ATTACK_MAX_PAGES: "${GMJFLOW_CEREAL2_ATTACK_MAX_PAGES-0}"
+      GMJFLOW_CEREAL2_ATTACK_PAGE_SIZE: "${GMJFLOW_CEREAL2_ATTACK_PAGE_SIZE-200}"
+      GMJFLOW_CEREAL2_ATTACK_MAX_PAGES: "${GMJFLOW_CEREAL2_ATTACK_MAX_PAGES-20}"
       GMJFLOW_CEREAL2_ATTACK_RETENTION_DAYS: "${GMJFLOW_CEREAL2_ATTACK_RETENTION_DAYS-30}"
       GMJFLOW_THREAT_INTEL_TEAM_CYMRU_ENABLED: "${GMJFLOW_THREAT_INTEL_TEAM_CYMRU_ENABLED-true}"
       GMJFLOW_THREAT_INTEL_TEAM_CYMRU_INTERVAL_SECONDS: "${GMJFLOW_THREAT_INTEL_TEAM_CYMRU_INTERVAL_SECONDS-14400}"
@@ -144,6 +145,8 @@ services:
       - ./frontend/dashboard-layout.js:/usr/share/nginx/html/dashboard-layout.js:ro
       - ./frontend/dashboard-resize.js:/usr/share/nginx/html/dashboard-resize.js:ro
       - ./frontend/dashboard-prefix-controls.js:/usr/share/nginx/html/dashboard-prefix-controls.js:ro
+      - ./frontend/threat-intelligence.js:/usr/share/nginx/html/threat-intelligence.js:ro
+      - ./frontend/threat-intelligence.css:/usr/share/nginx/html/threat-intelligence.css:ro
       - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend

@@ -7236,7 +7236,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="panel p-3 mb-3">
             <div class="database-metrics-grid mb-0">
-              <div class="metric-card"><div class="metric-label">Providers online</div><div id="threatSummaryOnline" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Providers ativos</div><div id="threatSummaryOnline" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Indicadores ativos</div><div id="threatSummaryRecords" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Vetores recentes</div><div id="threatSummaryVectors" class="metric-value">0</div></div>
               <div class="metric-card"><div class="metric-label">Campanhas recentes</div><div id="threatSummaryCampaigns" class="metric-value">0</div></div>
@@ -8928,6 +8928,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     groupBy: 'city',
     animated: true,
     interactive: true,
+    visualization: 'routes',
+    showControls: true,
+    pointUnit: 'itens',
     rankingLimit: 10,
     routeLabelLimit: 12,
     fitMaxZoom: 6,
@@ -9032,6 +9035,21 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     };
   }
 
+  function normalizeNode(node, index) {
+    const source = node && typeof node === 'object' ? node : {};
+    const label = String(source.label || source.name || source.key || `Ponto ${index + 1}`);
+    return {
+      ...source,
+      id: source.id || `node:${label}:${index}`,
+      label,
+      lat: finiteNumber(source.lat ?? source.latitude),
+      lon: finiteNumber(source.lon ?? source.lng ?? source.longitude),
+      value: finiteNumber(source.value ?? source.count ?? source.unique_ips) || 0,
+      color: String(source.color || PROTOCOL_COLORS.OTHER),
+      popup_html: String(source.popup_html || '')
+    };
+  }
+
   function normalizePayload(payload) {
     const source = payload && typeof payload === 'object' ? payload : {};
     const rawEdges = Array.isArray(source.edges)
@@ -9042,7 +9060,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       metric: source.metric || 'bits_s',
       group_by: source.group_by || source.groupBy || 'city',
       edges: rawEdges.map(normalizeEdge),
-      nodes: Array.isArray(source.nodes) ? source.nodes : []
+      nodes: Array.isArray(source.nodes) ? source.nodes.map(normalizeNode) : []
     };
   }
 
@@ -9125,6 +9143,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       this.mode = MODE_FILTERS[this.options.mode] ? this.options.mode : 'total';
       this.metric = options.metric || MODE_FILTERS[this.mode].metric;
       this.groupBy = this.options.groupBy || 'city';
+      this.visualization = this.options.visualization === 'points' ? 'points' : 'routes';
       this.theme = options.theme || document.documentElement?.dataset?.theme || 'dark';
       this.payload = normalizePayload({ edges: [], metric: this.metric, group_by: this.groupBy });
       this.map = null;
@@ -9171,7 +9190,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="geo-flow-map__subtitle">${escapeHtml(this.options.subtitle)}</div>
             </div>
           </div>
-          <div class="geo-flow-map__controls">
+          ${this.options.showControls ? `<div class="geo-flow-map__controls">
             <div class="geo-flow-map__modes" role="group" aria-label="Visualização do tráfego">
               ${[
                 ['flows', 'Fluxos'],
@@ -9191,7 +9210,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <option value="ip">IP/CIDR</option>
               </select>
             </label>
-          </div>
+          </div>` : ''}
         </div>
         <div class="geo-flow-map__body">
           <div class="geo-flow-map__canvas-wrap">
@@ -9224,10 +9243,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           this.setMode(button.dataset.geoMode);
         });
       });
-      this.groupElement.addEventListener('change', () => {
-        if (!this.options.interactive) return;
-        this.setGroupBy(this.groupElement.value);
-      });
+      if (this.groupElement) {
+        this.groupElement.addEventListener('change', () => {
+          if (!this.options.interactive) return;
+          this.setGroupBy(this.groupElement.value);
+        });
+      }
       if (!this.options.interactive) {
         this.element.classList.add('geo-flow-map--readonly');
         this.element.querySelectorAll('button, select').forEach(control => {
@@ -9318,6 +9339,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       this.payload = normalizePayload(payload);
       this.metric = options.metric || this.payload.metric || this.metric;
       this.groupBy = options.groupBy || this.payload.group_by || this.groupBy;
+      if (options.visualization) this.visualization = options.visualization === 'points' ? 'points' : 'routes';
       if (options.mode) this.mode = options.mode;
       this._syncControls();
       this.render({ fit: options.fit !== false });
@@ -9343,13 +9365,17 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       if (this.routeLayer) this.routeLayer.clearLayers();
       this.bounds = null;
       if (this.rankingElement) this.rankingElement.innerHTML = '';
-      if (this.rankingCountElement) this.rankingCountElement.textContent = '0 rotas';
+      if (this.rankingCountElement) this.rankingCountElement.textContent = this.visualization === 'points' ? '0 pontos' : '0 rotas';
       if (!options.keepState) this._setState('');
     }
 
     render(options = {}) {
       if (this.destroyed) return;
       this.clear();
+      if (this.visualization === 'points') {
+        this._renderPoints(options);
+        return;
+      }
       const edges = this.payload.edges || [];
       this._renderRanking(edges);
       if (!edges.length) {
@@ -9446,6 +9472,71 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       this.bounds = globalThis.L.latLngBounds(allPoints);
       if (options.fit !== false) this.fit();
       this.resize();
+    }
+
+    _renderPoints(options = {}) {
+      const nodes = (this.payload.nodes || []).filter(node => node.lat !== null && node.lon !== null);
+      this._renderPointRanking(nodes);
+      if (!nodes.length) {
+        this._setState('Nenhum ponto geográfico encontrado para os filtros atuais.', 'empty');
+        return;
+      }
+      if (!this.map || !this.routeLayer) {
+        this._setState('Biblioteca de mapa não carregada.', 'error');
+        return;
+      }
+      const maximum = Math.max(1, ...nodes.map(node => node.value));
+      const allPoints = [];
+      nodes.forEach(node => {
+        const scale = Math.sqrt(Math.max(0, node.value) / maximum);
+        const radius = Math.max(7, Math.min(25, 7 + scale * 18));
+        const marker = globalThis.L.circleMarker([node.lat, node.lon], {
+          radius,
+          color: '#f8fafc',
+          weight: 1.5,
+          fillColor: node.color,
+          fillOpacity: 0.84,
+          className: 'geo-flow-point'
+        }).bindPopup(node.popup_html || this._pointPopup(node), { maxWidth: 360 }).addTo(this.routeLayer);
+        marker.bindTooltip(escapeHtml(compactNumber(node.value, 0)), {
+          permanent: true,
+          direction: 'center',
+          className: 'geo-flow-point-count'
+        });
+        allPoints.push([node.lat, node.lon]);
+      });
+      this.bounds = globalThis.L.latLngBounds(allPoints);
+      if (options.fit !== false) this.fit();
+      this.resize();
+    }
+
+    _pointPopup(node) {
+      return [
+        `<strong>${escapeHtml(node.label)}</strong>`,
+        `${escapeHtml(compactNumber(node.value, 0))} ${escapeHtml(this.options.pointUnit)}`
+      ].join('<br>');
+    }
+
+    _renderPointRanking(nodes) {
+      const sorted = [...nodes].sort((a, b) => b.value - a.value).slice(0, this.options.rankingLimit);
+      const maximum = Math.max(1, ...sorted.map(node => node.value));
+      this.rankingCountElement.textContent = `${compactNumber(nodes.length, 0)} ponto${nodes.length === 1 ? '' : 's'}`;
+      this.rankingElement.innerHTML = sorted.map((node, index) => {
+        const width = Math.max(4, (node.value / maximum) * 100);
+        return `
+          <article class="geo-flow-map__rank-item">
+            <div class="geo-flow-map__rank-index">${index + 1}</div>
+            <div class="geo-flow-map__rank-content">
+              <div class="geo-flow-map__rank-route" title="${escapeHtml(node.label)}">${escapeHtml(node.label)}</div>
+              <div class="geo-flow-map__rank-meta">
+                <span><i style="--geo-color:${escapeHtml(node.color)}"></i>Infraestrutura hostil</span>
+                <strong>${escapeHtml(compactNumber(node.value, 0))} ${escapeHtml(this.options.pointUnit)}</strong>
+              </div>
+              <div class="geo-flow-map__rank-bar"><i style="width:${width}%;--geo-color:${escapeHtml(node.color)}"></i></div>
+            </div>
+          </article>
+        `;
+      }).join('') || '<div class="geo-flow-map__ranking-empty">Sem pontos para classificar.</div>';
     }
 
     _routePopup(edge) {

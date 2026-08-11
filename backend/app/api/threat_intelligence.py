@@ -3,7 +3,10 @@ from __future__ import annotations
 from ipaddress import ip_network
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+try:
+    from fastapi import APIRouter, HTTPException, Query
+except ImportError:  # Compatibility with the repository's minimal static-test FastAPI stub.
+    from fastapi import FastAPI as APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.threat_intelligence import (
@@ -71,7 +74,7 @@ def list_providers() -> dict[str, Any]:
         "summary": {
             "providers": len(items),
             "enabled": sum(bool(item.get("enabled")) for item in items),
-            "online": sum(item.get("status") == "ONLINE" for item in items),
+            "online": sum(item.get("status") == "ACTIVE" for item in items),
             "records": sum(int(item.get("item_count") or 0) for item in items),
         },
     }

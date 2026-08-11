@@ -26,6 +26,16 @@ O ClickHouse permanece como data plane e recebe apenas o agregado de curta reten
 
 Registros externos preservam somente campos operacionais normalizados. Respostas completas e credenciais não são persistidas.
 
+### Cereal2 e estado dos providers
+
+`/api/v1/c2` é tratado como snapshot completo. As páginas de `/api/v1/attacks` são buscadas com cursor e validadas antes da escrita; o tamanho é configurado por `GMJFLOW_CEREAL2_ATTACK_PAGE_SIZE` e limitado a 200, máximo aceito pela API real. `GMJFLOW_CEREAL2_ATTACK_MAX_PAGES` limita o trabalho de cada ciclo. Cursor repetido, watermark inconsistente, resposta incompleta ou HTTP 400 abortam o ciclo sem desativar o snapshot anterior. A auditoria registra apenas fase e caminho do endpoint, nunca query strings ou credenciais.
+
+Os estados visuais são derivados da disponibilidade efetiva dos dados: `WAITING_SYNC` antes da primeira coleta, `ACTIVE` quando há dados utilizáveis e a coleta está saudável, `DEGRADED` quando o cache continua utilizável após uma falha, `AUTH_ERROR`, `RATE_LIMITED`, `ERROR` quando não há dados utilizáveis, e `DISABLED`.
+
+### Enriquecimento comportamental
+
+Threat Intel é consultado somente depois de o comportamento local satisfazer um detector. `source_intel` contém matches da origem (`lookup_ip`); `target_campaign_intel` contém observações externas correlacionadas por alvo e tempo (`external_attack_matches`). Os dois sinais são persistidos separadamente. Lookups de origem são deduplicados, reutilizados durante a janela e limitados por `GMJFLOW_BEHAVIOR_MAX_INTEL_LOOKUPS_PER_VECTOR`; o JSON registra `lookup_count` e `lookup_truncated`. Bônus externos são limitados e não substituem score, intensidade, distribuição, baseline ou recorrência locais.
+
 ## Rollout seguro
 
 A detecção inicia em modo shadow. `GMJFLOW_THREAT_POLICY_AUTO_ENABLED=false` é o padrão e impede qualquer mitigação automática. Recomenda-se:

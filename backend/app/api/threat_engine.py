@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+try:
+    from fastapi import APIRouter, Query
+except ImportError:  # Compatibility with the repository's minimal static-test FastAPI stub.
+    from fastapi import FastAPI as APIRouter, Query
 
 from app.services.behavioral_detection import (
     BEHAVIORAL_THREAT_RUNTIME,

@@ -24,6 +24,24 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertIn("new root.GeoFlowMap", self.script)
         self.assertIn("id=\"threatGlobalMap\"", self.html)
 
+    def test_threat_map_uses_aggregated_points_without_gmj_routes(self) -> None:
+        self.assertIn("visualization: 'points'", self.script)
+        self.assertIn("nodes: mapNodes", self.script)
+        self.assertNotIn("GMJ_CENTER", self.script)
+        self.assertNotIn("dst_label: 'GMJ-FLOW'", self.script)
+        self.assertNotIn("mapEdges", self.script)
+
+    def test_point_popup_contains_required_aggregates(self) -> None:
+        for label in (
+            "País / localização",
+            "Quantidade de IPs",
+            "Top organizações",
+            "Top tags",
+            "Providers envolvidos",
+            "Classificação predominante",
+        ):
+            self.assertIn(label, self.script)
+
     def test_provider_secrets_are_not_rendered(self) -> None:
         self.assertNotIn("GREYNOISE_API_KEY", self.script)
         self.assertNotIn("api_key", self.script.lower())
@@ -33,6 +51,16 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         for label in ("GMJ-FLOW", "External Threat Intel", "Manual", "Allowlist/Exception"):
             self.assertIn(label, self.html)
         self.assertIn("threat-source-badge", self.style)
+
+    def test_provider_states_and_intel_evidence_lanes_are_explicit(self) -> None:
+        for status in ("ACTIVE", "WAITING_SYNC"):
+            self.assertIn(status, self.script)
+        for label in ("Detecção local", "Intel da origem", "Correlação alvo/campanha"):
+            self.assertIn(label, self.script)
+        self.assertIn("threat-status-active", self.style)
+        self.assertIn("threat-status-waiting-sync", self.style)
+        self.assertIn("source_intel", self.script)
+        self.assertIn("target_campaign_intel", self.script)
 
 
 if __name__ == "__main__":

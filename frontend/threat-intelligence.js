@@ -15,7 +15,6 @@
     TW: [23.7, 121.0], UA: [48.4, 31.2], US: [37.1, -95.7], AE: [23.4, 53.8], VN: [14.1, 108.3],
     ZA: [-30.6, 22.9]
   });
-  const GMJ_CENTER = [-15.79, -47.88];
   let threatMap = null;
   let loading = false;
 
@@ -37,9 +36,20 @@
   }
 
   function statusBadge(value) {
-    const status = String(value || 'OFFLINE').toUpperCase();
+    const status = String(value || 'WAITING_SYNC').toUpperCase();
     const css = status.toLowerCase().replace(/_/g, '-');
     return `<span class="threat-status-badge threat-status-${esc(css)}">${esc(status)}</span>`;
+  }
+
+  function providerStatusDescription(item) {
+    const status = String(item?.status || 'WAITING_SYNC').toUpperCase();
+    if (status === 'ACTIVE') return 'Dados válidos carregados e última coleta concluída.';
+    if (status === 'WAITING_SYNC') return 'Aguardando a primeira coleta concluída.';
+    if (status === 'DEGRADED') return `Última tentativa falhou; ${number(item?.item_count)} registros continuam utilizáveis.`;
+    if (status === 'AUTH_ERROR') return 'A credencial do provider foi rejeitada ou não está configurada.';
+    if (status === 'RATE_LIMITED') return `Limite do provider atingido; ${number(item?.item_count)} registros permanecem em uso.`;
+    if (status === 'ERROR') return 'Última coleta falhou e não há dados utilizáveis.';
+    return 'Provider desativado pelo usuário.';
   }
 
   function sourceBadge(source) {
@@ -58,6 +68,42 @@
       : '<span class="subtle">Sem match externo</span>';
   }
 
+  function intelMatchText(match) {
+    const details = [match?.indicator_type, match?.classification,
+      ...(Array.isArray(match?.tags) ? match.tags.slice(0, 3) : []), match?.botnet_family].filter(Boolean);
+    return details.length ? details.join('/') : 'match';
+  }
+
+  function vectorIntelEvidence(item) {
+    const threatIntel = item?.threat_intel || {};
+    const sourceIntel = threatIntel.source_intel || {};
+    const targetIntel = threatIntel.target_campaign_intel || {};
+    const sourceRows = [];
+    Object.entries(sourceIntel.sources || {}).slice(0, 6).forEach(([source, matches]) => {
+      (Array.isArray(matches) ? matches : []).slice(0, 4).forEach(match => {
+        sourceRows.push(`<div><code>${esc(source)}</code> ${sourceBadge(match.provider)} <span>${esc(intelMatchText(match))}</span></div>`);
+      });
+    });
+    if (!sourceRows.length && Number(sourceIntel.matched_source_count || sourceIntel.matches || 0) > 0) {
+      const summary = [
+        ...(sourceIntel.indicator_types || []), ...(sourceIntel.classifications || []), ...(sourceIntel.tags || [])
+      ].filter(Boolean).slice(0, 6).join('/');
+      sourceRows.push(`<div>${intelChips(sourceIntel.intel_sources)} <span>${number(sourceIntel.matched_source_count || sourceIntel.matches)} origens${summary ? ` · ${esc(summary)}` : ''}</span></div>`);
+    }
+    const targetRows = (Array.isArray(targetIntel.observations) ? targetIntel.observations : []).slice(0, 3).map(observation =>
+      `<div>${sourceBadge(observation.provider || 'EXTERNAL')} <span>${esc(observation.method || observation.protocol || 'campanha correlacionada')}</span></div>`
+    );
+    if (!targetRows.length && Number(targetIntel.matches || 0) > 0) {
+      targetRows.push(`<div>${intelChips(targetIntel.intel_sources)} <span>${number(targetIntel.matches)} correlações</span></div>`);
+    }
+    return `<div class="threat-evidence-stack">
+      <div class="threat-evidence-lane threat-evidence-local"><span class="threat-evidence-label">Detecção local</span>${sourceBadge('GMJ_FLOW')}</div>
+      ${sourceRows.length ? `<div class="threat-evidence-lane threat-evidence-source"><span class="threat-evidence-label">Intel da origem</span>${sourceRows.join('')}</div>` : ''}
+      ${targetRows.length ? `<div class="threat-evidence-lane threat-evidence-target"><span class="threat-evidence-label">Correlação alvo/campanha</span>${targetRows.join('')}</div>` : ''}
+      ${!sourceRows.length && !targetRows.length ? '<span class="subtle">Sem enriquecimento externo</span>' : ''}
+    </div>`;
+  }
+
   function scoreClass(value) {
     const score = Number(value || 0);
     return score >= 85 ? 'high' : score >= 60 ? 'medium' : 'low';
@@ -69,27 +115,79 @@
     if (!threatMap) {
       threatMap = new root.GeoFlowMap(element, {
         title: 'Infraestrutura hostil observada',
-        subtitle: 'Indicadores externos agregados por localização; o mapa não autoriza bloqueios',
+        subtitle: 'Pontos agregados dos provedores externos; detalhes analíticos permanecem nas tabelas',
         mode: 'flows', metric: 'flows', groupBy: 'country', interactive: false,
-        rankingLimit: 12, routeLabelLimit: 10, fitMaxZoom: 4
+        visualization: 'points', showControls: false, pointUnit: 'IPs',
+        rankingLimit: 12, fitMaxZoom: 4
       });
     }
     return threatMap;
   }
 
-  function mapEdges(items) {
+  function classificationColor(value) {
+    const classification = String(value || 'unknown').toLowerCase();
+    if (classification === 'malicious' || classification === 'anomalous_source') return '#ef4444';
+    if (classification === 'suspicious') return '#f59e0b';
+    if (classification === 'c2') return '#a855f7';
+    return '#38bdf8';
+  }
+
+  function topItems(items, fallbackName = '', fallbackCount = 0) {
+    const normalized = Array.isArray(items) ? items.filter(item => item && (item.name || typeof item === 'string')) : [];
+    if (normalized.length) return normalized.slice(0, 5).map(item => ({
+      name: typeof item === 'string' ? item : item.name,
+      count: typeof item === 'string' ? 0 : Number(item.count || 0)
+    }));
+    return fallbackName ? [{ name: fallbackName, count: Number(fallbackCount || 0) }] : [];
+  }
+
+  function popupList(items) {
+    if (!items.length) return '<span class="subtle">Sem informação</span>';
+    return items.map(item => `<span class="threat-map-popup__chip">${esc(item.name)}${item.count ? ` <strong>${number(item.count)}</strong>` : ''}</span>`).join('');
+  }
+
+  function pointPopup(item, ipCount) {
+    const country = [item.city, item.country || item.country_code].filter(Boolean).join(', ') || item.country_code || 'Localização desconhecida';
+    const organizations = topItems(item.top_organizations, item.organization, ipCount);
+    const tags = topItems(item.top_tags);
+    const providers = (Array.isArray(item.providers) ? item.providers : []).map(name => ({ name, count: 0 }));
+    const classification = item.predominant_classification || item.classification || 'unknown';
+    return `<div class="threat-map-popup">
+      <div class="threat-map-popup__title">${esc(item.label || item.key || country)}</div>
+      <dl><dt>País / localização</dt><dd>${esc(country)}</dd><dt>Quantidade de IPs</dt><dd><strong>${number(ipCount)}</strong></dd>
+        <dt>Classificação predominante</dt><dd><span class="threat-map-classification" data-classification="${esc(String(classification).toLowerCase())}">${esc(classification)}</span></dd></dl>
+      <div class="threat-map-popup__section"><strong>Top organizações</strong><div>${popupList(organizations)}</div></div>
+      <div class="threat-map-popup__section"><strong>Top tags</strong><div>${popupList(tags)}</div></div>
+      <div class="threat-map-popup__section"><strong>Providers envolvidos</strong><div>${popupList(providers)}</div></div>
+    </div>`;
+  }
+
+  function stableLocationOffset(seed, index, grouped) {
+    if (!grouped) return [0, 0];
+    let hash = 2166136261;
+    for (const character of String(seed || index)) {
+      hash ^= character.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    const angle = ((hash >>> 0) % 360) * (Math.PI / 180);
+    const distance = 0.35 + (((hash >>> 8) % 100) / 100) * 1.15;
+    return [Math.sin(angle) * distance, Math.cos(angle) * distance];
+  }
+
+  function mapNodes(items, groupBy) {
     return (items || []).map((item, index) => {
       const code = String(item.country_code || (String(item.key || '').length === 2 ? item.key : '')).toUpperCase();
       const center = COUNTRY_CENTERS[code];
       if (!center) return null;
+      const ipCount = Number(item.unique_ips || item.count || 0);
+      const offset = stableLocationOffset(item.key, index, groupBy !== 'country');
       return {
         id: `intel-${index}-${item.key || code}`,
-        src_label: item.label || item.organization || item.key || code,
-        src_country: code,
-        src_lat: center[0], src_lon: center[1],
-        dst_label: 'GMJ-FLOW', dst_country: 'BR', dst_lat: GMJ_CENTER[0], dst_lon: GMJ_CENTER[1],
-        flows: Number(item.count || item.unique_ips || 0), packets_s: 0, bits_s: 0,
-        top_protocol: 'OTHER', top_asn_src: Number(item.asn || 0), top_asn_dst: 0
+        label: item.label || item.organization || item.key || code,
+        lat: center[0] + offset[0], lon: center[1] + offset[1],
+        value: ipCount,
+        color: classificationColor(item.predominant_classification || item.classification),
+        popup_html: pointPopup(item, ipCount)
       };
     }).filter(Boolean);
   }
@@ -102,6 +200,7 @@
     document.getElementById('threatProviderCards').innerHTML = items.map(item => `
       <article class="threat-provider-card" data-provider="${esc(item.provider)}">
         <div class="threat-provider-card__header"><strong>${esc(item.display_name || item.provider)}</strong>${statusBadge(item.status)}</div>
+        <div class="threat-provider-card__state">${esc(providerStatusDescription(item))}</div>
         <div class="threat-provider-card__meta">
           <span>${number(item.item_count)} registros</span><span>•</span>
           <span>Sync: ${dateTime(item.last_sync)}</span><span>•</span>
@@ -138,7 +237,7 @@
         <td><strong>${esc(item.attack_type)}</strong><br><span class="subtle">${esc(item.direction || '-')}</span></td>
         <td>${esc(item.src_ip || 'distribuída')} → ${esc(item.target_prefix || item.target_ip || '-')}</td>
         <td><span class="threat-score ${scoreClass(item.detector_score)}">${number(item.detector_score)}</span><br><span class="subtle">conf. ${number(Number(item.confidence || 0) * 100, 1)}%</span></td>
-        <td>${esc(evidence)}</td><td>${intelChips(item.intel_sources)}</td>
+        <td>${esc(evidence)}</td><td>${vectorIntelEvidence(item)}</td>
         <td>${item.campaign_id ? `<code>${esc(item.campaign_id)}</code>` : '-'}</td><td>${dateTime(item.last_seen)}</td>
       </tr>`;
     }).join('') || '<tr><td colspan="7" class="text-muted">Nenhum Attack Vector recente.</td></tr>';
@@ -151,7 +250,7 @@
       <td><code>${esc(item.campaign_id)}</code><br><span class="subtle">${dateTime(item.last_seen)}</span></td>
       <td><strong>${esc(item.classification)}</strong><br>${esc(item.target_prefix || '-')}</td>
       <td><span class="threat-score ${scoreClass(item.coordination_score)}">${number(item.coordination_score)}</span><br><span class="subtle">${number(item.packets_per_second, 1)} pps</span></td>
-      <td>${number(item.unique_sources)} / ${number(item.unique_source_asns)}</td><td>${intelChips(item.intel_sources)}</td>
+      <td>${number(item.unique_sources)} / ${number(item.unique_source_asns)}</td><td>${vectorIntelEvidence(item)}</td>
     </tr>`).join('') || '<tr><td colspan="5" class="text-muted">Nenhum Campaign Vector recente.</td></tr>';
   }
 
@@ -167,7 +266,7 @@
     const items = payload.items || [];
     document.getElementById('threatSummaryAllowed').textContent = number(items.filter(item => item.decision === 'ALLOW_AUTO').length);
     document.getElementById('threatDecisionRows').innerHTML = items.map(item => `<tr>
-      <td>${statusBadge(item.decision === 'ALLOW_AUTO' ? 'ONLINE' : 'DISABLED')}<br><strong>${esc(item.decision)}</strong></td>
+      <td>${statusBadge(item.decision === 'ALLOW_AUTO' ? 'ACTIVE' : 'DISABLED')}<br><strong>${esc(item.decision)}</strong></td>
       <td>${esc(item.classification)}</td>
       <td><span class="threat-score ${scoreClass(item.policy_score)}">${number(item.policy_score)}</span><br><span class="subtle">Groq ${number(Number(item.confidence || 0) * 100, 1)}%</span></td>
       <td>${sourceBadge(item.decision_source)}<br>${intelChips(item.intel_sources)}</td>
@@ -178,7 +277,8 @@
   }
 
   async function loadMap() {
-    const query = new URLSearchParams({ group_by: document.getElementById('threatGroupFilter').value || 'country' });
+    const groupBy = document.getElementById('threatGroupFilter').value || 'country';
+    const query = new URLSearchParams({ group_by: groupBy });
     const provider = document.getElementById('threatProviderFilter').value;
     const classification = document.getElementById('threatClassificationFilter').value.trim();
     const tag = document.getElementById('threatTagFilter').value.trim();
@@ -188,7 +288,10 @@
     const map = ensureMap();
     map?.setLoading('Carregando indicadores geográficos...');
     const payload = await apiRequest(`/api/threat-intelligence/map?${query}`);
-    map?.setData({ edges: mapEdges(payload.items), metric: 'flows', group_by: 'country' }, { metric: 'flows', mode: 'flows', fit: true });
+    map?.setData(
+      { nodes: mapNodes(payload.items, payload.group_by || groupBy), metric: 'flows', group_by: payload.group_by || groupBy },
+      { metric: 'flows', mode: 'flows', visualization: 'points', groupBy: payload.group_by || groupBy, fit: true }
+    );
   }
 
   async function loadWorkspace() {
@@ -225,7 +328,7 @@
         });
       } else {
         const result = await apiRequest(`/api/threat-intelligence/providers/${encodeURIComponent(provider)}/${action}`, { method: 'POST' });
-        document.getElementById('threatWorkspaceStatus').textContent = `${provider}: ${result.status || (result.ok ? 'ONLINE' : 'falha')} ${result.error || ''}`;
+        document.getElementById('threatWorkspaceStatus').textContent = `${provider}: ${result.status || (result.ok ? 'ACTIVE' : 'falha')} ${result.error || ''}`;
       }
       await loadWorkspace();
     } finally {
@@ -255,6 +358,8 @@
       item?.threat_score !== null && item?.threat_score !== undefined ? `score ${number(item.threat_score)}` : '',
       item?.threat_confidence ? `conf. ${number(Number(item.threat_confidence) * 100, 1)}%` : '',
       item?.threat_hits ? `${number(item.threat_hits)} hits` : ''].filter(Boolean).join(' · ');
-    return `<span class="d-inline-flex flex-wrap gap-1 mt-1">${sourceBadge(item?.decision_source)}${intelChips(item?.intel_sources)}</span>${details ? `<span class="subtle d-block mt-1">${esc(details)}</span>` : ''}`;
+    const structuredIntel = item?.threat_intel?.source_intel || item?.threat_intel?.target_campaign_intel
+      ? vectorIntelEvidence(item) : '';
+    return `<span class="d-inline-flex flex-wrap gap-1 mt-1">${sourceBadge(item?.decision_source)}${intelChips(item?.intel_sources)}</span>${details ? `<span class="subtle d-block mt-1">${esc(details)}</span>` : ''}${structuredIntel}`;
   };
 }(typeof globalThis !== 'undefined' ? globalThis : window));
