@@ -45,7 +45,7 @@ from starlette.responses import JSONResponse, Response
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
 from app.api.threat_intelligence import router as threat_intelligence_router
-from app.api.threat_engine import router as threat_engine_router
+from app.api.threat_engine import router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
@@ -233,7 +233,9 @@ from app.services.behavioral_detection import (
     CampaignVector,
     behavioral_clickhouse_schema_statements,
     ensure_behavioral_schema,
+    event_key,
 )
+from app.services.security_events import update_security_event_mitigation_status_by_reference
 from app.services.threat_policy import (
     MitigationProposal,
     PolicyDecision,
@@ -288,6 +290,7 @@ app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
 app.include_router(threat_intelligence_router)
 app.include_router(threat_engine_router)
+app.include_router(security_router)
 
 PROTO_LABELS = {
     "1": "ICMP",
@@ -4916,7 +4919,7 @@ async def auth_middleware(request: Request, call_next):
         request.method == "OPTIONS"
         or path == "/health"
         or path in {"/api/auth/login", "/api/v1/auth/login"}
-        or not path.startswith("/api/")
+        or (not path.startswith("/api/") and not path.startswith("/security/"))
         or is_grafana_api_path(path)
     ):
         return await call_next(request)
@@ -4987,6 +4990,7 @@ async def auth_middleware(request: Request, call_next):
         "/api/ai",
         "/api/threat-intelligence",
         "/api/threat-engine",
+        "/security",
         "/api/dashboards",
         "/api/prefixes",
         "/api/ip-zones",
@@ -5147,6 +5151,8 @@ def permission_for_protected_api_route(request: Request) -> str:
 
     path = request.url.path
     method = request.method.upper()
+    if path.startswith("/security/"):
+        return "anomalies.view" if method == "GET" else "anomalies.manage"
     if path.startswith(("/api/auth", "/api/v1/auth", "/api/v1/users", "/api/v1/roles", "/api/v1/permissions", "/api/v1/audit")):
         return ""
     if path.startswith("/api/bgp"):
@@ -22619,6 +22625,14 @@ def transition_bgp_announcement(
         {"command": command, "peer_state": peer_state, "confirmation_level": confirmation_level, "details": details or {}},
         created_by,
     )
+    if clean_text(current["source"]) == "gmj_threat_engine":
+        lifecycle_status = BEHAVIORAL_THREAT_RUNTIME.mitigation_status_from_result({"status": status})
+        update_security_event_mitigation_status_by_reference(
+            conn,
+            clean_text(current["source_id"]),
+            lifecycle_status,
+            decision_source=clean_text(current["decision_source"]) or "GMJ_FLOW",
+        )
     return fetch_bgp_announcement(conn, int(announcement_id), include_events=True)
 
 
@@ -23169,8 +23183,7 @@ def apply_behavioral_policy_decision(
 
 
 def event_key_for_behavioral_vector(vector: AttackVector) -> str:
-    raw = f"{vector.attack_type}|{vector.src_ip}|{vector.target_prefix or vector.target_ip}|{vector.last_seen}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return event_key(vector)
 
 
 def apply_mitigation_candidates(
@@ -25074,7 +25087,7 @@ def enqueue_active_automatic_mitigations(limit: int = 500) -> int:
 
 
 def automatic_mitigation_worker_enabled() -> bool:
-    return clean_text(os.getenv("GMJFLOW_AUTO_MITIGATION_ENABLED", "true")).lower() not in {
+    return clean_text(os.getenv("GMJFLOW_AUTO_MITIGATION_ENABLED", "false")).lower() not in {
         "0",
         "false",
         "no",

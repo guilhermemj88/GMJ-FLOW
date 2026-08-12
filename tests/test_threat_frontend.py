@@ -62,6 +62,29 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertIn("source_intel", self.script)
         self.assertIn("target_campaign_intel", self.script)
 
+    def test_security_events_are_clickable_and_ai_is_manual(self) -> None:
+        self.assertIn('id="securityEventDrawer"', self.html)
+        self.assertIn("/security/events?limit=200", self.script)
+        self.assertIn('data-security-event-id', self.script)
+        self.assertIn('ANALISAR COM IA', self.script)
+        self.assertIn('REANALISAR', self.script)
+        self.assertIn('mitigation_recommended', self.script)
+        self.assertIn('.security-event-drawer', self.style)
+
+    def test_canonical_events_are_also_loaded_in_anomalies(self) -> None:
+        self.assertIn("apiRequest('/security/events?limit=200'", self.html)
+        self.assertIn('canonical_security_event: true', self.html)
+        self.assertIn('data-security-action="open"', self.html)
+
+    def test_legacy_anomalies_reuse_the_investigation_drawer(self) -> None:
+        self.assertEqual(self.html.count('id="securityEventDrawer"'), 1)
+        self.assertIn('data-legacy-security-anomaly-id', self.html)
+        self.assertIn('gmjLegacySecurityAnomalyCache', self.html)
+        self.assertIn('openLegacySecurityAnomaly', self.script)
+        self.assertIn('Legacy anomaly', self.script)
+        for action in ('mitigate', 'ack', 'close'):
+            self.assertIn(f'data-legacy-security-action="{action}"', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

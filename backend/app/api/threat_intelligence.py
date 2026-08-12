@@ -38,7 +38,12 @@ class NetworkContextPayload(BaseModel):
     enabled: bool = True
 
 
-NETWORK_CONTEXT_TYPES = {"INTERNAL", "CGNAT", "BRAS", "MANAGEMENT", "TRANSIT", "INTERNET", "EXTERNAL"}
+NETWORK_CONTEXT_TYPES = {
+    "CUSTOMER", "CGNAT_PUBLIC", "INFRASTRUCTURE", "MANAGEMENT",
+    "TRANSIT", "PEERING", "EXTERNAL", "UNKNOWN",
+    # Backward-compatible aliases already stored by previous releases.
+    "INTERNAL", "CGNAT", "BRAS", "INTERNET",
+}
 
 
 def normalized_network_context(payload: NetworkContextPayload) -> dict[str, Any]:

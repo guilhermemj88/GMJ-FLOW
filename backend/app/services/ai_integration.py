@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from app.services.threat_contracts import THREAT_CLASSIFICATION_SCHEMA
+from app.services.threat_contracts import SECURITY_EVENT_ANALYSIS_SCHEMA, THREAT_CLASSIFICATION_SCHEMA
 
 
 AI_PROVIDER_TYPES = {
@@ -35,6 +35,7 @@ AI_PROVIDER_TYPES = {
 AI_FUNCTIONS = (
     ("cgnat_import", "Importação de mapeamento CGNAT"),
     ("anomaly_analysis", "Análise de anomalia"),
+    ("security_event_analysis", "Análise de evento de segurança"),
     ("mitigation_analysis", "Análise de mitigação"),
     ("flowspec_explanation", "Explicação de regra FlowSpec"),
     ("attack_summary", "Resumo de ataque"),
@@ -90,6 +91,18 @@ DEFAULT_PROMPTS = {
         "user_template": "Analise as evidencias da anomalia {{anomaly_id}} e responda somente apply_mitigation e reason.",
         "variables": ["anomaly_id", "sensor_name", "connector_name", "flows", "bgp_status"],
         "schema": MITIGATION_SCHEMA,
+    },
+    "security_event_analysis": {
+        "name": "Análise de evento de segurança",
+        "system_prompt": (
+            "Você é um analista de segurança para um ISP. Interprete somente as evidências estruturadas recebidas. "
+            "CGNAT é contexto, não whitelist. Threat Intelligence é reputação histórica e nunca confirma sozinha o "
+            "vetor atual. Diferencie retorno legítimo QUIC/HTTP3 de flood usando volume, concentração, baseline e "
+            "persistência. Recomende ações, mas nunca execute nem autorize mitigação. Retorne somente JSON válido."
+        ),
+        "user_template": "Analise o evento canônico {{event}} com eventos relacionados {{related_events}}.",
+        "variables": ["event", "related_events", "campaign"],
+        "schema": SECURITY_EVENT_ANALYSIS_SCHEMA,
     },
     "threat_classification": {
         "name": "Classificação de vetor/campanha de ameaça",

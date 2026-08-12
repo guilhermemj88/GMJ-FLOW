@@ -24,6 +24,21 @@ from app.services.threat_intelligence import (
     utc_now,
     utc_now_iso,
 )
+from app.services.network_context import NetworkContextEngine
+from app.services.security_events import (
+    canonical_event_key,
+    cleanup_security_events,
+    ensure_security_event_schema,
+    migrate_legacy_security_events,
+    update_security_event_mitigation_status,
+    upsert_security_event,
+)
+from app.services.threat_contracts import (
+    FLOOD_ATTACK_TYPES,
+    SCAN_ATTACK_TYPES,
+    attack_family,
+    detector_verdict,
+)
 
 
 LOGGER = logging.getLogger("gmj-flow")
@@ -36,6 +51,7 @@ PORT_SCAN_VERTICAL = "PORT_SCAN_VERTICAL"
 PORT_SCAN_HORIZONTAL = "PORT_SCAN_HORIZONTAL"
 NETWORK_SWEEP = "NETWORK_SWEEP"
 LOW_SLOW_SCAN = "LOW_SLOW_SCAN"
+SSH_BRUTE_FORCE = "SSH_BRUTE_FORCE"
 SYN_FLOOD = "SYN_FLOOD"
 DISTRIBUTED_SYN_FLOOD = "DISTRIBUTED_SYN_FLOOD"
 SPOOFED_SYN_FLOOD = "SPOOFED_SYN_FLOOD"
@@ -43,6 +59,8 @@ UDP_FLOOD = "UDP_FLOOD"
 DISTRIBUTED_UDP_FLOOD = "DISTRIBUTED_UDP_FLOOD"
 UDP_REFLECTION_SUSPECTED = "UDP_REFLECTION_SUSPECTED"
 COORDINATED_DDOS = "COORDINATED_DDOS"
+SCANNING_CAMPAIGN = "SCANNING_CAMPAIGN"
+COORDINATED_SCANNING = "COORDINATED_SCANNING"
 BOTNET_LIKELY = "BOTNET_LIKELY"
 CARPET_BOMBING = "CARPET_BOMBING"
 MULTI_VECTOR_DDOS = "MULTI_VECTOR_DDOS"
@@ -56,6 +74,7 @@ CLASSIFICATIONS = {
     PORT_SCAN_HORIZONTAL,
     NETWORK_SWEEP,
     LOW_SLOW_SCAN,
+    SSH_BRUTE_FORCE,
     SYN_FLOOD,
     DISTRIBUTED_SYN_FLOOD,
     SPOOFED_SYN_FLOOD,
@@ -63,6 +82,8 @@ CLASSIFICATIONS = {
     DISTRIBUTED_UDP_FLOOD,
     UDP_REFLECTION_SUSPECTED,
     COORDINATED_DDOS,
+    SCANNING_CAMPAIGN,
+    COORDINATED_SCANNING,
     BOTNET_LIKELY,
     CARPET_BOMBING,
     MULTI_VECTOR_DDOS,
@@ -196,7 +217,14 @@ class AttackVector:
     src_ip: str = ""
     target_ip: str = ""
     target_prefix: str = ""
-    direction: str = "INTERNAL"
+    direction: str = "UNKNOWN"
+    attack_family: str = "OTHER_FAMILY"
+    severity: str = "INFO"
+    verdict: str = "INFO"
+    protocol: str = ""
+    network_context: dict[str, Any] = field(default_factory=dict)
+    evidence: list[str] = field(default_factory=list)
+    score_components: dict[str, int] = field(default_factory=dict)
     window_seconds: int = 60
     baseline_deviation: float = 0.0
     features: dict[str, Any] = field(default_factory=dict)
@@ -224,6 +252,8 @@ class CampaignVector:
     coordination_score: int
     first_seen: str
     last_seen: str
+    campaign_key: str = ""
+    recurrence_count: int = 1
     features: dict[str, Any] = field(default_factory=dict)
     threat_intel: dict[str, Any] = field(default_factory=dict)
     intel_sources: list[str] = field(default_factory=list)
@@ -244,6 +274,37 @@ class DetectorThresholds:
     carpet_unique_hosts: int = 8
     carpet_prefix_pps: float = 200.0
     carpet_host_pps: float = 100.0
+    carpet_min_packets: int = 3000
+    carpet_min_bps: float = 1_000_000.0
+    udp_min_packets: int = 3000
+    udp_min_pps: float = 100.0
+    udp_min_bps: float = 1_000_000.0
+    syn_min_packets: int = 3000
+    syn_min_pps: float = 100.0
+    syn_min_bps: float = 1_000_000.0
+    ssh_attempts: int = 30
+    ssh_min_elapsed: float = 30.0
+
+    @classmethod
+    def from_env(cls) -> "DetectorThresholds":
+        return cls(
+            vertical_ports=int(os.getenv("GMJFLOW_SCAN_VERTICAL_PORTS", "20")),
+            horizontal_hosts=int(os.getenv("GMJFLOW_SCAN_HORIZONTAL_HOSTS", "20")),
+            low_slow_unique=int(os.getenv("GMJFLOW_SCAN_LOW_SLOW_UNIQUE", "10")),
+            carpet_unique_hosts=int(os.getenv("GMJFLOW_CARPET_MIN_HOSTS", "8")),
+            carpet_prefix_pps=float(os.getenv("GMJFLOW_CARPET_MIN_PPS", "200")),
+            carpet_host_pps=float(os.getenv("GMJFLOW_CARPET_MAX_HOST_PPS", "100")),
+            carpet_min_packets=int(os.getenv("GMJFLOW_CARPET_MIN_PACKETS", "3000")),
+            carpet_min_bps=float(os.getenv("GMJFLOW_CARPET_MIN_BPS", "1000000")),
+            udp_min_packets=int(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PACKETS", "3000")),
+            udp_min_pps=float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PPS", "100")),
+            udp_min_bps=float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_BPS", "1000000")),
+            syn_min_packets=int(os.getenv("GMJFLOW_SYN_FLOOD_MIN_PACKETS", "3000")),
+            syn_min_pps=float(os.getenv("GMJFLOW_SYN_FLOOD_MIN_PPS", "100")),
+            syn_min_bps=float(os.getenv("GMJFLOW_SYN_FLOOD_MIN_BPS", "1000000")),
+            ssh_attempts=int(os.getenv("GMJFLOW_SSH_BRUTE_FORCE_MIN_ATTEMPTS", "30")),
+            ssh_min_elapsed=float(os.getenv("GMJFLOW_SSH_BRUTE_FORCE_MIN_SECONDS", "30")),
+        )
 
 
 def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[str, Any]:
@@ -255,7 +316,17 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
     rst_flows = sum(row.flow_count for row in rows if row.protocol == 6 and row.tcp_flags & 0x04)
     first = min(row.observed_at for row in rows)
     last = max(row.observed_at for row in rows)
-    elapsed = max(1.0, min(float(window_seconds), (last - first).total_seconds() or float(window_seconds)))
+    elapsed = max(1.0, min(float(window_seconds), (last - first).total_seconds()))
+    source_ports = Counter(row.src_port for row in rows)
+    destination_ports = Counter(row.dst_port for row in rows)
+    sources = Counter(row.src_ip for row in rows)
+    destinations = Counter(row.dst_ip for row in rows)
+    packet_sizes = [ratio(row.bytes, row.packets) for row in rows if row.packets]
+    temporal_buckets = {
+        int(row.observed_at.timestamp()) // 10
+        for row in rows
+    }
+    source_asns = sorted({row.src_asn for row in rows if row.src_asn})
     return {
         "flow_count": flow_count,
         "packet_count": packet_count,
@@ -264,6 +335,9 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         "unique_dst_ports": len({row.dst_port for row in rows}),
         "unique_src_ips": len({row.src_ip for row in rows}),
         "unique_src_asns": len({row.src_asn for row in rows if row.src_asn}),
+        "unique_source_asns": len(source_asns),
+        "source_asns": source_asns[:100],
+        "source_asns_sample": source_asns[:100],
         "unique_src_ports": len({row.src_port for row in rows}),
         "syn_flows": syn_flows,
         "ack_flows": ack_flows,
@@ -276,10 +350,37 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         "flows_per_second": round(ratio(flow_count, window_seconds), 4),
         "packets_per_second": round(ratio(packet_count, window_seconds), 4),
         "bits_per_second": round(ratio(byte_count * 8, window_seconds), 4),
+        "average_packet_size": round(ratio(sum(packet_sizes), len(packet_sizes)), 2) if packet_sizes else 0.0,
+        "packet_size_stddev": round(statistics.pstdev(packet_sizes), 2) if len(packet_sizes) > 1 else 0.0,
+        "top_source_ports": dict(source_ports.most_common(20)),
+        "top_destination_ports": dict(destination_ports.most_common(20)),
+        "top_sources": dict(sources.most_common(20)),
+        "top_destinations": dict(destinations.most_common(20)),
+        "persistent_windows": len(temporal_buckets),
         "first_seen": first.isoformat().replace("+00:00", "Z"),
         "last_seen": last.isoformat().replace("+00:00", "Z"),
         "elapsed_seconds": round(elapsed, 3),
     }
+
+
+def finalize_vector(vector: AttackVector) -> AttackVector:
+    vector.attack_family = attack_family(vector.attack_type)
+    persistent = safe_int(vector.features.get("persistent_windows") or vector.features.get("consecutive_windows") or 1)
+    vector.verdict = detector_verdict(vector.detector_score, persistent_windows=max(1, persistent))
+    if vector.verdict == "CONFIRMED_ATTACK" or vector.detector_score >= 90:
+        vector.severity = "CRITICAL"
+    elif vector.verdict == "LIKELY_ATTACK" or vector.detector_score >= 75:
+        vector.severity = "HIGH"
+    elif vector.detector_score >= 55:
+        vector.severity = "MEDIUM"
+    else:
+        vector.severity = "LOW"
+    vector.features["attack_family"] = vector.attack_family
+    vector.features["verdict"] = vector.verdict
+    vector.features["severity"] = vector.severity
+    vector.features["score_components"] = dict(vector.score_components)
+    vector.features["evidence"] = list(vector.evidence)
+    return vector
 
 
 class PortScanDetector:
@@ -343,6 +444,13 @@ class PortScanDetector:
                 if attack_type == LOW_SLOW_SCAN:
                     base = max(55, base - 10)
                 score = int(clamp(base))
+                target_prefix = ""
+                if dst_ips > 1:
+                    parsed_target = ip_address(rows[0].dst_ip)
+                    prefix_length = 24 if parsed_target.version == 4 else 64
+                    candidate_prefix = ip_network(f"{parsed_target}/{prefix_length}", strict=False)
+                    if all(ip_address(row.dst_ip).version == candidate_prefix.version and ip_address(row.dst_ip) in candidate_prefix for row in rows):
+                        target_prefix = str(candidate_prefix)
                 vector = AttackVector(
                     attack_type=attack_type,
                     detector=self.name,
@@ -352,11 +460,25 @@ class PortScanDetector:
                     last_seen=features["last_seen"],
                     src_ip=source,
                     target_ip=rows[0].dst_ip if dst_ips == 1 else "",
-                    target_prefix="",
+                    target_prefix=target_prefix,
                     window_seconds=window,
+                    protocol="tcp",
                     features=features,
                 )
+                vector.score_components = {
+                    "cardinality": min(35, int(math.log2(max(2, cardinality)) * 8)),
+                    "syn_attempts": 8 if features["syn_ratio"] >= 0.7 else 0,
+                    "persistence": 12 if features["elapsed_seconds"] >= 60 else 4,
+                    "threat_intel": 0,
+                }
+                vector.evidence = [
+                    f"{dst_ips} destinos em {window} segundos",
+                    f"{dst_ports} portas de destino",
+                    f"{features['flow_count']} tentativas TCP SYN sem ACK",
+                    f"persistência observada de {features['elapsed_seconds']:.0f} segundos",
+                ]
                 vector.features["behavioral_score"] = score
+                finalize_vector(vector)
                 key = (source, attack_type)
                 if key not in best or best[key].detector_score < score:
                     best[key] = vector
@@ -374,6 +496,103 @@ class PortScanDetector:
                 vector.detector_score = int(clamp(vector.detector_score + boost))
                 vector.confidence = round(clamp(vector.confidence + boost / 100.0, 0, 1), 3)
                 vector.features["source_intel_score_boost"] = boost
+                vector.score_components["threat_intel"] = boost
+                finalize_vector(vector)
+        return vectors
+
+
+class SshBruteForceDetector:
+    name = "ssh_brute_force"
+
+    def __init__(self, thresholds: DetectorThresholds | None = None) -> None:
+        self.thresholds = thresholds or DetectorThresholds()
+        self.last_suppressed_multi_target: dict[str, dict[str, Any]] = {}
+
+    def detect(
+        self,
+        observations: Sequence[FlowObservation],
+        intel_lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]] | None = None,
+        window_seconds: int = 300,
+    ) -> list[AttackVector]:
+        latest = max((row.observed_at for row in observations), default=utc_now())
+        cutoff = latest - timedelta(seconds=window_seconds)
+        grouped: dict[tuple[str, str], list[FlowObservation]] = defaultdict(list)
+        for row in observations:
+            if (
+                row.observed_at >= cutoff
+                and row.protocol == 6
+                and row.dst_port == 22
+                and (row.tcp_flags & 0x02)
+                and not (row.tcp_flags & 0x10)
+            ):
+                grouped[(row.src_ip, row.dst_ip)].append(row)
+        self.last_suppressed_multi_target = {}
+        source_target_counts = Counter(source for source, _target in grouped)
+        vectors: list[AttackVector] = []
+        for (source, target), rows in grouped.items():
+            features = flow_features(rows, window_seconds)
+            attempts = max(features["packet_count"], features["syn_flows"])
+            if attempts < self.thresholds.ssh_attempts:
+                continue
+            if features["elapsed_seconds"] < self.thresholds.ssh_min_elapsed:
+                continue
+            if source_target_counts[source] >= self.thresholds.horizontal_hosts:
+                summary = self.last_suppressed_multi_target.setdefault(source, {
+                    "target_count": source_target_counts[source],
+                    "qualifying_targets": 0,
+                    "attempts": 0,
+                    "elapsed_seconds": 0.0,
+                })
+                summary["qualifying_targets"] += 1
+                summary["attempts"] += attempts
+                summary["elapsed_seconds"] = max(
+                    float(summary["elapsed_seconds"]),
+                    float(features["elapsed_seconds"]),
+                )
+                continue
+            intel = source_intel_stats(rows, intel_lookup, maximum_lookups=1)
+            volume = min(35, int(math.log10(max(10, attempts)) * 12))
+            persistence = min(25, int(features["elapsed_seconds"] / 6))
+            recurrence = min(15, safe_int(features.get("persistent_windows")) * 3)
+            behavioral_score = int(clamp(35 + volume + persistence + recurrence))
+            intel_boost = source_intel_score_boost(intel, maximum=8)
+            score = int(clamp(behavioral_score + intel_boost))
+            features.update({
+                "protocol": "tcp",
+                "ssh_attempts": attempts,
+                "unique_sources": 1,
+                "unique_destinations": 1,
+                "behavioral_score": behavioral_score,
+                "source_intel_score_boost": intel_boost,
+            })
+            vector = AttackVector(
+                attack_type=SSH_BRUTE_FORCE,
+                detector=self.name,
+                detector_score=score,
+                confidence=round(score / 100.0, 3),
+                first_seen=features["first_seen"],
+                last_seen=features["last_seen"],
+                src_ip=source,
+                target_ip=target,
+                target_prefix=f"{target}/32" if ":" not in target else f"{target}/128",
+                window_seconds=window_seconds,
+                protocol="tcp",
+                features=features,
+                evidence=[
+                    f"{attempts} tentativas TCP/22 SYN sem ACK",
+                    f"uma origem para um único servidor",
+                    f"persistência observada de {features['elapsed_seconds']:.0f} segundos",
+                ],
+                score_components={
+                    "volume": volume,
+                    "target_concentration": 15,
+                    "persistence": persistence,
+                    "recurrence": recurrence,
+                    "threat_intel": intel_boost,
+                },
+            )
+            attach_source_intel(vector, intel)
+            vectors.append(finalize_vector(vector))
         return vectors
 
 
@@ -506,6 +725,24 @@ def source_intel_score_boost(intel: Mapping[str, Any], maximum: int = 10) -> int
     return min(max(0, int(maximum)), boost)
 
 
+def contextual_intel_score_boost(intel: Mapping[str, Any], attack_type: str, maximum: int = 8) -> tuple[int, str]:
+    """Return a bounded boost and explain relevance to the current behavior."""
+    matches = safe_int(intel.get("matched_source_count") or intel.get("matches"))
+    if not matches:
+        return 0, "no_match"
+    tags = {clean_text(value).lower() for value in intel.get("tags") or []}
+    classifications = {clean_text(value).lower() for value in intel.get("classifications") or []}
+    if attack_type in SCAN_ATTACK_TYPES:
+        relevant = safe_int(intel.get("scanner_sources")) or "scanner" in classifications or any("scan" in value for value in tags)
+        return (min(maximum, 8 if relevant else 2), "direct_scan_relevance" if relevant else "historical_reputation_only")
+    if "SYN" in attack_type and safe_int(intel.get("bogon_sources")):
+        return min(maximum, 6), "source_validity_relevance"
+    if safe_int(intel.get("c2_sources")):
+        return min(maximum, 4), "botnet_reputation_support"
+    # Telnet/scanner history does not confirm an unrelated UDP flood.
+    return min(maximum, 2), "historical_reputation_only"
+
+
 def attach_source_intel(vector: AttackVector, intel: Mapping[str, Any]) -> None:
     source = dict(intel)
     vector.threat_intel["source_intel"] = source
@@ -565,7 +802,16 @@ class SynFloodDetector:
             syn_ratio = ratio(syn_packets, max(1, features["packet_count"]))
             syn_ack_ratio = ratio(syn_packets, max(1, ack_packets))
             pps = ratio(syn_packets, window_seconds)
-            if syn_packets < self.thresholds.flood_packets and pps < self.thresholds.flood_pps:
+            bps = features["bits_per_second"]
+            current_baseline = float((baseline or {}).get(prefix) or 0)
+            deviation = ratio(pps, current_baseline) if current_baseline else 0.0
+            volume_signals = sum((
+                syn_packets >= self.thresholds.syn_min_packets,
+                pps >= self.thresholds.syn_min_pps,
+                bps >= self.thresholds.syn_min_bps,
+                deviation >= 3 and pps >= self.thresholds.syn_min_pps / 2,
+            ))
+            if volume_signals < 2:
                 continue
             if syn_ratio < 0.55 and syn_ack_ratio < 3:
                 continue
@@ -577,13 +823,22 @@ class SynFloodDetector:
                 attack_type = DISTRIBUTED_SYN_FLOOD
             if spoofing_likelihood >= 60 and unique_sources >= self.thresholds.distributed_sources:
                 attack_type = SPOOFED_SYN_FLOOD
-            current_baseline = float((baseline or {}).get(prefix) or 0)
-            deviation = ratio(pps, current_baseline) if current_baseline else 0.0
-            behavioral_score = int(clamp(45 + min(25, math.log10(max(10, syn_packets)) * 6) + min(15, unique_sources / 5) + min(15, max(0, syn_ack_ratio - 1))))
-            intel_boost = source_intel_score_boost(intel, maximum=10)
+            score_components = {
+                "volume": min(30, int(math.log10(max(10, syn_packets)) * 7)),
+                "source_diversity": min(12, int(math.log2(max(1, unique_sources)) * 3)),
+                "syn_imbalance": min(18, int(max(0, syn_ack_ratio - 1) * 3)),
+                "persistence": min(20, safe_int(features.get("persistent_windows")) * 4),
+                "baseline": min(10, int(deviation * 2)) if deviation else 0,
+                "threat_intel": 0,
+                "network_context": 0,
+            }
+            behavioral_score = int(clamp(20 + sum(score_components.values())))
+            intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=8)
+            score_components["threat_intel"] = intel_boost
             score = int(clamp(behavioral_score + intel_boost))
             features.update(
                 {
+                    "protocol": "tcp",
                     "syn_count": syn_packets,
                     "ack_count": ack_packets,
                     "rst_count": rst_packets,
@@ -595,6 +850,8 @@ class SynFloodDetector:
                     "spoofing_likelihood": spoofing_likelihood,
                     "behavioral_score": behavioral_score,
                     "source_intel_score_boost": intel_boost,
+                    "threat_intel_relevance": intel_relevance,
+                    "volume_signals": volume_signals,
                 }
             )
             vector_intel: dict[str, Any] = {}
@@ -607,15 +864,22 @@ class SynFloodDetector:
                 last_seen=features["last_seen"],
                 target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
                 target_prefix=prefix,
+                protocol="tcp",
                 window_seconds=window_seconds,
                 baseline_deviation=round(deviation, 3),
                 features=features,
                 threat_intel=vector_intel,
+                evidence=[
+                    f"{syn_packets} pacotes SYN sem ACK em {window_seconds} segundos",
+                    f"{pps:.1f} pps e {bps:.0f} bit/s",
+                    f"relação SYN/ACK de {syn_ack_ratio:.2f}",
+                    f"{unique_sources} fontes e {features['unique_source_asns']} ASNs",
+                    f"baseline {deviation:.2f}x" if deviation else "baseline ainda indisponível",
+                ],
+                score_components=score_components,
             )
             attach_source_intel(vector, intel)
-            vectors.append(
-                vector
-            )
+            vectors.append(finalize_vector(vector))
         return suppress_contained_vectors(vectors)
 
 
@@ -646,16 +910,44 @@ class UdpFloodDetector:
         for prefix, rows in grouped.items():
             features = flow_features(rows, window_seconds)
             pps = features["packets_per_second"]
-            if features["packet_count"] < self.thresholds.flood_packets and pps < self.thresholds.flood_pps:
+            bps = features["bits_per_second"]
+            current_baseline = float((baseline or {}).get(prefix) or 0)
+            deviation = ratio(pps, current_baseline) if current_baseline else 0.0
+            volume_signals = sum((
+                features["packet_count"] >= self.thresholds.udp_min_packets,
+                pps >= self.thresholds.udp_min_pps,
+                bps >= self.thresholds.udp_min_bps,
+                deviation >= 3 and pps >= self.thresholds.udp_min_pps / 2,
+            ))
+            # Cardinality and a single packet threshold are never sufficient.
+            if pps < self.thresholds.udp_min_pps or volume_signals < 2:
                 continue
             unique_sources = features["unique_src_ips"]
-            source_ports = Counter(row.src_port for row in rows)
-            destination_ports = Counter(row.dst_port for row in rows)
+            source_ports: Counter[int] = Counter()
+            destination_ports: Counter[int] = Counter()
+            destination_packets: Counter[str] = Counter()
+            for row in rows:
+                source_ports[row.src_port] += row.packets
+                destination_ports[row.dst_port] += row.packets
+                destination_packets[row.dst_ip] += row.packets
             sizes = [ratio(row.bytes, row.packets) for row in rows if row.packets]
             dominant_src_port, dominant_src_count = source_ports.most_common(1)[0] if source_ports else (0, 0)
             source_port_concentration = ratio(dominant_src_count, sum(source_ports.values()))
             average_packet_size = ratio(sum(sizes), len(sizes)) if sizes else 0.0
             packet_size_stddev = statistics.pstdev(sizes) if len(sizes) > 1 else 0.0
+            ephemeral_packets = sum(count for port, count in destination_ports.items() if port >= 32768)
+            ephemeral_destination_ratio = ratio(ephemeral_packets, features["packet_count"])
+            pps_per_destination = ratio(pps, max(1, features["unique_dst_ips"]))
+            target_concentration = ratio(max(destination_packets.values(), default=0), features["packet_count"])
+            quic_return_pattern = (
+                dominant_src_port == 443
+                and source_port_concentration >= 0.3
+                and ephemeral_destination_ratio >= 0.7
+                and features["unique_dst_ports"] >= 20
+                and pps_per_destination < 5
+            )
+            if quic_return_pattern and pps < 500 and (not deviation or deviation < 3):
+                continue
             distributed = unique_sources >= self.thresholds.distributed_sources
             # A known port is only one signal. Diversity, concentration and packet shape are also required.
             reflection = (
@@ -665,20 +957,34 @@ class UdpFloodDetector:
                 and average_packet_size >= 300
             )
             attack_type = UDP_REFLECTION_SUSPECTED if reflection else DISTRIBUTED_UDP_FLOOD if distributed else UDP_FLOOD
-            current_baseline = float((baseline or {}).get(prefix) or 0)
-            deviation = ratio(pps, current_baseline) if current_baseline else 0.0
             intel = source_intel_stats(rows, intel_lookup)
-            behavioral_score = int(clamp(45 + min(25, math.log10(max(10, features["packet_count"])) * 6) + min(20, unique_sources / 5) + (10 if reflection else 0)))
-            intel_boost = source_intel_score_boost(intel, maximum=8)
+            score_components = {
+                "volume": min(30, int(math.log10(max(10, features["packet_count"])) * 7)),
+                "source_diversity": min(12, int(math.log2(max(1, unique_sources)) * 2)),
+                "target_concentration": min(18, int(target_concentration * 18)),
+                "persistence": min(20, safe_int(features.get("persistent_windows")) * 4),
+                "baseline": min(10, int(deviation * 2)) if deviation else 0,
+                "reflection": 10 if reflection else 0,
+                "threat_intel": 0,
+                "network_context": 0,
+            }
+            behavioral_score = int(clamp(20 + sum(score_components.values())))
+            intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=6)
+            score_components["threat_intel"] = intel_boost
             score = int(clamp(behavioral_score + intel_boost))
             features.update(
                 {
+                    "protocol": "udp",
                     "unique_sources": unique_sources,
                     "unique_source_asns": features["unique_src_asns"],
                     "destination_port_distribution": dict(destination_ports.most_common(20)),
                     "source_port_distribution": dict(source_ports.most_common(20)),
                     "dominant_source_port": dominant_src_port,
                     "source_port_concentration": round(source_port_concentration, 4),
+                    "ephemeral_destination_ratio": round(ephemeral_destination_ratio, 4),
+                    "pps_per_destination": round(pps_per_destination, 4),
+                    "target_concentration": round(target_concentration, 4),
+                    "quic_return_pattern": quic_return_pattern,
                     "average_packet_size": round(average_packet_size, 2),
                     "packet_size_stddev": round(packet_size_stddev, 2),
                     "protocol_ratio": round(ratio(len(rows), len(observations)), 4),
@@ -687,6 +993,8 @@ class UdpFloodDetector:
                     "reflection_evidence_satisfied": reflection,
                     "behavioral_score": behavioral_score,
                     "source_intel_score_boost": intel_boost,
+                    "threat_intel_relevance": intel_relevance,
+                    "volume_signals": volume_signals,
                 }
             )
             vector = AttackVector(
@@ -698,14 +1006,22 @@ class UdpFloodDetector:
                 last_seen=features["last_seen"],
                 target_ip=rows[0].dst_ip if prefix.endswith("/32") else "",
                 target_prefix=prefix,
+                protocol="udp",
                 window_seconds=window_seconds,
                 baseline_deviation=round(deviation, 3),
                 features=features,
+                evidence=[
+                    f"{features['packet_count']} pacotes UDP em {window_seconds} segundos",
+                    f"{pps:.1f} pps e {bps:.0f} bit/s",
+                    f"{unique_sources} fontes, {features['unique_source_asns']} ASNs e {features['unique_dst_ips']} destinos",
+                    f"porta UDP de origem dominante {dominant_src_port} = {source_port_concentration * 100:.1f}%",
+                    f"portas efêmeras de destino = {ephemeral_destination_ratio * 100:.1f}%",
+                    f"baseline {deviation:.2f}x" if deviation else "baseline ainda indisponível",
+                ],
+                score_components=score_components,
             )
             attach_source_intel(vector, intel)
-            vectors.append(
-                vector
-            )
+            vectors.append(finalize_vector(vector))
         return suppress_contained_vectors(vectors)
 
 
@@ -763,14 +1079,32 @@ class CarpetBombingDetector:
             deviation = ratio(aggregate_pps, historical) if historical else 0.0
             if unique_hosts < self.thresholds.carpet_unique_hosts:
                 continue
-            if aggregate_pps < self.thresholds.carpet_prefix_pps and deviation < 3:
+            # Baseline is complementary evidence; an absolute traffic floor is mandatory.
+            if features["packet_count"] < self.thresholds.carpet_min_packets:
+                continue
+            if aggregate_pps < self.thresholds.carpet_prefix_pps and features["bits_per_second"] < self.thresholds.carpet_min_bps:
                 continue
             if max_host_pps >= self.thresholds.carpet_host_pps:
                 continue
-            score = int(clamp(55 + min(20, unique_hosts / 4) + min(25, deviation * 4 if deviation else aggregate_pps / 100)))
-            features.update({"target_prefix": prefix, "target_hosts": unique_hosts, "max_host_pps": round(max_host_pps, 3), "aggregate_pps": aggregate_pps})
+            score_components = {
+                "volume": min(30, int(math.log10(max(10, features["packet_count"])) * 7)),
+                "host_distribution": min(20, int(unique_hosts / 2)),
+                "low_per_host_rate": 12,
+                "persistence": min(20, safe_int(features.get("persistent_windows")) * 4),
+                "baseline": min(10, int(deviation * 2)) if deviation else 0,
+                "threat_intel": 0,
+                "network_context": 0,
+            }
+            score = int(clamp(20 + sum(score_components.values())))
+            features.update({
+                "protocol": "mixed",
+                "target_prefix": prefix,
+                "target_hosts": unique_hosts,
+                "max_host_pps": round(max_host_pps, 3),
+                "aggregate_pps": aggregate_pps,
+            })
             vectors.append(
-                AttackVector(
+                finalize_vector(AttackVector(
                     attack_type=CARPET_BOMBING,
                     detector=self.name,
                     detector_score=score,
@@ -778,10 +1112,18 @@ class CarpetBombingDetector:
                     first_seen=features["first_seen"],
                     last_seen=features["last_seen"],
                     target_prefix=prefix,
+                    protocol="mixed",
                     window_seconds=window_seconds,
                     baseline_deviation=round(deviation, 3),
                     features=features,
-                )
+                    evidence=[
+                        f"{features['packet_count']} pacotes para {unique_hosts} hosts em {window_seconds} segundos",
+                        f"taxa agregada {aggregate_pps:.1f} pps; máximo por host {max_host_pps:.1f} pps",
+                        f"{features['unique_src_ips']} fontes e {features['unique_source_asns']} ASNs",
+                        f"baseline {deviation:.2f}x" if deviation else "baseline ainda indisponível",
+                    ],
+                    score_components=score_components,
+                ))
             )
         return sorted(vectors, key=lambda item: (item.detector_score, ip_network(item.target_prefix).prefixlen), reverse=True)[:100]
 
@@ -799,14 +1141,56 @@ def campaign_prefix(vector: AttackVector) -> str:
 
 
 class CampaignEngine:
-    def __init__(self, campaign_id_factory: Callable[[], str] | None = None) -> None:
-        self.campaign_id_factory = campaign_id_factory or self.new_campaign_id
+    def __init__(self, campaign_id_factory: Callable[..., str] | None = None) -> None:
+        self.campaign_id_factory = campaign_id_factory
 
     @staticmethod
-    def new_campaign_id() -> str:
-        stamp = utc_now().strftime("%Y%m%d")
-        suffix = hashlib.sha256(f"{utc_now_iso()}|{os.getpid()}".encode()).hexdigest()[:5].upper()
-        return f"GMJ-{stamp}-{suffix}"
+    def new_campaign_id(campaign_key: str = "") -> str:
+        stable = clean_text(campaign_key) or hashlib.sha256(f"{utc_now_iso()}|{os.getpid()}".encode()).hexdigest()
+        return f"GMJ-C-{stable[:16].upper()}"
+
+    def campaign_id_for(self, campaign_key: str) -> str:
+        if self.campaign_id_factory is None:
+            return self.new_campaign_id(campaign_key)
+        try:
+            return self.campaign_id_factory(campaign_key)  # type: ignore[call-arg]
+        except TypeError:
+            return self.campaign_id_factory()
+
+    @staticmethod
+    def semantic_key(classification: str, target_prefix: str, items: Sequence[AttackVector]) -> str:
+        return CampaignEngine.semantic_key_from_attack_types(
+            classification,
+            target_prefix,
+            {item.attack_type for item in items},
+        )
+
+    @staticmethod
+    def semantic_key_from_attack_types(
+        classification: str,
+        target_prefix: str,
+        attack_types: Sequence[str] | set[str],
+    ) -> str:
+        item_types = {clean_text(value) for value in attack_types if clean_text(value)}
+        protocol_families = sorted({
+            "tcp_syn" if "SYN" in attack_type else
+            "udp" if "UDP" in attack_type else
+            "scan" if attack_type in SCAN_ATTACK_TYPES else
+            "other"
+            for attack_type in item_types
+        })
+        campaign_family = (
+            "FLOOD_FAMILY" if item_types & FLOOD_ATTACK_TYPES else
+            "SCAN_FAMILY" if item_types & SCAN_ATTACK_TYPES else
+            "OTHER_FAMILY"
+        )
+        identity = {
+            "campaign_family": campaign_family,
+            "classification": classification,
+            "target_prefix": target_prefix,
+            "protocol_families": protocol_families,
+        }
+        return hashlib.sha256(json_dump(identity).encode("utf-8")).hexdigest()
 
     def correlate(self, vectors: Sequence[AttackVector]) -> list[CampaignVector]:
         grouped: dict[str, list[AttackVector]] = defaultdict(list)
@@ -817,6 +1201,8 @@ class CampaignEngine:
         campaigns = []
         for prefix, items in grouped.items():
             types = {item.attack_type for item in items}
+            scan_items = [item for item in items if item.attack_type in SCAN_ATTACK_TYPES]
+            flood_items = [item for item in items if item.attack_type in FLOOD_ATTACK_TYPES]
             sources = {item.src_ip for item in items if item.src_ip}
             source_asns: set[int] = set()
             for item in items:
@@ -866,6 +1252,21 @@ class CampaignEngine:
                 for item in items
                 for observation in ((item.threat_intel.get("target_campaign_intel") or {}).get("observations") or [])
             ][:20]
+            packets_per_second = sum(float(item.features.get("packets_per_second") or item.features.get("pps") or 0) for item in items)
+            bits_per_second = sum(float(item.features.get("bits_per_second") or item.features.get("bps") or 0) for item in items)
+            flows_per_second = sum(float(item.features.get("flows_per_second") or 0) for item in items)
+            persisted = duration >= 30 or max((safe_int(item.features.get("persistent_windows")) for item in items), default=0) >= 3
+            target_correlated = len({campaign_prefix(item) for item in items if campaign_prefix(item)}) == 1
+            ddos_minimum = (
+                len(flood_items) >= 2
+                and unique_sources >= int(os.getenv("GMJFLOW_CAMPAIGN_DDOS_MIN_SOURCES", "20"))
+                and packets_per_second >= float(os.getenv("GMJFLOW_CAMPAIGN_DDOS_MIN_PPS", "200"))
+                and bits_per_second >= float(os.getenv("GMJFLOW_CAMPAIGN_DDOS_MIN_BPS", "1000000"))
+                and persisted
+                and target_correlated
+            )
+            if flood_items and not scan_items and CARPET_BOMBING not in types and not ddos_minimum:
+                continue
             score = int(
                 clamp(
                     25
@@ -876,36 +1277,47 @@ class CampaignEngine:
                     + (10 if c2_common else 0)
                 )
             )
-            classification = COORDINATED_DDOS
-            if len({"tcp" if "SYN" in item.attack_type else "udp" if "UDP" in item.attack_type else item.attack_type for item in items}) > 1:
-                classification = MULTI_VECTOR_DDOS
-            elif CARPET_BOMBING in types:
+            if scan_items and not flood_items:
+                classification = COORDINATED_SCANNING if unique_sources > 1 else SCANNING_CAMPAIGN
+            elif CARPET_BOMBING in types and not ddos_minimum:
                 classification = CARPET_BOMBING
-            elif any(item.attack_type in {DISTRIBUTED_SYN_FLOOD, SPOOFED_SYN_FLOOD} for item in items):
+            elif ddos_minimum and len({
+                "tcp" if "SYN" in item.attack_type else "udp" if "UDP" in item.attack_type else item.attack_type
+                for item in flood_items
+            }) > 1:
+                classification = MULTI_VECTOR_DDOS
+            elif ddos_minimum:
+                classification = COORDINATED_DDOS
+            elif any(item.attack_type in {DISTRIBUTED_SYN_FLOOD, SPOOFED_SYN_FLOOD} for item in flood_items):
                 classification = DISTRIBUTED_SYN_FLOOD
-            elif any(item.attack_type in {DISTRIBUTED_UDP_FLOOD, UDP_REFLECTION_SUSPECTED} for item in items):
+            elif any(item.attack_type in {DISTRIBUTED_UDP_FLOOD, UDP_REFLECTION_SUSPECTED} for item in flood_items):
                 classification = DISTRIBUTED_UDP_FLOOD
-            if c2_common and unique_sources >= 10:
+            else:
+                classification = SCANNING_CAMPAIGN if scan_items else SUSPICIOUS
+            if c2_common and unique_sources >= 10 and ddos_minimum:
                 classification = BOTNET_LIKELY
-            campaign_id = self.campaign_id_factory()
+            campaign_key = self.semantic_key(classification, prefix, items)
+            campaign_id = self.campaign_id_for(campaign_key)
             for item in items:
                 item.campaign_id = campaign_id
-            packets_per_second = sum(float(item.features.get("packets_per_second") or item.features.get("pps") or 0) for item in items)
-            bits_per_second = sum(float(item.features.get("bits_per_second") or item.features.get("bps") or 0) for item in items)
-            flows_per_second = sum(float(item.features.get("flows_per_second") or 0) for item in items)
+            source_asn_count = max(
+                len(source_asns),
+                max((safe_int(item.features.get("unique_source_asns") or item.features.get("unique_src_asns")) for item in items), default=0),
+            )
             campaigns.append(
                 CampaignVector(
                     campaign_id=campaign_id,
                     target_prefix=prefix,
                     classification=classification,
                     unique_sources=unique_sources,
-                    unique_source_asns=max(len(source_asns), max((safe_int(item.features.get("unique_source_asns")) for item in items), default=0)),
+                    unique_source_asns=source_asn_count,
                     packets_per_second=round(packets_per_second, 3),
                     bits_per_second=round(bits_per_second, 3),
                     flows_per_second=round(flows_per_second, 3),
                     coordination_score=score,
                     first_seen=first.isoformat().replace("+00:00", "Z"),
                     last_seen=last.isoformat().replace("+00:00", "Z"),
+                    campaign_key=campaign_key,
                     features={
                         "concurrent_sources": unique_sources,
                         "source_arrival_rate": round(source_arrival_rate, 4),
@@ -915,7 +1327,12 @@ class CampaignEngine:
                         "port_similarity": round(sum(1 for item in items if item.features.get("unique_dst_ports") == 1) / len(items), 4),
                         "packet_size_similarity": round(packet_size_similarity, 4),
                         "target_similarity": target_similarity,
-                        "source_asn_diversity": len(source_asns),
+                        "source_asn_diversity": source_asn_count,
+                        "source_asns_sample": sorted(source_asns)[:100],
+                        "attack_family": "SCAN_FAMILY" if scan_items and not flood_items else "FLOOD_FAMILY" if flood_items else "OTHER_FAMILY",
+                        "ddos_minimum_satisfied": ddos_minimum,
+                        "target_correlation": target_correlated,
+                        "persistence_satisfied": persisted,
                         "common_c2_intelligence": c2_common,
                         "historical_recurrence": max((safe_int(item.features.get("historical_recurrence") or item.features.get("recurrence_count")) for item in items), default=0),
                         "attack_types": sorted(types),
@@ -966,7 +1383,7 @@ def direction_for_flow(row: FlowObservation, customer_networks: Sequence[str]) -
         return "OUTBOUND"
     if dst_internal:
         return "INBOUND"
-    return "INTERNAL"
+    return "EXTERNAL"
 
 
 def compromised_host_score(vectors: Sequence[AttackVector], c2_match: bool, recurrence_count: int = 0) -> int:
@@ -1014,6 +1431,7 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE TABLE IF NOT EXISTS threat_campaigns (
             campaign_id TEXT PRIMARY KEY,
+            campaign_key TEXT NOT NULL DEFAULT '',
             target_prefix TEXT NOT NULL,
             classification TEXT NOT NULL,
             coordination_score INTEGER NOT NULL,
@@ -1029,6 +1447,7 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             intel_sources_json TEXT NOT NULL DEFAULT '[]',
             decision_source TEXT NOT NULL DEFAULT 'GMJ_FLOW',
             status TEXT NOT NULL DEFAULT 'active',
+            recurrence_count INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -1081,12 +1500,46 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             ON threat_engine_audit(created_at DESC);
         """
     )
+    campaign_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(threat_campaigns)").fetchall()
+    }
+    if "campaign_key" not in campaign_columns:
+        conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_key TEXT NOT NULL DEFAULT ''")
+    if "recurrence_count" not in campaign_columns:
+        conn.execute("ALTER TABLE threat_campaigns ADD COLUMN recurrence_count INTEGER NOT NULL DEFAULT 1")
+    legacy_campaigns = conn.execute(
+        "SELECT campaign_id, target_prefix, classification, feature_json FROM threat_campaigns WHERE campaign_key=''"
+    ).fetchall()
+    for row in legacy_campaigns:
+        item = dict(row) if isinstance(row, sqlite3.Row) else {
+            "campaign_id": row[0], "target_prefix": row[1], "classification": row[2], "feature_json": row[3]
+        }
+        features = safe_json(item.get("feature_json"), {})
+        key = CampaignEngine.semantic_key_from_attack_types(
+            clean_text(item.get("classification")),
+            clean_text(item.get("target_prefix")),
+            features.get("attack_types") or [],
+        )
+        conn.execute(
+            "UPDATE threat_campaigns SET campaign_key=? WHERE campaign_id=? AND campaign_key=''",
+            (key, item["campaign_id"]),
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_threat_campaigns_key ON threat_campaigns(campaign_key, last_seen DESC)"
+    )
 
 
 def event_key(vector: AttackVector) -> str:
-    bucket = int(parse_time(vector.last_seen).timestamp()) // max(10, vector.window_seconds)
-    raw = f"{vector.detector}|{vector.attack_type}|{vector.src_ip}|{vector.target_prefix}|{vector.target_ip}|{bucket}"
-    return hashlib.sha256(raw.encode()).hexdigest()
+    return canonical_event_key(
+        vector.detector,
+        vector.attack_type,
+        vector.src_ip,
+        vector.target_ip,
+        vector.target_prefix,
+        vector.direction,
+        vector.protocol,
+    )
 
 
 class BehavioralDetectionEngine:
@@ -1098,8 +1551,9 @@ class BehavioralDetectionEngine:
     ) -> None:
         self.connection_factory = connection_factory
         self.intel_manager = intel_manager
-        self.thresholds = thresholds or DetectorThresholds()
+        self.thresholds = thresholds or DetectorThresholds.from_env()
         self.port_scan = PortScanDetector(self.thresholds)
+        self.ssh_brute_force = SshBruteForceDetector(self.thresholds)
         self.syn_flood = SynFloodDetector(self.thresholds)
         self.udp_flood = UdpFloodDetector(self.thresholds)
         self.carpet = CarpetBombingDetector(
@@ -1107,11 +1561,14 @@ class BehavioralDetectionEngine:
             max_groups=int(os.getenv("GMJFLOW_BEHAVIOR_MAX_PREFIX_GROUPS", "50000")),
         )
         self.campaigns = CampaignEngine()
+        self.network_context = NetworkContextEngine(connection_factory)
         self._last_observations: list[FlowObservation] = []
 
     def ensure_schema(self) -> None:
         with self.connection_factory() as conn:
             ensure_behavioral_schema(conn)
+            ensure_security_event_schema(conn)
+            migrate_legacy_security_events(conn)
             conn.commit()
 
     def prefix_baselines(self, protocol: str) -> dict[str, float]:
@@ -1201,7 +1658,19 @@ class BehavioralDetectionEngine:
         carpet_baseline = {**tcp_baseline}
         for prefix, value in udp_baseline.items():
             carpet_baseline[prefix] = carpet_baseline.get(prefix, 0) + value
-        vectors = self.port_scan.detect(observations, lookup)
+        scan_vectors = self.port_scan.detect(observations, lookup)
+        ssh_vectors = self.ssh_brute_force.detect(observations, lookup)
+        for scan_vector in scan_vectors:
+            ssh_summary = self.ssh_brute_force.last_suppressed_multi_target.get(scan_vector.src_ip)
+            if not ssh_summary or scan_vector.attack_type not in {PORT_SCAN_HORIZONTAL, NETWORK_SWEEP}:
+                continue
+            scan_vector.features["ssh_multi_target_evidence"] = dict(ssh_summary)
+            scan_vector.evidence.append(
+                f"padrão TCP/22 multi-alvo: {ssh_summary['attempts']} tentativas persistentes "
+                f"em {ssh_summary['qualifying_targets']} de {ssh_summary['target_count']} hosts; "
+                "vetores SSH por host suprimidos"
+            )
+        vectors = [*scan_vectors, *ssh_vectors]
         vectors += self.syn_flood.detect(observations, lookup, tcp_baseline)
         vectors += self.udp_flood.detect(observations, lookup, udp_baseline)
         vectors += self.carpet.detect(observations, carpet_baseline)
@@ -1214,9 +1683,59 @@ class BehavioralDetectionEngine:
             vector.threat_intel.setdefault("target_campaign_intel", {"matches": 0, "observations": []})
             if vector.src_ip:
                 by_source[vector.src_ip].append(vector)
-            evidence_rows = [row for row in observations if (vector.src_ip and row.src_ip == vector.src_ip) or (vector.target_ip and row.dst_ip == vector.target_ip)]
+            target_network = None
+            if vector.target_prefix:
+                try:
+                    target_network = ip_network(vector.target_prefix, strict=False)
+                except ValueError:
+                    target_network = None
+            evidence_rows = [
+                row for row in observations
+                if (vector.src_ip and row.src_ip == vector.src_ip)
+                or (vector.target_ip and row.dst_ip == vector.target_ip)
+                or (
+                    target_network is not None
+                    and ip_address(row.dst_ip).version == target_network.version
+                    and ip_address(row.dst_ip) in target_network
+                )
+            ]
             if evidence_rows:
-                vector.direction = direction_for_flow(evidence_rows[0], customer_networks)
+                representative = evidence_rows[0]
+                context = self.network_context.resolve(
+                    representative.src_ip,
+                    representative.dst_ip,
+                    representative.input_if,
+                    representative.output_if,
+                    sensor=representative.sensor,
+                    exporter=representative.exporter_ip,
+                ).as_dict()
+                if context["traffic_direction"] in {"EXTERNAL", "UNKNOWN"} and customer_networks:
+                    legacy_direction = direction_for_flow(representative, customer_networks)
+                    if legacy_direction != "EXTERNAL":
+                        context["traffic_direction"] = legacy_direction
+                        if legacy_direction == "INBOUND":
+                            context["dst_role"] = "CUSTOMER"
+                        elif legacy_direction == "OUTBOUND":
+                            context["src_role"] = "CUSTOMER"
+                        elif legacy_direction == "INTERNAL":
+                            context["src_role"] = context["dst_role"] = "CUSTOMER"
+                vector.network_context = context
+                vector.direction = context["traffic_direction"]
+                vector.features.update({
+                    "network_context": context,
+                    "src_role": context["src_role"],
+                    "dst_role": context["dst_role"],
+                    "src_is_cgnat": context["src_is_cgnat"],
+                    "dst_is_cgnat": context["dst_is_cgnat"],
+                    "input_if": context["input_if"],
+                    "output_if": context["output_if"],
+                    "sensor": context["sensor"],
+                    "exporter": context["exporter"],
+                })
+                if context["dst_is_cgnat"]:
+                    vector.evidence.append(
+                        "o destino é CGNAT_PUBLIC; diversidade de conexões é contexto esperado e não prova ataque"
+                    )
             target = vector.target_prefix or (f"{vector.target_ip}/32" if vector.target_ip else "")
             if target:
                 correlations = self.intel_manager.external_attack_matches(target, "tcp" if "SYN" in vector.attack_type else "udp" if "UDP" in vector.attack_type else "", vector.last_seen)
@@ -1230,6 +1749,8 @@ class BehavioralDetectionEngine:
                         "intel_sources": sorted({clean_text(item.get("provider")) for item in correlations} - {""}),
                     }
                     vector.intel_sources = sorted((set(vector.intel_sources) | {clean_text(item.get("provider")) for item in correlations}) - {""})
+                    vector.score_components["threat_intel"] = min(10, safe_int(vector.score_components.get("threat_intel")) + 8)
+            finalize_vector(vector)
         self.enrich_internal_history(vectors)
         campaigns = self.campaigns.correlate(vectors)
         for source, items in by_source.items():
@@ -1251,6 +1772,18 @@ class BehavioralDetectionEngine:
         now = utc_now_iso()
         with self.connection_factory() as conn:
             self.update_prefix_baselines(conn, self._last_observations)
+            for campaign in campaigns:
+                existing = conn.execute(
+                    "SELECT campaign_id FROM threat_campaigns WHERE campaign_key=? ORDER BY last_seen DESC LIMIT 1",
+                    (campaign.campaign_key,),
+                ).fetchone()
+                if existing is None:
+                    continue
+                generated_id = campaign.campaign_id
+                campaign.campaign_id = clean_text(existing[0])
+                for vector in vectors:
+                    if vector.campaign_id == generated_id:
+                        vector.campaign_id = campaign.campaign_id
             for vector in vectors:
                 key = event_key(vector)
                 conn.execute(
@@ -1282,30 +1815,42 @@ class BehavioralDetectionEngine:
                     ),
                 )
                 self._history(conn, "IP", vector.src_ip or vector.target_ip or vector.target_prefix, attacks=1, external=int(bool(vector.intel_sources)))
+                upsert_security_event(conn, vector)
                 self._audit(conn, "DETECTOR_RESULT", vector=vector)
+                self._audit(conn, "CONTEXT_RESOLUTION", vector=vector, reason=vector.direction)
+                self._audit(
+                    conn,
+                    "THREAT_INTEL_ENRICHMENT",
+                    vector=vector,
+                    reason=clean_text(vector.features.get("threat_intel_relevance")) or "enrichment_only",
+                )
                 stats["vectors"] += 1
             for campaign in campaigns:
                 conn.execute(
                     """
                     INSERT INTO threat_campaigns (
-                        campaign_id, target_prefix, classification, coordination_score,
+                        campaign_id, campaign_key, target_prefix, classification, coordination_score,
                         unique_sources, unique_source_asns, packets_per_second, bits_per_second,
                         flows_per_second, first_seen, last_seen, feature_json, threat_intel_json,
                         intel_sources_json, decision_source, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(campaign_id) DO UPDATE SET
+                        campaign_key=excluded.campaign_key,
                         coordination_score=MAX(coordination_score, excluded.coordination_score),
                         unique_sources=MAX(unique_sources, excluded.unique_sources),
                         unique_source_asns=MAX(unique_source_asns, excluded.unique_source_asns),
                         packets_per_second=MAX(packets_per_second, excluded.packets_per_second),
                         bits_per_second=MAX(bits_per_second, excluded.bits_per_second),
                         flows_per_second=MAX(flows_per_second, excluded.flows_per_second),
-                        last_seen=excluded.last_seen, feature_json=excluded.feature_json,
+                        first_seen=MIN(first_seen, excluded.first_seen),
+                        last_seen=MAX(last_seen, excluded.last_seen),
+                        recurrence_count=recurrence_count+1,
+                        feature_json=excluded.feature_json,
                         threat_intel_json=excluded.threat_intel_json,
                         intel_sources_json=excluded.intel_sources_json, updated_at=excluded.updated_at
                     """,
                     (
-                        campaign.campaign_id, campaign.target_prefix, campaign.classification,
+                        campaign.campaign_id, campaign.campaign_key, campaign.target_prefix, campaign.classification,
                         campaign.coordination_score, campaign.unique_sources, campaign.unique_source_asns,
                         campaign.packets_per_second, campaign.bits_per_second, campaign.flows_per_second,
                         campaign.first_seen, campaign.last_seen, json_dump(campaign.features),
@@ -1316,6 +1861,7 @@ class BehavioralDetectionEngine:
                 self._history(conn, "PREFIX", campaign.target_prefix, campaigns=1, external=int(bool(campaign.intel_sources)))
                 self._audit(conn, "CAMPAIGN_RESULT", campaign=campaign)
                 stats["campaigns"] += 1
+            stats["expired_events"] = cleanup_security_events(conn)
             conn.commit()
         return stats
 
@@ -1457,6 +2003,35 @@ class BehavioralThreatRuntime:
             self.policy_engine = ThreatPolicyEngine(self.connection_factory)
         return self.policy_engine
 
+    def mark_mitigation_status(
+        self,
+        candidate: AttackVector | CampaignVector,
+        status: str,
+        decision_source: str = "GMJ_FLOW",
+    ) -> None:
+        with self.connection_factory() as conn:
+            ensure_behavioral_schema(conn)
+            update_security_event_mitigation_status(
+                conn,
+                candidate,
+                status,
+                decision_source=decision_source,
+            )
+            conn.commit()
+
+    @staticmethod
+    def mitigation_status_from_result(result: Mapping[str, Any]) -> str:
+        status = clean_text(result.get("status")).lower()
+        if status in {"advertised", "active", "announced", "applied", "executed"}:
+            return "executed"
+        if status in {"expired", "withdrawn"}:
+            return "expired"
+        if status in {"dry_run", "shadow"}:
+            return "shadow"
+        if status in {"queued", "sent", "generated", "applying", "pending", "pending_approval", "requested"}:
+            return "requested"
+        return "failed"
+
     def customer_networks(self) -> list[str]:
         with self.connection_factory() as conn:
             try:
@@ -1480,8 +2055,50 @@ class BehavioralThreatRuntime:
             lookback = max(60, min(int(os.getenv("GMJFLOW_BEHAVIOR_LOOKBACK_SECONDS", "300")), 3600))
             limit = max(1000, min(int(os.getenv("GMJFLOW_BEHAVIOR_MAX_OBSERVATIONS", "100000")), 250000))
             rows = self.observation_loader(lookback, limit)
+            candidate_v2: dict[str, Any] = {}
+            candidate_v2_error = ""
+            if os.getenv("GMJFLOW_BEHAVIOR_CANDIDATE_ENGINE_V2", "false").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    from app.services.behavioral_candidates import fetch_candidate_summary_v2
+
+                    candidate_v2 = fetch_candidate_summary_v2(
+                        lookback,
+                        min(limit, 10000),
+                        thresholds=self.engine.thresholds,
+                    )
+                except Exception as exc:
+                    candidate_v2_error = clean_text(exc) or exc.__class__.__name__
             vectors, campaigns = self.engine.detect(rows, self.customer_networks())
             stats = self.engine.persist(vectors, campaigns)
+            if candidate_v2 or candidate_v2_error:
+                v1_counts = Counter(item.detector for item in vectors)
+                comparison = {
+                    "mode": "shadow_compare",
+                    "v1_observations": len(rows),
+                    "v1_vectors": len(vectors),
+                    "v1_counts": dict(v1_counts),
+                    "v2_candidate_count": candidate_v2.get("candidate_count", 0),
+                    "v2_counts": candidate_v2.get("counts", {}),
+                    "v2_error": candidate_v2_error,
+                    "production_source": "V1",
+                }
+                with self.connection_factory() as conn:
+                    ensure_behavioral_schema(conn)
+                    conn.execute(
+                        """
+                        INSERT INTO threat_engine_audit (
+                            event_type, detector, attack_vector_json, reason,
+                            non_mitigation_reason, created_at
+                        ) VALUES ('CANDIDATE_ENGINE_SHADOW_COMPARISON', 'candidate_engine_v2', ?, ?, ?, ?)
+                        """,
+                        (
+                            json_dump(comparison),
+                            "V1 and V2 candidate counts compared in shadow mode",
+                            "candidate_engine_v2_does_not_drive_mitigation",
+                            utc_now_iso(),
+                        ),
+                    )
+                    conn.commit()
             minimum_evidence = max(0, min(int(os.getenv("GMJFLOW_THREAT_POLICY_MIN_EVIDENCE_SCORE", "75")), 100))
             maximum_evaluations = max(1, min(int(os.getenv("GMJFLOW_THREAT_POLICY_MAX_EVALUATIONS", "10")), 100))
             candidates: list[AttackVector | CampaignVector] = [
@@ -1500,17 +2117,24 @@ class BehavioralThreatRuntime:
                 decision = self.get_policy_engine().evaluate(candidate)
                 decisions += 1
                 if not decision.allowed:
+                    if decision.gates.get("shadow_policy_verdict") == "WOULD_BLOCK":
+                        self.mark_mitigation_status(candidate, "shadow", decision.decision_source)
                     continue
                 authorizations += 1
+                self.mark_mitigation_status(candidate, "requested", decision.decision_source)
                 if self.mitigation_handler is None:
                     mitigation_errors.append("flowspec_handler_not_configured")
+                    self.mark_mitigation_status(candidate, "failed", decision.decision_source)
                     continue
                 try:
                     result = self.mitigation_handler(candidate, decision)
-                    if clean_text(result.get("status")) not in {"", "not_applied", "blocked", "failed"}:
+                    mitigation_status = self.mitigation_status_from_result(result)
+                    self.mark_mitigation_status(candidate, mitigation_status, decision.decision_source)
+                    if mitigation_status == "executed":
                         submitted += 1
                 except Exception as exc:
                     mitigation_errors.append(clean_text(exc) or exc.__class__.__name__)
+                    self.mark_mitigation_status(candidate, "failed", decision.decision_source)
             self.state.update(
                 {
                     "last_run": utc_now_iso(),
@@ -1522,6 +2146,9 @@ class BehavioralThreatRuntime:
                     "mitigations_submitted": submitted,
                     "mitigation_errors": mitigation_errors[:20],
                     "observations": len(rows),
+                    "candidate_engine": "v1_with_v2_shadow" if candidate_v2 or candidate_v2_error else "v1",
+                    "candidate_v2": candidate_v2.get("counts", {}),
+                    "candidate_v2_error": candidate_v2_error,
                     "mode": "shadow" if not automatic_policy_enabled() else "policy",
                 }
             )

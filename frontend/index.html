@@ -7272,7 +7272,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="col-xl-7">
               <section class="panel p-3 h-100">
                 <div class="panel-title mb-2">Attack Vectors</div>
-                <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Tipo / direção</th><th>Origem → alvo</th><th>Score</th><th>Evidências</th><th>Threat Intel</th><th>Campanha</th><th>Última ocorrência</th></tr></thead><tbody id="threatVectorRows"><tr><td colspan="7" class="text-muted">Nenhum vetor carregado.</td></tr></tbody></table></div>
+                <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Tipo / família</th><th>Origem → alvo</th><th>Detector</th><th>Contexto / tráfego</th><th>Threat Intel</th><th>IA</th><th>Última ocorrência</th></tr></thead><tbody id="threatVectorRows"><tr><td colspan="7" class="text-muted">Nenhum evento carregado.</td></tr></tbody></table></div>
               </section>
             </div>
             <div class="col-xl-5">
@@ -7287,6 +7287,18 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="panel-title mb-2">Decisões, FlowSpec e TTL</div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Decisão</th><th>Classificação</th><th>Policy / Groq</th><th>Origem</th><th>FlowSpec proposto</th><th>TTL</th><th>Motivo</th><th>Data</th></tr></thead><tbody id="threatDecisionRows"><tr><td colspan="8" class="text-muted">Nenhuma decisão registrada.</td></tr></tbody></table></div>
           </section>
+
+          <aside id="securityEventDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="securityEventDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-security-action="close" aria-label="Fechar detalhes"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div class="subtle">Investigação do evento</div><h2 id="securityEventDrawerTitle">Evento de segurança</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="close" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="securityEventDrawerStatus" class="subtle"></div>
+              <div id="securityEventDrawerBody" class="security-event-drawer__body"></div>
+            </section>
+          </aside>
         </section>
 
         <section id="view-users" class="app-view">
@@ -12956,9 +12968,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     function renderSecurityAnomaliesMain(items) {
       const tbody = document.getElementById('securityAnomaliesMainTable');
       if (!tbody) return;
+      window.gmjLegacySecurityAnomalyCache = new Map(items
+        .filter(item => item.canonical_security_event !== true)
+        .map(item => [String(item.id), { ...item, _mitigation_anomaly_id: securityAnomalyActionId(item) }]));
       tbody.innerHTML = items.map(item => {
         const actionId = securityAnomalyActionId(item);
         const dstPort = securityAnomalyDstPort(item);
+        const canonicalEvent = item.canonical_security_event === true;
         return `
         <tr>
           <td>${formatDateTime(item.last_seen || item.updated_at || item.created_at)}</td>
@@ -12981,9 +12997,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <td>${escapeHtml(item.recommended_action || '-')}</td>
           <td>
             <div class="btn-group btn-group-sm" role="group">
-              <button type="button" class="btn btn-outline-success security-anomaly-mitigate" data-anomaly-id="${actionId}"><i data-lucide="shield-check"></i><span>Mitigar</span></button>
+              ${canonicalEvent ? `<button type="button" class="btn btn-outline-secondary" data-security-action="open" data-event-id="${Number(item.id)}"><i data-lucide="eye"></i><span>Investigar</span></button>` : `<button type="button" class="btn btn-outline-secondary" data-legacy-security-anomaly-id="${Number(item.id)}"><i data-lucide="eye"></i><span>Investigar</span></button><button type="button" class="btn btn-outline-success security-anomaly-mitigate" data-anomaly-id="${actionId}"><i data-lucide="shield-check"></i><span>Mitigar</span></button>`}
+              ${canonicalEvent ? '' : `
               <button type="button" class="btn btn-outline-secondary security-anomaly-ack" data-anomaly-id="${item.id}" aria-label="Reconhecer"><i data-lucide="check"></i></button>
-              <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>
+              <button type="button" class="btn btn-outline-danger security-anomaly-close" data-anomaly-id="${item.id}" aria-label="Encerrar"><i data-lucide="octagon-x"></i></button>`}
             </div>
           </td>
         </tr>
@@ -13012,10 +13029,34 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       status.textContent = 'Atualizando deteccoes IP Zone...';
       try {
         const path = tab === 'history' ? '/api/security/anomalies/history' : '/api/security/anomalies/active';
-        const payload = await apiRequest(path, { cache: 'no-store' });
-        const items = Array.isArray(payload.items) ? payload.items : [];
+        const [payload, canonical] = await Promise.all([
+          apiRequest(path, { cache: 'no-store' }),
+          apiRequest('/security/events?limit=200', { cache: 'no-store' })
+        ]);
+        const canonicalActiveStatuses = new Set(['active', 'investigating', 'confirmed']);
+        const canonicalItems = (canonical.items || []).filter(item => tab === 'history'
+          ? !canonicalActiveStatuses.has(String(item.status || '').toLowerCase())
+          : canonicalActiveStatuses.has(String(item.status || '').toLowerCase())).map(item => ({
+            ...item,
+            canonical_security_event: true,
+            zone_name: `${item.src_role || 'UNKNOWN'} → ${item.dst_role || 'UNKNOWN'}`,
+            prefix_cidr: item.target_prefix || item.target_ip || '-',
+            domain: item.attack_family || 'OTHER_FAMILY',
+            vector: item.attack_type,
+            dst_ip: item.target_ip,
+            packets_s: item.packets_per_second,
+            bits_s: item.bits_per_second,
+            flows_s: item.flows_per_second,
+            severity: String(item.severity || 'info').toLowerCase(),
+            response: 'DETECTION_ONLY',
+            message: (item.evidence?.facts || [])[0] || `${item.verdict || 'INFO'} · score ${item.detector_score || 0}`,
+            recommended_action: item.ai_analysis?.recommended_action || 'Investigar; sem mitigação automática',
+            last_seen: item.last_seen,
+          }));
+        const items = [...canonicalItems, ...(Array.isArray(payload.items) ? payload.items : [])]
+          .sort((left, right) => String(right.last_seen || right.updated_at || '').localeCompare(String(left.last_seen || left.updated_at || '')));
         renderSecurityAnomaliesMain(items);
-        status.textContent = `${formatNumber(items.length)} eventos IP Zone ${tab === 'history' ? 'no histórico' : 'ativos'}`;
+        status.textContent = `${formatNumber(items.length)} eventos de segurança ${tab === 'history' ? 'no histórico' : 'ativos'} · ${formatNumber(canonicalItems.length)} comportamentais`;
       } catch (error) {
         status.textContent = `Falha IP Zone: ${error.message}`;
         renderSecurityAnomaliesMain([]);

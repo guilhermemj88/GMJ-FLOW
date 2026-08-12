@@ -13,6 +13,7 @@ from app.services.behavioral_detection import (
     DISTRIBUTED_SYN_FLOOD,
     DISTRIBUTED_UDP_FLOOD,
     LOW_SLOW_SCAN,
+    SSH_BRUTE_FORCE,
     MULTI_VECTOR_DDOS,
     NETWORK_SWEEP,
     PORT_SCAN_HORIZONTAL,
@@ -36,6 +37,7 @@ SUPPORTED_AUTOMATIC = {
     PORT_SCAN_HORIZONTAL,
     NETWORK_SWEEP,
     LOW_SLOW_SCAN,
+    SSH_BRUTE_FORCE,
     SYN_FLOOD,
     DISTRIBUTED_SYN_FLOOD,
     SPOOFED_SYN_FLOOD,
@@ -96,6 +98,9 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
         "average_packet_size", "packet_size_stddev", "source_port_concentration",
         "dominant_source_port", "protocol_ratio", "target_hosts", "max_host_pps",
         "aggregate_pps", "spoofing_likelihood", "recurrence_count",
+        "persistent_windows", "elapsed_seconds", "threat_intel_relevance",
+        "src_role", "dst_role", "src_is_cgnat", "dst_is_cgnat",
+        "ephemeral_destination_ratio", "pps_per_destination", "target_concentration",
     }
     return {
         "vector_type": "ATTACK_VECTOR",
@@ -103,12 +108,19 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
         "target_ip": vector.target_ip,
         "target_prefix": vector.target_prefix,
         "attack_type": vector.attack_type,
+        "attack_family": vector.attack_family,
+        "verdict": vector.verdict,
+        "severity": vector.severity,
         "detector_score": vector.detector_score,
         "direction": vector.direction,
         "window_seconds": vector.window_seconds,
         "baseline_deviation": vector.baseline_deviation,
         "first_seen": vector.first_seen,
         "last_seen": vector.last_seen,
+        "protocol": vector.protocol,
+        "network_context": dict(vector.network_context or {}),
+        "evidence": list(vector.evidence or [])[:50],
+        "score_components": dict(vector.score_components or {}),
         "features": {key: value for key, value in features.items() if key in allowed_features},
         "threat_intel": {
             "intel_sources": list(vector.intel_sources),
@@ -413,8 +425,16 @@ class ThreatPolicyEngine:
         target_intel = vector.threat_intel.get("target_campaign_intel") or {}
         source_intel_present = safe_int(source_intel.get("matched_source_count") or source_intel.get("matches")) > 0
         target_intel_present = safe_int(target_intel.get("matches")) > 0 or (not is_campaign and vector.external_correlation)
-        external_bonus = min(8, (4 if source_intel_present else 0) + (3 if target_intel_present else 0) + (1 if source_intel_present and target_intel_present else 0))
+        relevance = clean_text((vector.features or {}).get("threat_intel_relevance")) if not is_campaign else "campaign_correlation"
+        source_bonus = 1 if source_intel_present and relevance == "historical_reputation_only" else 4 if source_intel_present else 0
+        external_bonus = min(8, source_bonus + (3 if target_intel_present else 0) + (1 if source_intel_present and target_intel_present else 0))
         recurrence = safe_int((vector.features or {}).get("historical_recurrence") or (vector.features or {}).get("recurrence_count"))
+        persistence = (
+            safe_int((vector.features or {}).get("persistent_windows")) >= 3
+            or float((vector.features or {}).get("elapsed_seconds") or 0) >= 60
+            or recurrence >= 2
+            or (is_campaign and bool((vector.features or {}).get("persistence_satisfied")))
+        )
         automatic_enabled = os.getenv("GMJFLOW_THREAT_POLICY_AUTO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         shadow_ai_enabled = os.getenv("GMJFLOW_THREAT_AI_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         if ai_result is not None:
@@ -446,6 +466,8 @@ class ThreatPolicyEngine:
         score_value = int(clamp(score))
         gates: dict[str, Any] = {
             "detector_evidence": detector_score >= 70 or coordination_score >= 85,
+            "minimum_confidence": is_campaign or float(getattr(vector, "confidence", 0) or 0) >= float(os.getenv("GMJFLOW_THREAT_POLICY_MIN_CONFIDENCE", "0.80")),
+            "persistence": persistence,
             "supported_classification": classification in SUPPORTED_AUTOMATIC,
             "minimum_policy_score": score_value >= int(os.getenv("GMJFLOW_THREAT_POLICY_MIN_SCORE", "85")),
             "proposal_available": proposal is not None,
@@ -458,6 +480,17 @@ class ThreatPolicyEngine:
             "collateral_impact": impact,
             "automatic_feature_enabled": automatic_enabled,
         }
+        context = dict(getattr(vector, "network_context", {}) or {})
+        gates["network_context_safe"] = not (
+            clean_text(context.get("src_role")).upper() in {"INFRASTRUCTURE", "MANAGEMENT"}
+            or clean_text(context.get("dst_role")).upper() in {"INFRASTRUCTURE", "MANAGEMENT"}
+        )
+        require_relevant_intel = os.getenv("GMJFLOW_THREAT_POLICY_REQUIRE_RELEVANT_INTEL", "false").strip().lower() in {"1", "true", "yes", "on"}
+        gates["relevant_threat_intel"] = (
+            not require_relevant_intel
+            or target_intel_present
+            or (source_intel_present and relevance not in {"", "no_match", "historical_reputation_only"})
+        )
         require_ai = os.getenv("GMJFLOW_THREAT_POLICY_REQUIRE_GROQ", "true").strip().lower() in {"1", "true", "yes", "on"}
         gates["ai_required"] = require_ai
         gates["ai_gate"] = (not require_ai) or (
@@ -468,19 +501,24 @@ class ThreatPolicyEngine:
         )
         safety = self.safety_guard.evaluate(proposal) if proposal else {"passed": False, "checked_immediately_before_flowspec": False}
         gates["safety"] = safety
-        required = (
+        evidence_and_safety = (
             gates["detector_evidence"],
+            gates["minimum_confidence"],
+            gates["persistence"],
             gates["supported_classification"],
             gates["minimum_policy_score"],
             gates["proposal_available"],
             gates["ttl_present"],
             gates["external_intel_is_not_solo_authority"],
             gates["ai_gate"],
-            gates["automatic_feature_enabled"],
+            gates["network_context_safe"],
+            gates["relevant_threat_intel"],
             safety.get("passed") is True,
         )
-        allowed = all(required)
-        failed = [key for key, value in gates.items() if key not in {"ai_confidence", "collateral_impact", "ai_required", "safety"} and value is False]
+        would_authorize = all(evidence_and_safety)
+        gates["shadow_policy_verdict"] = "WOULD_BLOCK" if would_authorize else "WOULD_NOT_BLOCK"
+        allowed = automatic_enabled and would_authorize
+        failed = [key for key, value in gates.items() if key not in {"ai_confidence", "collateral_impact", "ai_required", "safety", "shadow_policy_verdict"} and value is False]
         if not safety.get("passed"):
             failed.append("safety")
         reason = "Politica deterministica autorizou proposta FlowSpec de menor impacto com TTL." if allowed else ""
@@ -505,7 +543,7 @@ class ThreatPolicyEngine:
         ttl = max(60, min(int(os.getenv("GMJFLOW_THREAT_POLICY_TTL_SECONDS", "900")), 3600))
         intel_sources = list(vector.intel_sources)
         campaign_id = vector.campaign_id if isinstance(vector, CampaignVector) else vector.campaign_id
-        if isinstance(vector, AttackVector) and classification in {PORT_SCAN_VERTICAL, PORT_SCAN_HORIZONTAL, NETWORK_SWEEP, LOW_SLOW_SCAN}:
+        if isinstance(vector, AttackVector) and classification in {PORT_SCAN_VERTICAL, PORT_SCAN_HORIZONTAL, NETWORK_SWEEP, LOW_SLOW_SCAN, SSH_BRUTE_FORCE}:
             if not vector.src_ip:
                 return None, 100
             parsed = ip_address(vector.src_ip)
@@ -558,6 +596,13 @@ class ThreatPolicyEngine:
         entity_type = "CAMPAIGN_VECTOR" if isinstance(vector, CampaignVector) else "ATTACK_VECTOR"
         entity_key = vector.campaign_id if isinstance(vector, CampaignVector) else f"{vector.attack_type}:{vector.src_ip}:{vector.target_prefix or vector.target_ip}:{vector.last_seen}"
         proposal = decision.proposal.as_dict() if decision.proposal else {}
+        shadow_record = {
+            "detector_verdict": getattr(vector, "verdict", decision.classification),
+            "ai_verdict": decision.ai_result.get("verdict") or decision.ai_result.get("classification") or "NOT_EVALUATED",
+            "policy_verdict": decision.gates.get("shadow_policy_verdict") or decision.decision,
+            "mitigation_executed": False,
+            "automatic_enabled": bool(decision.gates.get("automatic_feature_enabled")),
+        }
         with self.connection_factory() as conn:
             ensure_threat_policy_schema(conn)
             conn.execute(
@@ -595,7 +640,7 @@ class ThreatPolicyEngine:
                     json_dump(compact_campaign_vector(vector)) if isinstance(vector, CampaignVector) else "{}",
                     json_dump({"intel_sources": decision.intel_sources}),
                     json_dump(decision.ai_result), json_dump(decision.as_dict()),
-                    json_dump(proposal), decision.reason, decision.non_mitigation_reason,
+                    json_dump({"proposal": proposal, **shadow_record}), decision.reason, decision.non_mitigation_reason,
                     safe_int(proposal.get("ttl_seconds")), utc_now_iso(),
                 ),
             )

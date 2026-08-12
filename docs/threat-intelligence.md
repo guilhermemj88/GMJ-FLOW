@@ -1,5 +1,7 @@
 # Threat Intelligence e Behavioral Threat Engine
 
+O modelo canônico, os papéis de rede, as APIs de investigação e a análise por IA estão documentados em [Eventos de segurança comportamentais](security-events.md).
+
 ## Arquitetura integrada
 
 O pipeline mantém os papéis já existentes no GMJ-FLOW:

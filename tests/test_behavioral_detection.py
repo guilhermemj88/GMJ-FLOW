@@ -95,18 +95,18 @@ class BehavioralDetectorTest(unittest.TestCase):
         self.assertEqual(1, match.features["unique_dst_ports"])
 
     def test_network_sweep(self):
-        rows = [flow(destination=f"203.0.113.{index}", destination_port=1000 + index) for index in range(1, 26)]
+        rows = [flow(destination=f"203.0.113.{index}", destination_port=1000 + index, flags=0x02) for index in range(1, 26)]
         self.assertIn(NETWORK_SWEEP, {item.attack_type for item in PortScanDetector().detect(rows)})
 
     def test_low_slow_scan(self):
-        rows = [flow(destination_port=1000 + index, seconds_ago=index * 20) for index in range(1, 13)]
+        rows = [flow(destination_port=1000 + index, flags=0x02, seconds_ago=index * 20) for index in range(1, 13)]
         match = next(item for item in PortScanDetector().detect(rows) if item.attack_type == LOW_SLOW_SCAN)
         self.assertEqual(300, match.window_seconds)
         self.assertLess(match.features["flows_per_second"], 1)
 
     def test_distributed_syn_flood(self):
         rows = [
-            flow(source=f"198.18.1.{index}", destination="203.0.113.55", flags=0x02, packets=100, bytes_count=6000)
+            flow(source=f"198.18.1.{index}", destination="203.0.113.55", flags=0x02, packets=400, bytes_count=24000)
             for index in range(1, 26)
         ]
         vectors = SynFloodDetector().detect(rows, lambda *_args: {"matches": []})
@@ -116,13 +116,13 @@ class BehavioralDetectorTest(unittest.TestCase):
         self.assertGreater(match.features["syn_ack_ratio"], 1)
 
     def test_single_source_syn_flood(self):
-        rows = [flow(source="198.18.1.1", destination="203.0.113.54", flags=0x02, packets=1200, bytes_count=72000)]
+        rows = [flow(source="198.18.1.1", destination="203.0.113.54", flags=0x02, packets=8000, bytes_count=480000)]
         match = next(item for item in SynFloodDetector().detect(rows, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
         self.assertEqual(SYN_FLOOD, match.attack_type)
 
     def test_spoofed_syn_flood_uses_bogon_and_source_diversity(self):
         rows = [
-            flow(source=f"198.18.2.{index}", destination="203.0.113.56", flags=0x02, packets=100, bytes_count=6000)
+            flow(source=f"198.18.2.{index}", destination="203.0.113.56", flags=0x02, packets=400, bytes_count=24000)
             for index in range(1, 26)
         ]
 
@@ -134,7 +134,7 @@ class BehavioralDetectorTest(unittest.TestCase):
         self.assertGreaterEqual(match.features["spoofing_likelihood"], 60)
 
     def test_syn_flood_c2_enriches_but_does_not_replace_behavior(self):
-        rows = [flow(source="198.18.2.90", destination="203.0.113.60", flags=0x02, packets=1200, bytes_count=72000)]
+        rows = [flow(source="198.18.2.90", destination="203.0.113.60", flags=0x02, packets=8000, bytes_count=480000)]
         plain = next(item for item in SynFloodDetector().detect(rows, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
 
         def c2_lookup(ip, context=None):
@@ -149,7 +149,7 @@ class BehavioralDetectorTest(unittest.TestCase):
 
     def test_distributed_syn_mixed_providers_has_bounded_intel_boost(self):
         rows = [
-            flow(source=f"198.18.7.{index}", destination="203.0.113.61", flags=0x02, packets=100, bytes_count=6000)
+            flow(source=f"198.18.7.{index}", destination="203.0.113.61", flags=0x02, packets=400, bytes_count=24000)
             for index in range(1, 26)
         ]
 
@@ -196,7 +196,7 @@ class BehavioralDetectorTest(unittest.TestCase):
 
     def test_intel_lookup_limit_is_deterministic_and_deduplicated(self):
         rows = [
-            flow(source=f"198.18.10.{index}", destination="203.0.113.62", flags=0x02, packets=100)
+            flow(source=f"198.18.10.{index}", destination="203.0.113.62", flags=0x02, packets=400, bytes_count=24000)
             for index in range(1, 31)
         ]
         calls = []
@@ -214,26 +214,26 @@ class BehavioralDetectorTest(unittest.TestCase):
 
     def test_distributed_udp_flood(self):
         rows = [
-            flow(source=f"198.18.3.{index}", destination="203.0.113.57", protocol=17, source_port=50000 + index, packets=100, bytes_count=10000)
+            flow(source=f"198.18.3.{index}", destination="203.0.113.57", protocol=17, source_port=50000 + index, packets=500, bytes_count=50000)
             for index in range(1, 26)
         ]
         match = next(item for item in UdpFloodDetector().detect(rows, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
         self.assertEqual(DISTRIBUTED_UDP_FLOOD, match.attack_type)
 
     def test_single_source_udp_flood(self):
-        rows = [flow(source="198.18.3.1", destination="203.0.113.58", protocol=17, packets=1200, bytes_count=120000)]
+        rows = [flow(source="198.18.3.1", destination="203.0.113.58", protocol=17, packets=8000, bytes_count=800000)]
         match = next(item for item in UdpFloodDetector().detect(rows, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
         self.assertEqual(UDP_FLOOD, match.attack_type)
 
     def test_udp_reflection_requires_more_than_a_port(self):
         small = [
-            flow(source=f"198.18.4.{index}", destination="203.0.113.58", protocol=17, source_port=53, packets=100, bytes_count=10000)
+            flow(source=f"198.18.4.{index}", destination="203.0.113.58", protocol=17, source_port=53, packets=500, bytes_count=50000)
             for index in range(1, 26)
         ]
         small_match = next(item for item in UdpFloodDetector().detect(small, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
         self.assertEqual(DISTRIBUTED_UDP_FLOOD, small_match.attack_type)
         large = [
-            flow(source=f"198.18.5.{index}", destination="203.0.113.59", protocol=17, source_port=53, packets=100, bytes_count=120000)
+            flow(source=f"198.18.5.{index}", destination="203.0.113.59", protocol=17, source_port=53, packets=500, bytes_count=600000)
             for index in range(1, 26)
         ]
         large_match = next(item for item in UdpFloodDetector().detect(large, lambda *_args: {"matches": []}) if item.target_prefix.endswith("/32"))
@@ -336,8 +336,8 @@ class BehavioralPersistenceTest(unittest.TestCase):
                 "dst_port": 443,
                 "proto": 6,
                 "tcp_flags": 2,
-                "packets": 1200,
-                "bytes": 72000,
+                "packets": 8000,
+                "bytes": 480000,
             }
         ]
         first, campaigns = self.engine.detect(rows)
