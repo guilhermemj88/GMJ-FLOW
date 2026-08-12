@@ -295,12 +295,25 @@ class PortScanDetector:
     ) -> list[AttackVector]:
         if not observations:
             return []
-        now = max(item.observed_at for item in observations)
+
+        # Port-scan detection must only consider connection attempts (SYN without ACK).
+        # Counting established/response traffic makes high-volume services look like scanners.
+        scan_observations = [
+            row
+            for row in observations
+            if row.protocol == 6
+            and (row.tcp_flags & 0x02)
+            and not (row.tcp_flags & 0x10)
+        ]
+        if not scan_observations:
+            return []
+
+        now = max(item.observed_at for item in scan_observations)
         best: dict[tuple[str, str], AttackVector] = {}
         for window in WINDOWS:
             grouped: dict[str, list[FlowObservation]] = defaultdict(list)
             cutoff = now - timedelta(seconds=window)
-            for row in observations:
+            for row in scan_observations:
                 if row.observed_at >= cutoff:
                     grouped[row.src_ip].append(row)
             for source, rows in grouped.items():
@@ -351,7 +364,7 @@ class PortScanDetector:
         if intel_lookup is None:
             return vectors
         rows_by_source: dict[str, list[FlowObservation]] = defaultdict(list)
-        for row in observations:
+        for row in scan_observations:
             rows_by_source[row.src_ip].append(row)
         for vector in vectors:
             intel = source_intel_stats(rows_by_source.get(vector.src_ip, []), intel_lookup, maximum_lookups=1)
