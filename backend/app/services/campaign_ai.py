@@ -20,9 +20,13 @@ CAMPAIGN_AI_SYSTEM_PROMPT = """You are a network security analyst specialized in
 
 Analyze this campaign as a campaign, not as an individual Security Event. Use only the bounded evidence provided by GMJ-FLOW and do not invent facts.
 
-Differentiate campaign detection/correlation evidence, persisted Threat Intelligence enrichment, correlated canonical events, and inference. Threat Intelligence is enrichment and must not be described as the reason the campaign detector fired unless the payload explicitly says so.
+Differentiate detector evidence, correlation evidence, persisted Threat Intelligence enrichment, correlated canonical events, and inference. Threat Intelligence is enrichment and must never be described as the reason the campaign detector fired.
 
-Return concise operational guidance as valid JSON matching the requested schema. The analysis is advisory only. Never perform, request, or imply automatic mitigation."""
+Do not call a campaign confirmed only because its detector or coordination score is high; scores reflect satisfied local criteria, not probabilistic certainty. Consider ISP and CGNAT context, baseline and delta, low per-host rate, source count and ASN diversity, persistence, and historical recurrence. Respect metric provenance: peak/detection PPS is not the average PPS across the campaign lifetime.
+
+A single persisted GreyNoise malicious match among thousands of sources is contextual support, not isolated confirmation of the whole campaign. Absence of a GreyNoise match does not mean a source is benign. State clearly when evidence is inconclusive.
+
+Return concise operational guidance as valid JSON matching the requested schema. The analysis is advisory only. Never claim mitigation happened and never perform, request, or imply automatic mitigation."""
 
 
 def ensure_campaign_ai_schema(conn: sqlite3.Connection) -> None:
@@ -100,7 +104,7 @@ def get_campaign_analysis(conn: sqlite3.Connection, campaign_id: str) -> dict[st
     investigation = get_campaign_investigation(conn, campaign_id)
     if investigation is None:
         return {"ok": False, "status": "not_found", "error_message": "Campanha não encontrada"}
-    config = security_ai_config()
+    config = security_ai_config(conn, "security_campaign_analysis")
     latest = _latest_attempt(conn, campaign_id)
     valid = latest if latest.get("status") == "valid" else _latest_valid_analysis(conn, campaign_id)
     analysis = valid.get("result") or {}
@@ -118,7 +122,13 @@ def get_campaign_analysis(conn: sqlite3.Connection, campaign_id: str) -> dict[st
         "campaign_id": campaign_id,
         "enabled": config["enabled"],
         "configured": config["configured"],
+        "kill_switch_enabled": config["kill_switch_enabled"],
+        "route_configured": config["route_configured"],
+        "route_enabled": config["route_enabled"],
+        "routing_global_enabled": config["routing_global_enabled"],
+        "config_source": config["config_source"],
         "provider": valid.get("provider") or latest.get("provider") or config["provider"],
+        "provider_name": valid.get("provider") or latest.get("provider") or config["provider_name"],
         "model": valid.get("model") or latest.get("model") or config["model"],
         "analysis": analysis or {},
         "analysis_status": "stale" if stale else "valid" if analysis else latest.get("status") or "not_analyzed",
@@ -143,7 +153,7 @@ def analyze_campaign(
     investigation = get_campaign_investigation(conn, campaign_id)
     if investigation is None:
         return {"ok": False, "status": "not_found", "error_message": "Campanha não encontrada"}
-    if executor is None and not security_ai_config()["enabled"]:
+    if executor is None and not security_ai_config(conn, "security_campaign_analysis")["kill_switch_enabled"]:
         return {
             "ok": False,
             "status": "disabled",

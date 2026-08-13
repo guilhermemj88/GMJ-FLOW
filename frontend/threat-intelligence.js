@@ -45,6 +45,17 @@
     return Number.isNaN(parsed.getTime()) ? esc(value) : parsed.toLocaleString('pt-BR');
   }
 
+  function humanDuration(value) {
+    const total = Number(value);
+    if (!Number.isFinite(total) || total < 0) return '-';
+    const seconds = Math.floor(total);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = seconds % 60;
+    return [hours ? `${hours}h` : '', (minutes || hours) ? `${String(minutes).padStart(2, '0')}m` : '',
+      `${String(remainder).padStart(2, '0')}s`].filter(Boolean).join(' ');
+  }
+
   function setInvestigationHeading(context, title) {
     const label = document.getElementById('securityEventDrawerContext');
     if (label) label.textContent = context;
@@ -442,7 +453,7 @@
 
   function renderSecurityDistribution(items, label) {
     const rows = (Array.isArray(items) ? items : []).slice(0, 20);
-    return rows.length ? `<div class="security-distribution"><h4>${esc(label)}</h4>${rows.map(item => `<div><strong>${esc(item.port ?? item.protocol ?? item.flags ?? '-')}</strong><span>${number(item.packets)} pacotes · ${securityBytes(item.bytes)} · ${number(item.flows)} flows</span></div>`).join('')}</div>` : '';
+    return rows.length ? `<div class="security-distribution"><h4>${esc(label)}</h4>${rows.map(item => `<div><strong>${esc(item.port ?? item.protocol_label ?? item.protocol ?? item.flags ?? '-')}</strong><span>${number(item.packets)} pacotes · ${securityBytes(item.bytes)} · ${number(item.flows)} flows</span></div>`).join('')}</div>` : '';
   }
 
   function sourceTableRows(items, sort) {
@@ -607,8 +618,8 @@
 
   function renderCampaignAsnDistribution(items) {
     const rows = Array.isArray(items) ? items : [];
-    return rows.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>ASN</th><th>Organização</th><th>Fontes</th><th>Percentual</th></tr></thead><tbody>${rows.map(item => `<tr>
-      <td>${item.asn ? `AS${number(item.asn)}` : '-'}</td><td>${esc(item.organization || '-')}</td><td>${optionalNumber(item.sources)}</td><td>${optionalNumber(item.percentage, 2, '%')}</td>
+    return rows.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>ASN</th><th>Organização</th><th>País</th><th>Fontes</th><th>Percentual</th></tr></thead><tbody>${rows.map(item => `<tr>
+      <td>${item.asn ? `AS${number(item.asn)}` : '-'}</td><td>${esc(item.organization || '-')}</td><td>${esc(item.country || '-')}</td><td>${optionalNumber(item.sources)}</td><td>${optionalNumber(item.percentage, 2, '%')}</td>
     </tr>`).join('')}</tbody></table></div>` : '<div class="subtle">Distribuição por ASN não persistida para esta campanha.</div>';
   }
 
@@ -623,7 +634,9 @@
       return `<article class="security-correlated-event">
         ${detailGrid([
           ['Public ID', item.public_id], ['Event type', item.event_type], ['Score', optionalNumber(item.score)], ['Target', item.target],
-          ['First seen', dateTime(item.first_seen)], ['Last seen', dateTime(item.last_seen)], ['Source count', optionalNumber(item.source_count)], ['Threat Intelligence', intelText]
+          ['First seen', dateTime(item.first_seen)], ['Last seen', dateTime(item.last_seen)], ['Source count', optionalNumber(item.source_count)], ['Threat Intelligence', intelText],
+          ['Source ASN', item.source_asn ? `AS${number(item.source_asn)} — ${item.source_asn_organization || '-'} · ${item.source_country || '-'}` : '-'],
+          ['Target ASN', item.target_asn ? `AS${number(item.target_asn)} — ${item.target_asn_organization || '-'} · ${item.target_country || '-'}` : '-']
         ])}
         <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="open" data-event-id="${esc(item.id)}">Abrir evento</button>
       </article>`;
@@ -639,13 +652,20 @@
       : !state.configured
         ? 'Provider, modelo ou credencial não configurados no backend.'
         : !canManageSecurityEvents() ? 'Seu perfil não pode solicitar análise.' : '';
+    const status = detailGrid([
+      ['AI enabled', state.enabled ? 'Sim' : 'Não'], ['Rota configurada', state.route_configured ? 'Sim' : 'Não — fallback por ambiente'],
+      ['Rota habilitada', state.route_configured ? (state.route_enabled ? 'Sim' : 'Não') : '-'],
+      ['Provider', state.provider_name || state.provider || '-'], ['Model', state.model || '-'],
+      ['Status da análise', state.analysis_status || 'not_analyzed'], ['Analyzed at', dateTime(state.analyzed_at)],
+      ['Cache / stale', state.stale ? 'stale' : hasAnalysis ? 'válido / reutilizável' : 'sem cache']
+    ]);
     if (!hasAnalysis) {
-      return `<p class="subtle">Esta campanha ainda não foi analisada por IA. A execução ocorre somente mediante clique e é consultiva.</p>
+      return `${status}<p class="subtle mt-2">Esta campanha ainda não foi analisada por IA. A execução ocorre somente mediante clique e é consultiva.</p>
         ${state.error ? `<div class="security-ai-error">${esc(state.error)}</div>` : ''}
         <button type="button" class="btn btn-sm btn-success mt-2" data-campaign-action="analyze" data-campaign-id="${esc(campaign.campaign_id)}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
         ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
     }
-    return `${state.stale ? '<div class="security-ai-stale">Análise potencialmente desatualizada após nova evidência da campanha.</div>' : ''}
+    return `${status}${state.stale ? '<div class="security-ai-stale mt-2">Análise potencialmente desatualizada após nova evidência da campanha.</div>' : ''}
       <div class="security-ai-verdict"><strong>${esc(analysis.assessment || 'Análise consultiva')}</strong><span>${esc(analysis.confidence || '-')}</span></div>
       <p>${esc(analysis.summary || '')}</p>
       <h4>Por que a campanha foi detectada</h4>${investigationList(analysis.why_detected)}
@@ -663,35 +683,65 @@
       <div class="subtle mt-1">Advisory only: a IA não executa nem solicita mitigação automática.</div>`;
   }
 
+  function renderCampaignDetectionContext(context = {}) {
+    return `<div class="campaign-context-box"><p>${esc(context.interpretation || 'Contexto de detecção não persistido.')}</p>${detailGrid([
+      ['Target role', context.target_role], ['Observed PPS', optionalNumber(context.observed_pps, 2)],
+      ['Baseline', optionalNumber(context.baseline_pps, 2, ' pps')], ['Delta', optionalNumber(context.baseline_delta, 2, 'x')],
+      ['Max per host', optionalNumber(context.max_per_host_pps, 2, ' pps')], ['Source count', optionalNumber(context.source_count)],
+      ['ASN diversity', optionalNumber(context.asn_diversity)], ['Destinations', optionalNumber(context.destination_count)],
+      ['Threat Intelligence', context.threat_intelligence_status]
+    ])}</div>`;
+  }
+
+  function provenanceWindow(item = {}) {
+    const interval = item.first_seen || item.last_seen ? `${dateTime(item.first_seen)} → ${dateTime(item.last_seen)}` : 'timestamp do pico não persistido';
+    const windows = (item.contributing_window_seconds || []).length ? ` · janelas detector ${item.contributing_window_seconds.join(', ')} s` : '';
+    return `${esc(item.scope || '-')} · ${esc(item.aggregation || '-')}${windows} · ${interval}`;
+  }
+
   function renderSecurityCampaignInvestigation(payload, aiState) {
     const campaign = payload.campaign || {};
     const traffic = payload.target_traffic || {};
     const evidence = payload.detection_correlation_evidence || {};
+    const provenance = payload.metric_provenance || {};
+    const detectionContext = payload.detection_context || {};
+    const asnContext = payload.asn_distribution_context || {};
     const ports = (traffic.ports || []).map(item => item.port).filter(value => value !== null && value !== undefined).join(', ');
     setInvestigationHeading('Campaign Investigation', `Investigação da campanha · ${campaign.campaign_id}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
-      <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN DISTRIBUTION'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
+      <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['context','Contexto'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN SNAPSHOT'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
       <section id="campaign-summary"><h3>RESUMO DA CAMPAIGN</h3>${detailGrid([
         ['Campaign ID', campaign.campaign_id], ['Classification / family', `${campaign.classification || '-'} / ${campaign.family || '-'}`],
         ['Target', campaign.target], ['Coordination score', optionalNumber(campaign.coordination_score)],
         ['Sources', optionalNumber(campaign.unique_sources)], ['ASN count', optionalNumber(campaign.unique_source_asns)],
-        ['pps', optionalNumber(campaign.packets_per_second, 2)], ['bps', optionalNumber(campaign.bits_per_second, 1)],
+        ['Peak detection PPS', optionalNumber(campaign.packets_per_second, 2)], ['Peak detection BPS', optionalNumber(campaign.bits_per_second, 1)],
         ['First seen', dateTime(campaign.first_seen)], ['Last seen', dateTime(campaign.last_seen)],
-        ['Duration', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 1)} s`],
+        ['Campaign duration', humanDuration(campaign.duration_seconds)],
+        ['Duration (technical)', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 3)} s`],
         ['Persistence', campaignPersistence(campaign)], ['Detector', campaign.detector], ['Enrichment summary', campaignEnrichmentText(campaign)]
-      ])}</section>
+      ])}<p class="subtle score-semantics" title="Detector score reflects local detection criteria, not probabilistic certainty.">Detector score reflects local detection criteria, not probabilistic certainty.</p></section>
+      <section id="campaign-context"><h3>CONTEXTO DE DETECÇÃO / CGNAT</h3>${renderCampaignDetectionContext(detectionContext)}</section>
       <section id="campaign-traffic"><h3>TARGET / TRAFFIC</h3>${detailGrid([
-        ['Target', traffic.target], ['Protocol', traffic.protocol], ['Ports', ports || '-'],
-        ['pps', optionalNumber(traffic.pps, 2)], ['bps', optionalNumber(traffic.bps, 1)],
-        ['Packets', optionalNumber(traffic.packets)], ['Bytes', traffic.bytes === null || traffic.bytes === undefined ? '-' : securityBytes(traffic.bytes)],
+        ['Target', traffic.target], ['Target role', traffic.target_role], ['Protocol', traffic.protocol], ['Ports', ports || '-'],
+        ['Peak detection PPS', optionalNumber(traffic.pps, 2)], ['Peak detection BPS', optionalNumber(traffic.bps, 1)],
+        ['Investigation packets', optionalNumber(traffic.packets)], ['Investigation bytes', traffic.bytes === null || traffic.bytes === undefined ? '-' : securityBytes(traffic.bytes)],
+        ['Investigation flows', optionalNumber(traffic.flows)],
         ['Source count', optionalNumber(traffic.source_count)], ['ASN diversity', optionalNumber(traffic.asn_diversity)]
-      ])}${renderSecurityDistribution(traffic.protocols, 'Protocol distribution')}${renderSecurityDistribution(traffic.ports, 'Destination ports')}</section>
+      ])}<h4>Metric provenance / time window</h4>${detailGrid([
+        ['Detection PPS scope', provenanceWindow(provenance.pps)], ['Detection BPS scope', provenanceWindow(provenance.bps)],
+        ['Investigation packets scope', provenanceWindow(provenance.packets)], ['Investigation bytes scope', provenanceWindow(provenance.bytes)],
+        ['Investigation window', `${dateTime(traffic.investigation_window?.first_seen)} → ${dateTime(traffic.investigation_window?.last_seen)}${traffic.investigation_window?.window_seconds === null || traffic.investigation_window?.window_seconds === undefined ? '' : ` · ${number(traffic.investigation_window.window_seconds, 3)} s`}`]
+      ])}<p class="subtle">Peak/detection rates and investigation volume are retained from different scopes and must not be multiplied as if they covered the same time window.</p>
+        ${renderSecurityDistribution(traffic.protocols, 'Protocol distribution')}${renderSecurityDistribution(traffic.ports, 'Destination ports')}</section>
       <section id="campaign-sources">${renderSecuritySources(payload.top_sources || [], true)}</section>
-      <section id="campaign-asn"><h3>ASN DISTRIBUTION</h3>${renderCampaignAsnDistribution(payload.asn_distribution)}
-        <p class="subtle">${payload.asn_distribution_context?.percentage_scope === 'persisted_top_sources_snapshot' ? 'Percentuais calculados sobre as origens presentes no snapshot persistido de Top Sources.' : 'Percentuais da distribuição persistida da campaign.'}</p></section>
+      <section id="campaign-asn"><h3>ASN DISTRIBUTION — TOP SOURCES SNAPSHOT</h3>${detailGrid([
+        ['Total campaign ASNs', optionalNumber(asnContext.total_campaign_asns)], ['ASNs represented in snapshot', optionalNumber(asnContext.represented_asns)],
+        ['Sources represented in snapshot', optionalNumber(asnContext.represented_sources)]
+      ])}${renderCampaignAsnDistribution(payload.asn_distribution)}
+        <p class="subtle">${asnContext.complete_campaign_distribution ? 'Distribuição completa persistida da campaign.' : 'Percentuais calculados somente sobre as origens presentes no snapshot persistido de Top Sources; não representam todos os ASNs da campaign.'}</p></section>
       <section id="campaign-intel"><h3>THREAT INTELLIGENCE</h3>${renderCampaignThreatIntel(campaign)}</section>
       <section id="campaign-events"><h3>EVENTOS CORRELACIONADOS</h3>${renderCampaignEvents(payload.correlated_events)}</section>
-      <section id="campaign-evidence"><h3>DETECTION / CORRELATION EVIDENCE</h3>${detailGrid(Object.entries(evidence.correlation_features || {}))}
+      <section id="campaign-evidence"><h3>DETECTION / CORRELATION EVIDENCE</h3><p class="subtle score-semantics" title="${esc(evidence.detector_score_semantics || '')}">${esc(evidence.detector_score_semantics || 'Detector score reflects local detection criteria, not probabilistic certainty.')}</p>${detailGrid(Object.entries(evidence.correlation_features || {}))}
         <h4>Detectores contribuintes</h4>${investigationList((evidence.contributing_vectors || []).map(item => `${item.detector || '-'} · ${item.attack_type || '-'} · score ${optionalNumber(item.score)} · ${item.source || 'distribuída'} → ${item.target || '-'}`))}</section>
       <section id="campaign-ai"><h3>ANÁLISE IA DA CAMPAIGN</h3>${renderCampaignAiInvestigation(campaign, aiState)}</section>`;
     root.lucide?.createIcons();

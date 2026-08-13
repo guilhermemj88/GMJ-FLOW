@@ -35,7 +35,10 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(parsed, maximum))
 
 
-def security_ai_config() -> dict[str, Any]:
+def security_ai_config(
+    conn: sqlite3.Connection | None = None,
+    function_key: str = "security_event_analysis",
+) -> dict[str, Any]:
     provider = clean_text(os.getenv("GMJFLOW_SECURITY_AI_PROVIDER", "groq")).lower().replace("-", "_")
     supported = provider in {"groq", "openai_compatible"}
     model = clean_text(os.getenv("GMJFLOW_SECURITY_AI_MODEL"))
@@ -46,20 +49,61 @@ def security_ai_config() -> dict[str, Any]:
         os.getenv("GROQ_API_KEY") if provider == "groq" else os.getenv("GMJFLOW_SECURITY_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
     ))
     enabled = _enabled(os.getenv("GMJFLOW_SECURITY_AI_ENABLED", "false"))
-    return {
+    config = {
         "enabled": enabled,
+        "kill_switch_enabled": enabled,
         "provider": provider,
+        "provider_name": provider,
         "model": model,
         "timeout_seconds": _bounded_int(os.getenv("GMJFLOW_SECURITY_AI_TIMEOUT_SECONDS"), 30, 1, 120),
         "max_prompt_chars": _bounded_int(os.getenv("GMJFLOW_SECURITY_AI_MAX_PROMPT_CHARS"), 30000, 4000, 100000),
         "max_output_tokens": _bounded_int(os.getenv("GMJFLOW_SECURITY_AI_MAX_OUTPUT_TOKENS"), 1600, 256, 4096),
         "base_url_configured": bool(base_url),
         "api_key_configured": api_key_configured,
-        "configured": enabled and supported and bool(model) and bool(base_url) and api_key_configured,
+        "configured": supported and bool(model) and bool(base_url) and api_key_configured,
         "supported": supported,
+        "route_configured": False,
+        "route_enabled": False,
+        "routing_global_enabled": False,
+        "config_source": "environment_fallback",
+        "function_key": function_key,
         "advisory_only": True,
         "automatic_mitigation": False,
     }
+    if conn is None:
+        return config
+    try:
+        has_routes = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ai_routes'"
+        ).fetchone()
+        if has_routes is None:
+            return config
+        from app.services.ai_integration import central_ai_effective_config, global_ai_settings, list_ai_routes
+
+        route = next((item for item in list_ai_routes(conn) if item.get("function_key") == function_key), None)
+        if not route or not route.get("primary_provider_id"):
+            return config
+        effective = central_ai_effective_config(conn, function_key) or {}
+        routing_global_enabled = _enabled(global_ai_settings(conn).get("global_enabled"))
+        route_enabled = bool(route.get("enabled"))
+        selected_model = clean_text(effective.get("selected_model") or route.get("primary_model"))
+        provider_name = clean_text(effective.get("provider_name") or route.get("primary_provider_name"))
+        config.update(
+            {
+                "enabled": enabled and routing_global_enabled and route_enabled and bool(effective.get("enabled")),
+                "provider": clean_text(effective.get("provider")) or provider_name,
+                "provider_name": provider_name,
+                "model": selected_model,
+                "configured": bool(provider_name and selected_model),
+                "route_configured": True,
+                "route_enabled": route_enabled,
+                "routing_global_enabled": routing_global_enabled,
+                "config_source": "ai_routing",
+            }
+        )
+    except (sqlite3.Error, ImportError):
+        return config
+    return config
 
 
 def _limited_text(value: Any, maximum: int = 2000) -> str:
@@ -298,11 +342,61 @@ def _normalize_analysis(value: Any) -> dict[str, Any] | None:
     return result
 
 
+def analysis_fingerprint(value: Any) -> str:
+    """Stable fingerprint shared by event and campaign advisory analyses."""
+    return _fingerprint(value)
+
+
+def normalize_advisory_analysis(value: Any) -> dict[str, Any] | None:
+    """Apply the common bounded, advisory-only result contract."""
+    return _normalize_analysis(value)
+
+
+def execute_security_ai_provider(
+    conn: sqlite3.Connection,
+    function_key: str,
+    prompt: str,
+    *,
+    system_prompt: str,
+    schema: dict[str, Any],
+    anomaly_id: int | None = None,
+) -> dict[str, Any]:
+    """Use AI Routing when configured, with the legacy environment route as fallback."""
+    config = security_ai_config(conn, function_key)
+    if not config["kill_switch_enabled"]:
+        return {
+            "ok": False,
+            "status": "disabled",
+            "error_type": "disabled",
+            "error_message": "Security AI desabilitada por configuração",
+            "config_source": config["config_source"],
+        }
+    if config["route_configured"]:
+        from app.services.ai_integration import execute_ai_route
+
+        return execute_ai_route(
+            conn,
+            function_key,
+            prompt,
+            system_prompt=system_prompt,
+            schema=schema,
+            anomaly_id=anomaly_id,
+        )
+    return _environment_executor(
+        conn,
+        function_key,
+        prompt,
+        system_prompt=system_prompt,
+        schema=schema,
+        anomaly_id=anomaly_id,
+    )
+
+
 def get_security_event_analysis(conn: sqlite3.Connection, event_reference: Any) -> dict[str, Any]:
     event = find_security_event(conn, event_reference)
     if event is None:
         return {"ok": False, "status": "not_found", "error_message": "Evento de segurança não encontrado"}
-    config = security_ai_config()
+    config = security_ai_config(conn, "security_event_analysis")
     row = conn.execute(
         "SELECT * FROM security_event_ai_analyses WHERE event_id=? ORDER BY id DESC LIMIT 1",
         (int(event["id"]),),
@@ -315,7 +409,13 @@ def get_security_event_analysis(conn: sqlite3.Connection, event_reference: Any) 
         "event_id": event["event_id"],
         "enabled": config["enabled"],
         "configured": config["configured"],
+        "kill_switch_enabled": config["kill_switch_enabled"],
+        "route_configured": config["route_configured"],
+        "route_enabled": config["route_enabled"],
+        "routing_global_enabled": config["routing_global_enabled"],
+        "config_source": config["config_source"],
         "provider": event.get("ai_provider") or config["provider"],
+        "provider_name": event.get("ai_provider") or config["provider_name"],
         "model": event.get("ai_model") or config["model"],
         "analysis": event.get("ai_analysis") or {},
         "analysis_status": event.get("ai_analysis_status") or "not_analyzed",
@@ -340,7 +440,7 @@ def analyze_security_event(
     event = find_security_event(conn, event_id)
     if event is None:
         return {"ok": False, "status": "not_found", "error_message": "Evento de segurança não encontrado"}
-    if executor is None and not security_ai_config()["enabled"]:
+    if executor is None and not security_ai_config(conn, "security_event_analysis")["kill_switch_enabled"]:
         return {"ok": False, "status": "disabled", "error_type": "disabled", "error_message": "Security AI desabilitada por configuração"}
 
     payload = structured_analysis_payload(conn, event)
@@ -384,7 +484,7 @@ def analyze_security_event(
         """,
         (json_dump({"event_id": event["event_id"], "analysis_version": ANALYSIS_VERSION, "evidence_fingerprint": evidence_fingerprint}), "structured_event_analysis", now),
     )
-    selected_executor = executor or _environment_executor
+    selected_executor = executor or execute_security_ai_provider
     result = selected_executor(
         conn, "security_event_analysis", prompt,
         system_prompt=SECURITY_AI_SYSTEM_PROMPT,

@@ -59,6 +59,7 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         ensure_behavioral_schema(self.conn)
         ensure_security_event_schema(self.conn)
+        self._create_local_asn_cache()
         self.previous_factory = api.BEHAVIORAL_THREAT_RUNTIME.connection_factory
         api.BEHAVIORAL_THREAT_RUNTIME.connection_factory = lambda: self.conn
         self._insert_campaign()
@@ -68,6 +69,39 @@ class CampaignInvestigationTest(unittest.TestCase):
     def tearDown(self) -> None:
         api.BEHAVIORAL_THREAT_RUNTIME.connection_factory = self.previous_factory
         self.conn.close()
+
+    def _create_local_asn_cache(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE asn_info (
+                asn INTEGER PRIMARY KEY,
+                as_name TEXT NOT NULL DEFAULT '',
+                org_name TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                raw_json TEXT NOT NULL DEFAULT '',
+                first_seen_at TEXT,
+                updated_at TEXT,
+                expires_at TEXT,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE asn_resolution_queue (
+                ip TEXT PRIMARY KEY,
+                asn INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'queued'
+            );
+            """
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO asn_info (asn, as_name, org_name, country, source, updated_at, expires_at)
+            VALUES (?, ?, ?, ?, 'local_rdap_cache', '2026-08-12T09:00:00Z', '2099-01-01T00:00:00Z')
+            """,
+            [
+                (64511, "EXAMPLE-TRANSIT", "Example Transit Cached", "BR"),
+                (64520, "TARGET-NET", "Target Network Cached", "BR"),
+            ],
+        )
 
     def _insert_campaign(self, campaign_id: str = CAMPAIGN_ID, *, threat_intel: dict | None = None) -> None:
         features = {
@@ -128,7 +162,7 @@ class CampaignInvestigationTest(unittest.TestCase):
             "unique_source_asns": 628,
             "top_source_details": [
                 {"source_ip": "198.51.100.10", "source_asn": 64510, "packets": 30000, "bytes": 23000000, "flows": 2500, "pps": 100},
-                {"source_ip": "198.51.100.11", "source_asn": 64511, "packets": 17640, "bytes": 14037025, "flows": 1250, "pps": 58.8, "asn_organization": "Example Transit"},
+                {"source_ip": "198.51.100.11", "source_asn": 64511, "packets": 17640, "bytes": 14037025, "flows": 1250, "pps": 58.8},
             ],
             "protocol_distribution": [{"protocol": "udp", "packets": 47640, "bytes": 37037025, "flows": 3750}],
             "top_destination_port_details": [{"port": 53, "packets": 47640, "bytes": 37037025, "flows": 3750}],
@@ -176,6 +210,7 @@ class CampaignInvestigationTest(unittest.TestCase):
                 direction="INBOUND",
                 protocol="udp",
                 campaign_id=CAMPAIGN_ID,
+                network_context={"src_asn": 64511, "dst_asn": 64520},
                 features={
                     "packet_count": 47640,
                     "byte_count": 37037025,
@@ -228,13 +263,90 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.assertEqual(64510, payload["top_sources"][0]["source_asn"])
         self.assertEqual("Hostile Cloud", payload["top_sources"][0]["asn_organization"])
         self.assertEqual("malicious", payload["top_sources"][0]["threat_intelligence_classification"])
+        cached_source = next(item for item in payload["top_sources"] if item["source_asn"] == 64511)
+        self.assertEqual("Example Transit Cached", cached_source["asn_organization"])
+        self.assertEqual("BR", cached_source["country"])
+        self.assertEqual("local_rdap_cache", cached_source["asn_resolution_source"])
         self.assertEqual(2, len(payload["asn_distribution"]))
+        cached_asn = next(item for item in payload["asn_distribution"] if item["asn"] == 64511)
+        self.assertEqual("Example Transit Cached", cached_asn["organization"])
+        self.assertEqual("BR", cached_asn["country"])
         self.assertEqual(47640, payload["target_traffic"]["packets"])
         self.assertEqual(37037025, payload["target_traffic"]["bytes"])
-        self.assertEqual("udp", payload["target_traffic"]["protocol"])
+        self.assertEqual("UDP (17)", payload["target_traffic"]["protocol"])
         self.assertEqual(53, payload["target_traffic"]["ports"][0]["port"])
         self.assertEqual(2320, payload["target_traffic"]["source_count"])
         self.assertEqual(628, payload["target_traffic"]["asn_diversity"])
+        self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM asn_resolution_queue").fetchone()[0])
+
+    def test_metric_provenance_keeps_peak_rates_separate_from_snapshot_totals(self) -> None:
+        payload = get_campaign_investigation(self.conn, CAMPAIGN_ID)
+        assert payload is not None
+        provenance = payload["metric_provenance"]
+        self.assertEqual("peak_detection_window", provenance["pps"]["scope"])
+        self.assertEqual("maximum_across_campaign_updates", provenance["pps"]["aggregation"])
+        self.assertEqual("threat_campaigns.packets_per_second", provenance["pps"]["source"])
+        self.assertEqual("investigation_snapshot", provenance["packets"]["scope"])
+        self.assertEqual("sum_of_persisted_contributing_vector_snapshots", provenance["packets"]["aggregation"])
+        self.assertEqual("2026-08-12T10:00:00Z", provenance["packets"]["first_seen"])
+        self.assertEqual("2026-08-12T10:05:00Z", provenance["packets"]["last_seen"])
+        self.assertEqual(300.0, provenance["packets"]["window_seconds"])
+        self.assertNotEqual(provenance["pps"]["scope"], provenance["packets"]["scope"])
+
+    def test_protocol_numbers_are_preserved_and_named(self) -> None:
+        row = self.conn.execute(
+            "SELECT id, feature_json FROM behavioral_attack_vectors WHERE campaign_id=?",
+            (CAMPAIGN_ID,),
+        ).fetchone()
+        features = json.loads(row["feature_json"])
+        features["protocol_distribution"] = [
+            {"protocol": 47, "packets": 30000, "bytes": 20000000, "flows": 2000},
+            {"protocol": 50, "packets": 17640, "bytes": 17037025, "flows": 1750},
+        ]
+        self.conn.execute("UPDATE behavioral_attack_vectors SET feature_json=? WHERE id=?", (json.dumps(features), row["id"]))
+        payload = get_campaign_investigation(self.conn, CAMPAIGN_ID)
+        assert payload is not None
+        protocols = {item["protocol_number"]: item for item in payload["target_traffic"]["protocols"]}
+        self.assertEqual("GRE (47)", protocols[47]["protocol_label"])
+        self.assertEqual(47, protocols[47]["protocol"])
+        self.assertEqual("ESP (50)", protocols[50]["protocol_label"])
+        self.assertEqual(50, protocols[50]["protocol"])
+
+    def test_cgnat_context_exposes_detector_facts_without_changing_score(self) -> None:
+        row = self.conn.execute(
+            "SELECT id, feature_json FROM behavioral_attack_vectors WHERE campaign_id=?",
+            (CAMPAIGN_ID,),
+        ).fetchone()
+        features = json.loads(row["feature_json"])
+        features.update(
+            {
+                "packets_per_second": 207.35,
+                "max_host_pps": 5.2,
+                "unique_src_ips": 2836,
+                "unique_source_asns": 634,
+                "unique_dst_ips": 321,
+                "network_context": {"dst_role": "CGNAT_PUBLIC", "dst_is_cgnat": True},
+                "evidence": ["diversidade de conexões é contexto esperado e não prova ataque"],
+                "score_components": {"baseline": 0, "network_context": 0, "source_diversity": 30},
+            }
+        )
+        self.conn.execute(
+            "UPDATE behavioral_attack_vectors SET feature_json=?, baseline_deviation=? WHERE id=?",
+            (json.dumps(features), .89, row["id"]),
+        )
+        payload = get_campaign_investigation(self.conn, CAMPAIGN_ID)
+        assert payload is not None
+        context = payload["detection_context"]
+        self.assertEqual("CGNAT_PUBLIC", context["target_role"])
+        self.assertEqual(207.35, context["observed_pps"])
+        self.assertAlmostEqual(232.9775, context["baseline_pps"], places=4)
+        self.assertEqual(.89, context["baseline_delta"])
+        self.assertEqual(5.2, context["max_per_host_pps"])
+        self.assertEqual(321, context["destination_count"])
+        self.assertIn("abaixo do baseline", context["interpretation"])
+        self.assertFalse(context["threat_intelligence_is_detector_trigger"])
+        self.assertEqual(84, context["detector_score"])
+        self.assertNotIn("probabilistic certainty", context["interpretation"])
 
     def test_campaign_with_correlated_event_exposes_canonical_event_as_additional_section(self) -> None:
         event_id = self._insert_correlated_event()
@@ -249,6 +361,9 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.assertEqual("179.189.82.0/23", event["target"])
         self.assertEqual(2320, event["source_count"])
         self.assertEqual(["GREYNOISE"], event["threat_intelligence"]["providers"])
+        self.assertEqual("Example Transit Cached", event["source_asn_organization"])
+        self.assertEqual("BR", event["source_country"])
+        self.assertEqual("Target Network Cached", event["target_asn_organization"])
         # The campaign summary is still sourced from threat_campaigns.
         self.assertEqual(71, payload["campaign"]["coordination_score"])
 
@@ -281,9 +396,15 @@ class CampaignInvestigationTest(unittest.TestCase):
         payload = campaign_analysis_payload(investigation)
         for key in (
             "campaign_metadata", "target", "coordination_score", "top_sources", "asn_diversity",
-            "traffic_metrics", "correlated_events", "threat_intelligence", "detection_correlation_evidence",
+            "traffic_metrics", "metric_provenance", "detection_context", "correlated_events",
+            "threat_intelligence", "detection_correlation_evidence",
         ):
             self.assertIn(key, payload)
+        self.assertEqual("peak_detection_window", payload["metric_provenance"]["pps"]["scope"])
+        self.assertEqual(4.2, payload["detection_context"]["baseline_delta"])
+        self.assertEqual("GREYNOISE", payload["threat_intelligence"]["source_matches"][0]["provider"])
+        self.assertEqual("Example Transit Cached", payload["top_sources"][1]["asn_organization"])
+        self.assertFalse(payload["detection_context"]["threat_intelligence_is_detector_trigger"])
         self.assertFalse(payload["analysis_constraints"]["automatic_mitigation_enabled"])
         self.assertFalse(payload["analysis_constraints"]["external_lookups_performed"])
 

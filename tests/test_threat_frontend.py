@@ -96,6 +96,55 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertIn("Advisory only", self.script)
         self.assertIn("Nenhuma mitigação automática foi executada", self.script)
 
+    def test_campaign_investigation_is_independent_from_canonical_events(self) -> None:
+        for label in (
+            "Investigação da campanha", "Campaign Investigation", "RESUMO DA CAMPAIGN",
+            "TARGET / TRAFFIC", "TOP SOURCES", "ASN DISTRIBUTION", "EVENTOS CORRELACIONADOS",
+            "Nenhum Security Event canônico correlacionado a esta campanha.",
+        ):
+            self.assertIn(label, self.script)
+        for field in (
+            "campaign.campaign_id", "campaign.classification", "campaign.coordination_score",
+            "campaign.unique_sources", "campaign.unique_source_asns", "campaign.packets_per_second",
+            "campaign.bits_per_second", "campaign.first_seen", "campaign.last_seen",
+        ):
+            self.assertIn(field, self.script)
+        self.assertIn("payload.correlated_events", self.script)
+        self.assertIn("payload.top_sources", self.script)
+        self.assertIn("payload.asn_distribution", self.script)
+        self.assertNotIn("Nenhum evento canônico vinculado.", self.script)
+
+    def test_campaign_ai_and_persisted_enrichment_are_wired(self) -> None:
+        self.assertIn("/api/security/campaigns/${encodeURIComponent(campaignId)}/ai-analysis", self.script)
+        self.assertIn('data-campaign-action="analyze"', self.script)
+        self.assertIn('data-campaign-action="reanalyze"', self.script)
+        self.assertIn("Enrichment persistido na campaign", self.script)
+        self.assertIn("Campanha sem enrichment externo associado", self.script)
+        self.assertIn("abrir o drawer não faz lookup individual", self.script)
+
+    def test_campaign_metric_context_and_asn_snapshot_are_explicit(self) -> None:
+        for label in (
+            "Peak detection PPS", "Investigation packets", "Investigation bytes",
+            "Metric provenance / time window", "Campaign duration", "Duration (technical)",
+            "ASN DISTRIBUTION — TOP SOURCES SNAPSHOT", "Total campaign ASNs",
+            "ASNs represented in snapshot", "Sources represented in snapshot",
+            "CONTEXTO DE DETECÇÃO / CGNAT", "Detector score reflects local detection criteria, not probabilistic certainty.",
+        ):
+            self.assertIn(label, self.script)
+        self.assertIn("function humanDuration(value)", self.script)
+        self.assertIn("const hours = Math.floor(seconds / 3600)", self.script)
+        self.assertIn("protocol_label", self.script)
+        self.assertIn("item.country", self.script)
+        self.assertNotIn("/api/asn/", self.script)
+
+    def test_opening_campaign_performs_only_gets_and_ai_is_manual(self) -> None:
+        start = self.script.index("async function openSecurityCampaign(")
+        end = self.script.index("function renderLegacySecurityAnomalyDetail", start)
+        open_campaign = self.script[start:end]
+        self.assertNotIn("method: 'POST'", open_campaign)
+        self.assertIn("apiRequest(base)", open_campaign)
+        self.assertIn("apiRequest(`${base}/ai-analysis`)", open_campaign)
+
     def test_canonical_events_are_also_loaded_in_anomalies(self) -> None:
         self.assertIn("apiRequest('/security/events?limit=200'", self.html)
         self.assertIn('canonical_security_event: true', self.html)

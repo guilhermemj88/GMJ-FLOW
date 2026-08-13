@@ -74,6 +74,15 @@ class AuthRbacStaticTest(unittest.TestCase):
         self.assertIn("showPasswordChange(payload.user)", FRONTEND)
         self.assertIn('"/api/v1/auth/change-password"', BACKEND)
 
+    def test_login_distinguishes_credentials_server_and_network_failures(self):
+        self.assertIn("response.status === 401 || response.status === 403", FRONTEND)
+        self.assertIn("Usuário ou senha inválidos.", FRONTEND)
+        self.assertIn("response.status >= 500", FRONTEND)
+        self.assertIn("Servidor temporariamente indisponível.", FRONTEND)
+        self.assertIn("error?.name === 'AbortError' || error instanceof TypeError", FRONTEND)
+        self.assertIn("Não foi possível conectar ao servidor.", FRONTEND)
+        self.assertIn("controller.abort()", FRONTEND)
+
 
 if __name__ == "__main__":
     unittest.main()

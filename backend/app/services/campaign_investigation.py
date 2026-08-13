@@ -4,6 +4,7 @@ from datetime import datetime
 import sqlite3
 from typing import Any, Mapping, Sequence
 
+from app.services.asn_local_cache import cached_asn_information, enrich_asn_rows_from_local_cache
 from app.services.behavioral_detection import attack_vector_row, campaign_row
 from app.services.security_events import security_event_row
 from app.services.threat_contracts import attack_family
@@ -13,6 +14,16 @@ from app.services.threat_intelligence import clean_text
 SOURCE_LIMIT = 100
 ASN_LIMIT = 100
 DETAIL_LIMIT = 20
+PROTOCOL_NAMES = {
+    1: "ICMP",
+    6: "TCP",
+    17: "UDP",
+    47: "GRE",
+    50: "ESP",
+    51: "AH",
+    58: "ICMPv6",
+}
+PROTOCOL_NUMBERS = {name.lower(): number for number, name in PROTOCOL_NAMES.items()}
 
 
 def _duration_seconds(first_seen: Any, last_seen: Any) -> float | None:
@@ -46,6 +57,52 @@ def _sum_vector_feature(vectors: Sequence[Mapping[str, Any]], *keys: str, intege
         return None
     total = sum(values)
     return int(total) if integer else round(float(total), 4)
+
+
+def protocol_details(value: Any, explicit_number: Any = None) -> dict[str, Any]:
+    original = value
+    number: int | None = None
+    for candidate in (explicit_number, value):
+        try:
+            number = int(candidate)
+            break
+        except (TypeError, ValueError):
+            continue
+    text = clean_text(value)
+    if number is None:
+        number = PROTOCOL_NUMBERS.get(text.lower())
+    name = PROTOCOL_NAMES.get(number) if number is not None else text.upper()
+    if number is not None and name:
+        label = f"{name} ({number})"
+    else:
+        label = text.upper() or "-"
+    return {"protocol": original, "protocol_number": number, "protocol_name": name, "protocol_label": label}
+
+
+def _snapshot_window(vectors: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    first_values: list[str] = []
+    last_values: list[str] = []
+    configured_windows: set[int] = set()
+    for vector in vectors:
+        features = vector.get("features") if isinstance(vector.get("features"), Mapping) else {}
+        first = clean_text(features.get("first_seen") or vector.get("first_seen"))
+        last = clean_text(features.get("last_seen") or vector.get("last_seen"))
+        if first:
+            first_values.append(first)
+        if last:
+            last_values.append(last)
+        try:
+            configured_windows.add(int(vector.get("window_seconds") or 0))
+        except (TypeError, ValueError):
+            pass
+    first_seen = min(first_values) if first_values else None
+    last_seen = max(last_values) if last_values else None
+    return {
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "window_seconds": _duration_seconds(first_seen, last_seen) if first_seen and last_seen else None,
+        "contributing_detection_window_seconds": sorted(value for value in configured_windows if value > 0),
+    }
 
 
 def _source_intel_maps(campaign: Mapping[str, Any], vectors: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -152,6 +209,7 @@ def campaign_asn_distribution(campaign: Mapping[str, Any], top_sources: Sequence
                 {
                     "asn": int(item.get("asn") or item.get("source_asn") or 0),
                     "organization": clean_text(item.get("organization") or item.get("asn_organization")),
+                    "country": clean_text(item.get("country") or item.get("country_code")),
                     "sources": _optional_number(item, "sources", "source_count", integer=True),
                     "percentage": _optional_number(item, "percentage", "percent", "share"),
                 }
@@ -165,11 +223,18 @@ def campaign_asn_distribution(campaign: Mapping[str, Any], top_sources: Sequence
             continue
         row = totals.setdefault(
             asn,
-            {"asn": asn, "organization": clean_text(source.get("asn_organization")), "source_ips": set()},
+            {
+                "asn": asn,
+                "organization": clean_text(source.get("asn_organization")),
+                "country": clean_text(source.get("country")),
+                "source_ips": set(),
+            },
         )
         row["source_ips"].add(clean_text(source.get("source_ip")))
         if not row["organization"]:
             row["organization"] = clean_text(source.get("asn_organization"))
+        if not row["country"]:
+            row["country"] = clean_text(source.get("country"))
     represented = sum(len(item["source_ips"]) for item in totals.values())
     if totals:
         return sorted(
@@ -177,6 +242,7 @@ def campaign_asn_distribution(campaign: Mapping[str, Any], top_sources: Sequence
                 {
                     "asn": asn,
                     "organization": item["organization"],
+                    "country": item["country"],
                     "sources": len(item["source_ips"]),
                     "percentage": round(len(item["source_ips"]) / represented * 100, 2) if represented else None,
                 }
@@ -187,7 +253,7 @@ def campaign_asn_distribution(campaign: Mapping[str, Any], top_sources: Sequence
 
     sample = features.get("source_asns_sample") or []
     return [
-        {"asn": int(asn), "organization": "", "sources": None, "percentage": None}
+        {"asn": int(asn), "organization": "", "country": "", "sources": None, "percentage": None}
         for asn in sample[:ASN_LIMIT]
         if int(asn or 0)
     ]
@@ -209,6 +275,8 @@ def _ranked_feature_details(
             if not key:
                 continue
             row = rows.setdefault(key, {identity: detail.get(identity), "packets": 0, "bytes": 0, "flows": 0})
+            if identity == "protocol":
+                row.update(protocol_details(detail.get(identity), detail.get("protocol_number")))
             for metric in ("packets", "bytes", "flows"):
                 row[metric] += max(0, int(detail.get(metric) or 0))
     return sorted(rows.values(), key=lambda item: (-int(item["packets"]), clean_text(item.get(identity))))[:DETAIL_LIMIT]
@@ -261,6 +329,7 @@ def _enrichment_summary(campaign: Mapping[str, Any]) -> dict[str, Any]:
 def _correlated_event_summary(event: Mapping[str, Any]) -> dict[str, Any]:
     threat = event.get("threat_intel") if isinstance(event.get("threat_intel"), Mapping) else {}
     source = threat.get("source_intel") if isinstance(threat.get("source_intel"), Mapping) else {}
+    network = event.get("network_context") if isinstance(event.get("network_context"), Mapping) else {}
     return {
         "id": event.get("id"),
         "public_id": event.get("event_id") or event.get("public_id"),
@@ -270,10 +339,125 @@ def _correlated_event_summary(event: Mapping[str, Any]) -> dict[str, Any]:
         "first_seen": event.get("first_seen"),
         "last_seen": event.get("last_seen"),
         "source_count": event.get("unique_sources"),
+        "source_asn": int(network.get("src_asn") or network.get("source_asn") or 0),
+        "source_asn_organization": clean_text(network.get("src_as_name") or network.get("source_as_name")),
+        "source_country": clean_text(network.get("src_country") or network.get("source_country")),
+        "target_asn": int(network.get("dst_asn") or network.get("target_asn") or 0),
+        "target_asn_organization": clean_text(network.get("dst_as_name") or network.get("target_as_name")),
+        "target_country": clean_text(network.get("dst_country") or network.get("target_country")),
         "threat_intelligence": {
             "matched_sources": int(source.get("matched_source_count") or source.get("matches") or 0),
             "providers": list(source.get("intel_sources") or event.get("intel_sources") or [])[:20],
             "classifications": list(source.get("classifications") or [])[:20],
+        },
+    }
+
+
+def _primary_detection_context(
+    campaign: Mapping[str, Any],
+    vectors: Sequence[Mapping[str, Any]],
+    enrichment: Mapping[str, Any],
+) -> dict[str, Any]:
+    def vector_rate(item: Mapping[str, Any]) -> float:
+        features = item.get("features") if isinstance(item.get("features"), Mapping) else {}
+        return float(features.get("aggregate_pps") or features.get("packets_per_second") or features.get("pps") or 0)
+
+    primary = max(vectors, key=vector_rate, default={})
+    features = primary.get("features") if isinstance(primary.get("features"), Mapping) else {}
+    network = features.get("network_context") if isinstance(features.get("network_context"), Mapping) else {}
+    observed_pps = _optional_number(features, "aggregate_pps", "packets_per_second", "pps")
+    delta = _optional_number(primary, "baseline_deviation")
+    baseline_pps = round(observed_pps / delta, 4) if observed_pps is not None and delta and delta > 0 else None
+    target_role = clean_text(network.get("dst_role") or features.get("dst_role")) or "UNKNOWN"
+    source_count = _optional_number(features, "unique_sources", "unique_src_ips", integer=True)
+    asn_diversity = _optional_number(features, "unique_source_asns", "unique_src_asns", integer=True)
+    destination_count = _optional_number(features, "target_hosts", "unique_destinations", "unique_dst_ips", integer=True)
+    max_per_host = _optional_number(features, "max_host_pps", "max_per_host_pps")
+    if target_role == "CGNAT_PUBLIC" or bool(network.get("dst_is_cgnat") or features.get("dst_is_cgnat")):
+        if delta is not None and delta < 1:
+            interpretation = (
+                "Tráfego distribuído detectado, porém o volume observado está abaixo do baseline. "
+                "A diversidade de origens é compatível com o contexto CGNAT. Evidência adicional é necessária para confirmação."
+            )
+        else:
+            interpretation = (
+                "Tráfego distribuído detectado em destino CGNAT_PUBLIC. A diversidade de origens pode ser contexto "
+                "esperado de CGNAT e não confirma ataque sem evidência adicional."
+            )
+    elif delta is not None and delta < 1:
+        interpretation = (
+            "O padrão distribuído foi detectado, mas o volume observado está abaixo do baseline. "
+            "O score do detector deve ser interpretado junto das demais evidências."
+        )
+    else:
+        interpretation = "Contexto persistido do detector; confirmação exige avaliação conjunta das evidências."
+    facts = [clean_text(item) for item in (features.get("evidence") or [])[:50] if clean_text(item)]
+    return {
+        "target_role": target_role,
+        "network_context": dict(network),
+        "observed_pps": observed_pps,
+        "baseline_pps": baseline_pps,
+        "baseline_delta": delta,
+        "max_per_host_pps": max_per_host,
+        "source_count": source_count if source_count is not None else campaign.get("unique_sources"),
+        "asn_diversity": asn_diversity if asn_diversity is not None else campaign.get("unique_source_asns"),
+        "destination_count": destination_count,
+        "threat_intelligence_status": (
+            f"enrichment persistido: {int(enrichment.get('matched_sources') or 0)} fonte(s) com match"
+            if enrichment.get("available") else "sem enrichment persistido; ausência de match não significa fonte benigna"
+        ),
+        "interpretation": interpretation,
+        "detector": primary.get("detector") or campaign.get("detector"),
+        "detector_facts": facts,
+        "score_components": dict(features.get("score_components") or {}),
+        "detector_score": primary.get("detector_score"),
+        "score_semantics": "Detector score reflects local detection criteria, not probabilistic certainty.",
+        "threat_intelligence_is_detector_trigger": False,
+    }
+
+
+def _metric_provenance(
+    campaign: Mapping[str, Any],
+    vectors: Sequence[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    *,
+    packets: int | float | None,
+    bytes_count: int | float | None,
+    flows: int | float | None,
+) -> dict[str, Any]:
+    detection_windows = list(snapshot.get("contributing_detection_window_seconds") or [])
+    peak_common = {
+        "scope": "peak_detection_window",
+        "aggregation": "maximum_across_campaign_updates",
+        "window_seconds": detection_windows[0] if len(detection_windows) == 1 else None,
+        "contributing_window_seconds": detection_windows,
+        "first_seen": None,
+        "last_seen": None,
+        "note": "Peak rate persisted independently; it is not the campaign-lifetime average.",
+    }
+    snapshot_common = {
+        "scope": "investigation_snapshot",
+        "aggregation": "sum_of_persisted_contributing_vector_snapshots",
+        "window_seconds": snapshot.get("window_seconds"),
+        "first_seen": snapshot.get("first_seen"),
+        "last_seen": snapshot.get("last_seen"),
+        "note": "Bounded persisted investigation snapshot; do not compare directly with the campaign lifetime.",
+    }
+    return {
+        "pps": {**peak_common, "value": campaign.get("packets_per_second"), "source": "threat_campaigns.packets_per_second"},
+        "bps": {**peak_common, "value": campaign.get("bits_per_second"), "source": "threat_campaigns.bits_per_second"},
+        "flows_per_second": {**peak_common, "value": campaign.get("flows_per_second"), "source": "threat_campaigns.flows_per_second"},
+        "packets": {**snapshot_common, "value": packets, "source": "behavioral_attack_vectors.feature_json"},
+        "bytes": {**snapshot_common, "value": bytes_count, "source": "behavioral_attack_vectors.feature_json"},
+        "flows": {**snapshot_common, "value": flows, "source": "behavioral_attack_vectors.feature_json"},
+        "campaign_duration": {
+            "value": campaign.get("duration_seconds"),
+            "scope": "campaign_lifetime",
+            "aggregation": "last_seen_minus_first_seen",
+            "window_seconds": campaign.get("duration_seconds"),
+            "first_seen": campaign.get("first_seen"),
+            "last_seen": campaign.get("last_seen"),
+            "source": "threat_campaigns.first_seen,last_seen",
         },
     }
 
@@ -299,7 +483,15 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
     features = campaign.get("features") if isinstance(campaign.get("features"), Mapping) else {}
     persistence_value = features.get("persistence_satisfied") if "persistence_satisfied" in features else None
     top_sources = campaign_top_sources(campaign, vectors)
+    top_sources = enrich_asn_rows_from_local_cache(
+        conn,
+        top_sources,
+        asn_key="source_asn",
+        organization_key="asn_organization",
+        country_key="country",
+    )
     asn_distribution = campaign_asn_distribution(campaign, top_sources)
+    asn_distribution = enrich_asn_rows_from_local_cache(conn, asn_distribution, asn_key="asn")
     protocols = _ranked_feature_details(campaign, vectors, "protocol_distribution", "protocol")
     destination_ports = _ranked_feature_details(campaign, vectors, "top_destination_port_details", "port")
     source_ports = _ranked_feature_details(campaign, vectors, "top_source_port_details", "port")
@@ -328,9 +520,21 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
             "enrichment_summary": enrichment,
         }
     )
+    snapshot = _snapshot_window(vectors)
+    metric_provenance = _metric_provenance(
+        campaign,
+        vectors,
+        snapshot,
+        packets=packets,
+        bytes_count=bytes_count,
+        flows=flows,
+    )
+    detection_context = _primary_detection_context(campaign, vectors, enrichment)
     target_traffic = {
         "target": campaign.get("target_prefix"),
-        "protocol": ", ".join(clean_text(item.get("protocol")) for item in protocols if clean_text(item.get("protocol"))) or None,
+        "target_role": detection_context.get("target_role"),
+        "network_context": detection_context.get("network_context") or {},
+        "protocol": ", ".join(clean_text(item.get("protocol_label")) for item in protocols if clean_text(item.get("protocol_label"))) or None,
         "protocols": protocols,
         "ports": destination_ports,
         "source_ports": source_ports,
@@ -342,6 +546,8 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
         "flows": flows,
         "source_count": campaign.get("unique_sources"),
         "asn_diversity": campaign.get("unique_source_asns"),
+        "metric_provenance": metric_provenance,
+        "investigation_window": snapshot,
     }
     correlation_features = {
         key: features.get(key)
@@ -355,6 +561,7 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
     }
     evidence = {
         "campaign_detector": campaign["detector"],
+        "detector_score_semantics": "Detector score reflects local detection criteria, not probabilistic certainty.",
         "correlation_features": correlation_features,
         "contributing_vectors": [
             {
@@ -365,21 +572,57 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
                 "last_seen": item.get("last_seen"),
                 "source": item.get("src_ip"),
                 "target": item.get("target_prefix") or item.get("target_ip"),
+                "baseline_delta": item.get("baseline_deviation"),
+                "detector_facts": list((item.get("features") or {}).get("evidence") or [])[:50],
+                "score_components": dict((item.get("features") or {}).get("score_components") or {}),
             }
             for item in vectors[:50]
         ],
     }
+    correlated_events = [_correlated_event_summary(item) for item in events]
+    event_asns: set[int] = set()
+    for item in correlated_events:
+        for value in (item.get("source_asn"), item.get("target_asn")):
+            try:
+                number = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                event_asns.add(number)
+    event_asn_info = cached_asn_information(conn, event_asns)
+    for item in correlated_events:
+        for prefix in ("source", "target"):
+            asn = int(item.get(f"{prefix}_asn") or 0)
+            info = event_asn_info.get(asn, {})
+            if not clean_text(item.get(f"{prefix}_asn_organization")):
+                item[f"{prefix}_asn_organization"] = clean_text(info.get("organization"))
+            if not clean_text(item.get(f"{prefix}_country")):
+                item[f"{prefix}_country"] = clean_text(info.get("country"))
+    represented_asn_numbers: set[int] = set()
+    for item in asn_distribution:
+        try:
+            number = int(item.get("asn") or 0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            represented_asn_numbers.add(number)
+    represented_asns = len(represented_asn_numbers)
     return {
         "campaign": campaign,
         "top_sources": top_sources,
         "asn_distribution": asn_distribution,
         "asn_distribution_context": {
+            "total_campaign_asns": campaign.get("unique_source_asns"),
+            "represented_asns": represented_asns,
             "represented_sources": sum(int(item.get("sources") or 0) for item in asn_distribution),
             "campaign_source_count": campaign.get("unique_sources"),
             "percentage_scope": "persisted_campaign_distribution" if features.get("asn_distribution") else "persisted_top_sources_snapshot",
+            "complete_campaign_distribution": bool(features.get("asn_distribution")),
         },
         "target_traffic": target_traffic,
-        "correlated_events": [_correlated_event_summary(item) for item in events],
+        "metric_provenance": metric_provenance,
+        "detection_context": detection_context,
+        "correlated_events": correlated_events,
         # Kept for clients that already consumed the original endpoint.
         "events": events,
         "detection_correlation_evidence": evidence,
@@ -404,7 +647,7 @@ def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any
             key: item.get(key)
             for key in (
                 "source_ip", "source_asn", "asn_organization", "packets", "bytes", "flows", "pps",
-                "share", "threat_intelligence_classification", "threat_intelligence_providers",
+                "country", "share", "threat_intelligence_classification", "threat_intelligence_providers",
             )
         }
         for item in [value for value in (investigation.get("top_sources") or []) if isinstance(value, Mapping)][:50]
@@ -441,7 +684,14 @@ def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any
             "detector": campaign.get("detector"),
             "contributing_detectors": campaign.get("contributing_detectors"),
         },
-        "target": {"prefix": campaign.get("target"), "protocol": traffic.get("protocol"), "ports": traffic.get("ports")},
+        "target": {
+            "prefix": campaign.get("target"),
+            "role": traffic.get("target_role"),
+            "network_context": traffic.get("network_context") or {},
+            "protocol": traffic.get("protocol"),
+            "protocols": traffic.get("protocols") or [],
+            "ports": traffic.get("ports"),
+        },
         "coordination_score": campaign.get("coordination_score"),
         "top_sources": bounded_sources,
         "asn_diversity": {
@@ -450,6 +700,8 @@ def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any
             "distribution_context": investigation.get("asn_distribution_context") or {},
         },
         "traffic_metrics": dict(traffic),
+        "metric_provenance": investigation.get("metric_provenance") or {},
+        "detection_context": investigation.get("detection_context") or {},
         "correlated_events": list(investigation.get("correlated_events") or [])[:20],
         "threat_intelligence": {
             "summary": campaign.get("enrichment_summary") or {},

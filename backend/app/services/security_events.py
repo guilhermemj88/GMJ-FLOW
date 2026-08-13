@@ -116,6 +116,22 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(event_id) REFERENCES security_events(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS campaign_ai_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            generated_at TEXT,
+            campaign_fingerprint TEXT NOT NULL DEFAULT '',
+            evidence_fingerprint TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_type TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_security_events_status_time
             ON security_events(status, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_security_events_type_time
@@ -128,6 +144,8 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             ON security_events(target_ip, target_prefix, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_security_event_ai_history
             ON security_event_ai_analyses(event_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_campaign_ai_history
+            ON campaign_ai_analyses(campaign_id, id DESC);
         """
     )
     # Forward-compatible additive migrations for installations that received an

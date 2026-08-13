@@ -7292,7 +7292,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <button type="button" class="security-event-drawer__backdrop" data-security-action="close" aria-label="Fechar detalhes"></button>
             <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
               <header class="security-event-drawer__header">
-                <div><div class="subtle">Investigação do evento</div><h2 id="securityEventDrawerTitle">Evento de segurança</h2></div>
+                <div><div id="securityEventDrawerContext" class="subtle">Security Event Investigation</div><h2 id="securityEventDrawerTitle">Evento de segurança</h2></div>
                 <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="close" aria-label="Fechar"><i data-lucide="x"></i></button>
               </header>
               <div id="securityEventDrawerStatus" class="subtle"></div>
@@ -10268,19 +10268,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       event.preventDefault();
       setLoginStatus('Entrando...');
       const endpoint = `${API_BASE}/api/auth/login`;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 15000);
       try {
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             username: document.getElementById('loginUsername').value.trim(),
             password: document.getElementById('loginPassword').value
           })
         });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.token) {
-          throw new Error(payload.detail || 'Usuario ou senha invalidos');
-        }
+        if (response.status === 401 || response.status === 403) throw new Error('Usuário ou senha inválidos.');
+        if (response.status >= 500) throw new Error('Servidor temporariamente indisponível.');
+        if (!response.ok || !payload.token) throw new Error(apiDetailMessage(payload.detail) || 'Não foi possível concluir o login.');
         localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
         currentAuthUser = payload.user;
         document.getElementById('loginPassword').value = '';
@@ -10291,7 +10294,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         showApp(payload.user);
       } catch (error) {
         localStorage.removeItem(AUTH_TOKEN_KEY);
-        setLoginStatus(error.message || 'Falha ao entrar', 'error');
+        const connectionFailure = error?.name === 'AbortError' || error instanceof TypeError;
+        setLoginStatus(connectionFailure ? 'Não foi possível conectar ao servidor.' : (error.message || 'Não foi possível concluir o login.'), 'error');
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 

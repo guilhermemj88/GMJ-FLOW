@@ -35,7 +35,8 @@ AI_PROVIDER_TYPES = {
 AI_FUNCTIONS = (
     ("cgnat_import", "Importação de mapeamento CGNAT"),
     ("anomaly_analysis", "Análise de anomalia"),
-    ("security_event_analysis", "Análise de evento de segurança"),
+    ("security_event_analysis", "Análise de Evento de Segurança"),
+    ("security_campaign_analysis", "Análise de Campanha de Segurança"),
     ("mitigation_analysis", "Análise de mitigação"),
     ("flowspec_explanation", "Explicação de regra FlowSpec"),
     ("attack_summary", "Resumo de ataque"),
@@ -93,7 +94,7 @@ DEFAULT_PROMPTS = {
         "schema": MITIGATION_SCHEMA,
     },
     "security_event_analysis": {
-        "name": "Análise de evento de segurança",
+        "name": "Análise de Evento de Segurança",
         "system_prompt": (
             "Você é um analista de segurança para um ISP. Interprete somente as evidências estruturadas recebidas. "
             "CGNAT é contexto, não whitelist. Threat Intelligence é reputação histórica e nunca confirma sozinha o "
@@ -102,6 +103,19 @@ DEFAULT_PROMPTS = {
         ),
         "user_template": "Analise o evento canônico {{event}} com eventos relacionados {{related_events}}.",
         "variables": ["event", "related_events", "campaign"],
+        "schema": SECURITY_EVENT_ANALYSIS_SCHEMA,
+    },
+    "security_campaign_analysis": {
+        "name": "Análise de Campanha de Segurança",
+        "system_prompt": (
+            "Analise a campanha como campanha, não como evento individual. Diferencie evidência do detector, "
+            "evidência de correlação, Threat Intelligence persistida e inferência. Considere baseline, CGNAT, "
+            "taxa por host, diversidade de fontes e proveniência temporal das métricas. Score alto não é certeza "
+            "probabilística. Threat Intelligence é contexto e nunca confirma isoladamente toda a campanha. "
+            "Nunca execute nem autorize mitigação. Retorne somente JSON válido."
+        ),
+        "user_template": "Analise a Campaign Investigation estruturada {{campaign}}.",
+        "variables": ["campaign"],
         "schema": SECURITY_EVENT_ANALYSIS_SCHEMA,
     },
     "threat_classification": {
@@ -741,6 +755,11 @@ def _seed_routes_and_prompts(conn: sqlite3.Connection) -> None:
             """,
             (function_key, display_name, sensitive_data_policy, now, now),
         )
+        if function_key in {"security_event_analysis", "security_campaign_analysis"}:
+            conn.execute(
+                "UPDATE ai_routes SET display_name=? WHERE function_key=?",
+                (display_name, function_key),
+            )
         if function_key == "cgnat_import":
             conn.execute(
                 "UPDATE ai_routes SET sensitive_data_policy = ? WHERE function_key = ?",

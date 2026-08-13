@@ -108,6 +108,7 @@ from app.services.ai_integration import (
     toggle_ai_provider,
     update_global_ai_settings,
 )
+from app.services.asn_local_cache import lookup_cached_asn_record
 from app.services.automatic_mitigation import (
     AUDIT_DEDUPLICATED,
     AUTOMATIC_PRIMARY,
@@ -8625,39 +8626,7 @@ def lookup_asn_info(asn: int) -> dict[str, Any] | None:
     ensure_sensor_db()
     with sqlite_connection() as conn:
         ensure_asn_db(conn)
-        row = conn.execute(
-            """
-            SELECT asn, as_name, org_name, country, source, raw_json,
-                   updated_at, expires_at, last_error
-            FROM asn_info
-            WHERE asn = ?
-            """,
-            (number,),
-        ).fetchone()
-    if row is None:
-        return None
-    expires_at = clean_text(row["expires_at"])
-    if expires_at:
-        try:
-            if datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
-                return None
-        except ValueError:
-            pass
-    try:
-        rdap_data = json.loads(clean_text(row["raw_json"]) or "{}")
-    except (TypeError, ValueError):
-        rdap_data = {}
-    return {
-        "asn": number,
-        "as_name": clean_text(row["as_name"]),
-        "org_name": clean_text(row["org_name"]),
-        "country": clean_text(row["country"]).upper(),
-        "source": clean_text(row["source"]),
-        "updated_at": clean_text(row["updated_at"]),
-        "expires_at": expires_at,
-        "last_error": clean_text(row["last_error"]),
-        "rdap": rdap_data if isinstance(rdap_data, dict) else {},
-    }
+        return lookup_cached_asn_record(conn, number)
 
 
 def queue_missing_asn_info(asn: int, priority: int = 80) -> None:
