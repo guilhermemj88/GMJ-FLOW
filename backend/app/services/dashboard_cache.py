@@ -475,7 +475,14 @@ class MemoryDashboardCache(CacheBackend):
         flight, owner = self._flight(key)
         if not owner:
             if not flight.event.wait(self.config.singleflight_timeout_seconds):
-                return compute()
+                self._logger.warning(
+                    "dashboard_cache_singleflight_wait_exceeded key_hash=%s wait_seconds=%s",
+                    hash(key),
+                    self.config.singleflight_timeout_seconds,
+                )
+                # A slow owner must remain the only computation. Starting a
+                # second ClickHouse query here used to amplify dashboard load.
+                flight.event.wait()
             if flight.error is not None:
                 raise flight.error
             return copy.deepcopy(flight.result)
@@ -508,9 +515,12 @@ class MemoryDashboardCache(CacheBackend):
                 self._misses += 1
             return None, True
         if not flight.event.wait(self.config.singleflight_timeout_seconds):
-            with self._lock:
-                self._misses += 1
-            return None, True
+            self._logger.warning(
+                "dashboard_cache_singleflight_wait_exceeded key_hash=%s wait_seconds=%s",
+                hash(key),
+                self.config.singleflight_timeout_seconds,
+            )
+            flight.event.wait()
         if flight.error is not None:
             raise flight.error
         return copy.deepcopy(flight.result), False
@@ -520,10 +530,7 @@ class MemoryDashboardCache(CacheBackend):
         thread_id = threading.get_ident()
         with self._lock:
             flight = self._flights.get(key)
-            if flight is None or (
-                flight.event.is_set()
-                or now - flight.started_at > self.config.singleflight_timeout_seconds
-            ):
+            if flight is None or flight.event.is_set():
                 flight = _Flight(threading.Event(), thread_id, now)
                 self._flights[key] = flight
                 return flight, True

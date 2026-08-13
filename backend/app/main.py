@@ -108,7 +108,11 @@ from app.services.ai_integration import (
     toggle_ai_provider,
     update_global_ai_settings,
 )
-from app.services.asn_local_cache import lookup_cached_asn_record
+from app.services.asn_local_cache import (
+    cached_asn_information,
+    lookup_cached_asn_record,
+    resolve_asn_ips_from_local_db,
+)
 from app.services.automatic_mitigation import (
     AUDIT_DEDUPLICATED,
     AUTOMATIC_PRIMARY,
@@ -135,6 +139,7 @@ from app.services.auth_access import (
     token_hash as auth_token_hash,
 )
 from app.services.dashboard_cache import DashboardCacheConfig, MemoryDashboardCache
+from app.services.dashboard_performance import DashboardPerformanceTrace
 from app.services.dashboard_aggregates import (
     DASHBOARD_AGGREGATE_TABLES,
     aggregate_boundaries,
@@ -250,6 +255,10 @@ app = FastAPI(title="GMJ-FLOW API", version="0.1.0")
 logger = logging.getLogger("gmj-flow")
 HTTP_REQUEST_ID: ContextVar[str] = ContextVar("gmjflow_http_request_id", default="")
 CLICKHOUSE_QUERY_SEQUENCE: ContextVar[int] = ContextVar("gmjflow_clickhouse_query_sequence", default=0)
+DASHBOARD_PERF_TRACE: ContextVar[DashboardPerformanceTrace | None] = ContextVar(
+    "gmjflow_dashboard_performance_trace",
+    default=None,
+)
 PREFIX_WIDGET_MAX_TOTAL_POINTS = 12000
 PREFIX_WIDGET_TARGET_PAYLOAD_BYTES = 2 * 1024 * 1024
 PREFIX_WIDGET_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
@@ -1734,7 +1743,22 @@ def clickhouse_request_query_id() -> tuple[str, str]:
     request_id = HTTP_REQUEST_ID.get() or str(uuid.uuid4())
     sequence = CLICKHOUSE_QUERY_SEQUENCE.get() + 1
     CLICKHOUSE_QUERY_SEQUENCE.set(sequence)
-    query_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"gmj-flow:{request_id}:{sequence}"))
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_id = re.sub(r"[^A-Za-z0-9_-]", "-", str(dashboard_trace.dashboard_id or "preview"))
+        widget_id = re.sub(r"[^A-Za-z0-9_-]", "-", str(dashboard_trace.widget_id or "preview"))
+        request_token = re.sub(r"[^A-Za-z0-9_-]", "", request_id)[:12] or "request"
+        query_id = (
+            f"gmjflow-dashboard-{dashboard_id}-widget-{widget_id}-"
+            f"{request_token}-{sequence}"
+        )
+    else:
+        query_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"gmj-flow:{request_id}:{sequence}",
+            )
+        )
     return request_id, query_id
 
 
@@ -1742,6 +1766,8 @@ def query_clickhouse(query: str, parameters: dict[str, Any] | None = None, admin
     client = get_client(send_receive_timeout=clickhouse_admin_timeout_seconds() if admin else None)
     started = time.monotonic()
     request_id, query_id = clickhouse_request_query_id()
+    result = None
+    failed = False
     try:
         try:
             result = client.query(
@@ -1760,10 +1786,19 @@ def query_clickhouse(query: str, parameters: dict[str, Any] | None = None, admin
             result = client.query(query, parameters=parameters or {})
         return result
     except BaseException as exc:
+        failed = True
         DASHBOARD_CACHE.fail_thread_flights(exc)
         raise
     finally:
         elapsed = time.monotonic() - started
+        dashboard_trace = DASHBOARD_PERF_TRACE.get()
+        if dashboard_trace is not None:
+            dashboard_trace.record_query(
+                query_id=query_id,
+                duration_seconds=elapsed,
+                result=result,
+                failed=failed,
+            )
         log_payload = {
             "event": "clickhouse_query",
             "request_id": request_id,
@@ -8588,6 +8623,96 @@ def resolve_asn_for_ip(ip: str) -> dict[str, Any]:
             queue_asn_resolution(conn, ip_text)
             conn.commit()
     return {"ip": ip_text, "asn": 0, "as_name": "", "country": "", "prefix": "", "source": "unresolved"}
+
+
+def resolve_asns_for_ips(ips: list[Any], max_ips: int = 500) -> dict[str, dict[str, Any]]:
+    """Resolve a bounded IP set from the existing local ASN data in one batch."""
+    normalized: list[str] = []
+    parsed_by_ip: dict[str, Any] = {}
+    for value in ips:
+        ip_text = clean_ip(value)
+        if not ip_text or ip_text in parsed_by_ip:
+            continue
+        try:
+            parsed_by_ip[ip_text] = ip_address(ip_text)
+        except ValueError:
+            continue
+        normalized.append(ip_text)
+        if len(normalized) >= max(1, int(max_ips)):
+            break
+    if not normalized:
+        return {}
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        resolved = resolve_asn_ips_from_local_db(
+            conn,
+            normalized,
+            max_ips=max_ips,
+        )
+        for ip_text in normalized:
+            item = resolved.get(ip_text)
+            if item and int(item.get("asn") or 0) > 0:
+                if item.get("resolution_tier") == "prefix":
+                    upsert_asn_lookup_cache(
+                        conn,
+                        ip_text,
+                        int(item.get("asn") or 0),
+                        item.get("prefix") or "",
+                        item.get("as_name") or "",
+                        item.get("country") or "",
+                        item.get("source") or "local_prefix_db",
+                    )
+                continue
+            parsed = parsed_by_ip[ip_text]
+            if parsed.is_global:
+                queue_asn_resolution(conn, ip_text)
+            resolved[ip_text] = {
+                "ip": ip_text,
+                "asn": 0,
+                "as_name": "",
+                "country": "",
+                "prefix": "",
+                "source": "unresolved",
+                "resolution_tier": "unresolved",
+            }
+        conn.commit()
+    return resolved
+
+
+def lookup_asn_information_batch(
+    asns: list[Any],
+    *,
+    queue_missing: bool = True,
+) -> dict[int, dict[str, Any]]:
+    """Read ASN organization metadata and queue misses with one transaction."""
+    parsed_numbers: set[int] = set()
+    for value in asns:
+        try:
+            number = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            parsed_numbers.add(number)
+    numbers = sorted(parsed_numbers)[:1000]
+    if not numbers:
+        return {}
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        ensure_asn_db(conn)
+        cached = cached_asn_information(conn, numbers)
+        if queue_missing:
+            for number in numbers:
+                if number not in cached:
+                    queue_asn_info_resolution(conn, number, priority=80)
+            conn.commit()
+    return {
+        number: {
+            **info,
+            "org_name": clean_text(info.get("organization")),
+        }
+        for number, info in cached.items()
+    }
 
 
 def asn_label(asn: int) -> str:
@@ -44134,20 +44259,10 @@ def top_asn_dimension(
                 "input": "dashboard_input_sample_rate",
                 "output": "dashboard_output_sample_rate",
             }.get(rate_direction, "dashboard_auto_sample_rate")
-    def weighted_ranking_query(
-        dimension_select: str,
-        final_dimension_select: str,
-        group_by_sql: str,
-        extra_where: str,
-        extra_aggregate: str = "",
-        limit_sql: str = "LIMIT {limit:UInt32}",
-    ) -> str:
-        aggregate_fields = (
-            f"{dimension_select},\n                {extra_aggregate},"
-            if extra_aggregate
-            else f"{dimension_select},"
-        )
-        return query_prefix + f"""
+    params["unresolved_limit"] = 200
+    params["combined_limit"] = int(limit) + int(params["unresolved_limit"])
+    result = query_clickhouse(
+        query_prefix + f"""
         ,
             weighted_source AS (
                 SELECT
@@ -44156,94 +44271,113 @@ def top_asn_dimension(
                     {corrected_value_expr("packets", factor_expr)} AS weighted_packets_value,
                     flow_count AS source_flow_count
                 FROM {source_table}
-                WHERE {rated_where}{extra_where}
+                WHERE {rated_where}
             ),
             aggregation_base AS (
                 SELECT
-                    {aggregate_fields}
+                    toUInt32({asn_col}) AS asn,
+                    if(asn > 0, '', toString({ip_col})) AS ip,
+                    any({as_name_col}) AS as_name,
                     sum(weighted_bytes_value) AS weighted_bytes_total,
                     sum(weighted_packets_value) AS weighted_packets_total,
                     sum(source_flow_count) AS flow_total
                 FROM weighted_source
-                GROUP BY {group_by_sql}
+                GROUP BY asn, ip
             ),
             ranking_values AS (
                 SELECT
-                    {final_dimension_select},
+                    asn,
+                    ip,
+                    as_name,
                     weighted_bytes_total * 8 / {{seconds:Float64}} AS bps,
                     weighted_packets_total AS packets,
-                    flow_total AS flows
+                    flow_total AS flows,
+                    sum(weighted_bytes_total) OVER () * 8
+                        / {{seconds:Float64}} AS total_bps,
+                    row_number() OVER (
+                        PARTITION BY if(asn > 0, 1, 0)
+                        ORDER BY weighted_bytes_total DESC, asn ASC, ip ASC
+                    ) AS group_rank
                 FROM aggregation_base
             )
         SELECT
-            {final_dimension_select},
+            asn,
+            ip,
+            as_name,
             bps,
             packets,
             flows,
+            total_bps,
+            group_rank,
             bps AS value
         FROM ranking_values
-        ORDER BY value DESC
-        {limit_sql}
-        """
-
-    result = query_clickhouse(
-        weighted_ranking_query(
-            f"toUInt32({asn_col}) AS asn",
-            "asn,\n                    as_name",
-            "asn",
-            f" AND {asn_col} > 0",
-            f"any({as_name_col}) AS as_name",
-        ),
+        WHERE (asn > 0 AND group_rank <= {{limit:UInt32}})
+           OR (asn = 0 AND group_rank <= {{unresolved_limit:UInt32}})
+        ORDER BY if(asn > 0, 0, 1), group_rank
+        LIMIT {{combined_limit:UInt32}}
+        """,
         params,
     )
-    items = []
-    for index, row in enumerate(rows_as_dicts(result), start=1):
-        asn = int(row["asn"] or 0)
+    ranking_rows = rows_as_dicts(result)
+    unresolved_rows = [
+        row for row in ranking_rows if int(row.get("asn") or 0) <= 0
+    ]
+    enrichment_started = time.monotonic()
+    resolved_by_ip = resolve_asns_for_ips(
+        [clean_ip(row.get("ip")) for row in unresolved_rows],
+        max_ips=200,
+    )
+    resolved_asns = [
+        int(item.get("asn") or 0) for item in resolved_by_ip.values()
+    ]
+    known_asns = [
+        int(row.get("asn") or 0)
+        for row in ranking_rows
+        if int(row.get("asn") or 0) > 0
+    ]
+    asn_information = lookup_asn_information_batch(
+        known_asns + resolved_asns,
+    )
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_trace.add_stage(
+            "enrichment",
+            time.monotonic() - enrichment_started,
+        )
+
+    aggregation_started = time.monotonic()
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in ranking_rows:
+        asn = int(row.get("asn") or 0)
         if asn <= 0:
             continue
-        asn_info = lookup_asn_info(asn) or {}
-        if not asn_info:
-            queue_missing_asn_info(asn)
+        asn_info = asn_information.get(asn, {})
         display_name = asn_display_name(
             asn,
             asn_info.get("as_name"),
             asn_info.get("org_name"),
             row.get("as_name"),
         )
-        items.append(
-            {
-                "rank": index,
-                "asn": asn_label(asn),
-                "asn_number": asn,
-                "display_name": display_name,
-                "description": display_name if display_name != asn_label(asn) else "-",
-                "org_name": clean_text(asn_info.get("org_name")),
-                "country": clean_text(asn_info.get("country")).upper() or "N/D",
-                "source": "flow",
-                "bps": round(float(row["bps"] or 0), 2),
-                "packets": int(float(row["packets"] or 0)),
-                "flows": int(row["flows"] or 0),
-                "percent": 0.0,
-            }
-        )
+        grouped[asn] = {
+            "asn": asn_label(asn),
+            "asn_number": asn,
+            "display_name": display_name,
+            "description": display_name if display_name != asn_label(asn) else "-",
+            "org_name": clean_text(asn_info.get("org_name")),
+            "country": clean_text(asn_info.get("country")).upper() or "N/D",
+            "source": "flow",
+            "bps": round(float(row.get("bps") or 0), 2),
+            "packets": int(float(row.get("packets") or 0)),
+            "flows": int(row.get("flows") or 0),
+            "percent": 0.0,
+        }
 
-    ip_result = query_clickhouse(
-        weighted_ranking_query(
-            f"toString({ip_col}) AS ip",
-            "ip",
-            "ip",
-            f" AND {asn_col} = 0",
-            limit_sql="LIMIT 200",
-        ),
-        params,
-    )
-    grouped = {int(item["asn_number"]): item for item in items}
-    for row in rows_as_dicts(ip_result):
-        resolved = resolve_asn_for_ip(clean_ip(row["ip"]))
+    for row in unresolved_rows:
+        resolved = resolved_by_ip.get(clean_ip(row.get("ip")), {})
         asn = int(resolved.get("asn") or 0)
         if asn <= 0:
             continue
-        asn_info = lookup_asn_info(asn) or {}
+        asn_info = asn_information.get(asn, {})
         display_name = asn_display_name(
             asn,
             asn_info.get("as_name"),
@@ -44258,7 +44392,9 @@ def top_asn_dimension(
                 "display_name": display_name,
                 "description": display_name if display_name != asn_label(asn) else "-",
                 "org_name": clean_text(asn_info.get("org_name")),
-                "country": clean_text(asn_info.get("country")).upper() or clean_text(resolved.get("country")).upper() or "N/D",
+                "country": clean_text(asn_info.get("country")).upper()
+                or clean_text(resolved.get("country")).upper()
+                or "N/D",
                 "source": clean_text(resolved.get("source")) or "local-cache",
                 "bps": 0.0,
                 "packets": 0,
@@ -44266,81 +44402,36 @@ def top_asn_dimension(
                 "percent": 0.0,
             },
         )
-        item["bps"] = round(float(item.get("bps") or 0) + float(row["bps"] or 0), 2)
-        item["packets"] = int(item.get("packets") or 0) + int(float(row["packets"] or 0))
-        item["flows"] = int(item.get("flows") or 0) + int(row["flows"] or 0)
-    items = sorted(grouped.values(), key=lambda item: float(item.get("bps") or 0), reverse=True)[:limit]
+        item["bps"] = round(
+            float(item.get("bps") or 0) + float(row.get("bps") or 0),
+            2,
+        )
+        item["packets"] = int(item.get("packets") or 0) + int(
+            float(row.get("packets") or 0)
+        )
+        item["flows"] = int(item.get("flows") or 0) + int(
+            row.get("flows") or 0
+        )
+    items = sorted(
+        grouped.values(),
+        key=lambda item: float(item.get("bps") or 0),
+        reverse=True,
+    )[:limit]
     for index, item in enumerate(items, start=1):
         item["rank"] = index
 
-    if not items:
-        ip_result = query_clickhouse(
-            weighted_ranking_query(
-                f"toString({ip_col}) AS ip",
-                "ip",
-                "ip",
-                "",
-                limit_sql="LIMIT 200",
-            ),
-            params,
-        )
-        grouped: dict[int, dict[str, Any]] = {}
-        for row in rows_as_dicts(ip_result):
-            ip_text = clean_ip(row["ip"])
-            try:
-                if not is_public_ip(ip_text):
-                    continue
-            except ValueError:
-                continue
-            asn_info = lookup_asn_prefix(ip_text)
-            if not asn_info:
-                continue
-            asn = int(asn_info["asn"] or 0)
-            resolved_info = lookup_asn_info(asn) or {}
-            display_name = asn_display_name(
-                asn,
-                resolved_info.get("as_name"),
-                resolved_info.get("org_name"),
-                asn_info.get("as_name"),
-            )
-            item = grouped.setdefault(
-                asn,
-                {
-                    "asn": asn_label(asn),
-                    "asn_number": asn,
-                    "display_name": display_name,
-                    "description": display_name if display_name != asn_label(asn) else "-",
-                    "org_name": clean_text(resolved_info.get("org_name")),
-                    "country": clean_text(resolved_info.get("country")).upper() or clean_text(asn_info.get("country")).upper() or "N/D",
-                    "source": asn_info.get("source") or "local-cache",
-                    "bps": 0.0,
-                    "packets": 0,
-                    "flows": 0,
-                    "percent": 0.0,
-                },
-            )
-            item["bps"] += float(row["bps"] or 0)
-            item["packets"] += int(float(row["packets"] or 0))
-            item["flows"] += int(row["flows"] or 0)
-        items = sorted(grouped.values(), key=lambda item: item["bps"], reverse=True)[:limit]
-        for index, item in enumerate(items, start=1):
-            item["rank"] = index
-            item["bps"] = round(float(item["bps"] or 0), 2)
-
-    total_result = query_clickhouse(
-        query_prefix + f"""
-        SELECT
-            {corrected_sum_expr("bytes", factor_expr)}
-            * 8 / {{seconds:Float64}} AS bps
-        FROM {source_table}
-        WHERE {rated_where}
-        """,
-        params,
+    total_bps = (
+        float(ranking_rows[0].get("total_bps") or 0)
+        if ranking_rows
+        else 0.0
     )
-    total_rows = rows_as_dicts(total_result)
-    total_bps = float(total_rows[0]["bps"] or 0) if total_rows else sum(float(item["bps"] or 0) for item in items)
     for item in items:
         item["percent"] = round(float(item["bps"] or 0) * 100 / total_bps, 2) if total_bps > 0 else 0.0
+    if dashboard_trace is not None:
+        dashboard_trace.add_stage(
+            "aggregation",
+            time.monotonic() - aggregation_started,
+        )
 
     if items:
         return dashboard_cache_set(
@@ -47693,7 +47784,7 @@ def dashboard_widget_query_path_hint(
     return "raw"
 
 
-def dashboard_widget_cached_query(
+def _dashboard_widget_cached_query(
     widget: dict[str, Any],
     query_context: dict[str, Any],
     *,
@@ -47702,6 +47793,9 @@ def dashboard_widget_cached_query(
     signature = widget_data_signature(widget, query_context)
     ttl = 2 if preview else dashboard_cache_ttl(query_context["range_minutes"])
     query_path = dashboard_widget_query_path_hint(widget, query_context)
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_trace.query_path = query_path
     key = dashboard_cache_key(
         "configurable-widget",
         {
@@ -47755,6 +47849,13 @@ def dashboard_widget_cached_query(
     cache_key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     cached = dashboard_cache_get(key, ttl)
     if cached is not None:
+        if dashboard_trace is not None:
+            dashboard_trace.cache_hit = True
+            dashboard_trace.query_path = (
+                clean_text(cached.get("query_path"))
+                or clean_text(cached.get("source"))
+                or query_path
+            )
         DASHBOARD_WIDGET_METRICS.cache_event(True)
         logger.info(
             "DASHBOARD_WIDGET_CACHE_HIT dashboard_id=%s widget_id=%s "
@@ -47798,6 +47899,8 @@ def dashboard_widget_cached_query(
         result["query_path"] = clean_text(
             result.get("source")
         ) or query_path
+        if dashboard_trace is not None:
+            dashboard_trace.query_path = result["query_path"]
         serialized_bytes = len(
             json.dumps(
                 result,
@@ -47847,6 +47950,80 @@ def dashboard_widget_cached_query(
         raise
 
 
+def dashboard_widget_cached_query(
+    widget: dict[str, Any],
+    query_context: dict[str, Any],
+    *,
+    preview: bool = False,
+) -> dict[str, Any]:
+    plan = build_widget_query_plan(widget)
+    trace = DashboardPerformanceTrace(
+        dashboard_id=query_context.get("dashboard_id")
+        or widget.get("dashboard_id"),
+        widget_id=query_context.get("widget_id") or widget.get("id"),
+        widget_type=clean_text(plan.get("kind")),
+        metric=clean_text(plan.get("metric")),
+        request_id=HTTP_REQUEST_ID.get(),
+        started_at=float(
+            query_context.get("_dashboard_started_at")
+            or time.monotonic()
+        ),
+    )
+    trace.add_stage(
+        "sqlite",
+        float(query_context.get("_sqlite_ms") or 0) / 1000,
+    )
+    token = DASHBOARD_PERF_TRACE.set(trace)
+    result: dict[str, Any] | None = None
+    error_name = ""
+    response_bytes = 0
+    try:
+        result = _dashboard_widget_cached_query(
+            widget,
+            query_context,
+            preview=preview,
+        )
+        serialization_started = time.monotonic()
+        response_bytes = len(
+            json.dumps(
+                result,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        trace.add_stage(
+            "serialization",
+            time.monotonic() - serialization_started,
+        )
+        return result
+    except Exception as exc:
+        error_name = type(exc).__name__
+        raise
+    finally:
+        returned = (
+            (result or {}).get("items")
+            or (result or {}).get("series")
+            or []
+        )
+        perf_payload = trace.log_payload(
+            cache_hit=trace.cache_hit,
+            query_path=trace.query_path,
+            result_rows=len(returned) if isinstance(returned, list) else 0,
+            response_bytes=response_bytes,
+            error=error_name,
+        )
+        log_method = (
+            logger.warning
+            if perf_payload["total_ms"] > 5000 or error_name
+            else logger.info
+        )
+        log_method(
+            "%s",
+            json.dumps(perf_payload, separators=(",", ":"), sort_keys=True),
+        )
+        DASHBOARD_PERF_TRACE.reset(token)
+
+
 def preview_configurable_dashboard_widget(
     payload: dict[str, Any],
     request: Request,
@@ -47869,6 +48046,7 @@ def query_configurable_dashboard_widget(
     request: Request,
 ):
     user = dashboard_request_user(request)
+    sqlite_stage_started = time.monotonic()
     with sqlite_connection() as conn:
         ensure_dashboard_schema(conn)
         dashboard = dashboard_or_404(conn, dashboard_id, user)
@@ -47902,6 +48080,11 @@ def query_configurable_dashboard_widget(
         context_payload.pop("end", None)
         context_payload.pop("range_minutes", None)
     context = dashboard_widget_query_context(context_payload, dashboard)
+    context["_dashboard_started_at"] = sqlite_stage_started
+    context["_sqlite_ms"] = round(
+        (time.monotonic() - sqlite_stage_started) * 1000,
+        2,
+    )
     context["dashboard_id"] = dashboard_id
     context["widget_id"] = widget_id
     if not widget.get("use_global_filters", True):

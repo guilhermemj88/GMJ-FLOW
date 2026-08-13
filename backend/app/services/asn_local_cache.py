@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from datetime import datetime, timezone
+from ipaddress import ip_address, ip_network
 import json
 import sqlite3
 from typing import Any, Iterable
@@ -158,6 +160,133 @@ def cached_asn_information(conn: sqlite3.Connection, asns: Iterable[Any]) -> dic
             if not current["updated_at"]:
                 current["updated_at"] = clean_text(row.get("updated_at"))
     return result
+
+
+def resolve_asn_ips_from_local_db(
+    conn: sqlite3.Connection,
+    ips: Iterable[Any],
+    *,
+    max_ips: int = 500,
+) -> dict[str, dict[str, Any]]:
+    """Resolve several IPs with one cache read and one prefix-table scan.
+
+    The legacy dashboard resolver loaded and parsed every prefix once per IP.
+    This keeps the same longest-prefix-match semantics while bounding the
+    request and parsing the local prefix catalog only once.
+    """
+    parsed_ips: dict[str, Any] = {}
+    for value in ips:
+        text = clean_text(value)
+        if not text or text in parsed_ips:
+            continue
+        try:
+            parsed_ips[text] = ip_address(text)
+        except ValueError:
+            continue
+        if len(parsed_ips) >= max(1, int(max_ips)):
+            break
+    if not parsed_ips:
+        return {}
+
+    resolved: dict[str, dict[str, Any]] = {}
+    if _table_exists(conn, "asn_lookup_cache"):
+        names = list(parsed_ips)
+        placeholders = ",".join("?" for _ in names)
+        rows = conn.execute(
+            f"""
+            SELECT ip, ip_version, asn, prefix, as_name, country, source,
+                   resolved_at, expires_at
+            FROM asn_lookup_cache
+            WHERE ip IN ({placeholders}) AND asn > 0
+            """,
+            names,
+        ).fetchall()
+        for raw in rows:
+            row = dict(raw)
+            text = clean_text(row.get("ip"))
+            parsed = parsed_ips.get(text)
+            if parsed is None or int(row.get("ip_version") or 0) != parsed.version:
+                continue
+            if not _not_expired(row.get("expires_at")):
+                continue
+            resolved[text] = {
+                "ip": text,
+                "asn": int(row.get("asn") or 0),
+                "prefix": clean_text(row.get("prefix")),
+                "as_name": clean_text(row.get("as_name")),
+                "country": clean_text(row.get("country")).upper(),
+                "source": clean_text(row.get("source")) or "cache",
+                "resolved_at": clean_text(row.get("resolved_at")),
+                "resolution_tier": "cache",
+            }
+
+    pending = {
+        text: parsed
+        for text, parsed in parsed_ips.items()
+        if text not in resolved
+    }
+    if not pending or not _table_exists(conn, "asn_prefixes"):
+        return resolved
+
+    versions = sorted({parsed.version for parsed in pending.values()})
+    placeholders = ",".join("?" for _ in versions)
+    rows = conn.execute(
+        f"""
+        SELECT prefix, ip_version, asn, as_name, country, source, updated_at
+        FROM asn_prefixes
+        WHERE asn > 0 AND ip_version IN ({placeholders})
+        """,
+        versions,
+    ).fetchall()
+
+    # version -> prefix length -> sorted (network start, network end, row)
+    buckets: dict[int, dict[int, list[tuple[int, int, dict[str, Any]]]]] = {}
+    for raw in rows:
+        row = dict(raw)
+        try:
+            network = ip_network(clean_text(row.get("prefix")), strict=False)
+        except ValueError:
+            continue
+        version_buckets = buckets.setdefault(network.version, {})
+        version_buckets.setdefault(network.prefixlen, []).append(
+            (int(network.network_address), int(network.broadcast_address), row)
+        )
+    del rows
+    indexes: dict[int, list[tuple[int, list[int], list[tuple[int, int, dict[str, Any]]]]]] = {}
+    for version, version_buckets in buckets.items():
+        version_indexes = []
+        for prefix_length in sorted(version_buckets, reverse=True):
+            entries = version_buckets[prefix_length]
+            entries.sort(key=lambda item: item[0])
+            version_indexes.append(
+                (prefix_length, [item[0] for item in entries], entries)
+            )
+        indexes[version] = version_indexes
+
+    for text, parsed in pending.items():
+        address_value = int(parsed)
+        match: dict[str, Any] | None = None
+        for _prefix_length, starts, entries in indexes.get(parsed.version, []):
+            position = bisect_right(starts, address_value) - 1
+            if position < 0:
+                continue
+            start_value, end_value, candidate = entries[position]
+            if start_value <= address_value <= end_value:
+                match = candidate
+                break
+        if match is None:
+            continue
+        resolved[text] = {
+            "ip": text,
+            "asn": int(match.get("asn") or 0),
+            "prefix": clean_text(match.get("prefix")),
+            "as_name": clean_text(match.get("as_name")),
+            "country": clean_text(match.get("country")).upper(),
+            "source": clean_text(match.get("source")) or "local_prefix_db",
+            "updated_at": clean_text(match.get("updated_at")),
+            "resolution_tier": "prefix",
+        }
+    return resolved
 
 
 def enrich_asn_rows_from_local_cache(

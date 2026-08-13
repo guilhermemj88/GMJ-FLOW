@@ -10682,9 +10682,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     async function apiRequest(path, options = {}) {
       const endpoint = apiUrl(path);
+      const requestStartedAt = globalThis.performance?.now?.() ?? Date.now();
+      const onTiming = typeof options.onTiming === 'function' ? options.onTiming : null;
+      const fetchOptions = { ...options };
+      delete fetchOptions.onTiming;
       let response;
       try {
-        response = await authFetch(endpoint, options);
+        response = await authFetch(endpoint, fetchOptions);
       } catch (error) {
         if (error instanceof TypeError || error.message === 'Failed to fetch') {
           const preview = requestBodyPreview(options);
@@ -10692,13 +10696,24 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         }
         throw error;
       }
+      const headersReceivedAt = globalThis.performance?.now?.() ?? Date.now();
       const text = await response.text().catch(() => '');
+      const downloadFinishedAt = globalThis.performance?.now?.() ?? Date.now();
       let payload = {};
       try {
         payload = text ? JSON.parse(text) : {};
       } catch (error) {
         payload = {};
       }
+      const parseFinishedAt = globalThis.performance?.now?.() ?? Date.now();
+      onTiming?.({
+        request_start_ms: requestStartedAt,
+        ttfb_ms: Math.max(0, headersReceivedAt - requestStartedAt),
+        download_ms: Math.max(0, downloadFinishedAt - headersReceivedAt),
+        json_parse_ms: Math.max(0, parseFinishedAt - downloadFinishedAt),
+        response_chars: text.length,
+        http_status: response.status
+      });
       if (!response.ok) {
         const detail = apiDetailMessage(payload.detail) || payload.message || payload.error_message || text || response.statusText;
         const preview = requestBodyPreview(options);
@@ -23244,6 +23259,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       configurableWidgetControllers.set(widget.id, controller);
       const element = document.querySelector(`.configurable-dashboard-widget[data-widget-id="${widget.id}"]`);
       element?.classList.add('widget-loading');
+      const requestStartedAt = globalThis.performance?.now?.() ?? Date.now();
+      let requestTiming = null;
       try {
         const payload = await apiRequest('/api/dashboard-widgets/query', {
           method: 'POST',
@@ -23253,7 +23270,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             widget_id: widget.id,
             ...queryContext
           }),
-          signal: controller.signal
+          signal: controller.signal,
+          onTiming: timing => { requestTiming = timing; }
         });
         if (
           controller.signal.aborted
@@ -23262,7 +23280,21 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           || Number(configurableDashboard?.id || 0) !== dashboardId
         ) return null;
         writeConfigurableWidgetCache(widget, payload, queryContext);
+        const renderStartedAt = globalThis.performance?.now?.() ?? Date.now();
         renderConfigurableWidget(widget, payload);
+        const renderFinishedAt = globalThis.performance?.now?.() ?? Date.now();
+        console.info('DASHBOARD_WIDGET_FRONTEND_PERF', {
+          dashboard_id: dashboardId,
+          widget_id: widget.id,
+          request_id: payload?.request_id || '',
+          ttfb_ms: Math.round(Number(requestTiming?.ttfb_ms || 0) * 100) / 100,
+          download_ms: Math.round(Number(requestTiming?.download_ms || 0) * 100) / 100,
+          json_parse_ms: Math.round(Number(requestTiming?.json_parse_ms || 0) * 100) / 100,
+          render_ms: Math.round((renderFinishedAt - renderStartedAt) * 100) / 100,
+          total_ms: Math.round((renderFinishedAt - requestStartedAt) * 100) / 100,
+          response_chars: Number(requestTiming?.response_chars || 0),
+          http_status: Number(requestTiming?.http_status || 0)
+        });
         return payload;
       } catch (error) {
         if (
@@ -23275,6 +23307,25 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           const timer = configurableWidgetTimers.get(widget.id);
           if (timer) clearTimeout(timer);
           configurableWidgetTimers.delete(widget.id);
+        }
+        if (configurableWidgetPayloads.has(Number(widget.id))) {
+          element?.classList.remove('widget-loading');
+          const status = element?.querySelector('.configurable-dashboard-widget-status');
+          if (status) {
+            status.textContent = 'dados anteriores · atualização falhou';
+            status.title = error.message || 'Falha transitória na atualização';
+          }
+          console.warn('DASHBOARD_WIDGET_FRONTEND_PERF', {
+            dashboard_id: dashboardId,
+            widget_id: widget.id,
+            total_ms: Math.round(((globalThis.performance?.now?.() ?? Date.now()) - requestStartedAt) * 100) / 100,
+            ttfb_ms: Math.round(Number(requestTiming?.ttfb_ms || 0) * 100) / 100,
+            download_ms: Math.round(Number(requestTiming?.download_ms || 0) * 100) / 100,
+            json_parse_ms: Math.round(Number(requestTiming?.json_parse_ms || 0) * 100) / 100,
+            http_status: Number(requestTiming?.http_status || error.status || 0),
+            preserved_previous_result: true
+          });
+          return null;
         }
         renderConfigurableWidgetError(widget, error);
         throw error;
