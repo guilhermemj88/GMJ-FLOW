@@ -45,7 +45,7 @@ from starlette.responses import JSONResponse, Response
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
 from app.api.threat_intelligence import router as threat_intelligence_router
-from app.api.threat_engine import router as threat_engine_router, security_router
+from app.api.threat_engine import api_security_router, router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.peak_hunter import ensure_peak_analysis_db
@@ -291,6 +291,7 @@ app.include_router(peak_hunter_router)
 app.include_router(threat_intelligence_router)
 app.include_router(threat_engine_router)
 app.include_router(security_router)
+app.include_router(api_security_router)
 
 PROTO_LABELS = {
     "1": "ICMP",
@@ -5123,7 +5124,7 @@ def permission_for_legacy_admin_route(request: Request) -> str:
         return "mitigations.view"
     if "/mitigation" in path:
         return "mitigations.view" if method == "GET" else "mitigations.configure"
-    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/detection", "/api/attack-vector")):
+    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/security/events", "/api/security/campaigns", "/api/detection", "/api/attack-vector")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"
     if path.startswith(("/api/peak-hunter", "/api/ops")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"
@@ -5159,7 +5160,7 @@ def permission_for_protected_api_route(request: Request) -> str:
         return permission_for_legacy_admin_route(request)
     if "/mitigation" in path:
         return permission_for_legacy_admin_route(request)
-    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/detection", "/api/attack-vector")):
+    if path.startswith(("/api/anomalies", "/api/security/anomalies", "/api/security/events", "/api/security/campaigns", "/api/detection", "/api/attack-vector")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"
     if path.startswith(("/api/peak-hunter", "/api/ops")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"

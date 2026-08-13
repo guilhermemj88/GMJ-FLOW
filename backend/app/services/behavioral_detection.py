@@ -327,6 +327,51 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         for row in rows
     }
     source_asns = sorted({row.src_asn for row in rows if row.src_asn})
+    source_details: dict[str, dict[str, Any]] = {}
+    source_port_details: dict[int, dict[str, Any]] = {}
+    destination_port_details: dict[int, dict[str, Any]] = {}
+    protocol_details: dict[int, dict[str, Any]] = {}
+    tcp_flag_details: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        source = source_details.setdefault(
+            row.src_ip,
+            {"source_ip": row.src_ip, "source_asn": row.src_asn, "packets": 0, "bytes": 0, "flows": 0},
+        )
+        source["packets"] += row.packets
+        source["bytes"] += row.bytes
+        source["flows"] += row.flow_count
+        if not source["source_asn"] and row.src_asn:
+            source["source_asn"] = row.src_asn
+        for container, port in ((source_port_details, row.src_port), (destination_port_details, row.dst_port)):
+            detail = container.setdefault(port, {"port": port, "packets": 0, "bytes": 0, "flows": 0})
+            detail["packets"] += row.packets
+            detail["bytes"] += row.bytes
+            detail["flows"] += row.flow_count
+        protocol = protocol_details.setdefault(
+            row.protocol,
+            {"protocol": {1: "icmp", 6: "tcp", 17: "udp"}.get(row.protocol, str(row.protocol)), "protocol_number": row.protocol, "packets": 0, "bytes": 0, "flows": 0},
+        )
+        protocol["packets"] += row.packets
+        protocol["bytes"] += row.bytes
+        protocol["flows"] += row.flow_count
+        if row.protocol == 6:
+            flags = tcp_flag_details.setdefault(
+                row.tcp_flags,
+                {"flags": row.tcp_flags, "packets": 0, "bytes": 0, "flows": 0},
+            )
+            flags["packets"] += row.packets
+            flags["bytes"] += row.bytes
+            flags["flows"] += row.flow_count
+
+    def ranked_details(values: Mapping[Any, dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        result = []
+        for item in sorted(values.values(), key=lambda value: (-int(value["packets"]), str(value)))[:limit]:
+            normalized = dict(item)
+            normalized["pps"] = round(ratio(normalized["packets"], window_seconds), 4)
+            normalized["share"] = round(ratio(normalized["packets"], packet_count) * 100, 4)
+            result.append(normalized)
+        return result
+
     return {
         "flow_count": flow_count,
         "packet_count": packet_count,
@@ -356,6 +401,14 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         "top_destination_ports": dict(destination_ports.most_common(20)),
         "top_sources": dict(sources.most_common(20)),
         "top_destinations": dict(destinations.most_common(20)),
+        # Investigation snapshots are bounded before they are persisted with the
+        # event. They make the drawer useful without querying flow_raw.
+        "top_source_details": ranked_details(source_details, 50),
+        "top_source_port_details": ranked_details(source_port_details, 20),
+        "top_destination_port_details": ranked_details(destination_port_details, 20),
+        "protocol_distribution": ranked_details(protocol_details, 20),
+        "tcp_flag_distribution": ranked_details(tcp_flag_details, 20),
+        "observation_samples": len(rows),
         "persistent_windows": len(temporal_buckets),
         "first_seen": first.isoformat().replace("+00:00", "Z"),
         "last_seen": last.isoformat().replace("+00:00", "Z"),
@@ -614,11 +667,25 @@ def normalized_intel_match(match: Mapping[str, Any]) -> dict[str, Any]:
             label = clean_text(item)
         if label and label not in tags:
             tags.append(label)
+    metadata = match.get("metadata") if isinstance(match.get("metadata"), Mapping) else {}
+    cves = []
+    for item in [*(match.get("cves") or []), *(metadata.get("cves") or [])]:
+        value = clean_text(item)
+        if value and value not in cves:
+            cves.append(value)
     return {
         "provider": clean_text(match.get("provider")).upper(),
         "indicator_type": clean_text(match.get("indicator_type")).upper(),
         "classification": clean_text(match.get("classification")).lower(),
         "tags": tags[:20],
+        "last_seen": clean_text(match.get("last_seen")),
+        "organization": clean_text(match.get("organization")),
+        "country": clean_text(match.get("country") or match.get("country_code")),
+        "country_code": clean_text(match.get("country_code")).upper(),
+        "actor": clean_text(match.get("actor")),
+        "asn": safe_int(match.get("asn")),
+        "cves": cves[:20],
+        "metadata": {clean_text(key): value for key, value in list(metadata.items())[:30] if clean_text(key)},
         "botnet_family": clean_text(match.get("botnet_family")),
         "network": clean_text(match.get("network")),
         "spoofing_likelihood": safe_int(match.get("spoofing_likelihood")),

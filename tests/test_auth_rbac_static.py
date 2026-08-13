@@ -24,6 +24,10 @@ class AuthRbacStaticTest(unittest.TestCase):
         self.assertIn('require_permission(request, "users.manage_permissions")', BACKEND)
         self.assertIn('require_permission(request, "users.delete")', BACKEND)
 
+    def test_security_event_investigation_uses_anomaly_permissions(self):
+        self.assertIn('"/api/security/events"', BACKEND)
+        self.assertIn('return "anomalies.view" if method == "GET" else "anomalies.manage"', BACKEND)
+
     def test_login_security_controls_are_present(self):
         self.assertIn("AUTH_DUMMY_PASSWORD_HASH", BACKEND)
         self.assertIn("failed_login_attempts", BACKEND)

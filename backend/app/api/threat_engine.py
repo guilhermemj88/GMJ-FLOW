@@ -14,9 +14,11 @@ from app.services.behavioral_detection import (
     ensure_behavioral_schema,
 )
 from app.services.threat_policy import ensure_threat_policy_schema, policy_decision_row
-from app.services.security_event_ai import analyze_security_event
+from app.services.security_event_ai import analyze_security_event, get_security_event_analysis
+from app.services.security_event_investigation import event_evidence, event_sources, event_traffic
 from app.services.security_events import (
     ensure_security_event_schema,
+    find_security_event,
     migrate_legacy_security_events,
     security_event_row,
     update_event_status,
@@ -25,6 +27,7 @@ from app.services.security_events import (
 
 router = APIRouter(prefix="/api/threat-engine", tags=["threat-engine"])
 security_router = APIRouter(prefix="/security", tags=["security-investigation"])
+api_security_router = APIRouter(prefix="/api/security", tags=["security-investigation"])
 
 
 @router.get("/status")
@@ -110,19 +113,20 @@ def threat_engine_audit(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any
     return {"items": [dict(row) for row in rows]}
 
 
-def _event_or_404(event_id: int) -> dict[str, Any]:
+def _event_or_404(event_id: Any) -> dict[str, Any]:
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
         ensure_security_event_schema(conn)
         migrate_legacy_security_events(conn)
         conn.commit()
-        row = conn.execute("SELECT * FROM security_events WHERE id=?", (int(event_id),)).fetchone()
-    if row is None:
+        event = find_security_event(conn, event_id)
+    if event is None:
         raise HTTPException(status_code=404, detail="Evento de segurança não encontrado")
-    return security_event_row(row)
+    return event
 
 
 @security_router.get("/events")
+@api_security_router.get("/events")
 def list_security_events(
     status: str = "",
     attack_type: str = "",
@@ -155,29 +159,41 @@ def list_security_events(
 
 
 @security_router.get("/events/{event_id}")
-def get_security_event(event_id: int) -> dict[str, Any]:
+@api_security_router.get("/events/{event_id}")
+def get_security_event(event_id: str) -> dict[str, Any]:
     return _event_or_404(event_id)
 
 
 @security_router.get("/events/{event_id}/evidence")
-def get_security_event_evidence(event_id: int) -> dict[str, Any]:
+@api_security_router.get("/events/{event_id}/evidence")
+def get_security_event_evidence(event_id: str, sample_limit: int = Query(100, ge=1, le=100)) -> dict[str, Any]:
     event = _event_or_404(event_id)
-    return {
-        "event_id": event_id,
-        "detector": event["detector"],
-        "score": event["detector_score"],
-        "score_components": event["score_components"],
-        "evidence": event["evidence"],
-        "network_context": event["network_context"],
-    }
+    return event_evidence(event, sample_limit=sample_limit)
+
+
+@security_router.get("/events/{event_id}/traffic")
+@api_security_router.get("/events/{event_id}/traffic")
+def get_security_event_traffic(event_id: str, padding_seconds: int = Query(600, ge=0, le=3600)) -> dict[str, Any]:
+    return event_traffic(_event_or_404(event_id), padding_seconds=padding_seconds)
+
+
+@security_router.get("/events/{event_id}/sources")
+@api_security_router.get("/events/{event_id}/sources")
+def get_security_event_sources(
+    event_id: str,
+    sort: str = Query("packets"),
+    limit: int = Query(100, ge=1, le=100),
+) -> dict[str, Any]:
+    return event_sources(_event_or_404(event_id), sort_by=sort, limit=limit)
 
 
 @security_router.get("/events/{event_id}/threat-intel")
-def get_security_event_threat_intel(event_id: int) -> dict[str, Any]:
+@api_security_router.get("/events/{event_id}/threat-intel")
+def get_security_event_threat_intel(event_id: str) -> dict[str, Any]:
     event = _event_or_404(event_id)
     source_intel = event["threat_intel"].get("source_intel") or {}
     return {
-        "event_id": event_id,
+        "event_id": event["event_id"],
         "threat_intel": event["threat_intel"],
         "interpretation": (
             f"Threat Intelligence encontrou {int(source_intel.get('matched_source_count') or source_intel.get('matches') or 0)} "
@@ -188,7 +204,8 @@ def get_security_event_threat_intel(event_id: int) -> dict[str, Any]:
 
 
 @security_router.get("/events/{event_id}/related")
-def related_security_events(event_id: int, limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+@api_security_router.get("/events/{event_id}/related")
+def related_security_events(event_id: str, limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     event = _event_or_404(event_id)
     clauses = []
     values: list[Any] = []
@@ -203,19 +220,24 @@ def related_security_events(event_id: int, limit: int = Query(50, ge=1, le=200))
         ensure_security_event_schema(conn)
         rows = conn.execute(
             f"SELECT * FROM security_events WHERE id<>? AND ({' OR '.join(clauses)}) ORDER BY last_seen DESC LIMIT ?",
-            (int(event_id), *values, int(limit)),
+            (int(event["id"]), *values, int(limit)),
         ).fetchall()
-    return {"event_id": event_id, "items": [security_event_row(row) for row in rows]}
+    return {"event_id": event["event_id"], "items": [security_event_row(row) for row in rows]}
 
 
-def _run_event_ai(event_id: int, force: bool) -> dict[str, Any]:
+def _run_event_ai(event_id: Any, force: bool) -> dict[str, Any]:
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
         result = analyze_security_event(conn, event_id, force=force)
     if result.get("status") == "not_found":
         raise HTTPException(status_code=404, detail=result.get("error_message"))
     if not result.get("ok"):
-        raise HTTPException(status_code=409, detail={
+        status_code = {
+            "disabled": 409, "not_configured": 409, "rate_limit": 429,
+            "timeout": 504, "unavailable": 503, "invalid_response": 502,
+            "payload_too_large": 413,
+        }.get(result.get("error_type") or result.get("status"), 503)
+        raise HTTPException(status_code=status_code, detail={
             "status": result.get("status") or "failed",
             "error_type": result.get("error_type") or "unavailable",
             "message": result.get("error_message") or "Análise de IA indisponível",
@@ -224,16 +246,34 @@ def _run_event_ai(event_id: int, force: bool) -> dict[str, Any]:
 
 
 @security_router.post("/events/{event_id}/analyze-ai")
-def analyze_event_ai(event_id: int) -> dict[str, Any]:
+def analyze_event_ai(event_id: str) -> dict[str, Any]:
     return _run_event_ai(event_id, force=False)
 
 
 @security_router.post("/events/{event_id}/reanalyze-ai")
-def reanalyze_event_ai(event_id: int) -> dict[str, Any]:
+def reanalyze_event_ai(event_id: str) -> dict[str, Any]:
     return _run_event_ai(event_id, force=True)
 
 
+@security_router.get("/events/{event_id}/ai-analysis")
+@api_security_router.get("/events/{event_id}/ai-analysis")
+def get_event_ai_analysis(event_id: str) -> dict[str, Any]:
+    with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
+        ensure_behavioral_schema(conn)
+        result = get_security_event_analysis(conn, event_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error_message"))
+    return result
+
+
+@security_router.post("/events/{event_id}/ai-analysis")
+@api_security_router.post("/events/{event_id}/ai-analysis")
+def create_event_ai_analysis(event_id: str, force: bool = Query(False)) -> dict[str, Any]:
+    return _run_event_ai(event_id, force=force)
+
+
 @security_router.get("/campaigns/{campaign_id}")
+@api_security_router.get("/campaigns/{campaign_id}")
 def get_security_campaign(campaign_id: str) -> dict[str, Any]:
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
@@ -248,10 +288,11 @@ def get_security_campaign(campaign_id: str) -> dict[str, Any]:
     return {"campaign": campaign_row(row), "events": [security_event_row(item) for item in event_rows]}
 
 
-def _set_event_status(event_id: int, status: str) -> dict[str, Any]:
+def _set_event_status(event_id: Any, status: str) -> dict[str, Any]:
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
-        item = update_event_status(conn, event_id, status)
+        event = find_security_event(conn, event_id)
+        item = update_event_status(conn, int(event["id"]), status) if event else None
         conn.commit()
     if item is None:
         raise HTTPException(status_code=404, detail="Evento de segurança não encontrado")
@@ -259,15 +300,18 @@ def _set_event_status(event_id: int, status: str) -> dict[str, Any]:
 
 
 @security_router.post("/events/{event_id}/mark-benign")
-def mark_event_benign(event_id: int) -> dict[str, Any]:
+@api_security_router.post("/events/{event_id}/mark-benign")
+def mark_event_benign(event_id: str) -> dict[str, Any]:
     return _set_event_status(event_id, "benign")
 
 
 @security_router.post("/events/{event_id}/mark-confirmed")
-def mark_event_confirmed(event_id: int) -> dict[str, Any]:
+@api_security_router.post("/events/{event_id}/mark-confirmed")
+def mark_event_confirmed(event_id: str) -> dict[str, Any]:
     return _set_event_status(event_id, "confirmed")
 
 
 @security_router.post("/events/{event_id}/investigating")
-def mark_event_investigating(event_id: int) -> dict[str, Any]:
+@api_security_router.post("/events/{event_id}/investigating")
+def mark_event_investigating(event_id: str) -> dict[str, Any]:
     return _set_event_status(event_id, "investigating")

@@ -71,6 +71,31 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertIn('mitigation_recommended', self.script)
         self.assertIn('.security-event-drawer', self.style)
 
+    def test_security_event_investigation_sections_and_bounded_endpoints_are_wired(self) -> None:
+        for label in (
+            "Resumo", "Tráfego", "Origens", "Top Sources", "Top Destination Ports",
+            "Top Source Ports", "Threat Intelligence", "Evidências", "Análise IA",
+        ):
+            self.assertIn(label, self.script)
+        for endpoint in ("/traffic?padding_seconds=600", "/sources?sort=packets&limit=100", "/evidence?sample_limit=100", "/ai-analysis"):
+            self.assertIn(endpoint, self.script)
+        for sort in ("packets", "bytes", "pps"):
+            self.assertIn(f"'{sort}'", self.script)
+        self.assertIn("securityEventTrafficChart", self.script)
+        self.assertIn("security-event-traffic-chart", self.style)
+
+    def test_threat_intelligence_uses_persisted_event_snapshot(self) -> None:
+        for field in ("last_seen", "organization", "country", "actor", "tags", "cves", "metadata"):
+            self.assertIn(field, self.script)
+        self.assertIn("abrir o drawer não faz lookup individual", self.script)
+        self.assertIn("Evento sem enrichment externo associado", self.script)
+
+    def test_ai_disabled_stale_and_advisory_states_are_visible(self) -> None:
+        self.assertIn("Security AI desabilitada por configuração", self.script)
+        self.assertIn("Análise potencialmente desatualizada", self.script)
+        self.assertIn("Advisory only", self.script)
+        self.assertIn("Nenhuma mitigação automática foi executada", self.script)
+
     def test_canonical_events_are_also_loaded_in_anomalies(self) -> None:
         self.assertIn("apiRequest('/security/events?limit=200'", self.html)
         self.assertIn('canonical_security_event: true', self.html)

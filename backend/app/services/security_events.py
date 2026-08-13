@@ -33,6 +33,7 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS security_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            public_id TEXT NOT NULL DEFAULT '',
             event_key TEXT NOT NULL UNIQUE,
             detector TEXT NOT NULL,
             attack_type TEXT NOT NULL,
@@ -56,6 +57,7 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             recurrence_count INTEGER NOT NULL DEFAULT 1,
             status TEXT NOT NULL DEFAULT 'active',
             packets INTEGER NOT NULL DEFAULT 0,
+            bytes INTEGER NOT NULL DEFAULT 0,
             packets_per_second REAL NOT NULL DEFAULT 0,
             bits_per_second REAL NOT NULL DEFAULT 0,
             flows INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +77,7 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             score_components_json TEXT NOT NULL DEFAULT '{}',
             threat_intel_json TEXT NOT NULL DEFAULT '{}',
+            investigation_json TEXT NOT NULL DEFAULT '{}',
             ai_analysis_json TEXT NOT NULL DEFAULT '{}',
             ai_analysis_status TEXT NOT NULL DEFAULT 'not_analyzed',
             ai_analysis_stale_at TEXT,
@@ -82,6 +85,9 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             ai_provider TEXT NOT NULL DEFAULT '',
             ai_model TEXT NOT NULL DEFAULT '',
             analysis_version TEXT NOT NULL DEFAULT '',
+            ai_event_fingerprint TEXT NOT NULL DEFAULT '',
+            ai_evidence_fingerprint TEXT NOT NULL DEFAULT '',
+            ai_analysis_error TEXT NOT NULL DEFAULT '',
             campaign_id TEXT NOT NULL DEFAULT '',
             mitigation_status TEXT NOT NULL DEFAULT 'not_executed',
             decision_source TEXT NOT NULL DEFAULT 'GMJ_FLOW'
@@ -90,6 +96,24 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS security_event_migrations (
             migration_key TEXT PRIMARY KEY,
             applied_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS security_event_ai_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            generated_at TEXT,
+            event_version INTEGER NOT NULL DEFAULT 1,
+            event_fingerprint TEXT NOT NULL DEFAULT '',
+            evidence_fingerprint TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_type TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(event_id) REFERENCES security_events(id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_security_events_status_time
@@ -102,12 +126,17 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             ON security_events(src_ip, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_security_events_target
             ON security_events(target_ip, target_prefix, last_seen DESC);
+        CREATE INDEX IF NOT EXISTS idx_security_event_ai_history
+            ON security_event_ai_analyses(event_id, id DESC);
         """
     )
     # Forward-compatible additive migrations for installations that received an
     # early preview of security_events.
     existing_columns = _columns(conn, "security_events")
     additions = {
+        "public_id": "public_id TEXT NOT NULL DEFAULT ''",
+        "bytes": "bytes INTEGER NOT NULL DEFAULT 0",
+        "investigation_json": "investigation_json TEXT NOT NULL DEFAULT '{}'",
         "score_components_json": "score_components_json TEXT NOT NULL DEFAULT '{}'",
         "ai_analysis_status": "ai_analysis_status TEXT NOT NULL DEFAULT 'not_analyzed'",
         "ai_analysis_stale_at": "ai_analysis_stale_at TEXT",
@@ -115,6 +144,9 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
         "ai_provider": "ai_provider TEXT NOT NULL DEFAULT ''",
         "ai_model": "ai_model TEXT NOT NULL DEFAULT ''",
         "analysis_version": "analysis_version TEXT NOT NULL DEFAULT ''",
+        "ai_event_fingerprint": "ai_event_fingerprint TEXT NOT NULL DEFAULT ''",
+        "ai_evidence_fingerprint": "ai_evidence_fingerprint TEXT NOT NULL DEFAULT ''",
+        "ai_analysis_error": "ai_analysis_error TEXT NOT NULL DEFAULT ''",
         "mitigation_status": "mitigation_status TEXT NOT NULL DEFAULT 'not_executed'",
     }
     for name, ddl in additions.items():
@@ -128,6 +160,16 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
               AND ai_analysis_json NOT IN ('', '{}', 'null')
             """
         )
+    rows = conn.execute("SELECT id, event_key, first_seen FROM security_events WHERE public_id='' OR public_id IS NULL").fetchall()
+    for row in rows:
+        item = dict(row)
+        conn.execute(
+            "UPDATE security_events SET public_id=? WHERE id=?",
+            (public_event_id(item.get("event_key"), item.get("first_seen")), int(item["id"])),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_security_events_public_id ON security_events(public_id) WHERE public_id<>''"
+    )
 
 
 def canonical_event_key(
@@ -143,6 +185,15 @@ def canonical_event_key(
         detector, attack_type, src_ip, target_ip, target_prefix, direction, protocol
     ))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def public_event_id(event_key: Any, first_seen: Any) -> str:
+    digits = "".join(character for character in clean_text(first_seen)[:10] if character.isdigit())
+    date_part = digits[:8] if len(digits) >= 8 else "00000000"
+    # Ten hex characters keep the human ID compact while avoiding collisions
+    # at the event volumes expected from carrier networks.
+    suffix = clean_text(event_key).upper()[:10] or "0000000000"
+    return f"GMJ-{date_part}-{suffix}"
 
 
 def _confidence_percent(value: Any) -> float:
@@ -172,6 +223,36 @@ def _feature(features: Mapping[str, Any], *names: str, default: Any = 0) -> Any:
     return default
 
 
+def _configured_detection_thresholds(attack_type: str, features: Mapping[str, Any]) -> dict[str, Any]:
+    supplied = features.get("detection_thresholds")
+    if isinstance(supplied, Mapping):
+        return dict(supplied)
+    if "UDP" in attack_type:
+        return {
+            "packets": int(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PACKETS", "3000")),
+            "pps": float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PPS", "100")),
+            "bps": float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_BPS", "1000000")),
+            "distributed_sources": 20,
+        }
+    if "SYN" in attack_type:
+        return {
+            "packets": int(os.getenv("GMJFLOW_SYN_FLOOD_MIN_PACKETS", "3000")),
+            "pps": float(os.getenv("GMJFLOW_SYN_FLOOD_MIN_PPS", "100")),
+            "bps": float(os.getenv("GMJFLOW_SYN_FLOOD_MIN_BPS", "1000000")),
+            "distributed_sources": 20,
+        }
+    if attack_type == "PORT_SCAN_VERTICAL":
+        return {"unique_destination_ports": int(os.getenv("GMJFLOW_SCAN_VERTICAL_PORTS", "20"))}
+    if attack_type in {"PORT_SCAN_HORIZONTAL", "NETWORK_SWEEP"}:
+        return {"unique_destination_hosts": int(os.getenv("GMJFLOW_SCAN_HORIZONTAL_HOSTS", "20"))}
+    if attack_type == "SSH_BRUTE_FORCE":
+        return {
+            "attempts": int(os.getenv("GMJFLOW_SSH_BRUTE_FORCE_MIN_ATTEMPTS", "30")),
+            "elapsed_seconds": float(os.getenv("GMJFLOW_SSH_BRUTE_FORCE_MIN_SECONDS", "30")),
+        }
+    return {}
+
+
 def vector_security_payload(vector: Any) -> dict[str, Any]:
     features = dict(getattr(vector, "features", {}) or {})
     network = dict(getattr(vector, "network_context", {}) or features.get("network_context") or {})
@@ -198,8 +279,43 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
         cgnat_context = "source_cgnat_public"
     if network.get("dst_is_cgnat"):
         cgnat_context = "destination_cgnat_public"
+    event_key = canonical_event_key(getattr(vector, "detector", ""), attack_type, src_ip, target_ip, target_prefix, direction, protocol)
+    first_seen = clean_text(getattr(vector, "first_seen", "")) or utc_now_iso()
+    top_sources = list(features.get("top_source_details") or [])[:50]
+    investigation = {
+        "top_sources": top_sources,
+        "top_source_ports": list(features.get("top_source_port_details") or [])[:20],
+        "top_destination_ports": list(features.get("top_destination_port_details") or [])[:20],
+        "protocols": list(features.get("protocol_distribution") or [])[:20],
+        "tcp_flags": list(features.get("tcp_flag_distribution") or [])[:20],
+        "samples": {
+            "observation_rows": int(features.get("observation_samples") or 0),
+            "persistent_windows": int(features.get("persistent_windows") or 0),
+        },
+        "detection_evidence": {
+            "observed": {
+                "packets": int(_feature(features, "packet_count", "packets", default=0) or 0),
+                "bytes": int(_feature(features, "byte_count", "bytes", default=0) or 0),
+                "pps": float(_feature(features, "packets_per_second", "pps", "aggregate_pps", default=0) or 0),
+                "bps": float(_feature(features, "bits_per_second", "bps", default=0) or 0),
+            },
+            "configured_thresholds": _configured_detection_thresholds(attack_type, features),
+            "baseline": float(features.get("baseline_pps") or (
+                float(_feature(features, "packets_per_second", "pps", "aggregate_pps", default=0) or 0)
+                / float(getattr(vector, "baseline_deviation", 0) or 1)
+                if float(getattr(vector, "baseline_deviation", 0) or 0) > 0 else 0
+            )),
+            "delta_baseline": float(getattr(vector, "baseline_deviation", 0) or 0),
+            "source_count": int(_feature(features, "unique_sources", "unique_src_ips", default=0) or 0),
+            "asn_diversity": int(_feature(features, "unique_source_asns", "unique_src_asns", default=0) or 0),
+            "destination_diversity": int(_feature(features, "unique_destinations", "unique_dst_ips", "target_hosts", default=0) or 0),
+            "window_seconds": int(getattr(vector, "window_seconds", 60) or 60),
+            "samples": int(features.get("observation_samples") or 0),
+        },
+    }
     return {
-        "event_key": canonical_event_key(getattr(vector, "detector", ""), attack_type, src_ip, target_ip, target_prefix, direction, protocol),
+        "public_id": public_event_id(event_key, first_seen),
+        "event_key": event_key,
         "detector": clean_text(getattr(vector, "detector", "")),
         "attack_type": attack_type,
         "attack_family": attack_family(attack_type),
@@ -215,9 +331,10 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
         "dst_role": dst_role or "UNKNOWN",
         "direction": direction,
         "protocol": protocol,
-        "first_seen": clean_text(getattr(vector, "first_seen", "")) or utc_now_iso(),
+        "first_seen": first_seen,
         "last_seen": clean_text(getattr(vector, "last_seen", "")) or utc_now_iso(),
         "packets": int(_feature(features, "packet_count", "packets", default=0) or 0),
+        "bytes": int(_feature(features, "byte_count", "bytes", default=0) or 0),
         "packets_per_second": float(_feature(features, "packets_per_second", "pps", "aggregate_pps", default=0) or 0),
         "bits_per_second": float(_feature(features, "bits_per_second", "bps", default=0) or 0),
         "flows": int(_feature(features, "flow_count", "flows", default=0) or 0),
@@ -237,6 +354,7 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
         "evidence_json": json_dump(dict(evidence)),
         "score_components_json": json_dump(dict(score_components)),
         "threat_intel_json": json_dump(getattr(vector, "threat_intel", {}) or {}),
+        "investigation_json": json_dump(investigation),
         "campaign_id": clean_text(getattr(vector, "campaign_id", "")),
         "mitigation_status": "not_executed",
         "decision_source": clean_text(getattr(vector, "decision_source", "GMJ_FLOW")) or "GMJ_FLOW",
@@ -246,14 +364,14 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
 def _material_event_changes(existing: Mapping[str, Any] | None, item: Mapping[str, Any]) -> list[str]:
     if not existing:
         return []
-    reasons: list[str] = []
+    reasons: list[str] = ["recurrence_count"]
     if clean_text(item.get("last_seen")) > clean_text(existing.get("last_seen")):
         reasons.append("last_seen")
     for field in ("detector_score", "confidence"):
         if float(item.get(field) or 0) > float(existing.get(field) or 0):
             reasons.append(field)
     for field in (
-        "packets", "packets_per_second", "bits_per_second", "flows", "flows_per_second",
+        "packets", "bytes", "packets_per_second", "bits_per_second", "flows", "flows_per_second",
         "unique_sources", "unique_destinations", "unique_src_ports", "unique_dst_ports",
         "unique_source_asns", "baseline_deviation",
     ):
@@ -261,7 +379,7 @@ def _material_event_changes(existing: Mapping[str, Any] | None, item: Mapping[st
         current = float(item.get(field) or 0)
         if current > previous and (previous <= 0 or current >= previous * 1.10):
             reasons.append(field)
-    for field in ("campaign_id", "network_context_json", "threat_intel_json", "evidence_json"):
+    for field in ("campaign_id", "network_context_json", "threat_intel_json", "evidence_json", "investigation_json"):
         if clean_text(item.get(field)) != clean_text(existing.get(field)):
             reasons.append(field)
     return reasons
@@ -296,6 +414,7 @@ def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
             last_seen=MAX(security_events.last_seen, excluded.last_seen),
             recurrence_count=security_events.recurrence_count+1,
             packets=MAX(security_events.packets, excluded.packets),
+            bytes=MAX(security_events.bytes, excluded.bytes),
             packets_per_second=MAX(security_events.packets_per_second, excluded.packets_per_second),
             bits_per_second=MAX(security_events.bits_per_second, excluded.bits_per_second),
             flows=MAX(security_events.flows, excluded.flows),
@@ -315,6 +434,7 @@ def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
             evidence_json=excluded.evidence_json,
             score_components_json=excluded.score_components_json,
             threat_intel_json=excluded.threat_intel_json,
+            investigation_json=excluded.investigation_json,
             campaign_id=excluded.campaign_id,
             decision_source=excluded.decision_source,
             updated_at=excluded.updated_at
@@ -329,6 +449,10 @@ def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
             WHERE event_key=?
             """,
             (now, now, item["event_key"]),
+        )
+        conn.execute(
+            "UPDATE security_event_ai_analyses SET status='stale', updated_at=? WHERE event_id=(SELECT id FROM security_events WHERE event_key=?) AND status='valid'",
+            (now, item["event_key"]),
         )
         conn.execute(
             """
@@ -457,10 +581,36 @@ def security_event_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
         ("evidence_json", "evidence", {}),
         ("score_components_json", "score_components", {}),
         ("threat_intel_json", "threat_intel", {}),
+        ("investigation_json", "investigation", {}),
         ("ai_analysis_json", "ai_analysis", {}),
     ):
         item[target] = safe_json(item.pop(source, "{}"), fallback)
+    item["event_id"] = item.get("public_id") or public_event_id(item.get("event_key"), item.get("first_seen"))
+    try:
+        first = datetime.fromisoformat(clean_text(item.get("first_seen")).replace("Z", "+00:00"))
+        last = datetime.fromisoformat(clean_text(item.get("last_seen")).replace("Z", "+00:00"))
+        item["duration_seconds"] = max(0.0, round((last - first).total_seconds(), 3))
+    except ValueError:
+        item["duration_seconds"] = 0.0
+    facts = item.get("evidence", {}).get("facts") if isinstance(item.get("evidence"), Mapping) else []
+    item["detection_reason"] = "; ".join(clean_text(value) for value in (facts or [])[:5] if clean_text(value))
     return item
+
+
+def find_security_event(conn: sqlite3.Connection, reference: Any) -> dict[str, Any] | None:
+    ensure_security_event_schema(conn)
+    value = clean_text(reference)
+    if not value:
+        return None
+    row = None
+    if value.isdigit():
+        row = conn.execute("SELECT * FROM security_events WHERE id=?", (int(value),)).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM security_events WHERE public_id=? OR event_key=? LIMIT 1",
+            (value, value.lower()),
+        ).fetchone()
+    return security_event_row(row) if row is not None else None
 
 
 def cleanup_security_events(conn: sqlite3.Connection, retention_days: int | None = None) -> int:
@@ -548,6 +698,7 @@ def migrate_legacy_security_events(conn: sqlite3.Connection) -> int:
             "recurrence_count": int(item.get("recurrence_count") or 1),
             "status": item.get("status") or "active",
             "packets": int(_feature(features, "packet_count", "packets", default=0) or 0),
+            "bytes": int(_feature(features, "byte_count", "bytes", default=0) or 0),
             "packets_per_second": float(_feature(features, "packets_per_second", "pps", default=0) or 0),
             "bits_per_second": float(_feature(features, "bits_per_second", "bps", default=0) or 0),
             "flows": int(_feature(features, "flow_count", "flows", default=0) or 0),
@@ -567,10 +718,18 @@ def migrate_legacy_security_events(conn: sqlite3.Connection) -> int:
             "evidence_json": json_dump({"facts": features.get("evidence") or []}),
             "score_components_json": json_dump(features.get("score_components") or {}),
             "threat_intel_json": item.get("threat_intel_json") or "{}",
+            "investigation_json": json_dump({
+                "top_sources": list(features.get("top_source_details") or [])[:50],
+                "top_source_ports": list(features.get("top_source_port_details") or [])[:20],
+                "top_destination_ports": list(features.get("top_destination_port_details") or [])[:20],
+                "protocols": list(features.get("protocol_distribution") or [])[:20],
+                "tcp_flags": list(features.get("tcp_flag_distribution") or [])[:20],
+            }),
             "campaign_id": item.get("campaign_id") or "",
             "mitigation_status": "not_executed",
             "decision_source": item.get("decision_source") or "GMJ_FLOW",
         }
+        payload["public_id"] = public_event_id(payload["event_key"], payload["first_seen"])
         columns = list(payload)
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO security_events ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",

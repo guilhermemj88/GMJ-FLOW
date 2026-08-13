@@ -18,6 +18,9 @@
   let threatMap = null;
   let loading = false;
   let currentSecurityEventId = null;
+  let currentSecurityEvent = null;
+  let currentSecuritySources = [];
+  let securityTrafficChart = null;
 
   function esc(value) {
     return String(value ?? '')
@@ -237,7 +240,7 @@
         item.recurrence_count ? `${number(item.recurrence_count)} ocorrências` : ''
       ].filter(Boolean).join(' · ') || '-';
       return `<tr class="security-event-row" tabindex="0" data-security-event-id="${number(item.id)}" title="Abrir investigação">
-        <td><strong>${esc(item.attack_type)}</strong><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
+        <td><strong>${esc(item.attack_type)}</strong><br><code>${esc(item.event_id || `#${item.id}`)}</code><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
         <td>${esc(item.src_ip || 'distribuída')} → ${esc(item.target_prefix || item.target_ip || '-')}</td>
         <td><span class="threat-score ${scoreClass(item.detector_score)}">${number(item.detector_score)}</span><br><span class="subtle">${esc(item.verdict || 'INFO')} · conf. ${number(confidence <= 1 ? confidence * 100 : confidence, 1)}%</span></td>
         <td><span class="subtle">${esc(item.direction || 'UNKNOWN')} · ${esc(item.src_role || 'UNKNOWN')} → ${esc(item.dst_role || 'UNKNOWN')}</span><br>${esc(evidence)}</td>
@@ -354,6 +357,204 @@
     renderSecurityEventDetail(event, related.items || []);
   }
 
+  function securityBytes(value) {
+    const amount = Number(value || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(Math.floor(Math.log(amount) / Math.log(1024)), units.length - 1);
+    return `${number(amount / (1024 ** index), 2)} ${units[index]}`;
+  }
+
+  function canManageSecurityEvents() {
+    return typeof root.hasPermission !== 'function' || root.hasPermission('anomalies.manage');
+  }
+
+  function investigationList(values, empty = 'Sem dados registrados.') {
+    const items = Array.isArray(values) ? values : [];
+    return items.length
+      ? `<ul>${items.map(item => `<li>${esc(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('')}</ul>`
+      : `<div class="subtle">${esc(empty)}</div>`;
+  }
+
+  function renderSecurityAiInvestigation(event, state = {}) {
+    const analysis = state.analysis && Object.keys(state.analysis).length ? state.analysis : (event.ai_analysis || {});
+    const hasAnalysis = Object.keys(analysis).length > 0;
+    const canAnalyze = canManageSecurityEvents() && state.enabled === true && state.configured === true;
+    const unavailable = !state.enabled
+      ? 'Security AI desabilitada por configuração.'
+      : !state.configured
+        ? 'Provider, modelo ou credencial não configurados no backend.'
+        : !canManageSecurityEvents() ? 'Seu perfil não pode solicitar análise.' : '';
+    if (!hasAnalysis) {
+      return `<p class="subtle">Ainda não analisado. A execução ocorre somente mediante clique e é consultiva.</p>
+        ${state.error ? `<div class="security-ai-error">${esc(state.error)}</div>` : ''}
+        <button type="button" class="btn btn-sm btn-success mt-2" data-security-action="analyze" data-event-id="${number(event.id)}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
+        ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
+    }
+    const confidence = typeof analysis.confidence === 'number' ? `${number(analysis.confidence, 1)}%` : analysis.confidence;
+    return `${state.stale || event.ai_analysis_status === 'stale' ? '<div class="security-ai-stale">Análise potencialmente desatualizada após nova recorrência/evidência.</div>' : ''}
+      <div class="security-ai-verdict"><strong>${esc(analysis.assessment || analysis.verdict || 'Análise consultiva')}</strong><span>${esc(confidence || '-')}</span></div>
+      <p>${esc(analysis.summary || '')}</p>
+      <h4>Por que foi detectado</h4>${investigationList(analysis.why_detected || analysis.evidence_for_attack)}
+      <h4>Origens importantes</h4>${investigationList(analysis.important_sources)}
+      <h4>Threat Intelligence</h4>${investigationList(analysis.threat_intelligence_findings || (analysis.threat_intel_interpretation ? [analysis.threat_intel_interpretation] : []))}
+      <h4>Possíveis falsos positivos</h4>${investigationList(analysis.possible_false_positive_factors || analysis.evidence_against_attack)}
+      <h4>Verificações recomendadas</h4>${investigationList(analysis.recommended_checks)}
+      <h4>Ações recomendadas</h4>${investigationList(analysis.recommended_actions || (analysis.recommended_action ? [analysis.recommended_action] : []))}
+      ${detailGrid([
+        ['Mitigação (advisory only)', analysis.mitigation_advisory || (analysis.mitigation_recommended ? 'Requer validação humana e Policy Engine; nada foi executado.' : 'Nenhuma mitigação automática foi executada.')],
+        ['Limitações', (analysis.limitations || []).join('; ')],
+        ['Provider / modelo', `${state.provider || event.ai_provider || '-'} / ${state.model || event.ai_model || '-'}`],
+        ['Gerada em', dateTime(state.analyzed_at || event.analyzed_at)],
+        ['Versão', state.analysis_version || event.analysis_version || '-']
+      ])}
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${number(event.id)}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>
+      <div class="subtle mt-1">Advisory only: a IA não executa nem solicita mitigação automática.</div>`;
+  }
+
+  function renderPersistedThreatIntel(event) {
+    const source = event.threat_intel?.source_intel || {};
+    const rows = Object.entries(source.sources || {}).flatMap(([ip, matches]) =>
+      (Array.isArray(matches) ? matches : []).slice(0, 10).map(match => {
+        const metadata = match.metadata && typeof match.metadata === 'object' ? JSON.stringify(match.metadata).slice(0, 500) : '-';
+        return `<tr><td><code>${esc(ip)}</code></td><td>${esc(match.provider || '-')}</td><td>${esc(match.classification || match.indicator_type || '-')}</td>
+          <td>${dateTime(match.last_seen)}</td><td>${esc(match.organization || '-')}</td><td>${esc(match.country || match.country_code || '-')}</td>
+          <td>${esc(match.actor || '-')}</td><td>${esc((match.tags || []).join(', ') || '-')}</td><td>${esc((match.cves || []).join(', ') || '-')}</td><td title="${esc(metadata)}">${esc(metadata)}</td></tr>`;
+      })
+    ).slice(0, 50);
+    return `<p><strong>${number(source.matched_source_count || source.matches)} de ${number(source.lookup_count)} origens consultadas</strong>${source.lookup_truncated ? ' (amostra limitada)' : ''}.</p>
+      <p class="subtle">Enrichment persistido no evento; abrir o drawer não faz lookup individual. Reputação histórica não é apresentada como causa da detecção local.</p>
+      ${rows.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>IP</th><th>Provider</th><th>Classificação</th><th>Last seen</th><th>Organização</th><th>País</th><th>Actor</th><th>Tags</th><th>CVEs</th><th>Metadata</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>` : '<div class="subtle">Evento sem enrichment externo associado.</div>'}`;
+  }
+
+  function renderSecurityDistribution(items, label) {
+    const rows = (Array.isArray(items) ? items : []).slice(0, 20);
+    return rows.length ? `<div class="security-distribution"><h4>${esc(label)}</h4>${rows.map(item => `<div><strong>${esc(item.port ?? item.protocol ?? item.flags ?? '-')}</strong><span>${number(item.packets)} pacotes · ${securityBytes(item.bytes)} · ${number(item.flows)} flows</span></div>`).join('')}</div>` : '';
+  }
+
+  function sourceTableRows(items, sort) {
+    return (items || []).slice().sort((left, right) => Number(right[sort] || 0) - Number(left[sort] || 0)).map(source =>
+      `<tr><td><code>${esc(source.source_ip || '-')}</code></td><td>${source.source_asn ? `AS${number(source.source_asn)}` : '-'}<br><span class="subtle">${esc(source.asn_organization || '-')}</span></td>
+        <td>${esc(source.country || '-')}</td><td>${number(source.packets)}</td><td>${securityBytes(source.bytes)}</td><td>${number(source.flows)}</td><td>${number(source.pps, 2)}</td><td>${number(source.share, 2)}%</td>
+        <td>${esc(source.threat_intelligence_classification || '-')}<br><span class="subtle">${esc((source.threat_intelligence_providers || []).join(', ') || source.threat_intelligence_provider || '-')}</span></td></tr>`
+    ).join('') || '<tr><td colspan="9" class="subtle">Sem origens agregadas disponíveis.</td></tr>';
+  }
+
+  function renderSecuritySources(items, distributed, sort = 'packets') {
+    currentSecuritySources = Array.isArray(items) ? items.slice() : [];
+    return `<div class="security-section-heading"><h3>${distributed ? 'Top Sources' : 'Origens'}</h3><div class="security-sort-controls" aria-label="Ordenar origens">
+      ${['packets', 'bytes', 'pps'].map(value => `<button type="button" class="btn btn-sm ${sort === value ? 'btn-secondary' : 'btn-outline-secondary'}" data-security-source-sort="${value}">${value}</button>`).join('')}</div></div>
+      <div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>Source IP</th><th>ASN / organização</th><th>País</th><th>Pacotes</th><th>Bytes</th><th>Flows</th><th>pps</th><th>Share</th><th>Threat Intelligence</th></tr></thead><tbody id="securityEventSourceRows">${sourceTableRows(currentSecuritySources, sort)}</tbody></table></div>`;
+  }
+
+  function renderSecurityTimeline(traffic) {
+    if (!(traffic?.items || []).length) return '<div class="subtle">Sem série temporal disponível.</div>';
+    return `<div id="securityEventTrafficChart" class="security-event-traffic-chart" role="img" aria-label="Timeline de pps, bps, flows e origens"></div>
+      <div class="subtle">Janela ${dateTime(traffic.query_window?.start)} – ${dateTime(traffic.query_window?.end)} · bucket ${number(traffic.query_window?.bucket_seconds)} s${traffic.query_window?.truncated ? ' · limitada por segurança' : ''}${traffic.available ? '' : ' · resumo persistido'}</div>`;
+  }
+
+  function mountSecurityTimeline(traffic) {
+    const element = document.getElementById('securityEventTrafficChart');
+    if (!element || !root.echarts) return;
+    securityTrafficChart?.dispose();
+    securityTrafficChart = root.echarts.init(element);
+    const items = traffic.items || [];
+    securityTrafficChart.setOption({
+      animation: false, tooltip: { trigger: 'axis' },
+      legend: { data: ['pps', 'bps', 'flows/s', 'origens'], textStyle: { color: '#94a3b8' } },
+      grid: { left: 58, right: 58, top: 42, bottom: 42 },
+      xAxis: { type: 'category', data: items.map(item => item.timestamp), axisLabel: { formatter: value => dateTime(value).split(' ')[1] || value } },
+      yAxis: [{ type: 'value', name: 'pps / flows' }, { type: 'value', name: 'bps' }],
+      series: [
+        { name: 'pps', type: 'line', showSymbol: false, data: items.map(item => item.pps), markArea: { silent: true, itemStyle: { color: 'rgba(239,68,68,.14)' }, data: [[{ xAxis: traffic.event_interval?.start }, { xAxis: traffic.event_interval?.end }]] } },
+        { name: 'bps', type: 'line', yAxisIndex: 1, showSymbol: false, data: items.map(item => item.bps) },
+        { name: 'flows/s', type: 'line', showSymbol: false, data: items.map(item => item.flows) },
+        { name: 'origens', type: 'line', showSymbol: false, data: items.map(item => item.source_count) }
+      ]
+    });
+  }
+
+  function renderDetectionEvidence(event) {
+    const detection = event.investigation?.detection_evidence || {};
+    const observed = detection.observed || {};
+    const thresholds = detection.configured_thresholds || {};
+    return `${detailGrid([
+      ['Threshold observado', `${number(observed.pps ?? event.packets_per_second, 2)} pps · ${number(observed.bps ?? event.bits_per_second, 1)} bit/s · ${number(observed.packets ?? event.packets)} pacotes`],
+      ['Threshold configurado', Object.entries(thresholds).map(([key, value]) => `${key}=${value}`).join(' · ') || 'Não persistido'],
+      ['Baseline / delta', `${number(detection.baseline, 2)} pps / ${number(detection.delta_baseline ?? event.baseline_deviation, 2)}x`],
+      ['Origens / ASNs / destinos', `${number(detection.source_count ?? event.unique_sources)} / ${number(detection.asn_diversity ?? event.unique_source_asns)} / ${number(detection.destination_diversity ?? event.unique_destinations)}`],
+      ['Janela / amostras', `${number(detection.window_seconds)} s / ${number(detection.samples)}`],
+      ['Detector', event.detector], ['Explicação', event.detection_reason || '-']
+    ])}<h4>Fatos usados pelo detector</h4>${investigationList(event.evidence?.facts)}<h4>Por que score ${number(event.detector_score)}</h4>${detailGrid(Object.entries(event.score_components || {}))}`;
+  }
+
+  function renderSecurityEventInvestigation(event, related, traffic, sources, aiState) {
+    currentSecurityEvent = event;
+    const network = event.network_context || {};
+    const investigation = event.investigation || {};
+    const duration = event.duration_seconds ?? Math.max(0, (new Date(event.last_seen) - new Date(event.first_seen)) / 1000);
+    const canManage = canManageSecurityEvents();
+    document.getElementById('securityEventDrawerTitle').textContent = `${event.attack_type} · ${event.event_id || `#${event.id}`}`;
+    document.getElementById('securityEventDrawerBody').innerHTML = `
+      <nav class="security-event-section-nav" aria-label="Seções da investigação">${[['summary','Resumo'],['traffic','Tráfego'],['sources','Origens'],['ports','Portas'],['intel','Threat Intelligence'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#security-event-${id}">${label}</a>`).join('')}</nav>
+      <section id="security-event-summary"><h3>Resumo</h3>${detailGrid([
+        ['Event ID', event.event_id || event.id], ['Event type', event.attack_type], ['Família', event.attack_family], ['Severity', event.severity],
+        ['Score / confiança', `${number(event.detector_score)} / ${number(event.confidence, 1)}%`], ['Status / verdict', `${event.status} / ${event.verdict}`],
+        ['Primeira / última ocorrência', `${dateTime(event.first_seen)} / ${dateTime(event.last_seen)}`], ['Duração / recorrências', `${number(duration, 0)} s / ${number(event.recurrence_count)}`],
+        ['Detector', event.detector], ['Detection reason', event.detection_reason || '-']
+      ])}<h4>Alvo</h4>${detailGrid([
+        ['IP / prefixo', event.target_prefix || event.target_ip || '-'], ['Role / contexto', event.dst_role || network.dst_role || '-'],
+        ['ASN', network.dst_asn || network.target_asn || '-'], ['ASN name', network.dst_as_name || network.target_as_name || '-'],
+        ['Interface', `in ${event.input_if || '-'} / out ${event.output_if || '-'}`], ['Customer / network', network.customer_name || network.zone_name || network.network_name || network.description || '-'],
+        ['Sensor / exporter', `${event.sensor || '-'} / ${event.exporter || '-'}`], ['CGNAT', event.cgnat_context || 'não identificado']
+      ])}</section>
+      <section id="security-event-traffic"><h3>Tráfego observado</h3>${detailGrid([
+        ['Protocolo', event.protocol], ['Origens / destinos', `${number(event.unique_sources)} / ${number(event.unique_destinations)}`],
+        ['Pacotes / bytes', `${number(event.packets)} / ${securityBytes(event.bytes)}`], ['pps / bit/s', `${number(event.packets_per_second, 2)} / ${number(event.bits_per_second, 1)}`],
+        ['Flows / flows/s', `${number(event.flows)} / ${number(event.flows_per_second, 2)}`], ['Portas src / dst', `${number(event.unique_src_ports)} / ${number(event.unique_dst_ports)}`]
+      ])}<h4>Timeline antes / durante / depois</h4>${renderSecurityTimeline(traffic)}</section>
+      <section id="security-event-sources">${renderSecuritySources(sources.items || investigation.top_sources || [], Boolean(sources.distributed || event.unique_sources > 1))}</section>
+      <section id="security-event-ports"><h3>Portas e protocolos</h3>${renderSecurityDistribution(investigation.top_destination_ports, 'Top Destination Ports')}${renderSecurityDistribution(investigation.top_source_ports, 'Top Source Ports')}${renderSecurityDistribution(investigation.protocols, 'Distribuição por protocolo')}${renderSecurityDistribution(investigation.tcp_flags, 'TCP Flags (SYN / ACK / RST)')}
+        ${!(investigation.top_destination_ports || []).length && !(investigation.top_source_ports || []).length ? '<div class="subtle">Evento legado sem distribuição persistida. Use “Ver evidências” para consultar agregados limitados.</div>' : ''}</section>
+      <section id="security-event-intel"><h3>Threat Intelligence</h3>${renderPersistedThreatIntel(event)}</section>
+      <section id="security-event-evidence"><div class="security-section-heading"><h3>Evidências</h3><button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="evidence" data-event-id="${number(event.id)}">VER EVIDÊNCIAS</button></div>${renderDetectionEvidence(event)}<div id="securityEventEvidenceSamples"></div></section>
+      <section id="security-event-ai"><h3>Análise IA</h3>${renderSecurityAiInvestigation(event, aiState)}</section>
+      <section><h3>Eventos relacionados</h3>${related.length ? investigationList(related.map(item => `${item.event_id || `#${item.id}`} ${item.attack_type} · ${item.verdict} · ${dateTime(item.last_seen)}`)) : '<div class="subtle">Nenhum evento relacionado.</div>'}</section>
+      <footer class="security-event-review-actions">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="status" data-status="investigating" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Investigando</button>
+        <button type="button" class="btn btn-sm btn-outline-success" data-security-action="status" data-status="benign" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Marcar benigno</button>
+        <button type="button" class="btn btn-sm btn-outline-danger" data-security-action="status" data-status="confirmed" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Confirmar ataque</button>
+      </footer>`;
+    requestAnimationFrame(() => mountSecurityTimeline(traffic));
+    root.lucide?.createIcons();
+  }
+
+  function renderAggregatedEvidence(payload) {
+    const element = document.getElementById('securityEventEvidenceSamples');
+    if (!element) return;
+    const conversations = payload.sample_conversations || [];
+    element.innerHTML = `<h4>Amostra agregada de conversas (${number(conversations.length)} / limite ${number(payload.limits?.sample_conversations)})</h4>
+      <p class="subtle">Nenhum flow_raw é retornado; os dados vêm de agregações temporais limitadas.</p>
+      ${conversations.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>Origem</th><th>Destino</th><th>Portas</th><th>Protocolo</th><th>Flags</th><th>Pacotes</th><th>Bytes</th><th>Flows</th></tr></thead><tbody>${conversations.map(item => `<tr><td><code>${esc(item.source_ip)}</code></td><td><code>${esc(item.destination_ip)}</code></td><td>${number(item.src_port)} → ${number(item.dst_port)}</td><td>${esc(item.protocol)}</td><td>${number(item.tcp_flags)}</td><td>${number(item.packets)}</td><td>${securityBytes(item.bytes)}</td><td>${number(item.flows)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="subtle">Sem conversas agregadas disponíveis.</div>'}
+      ${renderSecurityDistribution(payload.top_destination_ports, 'Top Destination Ports (agregado)')}${renderSecurityDistribution(payload.top_source_ports, 'Top Source Ports (agregado)')}${renderSecurityDistribution(payload.protocols, 'Protocolos (agregado)')}`;
+  }
+
+  async function openSecurityEventInvestigation(eventId) {
+    const drawer = document.getElementById('securityEventDrawer');
+    drawer.hidden = false;
+    drawer.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('security-event-drawer-open');
+    document.getElementById('securityEventDrawerStatus').textContent = 'Carregando investigação agregada...';
+    const base = `/api/security/events/${encodeURIComponent(eventId)}`;
+    const [event, related, traffic, sources, aiState] = await Promise.all([
+      apiRequest(base), apiRequest(`${base}/related?limit=20`), apiRequest(`${base}/traffic?padding_seconds=600`),
+      apiRequest(`${base}/sources?sort=packets&limit=100`), apiRequest(`${base}/ai-analysis`)
+    ]);
+    currentSecurityEventId = Number(event.id);
+    document.getElementById('securityEventDrawerStatus').textContent = '';
+    renderSecurityEventInvestigation(event, related.items || [], traffic, sources, aiState);
+  }
+
   async function openSecurityCampaign(campaignId) {
     currentSecurityEventId = null;
     const drawer = document.getElementById('securityEventDrawer');
@@ -432,6 +633,10 @@
     drawer.hidden = true;
     drawer.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('security-event-drawer-open');
+    securityTrafficChart?.dispose();
+    securityTrafficChart = null;
+    currentSecurityEvent = null;
+    currentSecuritySources = [];
     currentSecurityEventId = null;
   }
 
@@ -439,18 +644,23 @@
     const action = button.dataset.securityAction;
     if (action === 'close') return closeSecurityEvent();
     const eventId = Number(button.dataset.eventId || currentSecurityEventId);
-    if (action === 'open') return openSecurityEvent(eventId);
+    if (action === 'open') return openSecurityEventInvestigation(eventId);
     button.disabled = true;
     try {
       if (action === 'analyze' || action === 'reanalyze') {
-        const endpoint = action === 'reanalyze' ? 'reanalyze-ai' : 'analyze-ai';
         document.getElementById('securityEventDrawerStatus').textContent = 'Analisando evidências estruturadas...';
-        await apiRequest(`/security/events/${eventId}/${endpoint}`, { method: 'POST' });
+        await apiRequest(`/api/security/events/${eventId}/ai-analysis${action === 'reanalyze' ? '?force=true' : ''}`, { method: 'POST' });
+      } else if (action === 'evidence') {
+        document.getElementById('securityEventDrawerStatus').textContent = 'Carregando amostra agregada limitada...';
+        const evidence = await apiRequest(`/api/security/events/${eventId}/evidence?sample_limit=100`);
+        renderAggregatedEvidence(evidence);
+        document.getElementById('securityEventDrawerStatus').textContent = '';
+        return;
       } else if (action === 'status') {
         const endpoints = { benign: 'mark-benign', confirmed: 'mark-confirmed', investigating: 'investigating' };
-        await apiRequest(`/security/events/${eventId}/${endpoints[button.dataset.status]}`, { method: 'POST' });
+        await apiRequest(`/api/security/events/${eventId}/${endpoints[button.dataset.status]}`, { method: 'POST' });
       }
-      await openSecurityEvent(eventId);
+      await openSecurityEventInvestigation(eventId);
       await loadWorkspace();
     } finally {
       button.disabled = false;
@@ -540,6 +750,18 @@
   }
 
   document.addEventListener('click', event => {
+    const sourceSort = event.target.closest('[data-security-source-sort]');
+    if (sourceSort) {
+      event.preventDefault();
+      const sort = sourceSort.dataset.securitySourceSort || 'packets';
+      const rows = document.getElementById('securityEventSourceRows');
+      if (rows) rows.innerHTML = sourceTableRows(currentSecuritySources, sort);
+      sourceSort.parentElement?.querySelectorAll('[data-security-source-sort]').forEach(button => {
+        button.classList.toggle('btn-secondary', button === sourceSort);
+        button.classList.toggle('btn-outline-secondary', button !== sourceSort);
+      });
+      return;
+    }
     const legacyAction = event.target.closest('[data-legacy-security-action]');
     if (legacyAction) {
       event.stopPropagation();
@@ -554,7 +776,7 @@
     }
     const row = event.target.closest('[data-security-event-id]');
     if (row) {
-      openSecurityEvent(row.dataset.securityEventId).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
+      openSecurityEventInvestigation(row.dataset.securityEventId).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
       return;
     }
     const campaignRow = event.target.closest('[data-security-campaign-id]');
@@ -585,7 +807,7 @@
   });
 
   root.loadThreatIntelligenceWorkspace = loadWorkspace;
-  root.openSecurityEventInvestigation = eventId => openSecurityEvent(eventId).catch(error => {
+  root.openSecurityEventInvestigation = eventId => openSecurityEventInvestigation(eventId).catch(error => {
     const status = document.getElementById('threatWorkspaceStatus') || document.getElementById('anomalyStatus');
     if (status) status.textContent = error.message;
   });
