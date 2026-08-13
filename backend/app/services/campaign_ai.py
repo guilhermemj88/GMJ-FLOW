@@ -18,22 +18,24 @@ from app.services.threat_intelligence import clean_text, json_dump, safe_json, u
 
 ANALYSIS_VERSION = "campaign-analysis/v2"
 logger = logging.getLogger("gmj-flow")
-CAMPAIGN_AI_SYSTEM_PROMPT = """You are a network security analyst specialized in ISP, carrier and broadband networks.
+CAMPAIGN_AI_SYSTEM_PROMPT = """Você é um analista de segurança de redes especializado em ISP, carriers e banda larga.
 
-Analyze this campaign as a campaign, not as an individual Security Event. Use only the bounded evidence provided by GMJ-FLOW and do not invent facts.
+Analise esta campanha como Campaign, não como Security Event individual. Use apenas as evidências limitadas fornecidas pelo GMJ-FLOW e não invente fatos.
 
-Differentiate detector evidence, correlation evidence, persisted Threat Intelligence enrichment, correlated canonical events, and inference. Threat Intelligence is enrichment and must never be described as the reason the campaign detector fired.
+A avaliação contextual determinística recebida é soberana para state, attack_confidence e false_positive_risk. Explique-a e investigue-a, mas não altere esses valores arbitrariamente. Diferencie evidência do detector, evidência de correlação, Threat Intelligence persistida, eventos canônicos correlacionados e inferência. Threat Intelligence é enriquecimento e nunca deve ser descrita como motivo isolado do disparo do detector.
 
-Do not call a campaign confirmed only because its detector or coordination score is high; scores reflect satisfied local criteria, not probabilistic certainty. Consider ISP and CGNAT context, baseline and delta, low per-host rate, source count and ASN diversity, persistence, and historical recurrence. Respect metric provenance: peak/detection PPS is not the average PPS across the campaign lifetime.
+Não chame uma campanha de confirmada apenas porque o detector ou coordination_score é alto: scores refletem critérios locais satisfeitos, não certeza probabilística. Considere contexto ISP/CGNAT, baseline e delta, taxa por host, fontes, diversidade de ASN, persistência e recorrência. Respeite a proveniência: PPS/BPS de pico não são médias de toda a vida da campanha.
 
-A single persisted GreyNoise malicious match among thousands of sources is contextual support, not isolated confirmation of the whole campaign. Absence of a GreyNoise match does not mean a source is benign. State clearly when evidence is inconclusive.
+Um único match malicioso persistido do GreyNoise entre milhares de fontes é apoio contextual fraco, não confirmação isolada da campanha. Ausência de match do GreyNoise não significa origem benigna. Declare quando a evidência for inconclusiva.
 
-Return concise operational guidance as valid JSON matching the requested schema. The analysis is advisory only. Never claim mitigation happened and never perform, request, or imply automatic mitigation."""
+Todos os textos exibidos ao operador devem estar obrigatoriamente em português do Brasil (pt-BR), incluindo summary, assessment, motivos, falsos positivos, verificações, ações, limitações e mitigation_advisory. Preserve sem tradução IPs, ASNs, IDs, protocolos, detectores, providers, modelos e enums internos necessários. Não misture idiomas desnecessariamente.
+
+Retorne orientação operacional concisa como JSON válido no schema solicitado. A análise é somente consultiva. Nunca afirme que houve mitigação e nunca execute, solicite ou implique mitigação automática. Nunca crie Attack Vector ou Security Event."""
 
 
 CAMPAIGN_PROMPT_PREFIX = (
-    "Analyze the bounded Campaign Investigation payload below and return only JSON matching the requested schema. "
-    "Keep campaign evidence, correlated Security Events, Threat Intelligence enrichment, and inference distinct.\n"
+    "Analise a Campaign limitada abaixo. Responda somente com JSON no schema solicitado, em pt-BR. "
+    "Separe evidência local, eventos correlacionados, Threat Intelligence e inferência.\n"
     "CAMPAIGN_JSON_BEGIN\n"
 )
 CAMPAIGN_PROMPT_SUFFIX = "\nCAMPAIGN_JSON_END"
@@ -103,6 +105,20 @@ def _trim_payload_text(value: Any, max_chars: int) -> Any:
 
 def _compact_campaign_core(payload: dict[str, Any]) -> None:
     """Remove descriptive duplication while retaining the required scalar evidence."""
+    evaluation = payload.get("deterministic_context_evaluation")
+    if isinstance(evaluation, dict):
+        evaluation.pop("score_semantics", None)
+        evaluation.pop("behavioral_score", None)
+        evaluation.pop("data_source", None)
+        evaluation.pop("external_lookups_performed", None)
+        evaluation.pop("advisory_only", None)
+        evaluation.pop("automatic_mitigation", None)
+        evaluation["reasons"] = list(evaluation.get("reasons") or [])[:1]
+        signals = evaluation.get("signals") if isinstance(evaluation.get("signals"), dict) else {}
+        evaluation["signals"] = {key: value for key, value in signals.items() if value is True}
+        evaluation.pop("metrics", None)
+        # Network role/sensor/exporter remain in the top-level target context.
+        evaluation.pop("context", None)
     target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
     if (target.get("protocols") or {}).get("items"):
         target.pop("protocol_summary", None)
@@ -125,6 +141,8 @@ def _compact_campaign_core(payload: dict[str, Any]) -> None:
     asn.pop("distribution_context", None)
     metadata = payload.get("campaign_metadata") if isinstance(payload.get("campaign_metadata"), dict) else {}
     metadata.pop("contributing_detectors", None)
+    metadata.pop("score_semantics", None)
+    metadata.pop("duration_seconds", None)
     evidence = payload.get("detection_correlation_evidence") if isinstance(payload.get("detection_correlation_evidence"), dict) else {}
     evidence.pop("score_semantics", None)
     threat = payload.get("threat_intelligence") if isinstance(payload.get("threat_intelligence"), dict) else {}
@@ -241,7 +259,7 @@ def campaign_analysis_fingerprints(investigation: Mapping[str, Any], payload: Ma
         {
             key: payload.get(key)
             for key in (
-                "target", "top_sources", "asn_diversity", "traffic_metrics", "baseline_and_per_host_context", "correlated_events",
+                "deterministic_context_evaluation", "target", "top_sources", "asn_diversity", "traffic_metrics", "baseline_and_per_host_context", "correlated_events",
                 "threat_intelligence", "detection_correlation_evidence",
             )
         }

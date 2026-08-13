@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence
 
 from app.services.asn_local_cache import cached_asn_information, enrich_asn_rows_from_local_cache
 from app.services.behavioral_detection import attack_vector_row, campaign_row
+from app.services.campaign_context_evaluator import evaluate_campaign_context
 from app.services.security_events import security_event_row
 from app.services.threat_contracts import attack_family
 from app.services.threat_intelligence import clean_text
@@ -434,7 +435,7 @@ def _primary_detection_context(
         "detector_facts": facts,
         "score_components": dict(features.get("score_components") or {}),
         "detector_score": primary.get("detector_score"),
-        "score_semantics": "Detector score reflects local detection criteria, not probabilistic certainty.",
+        "score_semantics": "O score do detector reflete critérios locais de detecção, não certeza probabilística.",
         "threat_intelligence_is_detector_trigger": False,
     }
 
@@ -584,7 +585,7 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
     }
     evidence = {
         "campaign_detector": campaign["detector"],
-        "detector_score_semantics": "Detector score reflects local detection criteria, not probabilistic certainty.",
+        "detector_score_semantics": "O score do detector reflete critérios locais de detecção, não certeza probabilística.",
         "correlation_features": correlation_features,
         "contributing_vector_count": len(vectors),
         "detector_fact_count": sum(
@@ -636,8 +637,18 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
         if number > 0:
             represented_asn_numbers.add(number)
     represented_asns = len(represented_asn_numbers)
+    context_evaluation = evaluate_campaign_context(
+        campaign,
+        vectors=vectors,
+        correlated_events=events,
+        top_sources=top_sources,
+        target_traffic=target_traffic,
+        detection_context=detection_context,
+    )
+    campaign["context_evaluation"] = context_evaluation
     return {
         "campaign": campaign,
+        "context_evaluation": context_evaluation,
         "top_sources": top_sources,
         "asn_distribution": asn_distribution,
         "asn_distribution_context": {
@@ -669,6 +680,7 @@ def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any
     traffic = investigation.get("target_traffic") if isinstance(investigation.get("target_traffic"), Mapping) else {}
     provenance = investigation.get("metric_provenance") if isinstance(investigation.get("metric_provenance"), Mapping) else {}
     detection = investigation.get("detection_context") if isinstance(investigation.get("detection_context"), Mapping) else {}
+    context_evaluation = investigation.get("context_evaluation") if isinstance(investigation.get("context_evaluation"), Mapping) else {}
     evidence = investigation.get("detection_correlation_evidence") if isinstance(investigation.get("detection_correlation_evidence"), Mapping) else {}
     threat = campaign.get("threat_intel") if isinstance(campaign.get("threat_intel"), Mapping) else {}
     source_intel = threat.get("source_intel") if isinstance(threat.get("source_intel"), Mapping) else {}
@@ -835,12 +847,20 @@ def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any
     ]
 
     return {
+        "deterministic_context_evaluation": {
+            key: context_evaluation.get(key)
+            for key in (
+                "state", "attack_confidence", "false_positive_risk", "should_analyze_ai",
+                "behavioral_score", "score_semantics", "reasons", "signals", "metrics", "context",
+                "data_source", "external_lookups_performed", "advisory_only", "automatic_mitigation",
+            )
+        },
         "campaign_metadata": {
             "campaign_id": campaign.get("campaign_id"),
             "classification": campaign.get("classification"),
             "family": campaign.get("family"),
             "coordination_score": campaign.get("coordination_score"),
-            "score_semantics": "Coordination score reflects local detector/correlation criteria, not attack probability.",
+            "score_semantics": "O coordination_score reflete critérios locais de detecção/correlação, não probabilidade de ataque.",
             "first_seen": campaign.get("first_seen"),
             "last_seen": campaign.get("last_seen"),
             "duration_seconds": campaign.get("duration_seconds"),

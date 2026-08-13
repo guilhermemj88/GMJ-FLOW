@@ -7246,7 +7246,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
-              <div><div class="panel-title">Providers</div><div class="subtle">Credenciais nunca são exibidas; apenas o estado configurado.</div></div>
+              <div><div class="panel-title">Providers</div><div class="subtle">Credenciais nunca são exibidas; apenas o estado configurado.</div><div id="threatProvidersStatus" class="subtle" role="status"></div></div>
               <div class="threat-source-legend" aria-label="Legenda de origem">
                 <span class="threat-source-badge source-gmj">GMJ-FLOW</span>
                 <span class="threat-source-badge source-external">External Threat Intel</span>
@@ -7265,26 +7265,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="field"><label for="threatGroupFilter">Agrupar mapa</label><select id="threatGroupFilter" class="form-select form-select-sm"><option value="country">País</option><option value="asn">ASN</option><option value="organization">Organização</option><option value="ip">IP</option></select></div>
               <div class="field"><label>&nbsp;</label><button id="applyThreatFiltersButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="filter"></i><span>Aplicar</span></button></div>
             </div>
+            <div id="threatMapStatus" class="subtle mb-2" role="status"></div>
             <div id="threatGlobalMap" class="threat-global-map"></div>
           </section>
 
           <div class="row g-3 mb-3">
             <div class="col-xl-7">
               <section class="panel p-3 h-100">
-                <div class="panel-title mb-2">Attack Vectors</div>
+                <div class="panel-title">Attack Vectors</div>
+                <div id="threatVectorsStatus" class="subtle mb-2" role="status"></div>
                 <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Tipo / família</th><th>Origem → alvo</th><th>Detector</th><th>Contexto / tráfego</th><th>Threat Intel</th><th>IA</th><th>Última ocorrência</th></tr></thead><tbody id="threatVectorRows"><tr><td colspan="7" class="text-muted">Nenhum evento carregado.</td></tr></tbody></table></div>
               </section>
             </div>
             <div class="col-xl-5">
               <section class="panel p-3 h-100">
-                <div class="panel-title mb-2">Campaign Vectors</div>
+                <div class="panel-title">Campaign Vectors</div>
+                <div id="threatCampaignsStatus" class="subtle mb-2" role="status"></div>
                 <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Campanha</th><th>Classe / alvo</th><th>Coordenação</th><th>Fontes / ASNs</th><th>Intel</th></tr></thead><tbody id="threatCampaignRows"><tr><td colspan="5" class="text-muted">Nenhuma campanha carregada.</td></tr></tbody></table></div>
               </section>
             </div>
           </div>
 
           <section class="panel p-3">
-            <div class="panel-title mb-2">Decisões, FlowSpec e TTL</div>
+            <div class="panel-title">Decisões, FlowSpec e TTL</div>
+            <div id="threatDecisionsStatus" class="subtle mb-2" role="status"></div>
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Decisão</th><th>Classificação</th><th>Policy / Groq</th><th>Origem</th><th>FlowSpec proposto</th><th>TTL</th><th>Motivo</th><th>Data</th></tr></thead><tbody id="threatDecisionRows"><tr><td colspan="8" class="text-muted">Nenhuma decisão registrada.</td></tr></tbody></table></div>
           </section>
 

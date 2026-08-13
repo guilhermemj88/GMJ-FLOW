@@ -98,7 +98,7 @@ class ThreatFrontendStaticTest(unittest.TestCase):
 
     def test_campaign_investigation_is_independent_from_canonical_events(self) -> None:
         for label in (
-            "Investigação da campanha", "Campaign Investigation", "RESUMO DA CAMPAIGN",
+            "Investigação da campanha", "RESUMO DA CAMPANHA", "AVALIAÇÃO CONTEXTUAL DETERMINÍSTICA",
             "TARGET / TRAFFIC", "TOP SOURCES", "ASN DISTRIBUTION", "EVENTOS CORRELACIONADOS",
             "Nenhum Security Event canônico correlacionado a esta campanha.",
         ):
@@ -131,10 +131,10 @@ class ThreatFrontendStaticTest(unittest.TestCase):
     def test_campaign_metric_context_and_asn_snapshot_are_explicit(self) -> None:
         for label in (
             "Peak detection PPS", "Investigation packets", "Investigation bytes",
-            "Metric provenance / time window", "Campaign duration", "Duration (technical)",
+            "Metric provenance / time window", "Duração da campanha", "Duração técnica",
             "ASN DISTRIBUTION — TOP SOURCES SNAPSHOT", "Total campaign ASNs",
             "ASNs represented in snapshot", "Sources represented in snapshot",
-            "CONTEXTO DE DETECÇÃO / CGNAT", "Detector score reflects local detection criteria, not probabilistic certainty.",
+            "Contexto de detecção / CGNAT", "O score comportamental reflete critérios locais de correlação",
         ):
             self.assertIn(label, self.script)
         self.assertIn("function humanDuration(value)", self.script)
@@ -150,6 +150,62 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertNotIn("method: 'POST'", open_campaign)
         self.assertIn("apiRequest(base)", open_campaign)
         self.assertIn("apiRequest(`${base}/ai-analysis`)", open_campaign)
+        self.assertIn("Promise.allSettled", open_campaign)
+        self.assertIn("if (campaignResult.status === 'rejected')", open_campaign)
+        self.assertIn("renderSecurityCampaignInvestigation(payload, aiState)", open_campaign)
+
+    def test_campaign_context_state_confidence_fp_and_role_are_visible(self) -> None:
+        for label in (
+            "Estado operacional", "Confiança de ataque", "Risco de falso positivo",
+            "Role do alvo", "Análise por IA sugerida", "Score comportamental",
+        ):
+            self.assertIn(label, self.script)
+        for field in ("evaluation.state", "evaluation.attack_confidence", "evaluation.false_positive_risk", "context.target_role"):
+            self.assertIn(field, self.script)
+
+    def test_workspace_panels_are_isolated_with_partial_status(self) -> None:
+        start = self.script.index("async function loadWorkspace()")
+        end = self.script.index("async function providerAction", start)
+        workspace = self.script[start:end]
+        self.assertIn("Promise.allSettled", workspace)
+        self.assertNotIn("Promise.all([", workspace)
+        self.assertIn("Atualização parcial", workspace)
+        self.assertIn("renderVectors", workspace)
+        for panel_id in (
+            "threatProvidersStatus", "threatMapStatus", "threatVectorsStatus",
+            "threatCampaignsStatus", "threatDecisionsStatus",
+        ):
+            self.assertIn(f'id="{panel_id}"', self.html)
+            self.assertIn(panel_id, self.script)
+
+    def test_attack_vector_polling_is_bounded_canonical_and_non_concurrent(self) -> None:
+        self.assertIn("let securityEventsRequestPromise = null", self.script)
+        self.assertIn("if (securityEventsRequestPromise) return securityEventsRequestPromise", self.script)
+        self.assertIn("Math.max(5, Math.min(15", self.script)
+        self.assertIn("securityEventsPollingSeconds = 10", self.script)
+        start = self.script.index("async function fetchSecurityEvents()")
+        end = self.script.index("async function loadWorkspace()", start)
+        polling = self.script[start:end]
+        self.assertIn("apiRequest('/security/events?limit=200')", polling)
+        self.assertNotIn("/api/threat-engine/attack-vectors", polling)
+        self.assertNotIn("threat-intelligence/providers", polling)
+        self.assertNotIn("policy-decisions", polling)
+        self.assertNotIn("campaigns?", polling)
+
+    def test_low_rate_and_targetless_scanners_remain_visible(self) -> None:
+        start = self.script.index("function renderVectors(")
+        end = self.script.index("function renderCampaigns(", start)
+        renderer = self.script[start:end]
+        self.assertIn("items.map", renderer)
+        self.assertNotIn("items.filter", renderer)
+        self.assertIn("recurrence_count", renderer)
+        self.assertIn("rateNumber(item.packets_per_second)", renderer)
+        self.assertIn("Math.abs(parsed) < 1 ? 3 : 1", self.script)
+        self.assertIn("scannerTargetLabel(item)", renderer)
+        self.assertIn("múltiplos destinos", self.script)
+        self.assertIn("unique_dst_ports", self.script)
+        for badge in ("Scanner conhecido", "Malicious", "GreyNoise", "Botnet", "Exploit", "SSH brute force"):
+            self.assertIn(badge, self.script)
 
     def test_canonical_events_are_also_loaded_in_anomalies(self) -> None:
         self.assertIn("apiRequest('/security/events?limit=200'", self.html)

@@ -231,6 +231,7 @@ class CampaignInvestigationTest(unittest.TestCase):
         )
 
     def test_campaign_without_correlated_events_keeps_its_own_data(self) -> None:
+        security_events_before = self.conn.execute("SELECT COUNT(*) FROM security_events").fetchone()[0]
         table_row = api.list_campaigns(limit=100)["items"][0]
         payload = api.get_security_campaign(CAMPAIGN_ID)
         campaign = payload["campaign"]
@@ -248,6 +249,9 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.assertEqual("satisfied", campaign["persistence"])
         self.assertEqual("campaign_engine", campaign["detector"])
         self.assertFalse(payload["data_sources"]["external_lookups_performed"])
+        self.assertEqual("corroborated", table_row["context_evaluation"]["state"])
+        self.assertEqual(table_row["context_evaluation"]["state"], payload["context_evaluation"]["state"])
+        self.assertEqual(security_events_before, self.conn.execute("SELECT COUNT(*) FROM security_events").fetchone()[0])
         for field in (
             "campaign_id", "classification", "target_prefix", "coordination_score",
             "unique_sources", "unique_source_asns", "packets_per_second", "bits_per_second",
@@ -396,7 +400,7 @@ class CampaignInvestigationTest(unittest.TestCase):
         assert investigation is not None
         payload = campaign_analysis_payload(investigation)
         for key in (
-            "campaign_metadata", "target", "top_sources", "asn_diversity",
+            "deterministic_context_evaluation", "campaign_metadata", "target", "top_sources", "asn_diversity",
             "traffic_metrics", "baseline_and_per_host_context", "correlated_events",
             "threat_intelligence", "detection_correlation_evidence",
         ):
@@ -408,6 +412,7 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.assertFalse(payload["detection_correlation_evidence"]["threat_intelligence_is_detector_trigger"])
         self.assertFalse(payload["analysis_constraints"]["automatic_mitigation_enabled"])
         self.assertFalse(payload["analysis_constraints"]["external_lookups_performed"])
+        self.assertEqual("corroborated", payload["deterministic_context_evaluation"]["state"])
 
         prompts: list[str] = []
 
@@ -456,6 +461,45 @@ class CampaignInvestigationTest(unittest.TestCase):
             "SELECT groq_result_json FROM threat_engine_audit WHERE detector='campaign_ai' AND event_type='AI_RESPONSE' ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
         self.assertNotIn("Campanha coordenada requer validação operacional.", response_audit)
+
+    def test_manual_campaign_ai_remains_available_when_context_does_not_suggest_ai(self) -> None:
+        campaign_id = "GMJ-C-MANUAL-OBSERVED"
+        self._insert_campaign(campaign_id, threat_intel={})
+        self.conn.commit()
+        investigation = get_campaign_investigation(self.conn, campaign_id)
+        assert investigation is not None
+        self.assertEqual("observed", investigation["context_evaluation"]["state"])
+        self.assertFalse(investigation["context_evaluation"]["should_analyze_ai"])
+        event_count_before = self.conn.execute("SELECT COUNT(*) FROM security_events").fetchone()[0]
+        prompts: list[str] = []
+
+        def executor(_conn, function_key, prompt, **_kwargs):
+            prompts.append(prompt)
+            self.assertEqual("security_campaign_analysis", function_key)
+            return {
+                "ok": True,
+                "provider": "GOOGLE_GEMINI",
+                "model": "test-model",
+                "structured": {
+                    "summary": "Padrão observado submetido manualmente à investigação.",
+                    "confidence": "LOW",
+                    "assessment": "Sem corroboração local",
+                    "why_detected": ["correlação comportamental"],
+                    "important_sources": [],
+                    "threat_intelligence_findings": ["sem enrichment persistido"],
+                    "possible_false_positive_factors": ["agregação normal"],
+                    "recommended_checks": ["validar baseline"],
+                    "recommended_actions": ["continuar observando"],
+                    "mitigation_advisory": "Nenhuma mitigação automática.",
+                    "limitations": ["dados agregados"],
+                },
+            }
+
+        result = analyze_campaign(self.conn, campaign_id, executor=executor)
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, len(prompts))
+        self.assertIn('"should_analyze_ai":false', prompts[0])
+        self.assertEqual(event_count_before, self.conn.execute("SELECT COUNT(*) FROM security_events").fetchone()[0])
 
     def test_campaign_ai_payload_applies_all_section_limits_and_counts(self) -> None:
         investigation = get_campaign_investigation(self.conn, CAMPAIGN_ID)

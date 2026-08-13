@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -80,8 +81,10 @@ class SecurityEventApiTest(unittest.TestCase):
         self.conn.close()
 
     def test_list_detail_evidence_and_intel(self):
-        payload = api.list_security_events(limit=200, offset=0)
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_EVENTS_UI_REFRESH_SECONDS": "10"}):
+            payload = api.list_security_events(limit=200, offset=0)
         self.assertEqual(1, payload["total"])
+        self.assertEqual(10, payload["ui_refresh_seconds"])
         self.assertEqual(self.event_id, payload["items"][0]["id"])
         detail = api.get_security_event(self.event_id)
         self.assertEqual("SCAN_FAMILY", detail["attack_family"])
@@ -96,6 +99,14 @@ class SecurityEventApiTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(row)
         self.assertIn("no_mitigation", row["non_mitigation_reason"])
+
+    def test_ui_refresh_interval_is_configurable_and_bounded(self):
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_EVENTS_UI_REFRESH_SECONDS": "5"}):
+            self.assertEqual(5, api.security_events_ui_refresh_seconds())
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_EVENTS_UI_REFRESH_SECONDS": "60"}):
+            self.assertEqual(15, api.security_events_ui_refresh_seconds())
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_EVENTS_UI_REFRESH_SECONDS": "invalid"}):
+            self.assertEqual(10, api.security_events_ui_refresh_seconds())
 
 
 if __name__ == "__main__":

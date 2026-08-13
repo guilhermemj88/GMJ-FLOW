@@ -22,6 +22,9 @@
   let currentSecurityEvent = null;
   let currentSecuritySources = [];
   let securityTrafficChart = null;
+  let securityEventsRequestPromise = null;
+  let securityEventsPollingTimer = null;
+  let securityEventsPollingSeconds = 10;
 
   function esc(value) {
     return String(value ?? '')
@@ -37,6 +40,52 @@
   function optionalNumber(value, digits = 0, suffix = '') {
     if (value === null || value === undefined || value === '') return '-';
     return `${number(value, digits)}${suffix}`;
+  }
+
+  function rateNumber(value) {
+    const parsed = Number(value);
+    return number(value, Number.isFinite(parsed) && Math.abs(parsed) < 1 ? 3 : 1);
+  }
+
+  function setPanelStatus(elementId, message = '', isError = false) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+    element.textContent = message;
+    element.classList.toggle('text-danger', Boolean(isError));
+  }
+
+  function localizedLevel(value) {
+    return ({ low: 'Baixa', medium: 'Média', high: 'Alta' })[String(value || '').toLowerCase()] || '-';
+  }
+
+  function localizedRisk(value) {
+    return ({ low: 'Baixo', medium: 'Médio', high: 'Alto' })[String(value || '').toLowerCase()] || '-';
+  }
+
+  function scannerTargetLabel(item) {
+    const target = item.target_prefix || item.target_ip;
+    if (target) return target;
+    const features = item.features || {};
+    const destinations = Number(item.unique_destinations ?? features.unique_destinations ?? features.unique_dst_ips ?? 0);
+    const ports = Number(item.unique_dst_ports ?? features.unique_dst_ports ?? 0);
+    const scannerTypes = new Set(['PORT_SCAN_HORIZONTAL', 'NETWORK_SWEEP', 'LOW_SLOW_SCAN']);
+    if (scannerTypes.has(String(item.attack_type || '').toUpperCase()) && destinations > 0) {
+      return `múltiplos destinos (${number(destinations)})${ports > 1 ? ` / ${number(ports)} portas` : ''}`;
+    }
+    return destinations > 1 ? `múltiplos destinos (${number(destinations)})` : '-';
+  }
+
+  function scannerIntelBadges(item) {
+    const sourceIntel = item.threat_intel?.source_intel || {};
+    const serialized = JSON.stringify(sourceIntel).toLowerCase();
+    const labels = [];
+    if (Number(sourceIntel.scanner_sources || 0) > 0 || serialized.includes('scanner') || serialized.includes('scan')) labels.push('Scanner conhecido');
+    if (Number(sourceIntel.malicious_sources || 0) > 0 || serialized.includes('malicious')) labels.push('Malicious');
+    if (serialized.includes('greynoise')) labels.push('GreyNoise');
+    if (serialized.includes('botnet')) labels.push('Botnet');
+    if (serialized.includes('exploit')) labels.push('Exploit');
+    if (serialized.includes('ssh') && (serialized.includes('brute') || serialized.includes('scanner'))) labels.push('SSH brute force');
+    return labels.length ? `<div class="mt-1">${[...new Set(labels)].map(label => `<span class="threat-intel-chip">${esc(label)}</span>`).join('')}</div>` : '';
   }
 
   function dateTime(value) {
@@ -257,17 +306,18 @@
       const confidence = Number(item.confidence || 0);
       const sourceIntel = item.threat_intel?.source_intel || {};
       const evidence = [
-        item.packets_per_second ? `${number(item.packets_per_second, 1)} pps` : '',
+        item.packets_per_second ? `${rateNumber(item.packets_per_second)} pps` : '',
         item.unique_sources ? `${number(item.unique_sources)} fontes` : '',
         item.unique_destinations ? `${number(item.unique_destinations)} destinos` : '',
+        item.unique_dst_ports ? `${number(item.unique_dst_ports)} portas` : '',
         item.recurrence_count ? `${number(item.recurrence_count)} ocorrências` : ''
       ].filter(Boolean).join(' · ') || '-';
       return `<tr class="security-event-row" tabindex="0" data-security-event-id="${number(item.id)}" title="Abrir investigação">
         <td><strong>${esc(item.attack_type)}</strong><br><code>${esc(item.event_id || `#${item.id}`)}</code><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
-        <td>${esc(item.src_ip || 'distribuída')} → ${esc(item.target_prefix || item.target_ip || '-')}</td>
+        <td>${esc(item.src_ip || 'distribuída')} → ${esc(scannerTargetLabel(item))}</td>
         <td><span class="threat-score ${scoreClass(item.detector_score)}">${number(item.detector_score)}</span><br><span class="subtle">${esc(item.verdict || 'INFO')} · conf. ${number(confidence <= 1 ? confidence * 100 : confidence, 1)}%</span></td>
         <td><span class="subtle">${esc(item.direction || 'UNKNOWN')} · ${esc(item.src_role || 'UNKNOWN')} → ${esc(item.dst_role || 'UNKNOWN')}</span><br>${esc(evidence)}</td>
-        <td>${vectorIntelEvidence(item)}<div class="subtle">${number(sourceIntel.matched_source_count || sourceIntel.matches)} / ${number(sourceIntel.lookup_count)} origens</div></td>
+        <td>${vectorIntelEvidence(item)}${scannerIntelBadges(item)}<div class="subtle">${number(sourceIntel.matched_source_count || sourceIntel.matches)} / ${number(sourceIntel.lookup_count)} origens</div></td>
         <td>${item.ai_analysis?.verdict ? `<strong>${esc(item.ai_analysis.verdict)}</strong><br><span class="subtle">${number(item.ai_analysis.confidence, 1)}%</span>` : '<span class="subtle">Não analisado</span>'}</td>
         <td>${dateTime(item.last_seen)}<br><button type="button" class="btn btn-sm btn-outline-secondary mt-1" data-security-action="open" data-event-id="${number(item.id)}">Ver detalhes</button></td>
       </tr>`;
@@ -277,12 +327,17 @@
   function renderCampaigns(payload) {
     const items = payload.items || [];
     document.getElementById('threatSummaryCampaigns').textContent = number(items.length);
-    document.getElementById('threatCampaignRows').innerHTML = items.map(item => `<tr class="security-event-row" tabindex="0" data-security-campaign-id="${esc(item.campaign_id)}">
+    document.getElementById('threatCampaignRows').innerHTML = items.map(item => {
+      const evaluation = item.context_evaluation || {};
+      const role = evaluation.context?.target_role || item.features?.target_role || 'UNKNOWN';
+      return `<tr class="security-event-row" tabindex="0" data-security-campaign-id="${esc(item.campaign_id)}">
       <td><code>${esc(item.campaign_id)}</code><br><span class="subtle">${dateTime(item.last_seen)}</span></td>
-      <td><strong>${esc(item.classification)}</strong><br>${esc(item.target_prefix || '-')}</td>
-      <td><span class="threat-score ${scoreClass(item.coordination_score)}">${number(item.coordination_score)}</span><br><span class="subtle">${number(item.packets_per_second, 1)} pps</span></td>
+      <td><strong>${esc(item.classification)}</strong><br>${esc(item.target_prefix || '-')}<br><span class="subtle">Role: ${esc(role)}</span></td>
+      <td><span class="threat-score ${scoreClass(item.coordination_score)}">${number(item.coordination_score)}</span><br><span class="subtle">Score comportamental · ${number(item.packets_per_second, 1)} pps</span><br>
+        <strong>Estado: ${esc(String(evaluation.state || '-').toUpperCase())}</strong><br><span class="subtle">Confiança: ${esc(localizedLevel(evaluation.attack_confidence))} · Risco FP: ${esc(localizedRisk(evaluation.false_positive_risk))}</span></td>
       <td>${number(item.unique_sources)} / ${number(item.unique_source_asns)}</td><td>${vectorIntelEvidence(item)}</td>
-    </tr>`).join('') || '<tr><td colspan="5" class="text-muted">Nenhum Campaign Vector recente.</td></tr>';
+    </tr>`;
+    }).join('') || '<tr><td colspan="5" class="text-muted">Nenhum Campaign Vector recente.</td></tr>';
   }
 
   function detailGrid(entries) {
@@ -653,11 +708,11 @@
         ? 'Provider, modelo ou credencial não configurados no backend.'
         : !canManageSecurityEvents() ? 'Seu perfil não pode solicitar análise.' : '';
     const status = detailGrid([
-      ['AI enabled', state.enabled ? 'Sim' : 'Não'], ['Rota configurada', state.route_configured ? 'Sim' : 'Não — fallback por ambiente'],
+      ['IA habilitada', state.enabled ? 'Sim' : 'Não'], ['Rota configurada', state.route_configured ? 'Sim' : 'Não — fallback por ambiente'],
       ['Rota habilitada', state.route_configured ? (state.route_enabled ? 'Sim' : 'Não') : '-'],
-      ['Provider', state.provider_name || state.provider || '-'], ['Model', state.model || '-'],
-      ['Status da análise', state.analysis_status || 'not_analyzed'], ['Analyzed at', dateTime(state.analyzed_at)],
-      ['Cache / stale', state.stale ? 'stale' : hasAnalysis ? 'válido / reutilizável' : 'sem cache']
+      ['Provider', state.provider_name || state.provider || '-'], ['Modelo', state.model || '-'],
+      ['Status da análise', state.analysis_status || 'not_analyzed'], ['Analisada em', dateTime(state.analyzed_at)],
+      ['Cache / desatualização', state.stale ? 'desatualizada' : hasAnalysis ? 'válido / reutilizável' : 'sem cache']
     ]);
     if (!hasAnalysis) {
       return `${status}<p class="subtle mt-2">Esta campanha ainda não foi analisada por IA. A execução ocorre somente mediante clique e é consultiva.</p>
@@ -685,12 +740,34 @@
 
   function renderCampaignDetectionContext(context = {}) {
     return `<div class="campaign-context-box"><p>${esc(context.interpretation || 'Contexto de detecção não persistido.')}</p>${detailGrid([
-      ['Target role', context.target_role], ['Observed PPS', optionalNumber(context.observed_pps, 2)],
+      ['Role do alvo', context.target_role], ['PPS observado', optionalNumber(context.observed_pps, 2)],
       ['Baseline', optionalNumber(context.baseline_pps, 2, ' pps')], ['Delta', optionalNumber(context.baseline_delta, 2, 'x')],
-      ['Max per host', optionalNumber(context.max_per_host_pps, 2, ' pps')], ['Source count', optionalNumber(context.source_count)],
-      ['ASN diversity', optionalNumber(context.asn_diversity)], ['Destinations', optionalNumber(context.destination_count)],
+      ['Máximo por host', optionalNumber(context.max_per_host_pps, 2, ' pps')], ['Quantidade de fontes', optionalNumber(context.source_count)],
+      ['Diversidade de ASN', optionalNumber(context.asn_diversity)], ['Destinos', optionalNumber(context.destination_count)],
       ['Threat Intelligence', context.threat_intelligence_status]
     ])}</div>`;
+  }
+
+  function renderCampaignContextEvaluation(evaluation = {}) {
+    const metrics = evaluation.metrics || {};
+    const signals = evaluation.signals || {};
+    const context = evaluation.context || {};
+    return `${detailGrid([
+      ['Estado operacional', String(evaluation.state || '-').toUpperCase()],
+      ['Confiança de ataque', localizedLevel(evaluation.attack_confidence)],
+      ['Risco de falso positivo', localizedRisk(evaluation.false_positive_risk)],
+      ['Role do alvo', context.target_role || context.network_role],
+      ['Baseline PPS / BPS', `${optionalNumber(metrics.baseline_pps, 2)} / ${optionalNumber(metrics.baseline_bps, 1)}`],
+      ['Delta / razão do baseline', `${optionalNumber(metrics.baseline_delta, 2)} / ${optionalNumber(metrics.baseline_ratio, 2)}`],
+      ['Pico PPS / BPS', `${optionalNumber(metrics.peak_pps, 2)} / ${optionalNumber(metrics.peak_bps, 1)}`],
+      ['Máximo por host PPS / BPS', `${optionalNumber(metrics.max_pps_per_host, 2)} / ${optionalNumber(metrics.max_bps_per_host, 1)}`],
+      ['Fontes / ASNs', `${optionalNumber(metrics.source_count)} / ${optionalNumber(metrics.asn_count)}`],
+      ['Attack Vectors correlacionados', optionalNumber(metrics.correlated_attack_vector_count)],
+      ['Security Events correlacionados', optionalNumber(metrics.correlated_security_event_count)],
+      ['Threat Intelligence relevante', signals.relevant_threat_intel ? 'Sim' : 'Não'],
+      ['Análise por IA sugerida', evaluation.should_analyze_ai ? 'Sim' : 'Não']
+    ])}<h4>Motivos determinísticos</h4>${investigationList(evaluation.reasons, 'Nenhum motivo determinístico registrado.')}
+      <p class="subtle">Avaliação baseada somente em dados locais persistidos. O score comportamental não representa probabilidade de ataque e esta avaliação não aciona mitigação.</p>`;
   }
 
   function provenanceWindow(item = {}) {
@@ -705,22 +782,23 @@
     const evidence = payload.detection_correlation_evidence || {};
     const provenance = payload.metric_provenance || {};
     const detectionContext = payload.detection_context || {};
+    const contextEvaluation = payload.context_evaluation || campaign.context_evaluation || {};
     const asnContext = payload.asn_distribution_context || {};
     const ports = (traffic.ports || []).map(item => item.port).filter(value => value !== null && value !== undefined).join(', ');
-    setInvestigationHeading('Campaign Investigation', `Investigação da campanha · ${campaign.campaign_id}`);
+    setInvestigationHeading('Investigação da campanha', `Investigação da campanha · ${campaign.campaign_id}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
       <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['context','Contexto'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN SNAPSHOT'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
-      <section id="campaign-summary"><h3>RESUMO DA CAMPAIGN</h3>${detailGrid([
-        ['Campaign ID', campaign.campaign_id], ['Classification / family', `${campaign.classification || '-'} / ${campaign.family || '-'}`],
-        ['Target', campaign.target], ['Coordination score', optionalNumber(campaign.coordination_score)],
-        ['Sources', optionalNumber(campaign.unique_sources)], ['ASN count', optionalNumber(campaign.unique_source_asns)],
-        ['Peak detection PPS', optionalNumber(campaign.packets_per_second, 2)], ['Peak detection BPS', optionalNumber(campaign.bits_per_second, 1)],
-        ['First seen', dateTime(campaign.first_seen)], ['Last seen', dateTime(campaign.last_seen)],
-        ['Campaign duration', humanDuration(campaign.duration_seconds)],
-        ['Duration (technical)', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 3)} s`],
-        ['Persistence', campaignPersistence(campaign)], ['Detector', campaign.detector], ['Enrichment summary', campaignEnrichmentText(campaign)]
-      ])}<p class="subtle score-semantics" title="Detector score reflects local detection criteria, not probabilistic certainty.">Detector score reflects local detection criteria, not probabilistic certainty.</p></section>
-      <section id="campaign-context"><h3>CONTEXTO DE DETECÇÃO / CGNAT</h3>${renderCampaignDetectionContext(detectionContext)}</section>
+      <section id="campaign-summary"><h3>RESUMO DA CAMPANHA</h3>${detailGrid([
+        ['ID da campanha', campaign.campaign_id], ['Classificação / família', `${campaign.classification || '-'} / ${campaign.family || '-'}`],
+        ['Alvo', campaign.target], ['Score comportamental', optionalNumber(campaign.coordination_score)],
+        ['Fontes', optionalNumber(campaign.unique_sources)], ['Quantidade de ASNs', optionalNumber(campaign.unique_source_asns)],
+        ['Pico PPS da detecção', optionalNumber(campaign.packets_per_second, 2)], ['Pico BPS da detecção', optionalNumber(campaign.bits_per_second, 1)],
+        ['Primeira observação', dateTime(campaign.first_seen)], ['Última observação', dateTime(campaign.last_seen)],
+        ['Duração da campanha', humanDuration(campaign.duration_seconds)],
+        ['Duração técnica', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 3)} s`],
+        ['Persistência', campaignPersistence(campaign)], ['Detector', campaign.detector], ['Resumo do enrichment', campaignEnrichmentText(campaign)]
+      ])}<p class="subtle score-semantics">O score comportamental reflete critérios locais de correlação; não representa probabilidade de ataque.</p></section>
+      <section id="campaign-context"><h3>AVALIAÇÃO CONTEXTUAL DETERMINÍSTICA</h3>${renderCampaignContextEvaluation(contextEvaluation)}<h4>Contexto de detecção / CGNAT</h4>${renderCampaignDetectionContext(detectionContext)}</section>
       <section id="campaign-traffic"><h3>TARGET / TRAFFIC</h3>${detailGrid([
         ['Target', traffic.target], ['Target role', traffic.target_role], ['Protocol', traffic.protocol], ['Ports', ports || '-'],
         ['Peak detection PPS', optionalNumber(traffic.pps, 2)], ['Peak detection BPS', optionalNumber(traffic.bps, 1)],
@@ -741,9 +819,9 @@
         <p class="subtle">${asnContext.complete_campaign_distribution ? 'Distribuição completa persistida da campaign.' : 'Percentuais calculados somente sobre as origens presentes no snapshot persistido de Top Sources; não representam todos os ASNs da campaign.'}</p></section>
       <section id="campaign-intel"><h3>THREAT INTELLIGENCE</h3>${renderCampaignThreatIntel(campaign)}</section>
       <section id="campaign-events"><h3>EVENTOS CORRELACIONADOS</h3>${renderCampaignEvents(payload.correlated_events)}</section>
-      <section id="campaign-evidence"><h3>DETECTION / CORRELATION EVIDENCE</h3><p class="subtle score-semantics" title="${esc(evidence.detector_score_semantics || '')}">${esc(evidence.detector_score_semantics || 'Detector score reflects local detection criteria, not probabilistic certainty.')}</p>${detailGrid(Object.entries(evidence.correlation_features || {}))}
+      <section id="campaign-evidence"><h3>EVIDÊNCIAS DE DETECÇÃO / CORRELAÇÃO</h3><p class="subtle score-semantics" title="${esc(evidence.detector_score_semantics || '')}">${esc(evidence.detector_score_semantics || 'O score do detector reflete critérios locais de detecção, não certeza probabilística.')}</p>${detailGrid(Object.entries(evidence.correlation_features || {}))}
         <h4>Detectores contribuintes</h4>${investigationList((evidence.contributing_vectors || []).map(item => `${item.detector || '-'} · ${item.attack_type || '-'} · score ${optionalNumber(item.score)} · ${item.source || 'distribuída'} → ${item.target || '-'}`))}</section>
-      <section id="campaign-ai"><h3>ANÁLISE IA DA CAMPAIGN</h3>${renderCampaignAiInvestigation(campaign, aiState)}</section>`;
+      <section id="campaign-ai"><h3>ANÁLISE POR IA DA CAMPANHA</h3>${renderCampaignAiInvestigation(campaign, aiState)}</section>`;
     root.lucide?.createIcons();
   }
 
@@ -754,11 +832,18 @@
     drawer.hidden = false;
     drawer.setAttribute('aria-hidden', 'false');
     document.body.classList.add('security-event-drawer-open');
-    setInvestigationHeading('Campaign Investigation', `Investigação da campanha · ${campaignId}`);
+    setInvestigationHeading('Investigação da campanha', `Investigação da campanha · ${campaignId}`);
     document.getElementById('securityEventDrawerStatus').textContent = 'Carregando investigação da campanha...';
     const base = `/api/security/campaigns/${encodeURIComponent(campaignId)}`;
-    const [payload, aiState] = await Promise.all([apiRequest(base), apiRequest(`${base}/ai-analysis`)]);
-    document.getElementById('securityEventDrawerStatus').textContent = '';
+    const [campaignResult, aiResult] = await Promise.allSettled([apiRequest(base), apiRequest(`${base}/ai-analysis`)]);
+    if (campaignResult.status === 'rejected') throw campaignResult.reason;
+    const payload = campaignResult.value;
+    const aiState = aiResult.status === 'fulfilled' ? aiResult.value : {
+      enabled: true,
+      configured: true,
+      error: `Estado da IA indisponível: ${aiResult.reason?.message || 'falha ao carregar'}`,
+    };
+    document.getElementById('securityEventDrawerStatus').textContent = aiResult.status === 'fulfilled' ? '' : aiState.error;
     renderSecurityCampaignInvestigation(payload, aiState);
   }
 
@@ -912,6 +997,43 @@
       { nodes: mapNodes(payload.items, payload.group_by || groupBy), metric: 'flows', group_by: payload.group_by || groupBy },
       { metric: 'flows', mode: 'flows', visualization: 'points', groupBy: payload.group_by || groupBy, fit: true }
     );
+    setPanelStatus('threatMapStatus', `Mapa atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
+  }
+
+  async function fetchSecurityEvents() {
+    if (securityEventsRequestPromise) return securityEventsRequestPromise;
+    securityEventsRequestPromise = apiRequest('/security/events?limit=200');
+    try {
+      return await securityEventsRequestPromise;
+    } finally {
+      securityEventsRequestPromise = null;
+    }
+  }
+
+  function configureSecurityEventsPolling(payload = {}) {
+    const requested = Number(payload.ui_refresh_seconds || 10);
+    const configured = Number.isFinite(requested) ? Math.max(5, Math.min(15, requested)) : 10;
+    if (securityEventsPollingTimer && configured === securityEventsPollingSeconds) return;
+    if (securityEventsPollingTimer) root.clearInterval(securityEventsPollingTimer);
+    securityEventsPollingSeconds = configured;
+    securityEventsPollingTimer = root.setInterval(() => {
+      refreshSecurityEventsOnly().catch(() => { /* erro já exibido somente no painel */ });
+    }, securityEventsPollingSeconds * 1000);
+  }
+
+  async function refreshSecurityEventsOnly() {
+    setPanelStatus('threatVectorsStatus', 'Atualizando Security Events...');
+    try {
+      const payload = await fetchSecurityEvents();
+      renderVectors(payload);
+      configureSecurityEventsPolling(payload);
+      setPanelStatus('threatVectorsStatus', `Atualizado em ${new Date().toLocaleTimeString('pt-BR')} · polling ${securityEventsPollingSeconds} s.`);
+      root.lucide?.createIcons();
+      return payload;
+    } catch (error) {
+      setPanelStatus('threatVectorsStatus', `Erro ao carregar Attack Vectors: ${error.message}`, true);
+      throw error;
+    }
   }
 
   async function loadWorkspace() {
@@ -919,18 +1041,41 @@
     loading = true;
     document.getElementById('threatWorkspaceStatus').textContent = 'Atualizando inteligência e detecções...';
     try {
-      const [providers, vectors, campaigns, decisions] = await Promise.all([
-        apiRequest('/api/threat-intelligence/providers'), apiRequest('/security/events?limit=200'),
-        apiRequest('/api/threat-engine/campaigns?limit=100'), apiRequest('/api/threat-engine/policy-decisions?limit=200')
+      const requests = await Promise.allSettled([
+        apiRequest('/api/threat-intelligence/providers'),
+        fetchSecurityEvents(),
+        apiRequest('/api/threat-engine/campaigns?limit=100'),
+        apiRequest('/api/threat-engine/policy-decisions?limit=200')
       ]);
-      renderProviders(providers); renderVectors(vectors); renderCampaigns(campaigns); renderDecisions(decisions);
-      await loadMap();
-      document.getElementById('threatWorkspaceStatus').textContent = `Atualizado em ${new Date().toLocaleTimeString('pt-BR')}. Falhas externas permanecem isoladas do Threat Engine.`;
+      const panels = [
+        { name: 'Threat Intelligence', status: 'threatProvidersStatus', render: renderProviders },
+        { name: 'Attack Vectors', status: 'threatVectorsStatus', render: renderVectors },
+        { name: 'Campaigns', status: 'threatCampaignsStatus', render: renderCampaigns },
+        { name: 'Policy Decisions', status: 'threatDecisionsStatus', render: renderDecisions }
+      ];
+      const failures = [];
+      requests.forEach((result, index) => {
+        const panel = panels[index];
+        if (result.status === 'fulfilled') {
+          panel.render(result.value);
+          if (panel.name === 'Attack Vectors') configureSecurityEventsPolling(result.value);
+          setPanelStatus(panel.status, `Atualizado em ${new Date().toLocaleTimeString('pt-BR')}${panel.name === 'Attack Vectors' ? ` · polling ${securityEventsPollingSeconds} s` : ''}.`);
+        } else {
+          failures.push(panel.name);
+          setPanelStatus(panel.status, `Erro ao carregar ${panel.name}: ${result.reason?.message || 'indisponível'}`, true);
+        }
+      });
+      try {
+        await loadMap();
+      } catch (error) {
+        failures.push('Mapa de Threat Intelligence');
+        setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
+        ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
+      }
+      document.getElementById('threatWorkspaceStatus').textContent = failures.length
+        ? `Atualização parcial: ${failures.join(', ')} indisponível(is). Os demais painéis permanecem atualizados.`
+        : `Atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`;
       root.lucide?.createIcons();
-    } catch (error) {
-      document.getElementById('threatWorkspaceStatus').textContent = `Falha ao atualizar: ${error.message}`;
-      ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
-      throw error;
     } finally {
       loading = false;
     }
@@ -1007,9 +1152,13 @@
     if (action) providerAction(action).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
   });
   document.addEventListener('DOMContentLoaded', () => {
+    configureSecurityEventsPolling();
     document.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.getElementById('securityEventDrawer')?.hidden) closeSecurityEvent(); });
     document.getElementById('refreshThreatWorkspaceButton')?.addEventListener('click', () => loadWorkspace().catch(console.error));
-    document.getElementById('applyThreatFiltersButton')?.addEventListener('click', () => loadMap().catch(console.error));
+    document.getElementById('applyThreatFiltersButton')?.addEventListener('click', () => loadMap().catch(error => {
+      setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
+      ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
+    }));
     document.getElementById('runThreatEngineButton')?.addEventListener('click', async () => {
       const button = document.getElementById('runThreatEngineButton');
       button.disabled = true;
@@ -1020,6 +1169,7 @@
   });
 
   root.loadThreatIntelligenceWorkspace = loadWorkspace;
+  root.refreshSecurityEventsOnly = refreshSecurityEventsOnly;
   root.openSecurityEventInvestigation = eventId => openSecurityEventInvestigation(eventId).catch(error => {
     const status = document.getElementById('threatWorkspaceStatus') || document.getElementById('anomalyStatus');
     if (status) status.textContent = error.message;

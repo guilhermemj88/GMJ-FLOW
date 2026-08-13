@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 try:
@@ -15,6 +16,7 @@ from app.services.behavioral_detection import (
 )
 from app.services.threat_policy import ensure_threat_policy_schema, policy_decision_row
 from app.services.campaign_ai import analyze_campaign, get_campaign_analysis
+from app.services.campaign_context_evaluator import evaluate_campaign_context
 from app.services.campaign_investigation import get_campaign_investigation
 from app.services.security_event_ai import analyze_security_event, get_security_event_analysis
 from app.services.security_event_investigation import event_evidence, event_sources, event_traffic
@@ -72,11 +74,47 @@ def list_campaigns(status: str = "", limit: int = Query(200, ge=1, le=1000)) -> 
     values = (status, limit) if status else (limit,)
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
+        ensure_security_event_schema(conn)
         rows = conn.execute(
             f"SELECT * FROM threat_campaigns {where} ORDER BY last_seen DESC, campaign_id DESC LIMIT ?",
             values,
         ).fetchall()
-    return {"items": [campaign_row(row) for row in rows]}
+        campaigns = [campaign_row(row) for row in rows]
+        campaign_ids = [str(item.get("campaign_id") or "") for item in campaigns if item.get("campaign_id")]
+        vectors_by_campaign: dict[str, list[dict[str, Any]]] = {}
+        events_by_campaign: dict[str, list[dict[str, Any]]] = {}
+        if campaign_ids:
+            placeholders = ",".join("?" for _ in campaign_ids)
+            vector_rows = conn.execute(
+                f"SELECT * FROM behavioral_attack_vectors WHERE campaign_id IN ({placeholders})",
+                campaign_ids,
+            ).fetchall()
+            event_rows = conn.execute(
+                f"SELECT * FROM security_events WHERE campaign_id IN ({placeholders})",
+                campaign_ids,
+            ).fetchall()
+            for row in vector_rows:
+                vector = attack_vector_row(row)
+                vectors_by_campaign.setdefault(str(vector.get("campaign_id") or ""), []).append(vector)
+            for row in event_rows:
+                event = security_event_row(row)
+                events_by_campaign.setdefault(str(event.get("campaign_id") or ""), []).append(event)
+        for campaign in campaigns:
+            campaign_id = str(campaign.get("campaign_id") or "")
+            campaign["context_evaluation"] = evaluate_campaign_context(
+                campaign,
+                vectors=vectors_by_campaign.get(campaign_id, []),
+                correlated_events=events_by_campaign.get(campaign_id, []),
+            )
+    return {"items": campaigns}
+
+
+def security_events_ui_refresh_seconds() -> int:
+    try:
+        configured = int(float(os.getenv("GMJFLOW_SECURITY_EVENTS_UI_REFRESH_SECONDS", "10")))
+    except (TypeError, ValueError):
+        configured = 10
+    return max(5, min(configured, 15))
 
 
 @router.get("/history")
@@ -157,7 +195,13 @@ def list_security_events(
             (*values, int(limit), int(offset)),
         ).fetchall()
         conn.commit()
-    return {"items": [security_event_row(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [security_event_row(row) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "ui_refresh_seconds": security_events_ui_refresh_seconds(),
+    }
 
 
 @security_router.get("/events/{event_id}")
