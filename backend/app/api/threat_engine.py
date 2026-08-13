@@ -14,6 +14,8 @@ from app.services.behavioral_detection import (
     ensure_behavioral_schema,
 )
 from app.services.threat_policy import ensure_threat_policy_schema, policy_decision_row
+from app.services.campaign_ai import analyze_campaign, get_campaign_analysis
+from app.services.campaign_investigation import get_campaign_investigation
 from app.services.security_event_ai import analyze_security_event, get_security_event_analysis
 from app.services.security_event_investigation import event_evidence, event_sources, event_traffic
 from app.services.security_events import (
@@ -278,14 +280,49 @@ def get_security_campaign(campaign_id: str) -> dict[str, Any]:
     with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
         ensure_behavioral_schema(conn)
         ensure_security_event_schema(conn)
-        row = conn.execute("SELECT * FROM threat_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
-        event_rows = conn.execute(
-            "SELECT * FROM security_events WHERE campaign_id=? ORDER BY last_seen DESC",
-            (campaign_id,),
-        ).fetchall()
-    if row is None:
+        result = get_campaign_investigation(conn, campaign_id)
+    if result is None:
         raise HTTPException(status_code=404, detail="Campanha não encontrada")
-    return {"campaign": campaign_row(row), "events": [security_event_row(item) for item in event_rows]}
+    return result
+
+
+def _run_campaign_ai(campaign_id: str, force: bool) -> dict[str, Any]:
+    with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
+        ensure_behavioral_schema(conn)
+        ensure_security_event_schema(conn)
+        result = analyze_campaign(conn, campaign_id, force=force)
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=result.get("error_message"))
+    if not result.get("ok"):
+        status_code = {
+            "disabled": 409, "not_configured": 409, "rate_limit": 429,
+            "timeout": 504, "unavailable": 503, "invalid_response": 502,
+            "payload_too_large": 413,
+        }.get(result.get("error_type") or result.get("status"), 503)
+        raise HTTPException(status_code=status_code, detail={
+            "status": result.get("status") or "failed",
+            "error_type": result.get("error_type") or "unavailable",
+            "message": result.get("error_message") or "Análise de IA indisponível",
+        })
+    return result
+
+
+@security_router.get("/campaigns/{campaign_id}/ai-analysis")
+@api_security_router.get("/campaigns/{campaign_id}/ai-analysis")
+def get_security_campaign_ai_analysis(campaign_id: str) -> dict[str, Any]:
+    with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
+        ensure_behavioral_schema(conn)
+        ensure_security_event_schema(conn)
+        result = get_campaign_analysis(conn, campaign_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error_message"))
+    return result
+
+
+@security_router.post("/campaigns/{campaign_id}/ai-analysis")
+@api_security_router.post("/campaigns/{campaign_id}/ai-analysis")
+def create_security_campaign_ai_analysis(campaign_id: str, force: bool = Query(False)) -> dict[str, Any]:
+    return _run_campaign_ai(campaign_id, force=force)
 
 
 def _set_event_status(event_id: Any, status: str) -> dict[str, Any]:

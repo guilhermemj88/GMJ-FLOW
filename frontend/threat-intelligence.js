@@ -18,6 +18,7 @@
   let threatMap = null;
   let loading = false;
   let currentSecurityEventId = null;
+  let currentSecurityCampaignId = null;
   let currentSecurityEvent = null;
   let currentSecuritySources = [];
   let securityTrafficChart = null;
@@ -33,10 +34,21 @@
     return Number.isFinite(parsed) ? parsed.toLocaleString('pt-BR', { maximumFractionDigits: digits }) : '0';
   }
 
+  function optionalNumber(value, digits = 0, suffix = '') {
+    if (value === null || value === undefined || value === '') return '-';
+    return `${number(value, digits)}${suffix}`;
+  }
+
   function dateTime(value) {
     if (!value) return '-';
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? esc(value) : parsed.toLocaleString('pt-BR');
+  }
+
+  function setInvestigationHeading(context, title) {
+    const label = document.getElementById('securityEventDrawerContext');
+    if (label) label.textContent = context;
+    document.getElementById('securityEventDrawerTitle').textContent = title;
   }
 
   function statusBadge(value) {
@@ -308,7 +320,7 @@
     const network = event.network_context || {};
     const components = event.score_components || {};
     const duration = Math.max(0, (new Date(event.last_seen).getTime() - new Date(event.first_seen).getTime()) / 1000);
-    document.getElementById('securityEventDrawerTitle').textContent = `${event.attack_type} #${event.id}`;
+    setInvestigationHeading('Security Event Investigation', `${event.attack_type} #${event.id}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
       <section><h3>Resumo</h3>${detailGrid([
         ['Família', event.attack_family], ['Severity / verdict', `${event.severity} / ${event.verdict}`],
@@ -343,6 +355,7 @@
   }
 
   async function openSecurityEvent(eventId) {
+    currentSecurityCampaignId = null;
     currentSecurityEventId = Number(eventId);
     const drawer = document.getElementById('securityEventDrawer');
     drawer.hidden = false;
@@ -494,7 +507,7 @@
     const investigation = event.investigation || {};
     const duration = event.duration_seconds ?? Math.max(0, (new Date(event.last_seen) - new Date(event.first_seen)) / 1000);
     const canManage = canManageSecurityEvents();
-    document.getElementById('securityEventDrawerTitle').textContent = `${event.attack_type} · ${event.event_id || `#${event.id}`}`;
+    setInvestigationHeading('Security Event Investigation', `${event.attack_type} · ${event.event_id || `#${event.id}`}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
       <nav class="security-event-section-nav" aria-label="Seções da investigação">${[['summary','Resumo'],['traffic','Tráfego'],['sources','Origens'],['ports','Portas'],['intel','Threat Intelligence'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#security-event-${id}">${label}</a>`).join('')}</nav>
       <section id="security-event-summary"><h3>Resumo</h3>${detailGrid([
@@ -540,6 +553,7 @@
   }
 
   async function openSecurityEventInvestigation(eventId) {
+    currentSecurityCampaignId = null;
     const drawer = document.getElementById('securityEventDrawer');
     drawer.hidden = false;
     drawer.setAttribute('aria-hidden', 'false');
@@ -555,36 +569,154 @@
     renderSecurityEventInvestigation(event, related.items || [], traffic, sources, aiState);
   }
 
+  function campaignPersistence(campaign) {
+    if (campaign.persistence === 'satisfied' || campaign.persistence_satisfied === true) return 'satisfeita';
+    if (campaign.persistence === 'insufficient' || campaign.persistence_satisfied === false) return 'insuficiente';
+    return 'não registrada';
+  }
+
+  function campaignEnrichmentText(campaign) {
+    const summary = campaign.enrichment_summary || {};
+    if (!summary.available) return 'Sem enrichment persistido';
+    const parts = [
+      `${optionalNumber(summary.matched_sources)} fontes com match`,
+      summary.target_matches ? `${number(summary.target_matches)} correlações de alvo` : '',
+      (summary.providers || []).join(', '),
+      (summary.classifications || []).join(', ')
+    ].filter(Boolean);
+    return parts.join(' · ') || 'Enrichment persistido';
+  }
+
+  function renderCampaignThreatIntel(campaign) {
+    const threat = campaign.threat_intel || {};
+    const source = threat.source_intel || {};
+    const target = threat.target_campaign_intel || {};
+    const sourceRows = Object.entries(source.sources || {}).flatMap(([ip, matches]) =>
+      (Array.isArray(matches) ? matches : []).slice(0, 10).map(match => `<tr><td><code>${esc(ip)}</code></td><td>${esc(match.provider || '-')}</td>
+        <td>${esc(match.classification || match.indicator_type || '-')}</td><td>${esc(match.organization || '-')}</td><td>${esc((match.tags || []).join(', ') || '-')}</td><td>${dateTime(match.last_seen)}</td></tr>`)
+    ).slice(0, 50);
+    const summary = campaign.enrichment_summary || {};
+    if (!summary.available) {
+      return '<div class="subtle">Campanha sem enrichment externo associado.</div><p class="subtle">Abrir o drawer não executa lookup individual.</p>';
+    }
+    return `<p><strong>${esc(campaignEnrichmentText(campaign))}</strong></p>
+      <p class="subtle">Enrichment persistido na campaign; abrir o drawer não faz lookup individual. Threat Intelligence permanece separada da evidência do detector.</p>
+      ${sourceRows.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>Source IP</th><th>Provider</th><th>Classificação</th><th>Organização</th><th>Tags</th><th>Last seen</th></tr></thead><tbody>${sourceRows.join('')}</tbody></table></div>` : ''}
+      ${(target.observations || []).length ? `<h4>Correlação de alvo persistida</h4>${investigationList(target.observations.map(item => `${item.provider || 'External'} · ${item.method || item.protocol || 'observação'}`))}` : ''}`;
+  }
+
+  function renderCampaignAsnDistribution(items) {
+    const rows = Array.isArray(items) ? items : [];
+    return rows.length ? `<div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>ASN</th><th>Organização</th><th>Fontes</th><th>Percentual</th></tr></thead><tbody>${rows.map(item => `<tr>
+      <td>${item.asn ? `AS${number(item.asn)}` : '-'}</td><td>${esc(item.organization || '-')}</td><td>${optionalNumber(item.sources)}</td><td>${optionalNumber(item.percentage, 2, '%')}</td>
+    </tr>`).join('')}</tbody></table></div>` : '<div class="subtle">Distribuição por ASN não persistida para esta campanha.</div>';
+  }
+
+  function renderCampaignEvents(items) {
+    const events = Array.isArray(items) ? items : [];
+    if (!events.length) return '<div class="subtle">Nenhum Security Event canônico correlacionado a esta campanha.</div>';
+    return events.map(item => {
+      const intel = item.threat_intelligence || {};
+      const intelText = intel.matched_sources || (intel.providers || []).length
+        ? `${number(intel.matched_sources)} fontes · ${(intel.providers || []).join(', ') || 'enrichment persistido'}`
+        : 'sem enrichment persistido';
+      return `<article class="security-correlated-event">
+        ${detailGrid([
+          ['Public ID', item.public_id], ['Event type', item.event_type], ['Score', optionalNumber(item.score)], ['Target', item.target],
+          ['First seen', dateTime(item.first_seen)], ['Last seen', dateTime(item.last_seen)], ['Source count', optionalNumber(item.source_count)], ['Threat Intelligence', intelText]
+        ])}
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="open" data-event-id="${esc(item.id)}">Abrir evento</button>
+      </article>`;
+    }).join('');
+  }
+
+  function renderCampaignAiInvestigation(campaign, state = {}) {
+    const analysis = state.analysis && Object.keys(state.analysis).length ? state.analysis : {};
+    const hasAnalysis = Object.keys(analysis).length > 0;
+    const canAnalyze = canManageSecurityEvents() && state.enabled === true && state.configured === true;
+    const unavailable = !state.enabled
+      ? 'Security AI desabilitada por configuração.'
+      : !state.configured
+        ? 'Provider, modelo ou credencial não configurados no backend.'
+        : !canManageSecurityEvents() ? 'Seu perfil não pode solicitar análise.' : '';
+    if (!hasAnalysis) {
+      return `<p class="subtle">Esta campanha ainda não foi analisada por IA. A execução ocorre somente mediante clique e é consultiva.</p>
+        ${state.error ? `<div class="security-ai-error">${esc(state.error)}</div>` : ''}
+        <button type="button" class="btn btn-sm btn-success mt-2" data-campaign-action="analyze" data-campaign-id="${esc(campaign.campaign_id)}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
+        ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
+    }
+    return `${state.stale ? '<div class="security-ai-stale">Análise potencialmente desatualizada após nova evidência da campanha.</div>' : ''}
+      <div class="security-ai-verdict"><strong>${esc(analysis.assessment || 'Análise consultiva')}</strong><span>${esc(analysis.confidence || '-')}</span></div>
+      <p>${esc(analysis.summary || '')}</p>
+      <h4>Por que a campanha foi detectada</h4>${investigationList(analysis.why_detected)}
+      <h4>Origens importantes</h4>${investigationList(analysis.important_sources)}
+      <h4>Threat Intelligence</h4>${investigationList(analysis.threat_intelligence_findings)}
+      <h4>Possíveis falsos positivos</h4>${investigationList(analysis.possible_false_positive_factors)}
+      <h4>Verificações recomendadas</h4>${investigationList(analysis.recommended_checks)}
+      <h4>Ações recomendadas</h4>${investigationList(analysis.recommended_actions)}
+      ${detailGrid([
+        ['Mitigação (advisory only)', analysis.mitigation_advisory || 'Nenhuma mitigação automática foi executada.'],
+        ['Limitações', (analysis.limitations || []).join('; ')], ['Provider / modelo', `${state.provider || '-'} / ${state.model || '-'}`],
+        ['Gerada em', dateTime(state.analyzed_at)], ['Versão', state.analysis_version || '-']
+      ])}
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-campaign-action="reanalyze" data-campaign-id="${esc(campaign.campaign_id)}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>
+      <div class="subtle mt-1">Advisory only: a IA não executa nem solicita mitigação automática.</div>`;
+  }
+
+  function renderSecurityCampaignInvestigation(payload, aiState) {
+    const campaign = payload.campaign || {};
+    const traffic = payload.target_traffic || {};
+    const evidence = payload.detection_correlation_evidence || {};
+    const ports = (traffic.ports || []).map(item => item.port).filter(value => value !== null && value !== undefined).join(', ');
+    setInvestigationHeading('Campaign Investigation', `Investigação da campanha · ${campaign.campaign_id}`);
+    document.getElementById('securityEventDrawerBody').innerHTML = `
+      <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN DISTRIBUTION'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
+      <section id="campaign-summary"><h3>RESUMO DA CAMPAIGN</h3>${detailGrid([
+        ['Campaign ID', campaign.campaign_id], ['Classification / family', `${campaign.classification || '-'} / ${campaign.family || '-'}`],
+        ['Target', campaign.target], ['Coordination score', optionalNumber(campaign.coordination_score)],
+        ['Sources', optionalNumber(campaign.unique_sources)], ['ASN count', optionalNumber(campaign.unique_source_asns)],
+        ['pps', optionalNumber(campaign.packets_per_second, 2)], ['bps', optionalNumber(campaign.bits_per_second, 1)],
+        ['First seen', dateTime(campaign.first_seen)], ['Last seen', dateTime(campaign.last_seen)],
+        ['Duration', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 1)} s`],
+        ['Persistence', campaignPersistence(campaign)], ['Detector', campaign.detector], ['Enrichment summary', campaignEnrichmentText(campaign)]
+      ])}</section>
+      <section id="campaign-traffic"><h3>TARGET / TRAFFIC</h3>${detailGrid([
+        ['Target', traffic.target], ['Protocol', traffic.protocol], ['Ports', ports || '-'],
+        ['pps', optionalNumber(traffic.pps, 2)], ['bps', optionalNumber(traffic.bps, 1)],
+        ['Packets', optionalNumber(traffic.packets)], ['Bytes', traffic.bytes === null || traffic.bytes === undefined ? '-' : securityBytes(traffic.bytes)],
+        ['Source count', optionalNumber(traffic.source_count)], ['ASN diversity', optionalNumber(traffic.asn_diversity)]
+      ])}${renderSecurityDistribution(traffic.protocols, 'Protocol distribution')}${renderSecurityDistribution(traffic.ports, 'Destination ports')}</section>
+      <section id="campaign-sources">${renderSecuritySources(payload.top_sources || [], true)}</section>
+      <section id="campaign-asn"><h3>ASN DISTRIBUTION</h3>${renderCampaignAsnDistribution(payload.asn_distribution)}
+        <p class="subtle">${payload.asn_distribution_context?.percentage_scope === 'persisted_top_sources_snapshot' ? 'Percentuais calculados sobre as origens presentes no snapshot persistido de Top Sources.' : 'Percentuais da distribuição persistida da campaign.'}</p></section>
+      <section id="campaign-intel"><h3>THREAT INTELLIGENCE</h3>${renderCampaignThreatIntel(campaign)}</section>
+      <section id="campaign-events"><h3>EVENTOS CORRELACIONADOS</h3>${renderCampaignEvents(payload.correlated_events)}</section>
+      <section id="campaign-evidence"><h3>DETECTION / CORRELATION EVIDENCE</h3>${detailGrid(Object.entries(evidence.correlation_features || {}))}
+        <h4>Detectores contribuintes</h4>${investigationList((evidence.contributing_vectors || []).map(item => `${item.detector || '-'} · ${item.attack_type || '-'} · score ${optionalNumber(item.score)} · ${item.source || 'distribuída'} → ${item.target || '-'}`))}</section>
+      <section id="campaign-ai"><h3>ANÁLISE IA DA CAMPAIGN</h3>${renderCampaignAiInvestigation(campaign, aiState)}</section>`;
+    root.lucide?.createIcons();
+  }
+
   async function openSecurityCampaign(campaignId) {
     currentSecurityEventId = null;
+    currentSecurityCampaignId = String(campaignId);
     const drawer = document.getElementById('securityEventDrawer');
     drawer.hidden = false;
     drawer.setAttribute('aria-hidden', 'false');
     document.body.classList.add('security-event-drawer-open');
-    document.getElementById('securityEventDrawerStatus').textContent = 'Carregando campanha...';
-    const payload = await apiRequest(`/security/campaigns/${encodeURIComponent(campaignId)}`);
-    const campaign = payload.campaign || {};
-    document.getElementById('securityEventDrawerTitle').textContent = `Campanha ${campaign.campaign_id || campaignId}`;
+    setInvestigationHeading('Campaign Investigation', `Investigação da campanha · ${campaignId}`);
+    document.getElementById('securityEventDrawerStatus').textContent = 'Carregando investigação da campanha...';
+    const base = `/api/security/campaigns/${encodeURIComponent(campaignId)}`;
+    const [payload, aiState] = await Promise.all([apiRequest(base), apiRequest(`${base}/ai-analysis`)]);
     document.getElementById('securityEventDrawerStatus').textContent = '';
-    document.getElementById('securityEventDrawerBody').innerHTML = `
-      <section><h3>Resumo da campanha</h3>${detailGrid([
-        ['Classificação', campaign.classification], ['Alvo', campaign.target_prefix],
-        ['Score de coordenação', campaign.coordination_score], ['Fontes / ASNs', `${number(campaign.unique_sources)} / ${number(campaign.unique_source_asns)}`],
-        ['pps / bit/s', `${number(campaign.packets_per_second, 2)} / ${number(campaign.bits_per_second, 1)}`],
-        ['Primeira / última', `${dateTime(campaign.first_seen)} / ${dateTime(campaign.last_seen)}`],
-        ['Família', campaign.features?.attack_family], ['Persistência', campaign.features?.persistence_satisfied ? 'satisfeita' : 'insuficiente']
-      ])}</section>
-      <section><h3>Vetores correlacionados</h3>${(payload.events || []).length ? (payload.events || []).map(item => `
-        <button type="button" class="security-related-event" data-security-action="open" data-event-id="${number(item.id)}">
-          <strong>${esc(item.attack_type)}</strong><span>${esc(item.verdict)} · ${number(item.packets_per_second, 1)} pps · ${dateTime(item.last_seen)}</span>
-        </button>`).join('') : '<div class="subtle">Nenhum evento canônico vinculado.</div>'}</section>`;
+    renderSecurityCampaignInvestigation(payload, aiState);
   }
 
   function renderLegacySecurityAnomalyDetail(item) {
     const available = entries => entries.filter(([, value]) => value !== null && value !== undefined && value !== '');
     const anomalyId = number(item.id);
     const mitigationId = number(item._mitigation_anomaly_id || item.id);
-    document.getElementById('securityEventDrawerTitle').textContent = `Legacy anomaly #${anomalyId}`;
+    setInvestigationHeading('Legacy anomaly', `Legacy anomaly #${anomalyId}`);
     document.getElementById('securityEventDrawerStatus').textContent = 'Legacy anomaly';
     document.getElementById('securityEventDrawerBody').innerHTML = `
       <section><h3>Legacy anomaly</h3>${detailGrid(available([
@@ -607,6 +739,7 @@
   function openLegacySecurityAnomaly(item) {
     if (!item) return;
     currentSecurityEventId = null;
+    currentSecurityCampaignId = null;
     const drawer = document.getElementById('securityEventDrawer');
     drawer.hidden = false;
     drawer.setAttribute('aria-hidden', 'false');
@@ -638,12 +771,13 @@
     currentSecurityEvent = null;
     currentSecuritySources = [];
     currentSecurityEventId = null;
+    currentSecurityCampaignId = null;
   }
 
   async function securityAction(button) {
     const action = button.dataset.securityAction;
     if (action === 'close') return closeSecurityEvent();
-    const eventId = Number(button.dataset.eventId || currentSecurityEventId);
+    const eventId = button.dataset.eventId || currentSecurityEventId;
     if (action === 'open') return openSecurityEventInvestigation(eventId);
     button.disabled = true;
     try {
@@ -662,6 +796,21 @@
       }
       await openSecurityEventInvestigation(eventId);
       await loadWorkspace();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function campaignAction(button) {
+    const action = button.dataset.campaignAction;
+    const campaignId = button.dataset.campaignId || currentSecurityCampaignId;
+    if (!campaignId || !['analyze', 'reanalyze'].includes(action)) return;
+    button.disabled = true;
+    try {
+      document.getElementById('securityEventDrawerStatus').textContent = 'Analisando evidências da campanha...';
+      const suffix = action === 'reanalyze' ? '?force=true' : '';
+      await apiRequest(`/api/security/campaigns/${encodeURIComponent(campaignId)}/ai-analysis${suffix}`, { method: 'POST' });
+      await openSecurityCampaign(campaignId);
     } finally {
       button.disabled = false;
     }
@@ -766,6 +915,12 @@
     if (legacyAction) {
       event.stopPropagation();
       legacySecurityAction(legacyAction).catch(error => { document.getElementById('securityEventDrawerStatus').textContent = error.message; });
+      return;
+    }
+    const campaignActionButton = event.target.closest('[data-campaign-action]');
+    if (campaignActionButton) {
+      event.stopPropagation();
+      campaignAction(campaignActionButton).catch(error => { document.getElementById('securityEventDrawerStatus').textContent = error.message; });
       return;
     }
     const security = event.target.closest('[data-security-action]');
