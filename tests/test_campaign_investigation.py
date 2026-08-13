@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import types
 import unittest
+from pathlib import Path
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -45,7 +46,7 @@ except ImportError:
 
 from app.api import threat_engine as api  # noqa: E402
 from app.services.behavioral_detection import AttackVector, ensure_behavioral_schema  # noqa: E402
-from app.services.campaign_ai import analyze_campaign, get_campaign_analysis  # noqa: E402
+from app.services.campaign_ai import analyze_campaign, build_campaign_analysis_prompt, get_campaign_analysis  # noqa: E402
 from app.services.campaign_investigation import campaign_analysis_payload, get_campaign_investigation  # noqa: E402
 from app.services.security_events import ensure_security_event_schema, upsert_security_event  # noqa: E402
 
@@ -395,16 +396,16 @@ class CampaignInvestigationTest(unittest.TestCase):
         assert investigation is not None
         payload = campaign_analysis_payload(investigation)
         for key in (
-            "campaign_metadata", "target", "coordination_score", "top_sources", "asn_diversity",
-            "traffic_metrics", "metric_provenance", "detection_context", "correlated_events",
+            "campaign_metadata", "target", "top_sources", "asn_diversity",
+            "traffic_metrics", "baseline_and_per_host_context", "correlated_events",
             "threat_intelligence", "detection_correlation_evidence",
         ):
             self.assertIn(key, payload)
-        self.assertEqual("peak_detection_window", payload["metric_provenance"]["pps"]["scope"])
-        self.assertEqual(4.2, payload["detection_context"]["baseline_delta"])
-        self.assertEqual("GREYNOISE", payload["threat_intelligence"]["source_matches"][0]["provider"])
-        self.assertEqual("Example Transit Cached", payload["top_sources"][1]["asn_organization"])
-        self.assertFalse(payload["detection_context"]["threat_intelligence_is_detector_trigger"])
+        self.assertEqual("peak_detection_window", payload["traffic_metrics"]["peak_rates"]["pps"]["provenance"]["scope"])
+        self.assertEqual(4.2, payload["baseline_and_per_host_context"]["baseline_delta"])
+        self.assertEqual("GREYNOISE", payload["threat_intelligence"]["matches"]["items"][0]["provider"])
+        self.assertEqual("Example Transit Cached", payload["top_sources"]["items"][1]["asn_organization"])
+        self.assertFalse(payload["detection_correlation_evidence"]["threat_intelligence_is_detector_trigger"])
         self.assertFalse(payload["analysis_constraints"]["automatic_mitigation_enabled"])
         self.assertFalse(payload["analysis_constraints"]["external_lookups_performed"])
 
@@ -444,7 +445,96 @@ class CampaignInvestigationTest(unittest.TestCase):
         self.assertFalse(first["mitigation_executed"])
         self.assertTrue(first["advisory_only"])
         self.assertEqual("valid", state["analysis_status"])
-        self.assertEqual("campaign-analysis/v1", state["analysis_version"])
+        self.assertEqual("campaign-analysis/v2", state["analysis_version"])
+        request_audit = self.conn.execute(
+            "SELECT campaign_vector_json FROM threat_engine_audit WHERE detector='campaign_ai' AND event_type='AI_REQUEST' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        request_diagnostic = json.loads(request_audit)
+        self.assertEqual({"prompt_chars", "approx_tokens", "sections"}, set(request_diagnostic))
+        self.assertNotIn(CAMPAIGN_ID, request_audit)
+        response_audit = self.conn.execute(
+            "SELECT groq_result_json FROM threat_engine_audit WHERE detector='campaign_ai' AND event_type='AI_RESPONSE' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        self.assertNotIn("Campanha coordenada requer validação operacional.", response_audit)
+
+    def test_campaign_ai_payload_applies_all_section_limits_and_counts(self) -> None:
+        investigation = get_campaign_investigation(self.conn, CAMPAIGN_ID)
+        assert investigation is not None
+        investigation["top_sources"] = [
+            {"source_ip": f"198.51.100.{index}", "source_asn": 64500 + index, "packets": 1000 - index}
+            for index in range(45)
+        ]
+        investigation["asn_distribution"] = [
+            {"asn": 64500 + index, "organization": f"AS {index}", "sources": 1, "percentage": 1.0}
+            for index in range(45)
+        ]
+        investigation["target_traffic"]["ports"] = [
+            {"port": 1000 + index, "packets": 100 - index} for index in range(35)
+        ]
+        investigation["target_traffic"]["protocols"] = [
+            {"protocol": index, "protocol_label": f"PROTO-{index}", "packets": index}
+            for index in range(25)
+        ]
+        investigation["correlated_events"] = [
+            {"id": index, "public_id": f"GMJ-E-{index}", "event_type": "CARPET_BOMBING"}
+            for index in range(15)
+        ]
+        source_matches = {
+            f"198.51.100.{index}": [{"provider": "GREYNOISE", "classification": "scanner"}]
+            for index in range(25)
+        }
+        investigation["campaign"]["threat_intel"]["source_intel"]["sources"] = source_matches
+        investigation["detection_context"]["detector_facts"] = [f"fact-{index}" for index in range(30)]
+        investigation["detection_correlation_evidence"]["contributing_vectors"] = [
+            {"detector": f"detector-{index}", "detector_facts": [f"contributor-fact-{index}"]}
+            for index in range(15)
+        ]
+
+        payload = campaign_analysis_payload(investigation)
+        expected = {
+            "top_sources": (payload["top_sources"], 20, 2320),
+            "asn_distribution": (payload["asn_diversity"]["distribution"], 20, 628),
+            "ports": (payload["target"]["ports"], 20, 35),
+            "correlated_events": (payload["correlated_events"], 10, 15),
+            "threat_intelligence": (payload["threat_intelligence"]["matches"], 20, 25),
+            "detector_facts": (payload["detection_correlation_evidence"]["detector_facts"], 20, 45),
+            "contributors": (payload["detection_correlation_evidence"]["contributors"], 10, 15),
+        }
+        for name, (section, included, total) in expected.items():
+            with self.subTest(section=name):
+                self.assertEqual(included, section["included_count"])
+                self.assertEqual(included, len(section["items"]))
+                self.assertEqual(total, section["total_count"])
+        self.assertEqual(25, payload["target"]["protocols"]["included_count"])
+        self.assertEqual(25, payload["target"]["protocols"]["total_count"])
+
+    def test_campaign_prompt_hard_cap_preserves_valid_json_and_core_metrics(self) -> None:
+        investigation = get_campaign_investigation(self.conn, CAMPAIGN_ID)
+        assert investigation is not None
+        investigation["top_sources"] = [
+            {
+                "source_ip": f"198.51.100.{index}",
+                "asn_organization": "X" * 5000,
+                "packets": 1000 - index,
+            }
+            for index in range(100)
+        ]
+        investigation["detection_context"]["detector_facts"] = ["Y" * 5000 for _ in range(100)]
+        prompt, bounded_payload, diagnostic = build_campaign_analysis_prompt(investigation, max_prompt_chars=4000)
+        self.assertLessEqual(len(prompt), 4000)
+        self.assertEqual(len(prompt), diagnostic["prompt_chars"])
+        encoded = prompt.split("CAMPAIGN_JSON_BEGIN\n", 1)[1].rsplit("\nCAMPAIGN_JSON_END", 1)[0]
+        parsed = json.loads(encoded)
+        self.assertEqual(bounded_payload, parsed)
+        self.assertEqual(CAMPAIGN_ID, parsed["campaign_metadata"]["campaign_id"])
+        self.assertEqual(158.8, parsed["traffic_metrics"]["peak_rates"]["pps"]["value"])
+        self.assertEqual(47640, parsed["traffic_metrics"]["snapshot_totals"]["packets"]["value"])
+        self.assertEqual(2320, parsed["top_sources"]["total_count"])
+
+    def test_campaign_ai_code_has_no_automatic_mitigation_or_flowspec_side_effect(self) -> None:
+        source = Path(sys.modules[analyze_campaign.__module__].__file__).read_text(encoding="utf-8")
+        for forbidden in ("execute_flowspec", "apply_mitigation", "announce_bgp", "subprocess"):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

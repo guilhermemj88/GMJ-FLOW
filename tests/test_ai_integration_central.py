@@ -55,11 +55,11 @@ def provider(conn, name, base_url, provider_type="ollama", **overrides):
     return ai.save_ai_provider(conn, payload, "admin")
 
 
-def route(conn, primary, fallback=None, **overrides):
+def route(conn, primary, fallback=None, function_key="mitigation_analysis", **overrides):
     ai.update_global_ai_settings(conn, {"global_enabled": True}, "admin")
     return ai.save_ai_route(
         conn,
-        "mitigation_analysis",
+        function_key,
         {
             "enabled": True,
             "primary_provider_id": primary["id"],
@@ -392,6 +392,128 @@ class CentralAiProviderTest(unittest.TestCase):
         stored_error = conn.execute("SELECT last_error FROM ai_providers WHERE id = ?", (item["id"],)).fetchone()[0]
         self.assertNotIn(secret, stored_error)
         self.assertNotIn(secret, json.dumps(ai.ai_history(conn)))
+
+
+class GeminiStructuredResponseTest(unittest.TestCase):
+    def test_gemini_accepts_pure_and_markdown_fenced_json(self):
+        pure, pure_mode = ai.normalize_structured_json('{"summary":"pure"}')
+        fenced, fenced_mode = ai.normalize_structured_json('```json\n{"summary":"fenced"}\n```')
+        self.assertEqual({"summary": "pure"}, pure)
+        self.assertEqual("pure_json", pure_mode)
+        self.assertEqual({"summary": "fenced"}, fenced)
+        self.assertEqual("markdown_fence", fenced_mode)
+
+    def test_arbitrary_or_ambiguous_text_is_not_converted_to_json(self):
+        with self.assertRaises(ValueError):
+            ai.normalize_structured_json("free-form recommendation")
+        with self.assertRaises(ValueError):
+            ai.normalize_structured_json('{"summary":"one"} and {"summary":"two"}')
+
+    def test_gemini_native_request_uses_schema_and_extracts_candidate_parts(self):
+        seen = []
+
+        def opener(request, timeout=0):
+            seen.append((request.full_url, request_headers(request), json.loads(request.data.decode("utf-8"))))
+            return FakeResponse({
+                "candidates": [
+                    {"content": {"parts": [{"inlineData": {"mimeType": "text/plain"}}]}},
+                    {"content": {"parts": [{"text": '{"summary":'}, {"text": '"ok"}'}]}},
+                ],
+                "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3},
+            })
+
+        provider_instance = ai.GeminiProvider({
+            "name": "Google Gemini",
+            "provider_type": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com",
+            "api_key": "gemini-secret",
+            "default_model": "gemini-3.5-flash-lite",
+            "supports_json": True,
+        }, opener=opener)
+        generated = provider_instance.generate("bounded", structured=True, schema=SCHEMA)
+        self.assertEqual('{"summary":"ok"}', generated["content"])
+        self.assertEqual(1, len(seen))
+        self.assertEqual(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+            seen[0][0],
+        )
+        self.assertEqual("gemini-secret", seen[0][1]["x-goog-api-key"])
+        self.assertEqual("application/json", seen[0][2]["generationConfig"]["responseMimeType"])
+        self.assertEqual(SCHEMA, seen[0][2]["generationConfig"]["responseJsonSchema"])
+        self.assertEqual(2, provider_instance.last_request_diagnostic["candidate_count"])
+        self.assertEqual(2, provider_instance.last_request_diagnostic["text_part_count"])
+
+    def test_single_json_repair_succeeds_without_fallback(self):
+        conn = database()
+        primary = provider(conn, "Google Gemini", "https://generativelanguage.googleapis.com", "gemini", api_key="gemini-secret")
+        fallback = provider(conn, "Groq", "https://api.groq.com/openai/v1", "groq", api_key="gsk-unused")
+        route(conn, primary, fallback, function_key="security_campaign_analysis", repair_json_once=True, fallback_on_invalid_json=True)
+        calls = []
+
+        def opener(request, timeout=0):
+            calls.append(request.full_url)
+            if "generativelanguage" not in request.full_url:
+                self.fail("fallback must not run after a successful repair")
+            content = "not-json" if len(calls) == 1 else '{"summary":"repaired"}'
+            return FakeResponse({"candidates": [{"content": {"parts": [{"text": content}]}}]})
+
+        result = ai.execute_ai_route(conn, "security_campaign_analysis", "bounded", schema=SCHEMA, opener=opener)
+        self.assertTrue(result["ok"])
+        self.assertEqual(2, len(calls))
+        self.assertFalse(result["fallback_used"])
+        self.assertTrue(result["diagnostic"]["repair_attempted"])
+        self.assertTrue(result["diagnostic"]["json_parse_status"].startswith("valid_after_repair"))
+        stored = conn.execute("SELECT prompt_snapshot, response_snapshot FROM ai_requests ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(("", ""), tuple(stored))
+
+    def test_invalid_gemini_falls_back_to_groq_but_success_does_not(self):
+        for gemini_content, expected_calls, expected_fallback in (
+            ("not-json", 2, True),
+            ('{"summary":"gemini"}', 1, False),
+        ):
+            with self.subTest(gemini_content=gemini_content):
+                conn = database()
+                primary = provider(conn, "Google Gemini", "https://generativelanguage.googleapis.com", "gemini", api_key="gemini-secret")
+                fallback = provider(conn, "Groq", "https://api.groq.com/openai/v1", "groq", api_key="gsk-fallback")
+                route(conn, primary, fallback, function_key="security_campaign_analysis", repair_json_once=False, fallback_on_invalid_json=True)
+                calls = []
+
+                def opener(request, timeout=0):
+                    calls.append(request.full_url)
+                    if "generativelanguage" in request.full_url:
+                        return FakeResponse({"candidates": [{"content": {"parts": [{"text": gemini_content}]}}]})
+                    return FakeResponse({"model": "model-b", "choices": [{"message": {"content": '{"summary":"groq"}'}}]})
+
+                result = ai.execute_ai_route(conn, "security_campaign_analysis", "bounded", schema=SCHEMA, opener=opener)
+                self.assertTrue(result["ok"])
+                self.assertEqual(expected_calls, len(calls))
+                self.assertEqual(expected_fallback, result["fallback_used"])
+                primary_status = conn.execute("SELECT status FROM ai_providers WHERE id=?", (primary["id"],)).fetchone()[0]
+                self.assertEqual("invalid_json" if expected_fallback else "available", primary_status)
+
+    def test_invalid_gemini_and_rate_limited_groq_return_composite_error(self):
+        conn = database()
+        primary = provider(conn, "Google Gemini", "https://generativelanguage.googleapis.com", "gemini", api_key="gemini-secret")
+        fallback = provider(conn, "Groq", "https://api.groq.com/openai/v1", "groq", api_key="gsk-rate-limited")
+        route(conn, primary, fallback, function_key="security_campaign_analysis", repair_json_once=False, fallback_on_invalid_json=True)
+
+        def opener(request, timeout=0):
+            if "generativelanguage" in request.full_url:
+                return FakeResponse({"candidates": [{"content": {"parts": [{"text": "not-json"}]}}]})
+            body = json.dumps({"error": {"message": "usage limit", "type": "rate_limit"}}).encode("utf-8")
+            raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", {}, io.BytesIO(body))
+
+        result = ai.execute_ai_route(conn, "security_campaign_analysis", "bounded", schema=SCHEMA, opener=opener)
+        self.assertFalse(result["ok"])
+        self.assertEqual("rate_limit", result["error_type"])
+        self.assertEqual(429, result["diagnostic"]["http_status"])
+        self.assertIn("Google Gemini respondeu em formato inválido", result["error_message"])
+        self.assertIn("provider de fallback Groq atingiu o limite de uso", result["error_message"])
+        self.assertEqual(["invalid_json", "rate_limit"], [item["error_type"] for item in result["provider_attempts"]])
+        stored = conn.execute("SELECT prompt_snapshot, response_snapshot FROM ai_requests ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(("", ""), tuple(stored))
+        provider_error = conn.execute("SELECT last_error FROM ai_providers WHERE id=?", (fallback["id"],)).fetchone()[0]
+        self.assertNotIn("usage limit", provider_error)
 
 
 class CentralAiRoutingTest(unittest.TestCase):

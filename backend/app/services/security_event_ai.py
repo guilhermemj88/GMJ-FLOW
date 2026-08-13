@@ -304,7 +304,13 @@ def _environment_executor(
     }
     provider = build_ai_provider(runtime)
     try:
-        generated = provider.generate(prompt, model=config["model"], structured=True, system_prompt=system_prompt)
+        generated = provider.generate(
+            prompt,
+            model=config["model"],
+            structured=True,
+            system_prompt=system_prompt,
+            schema=schema,
+        )
         structured = validate_structured_response(generated.get("content"), schema)
         return {
             "ok": True,

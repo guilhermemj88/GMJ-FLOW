@@ -236,7 +236,7 @@ def _run_event_ai(event_id: Any, force: bool) -> dict[str, Any]:
     if not result.get("ok"):
         status_code = {
             "disabled": 409, "not_configured": 409, "rate_limit": 429,
-            "timeout": 504, "unavailable": 503, "invalid_response": 502,
+            "timeout": 504, "unavailable": 503, "invalid_response": 502, "invalid_json": 502,
             "payload_too_large": 413,
         }.get(result.get("error_type") or result.get("status"), 503)
         raise HTTPException(status_code=status_code, detail={
@@ -296,7 +296,7 @@ def _run_campaign_ai(campaign_id: str, force: bool) -> dict[str, Any]:
     if not result.get("ok"):
         status_code = {
             "disabled": 409, "not_configured": 409, "rate_limit": 429,
-            "timeout": 504, "unavailable": 503, "invalid_response": 502,
+            "timeout": 504, "unavailable": 503, "invalid_response": 502, "invalid_json": 502,
             "payload_too_large": 413,
         }.get(result.get("error_type") or result.get("status"), 503)
         raise HTTPException(status_code=status_code, detail={

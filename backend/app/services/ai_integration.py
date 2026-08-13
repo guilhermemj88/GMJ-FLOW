@@ -4,6 +4,7 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -149,6 +150,7 @@ PROVIDER_DEFAULTS = {
 }
 
 AI_HTTP_USER_AGENT = "GMJ-FLOW/1.0"
+logger = logging.getLogger("gmj-flow")
 
 
 def utc_now_iso() -> str:
@@ -446,6 +448,7 @@ def parse_provider_http_error(exc: urllib.error.HTTPError, secrets: list[str] | 
         "category": category,
         "error_message": error_message,
         "http_status": http_status,
+        "response_chars": len(body),
         "provider_error": provider_error,
         "provider_error_code": provider_error_code or (cloudflare_error_code if cloudflare_error else ""),
         "provider_error_type": provider_error_type or ("browser_signature_banned" if cloudflare_error else ""),
@@ -1225,13 +1228,47 @@ def sanitize_ai_content(text: str, policy: str, external_provider: bool = False)
     return result
 
 
+def normalize_structured_json(value: Any) -> tuple[dict[str, Any], str]:
+    """Parse one unambiguous JSON object without manufacturing structure."""
+    if isinstance(value, dict):
+        return value, "native_object"
+    if not isinstance(value, str):
+        raise ValueError("Resposta estruturada deve ser um objeto JSON")
+    content = value.strip()
+    try:
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise ValueError("Resposta estruturada deve ser um objeto JSON")
+        return parsed, "pure_json"
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", content, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        parsed = json.loads(fenced.group(1).strip())
+        if not isinstance(parsed, dict):
+            raise ValueError("Resposta estruturada deve ser um objeto JSON")
+        return parsed, "markdown_fence"
+
+    start = content.find("{")
+    if start >= 0:
+        try:
+            parsed, consumed = json.JSONDecoder().raw_decode(content[start:])
+        except json.JSONDecodeError:
+            parsed = None
+            consumed = 0
+        prefix = content[:start].strip()
+        suffix = content[start + consumed:].strip() if consumed else ""
+        wrappers_are_small = len(prefix) + len(suffix) <= 240
+        wrappers_have_no_other_object = not any(character in prefix + suffix for character in "{}")
+        if isinstance(parsed, dict) and wrappers_are_small and wrappers_have_no_other_object:
+            return parsed, "wrapped_json"
+    raise ValueError("Resposta não contém um único objeto JSON inequívoco")
+
+
 def validate_structured_response(value: Any, schema: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(value, str):
-        content = value.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```(?:json)?", "", content, flags=re.IGNORECASE).strip()
-            content = re.sub(r"```$", "", content).strip()
-        value = json.loads(content)
+    if not isinstance(value, dict):
+        value, _ = normalize_structured_json(value)
     if not isinstance(value, dict):
         raise ValueError("Resposta estruturada deve ser um objeto JSON")
     if schema.get("additionalProperties") is False:
@@ -1317,7 +1354,14 @@ class AIProvider:
         started = time.monotonic()
         try:
             with self.opener(request, timeout=timeout or int(self.config.get("timeout_seconds") or 30)) as response:
-                data = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+                raw_response = response.read()
+                response_text = raw_response.decode("utf-8", errors="replace") if isinstance(raw_response, bytes) else clean_text(raw_response)
+                response_status = getattr(response, "status", None)
+                if response_status is None and hasattr(response, "getcode"):
+                    response_status = response.getcode()
+                self.last_request_diagnostic["http_status"] = int(response_status or 200)
+                self.last_request_diagnostic["response_chars"] = len(response_text)
+                data = json.loads(response_text or "{}")
                 return data if isinstance(data, dict) else {"items": data}, int((time.monotonic() - started) * 1000)
         except urllib.error.HTTPError as exc:
             error = parse_provider_http_error(exc, [self.api_key])
@@ -1325,6 +1369,8 @@ class AIProvider:
             error_message = clean_text(error.pop("error_message"))
             error["final_url"] = self.last_request_diagnostic.get("final_url", "")
             error["user_agent_present"] = bool(self.last_request_diagnostic.get("user_agent_present"))
+            self.last_request_diagnostic["http_status"] = error.get("http_status")
+            self.last_request_diagnostic["response_chars"] = int(error.get("response_chars") or 0)
             self.last_request_diagnostic["cloudflare_error_code"] = clean_text(error.get("cloudflare_error_code"))
             self.last_request_diagnostic["retryable"] = bool(error.get("retryable"))
             raise AIProviderError(error_message, category, exc.code, dict(self.last_request_diagnostic), error) from exc
@@ -1371,7 +1417,15 @@ class AIProvider:
         raw = payload.get("data") or payload.get("models") or payload.get("items") or []
         return [{"name": clean_text(item.get("id") or item.get("name") or item.get("model")), "metadata": item} for item in raw if isinstance(item, dict)]
 
-    def generate(self, prompt: str, model: str = "", structured: bool = False, system_prompt: str = "") -> dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        model: str = "",
+        structured: bool = False,
+        system_prompt: str = "",
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del schema
         payload, latency = self._request(
             clean_text(self.config.get("chat_endpoint")) or "/generate",
             "POST",
@@ -1411,7 +1465,15 @@ class OllamaProvider(AIProvider):
             if isinstance(item, dict)
         ]
 
-    def generate(self, prompt: str, model: str = "", structured: bool = False, system_prompt: str = "") -> dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        model: str = "",
+        structured: bool = False,
+        system_prompt: str = "",
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del schema
         selected_model = model or clean_text(self.config.get("default_model"))
         options = {
             "temperature": float(self.config.get("temperature") or 0.1),
@@ -1452,7 +1514,15 @@ class OpenAICompatibleProvider(AIProvider):
             headers["OpenAI-Project"] = clean_text(self.config.get("project"))
         return headers
 
-    def generate(self, prompt: str, model: str = "", structured: bool = False, system_prompt: str = "") -> dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        model: str = "",
+        structured: bool = False,
+        system_prompt: str = "",
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del schema
         selected_model = model or clean_text(self.config.get("default_model"))
         messages = []
         if system_prompt:
@@ -1494,19 +1564,43 @@ class GeminiProvider(AIProvider):
             headers["x-goog-api-key"] = self.api_key
         return headers
 
-    def generate(self, prompt: str, model: str = "", structured: bool = False, system_prompt: str = "") -> dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        model: str = "",
+        structured: bool = False,
+        system_prompt: str = "",
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         selected_model = model or clean_text(self.config.get("default_model"))
         path = (clean_text(self.config.get("chat_endpoint")) or "/v1beta/models/{model}:generateContent").replace("{model}", urllib.parse.quote(selected_model, safe=""))
         generation_config: dict[str, Any] = {"temperature": float(self.config.get("temperature") or 0.1), "topP": float(self.config.get("top_p") or 1.0), "maxOutputTokens": int(self.config.get("max_output_tokens") or 1024)}
-        if structured:
+        if structured and sqlite_bool(self.config.get("supports_json", True)):
             generation_config["responseMimeType"] = "application/json"
+            if schema:
+                generation_config["responseJsonSchema"] = schema
         body: dict[str, Any] = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": generation_config}
         if system_prompt:
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
         payload, latency = self._request(path, "POST", body)
-        candidates = payload.get("candidates") or []
-        parts = ((candidates[0].get("content") or {}).get("parts") if candidates else []) or []
-        content = "".join(clean_text(part.get("text")) for part in parts if isinstance(part, dict))
+        candidates = [item for item in (payload.get("candidates") or []) if isinstance(item, dict)]
+        content = ""
+        text_part_count = 0
+        for candidate in candidates:
+            parts = (candidate.get("content") or {}).get("parts") or []
+            text_parts = [part.get("text") for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)]
+            if text_parts:
+                content = "".join(text_parts).strip()
+                text_part_count = len(text_parts)
+                break
+        self.last_request_diagnostic.update(
+            {
+                "candidate_count": len(candidates),
+                "text_part_count": text_part_count,
+                "response_chars": len(content),
+                "structured_requested": bool(structured),
+            }
+        )
         return {"content": content, "latency_ms": latency, "model": selected_model, "usage": payload.get("usageMetadata") or {}}
 
 
@@ -1524,7 +1618,15 @@ class AnthropicProvider(AIProvider):
         headers["anthropic-version"] = "2023-06-01"
         return headers
 
-    def generate(self, prompt: str, model: str = "", structured: bool = False, system_prompt: str = "") -> dict[str, Any]:
+    def generate(
+        self,
+        prompt: str,
+        model: str = "",
+        structured: bool = False,
+        system_prompt: str = "",
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del schema
         selected_model = model or clean_text(self.config.get("default_model"))
         body: dict[str, Any] = {
             "model": selected_model,
@@ -1769,6 +1871,80 @@ def _should_fallback(route: dict[str, Any], category: str) -> bool:
     return bool(key and sqlite_bool(route.get(key)))
 
 
+def _safe_route_attempt(
+    provider: dict[str, Any] | None,
+    model: str,
+    function_key: str,
+    *,
+    structured_requested: bool,
+    fallback_used: bool,
+    request_diagnostic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request = request_diagnostic or {}
+    return {
+        "provider": clean_text((provider or {}).get("name")),
+        "model": clean_text(model),
+        "function_key": clean_text(function_key),
+        "http_status": request.get("http_status"),
+        "response_chars": int(request.get("response_chars") or 0),
+        "structured_requested": bool(structured_requested),
+        "json_parse_status": "not_requested" if not structured_requested else "not_parsed",
+        "repair_attempted": False,
+        "fallback_used": bool(fallback_used),
+    }
+
+
+def _log_safe_route_attempt(diagnostic: dict[str, Any]) -> None:
+    logger.info(
+        "ai_route_diagnostic provider=%s model=%s function_key=%s http_status=%s response_chars=%s "
+        "structured_requested=%s json_parse_status=%s repair_attempted=%s fallback_used=%s",
+        diagnostic.get("provider"),
+        diagnostic.get("model"),
+        diagnostic.get("function_key"),
+        diagnostic.get("http_status"),
+        diagnostic.get("response_chars"),
+        diagnostic.get("structured_requested"),
+        diagnostic.get("json_parse_status"),
+        diagnostic.get("repair_attempted"),
+        diagnostic.get("fallback_used"),
+    )
+
+
+def _provider_failure_summary(attempts: list[dict[str, Any]], fallback_attempted: bool) -> str:
+    failures = [item for item in attempts if clean_text(item.get("error_type"))]
+    if not failures:
+        return ""
+    # Retries of one route candidate collapse to its final diagnostic.
+    collapsed: list[dict[str, Any]] = []
+    for item in failures:
+        phase = "fallback" if item.get("fallback_used") else "primary"
+        if collapsed and ("fallback" if collapsed[-1].get("fallback_used") else "primary") == phase:
+            collapsed[-1] = item
+        else:
+            collapsed.append(item)
+
+    def phrase(item: dict[str, Any], fallback: bool) -> str:
+        provider_name = clean_text(item.get("provider")) or "Provider"
+        subject = f"o provider de fallback {provider_name}" if fallback else provider_name
+        category = clean_text(item.get("error_type"))
+        if category in {"invalid_json", "invalid_response"}:
+            return f"{subject} respondeu em formato inválido"
+        if category == "rate_limit":
+            return f"{subject} atingiu o limite de uso"
+        if category == "timeout":
+            return f"{subject} excedeu o tempo limite"
+        if category in {"server_error", "unavailable"}:
+            return f"{subject} está temporariamente indisponível"
+        if category == "cost_limit":
+            return f"{subject} atingiu o limite de custo configurado"
+        return f"{subject} falhou ({category or 'erro desconhecido'})"
+
+    rendered = [phrase(item, bool(item.get("fallback_used"))) for item in collapsed]
+    if len(rendered) > 1 and fallback_attempted:
+        return " e ".join(rendered) + "."
+    return rendered[-1] + "."
+
+
 def execute_ai_route(
     conn: sqlite3.Connection,
     function_key: str,
@@ -1799,6 +1975,9 @@ def execute_ai_route(
     total_attempts = 0
     last_provider_config: dict[str, Any] | None = None
     last_model = ""
+    provider_attempts: list[dict[str, Any]] = []
+    structured_requested = sqlite_bool(route.get("require_structured"))
+    suppress_content_history = function_key == "security_campaign_analysis"
     started_total = time.monotonic()
     for provider_id, route_model, fallback_used in candidates:
         fallback_attempted = fallback_attempted or fallback_used
@@ -1808,6 +1987,16 @@ def execute_ai_route(
             last_category = "unavailable"
             last_error_details = {}
             last_diagnostic = {}
+            diagnostic = _safe_route_attempt(
+                None,
+                route_model,
+                function_key,
+                structured_requested=structured_requested,
+                fallback_used=fallback_used,
+            )
+            diagnostic.update({"json_parse_status": "not_attempted", "error_type": last_category})
+            provider_attempts.append(diagnostic)
+            _log_safe_route_attempt(diagnostic)
             if fallback_used or not _should_fallback(route, last_category):
                 break
             continue
@@ -1818,6 +2007,16 @@ def execute_ai_route(
             last_category = "credential_disabled"
             last_error_details = {}
             last_diagnostic = {}
+            diagnostic = _safe_route_attempt(
+                provider_config,
+                last_model,
+                function_key,
+                structured_requested=structured_requested,
+                fallback_used=fallback_used,
+            )
+            diagnostic.update({"json_parse_status": "not_attempted", "error_type": last_category})
+            provider_attempts.append(diagnostic)
+            _log_safe_route_attempt(diagnostic)
             break
         allowed, limit_message = provider_usage_state(conn, provider_config)
         if not allowed:
@@ -1825,6 +2024,16 @@ def execute_ai_route(
             last_category = "cost_limit" if "financeiro" in limit_message.lower() else "rate_limit"
             last_error_details = {"retryable": last_category == "rate_limit"}
             last_diagnostic = {}
+            diagnostic = _safe_route_attempt(
+                provider_config,
+                last_model,
+                function_key,
+                structured_requested=structured_requested,
+                fallback_used=fallback_used,
+            )
+            diagnostic.update({"json_parse_status": "not_attempted", "error_type": last_category})
+            provider_attempts.append(diagnostic)
+            _log_safe_route_attempt(diagnostic)
             conn.execute(
                 "UPDATE ai_providers SET status = 'limited', last_error = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
                 (sanitize_error(limit_message), utc_now_iso(), utc_now_iso(), provider_id),
@@ -1844,42 +2053,67 @@ def execute_ai_route(
         for attempt in range(1, attempts + 1):
             total_attempts += 1
             started = time.monotonic()
+            safe_attempt = _safe_route_attempt(
+                provider_config,
+                model,
+                function_key,
+                structured_requested=structured_requested,
+                fallback_used=fallback_used,
+            )
             try:
                 generated = provider.generate(
                     sanitized_prompt,
                     model=model,
-                    structured=sqlite_bool(route.get("require_structured")),
+                    structured=structured_requested,
                     system_prompt=system_prompt,
+                    schema=schema,
                 )
                 content = clean_text(generated.get("content"))
+                safe_attempt["http_status"] = provider.last_request_diagnostic.get("http_status")
+                safe_attempt["response_chars"] = len(content)
                 structured = None
-                if sqlite_bool(route.get("require_structured")):
+                if structured_requested:
                     try:
-                        structured = validate_structured_response(content, schema or {})
+                        normalized, parse_mode = normalize_structured_json(content)
+                        structured = validate_structured_response(normalized, schema or {})
+                        safe_attempt["json_parse_status"] = f"valid:{parse_mode}"
                     except (ValueError, json.JSONDecodeError) as exc:
+                        safe_attempt["json_parse_status"] = "invalid"
                         if sqlite_bool(route.get("repair_json_once")):
+                            safe_attempt["repair_attempted"] = True
                             correction = provider.generate(
                                 f"Corrija a resposta abaixo para JSON válido, sem acrescentar texto:\n{content[:6000]}",
                                 model=model,
                                 structured=True,
                                 system_prompt="Retorne somente JSON válido.",
+                                schema=schema,
                             )
                             content = clean_text(correction.get("content"))
-                            structured = validate_structured_response(content, schema or {})
+                            safe_attempt["http_status"] = provider.last_request_diagnostic.get("http_status")
+                            safe_attempt["response_chars"] = len(content)
+                            normalized, parse_mode = normalize_structured_json(content)
+                            structured = validate_structured_response(normalized, schema or {})
+                            safe_attempt["json_parse_status"] = f"valid_after_repair:{parse_mode}"
                         else:
                             raise AIProviderError(sanitize_error(exc), "invalid_json") from exc
                 usage = dict(generated.get("usage") or {})
                 estimate = provider.estimate_usage(sanitized_prompt, content)
                 usage = {
-                    "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens") or estimate["input_tokens"],
-                    "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens") or estimate["output_tokens"],
+                    "input_tokens": usage.get("prompt_tokens") or usage.get("input_tokens") or usage.get("promptTokenCount") or estimate["input_tokens"],
+                    "output_tokens": usage.get("completion_tokens") or usage.get("output_tokens") or usage.get("candidatesTokenCount") or estimate["output_tokens"],
                     "estimated_cost": estimate["estimated_cost"],
                 }
                 duration_ms = int((time.monotonic() - started) * 1000)
+                safe_attempt["error_type"] = ""
+                provider_attempts.append(safe_attempt)
+                _log_safe_route_attempt(safe_attempt)
                 request_id = _log_ai_request(
                     conn, function_key, provider_config, model, "success", duration_ms, attempt,
-                    fallback_used, usage, prompt=prompt, sanitized_prompt=sanitized_prompt,
-                    response=content, anomaly_id=anomaly_id, mitigation_id=mitigation_id,
+                    fallback_used, usage,
+                    prompt="" if suppress_content_history else prompt,
+                    sanitized_prompt="" if suppress_content_history else sanitized_prompt,
+                    response="" if suppress_content_history else content,
+                    anomaly_id=anomaly_id, mitigation_id=mitigation_id,
                 )
                 conn.execute(
                     "UPDATE ai_providers SET status = 'available', last_latency_ms = ?, last_error = '', last_checked_at = ?, updated_at = ? WHERE id = ?",
@@ -1899,6 +2133,8 @@ def execute_ai_route(
                     "attempts": attempt,
                     "fallback_used": fallback_used,
                     "usage": usage,
+                    "diagnostic": safe_attempt,
+                    "provider_attempts": provider_attempts,
                 }
             except AIProviderError as exc:
                 last_error = sanitize_error(exc, [provider_config.get("api_key") or ""])
@@ -1915,6 +2151,13 @@ def execute_ai_route(
                 last_category = "timeout" if isinstance(exc, (TimeoutError, socket.timeout)) else "unavailable"
                 last_error_details = {"retryable": True}
                 last_diagnostic = dict(provider.last_request_diagnostic)
+            safe_attempt["http_status"] = last_diagnostic.get("http_status", safe_attempt.get("http_status"))
+            safe_attempt["response_chars"] = int(last_diagnostic.get("response_chars") or safe_attempt.get("response_chars") or 0)
+            if structured_requested and safe_attempt["json_parse_status"] == "not_parsed" and last_category in {"invalid_json", "invalid_response"}:
+                safe_attempt["json_parse_status"] = "invalid"
+            safe_attempt["error_type"] = last_category
+            provider_attempts.append(safe_attempt)
+            _log_safe_route_attempt(safe_attempt)
             if attempt < attempts and last_category in {"timeout", "rate_limit", "server_error", "unavailable"}:
                 delay = max(0, int(provider_config.get("retry_interval_ms") or 0)) / 1000
                 if delay:
@@ -1923,15 +2166,36 @@ def execute_ai_route(
             break
         conn.execute(
             "UPDATE ai_providers SET status = ?, last_error = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
-            (last_category, last_error, utc_now_iso(), utc_now_iso(), provider_id),
+            (
+                last_category,
+                _provider_failure_summary([provider_attempts[-1]], fallback_used) if suppress_content_history and provider_attempts else last_error,
+                utc_now_iso(),
+                utc_now_iso(),
+                provider_id,
+            ),
         )
         if fallback_used or not _should_fallback(route, last_category):
             break
     duration_ms = int((time.monotonic() - started_total) * 1000)
+    composite_error = _provider_failure_summary(provider_attempts, fallback_attempted)
+    final_error = composite_error or last_error or "Todos os providers falharam"
+    final_diagnostic = {
+        **last_diagnostic,
+        **(provider_attempts[-1] if provider_attempts else {}),
+    }
+    returned_error_details = last_error_details
+    if suppress_content_history:
+        safe_detail_keys = {
+            "http_status", "retryable", "provider_error", "provider_error_code", "provider_error_type",
+            "cloudflare_error", "cloudflare_error_code", "cloudflare_ray_id", "final_url", "user_agent_present",
+        }
+        returned_error_details = {key: value for key, value in last_error_details.items() if key in safe_detail_keys}
     request_id = _log_ai_request(
         conn, function_key, last_provider_config, last_model, "failed", duration_ms, total_attempts, fallback_attempted,
-        {}, error_type=last_category, error_message=last_error, prompt=prompt,
-        sanitized_prompt=sanitize_ai_content(prompt, "mask_ips"), anomaly_id=anomaly_id, mitigation_id=mitigation_id,
+        {}, error_type=last_category, error_message=final_error,
+        prompt="" if suppress_content_history else prompt,
+        sanitized_prompt="" if suppress_content_history else sanitize_ai_content(prompt, "mask_ips"),
+        anomaly_id=anomaly_id, mitigation_id=mitigation_id,
     )
     return {
         "ok": False,
@@ -1939,9 +2203,10 @@ def execute_ai_route(
         "function_key": function_key,
         "status": last_category if last_category == "client_blocked" else "failed",
         "error_type": last_category,
-        "error_message": last_error or "Todos os providers falharam",
-        **last_error_details,
-        "diagnostic": last_diagnostic,
+        "error_message": final_error,
+        **returned_error_details,
+        "diagnostic": final_diagnostic,
+        "provider_attempts": provider_attempts,
         "duration_ms": duration_ms,
         "attempts": total_attempts,
         "fallback_used": fallback_attempted,

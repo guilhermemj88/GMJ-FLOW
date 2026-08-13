@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from typing import Any, Callable, Mapping
 
@@ -15,7 +16,8 @@ from app.services.threat_contracts import SECURITY_EVENT_ANALYSIS_SCHEMA
 from app.services.threat_intelligence import clean_text, json_dump, safe_json, utc_now_iso
 
 
-ANALYSIS_VERSION = "campaign-analysis/v1"
+ANALYSIS_VERSION = "campaign-analysis/v2"
+logger = logging.getLogger("gmj-flow")
 CAMPAIGN_AI_SYSTEM_PROMPT = """You are a network security analyst specialized in ISP, carrier and broadband networks.
 
 Analyze this campaign as a campaign, not as an individual Security Event. Use only the bounded evidence provided by GMJ-FLOW and do not invent facts.
@@ -27,6 +29,176 @@ Do not call a campaign confirmed only because its detector or coordination score
 A single persisted GreyNoise malicious match among thousands of sources is contextual support, not isolated confirmation of the whole campaign. Absence of a GreyNoise match does not mean a source is benign. State clearly when evidence is inconclusive.
 
 Return concise operational guidance as valid JSON matching the requested schema. The analysis is advisory only. Never claim mitigation happened and never perform, request, or imply automatic mitigation."""
+
+
+CAMPAIGN_PROMPT_PREFIX = (
+    "Analyze the bounded Campaign Investigation payload below and return only JSON matching the requested schema. "
+    "Keep campaign evidence, correlated Security Events, Threat Intelligence enrichment, and inference distinct.\n"
+    "CAMPAIGN_JSON_BEGIN\n"
+)
+CAMPAIGN_PROMPT_SUFFIX = "\nCAMPAIGN_JSON_END"
+_REDUCIBLE_CAMPAIGN_SECTIONS = (
+    ("correlated_events",),
+    ("detection_correlation_evidence", "contributors"),
+    ("threat_intelligence", "matches"),
+    ("asn_diversity", "distribution"),
+    ("top_sources",),
+    ("target", "ports"),
+    ("detection_correlation_evidence", "detector_facts"),
+    ("campaign_metadata", "contributing_detectors"),
+    ("threat_intelligence", "summary", "tags"),
+    ("threat_intelligence", "summary", "indicator_types"),
+    ("threat_intelligence", "summary", "classifications"),
+    ("threat_intelligence", "summary", "providers"),
+)
+
+
+def _campaign_prompt(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"{CAMPAIGN_PROMPT_PREFIX}{encoded}{CAMPAIGN_PROMPT_SUFFIX}"
+
+
+def _payload_section(payload: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any] | None:
+    value: Any = payload
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value if isinstance(value, dict) and isinstance(value.get("items"), list) else None
+
+
+def _campaign_section_counts(payload: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+    paths = {
+        "top_sources": ("top_sources",),
+        "asn_distribution": ("asn_diversity", "distribution"),
+        "ports": ("target", "ports"),
+        "protocols": ("target", "protocols"),
+        "correlated_events": ("correlated_events",),
+        "threat_intelligence_matches": ("threat_intelligence", "matches"),
+        "detector_facts": ("detection_correlation_evidence", "detector_facts"),
+        "contributors": ("detection_correlation_evidence", "contributors"),
+    }
+    counts: dict[str, dict[str, int]] = {}
+    for name, path in paths.items():
+        value: Any = payload
+        for key in path:
+            value = value.get(key) if isinstance(value, Mapping) else None
+        section = value if isinstance(value, Mapping) else {}
+        counts[name] = {
+            "total_count": int(section.get("total_count") or 0),
+            "included_count": int(section.get("included_count") or 0),
+        }
+    return counts
+
+
+def _trim_payload_text(value: Any, max_chars: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_chars else value[:max_chars]
+    if isinstance(value, list):
+        return [_trim_payload_text(item, max_chars) for item in value]
+    if isinstance(value, dict):
+        return {key: _trim_payload_text(item, max_chars) for key, item in value.items()}
+    return value
+
+
+def _compact_campaign_core(payload: dict[str, Any]) -> None:
+    """Remove descriptive duplication while retaining the required scalar evidence."""
+    target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    if (target.get("protocols") or {}).get("items"):
+        target.pop("protocol_summary", None)
+    if not target.get("network_context"):
+        target.pop("network_context", None)
+
+    traffic = payload.get("traffic_metrics") if isinstance(payload.get("traffic_metrics"), dict) else {}
+    for group_name in ("peak_rates", "snapshot_totals"):
+        group = traffic.get(group_name) if isinstance(traffic.get(group_name), dict) else {}
+        for metric in group.values():
+            provenance = metric.get("provenance") if isinstance(metric, dict) and isinstance(metric.get("provenance"), dict) else {}
+            provenance.pop("note", None)
+            provenance.pop("aggregation", None)
+    (traffic.get("peak_rates") or {}).pop("flows_per_second", None)
+
+    baseline = payload.get("baseline_and_per_host_context")
+    if isinstance(baseline, dict):
+        baseline.pop("interpretation", None)
+    asn = payload.get("asn_diversity") if isinstance(payload.get("asn_diversity"), dict) else {}
+    asn.pop("distribution_context", None)
+    metadata = payload.get("campaign_metadata") if isinstance(payload.get("campaign_metadata"), dict) else {}
+    metadata.pop("contributing_detectors", None)
+    evidence = payload.get("detection_correlation_evidence") if isinstance(payload.get("detection_correlation_evidence"), dict) else {}
+    evidence.pop("score_semantics", None)
+    threat = payload.get("threat_intelligence") if isinstance(payload.get("threat_intelligence"), dict) else {}
+    summary = threat.get("summary") if isinstance(threat.get("summary"), dict) else {}
+    for name in ("classifications", "indicator_types", "tags"):
+        section = summary.get(name) if isinstance(summary.get(name), dict) else {}
+        if not int(section.get("total_count") or 0):
+            summary.pop(name, None)
+
+
+def build_campaign_analysis_prompt(
+    investigation: Mapping[str, Any],
+    *,
+    max_prompt_chars: int | None = None,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Build a bounded valid-JSON Campaign prompt using progressive list reduction."""
+    hard_limit = max(4000, min(int(max_prompt_chars or 30000), 100000))
+    practical_target = min(hard_limit, 25000)
+    payload = campaign_analysis_payload(investigation)
+    prompt = _campaign_prompt(payload)
+
+    # Reduce one section at a time and re-measure so useful evidence is retained.
+    while len(prompt) > practical_target:
+        changed = False
+        for path in _REDUCIBLE_CAMPAIGN_SECTIONS:
+            current = _payload_section(payload, path)
+            if current is None or not current["items"]:
+                continue
+            size = len(current["items"])
+            reduced_size = max(0, size // 2)
+            current["items"] = current["items"][:reduced_size]
+            current["included_count"] = reduced_size
+            changed = True
+            prompt = _campaign_prompt(payload)
+            if len(prompt) <= practical_target:
+                break
+        if not changed:
+            break
+
+    # Extremely verbose persisted labels/facts can still exceed a small configured cap.
+    # Text is only truncated; fields and values are never synthesized.
+    if len(prompt) > hard_limit:
+        _compact_campaign_core(payload)
+        prompt = _campaign_prompt(payload)
+
+    if len(prompt) > hard_limit:
+        for text_limit in (240, 120, 60):
+            payload = _trim_payload_text(payload, text_limit)
+            prompt = _campaign_prompt(payload)
+            if len(prompt) <= hard_limit:
+                break
+
+    if len(prompt) > hard_limit:
+        for path in _REDUCIBLE_CAMPAIGN_SECTIONS:
+            current = _payload_section(payload, path)
+            if current is not None and current["items"]:
+                current["items"] = []
+                current["included_count"] = 0
+                prompt = _campaign_prompt(payload)
+                if len(prompt) <= hard_limit:
+                    break
+
+    diagnostic = {
+        "prompt_chars": len(prompt),
+        "approx_tokens": (len(prompt) + 3) // 4,
+        "sections": _campaign_section_counts(payload),
+    }
+    logger.info(
+        "campaign_ai_payload prompt_chars=%s approx_tokens=%s sections=%s",
+        diagnostic["prompt_chars"],
+        diagnostic["approx_tokens"],
+        diagnostic["sections"],
+    )
+    return prompt, payload, diagnostic
 
 
 def ensure_campaign_ai_schema(conn: sqlite3.Connection) -> None:
@@ -69,7 +241,7 @@ def campaign_analysis_fingerprints(investigation: Mapping[str, Any], payload: Ma
         {
             key: payload.get(key)
             for key in (
-                "target", "top_sources", "asn_diversity", "traffic_metrics", "correlated_events",
+                "target", "top_sources", "asn_diversity", "traffic_metrics", "baseline_and_per_host_context", "correlated_events",
                 "threat_intelligence", "detection_correlation_evidence",
             )
         }
@@ -153,7 +325,8 @@ def analyze_campaign(
     investigation = get_campaign_investigation(conn, campaign_id)
     if investigation is None:
         return {"ok": False, "status": "not_found", "error_message": "Campanha não encontrada"}
-    if executor is None and not security_ai_config(conn, "security_campaign_analysis")["kill_switch_enabled"]:
+    config = security_ai_config(conn, "security_campaign_analysis")
+    if executor is None and not config["kill_switch_enabled"]:
         return {
             "ok": False,
             "status": "disabled",
@@ -187,11 +360,9 @@ def analyze_campaign(
             "mitigation_executed": False,
         }
 
-    prompt = (
-        "Analyze the bounded Campaign Investigation payload below and return only JSON matching the requested schema. "
-        "Keep campaign evidence, correlated Security Events, Threat Intelligence enrichment, and inference distinct.\n"
-        f"CAMPAIGN_JSON_BEGIN\n{json.dumps(payload, ensure_ascii=False, separators=(',', ':'), default=str)}\n"
-        "CAMPAIGN_JSON_END"
+    prompt, _bounded_payload, payload_diagnostic = build_campaign_analysis_prompt(
+        investigation,
+        max_prompt_chars=config["max_prompt_chars"],
     )
     now = utc_now_iso()
     cursor = conn.execute(
@@ -209,8 +380,26 @@ def analyze_campaign(
             event_type, detector, campaign_vector_json, reason, non_mitigation_reason, created_at
         ) VALUES ('AI_REQUEST', 'campaign_ai', ?, 'structured_campaign_analysis', 'ai_is_manual_advisory_only', ?)
         """,
-        (json_dump({"campaign_id": campaign_id, "analysis_version": ANALYSIS_VERSION, "evidence_fingerprint": evidence_fingerprint}), now),
+        (json_dump(payload_diagnostic), now),
     )
+    if payload_diagnostic["prompt_chars"] > config["max_prompt_chars"]:
+        error_message = "Payload estruturado da campanha excede o limite configurado após compactação"
+        conn.execute(
+            """
+            UPDATE campaign_ai_analyses
+            SET status='failed', error_type='payload_too_large', error_message=?, updated_at=? WHERE id=?
+            """,
+            (error_message, utc_now_iso(), analysis_id),
+        )
+        conn.commit()
+        return {
+            "ok": False,
+            "status": "failed",
+            "error_type": "payload_too_large",
+            "error_message": error_message,
+            "analysis_id": analysis_id,
+            "payload_diagnostic": payload_diagnostic,
+        }
     selected_executor = executor or execute_security_ai_provider
     result = selected_executor(
         conn,
@@ -241,7 +430,7 @@ def analyze_campaign(
             (json_dump({key: value for key, value in result.items() if key != "content"}), error_message, failed_at),
         )
         conn.commit()
-        return {**result, "analysis_id": analysis_id}
+        return {**result, "analysis_id": analysis_id, "payload_diagnostic": payload_diagnostic}
 
     analysis = normalize_advisory_analysis(result.get("structured"))
     if analysis is None:
@@ -282,10 +471,10 @@ def analyze_campaign(
         ) VALUES ('AI_RESPONSE', 'campaign_ai', ?, ?, ?, ?, 'ai_is_manual_advisory_only', ?)
         """,
         (
-            json_dump({"campaign_id": campaign_id, "analysis_id": analysis_id, "analysis": analysis, "provider": provider, "model": model, "analysis_version": ANALYSIS_VERSION}),
+            json_dump({"campaign_id": campaign_id, "analysis_id": analysis_id, "provider": provider, "model": model, "analysis_version": ANALYSIS_VERSION}),
             json_dump({"policy_verdict": "NOT_EVALUATED"}),
             json_dump({"mitigation_executed": False}),
-            clean_text(analysis.get("summary")),
+            "structured_campaign_analysis_completed",
             analyzed_at,
         ),
     )
@@ -304,4 +493,5 @@ def analyze_campaign(
         "evidence_fingerprint": evidence_fingerprint,
         "advisory_only": True,
         "mitigation_executed": False,
+        "payload_diagnostic": payload_diagnostic,
     }

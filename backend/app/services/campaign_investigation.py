@@ -13,7 +13,15 @@ from app.services.threat_intelligence import clean_text
 
 SOURCE_LIMIT = 100
 ASN_LIMIT = 100
-DETAIL_LIMIT = 20
+CAMPAIGN_AI_LIMITS = {
+    "top_sources": 20,
+    "asn_distribution": 20,
+    "ports": 20,
+    "correlated_events": 10,
+    "threat_intelligence_matches": 20,
+    "detector_facts": 20,
+    "contributors": 10,
+}
 PROTOCOL_NAMES = {
     1: "ICMP",
     6: "TCP",
@@ -33,6 +41,21 @@ def _duration_seconds(first_seen: Any, last_seen: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return max(0.0, round((last - first).total_seconds(), 3))
+
+
+def _human_duration(seconds: Any) -> str | None:
+    try:
+        remaining = max(0, int(float(seconds)))
+    except (TypeError, ValueError):
+        return None
+    days, remaining = divmod(remaining, 86400)
+    hours, remaining = divmod(remaining, 3600)
+    minutes, seconds_value = divmod(remaining, 60)
+    parts = []
+    for value, suffix in ((days, "d"), (hours, "h"), (minutes, "m"), (seconds_value, "s")):
+        if value or (suffix == "s" and not parts):
+            parts.append(f"{value}{suffix}")
+    return " ".join(parts)
 
 
 def _optional_number(value: Mapping[str, Any], *keys: str, integer: bool = False) -> int | float | None:
@@ -279,7 +302,7 @@ def _ranked_feature_details(
                 row.update(protocol_details(detail.get(identity), detail.get("protocol_number")))
             for metric in ("packets", "bytes", "flows"):
                 row[metric] += max(0, int(detail.get(metric) or 0))
-    return sorted(rows.values(), key=lambda item: (-int(item["packets"]), clean_text(item.get(identity))))[:DETAIL_LIMIT]
+    return sorted(rows.values(), key=lambda item: (-int(item["packets"]), clean_text(item.get(identity))))
 
 
 def _enrichment_summary(campaign: Mapping[str, Any]) -> dict[str, Any]:
@@ -563,6 +586,12 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
         "campaign_detector": campaign["detector"],
         "detector_score_semantics": "Detector score reflects local detection criteria, not probabilistic certainty.",
         "correlation_features": correlation_features,
+        "contributing_vector_count": len(vectors),
+        "detector_fact_count": sum(
+            len((item.get("features") or {}).get("evidence") or [])
+            for item in vectors
+            if isinstance(item.get("features"), Mapping)
+        ),
         "contributing_vectors": [
             {
                 "attack_type": item.get("attack_type"),
@@ -638,77 +667,273 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
 def campaign_analysis_payload(investigation: Mapping[str, Any]) -> dict[str, Any]:
     campaign = investigation.get("campaign") if isinstance(investigation.get("campaign"), Mapping) else {}
     traffic = investigation.get("target_traffic") if isinstance(investigation.get("target_traffic"), Mapping) else {}
+    provenance = investigation.get("metric_provenance") if isinstance(investigation.get("metric_provenance"), Mapping) else {}
+    detection = investigation.get("detection_context") if isinstance(investigation.get("detection_context"), Mapping) else {}
+    evidence = investigation.get("detection_correlation_evidence") if isinstance(investigation.get("detection_correlation_evidence"), Mapping) else {}
     threat = campaign.get("threat_intel") if isinstance(campaign.get("threat_intel"), Mapping) else {}
     source_intel = threat.get("source_intel") if isinstance(threat.get("source_intel"), Mapping) else {}
     source_matches = source_intel.get("sources") if isinstance(source_intel.get("sources"), Mapping) else {}
     target_intel = threat.get("target_campaign_intel") if isinstance(threat.get("target_campaign_intel"), Mapping) else {}
-    bounded_sources = [
-        {
+
+    def section(items: Sequence[Any], limit: int, *, total_count: Any = None) -> dict[str, Any]:
+        values = list(items)
+        try:
+            total = max(len(values), int(total_count)) if total_count is not None else len(values)
+        except (TypeError, ValueError):
+            total = len(values)
+        included = values[: max(0, limit)]
+        return {"total_count": total, "included_count": len(included), "items": included}
+
+    def compact_provenance(metric: str) -> dict[str, Any]:
+        value = provenance.get(metric) if isinstance(provenance.get(metric), Mapping) else {}
+        return {
+            key: value.get(key)
+            for key in (
+                "source", "scope", "aggregation", "window_seconds", "contributing_window_seconds",
+                "first_seen", "last_seen", "note",
+            )
+            if value.get(key) not in (None, "", [])
+        }
+
+    top_source_rows = [value for value in (investigation.get("top_sources") or []) if isinstance(value, Mapping)]
+    bounded_sources = []
+    for item in top_source_rows:
+        compact_source = {
             key: item.get(key)
             for key in (
                 "source_ip", "source_asn", "asn_organization", "packets", "bytes", "flows", "pps",
-                "country", "share", "threat_intelligence_classification", "threat_intelligence_providers",
+                "country", "share", "threat_intelligence_classification",
             )
+            if item.get(key) not in (None, "", [])
         }
-        for item in [value for value in (investigation.get("top_sources") or []) if isinstance(value, Mapping)][:50]
-    ]
-    bounded_intel_rows = []
-    for ip, matches in list(source_matches.items())[:50]:
-        for match in [item for item in (matches or []) if isinstance(item, Mapping)][:5]:
-            bounded_intel_rows.append(
+        providers = list(item.get("threat_intelligence_providers") or [])
+        if providers:
+            compact_source["threat_intelligence_providers"] = section(providers, 10)
+        bounded_sources.append(compact_source)
+    intel_rows = []
+    intel_total_count = 0
+    for ip, matches in source_matches.items():
+        for match in [item for item in (matches or []) if isinstance(item, Mapping)]:
+            intel_total_count += 1
+            if len(intel_rows) >= CAMPAIGN_AI_LIMITS["threat_intelligence_matches"]:
+                continue
+            intel_rows.append(
                 {
+                    "scope": "source",
                     "source_ip": clean_text(ip)[:64],
                     "provider": clean_text(match.get("provider"))[:100],
                     "classification": clean_text(match.get("classification") or match.get("indicator_type"))[:100],
                     "organization": clean_text(match.get("organization"))[:300],
                     "country": clean_text(match.get("country") or match.get("country_code"))[:100],
                     "last_seen": clean_text(match.get("last_seen"))[:100],
-                    "tags": [clean_text(value)[:100] for value in (match.get("tags") or [])[:20]],
+                    "tags": section([clean_text(value)[:100] for value in (match.get("tags") or []) if clean_text(value)], 20),
                 }
             )
-            if len(bounded_intel_rows) >= 50:
-                break
-        if len(bounded_intel_rows) >= 50:
-            break
+    target_observations = [item for item in (target_intel.get("observations") or []) if isinstance(item, Mapping)]
+    for observation in target_observations:
+        intel_total_count += 1
+        if len(intel_rows) >= CAMPAIGN_AI_LIMITS["threat_intelligence_matches"]:
+            continue
+        intel_rows.append(
+            {
+                "scope": "target",
+                "provider": clean_text(observation.get("provider"))[:100],
+                "classification": clean_text(observation.get("classification") or observation.get("indicator_type"))[:100],
+                "organization": clean_text(observation.get("organization"))[:300],
+                "country": clean_text(observation.get("country") or observation.get("country_code"))[:100],
+                "last_seen": clean_text(observation.get("last_seen"))[:100],
+                "tags": section([clean_text(value)[:100] for value in (observation.get("tags") or []) if clean_text(value)], 20),
+            }
+        )
+
+    protocol_rows = [
+        {
+            key: item.get(key)
+            for key in ("protocol", "protocol_number", "protocol_name", "protocol_label", "packets", "bytes", "flows")
+            if item.get(key) not in (None, "")
+        }
+        for item in (traffic.get("protocols") or [])
+        if isinstance(item, Mapping)
+    ]
+    port_rows = [
+        {
+            "direction": direction,
+            **{
+                key: item.get(key)
+                for key in ("port", "packets", "bytes", "flows")
+                if item.get(key) not in (None, "")
+            },
+        }
+        for direction, values in (("destination", traffic.get("ports") or []), ("source", traffic.get("source_ports") or []))
+        for item in values
+        if isinstance(item, Mapping)
+    ]
+    asn_rows = [
+        {
+            key: item.get(key)
+            for key in ("asn", "organization", "country", "sources", "percentage")
+            if item.get(key) not in (None, "")
+        }
+        for item in (investigation.get("asn_distribution") or [])
+        if isinstance(item, Mapping)
+    ]
+    correlated_rows = []
+    for item in (investigation.get("correlated_events") or []):
+        if not isinstance(item, Mapping):
+            continue
+        compact_event = {
+            key: item.get(key)
+            for key in ("id", "public_id", "event_type", "score", "target", "first_seen", "last_seen", "source_count")
+            if item.get(key) not in (None, "")
+        }
+        event_intel = item.get("threat_intelligence") if isinstance(item.get("threat_intelligence"), Mapping) else {}
+        compact_event["threat_intelligence"] = {
+            "matched_sources": event_intel.get("matched_sources"),
+            "providers": section(list(event_intel.get("providers") or []), 20),
+            "classifications": section(list(event_intel.get("classifications") or []), 20),
+        }
+        correlated_rows.append(compact_event)
+    contributor_rows = [item for item in (evidence.get("contributing_vectors") or []) if isinstance(item, Mapping)]
+    detector_facts = [clean_text(item)[:500] for item in (detection.get("detector_facts") or []) if clean_text(item)]
+    for contributor in contributor_rows:
+        detector_facts.extend(clean_text(item)[:500] for item in (contributor.get("detector_facts") or []) if clean_text(item))
+    detector_facts = list(dict.fromkeys(detector_facts))
+    compact_contributors = [
+        {
+            key: item.get(key)
+            for key in ("attack_type", "detector", "score", "first_seen", "last_seen", "source", "target", "baseline_delta")
+            if item.get(key) not in (None, "")
+        }
+        for item in contributor_rows
+    ]
+    enrichment = campaign.get("enrichment_summary") if isinstance(campaign.get("enrichment_summary"), Mapping) else {}
+    network = traffic.get("network_context") if isinstance(traffic.get("network_context"), Mapping) else {}
+    compact_network = {
+        key: network.get(key)
+        for key in (
+            "traffic_direction", "src_role", "dst_role", "src_is_cgnat", "dst_is_cgnat",
+            "input_if", "output_if", "sensor", "exporter", "src_asn", "src_as_name", "src_country",
+            "dst_asn", "dst_as_name", "dst_country", "source_asn", "source_as_name",
+            "source_country", "target_asn", "target_as_name", "target_country",
+        )
+        if network.get(key) not in (None, "")
+    }
+    correlation_features = evidence.get("correlation_features") if isinstance(evidence.get("correlation_features"), Mapping) else {}
+    compact_correlation = {
+        key: value
+        for key, value in correlation_features.items()
+        if not isinstance(value, (list, dict)) and value not in (None, "")
+    }
+    attack_types = [clean_text(value) for value in (correlation_features.get("attack_types") or []) if clean_text(value)]
+    if attack_types:
+        compact_correlation["attack_types"] = section(attack_types, 20)
+    score_components = detection.get("score_components") if isinstance(detection.get("score_components"), Mapping) else {}
+    score_component_rows = [
+        {"component": clean_text(key)[:100], "value": value}
+        for key, value in score_components.items()
+        if isinstance(value, (bool, int, float, str)) or value is None
+    ]
+
     return {
         "campaign_metadata": {
             "campaign_id": campaign.get("campaign_id"),
             "classification": campaign.get("classification"),
             "family": campaign.get("family"),
             "coordination_score": campaign.get("coordination_score"),
+            "score_semantics": "Coordination score reflects local detector/correlation criteria, not attack probability.",
             "first_seen": campaign.get("first_seen"),
             "last_seen": campaign.get("last_seen"),
             "duration_seconds": campaign.get("duration_seconds"),
+            "duration_human": _human_duration(campaign.get("duration_seconds")),
             "persistence": campaign.get("persistence"),
             "recurrence_count": campaign.get("recurrence_count"),
             "detector": campaign.get("detector"),
-            "contributing_detectors": campaign.get("contributing_detectors"),
+            "contributing_detectors": section(list(campaign.get("contributing_detectors") or []), 10),
         },
         "target": {
             "prefix": campaign.get("target"),
             "role": traffic.get("target_role"),
-            "network_context": traffic.get("network_context") or {},
-            "protocol": traffic.get("protocol"),
-            "protocols": traffic.get("protocols") or [],
-            "ports": traffic.get("ports"),
+            "network_context": compact_network,
+            "protocol_summary": traffic.get("protocol"),
+            "protocols": section(protocol_rows, len(protocol_rows)),
+            "ports": section(port_rows, CAMPAIGN_AI_LIMITS["ports"]),
         },
-        "coordination_score": campaign.get("coordination_score"),
-        "top_sources": bounded_sources,
+        "top_sources": section(
+            bounded_sources,
+            CAMPAIGN_AI_LIMITS["top_sources"],
+            total_count=campaign.get("unique_sources"),
+        ),
         "asn_diversity": {
             "count": campaign.get("unique_source_asns"),
-            "distribution": list(investigation.get("asn_distribution") or [])[:20],
+            "distribution": section(
+                asn_rows,
+                CAMPAIGN_AI_LIMITS["asn_distribution"],
+                total_count=campaign.get("unique_source_asns"),
+            ),
             "distribution_context": investigation.get("asn_distribution_context") or {},
         },
-        "traffic_metrics": dict(traffic),
-        "metric_provenance": investigation.get("metric_provenance") or {},
-        "detection_context": investigation.get("detection_context") or {},
-        "correlated_events": list(investigation.get("correlated_events") or [])[:20],
-        "threat_intelligence": {
-            "summary": campaign.get("enrichment_summary") or {},
-            "source_matches": bounded_intel_rows,
-            "target_observations": [dict(item) for item in (target_intel.get("observations") or []) if isinstance(item, Mapping)][:20],
+        "traffic_metrics": {
+            "peak_rates": {
+                metric: {"value": traffic.get(metric), "provenance": compact_provenance(metric)}
+                for metric in ("pps", "bps", "flows_per_second")
+            },
+            "snapshot_totals": {
+                metric: {"value": traffic.get(metric), "provenance": compact_provenance(metric)}
+                for metric in ("packets", "bytes", "flows")
+            },
+            "source_count": traffic.get("source_count"),
+            "asn_diversity": traffic.get("asn_diversity"),
+            "investigation_window": {
+                key: (traffic.get("investigation_window") or {}).get(key)
+                for key in ("first_seen", "last_seen", "window_seconds", "contributing_detection_window_seconds")
+                if (traffic.get("investigation_window") or {}).get(key) not in (None, "", [])
+            },
         },
-        "detection_correlation_evidence": investigation.get("detection_correlation_evidence") or {},
+        "baseline_and_per_host_context": {
+            key: detection.get(key)
+            for key in (
+                "observed_pps", "baseline_pps", "baseline_delta", "max_per_host_pps",
+                "source_count", "asn_diversity", "destination_count", "target_role", "interpretation",
+            )
+            if detection.get(key) not in (None, "")
+        },
+        "correlated_events": section(correlated_rows, CAMPAIGN_AI_LIMITS["correlated_events"]),
+        "threat_intelligence": {
+            "persisted": bool(enrichment.get("available")),
+            "summary": {
+                "matches": enrichment.get("matches"),
+                "matched_sources": enrichment.get("matched_sources"),
+                "lookup_count": enrichment.get("lookup_count"),
+                "target_matches": enrichment.get("target_matches"),
+                "providers": section(list(enrichment.get("providers") or []), 20),
+                "classifications": section(list(enrichment.get("classifications") or []), 20),
+                "indicator_types": section(list(enrichment.get("indicator_types") or []), 20),
+                "tags": section(list(enrichment.get("tags") or []), 20),
+            },
+            "matches": section(
+                intel_rows,
+                CAMPAIGN_AI_LIMITS["threat_intelligence_matches"],
+                total_count=max(int(enrichment.get("matches") or 0), intel_total_count),
+            ),
+        },
+        "detection_correlation_evidence": {
+            "campaign_detector": evidence.get("campaign_detector"),
+            "detector_score": detection.get("detector_score"),
+            "score_semantics": evidence.get("detector_score_semantics") or detection.get("score_semantics"),
+            "score_components": section(score_component_rows, 20),
+            "correlation_features": compact_correlation,
+            "detector_facts": section(
+                detector_facts,
+                CAMPAIGN_AI_LIMITS["detector_facts"],
+                total_count=evidence.get("detector_fact_count"),
+            ),
+            "contributors": section(
+                compact_contributors,
+                CAMPAIGN_AI_LIMITS["contributors"],
+                total_count=evidence.get("contributing_vector_count"),
+            ),
+            "threat_intelligence_is_detector_trigger": False,
+        },
         "analysis_constraints": {
             "threat_intelligence_is_enrichment_only": True,
             "ai_is_manual_and_advisory_only": True,

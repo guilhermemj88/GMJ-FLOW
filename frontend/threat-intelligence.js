@@ -665,7 +665,7 @@
         <button type="button" class="btn btn-sm btn-success mt-2" data-campaign-action="analyze" data-campaign-id="${esc(campaign.campaign_id)}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
         ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
     }
-    return `${status}${state.stale ? '<div class="security-ai-stale mt-2">Análise potencialmente desatualizada após nova evidência da campanha.</div>' : ''}
+    return `${status}${state.error ? `<div class="security-ai-error mt-2">Última tentativa: ${esc(state.error)}</div>` : ''}${state.stale ? '<div class="security-ai-stale mt-2">Análise potencialmente desatualizada após nova evidência da campanha.</div>' : ''}
       <div class="security-ai-verdict"><strong>${esc(analysis.assessment || 'Análise consultiva')}</strong><span>${esc(analysis.confidence || '-')}</span></div>
       <p>${esc(analysis.summary || '')}</p>
       <h4>Por que a campanha foi detectada</h4>${investigationList(analysis.why_detected)}
@@ -861,6 +861,14 @@
       const suffix = action === 'reanalyze' ? '?force=true' : '';
       await apiRequest(`/api/security/campaigns/${encodeURIComponent(campaignId)}/ai-analysis${suffix}`, { method: 'POST' });
       await openSecurityCampaign(campaignId);
+    } catch (error) {
+      try {
+        await openSecurityCampaign(campaignId);
+      } catch (_reloadError) {
+        // Preserve the provider error below even if refreshing the persisted attempt also fails.
+      }
+      const providerMessage = error?.payload?.detail?.message || error?.payload?.error_message || error?.message || 'Análise de IA indisponível.';
+      document.getElementById('securityEventDrawerStatus').textContent = providerMessage;
     } finally {
       button.disabled = false;
     }

@@ -122,6 +122,12 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         self.assertIn("Campanha sem enrichment externo associado", self.script)
         self.assertIn("abrir o drawer não faz lookup individual", self.script)
 
+    def test_campaign_ai_provider_failure_is_reloaded_and_displayed(self) -> None:
+        self.assertIn("Última tentativa:", self.script)
+        self.assertIn("await openSecurityCampaign(campaignId);", self.script)
+        self.assertIn("error?.payload?.detail?.message", self.script)
+        self.assertIn("securityEventDrawerStatus').textContent = providerMessage", self.script)
+
     def test_campaign_metric_context_and_asn_snapshot_are_explicit(self) -> None:
         for label in (
             "Peak detection PPS", "Investigation packets", "Investigation bytes",
