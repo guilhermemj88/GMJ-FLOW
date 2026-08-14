@@ -85,6 +85,17 @@ class DashboardPerformanceTrace:
             sum(float(item.get("duration_ms") or 0) for item in self.queries),
             2,
         )
+        attributed_ms = clickhouse_ms + sum(
+            float(self.stages_ms.get(name, 0.0))
+            for name in (
+                "auth",
+                "sqlite",
+                "enrichment",
+                "aggregation",
+                "serialization",
+                "fallback",
+            )
+        )
         return {
             "event": "dashboard_widget_performance",
             "request_id": self.request_id,
@@ -96,11 +107,13 @@ class DashboardPerformanceTrace:
             "cache_hit": bool(cache_hit),
             "total_ms": total_ms,
             "clickhouse_ms": clickhouse_ms,
+            "auth_ms": round(self.stages_ms.get("auth", 0.0), 2),
             "sqlite_ms": round(self.stages_ms.get("sqlite", 0.0), 2),
             "enrichment_ms": round(self.stages_ms.get("enrichment", 0.0), 2),
             "aggregation_ms": round(self.stages_ms.get("aggregation", 0.0), 2),
             "serialization_ms": round(self.stages_ms.get("serialization", 0.0), 2),
             "fallback_ms": round(self.stages_ms.get("fallback", 0.0), 2),
+            "unattributed_ms": round(max(0.0, total_ms - attributed_ms), 2),
             "query_count": len(self.queries),
             "query_ids": [item["query_id"] for item in self.queries],
             "query_stats": [dict(item) for item in self.queries],

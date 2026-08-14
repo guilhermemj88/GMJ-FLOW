@@ -130,12 +130,108 @@ Speedup p50: 61,7×. A quantidade de queries ClickHouse do Top ASN caiu de
 3 (ou 4 no fallback) para 1. A equivalência testada inclui ASN já persistido,
 ASN resolvido por prefixo local, soma de BPS e percentual sobre o total exato.
 
-O baseline real fornecido foi 45,982 s e 46,315 s para os widgets 41/42. Não
-foi possível produzir o benchmark HTTP/ClickHouse pós-alteração, nem p50/p95
-do Dashboard completo, Top IP, Top porta e séries BPS/PPS nesta estação porque
-o daemon Docker/ClickHouse não está disponível. Portanto não se atribui uma
-redução real de `read_rows`, bytes, CPU ou memória antes do deploy; os query IDs
-e campos acima foram adicionados justamente para medir isso sem inferência.
+O baseline real fornecido foi 45,982 s e 46,315 s para os widgets 41/42. O
+daemon Docker/ClickHouse não estava disponível na estação de desenvolvimento;
+o benchmark real feito posteriormente no Fibinet está registrado a seguir.
+
+## Auditoria real no Fibinet após `6e2ba21`
+
+Acesso read-only em 13 de agosto de 2026. A árvore estava no merge `8e981d0`,
+que contém `6e2ba21 perf: optimize dashboard top ASN processing`, e a imagem
+ativa continha o mesmo código. Foram preservadas sem alteração as modificações
+locais preexistentes em Threat Intelligence, parser PMACCT e compose.
+
+Estado inicial:
+
+- 31 GiB de RAM, 27 GiB disponíveis e 27 GiB em page cache;
+- backend entre 96–129% CPU e 0,95–1,13 GiB RSS/container;
+- ClickHouse entre 39–323% CPU e aproximadamente 2,4 GiB;
+- um processo Uvicorn com 20 threads;
+- uma thread do backend consumia 76–91% CPU continuamente e outra chegava a
+  10–27%. Esta é evidência de trabalho Python concorrente/GIL; sem profiler de
+  stack instalado não foi atribuído um nome de rotina como fato.
+
+O cache existente estava habilitado com 512 MiB efetivos, uma entrada naquele
+instante, 102 hits, 177 misses, hit ratio de 36,56%, nenhuma pressão de memória
+e nenhum singleflight ativo. O ClickHouse query cache estava desabilitado;
+MarkCache tinha 19,9 MiB, filesystem/uncompressed cache estavam vazios e o
+page cache do sistema tinha 27,7 GB.
+
+### Correlação dos widgets
+
+| Widget | Backend | ClickHouse | Enrichment | SQLite/contexto | Leituras CH |
+|---|---:|---:|---:|---:|---:|
+| 41 Top ASN upload | 5,274 s | 469 ms | 4,150 s | 120 ms | 487.686 linhas / 24,5 MB |
+| 44 Top SYN origem | 5,877 s | 227 ms | não medido | 59 ms | 1.366.926 / 110,7 MB |
+| 35 Top IP origem | 5,919 s | 310 ms | não medido | 88 ms | 467.699 / 22,6 MB |
+| 45 Top SYN destino | 38,321 s | 244 ms | não medido | 3,615 s | 1.360.344 / 110,2 MB |
+| 40 Conversações | 38,646 s | 1,671 s | não medido | 3,420 s | 1.774.539 / 132,2 MB |
+
+Para o widget 41, a query principal durou 424 ms, leu 279.523 linhas/23,7 MB,
+usou pico de 29,8 MB e 611 ms de CPU segundo `system.query_log`. A outra query
+do trace era a prova de cobertura da MV, não um segundo ranking. Isso confirma
+uma melhora real de 45,982 s para 5,274 s no caso observado, aproximadamente
+8,7×, mas ainda acima da meta de 2 s por causa do enriquecimento local.
+
+O widget 42 teve query principal de 348 ms, 267.209 linhas/22,6 MB, pico de
+29,6 MB e 503 ms de CPU. A query principal de conversações durou 1,603 s,
+leu 1.223.866 linhas/130 MB, teve pico de 301,8 MB e 4,02 s de CPU paralela.
+Nenhuma SELECT individual explica os 38 segundos de backend.
+
+### Segundo N+1 comprovado pelo caminho de código
+
+A medição revelou N+1 adicionais depois da primeira correção:
+
+- Top IP resolvia ASN individualmente para cada item final;
+- Top Conversations fazia até dois lookups SQLite por conversa;
+- os widgets SYN configuráveis não reutilizavam `dashboard_top_syn`/a MV
+  `flow_dashboard_syn_1m`; caíam no caminho genérico raw e enriqueciam até 40
+  itens antes do corte final em 10;
+- filas ASN já existentes eram atualizadas novamente em cada refresh, criando
+  escrita e contenção SQLite desnecessárias.
+
+A correção seguinte no repositório de desenvolvimento passa esses três
+enriquecimentos para batch, roteia o contrato exato TCP SYN para a MV já
+existente, evita DDL `ensure` repetido no read path e somente enfileira IP/ASN
+que ainda não está na fila. Também adiciona `unattributed_ms` à telemetria.
+
+### Bancos e preagregações reais
+
+O SQLite tinha 1,2 GiB, WAL de 59 MiB, 24.371 entradas no cache de IP, 764 em
+`asn_info`, 192 prefixos e 16.704 itens na fila. Havia erros reais
+`database is locked`. Dos itens da fila, 2.425 `queued`, 585 `pending` e 860
+`stale` já tinham pelo menos três tentativas, portanto não eram consumidos pelo
+resolver configurado com máximo três, mas continuavam sendo tocados por
+upserts do read path anterior.
+
+As MVs de Dashboard estavam presentes e cobertas. Exemplos de volume:
+
+- `flow_raw`: 86,2 milhões de linhas / 2,37 GB;
+- `behavior_flow_10s`: 81,6 milhões / 1,88 GB;
+- ASN src/dst 1m: 208/226 milhões / 3,23/3,62 GB;
+- conversations 1m: 542 milhões / 13,34 GB;
+- src/dst IP 1m: 208/226 milhões / 3,09/3,45 GB.
+
+Em dez minutos, consultas somente sobre `flow_raw` somaram 1.120 execuções,
+71,6 milhões de linhas, 5,33 GB lidos e 110,4 s de CPU. As duas consultas
+observadas de `behavior_flow_10s` somaram 654 mil linhas, 65,4 MB e 2,67 s de
+CPU. Isso confirma que ela é rápida para seu uso de detecção, mas não demonstra
+equivalência semântica suficiente para substituir as MVs de Dashboard.
+
+### Benchmark HTTP parcial
+
+Uma execução fria seguida de hits imediatos, sequencialmente:
+
+- série BPS: 7,397 s fria; hits 111–192 ms;
+- série PPS: 332 ms fria; hits 108–184 ms;
+- Top IP origem: 1,186 s fria; hits 123 ms, 489 ms e 3,145 s;
+- Top porta: 5,494 s fria; hits 1,477–2,946 s; o quarto request já estava fora
+  do TTL de 5 s e recalculou em 2,161 s.
+
+A grande variância até em cache hit demonstra contenção/GIL e custo fora da
+query do widget. A sequência foi encerrada quando a VPN/SSH perdeu
+conectividade; não foram executados os widgets restantes e não se inferiu
+p50/p95 do dashboard completo a partir desse conjunto incompleto.
 
 ## Origem histórica
 
@@ -154,3 +250,16 @@ Campaign evaluator, coletores, parser, GreyNoise, Threat Intelligence, schema
 persistente ou volumes. O índice temporário de longest-prefix-match existe
 somente durante a resolução do lote bounded (máximo 200 no Top ASN); o cache
 RAM existente conserva seus limites e TTL.
+
+## Validação local e próximo passo
+
+A suíte focada executada em Python 3.12 passou 117 testes, cobrindo Dashboard,
+cache, prefixos, batching ASN, o roteamento Top SYN e a regressão do
+orquestrador de mitigação automática. `git diff --check` também passou.
+
+O segundo conjunto de correções permanece somente no repositório de
+desenvolvimento. Não houve deploy nem hotfix no Fibinet. Ao final da auditoria,
+uma nova sondagem TCP de cinco segundos ainda encontrou a porta SSH
+indisponível; portanto, a recomendação é fazer deploy controlado somente após
+restabelecer a VPN e então repetir os mesmos widgets, coletando p50/p95 e os
+campos `auth_ms`, `unattributed_ms` e `query_ids` da telemetria.

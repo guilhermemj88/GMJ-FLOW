@@ -4961,7 +4961,12 @@ async def auth_middleware(request: Request, call_next):
     ):
         return await call_next(request)
 
+    auth_started = time.monotonic()
     user = token_user_from_request(request)
+    request.state.auth_ms = round(
+        (time.monotonic() - auth_started) * 1000,
+        2,
+    )
     if user is None:
         return unauthorized_response()
 
@@ -5061,6 +5066,7 @@ async def http_observability_middleware(request: Request, call_next):
     request_token = HTTP_REQUEST_ID.set(request_id)
     sequence_token = CLICKHOUSE_QUERY_SEQUENCE.set(0)
     started = time.monotonic()
+    request.state.http_started_at = started
     status_code = 500
     response_bytes = 0
     response = None
@@ -8644,12 +8650,13 @@ def resolve_asns_for_ips(ips: list[Any], max_ips: int = 500) -> dict[str, dict[s
         return {}
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        ensure_asn_db(conn)
         resolved = resolve_asn_ips_from_local_db(
             conn,
             normalized,
             max_ips=max_ips,
         )
+        changed = False
+        unresolved_global_ips: list[str] = []
         for ip_text in normalized:
             item = resolved.get(ip_text)
             if item and int(item.get("asn") or 0) > 0:
@@ -8663,10 +8670,11 @@ def resolve_asns_for_ips(ips: list[Any], max_ips: int = 500) -> dict[str, dict[s
                         item.get("country") or "",
                         item.get("source") or "local_prefix_db",
                     )
+                    changed = True
                 continue
             parsed = parsed_by_ip[ip_text]
             if parsed.is_global:
-                queue_asn_resolution(conn, ip_text)
+                unresolved_global_ips.append(ip_text)
             resolved[ip_text] = {
                 "ip": ip_text,
                 "asn": 0,
@@ -8676,7 +8684,23 @@ def resolve_asns_for_ips(ips: list[Any], max_ips: int = 500) -> dict[str, dict[s
                 "source": "unresolved",
                 "resolution_tier": "unresolved",
             }
-        conn.commit()
+        if unresolved_global_ips:
+            placeholders = ",".join("?" for _ in unresolved_global_ips)
+            queued = {
+                clean_text(row["ip"])
+                for row in conn.execute(
+                    f"""
+                    SELECT ip FROM asn_resolution_queue
+                    WHERE ip IN ({placeholders})
+                    """,
+                    unresolved_global_ips,
+                ).fetchall()
+            }
+            for ip_text in unresolved_global_ips:
+                if ip_text not in queued:
+                    changed = queue_asn_resolution(conn, ip_text) or changed
+        if changed:
+            conn.commit()
     return resolved
 
 
@@ -8699,13 +8723,36 @@ def lookup_asn_information_batch(
         return {}
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        ensure_asn_db(conn)
         cached = cached_asn_information(conn, numbers)
         if queue_missing:
-            for number in numbers:
-                if number not in cached:
-                    queue_asn_info_resolution(conn, number, priority=80)
-            conn.commit()
+            missing = [number for number in numbers if number not in cached]
+            queued_asns: set[int] = set()
+            if missing:
+                keys = [f"AS{number}" for number in missing]
+                placeholders = ",".join("?" for _ in keys)
+                queued_asns = {
+                    int(row["asn"] or 0)
+                    for row in conn.execute(
+                        f"""
+                        SELECT asn FROM asn_resolution_queue
+                        WHERE ip IN ({placeholders})
+                        """,
+                        keys,
+                    ).fetchall()
+                }
+            changed = False
+            for number in missing:
+                if number not in queued_asns:
+                    changed = (
+                        queue_asn_info_resolution(
+                            conn,
+                            number,
+                            priority=80,
+                        )
+                        or changed
+                    )
+            if changed:
+                conn.commit()
     return {
         number: {
             **info,
@@ -42534,16 +42581,27 @@ def top_conversations_payload(
         """,
         params,
     )
+    conversation_rows = rows_as_dicts(result)
+    enrichment_started = time.monotonic()
+    conversation_asn_information = lookup_asn_information_batch(
+        [
+            row.get(field)
+            for row in conversation_rows
+            for field in ("src_asn", "dst_asn")
+        ],
+    )
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_trace.add_stage(
+            "enrichment",
+            time.monotonic() - enrichment_started,
+        )
     items = []
-    for index, row in enumerate(rows_as_dicts(result), start=1):
+    for index, row in enumerate(conversation_rows, start=1):
         src_asn = int(row.get("src_asn") or 0)
         dst_asn = int(row.get("dst_asn") or 0)
-        src_info = lookup_asn_info(src_asn) if src_asn > 0 else None
-        dst_info = lookup_asn_info(dst_asn) if dst_asn > 0 else None
-        if src_asn > 0 and not src_info:
-            queue_missing_asn_info(src_asn)
-        if dst_asn > 0 and not dst_info:
-            queue_missing_asn_info(dst_asn)
+        src_info = conversation_asn_information.get(src_asn)
+        dst_info = conversation_asn_information.get(dst_asn)
         duration = int(row.get("duration_seconds") or 0)
         items.append(
             {
@@ -42711,6 +42769,7 @@ def dashboard_top_syn(
         ],
     ) + ","
     source_table = "rated_source"
+    query_source = "raw"
     aggregate_table = DASHBOARD_AGGREGATE_TABLES["syn"]
     if dashboard_aggregate_range_covered(
         aggregate_table,
@@ -42739,6 +42798,7 @@ def dashboard_top_syn(
             + ","
         )
         source_table = "rated_source"
+        query_source = dashboard_aggregate_query_source(start_dt, end_dt)
         factor_expr = {
             "input": "dashboard_input_sample_rate",
             "output": "dashboard_output_sample_rate",
@@ -42796,12 +42856,21 @@ def dashboard_top_syn(
         """,
         params,
     )
+    syn_rows = rows_as_dicts(result)
+    enrichment_started = time.monotonic()
+    syn_asn_information = lookup_asn_information_batch(
+        [row.get("asn") for row in syn_rows],
+    )
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_trace.add_stage(
+            "enrichment",
+            time.monotonic() - enrichment_started,
+        )
     items = []
-    for index, row in enumerate(rows_as_dicts(result), start=1):
+    for index, row in enumerate(syn_rows, start=1):
         asn = int(row.get("asn") or 0)
-        info = lookup_asn_info(asn) if asn > 0 else None
-        if asn > 0 and not info:
-            queue_missing_asn_info(asn)
+        info = syn_asn_information.get(asn)
         country = clean_text((info or {}).get("country")).upper() or "N/D"
         items.append(
             {
@@ -42821,7 +42890,13 @@ def dashboard_top_syn(
         )
     return dashboard_cache_set(
         cache_key,
-        {"start": iso(start_dt), "end": iso(end_dt), "mode": mode, "items": items},
+        {
+            "start": iso(start_dt),
+            "end": iso(end_dt),
+            "mode": mode,
+            "query_source": query_source,
+            "items": items,
+        },
     )
 
 
@@ -45721,7 +45796,6 @@ def dashboard_widget_known_asn_prefixes(
     placeholders = ", ".join("?" for _ in numbers)
     ensure_sensor_db()
     with sqlite_connection() as conn:
-        ensure_asn_db(conn)
         rows = conn.execute(
             f"""
             SELECT asn, prefix
@@ -45744,6 +45818,8 @@ def dashboard_widget_enrich_ranking_identity(
     item: dict[str, Any],
     dimension: str,
     known_prefix: str = "",
+    resolved_ip: dict[str, Any] | None = None,
+    cached_asn_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = (
         dict(item.get("metadata"))
@@ -45757,9 +45833,19 @@ def dashboard_widget_enrich_ranking_identity(
         except ValueError:
             item["metadata"] = metadata
             return item
-        resolved = resolve_asn_for_ip(ip_text)
+        resolved = (
+            dict(resolved_ip)
+            if isinstance(resolved_ip, dict)
+            else resolve_asn_for_ip(ip_text)
+        )
         asn = int(resolved.get("asn") or 0)
-        asn_info = lookup_asn_info(asn) or {} if asn > 0 else {}
+        asn_info = (
+            dict(cached_asn_info)
+            if isinstance(cached_asn_info, dict)
+            else lookup_asn_info(asn) or {}
+            if asn > 0
+            else {}
+        )
         as_name = usable_asn_name(
             asn_info.get("as_name")
             or asn_info.get("org_name")
@@ -45805,8 +45891,15 @@ def dashboard_widget_enrich_ranking_identity(
         )
     elif dimension in {"src_asn", "dst_asn"}:
         asn = dashboard_widget_item_asn(item)
-        asn_info = lookup_asn_info(asn) or {} if asn > 0 else {}
-        if asn > 0 and not asn_info:
+        has_batched_asn_info = isinstance(cached_asn_info, dict)
+        asn_info = (
+            dict(cached_asn_info)
+            if has_batched_asn_info
+            else lookup_asn_info(asn) or {}
+            if asn > 0
+            else {}
+        )
+        if asn > 0 and not asn_info and not has_batched_asn_info:
             queue_missing_asn_info(asn, priority=20)
         as_name = usable_asn_name(
             asn_info.get("as_name")
@@ -45852,6 +45945,66 @@ def dashboard_widget_enrich_ranking_identity(
         item["description"] = label
     item["metadata"] = metadata
     return item
+
+
+def dashboard_widget_enrich_ranking_identities(
+    items: list[dict[str, Any]],
+    dimension: str,
+    known_asn_prefixes: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Enrich a final ranking with bounded, batched local ASN lookups."""
+    prefixes = known_asn_prefixes or {}
+    resolved_by_ip: dict[str, dict[str, Any]] = {}
+    asn_information: dict[int, dict[str, Any]] = {}
+    if dimension in {"src_ip", "dst_ip"}:
+        unresolved_ips = []
+        for item in items:
+            ip_text = clean_ip(item.get("ip") or item.get("key"))
+            asn = dashboard_widget_item_asn(item)
+            if asn > 0:
+                resolved_by_ip[ip_text] = {
+                    "ip": ip_text,
+                    "asn": asn,
+                    "as_name": clean_text(
+                        item.get("as_name")
+                        or item.get("display_name")
+                        or item.get("description")
+                    ),
+                    "country": clean_text(item.get("country")).upper(),
+                    "prefix": "",
+                    "source": "flow",
+                }
+            else:
+                unresolved_ips.append(ip_text)
+        resolved_by_ip.update(
+            resolve_asns_for_ips(
+                unresolved_ips,
+                max_ips=max(1, len(items)),
+            )
+        )
+        asn_information = lookup_asn_information_batch(
+            [item.get("asn") for item in resolved_by_ip.values()],
+        )
+    elif dimension in {"src_asn", "dst_asn"}:
+        asn_information = lookup_asn_information_batch(
+            [dashboard_widget_item_asn(item) for item in items],
+        )
+
+    for item in items:
+        item_asn = dashboard_widget_item_asn(item)
+        resolved_ip = None
+        if dimension in {"src_ip", "dst_ip"}:
+            ip_text = clean_ip(item.get("ip") or item.get("key"))
+            resolved_ip = resolved_by_ip.get(ip_text, {})
+            item_asn = int(resolved_ip.get("asn") or 0)
+        dashboard_widget_enrich_ranking_identity(
+            item,
+            dimension,
+            prefixes.get(item_asn, ""),
+            resolved_ip=resolved_ip,
+            cached_asn_info=asn_information.get(item_asn, {}),
+        )
+    return items
 
 
 def dashboard_widget_fold_prefixes(
@@ -46175,7 +46328,48 @@ def dashboard_widget_top_payload(
         and rule.get("operator") == "eq"
         for rule in filters
     )
+    syn_filter_contract = {
+        (
+            clean_text(rule.get("field")).lower(),
+            clean_text(rule.get("operator")).lower(),
+            clean_text(rule.get("value")).upper(),
+        )
+        for rule in filters
+    }
+    exact_syn_ranking = syn_filter_contract == {
+        ("protocol", "eq", "TCP"),
+        ("tcp_flags", "eq", "SYN"),
+    }
     if (
+        dimension in {"src_ip", "dst_ip"}
+        and metric == "pps"
+        and plan["direction"] == "both"
+        and exact_syn_ranking
+        and not prefix_filter_active(prefix_filter)
+    ):
+        payload = dashboard_top_syn(
+            range_minutes,
+            start,
+            end,
+            None,
+            None,
+            sensor_id,
+            interface_id,
+            if_index,
+            "both",
+            "src" if dimension == "src_ip" else "dst",
+            query_limit,
+            zone_id,
+            zone_direction,
+            False,
+        )
+        items = dashboard_widget_normalize_top_items(
+            payload.get("items", []),
+            dimension,
+            metric,
+        )
+        source = payload.get("query_source") or "syn_aggregate_first"
+    elif (
         dimension in aggregate_dimensions
         and metric in {"bps", "pps"}
         and aggregate_safe_filters
@@ -46372,18 +46566,24 @@ def dashboard_widget_top_payload(
         if all(dashboard_widget_match_filter(item, rule) for rule in post_filters)
     ][:limit]
     total = sum(dashboard_widget_item_value(item, metric) for item in items)
+    enrichment_started = time.monotonic()
     known_asn_prefixes = dashboard_widget_known_asn_prefixes(
         items,
         dimension,
     )
+    dashboard_widget_enrich_ranking_identities(
+        items,
+        dimension,
+        known_asn_prefixes,
+    )
+    dashboard_trace = DASHBOARD_PERF_TRACE.get()
+    if dashboard_trace is not None:
+        dashboard_trace.add_stage(
+            "enrichment",
+            time.monotonic() - enrichment_started,
+        )
     for index, item in enumerate(items, start=1):
         item["rank"] = index
-        item_asn = dashboard_widget_item_asn(item)
-        dashboard_widget_enrich_ranking_identity(
-            item,
-            dimension,
-            known_asn_prefixes.get(item_asn, ""),
-        )
         item["label"] = clean_text(
             item.get("display_label")
             or item.get("label")
@@ -47970,6 +48170,10 @@ def dashboard_widget_cached_query(
         ),
     )
     trace.add_stage(
+        "auth",
+        float(query_context.get("_auth_ms") or 0) / 1000,
+    )
+    trace.add_stage(
         "sqlite",
         float(query_context.get("_sqlite_ms") or 0) / 1000,
     )
@@ -48080,7 +48284,12 @@ def query_configurable_dashboard_widget(
         context_payload.pop("end", None)
         context_payload.pop("range_minutes", None)
     context = dashboard_widget_query_context(context_payload, dashboard)
-    context["_dashboard_started_at"] = sqlite_stage_started
+    context["_dashboard_started_at"] = float(
+        getattr(request.state, "http_started_at", sqlite_stage_started)
+    )
+    context["_auth_ms"] = float(
+        getattr(request.state, "auth_ms", 0.0)
+    )
     context["_sqlite_ms"] = round(
         (time.monotonic() - sqlite_stage_started) * 1000,
         2,
