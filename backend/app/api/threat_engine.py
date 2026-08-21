@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
-    from fastapi import APIRouter, HTTPException, Query
+    from fastapi import APIRouter, HTTPException, Query, Request, Response
 except ImportError:  # Compatibility with the repository's minimal static-test FastAPI stub.
     from fastapi import FastAPI as APIRouter, HTTPException, Query
+
+    Request = Any  # type: ignore[assignment,misc]
+    Response = Any  # type: ignore[assignment,misc]
+
+from app.services.threat_intelligence import clean_text, safe_json
+from app.services.threat_score import threat_score_payload
 
 from app.services.behavioral_detection import (
     BEHAVIORAL_THREAT_RUNTIME,
@@ -160,6 +168,20 @@ def _event_or_404(event_id: Any) -> dict[str, Any]:
         migrate_legacy_security_events(conn)
         conn.commit()
         event = find_security_event(conn, event_id)
+        if event is not None:
+            event_key = clean_text(event.get("event_key"))
+            if event_key:
+                feature_row = conn.execute(
+                    "SELECT feature_json FROM behavioral_attack_vectors WHERE event_key = ? LIMIT 1",
+                    (event_key,),
+                ).fetchone()
+                if feature_row is not None:
+                    features = safe_json(feature_row["feature_json"], {})
+                    history = {
+                        "historical_recurrence": int(features.get("historical_recurrence") or 0),
+                        "prior_mitigations": int(features.get("prior_mitigations") or 0),
+                    }
+                    event["threat_score"] = threat_score_payload(event, history=history)
     if event is None:
         raise HTTPException(status_code=404, detail="Evento de segurança não encontrado")
     return event
@@ -168,6 +190,8 @@ def _event_or_404(event_id: Any) -> dict[str, Any]:
 @security_router.get("/events")
 @api_security_router.get("/events")
 def list_security_events(
+    request: Request,
+    response: Response,
     status: str = "",
     attack_type: str = "",
     verdict: str = "",
@@ -190,17 +214,95 @@ def list_security_events(
         ensure_security_event_schema(conn)
         migrate_legacy_security_events(conn)
         total = int(conn.execute(f"SELECT COUNT(*) FROM security_events {where}", values).fetchone()[0])
+        fingerprint = conn.execute(
+            f"SELECT MAX(last_seen), MAX(updated_at) FROM security_events {where}",
+            values,
+        ).fetchone()
+        fingerprint_text = f"{total}|{clean_text(fingerprint[0])}|{clean_text(fingerprint[1])}|{where}"
+        etag = f'"sec-{hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()[:32]}"'
+        if_none_match = clean_text(request.headers.get("if-none-match") or "")
+        if if_none_match and if_none_match == etag:
+            # Data unchanged: skip the expensive 200-row materialization.
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
         rows = conn.execute(
             f"SELECT * FROM security_events {where} ORDER BY last_seen DESC, id DESC LIMIT ? OFFSET ?",
             (*values, int(limit), int(offset)),
         ).fetchall()
         conn.commit()
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
     return {
         "items": [security_event_row(row) for row in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
         "ui_refresh_seconds": security_events_ui_refresh_seconds(),
+    }
+
+
+@security_router.get("/summary")
+@api_security_router.get("/summary")
+def security_summary(window: int = Query(60, ge=5, le=10080)) -> dict[str, Any]:
+    window_minutes = int(window)
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=window_minutes)).isoformat().replace("+00:00", "Z")
+    hour_cutoff = cutoff[:13] + ":00:00Z"
+    with BEHAVIORAL_THREAT_RUNTIME.connection_factory() as conn:
+        ensure_behavioral_schema(conn)
+        ensure_security_event_schema(conn)
+        migrate_legacy_security_events(conn)
+        analyzed = int(conn.execute(
+            "SELECT COALESCE(SUM(observations), 0) FROM behavioral_runtime_counters WHERE hour >= ?",
+            (hour_cutoff,),
+        ).fetchone()[0])
+        corroborated = int(conn.execute(
+            """
+            SELECT COUNT(*) FROM security_events e
+            JOIN behavioral_attack_vectors v ON v.event_key = e.event_key
+            WHERE v.external_correlation = 1 AND e.last_seen >= ?
+            """,
+            (cutoff,),
+        ).fetchone()[0])
+        rows = conn.execute(
+            "SELECT * FROM security_events WHERE last_seen >= ? ORDER BY last_seen DESC LIMIT 2000",
+            (cutoff,),
+        ).fetchall()
+        events = [security_event_row(row) for row in rows]
+        conn.commit()
+    suspicious = 0
+    critical = 0
+    high = 0
+    eligible = 0
+    mitigated = 0
+    by_type: dict[str, int] = {}
+    for event in events:
+        band = str((event.get("threat_score") or {}).get("band") or "")
+        if band == "suspicious":
+            suspicious += 1
+        if band in {"mitigation_candidate", "auto_mitigation_eligible"}:
+            eligible += 1
+        severity = str(event.get("severity") or "").upper()
+        if severity == "CRITICAL":
+            critical += 1
+        elif severity == "HIGH":
+            high += 1
+        if event.get("mitigation_status") == "executed":
+            mitigated += 1
+        attack_type = clean_text(event.get("attack_type")) or "OTHER"
+        by_type[attack_type] = by_type.get(attack_type, 0) + 1
+    return {
+        "window_minutes": window_minutes,
+        "analyzed": analyzed,
+        "detections": len(events),
+        "suspicious": suspicious,
+        "security_events": len(events),
+        "critical": critical,
+        "high": high,
+        "corroborated": corroborated,
+        "eligible_for_mitigation": eligible,
+        "mitigated": mitigated,
+        "by_type": by_type,
+        "threat_score_mode": "shadow",
     }
 
 

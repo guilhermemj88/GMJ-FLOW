@@ -7234,6 +7234,25 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </div>
 
+          <section class="panel p-3 mb-3" id="securityOverviewPanel">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div><div class="panel-title">Security Overview</div><div id="secOverviewStatus" class="subtle" role="status">Carregando resumo...</div></div>
+              <span class="badge-soft warn" title="O Threat Score é consultivo e não executa mitigação.">Threat Score em SHADOW</span>
+            </div>
+            <div class="database-metrics-grid mb-2">
+              <div class="metric-card"><div class="metric-label">Analisados</div><div id="secOverviewAnalyzed" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Detecções</div><div id="secOverviewDetections" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Suspeitos</div><div id="secOverviewSuspicious" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Security Events</div><div id="secOverviewEvents" class="metric-value">0</div></div>
+              <div class="metric-card anomaly-critical-metric"><div class="metric-label">Critical</div><div id="secOverviewCritical" class="metric-value">0</div></div>
+              <div class="metric-card anomaly-warning-metric"><div class="metric-label">High</div><div id="secOverviewHigh" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Corroborados</div><div id="secOverviewCorroborated" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Elegíveis p/ mitigação</div><div id="secOverviewEligible" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Mitigados</div><div id="secOverviewMitigated" class="metric-value">0</div></div>
+            </div>
+            <div id="secOverviewPipeline" class="subtle"></div>
+          </section>
+
           <section class="panel p-3 mb-3">
             <div class="database-metrics-grid mb-0">
               <div class="metric-card"><div class="metric-label">Providers ativos</div><div id="threatSummaryOnline" class="metric-value">0</div></div>
@@ -10216,6 +10235,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function showLogin(message = '') {
+      window.stopThreatIntelligencePolling?.();
       currentAuthUser = null;
       document.getElementById('appShell').classList.add('auth-hidden');
       document.getElementById('loginView').classList.remove('auth-hidden');
@@ -10699,6 +10719,17 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const headersReceivedAt = globalThis.performance?.now?.() ?? Date.now();
       const text = await response.text().catch(() => '');
       const downloadFinishedAt = globalThis.performance?.now?.() ?? Date.now();
+      if (response.status === 304) {
+        onTiming?.({
+          request_start_ms: requestStartedAt,
+          ttfb_ms: Math.max(0, headersReceivedAt - requestStartedAt),
+          download_ms: Math.max(0, downloadFinishedAt - headersReceivedAt),
+          json_parse_ms: 0,
+          response_chars: text.length,
+          http_status: response.status
+        });
+        return { __notModified: true };
+      }
       let payload = {};
       try {
         payload = text ? JSON.parse(text) : {};
@@ -10722,6 +10753,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         apiError.payload = payload;
         apiError.retryAfter = response.headers.get('Retry-After') || '';
         throw apiError;
+      }
+      const responseEtag = response.headers.get('etag');
+      if (responseEtag && payload && typeof payload === 'object') {
+        Object.defineProperty(payload, '__etag', { value: responseEtag, configurable: true });
       }
       return payload;
     }
@@ -13056,7 +13091,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         const path = tab === 'history' ? '/api/security/anomalies/history' : '/api/security/anomalies/active';
         const [payload, canonical] = await Promise.all([
           apiRequest(path, { cache: 'no-store' }),
-          apiRequest('/security/events?limit=200', { cache: 'no-store' })
+          apiRequest('/api/security/events?limit=200', { cache: 'no-store' })
         ]);
         const canonicalActiveStatuses = new Set(['active', 'investigating', 'confirmed']);
         const canonicalItems = (canonical.items || []).filter(item => tab === 'history'
@@ -26433,6 +26468,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (aiModelPullPollTimer) clearTimeout(aiModelPullPollTimer);
         aiModelPullPollTimer = null;
       }
+      if (view !== 'threat-intelligence') {
+        window.stopThreatIntelligencePolling?.();
+      }
       activeView = view === 'placeholder' ? 'placeholder' : view;
       if (view !== 'placeholder' && window.location.hash !== `#${view}`) {
         window.history.replaceState(null, '', `#${view}`);
@@ -26491,6 +26529,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-threat-intelligence').classList.add('active');
         document.querySelector('[data-nav-view="threat-intelligence"]').classList.add('active');
         window.loadThreatIntelligenceWorkspace?.().catch(console.error);
+        window.startThreatIntelligencePolling?.();
       } else if (view === 'peak-hunter') {
         document.getElementById('view-peak-hunter').classList.add('active');
         document.querySelector('[data-nav-view="peak-hunter"]').classList.add('active');

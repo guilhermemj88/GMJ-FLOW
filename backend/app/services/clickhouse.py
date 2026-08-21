@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,22 +15,49 @@ SAMPLE_RATE_MODES = {"sensor_default", "per_interface", "snmp_auto"}
 FLOW_SAMPLE_RATE_FALLBACK = "greatest(toFloat64(sample_rate), 1.0)"
 
 
+def _client_reuse_enabled() -> bool:
+    value = os.getenv("GMJFLOW_CLICKHOUSE_REUSE_CLIENT", "true")
+    return clean_text(value).lower() not in {"0", "false", "no", "off"}
+
+
+def clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 class ClickHouseQueryError(RuntimeError):
     def __init__(self, query_context: str, message: str):
         super().__init__(message)
         self.query_context = query_context
 
 
+# clickhouse_connect builds a fresh HTTP client per get_client() call and each
+# client creation triggers several metadata round-trips (SELECT 1, version(),
+# system.settings). Creating one client per query produced ~11k connections in
+# 3h in production. Clients are stateless HTTP wrappers, so a single client per
+# worker thread is safe and keeps the public get_client() contract unchanged.
+_CLIENT_THREAD_LOCAL = threading.local()
+
+
+def _client_options() -> dict[str, Any]:
+    return {
+        "host": os.getenv("CLICKHOUSE_HOST", "clickhouse"),
+        "port": int(os.getenv("CLICKHOUSE_PORT", "8123")),
+        "username": os.getenv("CLICKHOUSE_USER", "default"),
+        "password": os.getenv("CLICKHOUSE_PASSWORD", ""),
+        "database": os.getenv("CLICKHOUSE_DATABASE", "flowdb"),
+        "connect_timeout": int(os.getenv("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", "5")),
+        "send_receive_timeout": int(os.getenv("CLICKHOUSE_QUERY_TIMEOUT_SECONDS", "30")),
+    }
+
+
 def get_client() -> Any:
-    return clickhouse_connect.get_client(
-        host=os.getenv("CLICKHOUSE_HOST", "clickhouse"),
-        port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
-        username=os.getenv("CLICKHOUSE_USER", "default"),
-        password=os.getenv("CLICKHOUSE_PASSWORD", ""),
-        database=os.getenv("CLICKHOUSE_DATABASE", "flowdb"),
-        connect_timeout=int(os.getenv("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", "5")),
-        send_receive_timeout=int(os.getenv("CLICKHOUSE_QUERY_TIMEOUT_SECONDS", "30")),
-    )
+    if not _client_reuse_enabled():
+        return clickhouse_connect.get_client(**_client_options())
+    client = getattr(_CLIENT_THREAD_LOCAL, "client", None)
+    if client is None:
+        client = clickhouse_connect.get_client(**_client_options())
+        _CLIENT_THREAD_LOCAL.client = client
+    return client
 
 
 def rows_as_dicts(result: Any) -> list[dict[str, Any]]:

@@ -75,19 +75,26 @@ def _event_filters(event: Mapping[str, Any], params: dict[str, Any]) -> list[str
     if protocol in PROTOCOL_NUMBERS:
         filters.append("proto = {protocol:UInt8}")
         params["protocol"] = PROTOCOL_NUMBERS[protocol]
+    # IPv4 flows are persisted as IPv4-mapped IPv6 (e.g. ::ffff:1.2.3.4) in the
+    # IPv6 columns of behavior_flow_10s. Plain `toString(ip) = '1.2.3.4'`
+    # comparisons never match that representation, so equality uses the typed
+    # toIPv6() cast (which maps IPv4 text to ::ffff:...) and prefix checks
+    # normalize the mapped string back to dotted-quad before matching.
     source = clean_text(event.get("src_ip"))
     if source:
-        filters.append("toString(src_ip) = {source_ip:String}")
+        filters.append("src_ip = toIPv6({source_ip:String})")
         params["source_ip"] = source
         scoped = True
     target_ip = clean_text(event.get("target_ip"))
     target_prefix = clean_text(event.get("target_prefix"))
     if target_ip:
-        filters.append("toString(dst_ip) = {target_ip:String}")
+        filters.append("dst_ip = toIPv6({target_ip:String})")
         params["target_ip"] = target_ip
         scoped = True
     elif target_prefix:
-        filters.append("isIPAddressInRange(toString(dst_ip), {target_prefix:String})")
+        filters.append(
+            "isIPAddressInRange(replaceRegexpOne(toString(dst_ip), '^::ffff:', ''), {target_prefix:String})"
+        )
         params["target_prefix"] = target_prefix
         scoped = True
     if not scoped:
@@ -188,6 +195,11 @@ def event_sources(
             """,
             params,
         )
+        if not rows:
+            # Do not present an empty live result as success when the window
+            # may simply predate behavior_flow_10s retention; fall back to the
+            # persisted event snapshot instead.
+            raise RuntimeError("security_event_sources_no_rows")
         available = True
         source = "behavior_flow_10s"
     except Exception:
@@ -234,6 +246,8 @@ def event_traffic(
             """,
             params,
         )
+        if not rows:
+            raise RuntimeError("security_event_traffic_no_rows")
         points = [{
             "timestamp": clean_text(row.get("timestamp")),
             "pps": float(row.get("pps") or 0),
@@ -309,12 +323,12 @@ def event_evidence(
     conversations: list[dict[str, Any]] = []
     aggregate_available = False
     try:
-        top_source_ports = _aggregate_query(
+        source_ports = _aggregate_query(
             query_executor, "security_event_source_ports",
             "src_port AS port, sum(packets) AS packets, sum(bytes) AS bytes, sum(flows) AS flows",
             "src_port", "packets", event, 20,
         )
-        top_destination_ports = _aggregate_query(
+        destination_ports = _aggregate_query(
             query_executor, "security_event_destination_ports",
             "dst_port AS port, sum(packets) AS packets, sum(bytes) AS bytes, sum(flows) AS flows",
             "dst_port", "packets", event, 50,
@@ -324,12 +338,17 @@ def event_evidence(
             "proto AS protocol_number, sum(packets) AS packets, sum(bytes) AS bytes, sum(flows) AS flows",
             "proto", "packets", event, 20,
         )
-        protocols = [{**row, "protocol": PROTOCOL_NAMES.get(int(row.get("protocol_number") or 0), str(row.get("protocol_number") or 0))} for row in protocol_rows]
-        conversations = _aggregate_query(
+        conversation_rows = _aggregate_query(
             query_executor, "security_event_conversations",
             "toString(src_ip) AS source_ip, toString(dst_ip) AS destination_ip, src_port, dst_port, proto AS protocol_number, tcp_flags, sum(packets) AS packets, sum(bytes) AS bytes, sum(flows) AS flows, min(bucket) AS first_seen, max(bucket) AS last_seen",
             "src_ip, dst_ip, src_port, dst_port, proto, tcp_flags", "packets", event, bounded_samples,
         )
+        if not source_ports and not destination_ports and not protocol_rows and not conversation_rows:
+            raise RuntimeError("security_event_evidence_no_rows")
+        top_source_ports = source_ports
+        top_destination_ports = destination_ports
+        protocols = [{**row, "protocol": PROTOCOL_NAMES.get(int(row.get("protocol_number") or 0), str(row.get("protocol_number") or 0))} for row in protocol_rows]
+        conversations = conversation_rows
         for row in conversations:
             row["protocol"] = PROTOCOL_NAMES.get(int(row.get("protocol_number") or 0), str(row.get("protocol_number") or 0))
         aggregate_available = True

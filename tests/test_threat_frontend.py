@@ -186,11 +186,55 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         start = self.script.index("async function fetchSecurityEvents()")
         end = self.script.index("async function loadWorkspace()", start)
         polling = self.script[start:end]
-        self.assertIn("apiRequest('/security/events?limit=200')", polling)
+        self.assertIn("apiRequest('/api/security/events?limit=200'", polling)
         self.assertNotIn("/api/threat-engine/attack-vectors", polling)
         self.assertNotIn("threat-intelligence/providers", polling)
         self.assertNotIn("policy-decisions", polling)
         self.assertNotIn("campaigns?", polling)
+
+    def test_polling_uses_etag_and_runs_only_for_active_visible_tab(self) -> None:
+        self.assertIn("'If-None-Match'", self.script)
+        self.assertIn("__notModified", self.script)
+        self.assertIn("__unchanged", self.script)
+        self.assertIn("__etag", self.script)
+        self.assertIn("function startSecurityEventsPolling", self.script)
+        self.assertIn("function stopSecurityEventsPolling", self.script)
+        self.assertIn("document.visibilityState !== 'visible'", self.script)
+        self.assertIn("root.startThreatIntelligencePolling = startSecurityEventsPolling", self.script)
+        self.assertIn("root.stopThreatIntelligencePolling = stopSecurityEventsPolling", self.script)
+        self.assertIn("window.startThreatIntelligencePolling?.()", self.html)
+        self.assertIn("window.stopThreatIntelligencePolling?.()", self.html)
+        self.assertNotIn("configureSecurityEventsPolling();", self.script)
+
+    def test_event_ids_are_not_localized_in_data_attributes(self) -> None:
+        self.assertIn('data-security-event-id="${item.id}"', self.script)
+        self.assertIn('data-event-id="${event.id}"', self.script)
+        self.assertIn('data-anomaly-id="${anomalyId}"', self.script)
+        self.assertIn('data-anomaly-id="${mitigationId}"', self.script)
+        # IDs técnicos nunca podem passar por number() (localização pt-BR
+        # transformaria 109771 em "109.771" e quebraria URLs/actions).
+        self.assertNotIn('number(event.id)', self.script)
+        self.assertNotIn('number(item.id)', self.script)
+        self.assertNotIn('number(anomalyId)', self.script)
+        self.assertNotIn('number(mitigationId)', self.script)
+        self.assertNotIn('data-security-event-id="${number(', self.script)
+        self.assertNotIn('data-event-id="${number(', self.script)
+        self.assertNotIn('data-anomaly-id="${number(', self.script)
+        self.assertNotIn('/api/security/events/${number(', self.script)
+        self.assertIn("apiRequest('/api/security/events?limit=200'", self.script)
+        self.assertNotIn("apiRequest('/security/events?limit=200'", self.script)
+
+    def test_security_overview_summary_and_shadow_score_are_wired(self) -> None:
+        self.assertIn('id="securityOverviewPanel"', self.html)
+        self.assertIn('id="secOverviewAnalyzed"', self.html)
+        self.assertIn('id="secOverviewEligible"', self.html)
+        self.assertIn('Threat Score em SHADOW', self.html)
+        self.assertIn("apiRequest('/api/security/summary?window=60')", self.script)
+        self.assertIn('function renderSecuritySummary', self.script)
+        self.assertIn('function renderThreatScore', self.script)
+        self.assertIn('threat_score', self.script)
+        self.assertIn('shadow_decision', self.script)
+        self.assertIn('eligible_for_mitigation', self.script)
 
     def test_low_rate_and_targetless_scanners_remain_visible(self) -> None:
         start = self.script.index("function renderVectors(")
@@ -208,7 +252,7 @@ class ThreatFrontendStaticTest(unittest.TestCase):
             self.assertIn(badge, self.script)
 
     def test_canonical_events_are_also_loaded_in_anomalies(self) -> None:
-        self.assertIn("apiRequest('/security/events?limit=200'", self.html)
+        self.assertIn("apiRequest('/api/security/events?limit=200'", self.html)
         self.assertIn('canonical_security_event: true', self.html)
         self.assertIn('data-security-action="open"', self.html)
 

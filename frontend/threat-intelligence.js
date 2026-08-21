@@ -312,14 +312,14 @@
         item.unique_dst_ports ? `${number(item.unique_dst_ports)} portas` : '',
         item.recurrence_count ? `${number(item.recurrence_count)} ocorrências` : ''
       ].filter(Boolean).join(' · ') || '-';
-      return `<tr class="security-event-row" tabindex="0" data-security-event-id="${number(item.id)}" title="Abrir investigação">
+      return `<tr class="security-event-row" tabindex="0" data-security-event-id="${item.id}" title="Abrir investigação">
         <td><strong>${esc(item.attack_type)}</strong><br><code>${esc(item.event_id || `#${item.id}`)}</code><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
         <td>${esc(item.src_ip || 'distribuída')} → ${esc(scannerTargetLabel(item))}</td>
         <td><span class="threat-score ${scoreClass(item.detector_score)}">${number(item.detector_score)}</span><br><span class="subtle">${esc(item.verdict || 'INFO')} · conf. ${number(confidence <= 1 ? confidence * 100 : confidence, 1)}%</span></td>
         <td><span class="subtle">${esc(item.direction || 'UNKNOWN')} · ${esc(item.src_role || 'UNKNOWN')} → ${esc(item.dst_role || 'UNKNOWN')}</span><br>${esc(evidence)}</td>
         <td>${vectorIntelEvidence(item)}${scannerIntelBadges(item)}<div class="subtle">${number(sourceIntel.matched_source_count || sourceIntel.matches)} / ${number(sourceIntel.lookup_count)} origens</div></td>
         <td>${item.ai_analysis?.verdict ? `<strong>${esc(item.ai_analysis.verdict)}</strong><br><span class="subtle">${number(item.ai_analysis.confidence, 1)}%</span>` : '<span class="subtle">Não analisado</span>'}</td>
-        <td>${dateTime(item.last_seen)}<br><button type="button" class="btn btn-sm btn-outline-secondary mt-1" data-security-action="open" data-event-id="${number(item.id)}">Ver detalhes</button></td>
+        <td>${dateTime(item.last_seen)}<br><button type="button" class="btn btn-sm btn-outline-secondary mt-1" data-security-action="open" data-event-id="${item.id}">Ver detalhes</button></td>
       </tr>`;
     }).join('') || '<tr><td colspan="7" class="text-muted">Nenhum evento comportamental recente.</td></tr>';
   }
@@ -353,7 +353,7 @@
     const analysis = event.ai_analysis || {};
     if (!analysis.verdict) {
       return `<div class="subtle">Este evento ainda não foi analisado por IA.</div>
-        <button type="button" class="btn btn-sm btn-success mt-2" data-security-action="analyze" data-event-id="${number(event.id)}">ANALISAR COM IA</button>`;
+        <button type="button" class="btn btn-sm btn-success mt-2" data-security-action="analyze" data-event-id="${event.id}">ANALISAR COM IA</button>`;
     }
     return `<div class="security-ai-verdict"><strong>${esc(analysis.verdict)}</strong><span>${number(analysis.confidence, 1)}%</span></div>
       <p>${esc(analysis.summary || '')}</p>
@@ -367,7 +367,7 @@
         ['Mitigação recomendada', analysis.mitigation_recommended ? 'Sim — requer Policy Engine' : 'Não']
       ])}
       <div class="subtle">${esc(event.ai_provider || '-')} · ${esc(event.ai_model || '-')} · ${esc(event.analysis_version || '-')} · ${dateTime(event.analyzed_at)}</div>
-      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${number(event.id)}">REANALISAR</button>`;
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${event.id}">REANALISAR</button>`;
   }
 
   function renderThreatIntelDetail(event) {
@@ -413,9 +413,9 @@
       <section><h3>Análise por IA</h3>${renderAiAnalysis(event)}</section>
       <section><h3>Eventos relacionados</h3>${related.length ? evidenceList(related.map(item => `#${item.id} ${item.attack_type} · ${item.verdict} · ${dateTime(item.last_seen)}`)) : '<div class="subtle">Nenhum evento relacionado.</div>'}</section>
       <footer class="security-event-review-actions">
-        <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="status" data-status="investigating" data-event-id="${number(event.id)}">Investigando</button>
-        <button type="button" class="btn btn-sm btn-outline-success" data-security-action="status" data-status="benign" data-event-id="${number(event.id)}">Marcar benigno</button>
-        <button type="button" class="btn btn-sm btn-outline-danger" data-security-action="status" data-status="confirmed" data-event-id="${number(event.id)}">Confirmar ataque</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="status" data-status="investigating" data-event-id="${event.id}">Investigando</button>
+        <button type="button" class="btn btn-sm btn-outline-success" data-security-action="status" data-status="benign" data-event-id="${event.id}">Marcar benigno</button>
+        <button type="button" class="btn btn-sm btn-outline-danger" data-security-action="status" data-status="confirmed" data-event-id="${event.id}">Confirmar ataque</button>
       </footer>`;
     root.lucide?.createIcons();
   }
@@ -429,8 +429,8 @@
     document.body.classList.add('security-event-drawer-open');
     document.getElementById('securityEventDrawerStatus').textContent = 'Carregando evidências...';
     const [event, related] = await Promise.all([
-      apiRequest(`/security/events/${currentSecurityEventId}`),
-      apiRequest(`/security/events/${currentSecurityEventId}/related?limit=20`)
+      apiRequest(`/api/security/events/${currentSecurityEventId}`),
+      apiRequest(`/api/security/events/${currentSecurityEventId}/related?limit=20`)
     ]);
     document.getElementById('securityEventDrawerStatus').textContent = '';
     renderSecurityEventDetail(event, related.items || []);
@@ -467,7 +467,7 @@
     if (!hasAnalysis) {
       return `<p class="subtle">Ainda não analisado. A execução ocorre somente mediante clique e é consultiva.</p>
         ${state.error ? `<div class="security-ai-error">${esc(state.error)}</div>` : ''}
-        <button type="button" class="btn btn-sm btn-success mt-2" data-security-action="analyze" data-event-id="${number(event.id)}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
+        <button type="button" class="btn btn-sm btn-success mt-2" data-security-action="analyze" data-event-id="${event.id}" ${canAnalyze ? '' : 'disabled'}>ANALISAR COM IA</button>
         ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
     }
     const confidence = typeof analysis.confidence === 'number' ? `${number(analysis.confidence, 1)}%` : analysis.confidence;
@@ -487,7 +487,7 @@
         ['Gerada em', dateTime(state.analyzed_at || event.analyzed_at)],
         ['Versão', state.analysis_version || event.analysis_version || '-']
       ])}
-      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${number(event.id)}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>
+      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${event.id}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>
       <div class="subtle mt-1">Advisory only: a IA não executa nem solicita mitigação automática.</div>`;
   }
 
@@ -581,7 +581,7 @@
         ['Score / confiança', `${number(event.detector_score)} / ${number(event.confidence, 1)}%`], ['Status / verdict', `${event.status} / ${event.verdict}`],
         ['Primeira / última ocorrência', `${dateTime(event.first_seen)} / ${dateTime(event.last_seen)}`], ['Duração / recorrências', `${number(duration, 0)} s / ${number(event.recurrence_count)}`],
         ['Detector', event.detector], ['Detection reason', event.detection_reason || '-']
-      ])}<h4>Alvo</h4>${detailGrid([
+      ])}${renderThreatScore(event)}<h4>Alvo</h4>${detailGrid([
         ['IP / prefixo', event.target_prefix || event.target_ip || '-'], ['Role / contexto', event.dst_role || network.dst_role || '-'],
         ['ASN', network.dst_asn || network.target_asn || '-'], ['ASN name', network.dst_as_name || network.target_as_name || '-'],
         ['Interface', `in ${event.input_if || '-'} / out ${event.output_if || '-'}`], ['Customer / network', network.customer_name || network.zone_name || network.network_name || network.description || '-'],
@@ -596,13 +596,13 @@
       <section id="security-event-ports"><h3>Portas e protocolos</h3>${renderSecurityDistribution(investigation.top_destination_ports, 'Top Destination Ports')}${renderSecurityDistribution(investigation.top_source_ports, 'Top Source Ports')}${renderSecurityDistribution(investigation.protocols, 'Distribuição por protocolo')}${renderSecurityDistribution(investigation.tcp_flags, 'TCP Flags (SYN / ACK / RST)')}
         ${!(investigation.top_destination_ports || []).length && !(investigation.top_source_ports || []).length ? '<div class="subtle">Evento legado sem distribuição persistida. Use “Ver evidências” para consultar agregados limitados.</div>' : ''}</section>
       <section id="security-event-intel"><h3>Threat Intelligence</h3>${renderPersistedThreatIntel(event)}</section>
-      <section id="security-event-evidence"><div class="security-section-heading"><h3>Evidências</h3><button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="evidence" data-event-id="${number(event.id)}">VER EVIDÊNCIAS</button></div>${renderDetectionEvidence(event)}<div id="securityEventEvidenceSamples"></div></section>
+      <section id="security-event-evidence"><div class="security-section-heading"><h3>Evidências</h3><button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="evidence" data-event-id="${event.id}">VER EVIDÊNCIAS</button></div>${renderDetectionEvidence(event)}<div id="securityEventEvidenceSamples"></div></section>
       <section id="security-event-ai"><h3>Análise IA</h3>${renderSecurityAiInvestigation(event, aiState)}</section>
       <section><h3>Eventos relacionados</h3>${related.length ? investigationList(related.map(item => `${item.event_id || `#${item.id}`} ${item.attack_type} · ${item.verdict} · ${dateTime(item.last_seen)}`)) : '<div class="subtle">Nenhum evento relacionado.</div>'}</section>
       <footer class="security-event-review-actions">
-        <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="status" data-status="investigating" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Investigando</button>
-        <button type="button" class="btn btn-sm btn-outline-success" data-security-action="status" data-status="benign" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Marcar benigno</button>
-        <button type="button" class="btn btn-sm btn-outline-danger" data-security-action="status" data-status="confirmed" data-event-id="${number(event.id)}" ${canManage ? '' : 'disabled'}>Confirmar ataque</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="status" data-status="investigating" data-event-id="${event.id}" ${canManage ? '' : 'disabled'}>Investigando</button>
+        <button type="button" class="btn btn-sm btn-outline-success" data-security-action="status" data-status="benign" data-event-id="${event.id}" ${canManage ? '' : 'disabled'}>Marcar benigno</button>
+        <button type="button" class="btn btn-sm btn-outline-danger" data-security-action="status" data-status="confirmed" data-event-id="${event.id}" ${canManage ? '' : 'disabled'}>Confirmar ataque</button>
       </footer>`;
     requestAnimationFrame(() => mountSecurityTimeline(traffic));
     root.lucide?.createIcons();
@@ -849,8 +849,8 @@
 
   function renderLegacySecurityAnomalyDetail(item) {
     const available = entries => entries.filter(([, value]) => value !== null && value !== undefined && value !== '');
-    const anomalyId = number(item.id);
-    const mitigationId = number(item._mitigation_anomaly_id || item.id);
+    const anomalyId = item.id;
+    const mitigationId = item._mitigation_anomaly_id || item.id;
     setInvestigationHeading('Legacy anomaly', `Legacy anomaly #${anomalyId}`);
     document.getElementById('securityEventDrawerStatus').textContent = 'Legacy anomaly';
     document.getElementById('securityEventDrawerBody').innerHTML = `
@@ -1000,33 +1000,100 @@
     setPanelStatus('threatMapStatus', `Mapa atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
   }
 
+  function renderSecuritySummary(payload) {
+    if (!payload) return;
+    document.getElementById('secOverviewAnalyzed').textContent = number(payload.analyzed);
+    document.getElementById('secOverviewDetections').textContent = number(payload.detections);
+    document.getElementById('secOverviewSuspicious').textContent = number(payload.suspicious);
+    document.getElementById('secOverviewEvents').textContent = number(payload.security_events);
+    document.getElementById('secOverviewCritical').textContent = number(payload.critical);
+    document.getElementById('secOverviewHigh').textContent = number(payload.high);
+    document.getElementById('secOverviewCorroborated').textContent = number(payload.corroborated);
+    document.getElementById('secOverviewEligible').textContent = number(payload.eligible_for_mitigation);
+    document.getElementById('secOverviewMitigated').textContent = number(payload.mitigated);
+    const pipeline = document.getElementById('secOverviewPipeline');
+    if (pipeline) {
+      pipeline.textContent = `Pipeline (janela ${number(payload.window_minutes)} min): ${number(payload.analyzed)} analisados → ${number(payload.detections)} detecções → ${number(payload.suspicious)} suspeitos → ${number(payload.security_events)} eventos → ${number(payload.corroborated)} corroborados → ${number(payload.mitigated)} mitigados · ${esc(payload.threat_score_mode || 'shadow')}`;
+    }
+    document.getElementById('secOverviewStatus').textContent = `Janela de ${number(payload.window_minutes)} min · atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`;
+  }
+
+  async function fetchSecuritySummary() {
+    const payload = await apiRequest('/api/security/summary?window=60');
+    renderSecuritySummary(payload);
+    return payload;
+  }
+
+  function renderThreatScore(event) {
+    const score = event?.threat_score;
+    if (!score || score.score === undefined || score.score === null) return '';
+    const components = (score.components || []).map(component => `+${number(component.points)} ${esc(component.label)}`).join(' ');
+    return `<div class="security-threat-score">
+      <div><strong>Threat Score: ${number(score.score)}/100</strong> <span class="threat-score-band">${esc(score.band)}</span> <span class="subtle">(${esc(score.mode || 'shadow')})</span></div>
+      <div class="subtle">${esc(score.shadow_decision || '')} · ${esc(score.decision_reason || '')}</div>
+      ${components ? `<div class="subtle">${components}</div>` : ''}
+      <div class="subtle">Advisory only: o Threat Score não executa mitigação.</div>
+    </div>`;
+  }
+
+  let securityEventsEtag = '';
+  let lastSecurityEventsPayload = null;
+
   async function fetchSecurityEvents() {
     if (securityEventsRequestPromise) return securityEventsRequestPromise;
-    securityEventsRequestPromise = apiRequest('/security/events?limit=200');
-    try {
-      return await securityEventsRequestPromise;
-    } finally {
-      securityEventsRequestPromise = null;
-    }
+    const headers = securityEventsEtag ? { 'If-None-Match': securityEventsEtag } : {};
+    securityEventsRequestPromise = apiRequest('/api/security/events?limit=200', { headers })
+      .then(payload => {
+        if (payload && payload.__notModified) {
+          const cached = lastSecurityEventsPayload || payload;
+          Object.defineProperty(cached, '__unchanged', { value: true, configurable: true });
+          return cached;
+        }
+        securityEventsEtag = (payload && payload.__etag) || '';
+        lastSecurityEventsPayload = payload;
+        return payload;
+      })
+      .finally(() => { securityEventsRequestPromise = null; });
+    return securityEventsRequestPromise;
   }
 
   function configureSecurityEventsPolling(payload = {}) {
     const requested = Number(payload.ui_refresh_seconds || 10);
     const configured = Number.isFinite(requested) ? Math.max(5, Math.min(15, requested)) : 10;
-    if (securityEventsPollingTimer && configured === securityEventsPollingSeconds) return;
-    if (securityEventsPollingTimer) root.clearInterval(securityEventsPollingTimer);
+    if (configured === securityEventsPollingSeconds) return;
     securityEventsPollingSeconds = configured;
+    if (securityEventsPollingTimer) {
+      root.clearInterval(securityEventsPollingTimer);
+      securityEventsPollingTimer = null;
+      startSecurityEventsPolling();
+    }
+  }
+
+  function startSecurityEventsPolling() {
+    if (securityEventsPollingTimer) return;
     securityEventsPollingTimer = root.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
       refreshSecurityEventsOnly().catch(() => { /* erro já exibido somente no painel */ });
     }, securityEventsPollingSeconds * 1000);
+  }
+
+  function stopSecurityEventsPolling() {
+    if (!securityEventsPollingTimer) return;
+    root.clearInterval(securityEventsPollingTimer);
+    securityEventsPollingTimer = null;
   }
 
   async function refreshSecurityEventsOnly() {
     setPanelStatus('threatVectorsStatus', 'Atualizando Security Events...');
     try {
       const payload = await fetchSecurityEvents();
+      if (payload && payload.__unchanged) {
+        setPanelStatus('threatVectorsStatus', `Sem alterações em ${new Date().toLocaleTimeString('pt-BR')} · polling ${securityEventsPollingSeconds} s.`);
+        return payload;
+      }
       renderVectors(payload);
       configureSecurityEventsPolling(payload);
+      fetchSecuritySummary().catch(() => { /* resumo é não-bloqueante */ });
       setPanelStatus('threatVectorsStatus', `Atualizado em ${new Date().toLocaleTimeString('pt-BR')} · polling ${securityEventsPollingSeconds} s.`);
       root.lucide?.createIcons();
       return payload;
@@ -1058,7 +1125,10 @@
         const panel = panels[index];
         if (result.status === 'fulfilled') {
           panel.render(result.value);
-          if (panel.name === 'Attack Vectors') configureSecurityEventsPolling(result.value);
+          if (panel.name === 'Attack Vectors') {
+            configureSecurityEventsPolling(result.value);
+            startSecurityEventsPolling();
+          }
           setPanelStatus(panel.status, `Atualizado em ${new Date().toLocaleTimeString('pt-BR')}${panel.name === 'Attack Vectors' ? ` · polling ${securityEventsPollingSeconds} s` : ''}.`);
         } else {
           failures.push(panel.name);
@@ -1071,6 +1141,11 @@
         failures.push('Mapa de Threat Intelligence');
         setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
         ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
+      }
+      try {
+        await fetchSecuritySummary();
+      } catch (error) {
+        document.getElementById('secOverviewStatus').textContent = `Falha ao carregar resumo: ${error.message}`;
       }
       document.getElementById('threatWorkspaceStatus').textContent = failures.length
         ? `Atualização parcial: ${failures.join(', ')} indisponível(is). Os demais painéis permanecem atualizados.`
@@ -1152,7 +1227,6 @@
     if (action) providerAction(action).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
   });
   document.addEventListener('DOMContentLoaded', () => {
-    configureSecurityEventsPolling();
     document.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.getElementById('securityEventDrawer')?.hidden) closeSecurityEvent(); });
     document.getElementById('refreshThreatWorkspaceButton')?.addEventListener('click', () => loadWorkspace().catch(console.error));
     document.getElementById('applyThreatFiltersButton')?.addEventListener('click', () => loadMap().catch(error => {
@@ -1170,6 +1244,8 @@
 
   root.loadThreatIntelligenceWorkspace = loadWorkspace;
   root.refreshSecurityEventsOnly = refreshSecurityEventsOnly;
+  root.startThreatIntelligencePolling = startSecurityEventsPolling;
+  root.stopThreatIntelligencePolling = stopSecurityEventsPolling;
   root.openSecurityEventInvestigation = eventId => openSecurityEventInvestigation(eventId).catch(error => {
     const status = document.getElementById('threatWorkspaceStatus') || document.getElementById('anomalyStatus');
     if (status) status.textContent = error.message;
