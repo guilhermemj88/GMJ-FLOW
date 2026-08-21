@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from app.services.threat_contracts import attack_family, detector_verdict
 from app.services.threat_intelligence import clean_text, json_dump, safe_json, utc_now_iso
+from app.services.threat_score import threat_score_payload
 
 
 PROTECTED_RETENTION_STATUSES = {"confirmed", "investigating", "mitigated", "manually_pinned"}
@@ -612,6 +613,7 @@ def security_event_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
         item["duration_seconds"] = 0.0
     facts = item.get("evidence", {}).get("facts") if isinstance(item.get("evidence"), Mapping) else []
     item["detection_reason"] = "; ".join(clean_text(value) for value in (facts or [])[:5] if clean_text(value))
+    item["threat_score"] = threat_score_payload(item)
     return item
 
 

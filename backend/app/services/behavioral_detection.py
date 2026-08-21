@@ -1557,6 +1557,12 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(prefix, protocol)
         );
+        CREATE TABLE IF NOT EXISTS behavioral_runtime_counters (
+            hour TEXT PRIMARY KEY,
+            observations INTEGER NOT NULL DEFAULT 0,
+            runs INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_status_time
             ON behavioral_attack_vectors(status, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_campaign
@@ -2122,6 +2128,7 @@ class BehavioralThreatRuntime:
             lookback = max(60, min(int(os.getenv("GMJFLOW_BEHAVIOR_LOOKBACK_SECONDS", "300")), 3600))
             limit = max(1000, min(int(os.getenv("GMJFLOW_BEHAVIOR_MAX_OBSERVATIONS", "100000")), 250000))
             rows = self.observation_loader(lookback, limit)
+            self._record_runtime_counter(len(rows))
             candidate_v2: dict[str, Any] = {}
             candidate_v2_error = ""
             if os.getenv("GMJFLOW_BEHAVIOR_CANDIDATE_ENGINE_V2", "false").strip().lower() in {"1", "true", "yes", "on"}:
@@ -2226,6 +2233,26 @@ class BehavioralThreatRuntime:
             self.state["running"] = False
             self._run_lock.release()
         return dict(self.state)
+
+    def _record_runtime_counter(self, observations: int) -> None:
+        """Aggregated per-hour telemetry for the Security Overview. This is
+        bookkeeping only and does not change detection or policy behavior."""
+        now = utc_now_iso()
+        hour = now[:13] + ":00:00Z"
+        with self.connection_factory() as conn:
+            ensure_behavioral_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO behavioral_runtime_counters (hour, observations, runs, updated_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(hour) DO UPDATE SET
+                    observations = observations + excluded.observations,
+                    runs = runs + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (hour, int(observations), now),
+            )
+            conn.commit()
 
     def start(self) -> None:
         self.engine.ensure_schema()
