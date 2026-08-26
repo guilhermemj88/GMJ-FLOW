@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Baixa e converte o dataset CAIDA RouteViews prefix2as para o dicionario ASN.
 
-Fonte: https://publicdata.caida.org/datasets/routing/routeviews-prefix2as/
+Fonte: https://data.caida.org/datasets/routing/
 Arquivos:
-  routeviews-rv2-<YYYYMMDD>-0000.pfx2as.gz   (IPv4)
-  routeviews-rv6-<YYYYMMDD>-0000.pfx2as.gz   (IPv6)
+  routeviews-prefix2as/routeviews-rv2-<YYYYMMDD>-1200.pfx2as.gz   (IPv4)
+  routeviews6-prefix2as/routeviews-rv6-<YYYYMMDD>-1200.pfx2as.gz  (IPv6)
 Formato (TAB-separado, 1 linha por prefixo):
   IP prefix \t prefix length \t AS number
   Ex.: 1.2.3.0 \t 24 \t 1234
@@ -37,9 +37,20 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-BASE_URL = "https://publicdata.caida.org/datasets/routing/routeviews-prefix2as/"
+BASE_URL = "https://data.caida.org/datasets/routing/"
 
 CH_COLUMNS = ["prefix", "asn", "as_name", "country", "source"]
+
+
+def family_url(date: str, family: str) -> str:
+    """URL do snapshot pfx2as (snapshot -1200, em subpasta YYYY/MM).
+
+    IPv6 fica em outro diretorio (routeviews6-prefix2as).
+    """
+    yyyy, mm = date[:4], date[4:6]
+    if family == "v4":
+        return f"{BASE_URL}routeviews-prefix2as/{yyyy}/{mm}/routeviews-rv2-{date}-1200.pfx2as.gz"
+    return f"{BASE_URL}routeviews6-prefix2as/{yyyy}/{mm}/routeviews-rv6-{date}-1200.pfx2as.gz"
 
 
 def utc_now() -> str:
@@ -129,12 +140,12 @@ def iter_gz_lines(path: str):
 def build_tsv(date: str, out_dir: str) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     files = {
-        "v4": os.path.join(out_dir, f"routeviews-rv2-{date}-0000.pfx2as.gz"),
-        "v6": os.path.join(out_dir, f"routeviews-rv6-{date}-0000.pfx2as.gz"),
+        "v4": os.path.join(out_dir, f"routeviews-rv2-{date}-1200.pfx2as.gz"),
+        "v6": os.path.join(out_dir, f"routeviews-rv6-{date}-1200.pfx2as.gz"),
     }
     for key, local in files.items():
         if not os.path.exists(local):
-            download_one(f"{BASE_URL}{os.path.basename(local)}", local)
+            download_one(family_url(date, key), local)
 
     stats = {
         "date": date,
