@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import json
 import os
@@ -47,6 +48,7 @@ TIME_ONLY_LOG_TIMESTAMP_RE = re.compile(
 DEFAULT_EXABGP_LOG_PATH = "/var/log/exabgp-gmj-flow.log"
 DEFAULT_EXABGP_CONFIG_PATH = "/etc/exabgp/gmj-flow-ne8000.conf"
 DEFAULT_EXABGP_SYSTEMD_SERVICE = "exabgp-gmj-flow.service"
+DEFAULT_HOST_AGENT_PORT = 18080
 DEFAULT_CLOSE_WAIT_ALERT_THRESHOLD = 5
 DEFAULT_RECV_Q_ALERT_THRESHOLD = 0
 MAX_LOG_READ_BYTES = 4 * 1024 * 1024
@@ -1256,6 +1258,23 @@ def bgp_status(
     }
 
 
+def configured_token() -> str:
+    return str(os.getenv("GMJFLOW_HOST_AGENT_TOKEN", "") or "").strip()
+
+
+def token_is_valid(presented: str, expected: str) -> bool:
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(presented, expected)
+
+
+def request_bearer_token(handler: Any) -> str:
+    header = str(handler.headers.get("Authorization") or "")
+    if header.startswith("Bearer "):
+        return header[len("Bearer ") :].strip()
+    return str(handler.headers.get("X-GMJFLOW-Host-Agent-Token") or "").strip()
+
+
 def recovery_snapshot(
     service: str,
     peer_ips: list[str],
@@ -1427,12 +1446,28 @@ def recover_bgp_sessions(
 class Handler(BaseHTTPRequestHandler):
     configured_log_path = DEFAULT_EXABGP_LOG_PATH
     configured_config_path = DEFAULT_EXABGP_CONFIG_PATH
+    expected_token = ""
+    recovery_enabled = False
+
+    def _authorized(self) -> bool:
+        return token_is_valid(request_bearer_token(self), self.expected_token)
+
+    def _write_json(self, status_code: int, payload: object) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path != "/bgp/status":
             self.send_response(404)
             self.end_headers()
+            return
+        if not self._authorized():
+            self._write_json(401, {"available": False, "error": "unauthorized"})
             return
         params = parse_qs(parsed.query)
         service = params.get("service", [""])[0]
@@ -1464,18 +1499,21 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             payload = {"available": False, "error": str(exc)}
             status_code = 400
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_json(status_code, payload)
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path != "/bgp/recover":
             self.send_response(404)
             self.end_headers()
+            return
+        if not self._authorized():
+            self._write_json(401, {"ok": False, "error": "unauthorized"})
+            return
+        if not self.recovery_enabled:
+            # Strictly read-only by default: recovery (systemctl restart) is an
+            # explicit opt-in and is refused unless --enable-recovery is set.
+            self._write_json(403, {"ok": False, "error": "recovery disabled on this read-only host agent"})
             return
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -1513,12 +1551,7 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             payload = {"ok": False, "error": str(exc)}
             status_code = 400
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._write_json(status_code, payload)
 
     def log_message(self, fmt: str, *args: object) -> None:
         return
@@ -1527,7 +1560,17 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="GMJ-FLOW optional host status agent")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument("--port", type=int, default=DEFAULT_HOST_AGENT_PORT)
+    parser.add_argument(
+        "--token",
+        default=configured_token(),
+        help="shared secret required for /bgp/status and /bgp/recover (or GMJFLOW_HOST_AGENT_TOKEN)",
+    )
+    parser.add_argument(
+        "--enable-recovery",
+        action="store_true",
+        help="opt-in to allow POST /bgp/recover (systemctl restart). Default: read-only.",
+    )
     parser.add_argument(
         "--log-path",
         default=os.getenv("GMJFLOW_EXABGP_LOG_PATH", DEFAULT_EXABGP_LOG_PATH),
@@ -1539,6 +1582,11 @@ def main() -> None:
         help="absolute ExaBGP config path accepted by /bgp/status",
     )
     args = parser.parse_args()
+    if not args.token:
+        parser.error(
+            "GMJFLOW_HOST_AGENT_TOKEN is required: the read-only host agent refuses "
+            "to start without authentication."
+        )
     try:
         Handler.configured_log_path = validated_log_path(args.log_path, args.log_path)
         Handler.configured_config_path = validated_config_path(
@@ -1546,6 +1594,8 @@ def main() -> None:
         )
     except ValueError as exc:
         parser.error(str(exc))
+    Handler.expected_token = str(args.token).strip()
+    Handler.recovery_enabled = bool(args.enable_recovery)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.serve_forever()
 
