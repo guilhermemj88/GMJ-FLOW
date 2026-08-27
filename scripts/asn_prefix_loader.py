@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Baixa e converte o dataset CAIDA RouteViews prefix2as para o dicionario ASN.
 
-Fonte: https://publicdata.caida.org/datasets/routing/routeviews-prefix2as/
+Fonte: https://data.caida.org/datasets/routing/
 Arquivos:
   routeviews-prefix2as/routeviews-rv2-<YYYYMMDD>-1200.pfx2as.gz   (IPv4)
   routeviews6-prefix2as/routeviews-rv6-<YYYYMMDD>-1200.pfx2as.gz  (IPv6)
