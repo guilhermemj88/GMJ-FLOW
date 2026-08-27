@@ -27,14 +27,42 @@ CREATE TABLE IF NOT EXISTS flow_raw
     src_asn UInt32 DEFAULT 0,
     dst_asn UInt32 DEFAULT 0,
     src_as_name String DEFAULT '',
-    dst_as_name String DEFAULT ''
+    dst_as_name String DEFAULT '',
+    clock_skew_seconds Int32 MATERIALIZED (toUnixTimestamp(flow_time) - toUnixTimestamp(received_at)),
+    time_classification LowCardinality(String) MATERIALIZED multiIf(
+        toUnixTimestamp(flow_time) - toUnixTimestamp(received_at) > 3600, 'QUARANTINED_FUTURE_CLOCK_SKEW',
+        toUnixTimestamp(flow_time) - toUnixTimestamp(received_at) < -3600, 'QUARANTINED_PAST_CLOCK_SKEW',
+        'VALID_TIME'
+    )
 )
 ENGINE = MergeTree
 PARTITION BY toDate(flow_time)
 ORDER BY (sensor, flow_time, src_ip, dst_ip, proto, dst_port)
 TTL toDateTime(flow_time) + INTERVAL 168 HOUR DELETE
 SETTINGS index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS clock_skew_counters
+(
+    hour DateTime('UTC'),
+    sensor LowCardinality(String),
+    exporter_ip IPv6,
+    time_classification LowCardinality(String),
+    rows UInt64
+)
+ENGINE = SummingMergeTree((rows))
+PARTITION BY toYYYYMM(hour)
+ORDER BY (sensor, exporter_ip, time_classification, hour)
+TTL toDateTime(hour) + INTERVAL 720 HOUR DELETE;
 
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_flow_raw_to_clock_skew_counters
+TO clock_skew_counters AS
+SELECT
+    toStartOfHour(received_at) AS hour,
+    sensor,
+    exporter_ip,
+    time_classification,
+    count() AS rows
+FROM flow_raw
+GROUP BY hour, sensor, exporter_ip, time_classification;
 CREATE TABLE IF NOT EXISTS behavior_flow_10s
 (
     bucket DateTime('UTC'),
