@@ -458,6 +458,7 @@
   function renderSecurityAiInvestigation(event, state = {}) {
     const analysis = state.analysis && Object.keys(state.analysis).length ? state.analysis : (event.ai_analysis || {});
     const hasAnalysis = Object.keys(analysis).length > 0;
+    const inherited = state.analysis_source === 'campaign' && state.inherited_from_campaign === true;
     const canAnalyze = canManageSecurityEvents() && state.enabled === true && state.configured === true;
     const unavailable = !state.enabled
       ? 'Security AI desabilitada por configuração.'
@@ -471,7 +472,16 @@
         ${unavailable ? `<div class="subtle mt-1">${esc(unavailable)}</div>` : ''}`;
     }
     const confidence = typeof analysis.confidence === 'number' ? `${number(analysis.confidence, 1)}%` : analysis.confidence;
-    return `${state.stale || event.ai_analysis_status === 'stale' ? '<div class="security-ai-stale">Análise potencialmente desatualizada após nova recorrência/evidência.</div>' : ''}
+    const staleBanner = !inherited && (state.stale || event.ai_analysis_status === 'stale')
+      ? '<div class="security-ai-stale">Análise potencialmente desatualizada após nova recorrência/evidência.</div>' : '';
+    const inheritedHeader = inherited
+      ? `<div class="mt-1"><span class="threat-intel-chip">Análise da campanha</span></div>
+         <p class="subtle">Esta análise foi herdada da campanha correlacionada.</p>` : '';
+    const actions = inherited
+      ? `<button type="button" class="btn btn-sm btn-outline-primary mt-2" data-campaign-action="open" data-campaign-id="${esc(state.campaign_id || event.campaign_id || '')}">Abrir campanha</button>
+         <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${event.id}" ${canAnalyze ? '' : 'disabled'}>Analisar este evento individualmente</button>`
+      : `<button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${event.id}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>`;
+    return `${staleBanner}${inheritedHeader}
       <div class="security-ai-verdict"><strong>${esc(analysis.assessment || analysis.verdict || 'Análise consultiva')}</strong><span>${esc(confidence || '-')}</span></div>
       <p>${esc(analysis.summary || '')}</p>
       <h4>Por que foi detectado</h4>${investigationList(analysis.why_detected || analysis.evidence_for_attack)}
@@ -487,7 +497,7 @@
         ['Gerada em', dateTime(state.analyzed_at || event.analyzed_at)],
         ['Versão', state.analysis_version || event.analysis_version || '-']
       ])}
-      <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-security-action="reanalyze" data-event-id="${event.id}" ${canAnalyze ? '' : 'disabled'}>REANALISAR</button>
+      ${actions}
       <div class="subtle mt-1">Advisory only: a IA não executa nem solicita mitigação automática.</div>`;
   }
 
@@ -1044,7 +1054,12 @@
   async function campaignAction(button) {
     const action = button.dataset.campaignAction;
     const campaignId = button.dataset.campaignId || currentSecurityCampaignId;
-    if (!campaignId || !['analyze', 'reanalyze'].includes(action)) return;
+    if (!campaignId) return;
+    if (action === 'open') {
+      openSecurityCampaign(campaignId).catch(error => { document.getElementById('securityEventDrawerStatus').textContent = error.message; });
+      return;
+    }
+    if (!['analyze', 'reanalyze'].includes(action)) return;
     button.disabled = true;
     try {
       document.getElementById('securityEventDrawerStatus').textContent = 'Analisando evidências da campanha...';

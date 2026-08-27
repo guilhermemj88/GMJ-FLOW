@@ -332,6 +332,59 @@ def get_campaign_analysis(conn: sqlite3.Connection, campaign_id: str) -> dict[st
     }
 
 
+def resolve_campaign_ai_for_event(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    """Resolve a usable Campaign AI analysis for event inheritance.
+
+    Canonical owner of campaign lookup, stale check and fingerprint comparison.
+    Reuses `campaign_analysis_fingerprints` (the same stale criteria used by
+    `get_campaign_analysis`). Returns `available`/`valid`/`stale`; `valid=True`
+    means the campaign analysis can be inherited without a provider call.
+    """
+    normalized = clean_text(campaign_id)
+    empty: dict[str, Any] = {
+        "available": False,
+        "valid": False,
+        "stale": False,
+        "campaign_id": normalized,
+        "campaign_analysis_id": None,
+        "analysis": {},
+        "provider": "",
+        "model": "",
+        "analysis_fingerprint": "",
+        "evidence_fingerprint": "",
+        "analyzed_at": None,
+    }
+    if not normalized:
+        return empty
+    investigation = get_campaign_investigation(conn, normalized)
+    if investigation is None:
+        return empty
+    latest = _latest_attempt(conn, normalized)
+    valid = latest if latest.get("status") == "valid" else _latest_valid_analysis(conn, normalized)
+    analysis = valid.get("result") or {}
+    if not analysis:
+        return empty
+    payload = campaign_analysis_payload(investigation)
+    campaign_fingerprint, evidence_fingerprint = campaign_analysis_fingerprints(investigation, payload)
+    stale = bool(
+        clean_text(valid.get("campaign_fingerprint")) != campaign_fingerprint
+        or clean_text(valid.get("evidence_fingerprint")) != evidence_fingerprint
+    )
+    return {
+        "available": True,
+        "valid": not stale,
+        "stale": stale,
+        "campaign_id": normalized,
+        "campaign_analysis_id": int(valid["id"]) if valid.get("id") is not None else None,
+        "analysis": analysis,
+        "provider": clean_text(valid.get("provider")),
+        "model": clean_text(valid.get("model")),
+        "analysis_fingerprint": campaign_fingerprint,
+        "evidence_fingerprint": evidence_fingerprint,
+        "analyzed_at": valid.get("generated_at"),
+    }
+
+
 def analyze_campaign(
     conn: sqlite3.Connection,
     campaign_id: str,

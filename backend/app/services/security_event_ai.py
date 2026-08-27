@@ -409,6 +409,23 @@ def execute_security_ai_provider(
     )
 
 
+def _resolve_campaign_ai(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    # Lazy import avoids a module-level circular dependency (campaign_ai imports security_event_ai).
+    from app.services.campaign_ai import resolve_campaign_ai_for_event
+
+    return resolve_campaign_ai_for_event(conn, campaign_id)
+
+
+def _event_individual_analysis(conn: sqlite3.Connection, event: Mapping[str, Any]) -> tuple[bool, int | None]:
+    if not (event.get("ai_analysis") and event.get("ai_analysis_status") == "valid"):
+        return False, None
+    row = conn.execute(
+        "SELECT id FROM security_event_ai_analyses WHERE event_id=? AND status='valid' ORDER BY id DESC LIMIT 1",
+        (int(event["id"]),),
+    ).fetchone()
+    return True, (int(row[0]) if row is not None else None)
+
+
 def get_security_event_analysis(conn: sqlite3.Connection, event_reference: Any) -> dict[str, Any]:
     event = find_security_event(conn, event_reference)
     if event is None:
@@ -421,7 +438,13 @@ def get_security_event_analysis(conn: sqlite3.Connection, event_reference: Any) 
     history = dict(row) if row is not None else {}
     if history:
         history["result"] = safe_json(history.pop("result_json", "{}"), {})
-    return {
+
+    individual_available, individual_analysis_id = _event_individual_analysis(conn, event)
+    campaign_id = clean_text(event.get("campaign_id"))
+    campaign_resolution = _resolve_campaign_ai(conn, campaign_id) if campaign_id else None
+    inheritable = bool(campaign_resolution and campaign_resolution.get("valid"))
+
+    base = {
         "ok": True,
         "event_id": event["event_id"],
         "enabled": config["enabled"],
@@ -431,19 +454,49 @@ def get_security_event_analysis(conn: sqlite3.Connection, event_reference: Any) 
         "route_enabled": config["route_enabled"],
         "routing_global_enabled": config["routing_global_enabled"],
         "config_source": config["config_source"],
-        "provider": event.get("ai_provider") or config["provider"],
-        "provider_name": event.get("ai_provider") or config["provider_name"],
-        "model": event.get("ai_model") or config["model"],
-        "analysis": event.get("ai_analysis") or {},
-        "analysis_status": event.get("ai_analysis_status") or "not_analyzed",
-        "stale": event.get("ai_analysis_status") == "stale",
-        "analyzed_at": event.get("analyzed_at"),
-        "analysis_version": event.get("analysis_version"),
-        "error": _limited_text(event.get("ai_analysis_error"), 1000),
         "latest_attempt": history,
         "advisory_only": True,
         "automatic_mitigation": False,
     }
+    if inheritable:
+        base.update({
+            "provider": campaign_resolution["provider"] or config["provider"],
+            "provider_name": campaign_resolution["provider"] or config["provider_name"],
+            "model": campaign_resolution["model"] or config["model"],
+            "analysis": campaign_resolution["analysis"],
+            "analysis_status": "valid",
+            "stale": False,
+            "analyzed_at": campaign_resolution["analyzed_at"],
+            "analysis_version": ANALYSIS_VERSION,
+            "error": "",
+            "analysis_source": "campaign",
+            "inherited_from_campaign": True,
+            "campaign_id": campaign_id,
+            "campaign_analysis_id": campaign_resolution["campaign_analysis_id"],
+            "individual_analysis_available": individual_available,
+            "individual_analysis_id": individual_analysis_id,
+        })
+    else:
+        base.update({
+            "provider": event.get("ai_provider") or config["provider"],
+            "provider_name": event.get("ai_provider") or config["provider_name"],
+            "model": event.get("ai_model") or config["model"],
+            "analysis": event.get("ai_analysis") or {},
+            "analysis_status": event.get("ai_analysis_status") or "not_analyzed",
+            "stale": event.get("ai_analysis_status") == "stale",
+            "analyzed_at": event.get("analyzed_at"),
+            "analysis_version": event.get("analysis_version"),
+            "error": _limited_text(event.get("ai_analysis_error"), 1000),
+            "analysis_source": "event",
+            "inherited_from_campaign": False,
+            "campaign_id": campaign_id or None,
+            "campaign_analysis_id": None,
+            "individual_analysis_available": False,
+        })
+        if campaign_resolution and campaign_resolution.get("available") and campaign_resolution.get("stale"):
+            base["campaign_analysis_available"] = True
+            base["campaign_analysis_stale"] = True
+    return base
 
 
 def analyze_security_event(
@@ -460,6 +513,40 @@ def analyze_security_event(
     if executor is None and not security_ai_config(conn, "security_event_analysis")["kill_switch_enabled"]:
         return {"ok": False, "status": "disabled", "error_type": "disabled", "error_message": "Security AI desabilitada por configuração"}
 
+    campaign_id = clean_text(event.get("campaign_id"))
+    if not force and campaign_id:
+        campaign_resolution = _resolve_campaign_ai(conn, campaign_id)
+        if campaign_resolution and campaign_resolution.get("valid"):
+            individual_available, individual_analysis_id = _event_individual_analysis(conn, event)
+            conn.execute(
+                """
+                INSERT INTO threat_engine_audit (
+                    event_type, detector, campaign_vector_json, reason, non_mitigation_reason, created_at
+                ) VALUES ('AI_INHERITED', 'security_event_ai', ?, ?, 'ai_is_manual_advisory_only', ?)
+                """,
+                (
+                    json_dump({
+                        "event_id": event["event_id"],
+                        "campaign_id": campaign_id,
+                        "campaign_analysis_id": campaign_resolution["campaign_analysis_id"],
+                    }),
+                    "event_ai_inherited_valid_campaign_analysis",
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+            return {
+                "ok": True, "cached": True, "analysis": campaign_resolution["analysis"],
+                "analyzed_at": campaign_resolution["analyzed_at"],
+                "provider": campaign_resolution["provider"], "model": campaign_resolution["model"],
+                "analysis_version": ANALYSIS_VERSION, "analysis_status": "valid",
+                "analysis_source": "campaign", "inherited_from_campaign": True,
+                "campaign_id": campaign_id, "campaign_analysis_id": campaign_resolution["campaign_analysis_id"],
+                "individual_analysis_available": individual_available,
+                "individual_analysis_id": individual_analysis_id,
+                "advisory_only": True, "mitigation_executed": False,
+            }
+
     payload = structured_analysis_payload(conn, event)
     event_fingerprint, evidence_fingerprint = event_analysis_fingerprints(event, payload)
     legacy_cache = not clean_text(event.get("ai_event_fingerprint"))
@@ -474,6 +561,8 @@ def analyze_security_event(
             "model": event.get("ai_model"), "analysis_version": event.get("analysis_version"),
             "analysis_status": "valid", "event_fingerprint": event_fingerprint,
             "evidence_fingerprint": evidence_fingerprint, "advisory_only": True,
+            "analysis_source": "event", "inherited_from_campaign": False,
+            "campaign_id": campaign_id or None, "campaign_analysis_id": None,
         }
 
     prompt = (
@@ -581,4 +670,6 @@ def analyze_security_event(
         "analysis_version": ANALYSIS_VERSION, "analysis_status": "valid",
         "event_fingerprint": event_fingerprint, "evidence_fingerprint": evidence_fingerprint,
         "advisory_only": True, "mitigation_executed": False,
+        "analysis_source": "event", "inherited_from_campaign": False,
+        "campaign_id": campaign_id or None, "campaign_analysis_id": None,
     }
