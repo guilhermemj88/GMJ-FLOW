@@ -26,6 +26,7 @@ from app.services.threat_policy import ensure_threat_policy_schema, policy_decis
 from app.services.campaign_ai import analyze_campaign, get_campaign_analysis
 from app.services.campaign_context_evaluator import evaluate_campaign_context
 from app.services.campaign_investigation import get_campaign_investigation
+from app.services.campaign_score import campaign_risk_from_context
 from app.services.security_event_ai import analyze_security_event, get_security_event_analysis
 from app.services.security_event_investigation import event_evidence, event_sources, event_traffic
 from app.services.security_events import (
@@ -114,6 +115,11 @@ def list_campaigns(status: str = "", limit: int = Query(200, ge=1, le=1000)) -> 
                 vectors=vectors_by_campaign.get(campaign_id, []),
                 correlated_events=events_by_campaign.get(campaign_id, []),
             )
+            if not campaign.get("campaign_risk_score"):
+                risk = campaign_risk_from_context(campaign, campaign["context_evaluation"])
+                campaign["campaign_risk_score"] = risk["score"]
+                campaign["campaign_risk_band"] = risk["band"]
+                campaign["campaign_risk_components"] = risk["components"]
     return {"items": campaigns}
 
 

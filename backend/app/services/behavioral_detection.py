@@ -30,9 +30,12 @@ from app.services.security_events import (
     cleanup_security_events,
     ensure_security_event_schema,
     migrate_legacy_security_events,
+    security_event_row,
     update_security_event_mitigation_status,
     upsert_security_event,
 )
+from app.services.campaign_context_evaluator import evaluate_campaign_context
+from app.services.campaign_score import calculate_campaign_risk_score
 from app.services.threat_contracts import (
     FLOOD_ATTACK_TYPES,
     SCAN_ATTACK_TYPES,
@@ -1515,6 +1518,9 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             decision_source TEXT NOT NULL DEFAULT 'GMJ_FLOW',
             status TEXT NOT NULL DEFAULT 'active',
             recurrence_count INTEGER NOT NULL DEFAULT 1,
+            campaign_risk_score INTEGER NOT NULL DEFAULT 0,
+            campaign_risk_band TEXT NOT NULL DEFAULT '',
+            campaign_risk_components_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -1581,6 +1587,12 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_key TEXT NOT NULL DEFAULT ''")
     if "recurrence_count" not in campaign_columns:
         conn.execute("ALTER TABLE threat_campaigns ADD COLUMN recurrence_count INTEGER NOT NULL DEFAULT 1")
+    if "campaign_risk_score" not in campaign_columns:
+        conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_risk_score INTEGER NOT NULL DEFAULT 0")
+    if "campaign_risk_band" not in campaign_columns:
+        conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_risk_band TEXT NOT NULL DEFAULT ''")
+    if "campaign_risk_components_json" not in campaign_columns:
+        conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_risk_components_json TEXT NOT NULL DEFAULT '{}'")
     legacy_campaigns = conn.execute(
         "SELECT campaign_id, target_prefix, classification, feature_json FROM threat_campaigns WHERE campaign_key=''"
     ).fetchall()
@@ -1899,14 +1911,34 @@ class BehavioralDetectionEngine:
                 )
                 stats["vectors"] += 1
             for campaign in campaigns:
+                campaign_vectors = [item.as_dict() for item in vectors if item.campaign_id == campaign.campaign_id]
+                try:
+                    event_rows = conn.execute(
+                        "SELECT * FROM security_events WHERE campaign_id=?",
+                        (campaign.campaign_id,),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    event_rows = []
+                campaign_context = evaluate_campaign_context(
+                    campaign.as_dict(),
+                    vectors=campaign_vectors,
+                    correlated_events=[security_event_row(item) for item in event_rows],
+                )
+                campaign_risk = calculate_campaign_risk_score(
+                    coordination_score=campaign.coordination_score,
+                    recurrence_count=campaign.recurrence_count,
+                    context_evaluation=campaign_context,
+                    persistence_satisfied=bool(campaign.features.get("persistence_satisfied")),
+                )
                 conn.execute(
                     """
                     INSERT INTO threat_campaigns (
                         campaign_id, campaign_key, target_prefix, classification, coordination_score,
                         unique_sources, unique_source_asns, packets_per_second, bits_per_second,
                         flows_per_second, first_seen, last_seen, feature_json, threat_intel_json,
-                        intel_sources_json, decision_source, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        intel_sources_json, decision_source, campaign_risk_score, campaign_risk_band,
+                        campaign_risk_components_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(campaign_id) DO UPDATE SET
                         campaign_key=excluded.campaign_key,
                         coordination_score=MAX(coordination_score, excluded.coordination_score),
@@ -1920,7 +1952,11 @@ class BehavioralDetectionEngine:
                         recurrence_count=recurrence_count+1,
                         feature_json=excluded.feature_json,
                         threat_intel_json=excluded.threat_intel_json,
-                        intel_sources_json=excluded.intel_sources_json, updated_at=excluded.updated_at
+                        intel_sources_json=excluded.intel_sources_json,
+                        campaign_risk_score=excluded.campaign_risk_score,
+                        campaign_risk_band=excluded.campaign_risk_band,
+                        campaign_risk_components_json=excluded.campaign_risk_components_json,
+                        updated_at=excluded.updated_at
                     """,
                     (
                         campaign.campaign_id, campaign.campaign_key, campaign.target_prefix, campaign.classification,
@@ -1928,7 +1964,8 @@ class BehavioralDetectionEngine:
                         campaign.packets_per_second, campaign.bits_per_second, campaign.flows_per_second,
                         campaign.first_seen, campaign.last_seen, json_dump(campaign.features),
                         json_dump(campaign.threat_intel), json_dump(campaign.intel_sources),
-                        campaign.decision_source, now, now,
+                        campaign.decision_source, campaign_risk["score"], campaign_risk["band"],
+                        json_dump(campaign_risk["components"]), now, now,
                     ),
                 )
                 self._history(conn, "PREFIX", campaign.target_prefix, campaigns=1, external=int(bool(campaign.intel_sources)))
@@ -1992,6 +2029,9 @@ def campaign_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
     item["features"] = safe_json(item.pop("feature_json", "{}"), {})
     item["threat_intel"] = safe_json(item.pop("threat_intel_json", "{}"), {})
     item["intel_sources"] = safe_json(item.pop("intel_sources_json", "[]"), [])
+    item["campaign_risk_components"] = safe_json(item.pop("campaign_risk_components_json", "{}"), {})
+    item.setdefault("campaign_risk_score", 0)
+    item.setdefault("campaign_risk_band", "")
     return item
 
 

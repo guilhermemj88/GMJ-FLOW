@@ -334,7 +334,7 @@
       <td><code>${esc(item.campaign_id)}</code><br><span class="subtle">${dateTime(item.last_seen)}</span></td>
       <td><strong>${esc(item.classification)}</strong><br>${esc(item.target_prefix || '-')}<br><span class="subtle">Role: ${esc(role)}</span></td>
       <td><span class="threat-score ${scoreClass(item.coordination_score)}">${number(item.coordination_score)}</span><br><span class="subtle">Score comportamental · ${number(item.packets_per_second, 1)} pps</span><br>
-        <strong>Estado: ${esc(String(evaluation.state || '-').toUpperCase())}</strong><br><span class="subtle">Confiança: ${esc(localizedLevel(evaluation.attack_confidence))} · Risco FP: ${esc(localizedRisk(evaluation.false_positive_risk))}</span></td>
+        <strong>Estado: ${esc(String(evaluation.state || '-').toUpperCase())}</strong><br><span class="subtle">Confiança: ${esc(localizedLevel(evaluation.attack_confidence))} · Risco FP: ${esc(localizedRisk(evaluation.false_positive_risk))}</span>${renderCampaignRiskBadge(item)}</td>
       <td>${number(item.unique_sources)} / ${number(item.unique_source_asns)}</td><td>${vectorIntelEvidence(item)}</td>
     </tr>`;
     }).join('') || '<tr><td colspan="5" class="text-muted">Nenhum Campaign Vector recente.</td></tr>';
@@ -712,6 +712,35 @@
     return 'não registrada';
   }
 
+  function campaignRiskLabel(band) {
+    return ({ informational: 'Informativo', suspicious: 'Suspeito', needs_review: 'Revisão', elevated: 'Elevado', critical: 'Crítico' })[band] || band || '-';
+  }
+
+  function renderCampaignRiskBadge(campaign) {
+    const score = Number(campaign.campaign_risk_score ?? 0);
+    const band = campaign.campaign_risk_band || '';
+    return `<div class="mt-1"><span class="threat-score ${scoreClass(score)}">${number(score)}</span> <span class="subtle">${esc(campaignRiskLabel(band))} · priorização</span></div>`;
+  }
+
+  function renderCampaignRiskScore(campaign) {
+    const components = campaign.campaign_risk_components || {};
+    const score = Number(campaign.campaign_risk_score ?? 0);
+    const band = campaign.campaign_risk_band || '';
+    const rows = [
+      ['Coordenação', components.coordination],
+      ['Desvio de tráfego', components.traffic_deviation],
+      ['Recorrência', components.recurrence],
+      ['Threat Intelligence', components.threat_intel],
+      ['Eventos correlacionados', components.security_events],
+      ['Persistência', components.persistence]
+    ];
+    return `<div class="campaign-risk-score">
+      <div class="security-ai-verdict"><strong>${number(score)} / 100</strong><span>${esc(campaignRiskLabel(band))}</span></div>
+      <div class="table-wrap"><table class="table table-sm security-wide-table"><thead><tr><th>Componente</th><th>Pontos</th></tr></thead><tbody>${rows.map(([label, pts]) => `<tr><td>${label}</td><td>${number(pts)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="subtle">Score de priorização — não executa bloqueio e não alimenta decisão automática de mitigação.</p>
+    </div>`;
+  }
+
   function campaignEnrichmentText(campaign) {
     const summary = campaign.enrichment_summary || {};
     if (!summary.available) return 'Sem enrichment persistido';
@@ -858,7 +887,7 @@
     const ports = (traffic.ports || []).map(item => item.port).filter(value => value !== null && value !== undefined).join(', ');
     setInvestigationHeading('Investigação da campanha', `Investigação da campanha · ${campaign.campaign_id}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
-      <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['context','Contexto'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN SNAPSHOT'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
+      <nav class="security-event-section-nav" aria-label="Seções da investigação da campanha">${[['summary','Resumo'],['risk','Risk Score'],['context','Contexto'],['traffic','TARGET / TRAFFIC'],['sources','TOP SOURCES'],['asn','ASN SNAPSHOT'],['intel','Threat Intelligence'],['events','Eventos correlacionados'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#campaign-${id}">${label}</a>`).join('')}</nav>
       <section id="campaign-summary"><h3>RESUMO DA CAMPANHA</h3>${detailGrid([
         ['ID da campanha', campaign.campaign_id], ['Classificação / família', `${campaign.classification || '-'} / ${campaign.family || '-'}`],
         ['Alvo', campaign.target], ['Score comportamental', optionalNumber(campaign.coordination_score)],
@@ -869,6 +898,7 @@
         ['Duração técnica', campaign.duration_seconds === null || campaign.duration_seconds === undefined ? '-' : `${number(campaign.duration_seconds, 3)} s`],
         ['Persistência', campaignPersistence(campaign)], ['Detector', campaign.detector], ['Resumo do enrichment', campaignEnrichmentText(campaign)]
       ])}<p class="subtle score-semantics">O score comportamental reflete critérios locais de correlação; não representa probabilidade de ataque.</p></section>
+      <section id="campaign-risk"><h3>CAMPAIGN RISK SCORE</h3>${renderCampaignRiskScore(campaign)}</section>
       <section id="campaign-context"><h3>AVALIAÇÃO CONTEXTUAL DETERMINÍSTICA</h3>${renderCampaignContextEvaluation(contextEvaluation)}<h4>Contexto de detecção / CGNAT</h4>${renderCampaignDetectionContext(detectionContext)}</section>
       <section id="campaign-traffic"><h3>TARGET / TRAFFIC</h3>${detailGrid([
         ['Target', traffic.target], ['Target role', traffic.target_role], ['Protocol', traffic.protocol], ['Ports', ports || '-'],

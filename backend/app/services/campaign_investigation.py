@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from app.services.asn_local_cache import cached_asn_information, enrich_asn_rows_from_local_cache
 from app.services.behavioral_detection import attack_vector_row, campaign_row
 from app.services.campaign_context_evaluator import evaluate_campaign_context
+from app.services.campaign_score import campaign_risk_from_context
 from app.services.security_events import security_event_row
 from app.services.threat_contracts import attack_family
 from app.services.threat_intelligence import clean_text
@@ -646,6 +647,11 @@ def get_campaign_investigation(conn: sqlite3.Connection, campaign_id: str) -> di
         detection_context=detection_context,
     )
     campaign["context_evaluation"] = context_evaluation
+    if not campaign.get("campaign_risk_score"):
+        risk = campaign_risk_from_context(campaign, context_evaluation)
+        campaign["campaign_risk_score"] = risk["score"]
+        campaign["campaign_risk_band"] = risk["band"]
+        campaign["campaign_risk_components"] = risk["components"]
     return {
         "campaign": campaign,
         "context_evaluation": context_evaluation,
