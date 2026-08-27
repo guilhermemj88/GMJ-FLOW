@@ -89,7 +89,7 @@ class SecurityAiRoutingTest(unittest.TestCase):
         self.assertNotEqual(event["model"], campaign["model"])
 
     def test_global_security_kill_switch_blocks_both_routes_before_provider_execution(self) -> None:
-        with patch.dict(os.environ, {"GMJFLOW_SECURITY_AI_ENABLED": "false"}, clear=False), patch(
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_AI_KILL_SWITCH": "true"}, clear=False), patch(
             "app.services.ai_integration.execute_ai_route"
         ) as routed:
             for function_key in ("security_event_analysis", "security_campaign_analysis"):
@@ -119,6 +119,28 @@ class SecurityAiRoutingTest(unittest.TestCase):
         self.assertEqual(routed_result, result)
         routed.assert_called_once()
         self.assertEqual("security_campaign_analysis", routed.call_args[0][1])
+
+    def test_structured_schema_hint_renders_exact_field_contract(self) -> None:
+        schema = {
+            "type": "object",
+            "required": ["summary", "confidence", "assessment"],
+            "additionalProperties": False,
+            "properties": {
+                "summary": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+                "assessment": {"type": "string"},
+            },
+        }
+        hint = ai._structured_schema_hint(schema)
+        self.assertIn("summary : string", hint)
+        self.assertIn("confidence : string : enum[LOW, MEDIUM, HIGH]", hint)
+        self.assertIn("assessment : string", hint)
+        self.assertIn("Do not add any field beyond this list", hint)
+
+    def test_structured_schema_hint_is_empty_for_missing_or_non_mapping_schema(self) -> None:
+        self.assertEqual("", ai._structured_schema_hint(None))
+        self.assertEqual("", ai._structured_schema_hint({}))
+        self.assertEqual("", ai._structured_schema_hint({"type": "object", "required": ["x"]}))
 
 
 if __name__ == "__main__":

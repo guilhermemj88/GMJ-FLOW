@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -1871,6 +1871,45 @@ def _should_fallback(route: dict[str, Any], category: str) -> bool:
     return bool(key and sqlite_bool(route.get(key)))
 
 
+def _structured_schema_hint(schema: dict[str, Any] | None) -> str:
+    """Render a compact field contract for models that only honor `response_format=json_object`.
+
+    Providers such as Groq do not receive the JSON Schema itself (only the
+    `response_format={"type":"json_object"}` flag), so the model must be told the
+    exact field names, types and enums in the prompt; otherwise it invents its own
+    keys and structured validation fails with `invalid_json`.
+    """
+    if not schema or not isinstance(schema, Mapping):
+        return ""
+    properties = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else {}
+    required = [clean_text(item) for item in (schema.get("required") or []) if clean_text(item)]
+    additional = bool(schema.get("additionalProperties"))
+    lines: list[str] = []
+    fields = [field for field in required if field in properties]
+    for field in fields:
+        rules = properties.get(field)
+        rules = rules if isinstance(rules, Mapping) else {}
+        field_type = rules.get("type")
+        enum = rules.get("enum")
+        parts = [field]
+        if isinstance(field_type, list):
+            parts.append(" | ".join(clean_text(str(item)) for item in field_type))
+        elif field_type:
+            parts.append(clean_text(str(field_type)))
+        if isinstance(enum, list) and enum:
+            parts.append("enum[" + ", ".join(clean_text(str(item)) for item in enum) + "]")
+        lines.append("- " + " : ".join(parts))
+    if not lines:
+        return ""
+    instruction = (
+        "Return ONLY a single JSON object with EXACTLY the following fields "
+        "(no extra fields, no markdown fences, no commentary):"
+    )
+    if not additional:
+        instruction += " Do not add any field beyond this list."
+    return instruction + "\n" + "\n".join(lines)
+
+
 def _safe_route_attempt(
     provider: dict[str, Any] | None,
     model: str,
@@ -2049,6 +2088,9 @@ def execute_ai_route(
         external_provider = provider_config.get("provider_type") != "ollama"
         force_external_privacy = external_provider and global_settings.get("external_ip_policy", "never_internal_full") != "route_policy"
         sanitized_prompt = sanitize_ai_content(prompt, clean_text(route.get("sensitive_data_policy")) or "mask_ips", external_provider=force_external_privacy)
+        schema_hint = _structured_schema_hint(schema) if structured_requested else ""
+        if schema_hint:
+            sanitized_prompt = f"{sanitized_prompt}\n\n{schema_hint}"
         attempts = max(1, min(int(route.get("max_attempts") or 1), int(provider_config.get("retries") or 0) + 1))
         for attempt in range(1, attempts + 1):
             total_attempts += 1
@@ -2081,8 +2123,11 @@ def execute_ai_route(
                         safe_attempt["json_parse_status"] = "invalid"
                         if sqlite_bool(route.get("repair_json_once")):
                             safe_attempt["repair_attempted"] = True
+                            repair_prompt = f"Corrija a resposta abaixo para JSON válido, sem acrescentar texto:\n{content[:6000]}"
+                            if schema_hint:
+                                repair_prompt = f"{repair_prompt}\n\n{schema_hint}"
                             correction = provider.generate(
-                                f"Corrija a resposta abaixo para JSON válido, sem acrescentar texto:\n{content[:6000]}",
+                                repair_prompt,
                                 model=model,
                                 structured=True,
                                 system_prompt="Retorne somente JSON válido.",
