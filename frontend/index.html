@@ -2221,6 +2221,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       border-inline-start: 3px solid var(--info);
     }
 
+    tr.mitigation-execution-correlated td:first-child {
+      border-inline-start: 3px solid var(--success, #16a34a);
+    }
+
     .metric-card.anomaly-critical-metric .metric-value {
       color: var(--danger);
     }
@@ -6606,6 +6610,14 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="panel-title mb-2">Estado dos provedores</div>
               <div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Estado</th><th>Latência</th><th>Última checagem</th></tr></thead><tbody id="aiOverviewProvidersTable"></tbody></table></div>
             </div>
+            <div class="panel p-3 mb-3">
+              <div class="panel-title mb-2">Configuração efetiva</div>
+              <div class="table-wrap"><table class="table table-sm align-middle mb-0">
+                <thead><tr><th>Recurso</th><th>Configurado</th><th>Kill switch</th><th>Estado efetivo</th><th>Motivo</th></tr></thead>
+                <tbody id="effectiveConfigTable"></tbody>
+              </table></div>
+              <div class="subtle mt-2">O estado operacional vive no banco (SQLite). Variáveis de ambiente atuam apenas como kill switch de emergência.</div>
+            </div>
             <div class="panel p-3 ai-admin-control">
               <div class="panel-title mb-2">Política global</div>
               <div class="flow-search-grid mb-2">
@@ -7014,6 +7026,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="field"><label for="bgpProfileTcpFlags">TCP flags</label><select id="bgpProfileTcpFlags" class="form-select form-select-sm"></select></div>
               <div class="field"><label for="bgpProfileDuration">Duração padrão (s)</label><input id="bgpProfileDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
               <div class="field"><label for="bgpProfileMaxDuration">Duração máxima (s)</label><input id="bgpProfileMaxDuration" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
+              <div class="field"><label for="bgpProfileInitialLease">TTL inicial (s)</label><input id="bgpProfileInitialLease" type="number" min="60" class="form-control form-control-sm" value="3600"></div>
+              <div class="field"><label for="bgpProfileRecurrenceLease">TTL após recorrência (s)</label><input id="bgpProfileRecurrenceLease" type="number" min="60" class="form-control form-control-sm" value="86400"></div>
+              <div class="field"><label for="bgpProfileMaxLifetime">Duração máxima (s)</label><input id="bgpProfileMaxLifetime" type="number" min="60" class="form-control form-control-sm" placeholder="vazio = sem limite"></div>
+              <div class="field"><label for="bgpProfileRecurrenceRenewal">Renovação por recorrência</label><select id="bgpProfileRecurrenceRenewal" class="form-select form-select-sm"><option value="true">Ativada</option><option value="false">Desativada</option></select></div>
               <div class="field"><label for="bgpProfileMultiTargetDns">DNS multi-destino</label><select id="bgpProfileMultiTargetDns" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
               <div class="field"><label for="bgpProfileMaxDnsTargets">Máx. destinos DNS</label><input id="bgpProfileMaxDnsTargets" type="number" min="1" max="100" class="form-control form-control-sm" value="10"></div>
               <div class="field"><label for="bgpProfileMinDnsPps">Min. packets/s DNS</label><input id="bgpProfileMinDnsPps" type="number" min="0" step="1" class="form-control form-control-sm"></div>
@@ -13541,6 +13557,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const readiness = bgpConnectorReadinessState(status, connector);
       if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP. A instalação da rota no Huawei não foi verificada.';
       if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
+      if (status.service?.check_possible === false) return 'O backend em container não consegue verificar o serviço systemd do host; configure o Host Agent (GMJFLOW_HOST_AGENT_URL) para evidência real.';
       if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
       if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
       if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
@@ -13570,6 +13587,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto')),
         bgpConnectorDetailField('Motivo exato', (status?.readiness?.reasons || []).map(reason => ({
           exabgp_service_inactive: 'serviço systemd inativo',
+          exabgp_service_unverified: 'serviço systemd não verificável no container (use host-agent)',
           tcp_listener_unavailable: 'listener TCP/179 indisponível',
           peer_bgp_down: 'sessão BGP do peer indisponível',
           peer_bgp_not_verified: 'sessão BGP do peer não verificada',
@@ -13637,12 +13655,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         const closeWaitCount = Number(status?.session?.close_wait_count || 0);
         const closeWaitAlert = Boolean(status?.session?.close_wait_alert);
         const serviceName = status?.service?.name || connector.systemd_service_name || 'exabgp-gmj-flow.service';
+        const serviceChecked = status?.service?.check_possible !== false;
+        const serviceActive = Boolean(status?.service?.active);
+        const serviceLabel = serviceActive ? `${serviceName} · ativo` : serviceChecked ? `${serviceName} · indisponível` : `${serviceName} · não verificado`;
+        const serviceKind = serviceActive ? 'ok' : serviceChecked ? 'down' : 'not_verified';
+        const listenerRequired = status?.listener?.required !== undefined ? Boolean(status.listener.required) : Boolean(connector?.passive_listen_enabled);
+        const listenerListening = Boolean(status?.listener?.listening);
+        const listenerLabel = !listenerRequired ? 'Não exigido (active-connect)' : listenerListening ? 'TCP/179 em escuta' : status ? 'Listener indisponível' : 'Listener não verificado';
+        const listenerKind = !listenerRequired ? 'ok' : listenerListening ? 'ok' : status ? 'down' : 'not_verified';
         return `
           <tr>
             <td>${escapeHtml(connector.name || `#${connector.id}`)}</td>
             <td>${escapeHtml(connector.peer_ip || '-')}</td>
-            <td>${bgpStatusBadge(`${serviceName} · ${status?.service?.active ? 'ativo' : 'indisponível'}`, status?.service?.active ? 'ok' : status ? 'down' : 'not_verified')}</td>
-            <td>${bgpStatusBadge(status?.listener?.listening ? 'TCP/179 em escuta' : status ? 'Listener indisponível' : 'Listener não verificado', status?.listener?.listening ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(serviceLabel, serviceKind)}</td>
+            <td>${bgpStatusBadge(listenerLabel, listenerKind)}</td>
             <td>${bgpStatusBadge(bgpState === 'UP' ? 'BGP estabelecido' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'NAO VERIFICADO' ? 'BGP não verificado' : bgpState, bgpKind)}</td>
             <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec habilitado no ExaBGP' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
             <td>${bgpStatusBadge(fifoExists && fifoValid ? 'FIFO válido' : fifoExists === false ? 'FIFO ausente' : 'FIFO não verificado', fifoExists && fifoValid ? 'ok' : fifoExists === false ? 'down' : 'not_verified')}</td>
@@ -14072,69 +14098,333 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return `<button type="button" class="btn btn-link btn-sm p-0 mitigation-connector-link" data-connector-id="${connectorId}" title="Abrir em BGP / Conectores">${escapeHtml(label)}</button>`;
     }
 
-    function automaticMitigationStatusBadge(item = {}) {
+    function automaticMitigationExecutionKey(item = {}) {
+      return String(item.idempotency_key || item.mitigation_key || '').trim();
+    }
+
+    function automaticMitigationDestination(item = {}) {
+      const normalized = item.normalized_match && typeof item.normalized_match === 'object' ? item.normalized_match : {};
+      return String(
+        item.target_prefix || item.dst_prefix || normalized.destination || item.dst_ip || ''
+      ).trim() || '-';
+    }
+
+    function automaticMitigationMatchLabel(item = {}) {
+      const normalized = item.normalized_match && typeof item.normalized_match === 'object' ? item.normalized_match : {};
+      const destination = automaticMitigationDestination(item);
+      const protocol = String(normalized.protocol || item.protocol || '').trim().toUpperCase();
+      const port = String(normalized.destination_port || item.dst_port || '').trim();
+      const parts = [];
+      if (destination && destination !== '-') parts.push(destination);
+      if (protocol || port) parts.push([protocol, port].filter(Boolean).join('/'));
+      return parts.join(' · ') || '-';
+    }
+
+    function automaticMitigationAddressFamily(item = {}) {
+      const normalized = item.normalized_match && typeof item.normalized_match === 'object' ? item.normalized_match : {};
+      const explicit = String(normalized.address_family || item.address_family || '').trim().toLowerCase();
+      if (explicit) return explicit;
+      const destination = String(
+        item.target_prefix || item.dst_prefix || normalized.destination || item.dst_ip || ''
+      ).trim();
+      if (destination.includes(':')) return 'ipv6';
+      if (destination.includes('.')) return 'ipv4';
+      return '';
+    }
+
+    function automaticMitigationCorrelationKey(item = {}) {
+      const normalized = item.normalized_match && typeof item.normalized_match === 'object' ? item.normalized_match : {};
+      const destination = String(
+        item.target_prefix || item.dst_prefix || normalized.destination || item.dst_ip || ''
+      ).trim().toLowerCase();
+      const protocol = String(normalized.protocol || item.protocol || '').trim().toLowerCase();
+      const destinationPort = String(normalized.destination_port || item.dst_port || '').trim().toLowerCase();
+      const action = String(item.action || item.then_action || '').trim().toLowerCase();
+      return [automaticMitigationAddressFamily(item), destination, protocol, destinationPort, action].join('|');
+    }
+
+    function automaticMitigationConnectorCompatible(a, b) {
+      const left = Number(a || 0);
+      const right = Number(b || 0);
+      if (!left || !right) return true;
+      return left === right;
+    }
+
+    function automaticMitigationAnnouncementActive(item = {}) {
+      if (String(item.status || '').toLowerCase() !== 'advertised') return false;
+      const expiresAt = item.expires_at;
+      if (!expiresAt) return true;
+      const time = new Date(expiresAt).getTime();
+      return !Number.isFinite(time) || time > Date.now();
+    }
+
+    function automaticMitigationActiveIndex() {
+      const activeExecutionByKey = new Map();
+      const activeAnnouncementByKey = new Map();
+      const activeExecutionByMatch = new Map();
+      const activeAnnouncementByMatch = new Map();
+      (automaticMitigationExecutions || []).forEach(item => {
+        if (String(item.status || '').toLowerCase() === 'active') {
+          const key = automaticMitigationExecutionKey(item);
+          if (key && !activeExecutionByKey.has(key)) activeExecutionByKey.set(key, item);
+          const matchKey = automaticMitigationCorrelationKey(item);
+          if (matchKey && !activeExecutionByMatch.has(matchKey)) activeExecutionByMatch.set(matchKey, item);
+        }
+      });
+      (bgpAnnouncements || []).forEach(item => {
+        if (automaticMitigationAnnouncementActive(item)) {
+          const key = String(item.mitigation_key || '').trim();
+          if (key && !activeAnnouncementByKey.has(key)) activeAnnouncementByKey.set(key, item);
+          const matchKey = automaticMitigationCorrelationKey(item);
+          if (matchKey && !activeAnnouncementByMatch.has(matchKey)) activeAnnouncementByMatch.set(matchKey, item);
+        }
+      });
+      return { activeExecutionByKey, activeAnnouncementByKey, activeExecutionByMatch, activeAnnouncementByMatch };
+    }
+
+    function automaticMitigationResponsible(item = {}, index) {
+      const lookup = index || automaticMitigationActiveIndex();
+      const selfId = String(item.id || '');
+      const connectorId = Number(item.connector_id || 0);
+      let execution = null;
+      let announcement = null;
+      const exactKey = automaticMitigationExecutionKey(item);
+      if (exactKey) {
+        execution = lookup.activeExecutionByKey.get(exactKey) || null;
+        announcement = lookup.activeAnnouncementByKey.get(exactKey) || null;
+      }
+      if (!execution && !announcement) {
+        const matchKey = automaticMitigationCorrelationKey(item);
+        if (matchKey) {
+          const candidateExecution = lookup.activeExecutionByMatch.get(matchKey);
+          const candidateAnnouncement = lookup.activeAnnouncementByMatch.get(matchKey);
+          if (candidateExecution && automaticMitigationConnectorCompatible(connectorId, candidateExecution.connector_id)) {
+            execution = candidateExecution;
+          }
+          if (candidateAnnouncement && automaticMitigationConnectorCompatible(connectorId, candidateAnnouncement.connector_id)) {
+            announcement = candidateAnnouncement;
+          }
+        }
+      }
+      return {
+        execution: execution && String(execution.id || '') !== selfId ? execution : null,
+        announcement,
+      };
+    }
+
+    function automaticMitigationDisplayState(item = {}, index) {
       const status = String(item.status || '').toLowerCase();
-      const tone = status === 'active'
-        ? 'status-active'
-        : ['failed', 'blocked'].includes(status)
-          ? 'off'
-          : ['queued', 'applying', 'withdraw_pending'].includes(status)
-            ? 'warn'
-            : '';
-      return `<span class="badge-soft ${tone}">${escapeHtml(status || '-')}</span>`;
+      if (status === 'active') {
+        return { code: 'ACTIVE', label: 'ACTIVE', tone: 'status-active', alreadyMitigated: false };
+      }
+      const reason = String(item.error_code || item.error_message || item.policy_reason || '').toLowerCase();
+      const { execution, announcement } = automaticMitigationResponsible(item, index);
+      if (execution || announcement) {
+        return {
+          code: 'ALREADY_MITIGATED',
+          label: 'ALREADY_MITIGATED',
+          tone: 'ok',
+          alreadyMitigated: true,
+          responsible: { execution, announcement },
+        };
+      }
+      if (status === 'blocked') {
+        if (reason.includes('not_automatic_eligible') || reason.includes('not_auto_eligible')) {
+          return { code: 'NOT_AUTO_ELIGIBLE', label: 'NOT_AUTO_ELIGIBLE', tone: 'off', alreadyMitigated: false };
+        }
+        if (reason.includes('validation')) {
+          return { code: 'VALIDATION_FAILED', label: 'VALIDATION_FAILED', tone: 'down', alreadyMitigated: false };
+        }
+        if (reason.includes('connector')) {
+          return { code: 'CONNECTOR_BLOCKED', label: 'CONNECTOR_BLOCKED', tone: 'warn', alreadyMitigated: false };
+        }
+        if (reason.includes('policy') || reason.includes('profile_not_automatic')) {
+          return { code: 'BLOCKED_BY_POLICY', label: 'BLOCKED_BY_POLICY', tone: 'off', alreadyMitigated: false };
+        }
+        return { code: 'BLOCKED', label: 'BLOCKED', tone: 'off', alreadyMitigated: false };
+      }
+      if (status === 'failed') {
+        return { code: 'DELIVERY_FAILED', label: 'DELIVERY_FAILED', tone: 'down', alreadyMitigated: false };
+      }
+      if (status === 'withdrawn') {
+        return { code: 'WITHDRAWN', label: 'WITHDRAWN', tone: 'warn', alreadyMitigated: false };
+      }
+      if (status === 'expired') {
+        return { code: 'EXPIRED', label: 'EXPIRED', tone: 'status-ended', alreadyMitigated: false };
+      }
+      if (['queued', 'applying', 'withdraw_pending'].includes(status)) {
+        return { code: status.toUpperCase(), label: status.toUpperCase(), tone: 'warn', alreadyMitigated: false };
+      }
+      return { code: status ? status.toUpperCase() : 'UNKNOWN', label: status || '-', tone: 'off', alreadyMitigated: false };
+    }
+
+    function automaticMitigationStatusBadge(item = {}, index) {
+      const state = automaticMitigationDisplayState(item, index);
+      return `<span class="badge-soft ${state.tone}" title="status: ${escapeHtml(state.code)}">${escapeHtml(state.label)}</span>`;
+    }
+
+    function automaticMitigationResponsibleDetails(item = {}, index) {
+      const state = automaticMitigationDisplayState(item, index);
+      if (!state.alreadyMitigated || !state.responsible) return '';
+      const { execution, announcement } = state.responsible;
+      const vector = String(
+        (execution && execution.vector)
+        || (announcement && announcement.attack_vector_name)
+        || (announcement && announcement.raw_payload && announcement.raw_payload.attack_vector_name)
+        || ''
+      ).trim() || '-';
+      const destination = automaticMitigationDestination(execution || announcement || {});
+      const expiresAt = (execution && execution.expires_at) || (announcement && announcement.expires_at) || '';
+      const anomalyId = (execution && execution.anomaly_id) || (announcement && announcement.anomaly_id) || '';
+      return `
+        <details class="mt-1">
+          <summary>Já mitigado por FlowSpec ativo</summary>
+          <div class="subtle">
+            ${announcement ? `<div>Announcement: <strong>#${escapeHtml(announcement.id)}</strong></div>` : ''}
+            ${execution ? `<div>Execution: <strong>#${escapeHtml(execution.id)}</strong></div>` : ''}
+            ${anomalyId ? `<div>Anomaly responsável: <strong>#${escapeHtml(anomalyId)}</strong></div>` : ''}
+            <div>Vector responsável: <strong>${escapeHtml(vector)}</strong></div>
+            <div>Destino: <strong>${escapeHtml(destination)}</strong></div>
+            ${expiresAt ? `<div>Expira: <strong>${escapeHtml(formatDateTime(expiresAt))}</strong></div>` : ''}
+          </div>
+        </details>`;
+    }
+
+    function automaticMitigationGroupedRows(index) {
+      const active = [];
+      const correlatedByKey = new Map();
+      const rest = [];
+      (automaticMitigationExecutions || []).forEach(item => {
+        const status = String(item.status || '').toLowerCase();
+        if (status === 'active') {
+          active.push(item);
+          return;
+        }
+        const state = automaticMitigationDisplayState(item, index);
+        if (state.alreadyMitigated) {
+          const responsible = state.responsible;
+          const groupKey = responsible && responsible.execution
+            ? automaticMitigationExecutionKey(responsible.execution)
+            : responsible && responsible.announcement
+              ? String(responsible.announcement.mitigation_key || '').trim()
+              : '';
+          if (groupKey) {
+            const bucket = correlatedByKey.get(groupKey) || [];
+            bucket.push(item);
+            correlatedByKey.set(groupKey, bucket);
+            return;
+          }
+        }
+        rest.push(item);
+      });
+      const sortByDescId = (a, b) => Number(b.id || 0) - Number(a.id || 0);
+      const timeOf = item => String(item.applied_at || item.expires_at || item.updated_at || item.created_at || '');
+      active.sort((a, b) => timeOf(b).localeCompare(timeOf(a)) || sortByDescId(a, b));
+      rest.sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')) || sortByDescId(a, b));
+      const groups = active.map(activeItem => {
+        const key = automaticMitigationExecutionKey(activeItem);
+        const correlated = (correlatedByKey.get(key) || []).sort(sortByDescId);
+        correlatedByKey.delete(key);
+        return { active: activeItem, correlated };
+      });
+      const orphanGroups = [...correlatedByKey.entries()].map(([key, rows]) => ({ active: null, key, correlated: rows.sort(sortByDescId) }));
+      return { groups, orphanGroups, rest };
+    }
+
+    function automaticMitigationGroupHeader(activeItem, correlatedRows) {
+      const matchLabel = automaticMitigationMatchLabel(activeItem);
+      const generator = `${activeItem.vector || '-'} #${activeItem.id}`;
+      const correlated = correlatedRows.length
+        ? correlatedRows.map(row => `${row.vector || '-'} #${row.id}`).join(' · ')
+        : '';
+      return `
+        <tr class="mitigation-group-header">
+          <td colspan="9">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="fw-semibold">${escapeHtml(matchLabel)}</span>
+              <span class="badge-soft status-active">FlowSpec ACTIVE</span>
+            </div>
+            <div class="subtle">Gerador: ${escapeHtml(generator)}</div>
+            ${correlated ? `<div class="subtle">Correlacionados: ${escapeHtml(correlated)}</div>` : ''}
+          </td>
+        </tr>`;
+    }
+
+    function automaticMitigationExecutionRow(item, index, correlated) {
+      const match = item.normalized_match && typeof item.normalized_match === 'object'
+        ? Object.entries(item.normalized_match)
+          .filter(([, value]) => value !== null && value !== undefined && String(value) !== '')
+          .map(([key, value]) => `${key}=${value}`)
+          .join(' · ')
+        : '-';
+      const state = automaticMitigationDisplayState(item, index);
+      const result = state.alreadyMitigated
+        ? automaticMitigationResponsibleDetails(item, index)
+        : (item.error_message
+            || item.apply_result?.announcement?.last_error
+            || (item.status === 'active' ? 'Aplicado automaticamente' : item.policy_reason)
+            || '-');
+      const originalReason = item.error_code || item.error_message || item.policy_reason || '';
+      const policyReasonNote = state.alreadyMitigated && originalReason
+        ? `<div class="subtle">Motivo original do candidato: ${escapeHtml(originalReason)}</div>`
+        : '';
+      const addressing = item.gates?.subscriber_addressing_resolution
+        || item.metadata?.subscriber_addressing_resolution
+        || {};
+      const identity = item.metadata?.subscriber_identity || {};
+      const cgnatApplicable = addressing.cgnat_lookup_required === true
+        ? 'sim'
+        : addressing.effective_mode === 'direct_public'
+          ? 'não'
+          : '-';
+      const identityText = addressing.effective_mode === 'direct_public'
+        ? `IPv4 público ${addressing.source_ip || '-'}`
+        : [identity.private_ip, identity.subscriber_id, identity.subscriber_name].filter(Boolean).join(' / ') || '-';
+      const addressingAudit = addressing.configured_mode ? `
+        <details>
+          <summary>Endereçamento do assinante</summary>
+          <div class="subtle">
+            Configurado: ${escapeHtml(addressing.configured_mode || '-')} ·
+            Efetivo: ${escapeHtml(addressing.effective_mode || '-')} ·
+            CGNAT aplicável: ${escapeHtml(cgnatApplicable)}
+          </div>
+          <div class="subtle">Classificação: ${escapeHtml(addressing.reason || '-')} · Cliente: ${escapeHtml(identityText)}</div>
+          <div class="subtle">Gates aplicados: ${escapeHtml((item.gates?.gates_applied || []).join(', ') || '-')}</div>
+          <div class="subtle">Não aplicáveis: ${escapeHtml((item.gates?.gates_not_applicable || []).join(', ') || '-')}</div>
+        </details>` : '';
+      const correlatedNote = correlated
+        ? '<span class="subtle">Correlacionado com mitigação ativa</span>'
+        : '';
+      return `
+        <tr${correlated ? ' class="mitigation-execution-correlated"' : ''}>
+          <td>#${escapeHtml(item.id)}</td>
+          <td>#${escapeHtml(item.anomaly_id)}</td>
+          <td>${escapeHtml(item.vector || '-')}<br><span class="subtle">${escapeHtml(item.profile || '-')}</span></td>
+          <td>${automaticMitigationStatusBadge(item, index)}<br><span class="subtle">${item.automatic ? 'Automática' : 'Manual'}</span><br>${window.threatDecisionSourceBadge?.(item) || ''}${correlatedNote ? `<br>${correlatedNote}` : ''}</td>
+          <td>${mitigationConnectorLink(item)}</td>
+          <td><span class="subtle">${escapeHtml(match)}</span><details><summary>Comando</summary><pre class="mb-0">${escapeHtml(item.command || '-')}</pre></details></td>
+          <td>${formatDateTime(item.applied_at)}</td>
+          <td>${formatDateTime(item.expires_at)}</td>
+          <td>${state.alreadyMitigated ? result : escapeHtml(result)}${policyReasonNote}${addressingAudit}</td>
+        </tr>`;
     }
 
     function renderAutomaticMitigationExecutions() {
       const table = document.getElementById('automaticMitigationExecutionsTable');
       if (!table) return;
-      table.innerHTML = automaticMitigationExecutions.map(item => {
-        const match = item.normalized_match && typeof item.normalized_match === 'object'
-          ? Object.entries(item.normalized_match)
-            .filter(([, value]) => value !== null && value !== undefined && String(value) !== '')
-            .map(([key, value]) => `${key}=${value}`)
-            .join(' · ')
-          : '-';
-        const result = item.error_message
-          || item.apply_result?.announcement?.last_error
-          || (item.status === 'active' ? 'Aplicado automaticamente' : item.policy_reason)
-          || '-';
-        const addressing = item.gates?.subscriber_addressing_resolution
-          || item.metadata?.subscriber_addressing_resolution
-          || {};
-        const identity = item.metadata?.subscriber_identity || {};
-        const cgnatApplicable = addressing.cgnat_lookup_required === true
-          ? 'sim'
-          : addressing.effective_mode === 'direct_public'
-            ? 'não'
-            : '-';
-        const identityText = addressing.effective_mode === 'direct_public'
-          ? `IPv4 público ${addressing.source_ip || '-'}`
-          : [identity.private_ip, identity.subscriber_id, identity.subscriber_name].filter(Boolean).join(' / ') || '-';
-        const addressingAudit = addressing.configured_mode ? `
-          <details>
-            <summary>Endereçamento do assinante</summary>
-            <div class="subtle">
-              Configurado: ${escapeHtml(addressing.configured_mode || '-')} ·
-              Efetivo: ${escapeHtml(addressing.effective_mode || '-')} ·
-              CGNAT aplicável: ${escapeHtml(cgnatApplicable)}
-            </div>
-            <div class="subtle">Classificação: ${escapeHtml(addressing.reason || '-')} · Cliente: ${escapeHtml(identityText)}</div>
-            <div class="subtle">Gates aplicados: ${escapeHtml((item.gates?.gates_applied || []).join(', ') || '-')}</div>
-            <div class="subtle">Não aplicáveis: ${escapeHtml((item.gates?.gates_not_applicable || []).join(', ') || '-')}</div>
-          </details>` : '';
-        return `
-          <tr>
-            <td>#${escapeHtml(item.id)}</td>
-            <td>#${escapeHtml(item.anomaly_id)}</td>
-            <td>${escapeHtml(item.vector || '-')}<br><span class="subtle">${escapeHtml(item.profile || '-')}</span></td>
-            <td>${automaticMitigationStatusBadge(item)}<br><span class="subtle">${item.automatic ? 'Automática' : 'Manual'}</span><br>${window.threatDecisionSourceBadge?.(item) || ''}</td>
-            <td>${mitigationConnectorLink(item)}</td>
-            <td><span class="subtle">${escapeHtml(match)}</span><details><summary>Comando</summary><pre class="mb-0">${escapeHtml(item.command || '-')}</pre></details></td>
-            <td>${formatDateTime(item.applied_at)}</td>
-            <td>${formatDateTime(item.expires_at)}</td>
-            <td>${escapeHtml(result)}${addressingAudit}</td>
-          </tr>`;
-      }).join('') || '<tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr>';
+      const index = automaticMitigationActiveIndex();
+      const { groups, orphanGroups, rest } = automaticMitigationGroupedRows(index);
+      const html = [];
+      groups.forEach(group => {
+        html.push(automaticMitigationGroupHeader(group.active, group.correlated));
+        html.push(automaticMitigationExecutionRow(group.active, index, false));
+        group.correlated.forEach(row => html.push(automaticMitigationExecutionRow(row, index, true)));
+      });
+      orphanGroups.forEach(group => {
+        group.correlated.forEach(row => html.push(automaticMitigationExecutionRow(row, index, true)));
+      });
+      rest.forEach(row => html.push(automaticMitigationExecutionRow(row, index, false)));
+      table.innerHTML = html.join('') || '<tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr>';
     }
 
     function renderBgpAnnouncements() {
@@ -14907,6 +15197,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await loadAiWorkspace();
     }
 
+    function effectiveConfigReason(item) {
+      if (!item) return '-';
+      if (item.reason === 'disabled_by_kill_switch') return 'Kill switch de ambiente';
+      if (item.reason === 'disabled_by_operator') return 'Desativado pelo operador';
+      if (item.reason === 'enabled') return '—';
+      return '—';
+    }
+
+    function effectiveConfigRow(label, item) {
+      if (!item) return `<tr><td>${escapeHtml(label)}</td><td colspan="4" class="subtle">Indisponível</td></tr>`;
+      const configured = item.configured ? 'ATIVO' : 'DESATIVADO';
+      const killSwitch = item.kill_switch ? 'BLOQUEADO' : 'OK';
+      const effective = item.effective ? 'ATIVO' : 'DESATIVADO';
+      return `<tr><td>${escapeHtml(label)}</td><td>${configured}</td><td>${killSwitch}</td><td>${effective}</td><td>${escapeHtml(effectiveConfigReason(item))}</td></tr>`;
+    }
+
+    async function loadEffectiveConfig() {
+      const target = document.getElementById('effectiveConfigTable');
+      if (!target) return;
+      try {
+        const cfg = await apiRequest('/api/config/effective');
+        const rows = [
+          ['Mitigação automática', cfg.auto_mitigation],
+          ['Security AI', cfg.security_ai],
+          ['Política automática de ameaça', cfg.threat_policy_auto]
+        ].map(([label, item]) => effectiveConfigRow(label, item)).join('');
+        target.innerHTML = rows || '<tr><td colspan="5" class="subtle">Indisponível.</td></tr>';
+      } catch (error) {
+        target.innerHTML = `<tr><td colspan="5" class="subtle">Falha ao carregar: ${escapeHtml(error.message || '')}</td></tr>`;
+      }
+    }
+
     async function loadAiWorkspace() {
       aiWorkspaceLoading = true;
       document.getElementById('runAiPlaygroundButton').disabled = true;
@@ -14918,6 +15240,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (activeView !== 'ai') return;
         aiOverviewState = overview; aiProviders = providers.items || []; aiModels = models.items || []; aiRoutes = routes.items || []; aiRouteFunctions = routes.functions || []; aiPrompts = prompts.items || [];
         renderAiOverview(overview, settings); renderAiProviders(); renderAiModels(); renderAiRoutes(); renderAiPrompts(); renderAiHistory(history.items || [], audit.items || []);
+        loadEffectiveConfig();
         aiWorkspaceLoading = false;
         syncAiPlaygroundProviderDefaults();
         setText('aiPageStatus', `${aiProviders.length} provider(s), ${aiModels.length} modelo(s), ${aiRoutes.length} rota(s).`);
@@ -15054,6 +15377,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', 'any');
       setValue('bgpProfileDuration', 1800);
       setValue('bgpProfileMaxDuration', 3600);
+      setValue('bgpProfileInitialLease', 3600);
+      setValue('bgpProfileRecurrenceLease', 86400);
+      setValue('bgpProfileMaxLifetime', '');
+      setBoolSelect('bgpProfileRecurrenceRenewal', true);
       setBoolSelect('bgpProfileMultiTargetDns', true);
       setValue('bgpProfileMaxDnsTargets', 10);
       setValue('bgpProfileMinDnsPps', '');
@@ -15085,6 +15412,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', item.tcp_flags_selector);
       setValue('bgpProfileDuration', item.default_duration_seconds || 1800);
       setValue('bgpProfileMaxDuration', item.max_duration_seconds || 3600);
+      setValue('bgpProfileInitialLease', item.initial_lease_seconds ?? item.default_duration_seconds ?? 3600);
+      setValue('bgpProfileRecurrenceLease', item.recurrence_lease_seconds ?? 86400);
+      setValue('bgpProfileMaxLifetime', item.max_lifetime_seconds ?? '');
+      setBoolSelect('bgpProfileRecurrenceRenewal', item.recurrence_renewal_enabled !== false);
       setBoolSelect('bgpProfileMultiTargetDns', item.enable_multi_target_dns);
       setValue('bgpProfileMaxDnsTargets', item.max_targets_per_anomaly || 10);
       setValue('bgpProfileMinDnsPps', item.min_target_packets_s ?? '');
@@ -15143,6 +15474,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         default_duration_seconds: Math.max(60, numberValue('bgpProfileDuration', 1800)),
         duration_default: Math.max(60, numberValue('bgpProfileDuration', 1800)),
         max_duration_seconds: Math.max(60, numberValue('bgpProfileMaxDuration', 3600)),
+        initial_lease_seconds: Math.max(60, numberValue('bgpProfileInitialLease', 3600)),
+        recurrence_lease_seconds: Math.max(60, numberValue('bgpProfileRecurrenceLease', 86400)),
+        max_lifetime_seconds: (() => { const raw = String((document.getElementById('bgpProfileMaxLifetime') || {}).value || '').trim(); return raw ? Math.max(60, Number(raw)) : null; })(),
+        recurrence_renewal_enabled: boolSelectValue('bgpProfileRecurrenceRenewal'),
         enable_multi_target_dns: boolSelectValue('bgpProfileMultiTargetDns'),
         max_targets_per_anomaly: Math.max(1, numberValue('bgpProfileMaxDnsTargets', 10)),
         min_target_packets_s: selectValue('bgpProfileMinDnsPps') ? Number(selectValue('bgpProfileMinDnsPps')) : null,
@@ -16333,6 +16668,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProfileTcpFlags', draft.tcp_flags_selector || 'any');
       setValue('bgpProfileDuration', draft.default_duration_seconds || 1800);
       setValue('bgpProfileMaxDuration', draft.max_duration_seconds || 3600);
+      setValue('bgpProfileInitialLease', draft.initial_lease_seconds ?? draft.default_duration_seconds ?? 3600);
+      setValue('bgpProfileRecurrenceLease', draft.recurrence_lease_seconds ?? 86400);
+      setValue('bgpProfileMaxLifetime', draft.max_lifetime_seconds ?? '');
+      setBoolSelect('bgpProfileRecurrenceRenewal', draft.recurrence_renewal_enabled !== false);
       setBoolSelect('bgpProfileMultiTargetDns', draft.enable_multi_target_dns ?? true);
       setValue('bgpProfileMaxDnsTargets', draft.max_targets_per_anomaly || 10);
       setValue('bgpProfileMinDnsPps', draft.min_target_packets_s ?? '');
