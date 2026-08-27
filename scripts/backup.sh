@@ -13,7 +13,14 @@ archive="$backup_dir/gmj-flow-$timestamp.tar.gz"
 mkdir -p "$work_dir"
 
 if [ -f data/backend/gmjflow.db ]; then
-  cp data/backend/gmjflow.db "$work_dir/gmjflow.db"
+  # WAL-safe: NUNCA usar `cp` simples do .db (ignora o -wal e produz snapshot
+  # inconsistente/corrompido). A API online `.backup` gera um snapshot válido.
+  sqlite3 data/backend/gmjflow.db ".backup '$work_dir/gmjflow.db'"
+  integrity=$(sqlite3 "$work_dir/gmjflow.db" 'PRAGMA quick_check;' 2>&1 || true)
+  if [ "$integrity" != "ok" ]; then
+    echo "ERROR: SQLite backup integrity check failed: $integrity" >&2
+    exit 1
+  fi
 fi
 
 if [ -d data/collectors ]; then
@@ -50,5 +57,9 @@ fi
 
 tar -czf "$archive" -C "$work_dir" .
 rm -rf "$work_dir"
+
+# Retenção local: manter apenas os 2 backups .tar.gz mais recentes.
+# (histórico maior deve ficar em destino externo, quando disponível).
+ls -1t "$backup_dir"/gmj-flow-*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
 
 echo "Backup created: $archive"
