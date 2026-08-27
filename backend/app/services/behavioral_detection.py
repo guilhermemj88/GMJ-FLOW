@@ -2281,7 +2281,13 @@ class BehavioralThreatRuntime:
 
 
 def automatic_policy_enabled() -> bool:
-    return os.getenv("GMJFLOW_THREAT_POLICY_AUTO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    from app.services.config_effective import threat_policy_auto_enabled
+
+    try:
+        with sqlite_connection() as conn:
+            return threat_policy_auto_enabled(conn)
+    except Exception:
+        return False
 
 
 BEHAVIORAL_THREAT_RUNTIME = BehavioralThreatRuntime()

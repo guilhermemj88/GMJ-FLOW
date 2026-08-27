@@ -6,6 +6,7 @@ import os
 import sqlite3
 from typing import Any, Callable, Mapping
 
+from app.services.config_effective import security_ai_kill_switch
 from app.services.security_events import ensure_security_event_schema, find_security_event, security_event_row
 from app.services.threat_contracts import SECURITY_EVENT_ANALYSIS_SCHEMA
 from app.services.threat_intelligence import clean_text, json_dump, safe_json, utc_now_iso
@@ -50,10 +51,15 @@ def security_ai_config(
     api_key_configured = bool(clean_text(
         os.getenv("GROQ_API_KEY") if provider == "groq" else os.getenv("GMJFLOW_SECURITY_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
     ))
-    enabled = _enabled(os.getenv("GMJFLOW_SECURITY_AI_ENABLED", "false"))
+    # The functional state is persisted in SQLite (ai_global_settings + ai_routes
+    # + providers). The environment variable is now only a kill switch and its
+    # absence never disables the feature silently.
+    kill_switch = security_ai_kill_switch()
+    env_configured = supported and bool(model) and bool(base_url) and api_key_configured
     config = {
-        "enabled": enabled,
-        "kill_switch_enabled": enabled,
+        "enabled": env_configured and not kill_switch,
+        "kill_switch_enabled": not kill_switch,
+        "kill_switch": kill_switch,
         "provider": provider,
         "provider_name": provider,
         "model": model,
@@ -62,7 +68,7 @@ def security_ai_config(
         "max_output_tokens": _bounded_int(os.getenv("GMJFLOW_SECURITY_AI_MAX_OUTPUT_TOKENS"), 1600, 256, 4096),
         "base_url_configured": bool(base_url),
         "api_key_configured": api_key_configured,
-        "configured": supported and bool(model) and bool(base_url) and api_key_configured,
+        "configured": env_configured,
         "supported": supported,
         "route_configured": False,
         "route_enabled": False,
@@ -90,13 +96,16 @@ def security_ai_config(
         route_enabled = bool(route.get("enabled"))
         selected_model = clean_text(effective.get("selected_model") or route.get("primary_model"))
         provider_name = clean_text(effective.get("provider_name") or route.get("primary_provider_name"))
+        chain_enabled = routing_global_enabled and route_enabled and bool(effective.get("enabled"))
         config.update(
             {
-                "enabled": enabled and routing_global_enabled and route_enabled and bool(effective.get("enabled")),
+                "enabled": chain_enabled and not kill_switch,
+                "kill_switch_enabled": chain_enabled and not kill_switch,
+                "kill_switch": kill_switch,
                 "provider": clean_text(effective.get("provider")) or provider_name,
                 "provider_name": provider_name,
                 "model": selected_model,
-                "configured": bool(provider_name and selected_model),
+                "configured": chain_enabled,
                 "route_configured": True,
                 "route_enabled": route_enabled,
                 "routing_global_enabled": routing_global_enabled,

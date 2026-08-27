@@ -28,6 +28,7 @@ from app.services.behavioral_detection import (
     ensure_behavioral_schema,
     safe_int,
 )
+from app.services.config_effective import threat_policy_auto_enabled
 from app.services.threat_intelligence import clean_text, json_dump, safe_json, utc_now_iso
 from app.services.threat_contracts import THREAT_CLASSIFICATION_SCHEMA
 
@@ -414,6 +415,14 @@ class ThreatPolicyEngine:
         self.ai_classifier = ai_classifier or ThreatAiClassifier(connection_factory)
         self.safety_guard = safety_guard or ThreatSafetyGuard(connection_factory)
 
+    def _automatic_policy_enabled(self) -> bool:
+        """Effective automatic policy: SQLite setting AND NOT env kill switch."""
+        try:
+            with self.connection_factory() as conn:
+                return threat_policy_auto_enabled(conn)
+        except Exception:
+            return False
+
     def evaluate(self, vector: AttackVector | CampaignVector, ai_result: Mapping[str, Any] | None = None) -> PolicyDecision:
         is_campaign = isinstance(vector, CampaignVector)
         classification = vector.classification if is_campaign else vector.attack_type
@@ -435,7 +444,7 @@ class ThreatPolicyEngine:
             or recurrence >= 2
             or (is_campaign and bool((vector.features or {}).get("persistence_satisfied")))
         )
-        automatic_enabled = os.getenv("GMJFLOW_THREAT_POLICY_AUTO_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        automatic_enabled = self._automatic_policy_enabled()
         shadow_ai_enabled = os.getenv("GMJFLOW_THREAT_AI_SHADOW_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
         if ai_result is not None:
             ai = dict(ai_result)
