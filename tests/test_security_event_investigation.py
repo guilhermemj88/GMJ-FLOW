@@ -18,7 +18,7 @@ from app.services.security_event_ai import (  # noqa: E402
     get_security_event_analysis,
     structured_analysis_payload,
 )
-from app.services.security_event_investigation import event_evidence, event_sources, event_traffic  # noqa: E402
+from app.services.security_event_investigation import _event_filters, event_evidence, event_sources, event_traffic  # noqa: E402
 from app.services.security_events import ensure_security_event_schema, find_security_event, security_event_row, upsert_security_event  # noqa: E402
 
 
@@ -147,6 +147,52 @@ class SecurityEventInvestigationTest(unittest.TestCase):
         event_traffic(legacy, query_executor=query)
         self.assertIn("AND 0", captured[0])
 
+    def test_event_filters_match_ipv4_stored_as_ipv4_mapped_ipv6(self):
+        source_params = {}
+        source_event = dict(self.event)
+        source_event["src_ip"] = "198.51.100.7"
+        source_event["target_ip"] = ""
+        source_event["target_prefix"] = ""
+        source_sql = " AND ".join(_event_filters(source_event, source_params))
+        self.assertIn("src_ip = toIPv6({source_ip:String})", source_sql)
+        self.assertNotIn("toString(src_ip) =", source_sql)
+        self.assertEqual("198.51.100.7", source_params["source_ip"])
+
+        target_params = {}
+        target_event = dict(self.event)
+        target_event["src_ip"] = ""
+        target_event["target_ip"] = "179.189.80.5"
+        target_event["target_prefix"] = ""
+        target_sql = " AND ".join(_event_filters(target_event, target_params))
+        self.assertIn("dst_ip = toIPv6({target_ip:String})", target_sql)
+        self.assertEqual("179.189.80.5", target_params["target_ip"])
+
+        prefix_params = {}
+        prefix_event = dict(self.event)
+        prefix_event["src_ip"] = ""
+        prefix_event["target_ip"] = ""
+        prefix_event["target_prefix"] = "179.189.80.0/22"
+        prefix_sql = " AND ".join(_event_filters(prefix_event, prefix_params))
+        self.assertIn(
+            "isIPAddressInRange(replaceRegexpOne(toString(dst_ip), '^::ffff:', ''), {target_prefix:String})",
+            prefix_sql,
+        )
+        self.assertEqual("179.189.80.0/22", prefix_params["target_prefix"])
+
+    def test_empty_aggregate_results_fall_back_to_persisted_snapshot(self):
+        def query(_context, _sql, _params):
+            return []
+
+        traffic = event_traffic(self.event, padding_seconds=600, query_executor=query)
+        self.assertFalse(traffic["available"])
+        self.assertEqual("persisted_event_summary", traffic["source"])
+        sources = event_sources(self.event, query_executor=query)
+        # Fallback keeps the persisted snapshot available for display.
+        self.assertEqual("persisted_event_snapshot", sources["source"])
+        self.assertEqual(2, len(sources["items"]))
+        evidence = event_evidence(self.event, query_executor=query)
+        self.assertFalse(evidence["aggregate_available"])
+
     def test_payload_arrays_are_limited_and_intel_is_separate_from_detection(self):
         payload = structured_analysis_payload(self.conn, self.event)
         self.assertLessEqual(len(payload["top_sources"]), 50)
@@ -157,7 +203,7 @@ class SecurityEventInvestigationTest(unittest.TestCase):
         self.assertNotIn("flow_raw", str(payload))
 
     def test_ai_disabled_is_safe_and_does_not_create_attempt(self):
-        with patch.dict(os.environ, {"GMJFLOW_SECURITY_AI_ENABLED": "false"}, clear=False):
+        with patch.dict(os.environ, {"GMJFLOW_SECURITY_AI_KILL_SWITCH": "true"}, clear=False):
             result = analyze_security_event(self.conn, self.event_id)
             state = get_security_event_analysis(self.conn, self.event_id)
         self.assertFalse(result["ok"])

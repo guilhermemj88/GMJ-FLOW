@@ -33,13 +33,25 @@ class SqliteFixture:
         handle = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.path = handle.name
         handle.close()
+        self._connections: list[sqlite3.Connection] = []
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        self._connections.append(conn)
         return conn
 
     def close(self) -> None:
+        # Fechar todas as conexões abertas de forma determinística antes de
+        # desvincular o arquivo: no Windows o driver mantém o handle aberto e
+        # os.unlink() falha com PermissionError (WinError 32) enquanto qualquer
+        # conexão ainda estiver viva.
+        for conn in reversed(self._connections):
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        self._connections.clear()
         try:
             os.unlink(self.path)
         except FileNotFoundError:
@@ -89,12 +101,23 @@ class ThreatPolicyTest(unittest.TestCase):
                 CREATE TABLE bgp_protected_prefixes (
                     id INTEGER PRIMARY KEY, enabled INTEGER, cidr TEXT
                 );
+                CREATE TABLE system_settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
                 """
             )
             conn.commit()
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def enable_auto_policy(self) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_settings (key, value, updated_at) "
+                "VALUES ('threat_policy_auto_enabled', 'true', 'now')"
+            )
+            conn.commit()
 
     @staticmethod
     def ai(classification: str = PORT_SCAN_VERTICAL, confidence: float = 0.98) -> dict:
@@ -123,8 +146,8 @@ class ThreatPolicyTest(unittest.TestCase):
 
     def test_external_match_alone_never_authorizes(self) -> None:
         item = vector(detector_score=0, baseline_deviation=0, features={}, intel_sources=["FEODO"], external_correlation=True)
-        with patch.dict(os.environ, {"GMJFLOW_THREAT_POLICY_AUTO_ENABLED": "true"}, clear=False):
-            decision = ThreatPolicyEngine(self.db.connect).evaluate(item, self.ai())
+        self.enable_auto_policy()
+        decision = ThreatPolicyEngine(self.db.connect).evaluate(item, self.ai())
         self.assertFalse(decision.allowed)
         self.assertFalse(decision.gates["detector_evidence"])
 
@@ -152,10 +175,10 @@ class ThreatPolicyTest(unittest.TestCase):
 
     def test_strong_multi_signal_scan_can_pass_only_when_auto_enabled(self) -> None:
         engine = ThreatPolicyEngine(self.db.connect)
+        self.enable_auto_policy()
         with patch.dict(
             os.environ,
             {
-                "GMJFLOW_THREAT_POLICY_AUTO_ENABLED": "true",
                 "GMJFLOW_THREAT_POLICY_REQUIRE_GROQ": "true",
                 "GMJFLOW_THREAT_POLICY_MIN_SCORE": "85",
             },
@@ -173,9 +196,10 @@ class ThreatPolicyTest(unittest.TestCase):
     def test_non_groq_provider_cannot_satisfy_required_groq_gate(self) -> None:
         ai = self.ai()
         ai["provider_type"] = "openai"
+        self.enable_auto_policy()
         with patch.dict(
             os.environ,
-            {"GMJFLOW_THREAT_POLICY_AUTO_ENABLED": "true", "GMJFLOW_THREAT_POLICY_REQUIRE_GROQ": "true"},
+            {"GMJFLOW_THREAT_POLICY_REQUIRE_GROQ": "true"},
             clear=False,
         ):
             decision = ThreatPolicyEngine(self.db.connect).evaluate(vector(), ai)

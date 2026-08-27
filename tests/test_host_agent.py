@@ -754,5 +754,49 @@ class HostAgentConfigSafetyTest(unittest.TestCase):
         )
 
 
+class HostAgentAuthTest(unittest.TestCase):
+    def test_token_comparison_is_constant_time_and_strict(self):
+        self.assertTrue(host_agent.token_is_valid("secret", "secret"))
+        self.assertFalse(host_agent.token_is_valid("secret", "Secret"))
+        self.assertFalse(host_agent.token_is_valid("", "secret"))
+        self.assertFalse(host_agent.token_is_valid("secret", ""))
+
+    def test_bearer_and_custom_header_are_extracted(self):
+        bearer = types.SimpleNamespace(headers={"Authorization": "Bearer abc123"})
+        self.assertEqual("abc123", host_agent.request_bearer_token(bearer))
+        custom = types.SimpleNamespace(headers={"X-GMJFLOW-Host-Agent-Token": "tok2"})
+        self.assertEqual("tok2", host_agent.request_bearer_token(custom))
+        none = types.SimpleNamespace(headers={})
+        self.assertEqual("", host_agent.request_bearer_token(none))
+
+    def test_configured_token_reads_environment(self):
+        with patch.dict(host_agent.os.environ, {"GMJFLOW_HOST_AGENT_TOKEN": "env-secret"}):
+            self.assertEqual("env-secret", host_agent.configured_token())
+
+
+class HostAgentReadOnlySurfaceTest(unittest.TestCase):
+    SOURCE = MODULE_PATH.read_text(encoding="utf-8")
+
+    def _block(self, start_marker, end_marker):
+        start = self.SOURCE.index(start_marker)
+        return self.SOURCE[start:self.SOURCE.index(end_marker, start)]
+
+    def test_get_status_requires_authorization(self):
+        block = self._block("    def do_GET", "    def do_POST")
+        self.assertIn("_authorized()", block)
+        self.assertIn("401", block)
+
+    def test_post_recover_is_gated_by_enable_recovery(self):
+        block = self._block("    def do_POST", "    def log_message")
+        self.assertIn("recovery_enabled", block)
+        self.assertIn("403", block)
+        self.assertIn("recovery disabled on this read-only host agent", block)
+
+    def test_main_refuses_to_start_without_token(self):
+        block = self._block("def main()", "server = ThreadingHTTPServer")
+        self.assertIn("GMJFLOW_HOST_AGENT_TOKEN is required", block)
+        self.assertIn("if not args.token", block)
+
+
 if __name__ == "__main__":
     unittest.main()

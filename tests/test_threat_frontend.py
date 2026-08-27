@@ -265,6 +265,34 @@ class ThreatFrontendStaticTest(unittest.TestCase):
         for action in ('mitigate', 'ack', 'close'):
             self.assertIn(f'data-legacy-security-action="{action}"', self.script)
 
+    def test_investigation_drawer_is_never_empty_and_has_lineage_and_deeplink(self) -> None:
+        # Fallback de CASO B: sem Security Event persistido, ainda renderiza algo.
+        self.assertIn('function renderInvestigationUnavailable', self.script)
+        self.assertIn('Esta é uma detecção comportamental informativa', self.script)
+        self.assertIn('não possui Anomaly/Security Event correlacionado', self.script)
+        # Nucleo renderiza imediatamente e enriquecimento e independente.
+        start = self.script.index('async function openSecurityEventInvestigation(')
+        end = self.script.index('function campaignPersistence', start)
+        opener = self.script[start:end]
+        self.assertIn('renderSecurityEventInvestigation(event, [], { items: [] }, { items: [] }, {})', opener)
+        self.assertIn('Promise.allSettled', opener)
+        self.assertNotIn('Promise.all([', opener)
+        self.assertIn('renderInvestigationUnavailable(eventId, error)', opener)
+        # Rastreabilidade (lineage) e deep-link para Threat Intelligence.
+        self.assertIn('function renderSecurityEventLineage', self.script)
+        self.assertIn('Rastreabilidade', self.script)
+        self.assertIn('Regra responsável', self.script)
+        self.assertIn('ABRIR NO THREAT INTELLIGENCE', self.script)
+        self.assertIn('data-security-action="open-in-threat-intel"', self.script)
+        self.assertIn("showView('threat-intelligence')", self.script)
+        # Evidencia deterministica generica (observado vs threshold) e campos E2.2.
+        self.assertIn('Resultado', self.script)
+        self.assertIn('unique_destination_hosts', self.script)
+        self.assertIn('Robust z-score', self.script)
+        self.assertIn('Maturity', self.script)
+        self.assertIn('Classification', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()
+

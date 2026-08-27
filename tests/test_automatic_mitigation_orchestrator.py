@@ -315,6 +315,29 @@ class AutomaticMitigationOrchestratorTest(unittest.TestCase):
         self.assertIn("Aplicado automaticamente", html)
         self.assertIn("candidate.automatic_execution", html)
 
+    def test_frontend_prioritizes_already_mitigated_semantics_over_blocked(self):
+        html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        for token in (
+            "ALREADY_MITIGATED",
+            "NOT_AUTO_ELIGIBLE",
+            "VALIDATION_FAILED",
+            "DELIVERY_FAILED",
+            "WITHDRAWN",
+            "EXPIRED",
+            "Já mitigado por FlowSpec ativo",
+            "Correlacionado com mitigação ativa",
+            "automaticMitigationActiveIndex",
+            "automaticMitigationDisplayState",
+            "automaticMitigationResponsibleDetails",
+            "automaticMitigationGroupedRows",
+            "automaticMitigationExecutionKey",
+            "automaticMitigationCorrelationKey",
+            "automaticMitigationConnectorCompatible",
+            "automaticMitigationAddressFamily",
+            "automaticMitigationAnnouncementActive",
+        ):
+            self.assertIn(token, html)
+
     def test_structured_audit_covers_evaluation_apply_dedup_and_withdraw(self):
         with self.assertLogs("gmj-flow.automatic-mitigation", level="INFO") as captured:
             active = self.orchestrator.process_anomaly(101)[0]

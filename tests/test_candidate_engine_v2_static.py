@@ -51,7 +51,9 @@ class CandidateEngineV2StaticTest(unittest.TestCase):
     def test_automatic_mitigation_is_off_by_default_everywhere(self):
         self.assertIn("GMJFLOW_AUTO_MITIGATION_ENABLED=false", self.env)
         self.assertIn("GMJFLOW_AUTO_MITIGATION_ENABLED-false", self.compose)
-        self.assertIn('os.getenv("GMJFLOW_AUTO_MITIGATION_ENABLED", "false")', self.main)
+        self.assertIn('"auto_mitigation_enabled": "GMJFLOW_AUTO_MITIGATION_ENABLED"', self.main)
+        self.assertIn("GMJFLOW_AUTO_MITIGATION_KILL_SWITCH", self.env)
+        self.assertIn("GMJFLOW_AUTO_MITIGATION_KILL_SWITCH", self.compose)
 
     def test_v2_receives_the_same_effective_detector_thresholds_as_v1(self):
         thresholds = DetectorThresholds(
