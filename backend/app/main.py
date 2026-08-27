@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import socket
+import stat
 import subprocess
 import re
 import shutil
@@ -737,6 +738,11 @@ SYSTEM_SETTING_DEFAULTS = {
     "ai_keep_alive": os.getenv("AI_KEEP_ALIVE", "30m"),
     "ai_allow_auto": os.getenv("AI_ALLOW_AUTO", "false"),
     "ai_require_policy_validation": os.getenv("AI_REQUIRE_POLICY_VALIDATION", "true"),
+    # Operationally-persistent feature flags (single owner: SQLite).
+    # Environment variables act only as kill switches via GMJFLOW_*_KILL_SWITCH.
+    "auto_mitigation_enabled": "false",
+    "threat_policy_auto_enabled": "false",
+    "threat_response_profile_id": "",
 }
 
 RETENTION_HOURS_MIGRATIONS = {
@@ -928,6 +934,7 @@ DETECTION_MITIGATION_MODES = {"detection_only", "manual_review", "response_profi
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 GMJFLOW_HOST_AGENT_URL = os.getenv("GMJFLOW_HOST_AGENT_URL", "").strip().rstrip("/")
+GMJFLOW_HOST_AGENT_TOKEN = os.getenv("GMJFLOW_HOST_AGENT_TOKEN", "").strip()
 GMJFLOW_EXABGP_LOG_PATH = (
     os.getenv("GMJFLOW_EXABGP_LOG_PATH", "/var/log/exabgp-gmj-flow.log").strip()
     or "/var/log/exabgp-gmj-flow.log"
@@ -2153,6 +2160,38 @@ def migrate_retention_hours_settings(conn: sqlite3.Connection, now: str) -> None
         )
 
 
+# Legacy environment variables imported exactly once into SQLite. The env var is
+# no longer read as operational state afterwards; it only seeds the first value.
+LEGACY_ENV_SETTING_MIGRATIONS = {
+    "auto_mitigation_enabled": "GMJFLOW_AUTO_MITIGATION_ENABLED",
+    "threat_policy_auto_enabled": "GMJFLOW_THREAT_POLICY_AUTO_ENABLED",
+    "threat_response_profile_id": "GMJFLOW_THREAT_RESPONSE_PROFILE_ID",
+}
+
+
+def migrate_legacy_env_settings(conn: sqlite3.Connection, now: str) -> None:
+    """Import legacy env values once; never overwrite an existing DB value.
+
+    Only an explicitly defined (non-empty) legacy variable is imported. An
+    absent variable falls through to the fail-safe default, so nothing can be
+    switched on silently by migration alone.
+    """
+    for setting_key, env_name in LEGACY_ENV_SETTING_MIGRATIONS.items():
+        env_value = clean_text(os.getenv(env_name, ""))
+        if not env_value:
+            continue
+        existing = conn.execute(
+            "SELECT value FROM system_settings WHERE key = ?",
+            (setting_key,),
+        ).fetchone()
+        if existing is not None:
+            continue
+        conn.execute(
+            "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (setting_key, env_value, now),
+        )
+
+
 def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
     db_key = sqlite_database_key(conn)
     if db_key in SYSTEM_SETTINGS_READY_KEYS:
@@ -2173,6 +2212,8 @@ def ensure_system_settings_table(conn: sqlite3.Connection) -> None:
         # Hours are derived before generic defaults are inserted, otherwise a
         # new default would take precedence over an operator's legacy days.
         migrate_retention_hours_settings(conn, now)
+        # One-shot import of legacy env-based operational flags (never overwrites).
+        migrate_legacy_env_settings(conn, now)
         for key, value in SYSTEM_SETTING_DEFAULTS.items():
             if key.startswith("ai_"):
                 continue
@@ -2244,6 +2285,195 @@ def setting_float(
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(value, maximum))
+
+
+PREFLIGHT_STATE: dict[str, Any] = {}
+
+
+def host_agent_preflight() -> dict[str, Any]:
+    """Read-only reachability probe for the Host Agent (BGP observability)."""
+    url = clean_text(os.getenv("GMJFLOW_HOST_AGENT_URL", ""))
+    token = clean_text(os.getenv("GMJFLOW_HOST_AGENT_TOKEN", ""))
+    if not url or not token:
+        return {
+            "status": "unverified",
+            "detail": "GMJFLOW_HOST_AGENT_URL/TOKEN não configurados",
+        }
+    try:
+        headers: dict[str, str] = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(f"{url}/bgp/status", method="GET", headers=headers)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status = getattr(response, "status", 200) or 200
+            if int(status) == 200:
+                return {"status": "ok", "detail": f"Host Agent acessível em {url}"}
+            return {"status": "unverified", "detail": f"Host Agent respondeu HTTP {status}"}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {"status": "unverified", "detail": "Host Agent rejeitou autenticação (401)"}
+        return {"status": "degraded", "detail": f"Host Agent respondeu HTTP {exc.code}"}
+    except Exception as exc:
+        return {"status": "degraded", "detail": f"Host Agent indisponível: {exc}"}
+
+
+def collect_preflight_report() -> dict[str, Any]:
+    """Read-only, component-scoped startup preflight. Never mutates config."""
+    report: dict[str, Any] = {
+        "database": {"status": "ok", "detail": ""},
+        "collector_management": {"status": "ok", "detail": ""},
+        "sensor_1": {"status": "ok", "detail": ""},
+        "sensor_2": {"status": "ok", "detail": ""},
+        "data_plane": {"status": "ok", "detail": ""},
+        "bgp_observability": {"status": "unverified", "detail": ""},
+        "bgp_connectors": {"status": "ok", "detail": ""},
+    }
+    # SQLite principal.
+    try:
+        with sqlite_connection() as conn:
+            get_system_settings(conn)
+        report["database"] = {"status": "ok", "detail": str(sqlite_path())}
+    except Exception as exc:
+        report["database"] = {"status": "blocked", "detail": f"SQLite inacessível: {exc}"}
+    # Project dir (collector management) — absence is fatal only for collectors.
+    project_dir = clean_text(os.getenv("GMJFLOW_PROJECT_DIR", ""))
+    if not project_dir:
+        report["collector_management"] = {
+            "status": "blocked",
+            "detail": "CONFIGURATION ERROR: GMJFLOW_PROJECT_DIR ausente ou inválido",
+        }
+    else:
+        report["collector_management"] = {"status": "ok", "detail": project_dir}
+    # Sensor configs — read-only validation, never regenerated.
+    try:
+        base = collectors_dir()
+    except Exception as exc:
+        base = None
+        report["collector_management"] = {"status": "blocked", "detail": str(exc)}
+    for key, sensor_id in (("sensor_1", 1), ("sensor_2", 2)):
+        if base is None:
+            report[key] = {"status": "blocked", "detail": "collectors_dir indisponível"}
+            continue
+        sensor_dir = Path(base) / f"sensor-{sensor_id}"
+        nfacctd = sensor_dir / "nfacctd.conf"
+        allow = sensor_dir / "allow.lst"
+        missing = [str(path) for path in (nfacctd, allow) if not path.is_file()]
+        if missing:
+            report[key] = {
+                "status": "blocked",
+                "detail": "CONFIGURATION ERROR: " + ", ".join(missing),
+            }
+        else:
+            report[key] = {"status": "ok", "detail": str(sensor_dir)}
+    # ClickHouse (data plane) — degraded, never blocks the backend.
+    try:
+        if ping_clickhouse():
+            report["data_plane"] = {"status": "ok", "detail": "ClickHouse acessível"}
+        else:
+            report["data_plane"] = {"status": "degraded", "detail": "ClickHouse não respondeu"}
+    except Exception as exc:
+        report["data_plane"] = {"status": "degraded", "detail": str(exc)}
+    # Host Agent (BGP observability) — real reachability probe.
+    report["bgp_observability"] = host_agent_preflight()
+    # BGP connectors consistency.
+    try:
+        with sqlite_connection() as conn:
+            rows = conn.execute(
+                "SELECT name, enabled, is_active, peer_ip FROM bgp_connectors ORDER BY id"
+            ).fetchall()
+        active = [row for row in rows if sqlite_bool(row["enabled"]) and sqlite_bool(row["is_active"])]
+        inconsistent = [clean_text(row["name"]) or str(row["name"]) for row in active if not clean_text(row["peer_ip"])]
+        if inconsistent:
+            report["bgp_connectors"] = {
+                "status": "warning",
+                "detail": "conectores ativos sem peer_ip: " + ", ".join(inconsistent),
+            }
+        else:
+            report["bgp_connectors"] = {"status": "ok", "detail": f"{len(active)} conector(es) ativo(s)"}
+    except Exception as exc:
+        report["bgp_connectors"] = {"status": "warning", "detail": str(exc)}
+    return report
+
+
+def run_startup_preflight() -> None:
+    """Non-blocking, read-only startup preflight. Never raises to the caller."""
+    global PREFLIGHT_STATE
+    try:
+        PREFLIGHT_STATE = collect_preflight_report()
+    except Exception as exc:  # pragma: no cover - defensive.
+        PREFLIGHT_STATE = {"error": str(exc)}
+    blocked = [
+        key
+        for key, value in PREFLIGHT_STATE.items()
+        if isinstance(value, dict) and value.get("status") == "blocked"
+    ]
+    degraded = [
+        key
+        for key, value in PREFLIGHT_STATE.items()
+        if isinstance(value, dict) and value.get("status") in {"warning", "degraded", "unverified"}
+    ]
+    if blocked:
+        logger.warning("PREFLIGHT BLOCKED componentes=%s", blocked)
+    if degraded:
+        logger.warning("PREFLIGHT WARNING componentes=%s", degraded)
+
+
+@app.get("/api/config/effective")
+def config_effective(request: Request):
+    require_admin(request)
+    ensure_sensor_db()
+    from app.services.config_effective import (
+        auto_mitigation_effective,
+        security_ai_kill_switch,
+        threat_policy_auto_effective,
+    )
+    from app.services.security_event_ai import security_ai_config
+
+    with sqlite_connection() as conn:
+        auto = auto_mitigation_effective(conn)
+        threat = threat_policy_auto_effective(conn)
+        settings = get_system_settings(conn)
+        profile_id = clean_text(settings.get("threat_response_profile_id"))
+        security = security_ai_config(conn, "security_event_analysis")
+    security_kill = security_ai_kill_switch()
+    security_configured = bool(security.get("configured"))
+    security_effective = security_configured and not security_kill
+    return {
+        "auto_mitigation": auto,
+        "security_ai": {
+            "configured": security_configured,
+            "configured_source": "database",
+            "kill_switch": security_kill,
+            "effective": security_effective,
+            "reason": (
+                "enabled"
+                if security_effective
+                else ("disabled_by_kill_switch" if security_kill else "disabled_by_operator")
+            ),
+        },
+        "threat_policy_auto": threat,
+        "threat_response_profile_id": {
+            "value": profile_id,
+            "source": "database",
+        },
+        "project_dir": {
+            "value": clean_text(os.getenv("GMJFLOW_PROJECT_DIR", "")),
+            "source": "environment",
+        },
+        "collectors_dir": {
+            "value": clean_text(os.getenv("GMJFLOW_COLLECTORS_DIR", "")),
+            "source": "environment",
+        },
+    }
+
+
+@app.get("/api/config/preflight")
+def config_preflight(request: Request):
+    require_admin(request)
+    try:
+        return {"components": collect_preflight_report()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Preflight indisponível: {exc}") from exc
 
 
 def hash_password(password: str) -> str:
@@ -3657,15 +3887,20 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "description": "Mitigacao automatica segura para DNS outbound: destination /32, udp, destination-port 53.",
             "response_type": "flowspec",
             "approval_mode": "auto",
-            "mitigation_target_mode": "sensor_origin",
+            "mitigation_target_mode": "fixed_connector",
+            "connector_id": 2,
             "action": "discard",
             "target_selector": "dst_ip",
             "protocol_selector": "udp",
             "dst_port_selector": "fixed",
             "dst_port_value": "53",
             "require_protocol_or_port": 1,
-            "default_duration_seconds": DNS_SINGLE_FLOW_DEFAULT_TTL_SECONDS,
-            "max_duration_seconds": 1800,
+            "default_duration_seconds": DNS_SINGLE_FLOW_INITIAL_LEASE_SECONDS,
+            "max_duration_seconds": DNS_SINGLE_FLOW_INITIAL_LEASE_SECONDS,
+            "initial_lease_seconds": DNS_SINGLE_FLOW_INITIAL_LEASE_SECONDS,
+            "recurrence_lease_seconds": DNS_SINGLE_FLOW_RECURRENCE_LEASE_SECONDS,
+            "max_lifetime_seconds": None,
+            "recurrence_renewal_enabled": 1,
             "enable_multi_target_dns": 1,
             "max_targets_per_anomaly": 10,
         },
@@ -3767,18 +4002,20 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 dst_port_selector, dst_port_value, tcp_flags_selector, rate_limit_bps,
                 redirect_target, next_hop, community, large_community, require_protocol_or_port,
                 allow_wide_prefix, max_duration_seconds, default_duration_seconds,
+                initial_lease_seconds, recurrence_lease_seconds, max_lifetime_seconds, recurrence_renewal_enabled,
                 enable_multi_target_dns, max_targets_per_anomaly, min_target_packets_s, min_target_bits_s,
                 created_at, updated_at
             )
             VALUES (
-                ?, ?, 1, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
-                '', '', '', '', ?, 0, ?, ?, ?, ?, NULL, NULL, ?, ?
+                ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+                '', '', '', '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?
             )
             """,
             (
                 item["name"],
                 item["description"],
                 item["response_type"],
+                item.get("connector_id"),
                 item.get("mitigation_target_mode", "sensor_origin"),
                 item["approval_mode"],
                 item["action"],
@@ -3792,6 +4029,10 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 int(item.get("require_protocol_or_port", 1)),
                 int(item.get("max_duration_seconds", BGP_DEFAULT_MAX_DURATION_SECONDS)),
                 int(item.get("default_duration_seconds", 1800)),
+                item.get("initial_lease_seconds"),
+                item.get("recurrence_lease_seconds"),
+                item.get("max_lifetime_seconds"),
+                int(item.get("recurrence_renewal_enabled", 1)),
                 int(item.get("enable_multi_target_dns", 0)),
                 int(item.get("max_targets_per_anomaly", 10)),
                 now,
@@ -4116,6 +4357,11 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_response_profiles", "min_target_packets_s", "min_target_packets_s REAL")
     ensure_sqlite_column(conn, "bgp_response_profiles", "min_target_bits_s", "min_target_bits_s REAL")
     ensure_sqlite_column(conn, "bgp_response_profiles", "notes", "notes TEXT NOT NULL DEFAULT ''")
+    # Lease vs hard-cap model. NULL max_lifetime_seconds = unlimited (no hard cap).
+    ensure_sqlite_column(conn, "bgp_response_profiles", "initial_lease_seconds", "initial_lease_seconds INTEGER")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "recurrence_lease_seconds", "recurrence_lease_seconds INTEGER")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "max_lifetime_seconds", "max_lifetime_seconds INTEGER")
+    ensure_sqlite_column(conn, "bgp_response_profiles", "recurrence_renewal_enabled", "recurrence_renewal_enabled INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_announcement_events (
@@ -4169,19 +4415,18 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
         UPDATE bgp_response_profiles
         SET enable_multi_target_dns = 1,
             approval_mode = 'auto',
-            mitigation_target_mode = 'sensor_origin',
+            mitigation_target_mode = 'fixed_connector',
+            connector_id = 2,
             target_selector = 'dst_ip',
             protocol_selector = 'udp',
             dst_port_selector = 'fixed',
             dst_port_value = '53',
             max_targets_per_anomaly = CASE WHEN COALESCE(max_targets_per_anomaly, 0) <= 0 THEN 10 ELSE max_targets_per_anomaly END,
-            default_duration_seconds = CASE
-                WHEN COALESCE(default_duration_seconds, 0) <= 0
-                  OR default_duration_seconds IN (600, 1800)
-                THEN 900
-                ELSE default_duration_seconds
-            END,
-            max_duration_seconds = CASE WHEN COALESCE(max_duration_seconds, 0) <= 0 THEN 1800 ELSE max_duration_seconds END
+            default_duration_seconds = 3600,
+            max_duration_seconds = 3600,
+            initial_lease_seconds = COALESCE(initial_lease_seconds, 3600),
+            recurrence_lease_seconds = COALESCE(recurrence_lease_seconds, 86400),
+            recurrence_renewal_enabled = 1
         WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
         """
     )
@@ -4402,6 +4647,7 @@ def ensure_sensor_db() -> None:
 @app.on_event("startup")
 def startup() -> None:
     ensure_sensor_db()
+    run_startup_preflight()
     THREAT_INTEL_MANAGER.start()
     BEHAVIORAL_THREAT_RUNTIME.set_mitigation_handler(apply_behavioral_policy_decision)
     BEHAVIORAL_THREAT_RUNTIME.start()
@@ -11026,7 +11272,14 @@ def bgp_response_profile_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "max_prefixlen_v6": int(item.get("max_prefixlen_v6") or 128),
         "max_duration_seconds": int(item.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
         "default_duration_seconds": int(item.get("default_duration_seconds") or 1800),
-        "duration_seconds": int(item.get("default_duration_seconds") or 1800),
+        "initial_lease_seconds": int_or_none(item.get("initial_lease_seconds")),
+        "recurrence_lease_seconds": int_or_none(item.get("recurrence_lease_seconds")),
+        "max_lifetime_seconds": int_or_none(item.get("max_lifetime_seconds")),
+        "recurrence_renewal_enabled": sqlite_bool(item.get("recurrence_renewal_enabled", 1)),
+        "duration_seconds": (
+            int_or_none(item.get("initial_lease_seconds"))
+            or int(item.get("default_duration_seconds") or 1800)
+        ),
         "enable_multi_target_dns": sqlite_bool(item.get("enable_multi_target_dns", 0)),
         "max_targets_per_anomaly": int(item.get("max_targets_per_anomaly") or 10),
         "min_target_packets_s": item.get("min_target_packets_s"),
@@ -11419,6 +11672,11 @@ def normalize_systemd_service_name(value: Any, *, with_suffix: bool = True) -> s
     service = clean_text(value)
     if not service:
         service = clean_text(GMJFLOW_EXABGP_SYSTEMD_SERVICE) or "exabgp-gmj-flow"
+    # Tolerate a stored "...-service" suffix (a common typo for the systemd
+    # unit "... .service") and map it to the real unit name before validation,
+    # otherwise systemctl never finds the real "exabgp-gmj-flow.service".
+    if service.endswith("-service"):
+        service = service[: -len("-service")] + ".service"
     if not SYSTEMD_SERVICE_NAME_RE.fullmatch(service):
         raise HTTPException(status_code=400, detail="systemd_service_name invalido")
     if with_suffix and not service.endswith(".service"):
@@ -11937,12 +12195,28 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
         }
     )
     try:
-        request = urllib.request.Request(f"{GMJFLOW_HOST_AGENT_URL}/bgp/status?{params}", method="GET")
+        headers: dict[str, str] = {}
+        if GMJFLOW_HOST_AGENT_TOKEN:
+            headers["Authorization"] = f"Bearer {GMJFLOW_HOST_AGENT_TOKEN}"
+        request = urllib.request.Request(
+            f"{GMJFLOW_HOST_AGENT_URL}/bgp/status?{params}",
+            method="GET",
+            headers=headers,
+        )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
         if not isinstance(payload, dict):
             raise ValueError("Resposta Host Agent invalida")
         return {"enabled": True, "method": "host_agent", **payload}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {
+                "enabled": True,
+                "method": "host_agent",
+                "available": False,
+                "message": "Host Agent rejeitou a autenticacao (401); verifique GMJFLOW_HOST_AGENT_TOKEN.",
+            }
+        return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
     except Exception as exc:
         return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
 
@@ -12093,6 +12367,62 @@ def exabgp_pipe_mount_error(pipe_path: str) -> str:
     return ""
 
 
+def exabgp_backend_delivery_path_status(pipe_in: str, pipe_out: str = "") -> dict[str, Any]:
+    """Container-side (backend process) view of the ExaBGP FIFO delivery path.
+
+    Independent of the Host Agent host-side view: this reflects what the
+    backend container itself can see and write to, which is the actual
+    condition required to deliver a real FlowSpec announce. Uses only
+    filesystem/permission checks — never writes to the FIFO.
+    """
+    pipe_in = clean_text(pipe_in)
+    pipe_out = clean_text(pipe_out)
+    in_path = Path(pipe_in) if pipe_in else None
+    out_path = Path(pipe_out) if pipe_out else None
+    mount_dir = in_path.parent if in_path is not None else None
+    backend_mount_visible = bool(mount_dir is not None and mount_dir.exists())
+    backend_pipe_in_visible = bool(in_path is not None and in_path.exists())
+    if pipe_out:
+        backend_pipe_out_visible = bool(out_path is not None and out_path.exists())
+    else:
+        backend_pipe_out_visible = True
+    backend_pipe_in_is_fifo = False
+    if backend_pipe_in_visible and in_path is not None:
+        try:
+            backend_pipe_in_is_fifo = bool(stat.S_ISFIFO(in_path.stat().st_mode))
+        except OSError:
+            backend_pipe_in_is_fifo = False
+    backend_pipe_writable = bool(
+        backend_pipe_in_visible and in_path is not None and os.access(pipe_in, os.W_OK)
+    )
+    delivery_path_ready = bool(
+        backend_mount_visible
+        and backend_pipe_in_visible
+        and backend_pipe_out_visible
+        and backend_pipe_in_is_fifo
+        and backend_pipe_writable
+    )
+    reasons: list[str] = []
+    if not backend_mount_visible or not backend_pipe_in_visible:
+        reasons.append("backend_exabgp_pipe_unavailable")
+    elif not backend_pipe_in_is_fifo:
+        reasons.append("backend_exabgp_pipe_not_fifo")
+    elif not backend_pipe_writable:
+        reasons.append("backend_exabgp_pipe_not_writable")
+    elif not backend_pipe_out_visible:
+        reasons.append("backend_exabgp_pipe_out_unavailable")
+    return {
+        "backend_mount_visible": backend_mount_visible,
+        "backend_pipe_in_visible": backend_pipe_in_visible,
+        "backend_pipe_out_visible": backend_pipe_out_visible,
+        "backend_pipe_in_is_fifo": backend_pipe_in_is_fifo,
+        "backend_pipe_writable": backend_pipe_writable,
+        "delivery_path_ready": delivery_path_ready,
+        "reason": reasons[0] if reasons else "",
+        "reasons": reasons,
+    }
+
+
 def exabgp_pipe_status(connector: dict[str, Any]) -> dict[str, Any]:
     pipe_in = clean_text(connector.get("exabgp_pipe_in"))
     pipe_out = clean_text(connector.get("exabgp_pipe_out"))
@@ -12176,6 +12506,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     service_raw = "unknown"
     service_active = False
     service_severity = "unknown"
+    service_check_possible = shutil.which("systemctl") is not None
     if shutil.which("systemctl") is None:
         service_raw = "unavailable_in_container"
         messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
@@ -12190,9 +12521,10 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     local_address = clean_text(connector.get("local_address"))
     peer_ip = clean_text(connector.get("peer_ip"))
     listen_port = int(connector.get("listen_port") or 179)
+    passive_listen = sqlite_bool(connector.get("passive_listen_enabled"))
     listening = False
-    listener_status = "unknown_missing_ss"
-    listener_severity = "unknown"
+    listener_status = "not_required" if not passive_listen else "unknown_missing_ss"
+    listener_severity = "ok" if not passive_listen else "unknown"
     tcp_established = False
     session_status = "unknown_missing_ss"
     session_severity = "unknown"
@@ -12208,19 +12540,26 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         if not any("Backend containerizado" in message for message in messages):
             messages.append("Backend containerizado nao consegue consultar systemd/ss do host. Use host-agent ou router SSH para status completo.")
     else:
-        code_listen, listen_output = bgp_run_command(["ss", "-lntp"])
-        if code_listen == 0:
-            for line in listen_output.splitlines():
-                if f":{listen_port}" not in line:
-                    continue
-                if not local_address or f"{local_address}:{listen_port}" in line or f"0.0.0.0:{listen_port}" in line or f"*:{listen_port}" in line:
-                    listening = True
-                    break
-            listener_status = "listening" if listening else "down"
-            listener_severity = "ok" if listening else "down"
+        # A local LISTEN on :179 only exists for passive (server) mode. For
+        # active-connect the ExaBGP opens an ephemeral local port toward the
+        # peer's :179, so absence of LISTEN must never be reported as down.
+        if passive_listen:
+            code_listen, listen_output = bgp_run_command(["ss", "-lntp"])
+            if code_listen == 0:
+                for line in listen_output.splitlines():
+                    if f":{listen_port}" not in line:
+                        continue
+                    if not local_address or f"{local_address}:{listen_port}" in line or f"0.0.0.0:{listen_port}" in line or f"*:{listen_port}" in line:
+                        listening = True
+                        break
+                listener_status = "listening" if listening else "down"
+                listener_severity = "ok" if listening else "down"
+            else:
+                listener_status = "unknown_ss_error"
+                errors.append(f"ss -lntp: {listen_output}")
         else:
-            listener_status = "unknown_ss_error"
-            errors.append(f"ss -lntp: {listen_output}")
+            listener_status = "not_required"
+            listener_severity = "ok"
 
         code_tcp, tcp_output = bgp_run_command(["ss", "-antp"])
         if code_tcp == 0:
@@ -12252,6 +12591,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     agent_available = bool(agent_status.get("enabled") and agent_status.get("available"))
     agent_pipe: dict[str, Any] = {}
     if agent_available:
+        service_check_possible = True
         agent_service = agent_status.get("service") or {}
         agent_listener = agent_status.get("listener") or {}
         agent_session = agent_status.get("session") or {}
@@ -12433,12 +12773,19 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         )
     if router_status.get("message"):
         messages.append(f"Router SSH: {router_status['message']}")
+    if not passive_listen:
+        # Active-connect topology: a local LISTEN is never expected. Keep the
+        # listener informational regardless of what host-agent reported.
+        listening = False
+        listener_status = "not_required"
+        listener_severity = "ok"
     service_info = {
         "name": service_name,
         "configured_name": service_resolution["configured_name"],
         "active": service_active,
         "raw": service_raw,
         "severity": service_severity,
+        "check_possible": service_check_possible,
         "shared": service_name
         == normalize_systemd_service_name(GMJFLOW_EXABGP_SYSTEMD_SERVICE),
         "fallback_used": bool(service_resolution["fallback_used"]),
@@ -12459,7 +12806,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     }
     checks = {
         "service_ok": service_active,
-        "listener_ok": listening,
+        "listener_ok": listening if passive_listen else True,
         "bgp_ok": tcp_established,
         "flowspec_ok": flowspec_state == "established",
         "pipe_ok": pipes_ok,
@@ -12475,7 +12822,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             connector.get("passive_listen_enabled")
         ),
         "service": service_info,
-        "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity},
+        "listener": {"expected_ip": local_address, "expected_port": listen_port, "listening": listening, "status": listener_status, "severity": listener_severity, "required": passive_listen},
         "pipes": pipes,
         "exabgp_peer": exabgp_peer,
         "exabgp_log_peer": heuristic_peer,
@@ -12637,6 +12984,7 @@ def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
         "checks": status.get("checks") or {},
         "host_agent_evidence": host_agent.get("evidence") or {},
         "host_agent_pipes": host_agent_pipes,
+        "backend_pipes": status.get("backend_pipes") or {},
         "messages": status.get("messages") or [],
         "errors": status.get("errors") or [],
     }
@@ -12649,19 +12997,26 @@ def bgp_readiness_reason_message(reason: str) -> str:
         "flowspec_not_verified": "Familia FlowSpec nao confirmada; anuncio nao enviado.",
         "flowspec_down": "Familia FlowSpec indisponivel; anuncio nao enviado.",
         "exabgp_service_inactive": "Servico ExaBGP indisponivel; anuncio nao enviado.",
+        "exabgp_service_unverified": "Servico ExaBGP nao verificavel no container; use host-agent para evidencia do host.",
         "tcp_listener_unavailable": "Listener TCP/179 indisponivel; anuncio nao enviado.",
         "exabgp_pipe_unavailable": "Pipe ExaBGP indisponivel ou sem leitor ativo; anuncio nao enviado.",
+        "backend_exabgp_pipe_unavailable": "Pipe /run/exabgp nao montado ou indisponivel dentro do container backend; anuncio nao enviado.",
+        "backend_exabgp_pipe_not_fifo": "Caminho ExaBGP do backend nao e um FIFO; anuncio nao enviado.",
+        "backend_exabgp_pipe_not_writable": "Pipe ExaBGP sem permissao de escrita no backend; anuncio nao enviado.",
+        "backend_exabgp_pipe_out_unavailable": "Pipe de saida ExaBGP indisponivel no backend; anuncio nao enviado.",
         "close_wait_above_threshold": "CLOSE_WAIT acima do limite operacional; anuncio nao enviado.",
     }.get(clean_text(reason), clean_text(reason))
 
 
 def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     raw_peer_state = clean_text(status.get("bgp_state")).lower()
+    service = status.get("service") or {}
     service_active = bool(
         bgp_status_check_value(
-            status, "service_ok", (status.get("service") or {}).get("active")
+            status, "service_ok", service.get("active")
         )
     )
+    service_checked = bool(service.get("check_possible", True))
     listener = status.get("listener") or {}
     session = status.get("session") or {}
     listener_ok = bool(
@@ -12697,6 +13052,16 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     pipe_ok = bool(
         bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
     )
+    requires_backend_delivery = bool(clean_text(pipes.get("input_path")))
+    backend_pipes = status.get("backend_pipes")
+    if not isinstance(backend_pipes, dict):
+        backend_pipes = exabgp_backend_delivery_path_status(
+            clean_text(pipes.get("input_path")),
+            clean_text(pipes.get("output_path")),
+        )
+    delivery_path_ready = bool(
+        backend_pipes.get("delivery_path_ready") if requires_backend_delivery else True
+    )
     close_wait_count = int(session.get("close_wait_count") or 0)
     close_wait_threshold = int(session.get("close_wait_alert_threshold") or 0)
     if isinstance(session.get("close_wait_alert"), bool):
@@ -12718,7 +13083,9 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     transport_ready = bool(listener_ok or bgp_ok)
     failed_reasons: list[str] = []
     if not service_active:
-        failed_reasons.append("exabgp_service_inactive")
+        failed_reasons.append(
+            "exabgp_service_inactive" if service_checked else "exabgp_service_unverified"
+        )
     if not bgp_ok:
         failed_reasons.append(
             "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
@@ -12733,6 +13100,10 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         )
     if not pipe_ok:
         failed_reasons.append("exabgp_pipe_unavailable")
+    if not delivery_path_ready:
+        failed_reasons.append(
+            clean_text(backend_pipes.get("reason")) or "backend_exabgp_pipe_unavailable"
+        )
     if not close_wait_ok:
         failed_reasons.append("close_wait_above_threshold")
     reason = failed_reasons[0] if failed_reasons else ""
@@ -12740,6 +13111,13 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "peer_down"
         if "peer_bgp_down" in failed_reasons
         else "failed"
+        if any(
+            failed.endswith(
+                ("_down", "_inactive", "_unavailable", "_above_threshold", "_not_fifo", "_not_writable")
+            )
+            for failed in failed_reasons
+        )
+        else "unverified"
         if failed_reasons
         else ""
     )
@@ -12758,6 +13136,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "pipe_ok": pipe_ok,
         "transport_ready": transport_ready,
         "close_wait_ok": close_wait_ok,
+        "delivery_path_ready": delivery_path_ready,
     }
     required_checks = {
         "service_ok": service_active,
@@ -12766,6 +13145,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "pipe_ok": pipe_ok,
         "transport_ready": transport_ready,
         "close_wait_ok": close_wait_ok,
+        "delivery_path_ready": delivery_path_ready,
     }
     ready = all(required_checks.values())
     details = compact_bgp_status_details(status)
@@ -12790,6 +13170,8 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "reason_message": bgp_readiness_reason_message(reason),
         "failure_status": failure_status,
         "confirmation_level": confirmation_level,
+        "backend_pipes": backend_pipes,
+        "delivery_path_ready": delivery_path_ready,
         "details": details,
     }
 
@@ -13106,6 +13488,10 @@ def check_bgp_connector_readiness(conn: sqlite3.Connection, connector: dict[str,
                 "errors": [error],
                 "messages": [error],
             }
+        raw_status["backend_pipes"] = exabgp_backend_delivery_path_status(
+            clean_text(connector.get("exabgp_pipe_in")),
+            clean_text(connector.get("exabgp_pipe_out")),
+        )
         status = normalize_bgp_connector_status_snapshot(connector, raw_status)
         persist_bgp_connector_status_snapshot(conn, connector, status)
         readiness = evaluate_bgp_connector_readiness(status)
@@ -13293,6 +13679,10 @@ def finish_bgp_connector_status_check(execution: dict[str, Any]) -> dict[str, An
                 "errors": [error],
                 "messages": [error],
             }
+        status["backend_pipes"] = exabgp_backend_delivery_path_status(
+            clean_text(connector.get("exabgp_pipe_in")),
+            clean_text(connector.get("exabgp_pipe_out")),
+        )
         status = normalize_bgp_connector_status_snapshot(connector, status)
         with sqlite_connection() as conn:
             persist_bgp_connector_status_snapshot(conn, connector, status)
@@ -14232,6 +14622,23 @@ def bgp_prefix_overlaps(a: str, b: str) -> bool:
     return left.version == right.version and left.overlaps(right)
 
 
+def validate_mitigation_duration(candidate: dict[str, Any], response_profile: dict[str, Any]) -> list[str]:
+    """Duration validation under the lease vs hard-cap model.
+
+    max_lifetime_seconds NULL means unlimited: a 86400s recurrence lease is
+    accepted even when the legacy profile/connector max_duration_seconds is
+    3600. Only an explicit max_lifetime_seconds caps the per-lease duration.
+    """
+    errors: list[str] = []
+    duration = int(candidate.get("duration_seconds") or 0)
+    max_lifetime = mitigation_max_lifetime_seconds(response_profile or {})
+    if duration <= 0:
+        errors.append("Duracao invalida.")
+    elif max_lifetime is not None and duration > max_lifetime:
+        errors.append(f"Duracao excede a vida maxima permitida ({max_lifetime}s).")
+    return errors
+
+
 def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str, Any] | None, response_profile: dict[str, Any]) -> dict[str, list[str]]:
     ensure_sensor_db()
     errors: list[str] = []
@@ -14321,14 +14728,10 @@ def validate_mitigation_candidate(candidate: dict[str, Any], connector: dict[str
                 errors.append("Destino externo outbound precisa ser /32 ou /128.")
 
     duration = int(candidate.get("duration_seconds") or 0)
-    max_duration = min(
-        int(response_profile.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS),
-        int(connector.get("max_duration_seconds") or BGP_DEFAULT_MAX_DURATION_SECONDS) if connector else BGP_DEFAULT_MAX_DURATION_SECONDS,
-    )
-    if duration <= 0:
-        errors.append("Duracao invalida.")
-    elif duration > max_duration:
-        errors.append(f"Duracao excede o maximo permitido ({max_duration}s).")
+    # Lease vs hard-cap model: max_lifetime_seconds NULL means unlimited.
+    # The per-lease duration is bounded by the lease itself (initial/recurrence),
+    # never by a global 3600s hard cap.
+    errors.extend(validate_mitigation_duration(candidate, response_profile))
     if connector and clean_text(connector.get("peer_ip")):
         peer_ip = ip_address(connector["peer_ip"])
         for prefix in prefixes:
@@ -15373,7 +15776,14 @@ def attach_mitigation_config(conn: sqlite3.Connection, candidate: dict[str, Any]
         candidate["mitigation_mode"] = "manual_approval"
     candidate["requested_mode"] = candidate["mitigation_mode"]
     default_profile_duration = int(profile.get("default_duration_seconds") or 0) if profile else 0
-    candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or default_profile_duration or 900) if vector else int(candidate.get("duration_seconds") or default_profile_duration or 900)
+    if profile and int_or_none(profile.get("initial_lease_seconds")) is not None:
+        # Single-owner for the initial TTL: the selected Response Profile owns
+        # the first-announcement lease (initial_lease_seconds). A persisted
+        # profile lease must never be overridden by the attack vector's
+        # hardcoded default TTL (e.g. DNS 900s).
+        candidate["duration_seconds"] = mitigation_initial_lease_seconds(profile)
+    else:
+        candidate["duration_seconds"] = int(vector.get("duration_seconds") or candidate.get("duration_seconds") or default_profile_duration or 900) if vector else int(candidate.get("duration_seconds") or default_profile_duration or 900)
     candidate["require_protected_prefix"] = bool(vector.get("require_protected_prefix", True)) if vector else bool(candidate.get("require_protected_prefix", True))
     candidate["max_auto_prefixlen_v4"] = vector.get("max_auto_prefixlen_v4") if vector else candidate.get("max_auto_prefixlen_v4")
     candidate["max_auto_prefixlen_v6"] = vector.get("max_auto_prefixlen_v6") if vector else candidate.get("max_auto_prefixlen_v6")
@@ -17422,6 +17832,122 @@ def mitigation_connector_choice(connector: dict[str, Any]) -> dict[str, Any]:
         "readiness": connector_persisted_readiness(connector),
         "dry_run": connector_is_dry_run(connector),
     }
+
+
+DNS_SINGLE_FLOW_INITIAL_LEASE_SECONDS = 3600
+DNS_SINGLE_FLOW_RECURRENCE_LEASE_SECONDS = 86400
+
+
+def mitigation_initial_lease_seconds(profile: dict[str, Any]) -> int:
+    """First-announcement lease (seconds). Falls back to legacy duration fields."""
+    value = int_or_none(profile.get("initial_lease_seconds"))
+    if value is None:
+        value = int_or_none(profile.get("default_duration_seconds"))
+    if value is None:
+        value = int_or_none(profile.get("duration_seconds"))
+    return max(60, int(value or DNS_SINGLE_FLOW_INITIAL_LEASE_SECONDS))
+
+
+def mitigation_recurrence_lease_seconds(profile: dict[str, Any]) -> int:
+    """Lease applied when a valid recurrence extends an active rule."""
+    value = int_or_none(profile.get("recurrence_lease_seconds"))
+    if value is None:
+        value = mitigation_initial_lease_seconds(profile)
+    return max(60, int(value))
+
+
+def mitigation_max_lifetime_seconds(profile: dict[str, Any]) -> int | None:
+    """Absolute lifetime cap; None means unlimited (no hard cap)."""
+    return int_or_none(profile.get("max_lifetime_seconds"))
+
+
+def recurrence_renewal_enabled(profile: dict[str, Any]) -> bool:
+    return sqlite_bool(profile.get("recurrence_renewal_enabled", 1))
+
+
+def is_dns_single_flow_recurrence(
+    candidate: dict[str, Any],
+    active_announcement: dict[str, Any],
+) -> bool:
+    """A candidate is a recurrence of an active DNS rule only when it targets the
+    exact same deterministic match: same destination /32, UDP, destination-port 53
+    and same DNS_SINGLE_FLOW_OUTBOUND vector/scope. Same-IP-alone never counts."""
+    def _norm(value: Any) -> str:
+        return clean_text(value).lower().strip()
+
+    vector = _norm(
+        candidate.get("attack_vector_name")
+        or candidate.get("vector")
+        or candidate.get("candidate_kind")
+    )
+    if vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR.lower():
+        return False
+    if _norm(candidate.get("mitigation_scope")) != DNS_SINGLE_FLOW_MITIGATION_SCOPE:
+        return False
+    if _norm(candidate.get("protocol")) != "udp":
+        return False
+    if _norm(candidate.get("dst_port")) != "53":
+        return False
+    candidate_dst = _norm(candidate.get("dst_ip") or candidate.get("dst_prefix") or candidate.get("dst_cidr"))
+    active_dst = _norm(
+        active_announcement.get("dst_ip")
+        or active_announcement.get("dst_prefix")
+        or active_announcement.get("target_prefix")
+    )
+    if not candidate_dst or candidate_dst != active_dst:
+        return False
+    if _norm(active_announcement.get("protocol")) != "udp":
+        return False
+    if _norm(active_announcement.get("dst_port")) != "53":
+        return False
+    return True
+
+
+def extend_active_announcement_lease(
+    conn: sqlite3.Connection,
+    announcement: dict[str, Any],
+    new_expires_at: str,
+    *,
+    old_lease_seconds: int,
+    new_lease_seconds: int,
+    reason: str = "recurrence_confirmed",
+) -> None:
+    """Extend the lease of an already-active rule instead of re-announcing it,
+    and record an AUTO_MITIGATION_EXTENDED audit event (avoids FlowSpec flap)."""
+    announcement_id = int(announcement.get("id") or 0)
+    if not announcement_id:
+        return
+    old_expires_at = clean_text(announcement.get("expires_at"))
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE bgp_announcements
+        SET expires_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (new_expires_at, now, announcement_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO bgp_announcement_events (announcement_id, event_type, message, payload_json, created_by, created_at)
+        VALUES (?, 'AUTO_MITIGATION_EXTENDED', ?, ?, 'automatic_mitigation_worker', ?)
+        """,
+        (
+            announcement_id,
+            reason,
+            json.dumps({
+                "announcement_id": announcement_id,
+                "old_expires_at": old_expires_at,
+                "new_expires_at": new_expires_at,
+                "old_lease_seconds": old_lease_seconds,
+                "new_lease_seconds": new_lease_seconds,
+                "reason": reason,
+                "recurrence_evidence": "dns_single_flow_outbound",
+                "timestamp": now,
+            }, sort_keys=True),
+            now,
+        ),
+    )
 
 
 def equivalent_mitigation_announcement(
@@ -23213,7 +23739,7 @@ def apply_behavioral_policy_decision(
 
     with sqlite_connection() as conn:
         ensure_bgp_db(conn)
-        configured_profile_id = int_or_none(os.getenv("GMJFLOW_THREAT_RESPONSE_PROFILE_ID"))
+        configured_profile_id = int_or_none(get_system_settings(conn).get("threat_response_profile_id"))
         if configured_profile_id is not None:
             profile_rows = conn.execute(
                 """
@@ -24154,6 +24680,26 @@ def deterministic_automatic_proposal_state(conn: sqlite3.Connection, candidate: 
         deterministic_reason = "validation_failed"
     elif equivalent:
         deterministic_reason = "equivalent_active_announcement"
+        if (
+            auto_allowed
+            and recurrence_renewal_enabled(profile)
+            and is_dns_single_flow_recurrence(candidate, equivalent)
+        ):
+            recurrence_lease = mitigation_recurrence_lease_seconds(profile)
+            new_expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=recurrence_lease)
+            ).isoformat().replace("+00:00", "Z")
+            extend_active_announcement_lease(
+                conn,
+                equivalent,
+                new_expires_at,
+                old_lease_seconds=int(equivalent.get("duration_seconds") or 0),
+                new_lease_seconds=recurrence_lease,
+            )
+            candidate["lease_extended"] = True
+            candidate["extended_announcement_id"] = int(equivalent.get("id") or 0)
+            candidate["new_expires_at"] = new_expires_at
+            candidate["new_lease_seconds"] = recurrence_lease
     elif not cooldown_allowed:
         deterministic_reason = "cooldown_active"
     readiness: dict[str, Any] | None = None
@@ -25229,12 +25775,13 @@ def enqueue_active_automatic_mitigations(limit: int = 500) -> int:
 
 
 def automatic_mitigation_worker_enabled() -> bool:
-    return clean_text(os.getenv("GMJFLOW_AUTO_MITIGATION_ENABLED", "false")).lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
+    from app.services.config_effective import auto_mitigation_effective
+
+    try:
+        with sqlite_connection() as conn:
+            return bool(auto_mitigation_effective(conn)["effective"])
+    except Exception:
+        return False
 
 
 def automatic_mitigation_worker_loop() -> None:
