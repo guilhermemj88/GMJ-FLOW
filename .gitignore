@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# GMJ-FLOW runtime e backups (reconciliacao)
+data/
+asn_data/
+*.bak*
+*.pre-*
+.backup-*
+.env.bak*
