@@ -470,6 +470,23 @@ def cleanup_old_rotations(directory: Path, keep_days: int, active_file: Path | N
     return deleted
 
 
+def _remove_rotation_partial_copy(path: Path) -> None:
+    """Remove SOMENTE a copia parcial da tentativa de rotacao que falhou.
+
+    Nunca remove o CSV ativo, um .gz valido ou um arquivo com processed.json
+    valido: o argumento `path` e exatamente o arquivo recem-criado por copy2
+    nesta tentativa (variavel local `rotated`), identificado de forma unica.
+    """
+    try:
+        path.unlink()
+        print(f"pmacct rotation WARN: active CSV changed during copy; partial copy removed: {path}", flush=True)
+    except FileNotFoundError:
+        # A copia parcial ja nao existe (ex.: copy2 nao chegou a cria-la).
+        pass
+    except OSError as exc:
+        print(f"pmacct rotation ERROR: failed to remove partial copy {path}: {exc}", flush=True)
+
+
 def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_days: int) -> dict[str, Any]:
     if not output_file.exists():
         raise RuntimeError("active pmacct CSV does not exist")
@@ -485,7 +502,10 @@ def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_d
     rotated = output_file.with_name(f"{output_file.stem}-{timestamp}{output_file.suffix}")
     shutil.copy2(output_file, rotated)
     if output_file.stat().st_size != source_size:
-        raise RuntimeError("pmacct rotation blocked: active CSV changed while it was copied")
+        # A copia parcial desta tentativa e invalida: remover somente ela e
+        # abortar. Nao tocar no CSV ativo, em .gz validos ou em outros arquivos.
+        _remove_rotation_partial_copy(rotated)
+        raise RuntimeError("pmacct rotation blocked: active CSV changed while it was copied; partial copy removed")
     with output_file.open("w", encoding="utf-8"):
         pass
     final_path = compress_file(rotated) if compress else rotated
