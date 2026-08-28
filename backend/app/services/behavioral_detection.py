@@ -36,6 +36,19 @@ from app.services.security_events import (
 )
 from app.services.campaign_context_evaluator import evaluate_campaign_context
 from app.services.campaign_score import calculate_campaign_risk_score
+from app.services.behavior_baseline import (
+    BOOTSTRAP,
+    DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS,
+    DEFAULT_MIN_QUARANTINE_SAMPLES,
+    DEFAULT_QUARANTINE_MINUTES,
+    DEFAULT_SAFE_QUARANTINE_Z,
+    ELIGIBLE,
+    QUARANTINED,
+    REJECTED,
+    TRUSTED,
+    safe_learning_decision,
+)
+from app.services.config_effective import behavior_safe_learning_enabled
 from app.services.threat_contracts import (
     FLOOD_ATTACK_TYPES,
     SCAN_ATTACK_TYPES,
@@ -659,6 +672,23 @@ def target_prefixes(ip_text: str) -> Iterable[str]:
             yield str(ip_network(f"{parsed}/{length}", strict=False))
     else:
         yield str(ip_network(f"{parsed}/128", strict=False))
+
+
+def _attack_signal(prefix: str, attack_networks: Sequence[Any], confirmed_networks: Sequence[Any]) -> tuple[bool, bool]:
+    """Return (strong_signal, confirmed_attack) for a baseline prefix.
+
+    Reuses only the current run's AttackVectors (already validated detector
+    output) — no new detection, no second threshold collection.
+    """
+    if not attack_networks:
+        return False, False
+    try:
+        network = ip_network(prefix, strict=False)
+    except ValueError:
+        return False, False
+    strong = any(network.overlaps(other) for other in attack_networks)
+    confirmed = any(network.overlaps(other) for other in confirmed_networks)
+    return strong, confirmed
 
 
 def normalized_intel_match(match: Mapping[str, Any]) -> dict[str, Any]:
@@ -1560,6 +1590,14 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             packets_per_second_ema REAL NOT NULL DEFAULT 0,
             bits_per_second_ema REAL NOT NULL DEFAULT 0,
             sample_count INTEGER NOT NULL DEFAULT 0,
+            baseline_state TEXT NOT NULL DEFAULT 'BOOTSTRAP',
+            bootstrap_clean_count INTEGER NOT NULL DEFAULT 0,
+            last_classification TEXT NOT NULL DEFAULT '',
+            quarantined_until TEXT NOT NULL DEFAULT '',
+            mad_pps REAL NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            quarantined_count INTEGER NOT NULL DEFAULT 0,
+            trusted_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL,
             PRIMARY KEY(prefix, protocol)
         );
@@ -1568,6 +1606,13 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             observations INTEGER NOT NULL DEFAULT 0,
             runs INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS behavior_safe_learning_counters (
+            hour TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(hour, metric)
         );
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_status_time
             ON behavioral_attack_vectors(status, last_seen DESC);
@@ -1593,6 +1638,23 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_risk_band TEXT NOT NULL DEFAULT ''")
     if "campaign_risk_components_json" not in campaign_columns:
         conn.execute("ALTER TABLE threat_campaigns ADD COLUMN campaign_risk_components_json TEXT NOT NULL DEFAULT '{}'")
+    baseline_columns = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in conn.execute("PRAGMA table_info(prefix_behavior_baselines)").fetchall()
+    }
+    baseline_additions = {
+        "baseline_state": "baseline_state TEXT NOT NULL DEFAULT 'BOOTSTRAP'",
+        "bootstrap_clean_count": "bootstrap_clean_count INTEGER NOT NULL DEFAULT 0",
+        "last_classification": "last_classification TEXT NOT NULL DEFAULT ''",
+        "quarantined_until": "quarantined_until TEXT NOT NULL DEFAULT ''",
+        "mad_pps": "mad_pps REAL NOT NULL DEFAULT 0",
+        "rejected_count": "rejected_count INTEGER NOT NULL DEFAULT 0",
+        "quarantined_count": "quarantined_count INTEGER NOT NULL DEFAULT 0",
+        "trusted_at": "trusted_at TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in baseline_additions.items():
+        if column not in baseline_columns:
+            conn.execute(f"ALTER TABLE prefix_behavior_baselines ADD COLUMN {ddl}")
     legacy_campaigns = conn.execute(
         "SELECT campaign_id, target_prefix, classification, feature_json FROM threat_campaigns WHERE campaign_key=''"
     ).fetchall()
@@ -1682,7 +1744,13 @@ class BehavioralDetectionEngine:
                 vector.features["historical_recurrence"] = safe_int(row[0])
                 vector.features["prior_mitigations"] = safe_int(row[1])
 
-    def update_prefix_baselines(self, conn: sqlite3.Connection, observations: Sequence[FlowObservation], window_seconds: int = 60) -> None:
+    def update_prefix_baselines(
+        self,
+        conn: sqlite3.Connection,
+        observations: Sequence[FlowObservation],
+        window_seconds: int = 60,
+        vectors: Sequence[AttackVector] = (),
+    ) -> None:
         groups: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
         maximum = max(1000, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_PREFIX_GROUPS", "50000")))
         latest = max((row.observed_at for row in observations), default=utc_now())
@@ -1699,32 +1767,160 @@ class BehavioralDetectionEngine:
                 groups[key][1] += row.bytes
         now = utc_now_iso()
         alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
+        safe_enabled = behavior_safe_learning_enabled(conn)
+
+        attack_networks: list[Any] = []
+        confirmed_networks: list[Any] = []
+        for vector in vectors:
+            target = vector.target_prefix or (f"{vector.target_ip}/32" if vector.target_ip else "")
+            if not target:
+                continue
+            try:
+                network = ip_network(target, strict=False)
+            except ValueError:
+                continue
+            attack_networks.append(network)
+            if vector.verdict == "CONFIRMED_ATTACK" or clean_text(vector.severity).upper() == "CRITICAL":
+                confirmed_networks.append(network)
+
+        counters: dict[str, int] = defaultdict(int)
         for (prefix, protocol), (packets, byte_count) in groups.items():
             pps = ratio(packets, max(1, window_seconds))
             bps = ratio(byte_count * 8, max(1, window_seconds))
             current = conn.execute(
-                "SELECT packets_per_second_ema, bits_per_second_ema, sample_count FROM prefix_behavior_baselines WHERE prefix=? AND protocol=?",
+                "SELECT packets_per_second_ema, bits_per_second_ema, sample_count, baseline_state, "
+                "bootstrap_clean_count, mad_pps, quarantined_until, rejected_count, quarantined_count, trusted_at "
+                "FROM prefix_behavior_baselines WHERE prefix=? AND protocol=?",
                 (prefix, protocol),
             ).fetchone()
+
+            # V1 EMA update (unchanged math).
             if current is None:
                 next_pps, next_bps, samples = pps, bps, 1
+                old_pps, old_bps, old_mad = pps, bps, 0.0
             else:
                 old_pps, old_bps, old_samples = float(current[0] or 0), float(current[1] or 0), safe_int(current[2])
+                old_mad = float(current[5] or 0)
                 bounded_pps = min(pps, old_pps * 3) if old_samples >= 5 and old_pps > 0 else pps
                 bounded_bps = min(bps, old_bps * 3) if old_samples >= 5 and old_bps > 0 else bps
                 next_pps = old_pps * (1 - alpha) + bounded_pps * alpha
                 next_bps = old_bps * (1 - alpha) + bounded_bps * alpha
                 samples = old_samples + 1
+
+            state, clean_count = self._safe_state(current, samples)
+            strong_signal, confirmed_attack = _attack_signal(prefix, attack_networks, confirmed_networks)
+            decision = safe_learning_decision(
+                baseline_state=state,
+                bootstrap_clean_count=clean_count,
+                sample_count=samples,
+                ema_pps=old_pps,
+                mad_pps=old_mad,
+                window_pps=pps,
+                confirmed_attack=confirmed_attack,
+                strong_detector_signal=strong_signal,
+                quarantined_until=clean_text(current[6]) if current is not None else "",
+                now_iso=now,
+            )
+            classification = decision["classification"]
+            final_state = decision["next_state"]
+            final_clean = decision["next_clean_count"]
+            next_quarantine = decision["next_quarantined_until"]
+            rejected_count = safe_int(current[7]) if current is not None else 0
+            quarantined_count = safe_int(current[8]) if current is not None else 0
+            trusted_at = clean_text(current[9]) if current is not None else ""
+
+            if classification == REJECTED:
+                rejected_count += 1
+            elif classification == QUARANTINED:
+                quarantined_count += 1
+            if final_state == TRUSTED and not trusted_at:
+                trusted_at = now
+
+            if classification == ELIGIBLE and decision["should_update"]:
+                next_mad = old_mad * (1 - alpha) + abs(pps - next_pps) * alpha
+            else:
+                next_mad = old_mad
+
+            update_allowed = (not safe_enabled) or decision["should_update"]
+            applied_pps = next_pps if update_allowed else old_pps
+            applied_bps = next_bps if update_allowed else old_bps
+            applied_samples = samples if update_allowed else (safe_int(current[2]) if current is not None else 0)
+
             conn.execute(
                 """
-                INSERT INTO prefix_behavior_baselines(prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO prefix_behavior_baselines(
+                    prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count,
+                    baseline_state, bootstrap_clean_count, last_classification, quarantined_until,
+                    mad_pps, rejected_count, quarantined_count, trusted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(prefix, protocol) DO UPDATE SET
                     packets_per_second_ema=excluded.packets_per_second_ema,
                     bits_per_second_ema=excluded.bits_per_second_ema,
-                    sample_count=excluded.sample_count, updated_at=excluded.updated_at
+                    sample_count=excluded.sample_count,
+                    baseline_state=excluded.baseline_state,
+                    bootstrap_clean_count=excluded.bootstrap_clean_count,
+                    last_classification=excluded.last_classification,
+                    quarantined_until=excluded.quarantined_until,
+                    mad_pps=excluded.mad_pps,
+                    rejected_count=excluded.rejected_count,
+                    quarantined_count=excluded.quarantined_count,
+                    trusted_at=excluded.trusted_at,
+                    updated_at=excluded.updated_at
                 """,
-                (prefix, protocol, next_pps, next_bps, samples, now),
+                (
+                    prefix, protocol, applied_pps, applied_bps, applied_samples,
+                    final_state, final_clean, classification, next_quarantine,
+                    next_mad, rejected_count, quarantined_count, trusted_at, now,
+                ),
+            )
+
+            if final_state == BOOTSTRAP:
+                counters["bootstrap"] += 1
+            if decision["promoted"]:
+                counters["promoted_to_trusted"] += 1
+            if classification == ELIGIBLE:
+                counters["eligible"] += 1
+            elif classification == QUARANTINED:
+                counters["quarantined"] += 1
+            elif classification == REJECTED:
+                counters["rejected"] += 1
+            if update_allowed:
+                counters["baseline_updates_allowed"] += 1
+            else:
+                counters["baseline_updates_blocked"] += 1
+
+        self._record_safe_learning_counters(conn, counters, now)
+
+    @staticmethod
+    def _safe_state(current: Any, samples: int) -> tuple[str, int]:
+        if current is None:
+            return BOOTSTRAP, 0
+        stored_state = clean_text(current[3])
+        clean_count = safe_int(current[4])
+        trusted_at = clean_text(current[9])
+        if stored_state == TRUSTED:
+            return TRUSTED, clean_count
+        # Legacy pre-safe-learning baselines (or mature-enough history): derive
+        # TRUSTED opportunistically. Fresh rows promote at ~12 clean windows
+        # (sample_count ~= 12), long before 24, so sample_count >= 24 while
+        # not-yet-trusted implies legacy maturity. No mass UPDATE on disk.
+        if samples >= DEFAULT_MIN_QUARANTINE_SAMPLES and not trusted_at:
+            return TRUSTED, 0
+        return BOOTSTRAP, clean_count
+
+    def _record_safe_learning_counters(self, conn: sqlite3.Connection, counters: Mapping[str, int], now_iso: str) -> None:
+        if not counters:
+            return
+        hour = clean_text(now_iso)[:13] + ":00:00Z"
+        for metric, value in counters.items():
+            conn.execute(
+                """
+                INSERT INTO behavior_safe_learning_counters(hour, metric, count, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(hour, metric) DO UPDATE SET
+                    count = count + excluded.count, updated_at = excluded.updated_at
+                """,
+                (hour, metric, int(value), now_iso),
             )
 
     def detect(self, raw_observations: Iterable[Mapping[str, Any]], customer_networks: Sequence[str] = ()) -> tuple[list[AttackVector], list[CampaignVector]]:
@@ -1856,7 +2052,7 @@ class BehavioralDetectionEngine:
         stats = {"vectors": 0, "campaigns": 0}
         now = utc_now_iso()
         with self.connection_factory() as conn:
-            self.update_prefix_baselines(conn, self._last_observations)
+            self.update_prefix_baselines(conn, self._last_observations, vectors=vectors)
             for campaign in campaigns:
                 existing = conn.execute(
                     "SELECT campaign_id FROM threat_campaigns WHERE campaign_key=? ORDER BY last_seen DESC LIMIT 1",

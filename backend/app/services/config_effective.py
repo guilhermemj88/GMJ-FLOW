@@ -24,6 +24,11 @@ TRUTHY = {"1", "true", "yes", "on"}
 AUTO_MITIGATION_KILL_SWITCH = "GMJFLOW_AUTO_MITIGATION_KILL_SWITCH"
 SECURITY_AI_KILL_SWITCH = "GMJFLOW_SECURITY_AI_KILL_SWITCH"
 THREAT_POLICY_AUTO_KILL_SWITCH = "GMJFLOW_THREAT_POLICY_AUTO_KILL_SWITCH"
+BEHAVIOR_SAFE_LEARNING_KILL_SWITCH = "GMJFLOW_BEHAVIOR_SAFE_LEARNING_KILL_SWITCH"
+
+# Explicit env override for Safe Learning (truthy enables; falsy disables).
+# Absent => the persistent system_settings value (default false) is used.
+BEHAVIOR_SAFE_LEARNING_ENV = "GMJFLOW_BEHAVIOR_SAFE_LEARNING"
 
 # Legacy env variables used ONLY for one-shot migration into SQLite. They are
 # not read as operational state after migration.
@@ -111,3 +116,24 @@ def threat_response_profile_id(conn: sqlite3.Connection) -> str:
 
 def security_ai_kill_switch() -> bool:
     return kill_switch_active(SECURITY_AI_KILL_SWITCH)
+
+
+def behavior_safe_learning_effective(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = system_settings_rows(conn)
+    configured = setting_bool(rows, "behavior_safe_learning_enabled")
+    # Explicit env override allows shadow -> on (or force-off) without a DB edit.
+    if env_explicitly_set(BEHAVIOR_SAFE_LEARNING_ENV):
+        configured = env_flag(BEHAVIOR_SAFE_LEARNING_ENV, "false")
+    kill_switch = kill_switch_active(BEHAVIOR_SAFE_LEARNING_KILL_SWITCH)
+    effective, reason = _effective(configured, kill_switch)
+    return {
+        "configured": configured,
+        "configured_source": "environment" if env_explicitly_set(BEHAVIOR_SAFE_LEARNING_ENV) else "database",
+        "kill_switch": kill_switch,
+        "effective": effective,
+        "reason": reason,
+    }
+
+
+def behavior_safe_learning_enabled(conn: sqlite3.Connection) -> bool:
+    return bool(behavior_safe_learning_effective(conn)["effective"])

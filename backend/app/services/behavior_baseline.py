@@ -20,7 +20,7 @@ working unchanged; they will be migrated to import from here in a later step.
 """
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import median as _statistics_median
 from typing import Any, Mapping, Sequence
 
@@ -335,3 +335,161 @@ def classify_candidate_window(
     if score_value is not None and score_value >= float(quarantine_threshold):
         return QUARANTINED
     return ELIGIBLE
+
+
+# --------------------------------------------------------------------------
+# Safe Learning / Safe Bootstrap maturity states (E2.2 wired into the
+# vector-engine baseline). The window classification still reuses
+# ELIGIBLE / QUARANTINED / REJECTED; baseline_state tracks maturity.
+# --------------------------------------------------------------------------
+
+BOOTSTRAP = "BOOTSTRAP"
+TRUSTED = "TRUSTED"
+
+# Number of consecutive clean windows required to promote BOOTSTRAP -> TRUSTED.
+DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS = 12
+
+# Robust z-score threshold above which a TRUSTED baseline quarantines a window.
+# NOTE: this is a z-score, NOT the 0-100 anomaly-score DEFAULT_QUARANTINE_THRESHOLD.
+DEFAULT_SAFE_QUARANTINE_Z = 4.0
+
+# Minimum samples before the robust-z quarantine gate becomes active.
+DEFAULT_MIN_QUARANTINE_SAMPLES = 24
+
+# How long a quarantined baseline stays frozen (per-window evaluation continues).
+DEFAULT_QUARANTINE_MINUTES = 15
+
+
+def _add_iso_minutes(iso: str, minutes: int) -> str:
+    parsed = _parse_timestamp(iso)
+    if parsed is None:
+        return ""
+    return (parsed + timedelta(minutes=max(0, int(minutes)))).isoformat().replace("+00:00", "Z")
+
+
+def safe_learning_decision(
+    *,
+    baseline_state: str = BOOTSTRAP,
+    bootstrap_clean_count: int = 0,
+    sample_count: int = 0,
+    ema_pps: float = 0.0,
+    mad_pps: float = 0.0,
+    window_pps: float = 0.0,
+    confirmed_attack: bool = False,
+    strong_detector_signal: bool = False,
+    quarantined_until: str = "",
+    now_iso: str = "",
+    bootstrap_min_clean_windows: int = DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS,
+    quarantine_z: float = DEFAULT_SAFE_QUARANTINE_Z,
+    min_quarantine_samples: int = DEFAULT_MIN_QUARANTINE_SAMPLES,
+    quarantine_minutes: int = DEFAULT_QUARANTINE_MINUTES,
+) -> dict[str, Any]:
+    """Deterministic Safe Learning decision for one baseline window.
+
+    Pure: no persistence, no lookup. Returns classification, whether the
+    baseline should update, the next maturity state/clean-count, promotion and
+    the next quarantine deadline. The caller decides whether to actually apply
+    the update (feature switch) and what to persist.
+    """
+    state = baseline_state if baseline_state in (BOOTSTRAP, TRUSTED) else BOOTSTRAP
+    frozen = bool(quarantined_until and now_iso and str(quarantined_until) > str(now_iso))
+
+    # A confirmed attack (or CRITICAL) signal always rejects the window and
+    # never feeds the baseline.
+    if confirmed_attack:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": state,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "confirmed_attack",
+            "next_quarantined_until": "",
+        }
+
+    if state == BOOTSTRAP:
+        # During bootstrap there is no trusted baseline to z-score against, so
+        # "clean" is decided by absolute detector evidence only.
+        if strong_detector_signal:
+            return {
+                "classification": REJECTED,
+                "should_update": False,
+                "next_state": BOOTSTRAP,
+                "next_clean_count": 0,
+                "promoted": False,
+                "reason": "bootstrap_strong_signal",
+                "next_quarantined_until": "",
+            }
+        clean_count = max(0, int(bootstrap_clean_count)) + 1
+        if clean_count >= max(1, int(bootstrap_min_clean_windows)):
+            return {
+                "classification": ELIGIBLE,
+                "should_update": True,
+                "next_state": TRUSTED,
+                "next_clean_count": clean_count,
+                "promoted": True,
+                "reason": "bootstrap_promoted",
+                "next_quarantined_until": "",
+            }
+        return {
+            "classification": ELIGIBLE,
+            "should_update": True,
+            "next_state": BOOTSTRAP,
+            "next_clean_count": clean_count,
+            "promoted": False,
+            "reason": "bootstrap_clean",
+            "next_quarantined_until": "",
+        }
+
+    # TRUSTED state.
+    if frozen:
+        z_score = robust_z_score(window_pps, ema_pps, mad_pps)
+        if abs(z_score) >= float(quarantine_z):
+            return {
+                "classification": QUARANTINED,
+                "should_update": False,
+                "next_state": TRUSTED,
+                "next_clean_count": 0,
+                "promoted": False,
+                "reason": "quarantine_extended",
+                "next_quarantined_until": _add_iso_minutes(now_iso, quarantine_minutes),
+            }
+        return {
+            "classification": ELIGIBLE,
+            "should_update": False,  # still frozen until the deadline expires
+            "next_state": TRUSTED,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "quarantine_frozen",
+            "next_quarantined_until": quarantined_until,
+        }
+
+    # Not frozen: quarantine only via a robust z-score against a mature baseline.
+    if (
+        int(sample_count) >= int(min_quarantine_samples)
+        and _finite_float(ema_pps) is not None
+        and _finite_float(ema_pps) > 0
+        and _finite_float(mad_pps) is not None
+        and _finite_float(mad_pps) > 0
+    ):
+        z_score = robust_z_score(window_pps, ema_pps, mad_pps)
+        if abs(z_score) >= float(quarantine_z):
+            return {
+                "classification": QUARANTINED,
+                "should_update": False,
+                "next_state": TRUSTED,
+                "next_clean_count": 0,
+                "promoted": False,
+                "reason": "robust_z",
+                "next_quarantined_until": _add_iso_minutes(now_iso, quarantine_minutes),
+            }
+
+    return {
+        "classification": ELIGIBLE,
+        "should_update": True,
+        "next_state": TRUSTED,
+        "next_clean_count": 0,
+        "promoted": False,
+        "reason": "normal",
+        "next_quarantined_until": "",
+    }
