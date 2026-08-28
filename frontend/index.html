@@ -7293,13 +7293,53 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
 
           <section class="panel p-3 mb-3">
-            <div class="flow-search-grid mb-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <div class="panel-title">Mapa de situação de segurança</div>
+                <div class="subtle">Ameaças detectadas (eventos + campanhas) agregadas por localização, ASN ou campanha. Determinístico: nenhuma chamada de IA para renderizar.</div>
+              </div>
+              <div class="threat-map-layer-toggle" role="group" aria-label="Camada do mapa">
+                <button type="button" id="threatLayerSecurity" class="btn btn-sm btn-primary" aria-pressed="true">Ameaças detectadas</button>
+                <button type="button" id="threatLayerInfra" class="btn btn-sm btn-outline-secondary" aria-pressed="false">Infraestrutura hostil</button>
+              </div>
+            </div>
+            <div class="threat-map-legend mb-3" aria-label="Legenda de severidade">
+              <span><i style="background:#ef4444"></i>Confirmado / Crítico</span>
+              <span><i style="background:#f97316"></i>Provável / Alto</span>
+              <span><i style="background:#facc15"></i>Suspeito</span>
+              <span><i style="background:#818cf8"></i>Informativo</span>
+              <span><i style="background:#64748b"></i>Resolvido / Benigno</span>
+            </div>
+
+            <div id="threatSecurityFilters" class="flow-search-grid mb-3">
+              <div class="field"><label for="secMapPeriodFilter">Período</label><select id="secMapPeriodFilter" class="form-select form-select-sm"><option value="15m">15 min</option><option value="30m">30 min</option><option value="1h">1 h</option><option value="6h">6 h</option><option value="24h" selected>24 h</option><option value="7d">7 d</option></select></div>
+              <div class="field"><label for="secMapSeverityFilter">Severidade</label><select id="secMapSeverityFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="CRITICAL">Crítica</option><option value="HIGH">Alta</option><option value="MEDIUM">Média</option><option value="LOW">Baixa</option><option value="INFO">Informativa</option></select></div>
+              <div class="field"><label for="secMapVerdictFilter">Veredito</label><select id="secMapVerdictFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="CONFIRMED_ATTACK">Confirmado</option><option value="LIKELY_ATTACK">Provável</option><option value="WARNING">Alerta</option><option value="INFO">Informativo</option></select></div>
+              <div class="field"><label for="secMapTypeFilter">Tipo</label><select id="secMapTypeFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="SYN_FLOOD">SYN flood</option><option value="UDP_FLOOD">UDP flood</option><option value="DNS_AMPLIFICATION">DNS amplification</option><option value="PORT_SCAN_VERTICAL">Port scan</option><option value="NETWORK_SWEEP">Network sweep</option><option value="LOW_SLOW_SCAN">Low &amp; slow scan</option><option value="CARPET_BOMBING">Carpet bombing</option><option value="BRUTE_FORCE">Brute force</option></select></div>
+              <div class="field"><label for="secMapStatusFilter">Status</label><select id="secMapStatusFilter" class="form-select form-select-sm"><option value="">Todos</option><option value="active">Ativo</option><option value="investigating">Investigando</option><option value="confirmed">Confirmado</option><option value="benign">Benigno</option><option value="mitigated">Mitigado</option><option value="manually_pinned">Fixado</option></select></div>
+              <div class="field"><label for="secMapCampaignFilter">Campanha</label><select id="secMapCampaignFilter" class="form-select form-select-sm"><option value="all">Todos</option><option value="with">Com campanha</option><option value="without">Sem campanha</option></select></div>
+              <div class="field"><label for="secMapAiFilter">Análise IA</label><select id="secMapAiFilter" class="form-select form-select-sm"><option value="all">Todos</option><option value="analyzed">Analisados</option><option value="not_analyzed">Não analisados</option><option value="campaign">Com campanha</option></select></div>
+              <div class="field"><label for="secMapGroupFilter">Agrupar</label><select id="secMapGroupFilter" class="form-select form-select-sm"><option value="country">País</option><option value="city">Cidade</option><option value="asn">ASN</option><option value="campaign">Campanha</option></select></div>
+              <div class="field"><label>&nbsp;</label><button id="applySecMapFiltersButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="filter"></i><span>Aplicar</span></button></div>
+            </div>
+
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+              <span class="subtle">Atalhos:</span>
+              <button type="button" class="btn btn-sm btn-outline-secondary sec-map-preset" data-preset="recent">Mais recentes</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sec-map-preset" data-preset="critical">Críticos</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sec-map-preset" data-preset="confirmed">Confirmados</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sec-map-preset" data-preset="analyzing">Em análise</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary sec-map-preset" data-preset="reset">Limpar</button>
+            </div>
+
+            <div id="threatInfraFilters" class="flow-search-grid mb-3" hidden>
               <div class="field"><label for="threatProviderFilter">Provider</label><select id="threatProviderFilter" class="form-select form-select-sm"><option value="">Todos</option></select></div>
               <div class="field"><label for="threatClassificationFilter">Classificação</label><select id="threatClassificationFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="malicious">Malicious</option><option value="suspicious">Suspicious</option><option value="c2">C2</option></select></div>
               <div class="field"><label for="threatTagFilter">Tag</label><select id="threatTagFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="botnet">Botnet</option><option value="mirai">Mirai</option><option value="telnet">Telnet</option><option value="ssh">SSH brute force</option><option value="port scan">Port scan</option><option value="iot">IoT</option></select></div>
               <div class="field"><label for="threatGroupFilter">Agrupar mapa</label><select id="threatGroupFilter" class="form-select form-select-sm"><option value="country">País</option><option value="asn">ASN</option><option value="organization">Organização</option><option value="ip">IP</option></select></div>
               <div class="field"><label>&nbsp;</label><button id="applyThreatFiltersButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="filter"></i><span>Aplicar</span></button></div>
             </div>
+
             <div id="threatMapStatus" class="subtle mb-2" role="status"></div>
             <div id="threatGlobalMap" class="threat-global-map"></div>
           </section>
@@ -8997,6 +9037,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     showControls: true,
     pointUnit: 'itens',
     rankingLimit: 10,
+    rankingMetaLabel: 'Infraestrutura hostil',
     routeLabelLimit: 12,
     fitMaxZoom: 6,
     initialCenter: [5, -35],
@@ -9594,7 +9635,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="geo-flow-map__rank-content">
               <div class="geo-flow-map__rank-route" title="${escapeHtml(node.label)}">${escapeHtml(node.label)}</div>
               <div class="geo-flow-map__rank-meta">
-                <span><i style="--geo-color:${escapeHtml(node.color)}"></i>Infraestrutura hostil</span>
+                <span><i style="--geo-color:${escapeHtml(node.color)}"></i>${escapeHtml(this.options.rankingMetaLabel)}</span>
                 <strong>${escapeHtml(compactNumber(node.value, 0))} ${escapeHtml(this.options.pointUnit)}</strong>
               </div>
               <div class="geo-flow-map__rank-bar"><i style="width:${width}%;--geo-color:${escapeHtml(node.color)}"></i></div>

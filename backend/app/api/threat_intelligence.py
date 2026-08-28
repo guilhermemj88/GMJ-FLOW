@@ -144,6 +144,35 @@ def threat_intel_map(
     return {"group_by": group_by, "items": items}
 
 
+@router.get("/security-map")
+def security_situation_map(
+    period: str = Query("24h", pattern="^(15m|30m|1h|6h|24h|7d)$"),
+    severity: str = "",
+    verdict: str = "",
+    attack_type: str = "",
+    status: str = "",
+    campaign: str = Query("all", pattern="^(with|without|all)$"),
+    ai_status: str = Query("all", pattern="^(analyzed|not_analyzed|campaign|all)$"),
+    group_by: str = Query("country", pattern="^(country|city|asn|campaign)$"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    from app.services.security_situation_map import build_security_map
+
+    with THREAT_INTEL_MANAGER.connection_factory() as conn:
+        return build_security_map(
+            conn,
+            period=period,
+            severity=severity,
+            verdict=verdict,
+            attack_type=attack_type,
+            status=status,
+            campaign=campaign,
+            ai_status=ai_status,
+            group_by=group_by,
+            limit=limit,
+        )
+
+
 @router.get("/audit")
 def sync_audit(provider: str = "", limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
     return {"items": THREAT_INTEL_MANAGER.audit(provider, limit)}

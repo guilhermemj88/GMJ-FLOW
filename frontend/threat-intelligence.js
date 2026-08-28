@@ -190,14 +190,81 @@
     if (!element || !root.GeoFlowMap) return null;
     if (!threatMap) {
       threatMap = new root.GeoFlowMap(element, {
-        title: 'Infraestrutura hostil observada',
-        subtitle: 'Pontos agregados dos provedores externos; detalhes analíticos permanecem nas tabelas',
+        title: 'Mapa de situação de segurança',
+        subtitle: '',
         mode: 'flows', metric: 'flows', groupBy: 'country', interactive: false,
-        visualization: 'points', showControls: false, pointUnit: 'IPs',
-        rankingLimit: 12, fitMaxZoom: 4
+        visualization: 'points', showControls: false, pointUnit: 'eventos',
+        rankingLimit: 12, fitMaxZoom: 4, rankingMetaLabel: 'Ameaça detectada'
       });
     }
     return threatMap;
+  }
+
+  function setMapMeta(title, subtitle, metaLabel, pointUnit) {
+    const map = ensureMap();
+    if (!map) return;
+    if (metaLabel) map.options.rankingMetaLabel = metaLabel;
+    if (pointUnit) map.options.pointUnit = pointUnit;
+    const titleElement = map.element?.querySelector('.geo-flow-map__title');
+    const subtitleElement = map.element?.querySelector('.geo-flow-map__subtitle');
+    if (titleElement) titleElement.textContent = title;
+    if (subtitleElement) subtitleElement.textContent = subtitle;
+  }
+
+  const SECURITY_TIER_STYLE = {
+    critical: '#ef4444',
+    elevated: '#f97316',
+    suspicious: '#facc15',
+    info: '#818cf8',
+    benign: '#64748b'
+  };
+
+  const SECURITY_TIER_LABEL = {
+    critical: 'Confirmado / Crítico',
+    elevated: 'Provável / Alto',
+    suspicious: 'Suspeito',
+    info: 'Informativo',
+    benign: 'Resolvido / Benigno'
+  };
+
+  function securityMapSeverityStyle(tier) {
+    return SECURITY_TIER_STYLE[String(tier || 'info').toLowerCase()] || SECURITY_TIER_STYLE.info;
+  }
+
+  function securityTierLabel(tier) {
+    return SECURITY_TIER_LABEL[String(tier || 'info').toLowerCase()] || SECURITY_TIER_LABEL.info;
+  }
+
+  function securityMapPopup(point) {
+    const location = [point.city, point.country || point.country_code].filter(Boolean).join(', ') || point.country_code || 'Localização desconhecida';
+    const attackTypes = (Array.isArray(point.top_attack_types) ? point.top_attack_types : []).map(type =>
+      `<span class="threat-map-popup__chip">${esc(type)}</span>`).join('') || '<span class="subtle">Sem informação</span>';
+    return `<div class="threat-map-popup">
+      <div class="threat-map-popup__title">${esc(point.label || point.key || location)}</div>
+      <div class="threat-map-popup__badge"><span class="threat-map-tier" style="--tier-color:${esc(point.color || securityMapSeverityStyle(point.tier))}">${esc(securityTierLabel(point.tier))}</span></div>
+      <dl>
+        <dt>Localização</dt><dd>${esc(location)}</dd>
+        <dt>Eventos detectados</dt><dd><strong>${number(point.event_count)}</strong></dd>
+        <dt>Confirmados / Prováveis</dt><dd>${number(point.confirmed_count)} / ${number(point.likely_count)}</dd>
+        <dt>Severidade máxima</dt><dd>${esc(point.max_severity || '-')}</dd>
+        <dt>Threat Score máx.</dt><dd>${number(point.max_threat_score)}</dd>
+        <dt>Campanhas</dt><dd>${number(point.campaign_count)}</dd>
+        <dt>Última ocorrência</dt><dd>${dateTime(point.latest_seen)}</dd>
+      </dl>
+      <div class="threat-map-popup__section"><strong>Tipos de ataque</strong><div>${attackTypes}</div></div>
+    </div>`;
+  }
+
+  function securityMapNodes(points) {
+    return (points || []).map((point, index) => ({
+      id: `sec-${index}-${point.key || point.label}`,
+      label: point.label || point.key,
+      lat: point.lat,
+      lon: point.lon,
+      value: Number(point.event_count || 0),
+      color: point.color || securityMapSeverityStyle(point.tier),
+      popup_html: securityMapPopup(point)
+    })).filter(node => node.lat !== null && node.lon !== null && node.lat !== undefined && node.lon !== undefined);
   }
 
   function classificationColor(value) {
@@ -1111,6 +1178,7 @@
     if (classification) query.set('classification', classification);
     if (tag) query.set('tag', tag);
     const map = ensureMap();
+    setMapMeta('Infraestrutura hostil observada', 'Pontos agregados dos provedores externos; detalhes analíticos permanecem nas tabelas', 'Infraestrutura hostil', 'IPs');
     map?.setLoading('Carregando indicadores geográficos...');
     const payload = await apiRequest(`/api/threat-intelligence/map?${query}`);
     map?.setData(
@@ -1118,6 +1186,73 @@
       { metric: 'flows', mode: 'flows', visualization: 'points', groupBy: payload.group_by || groupBy, fit: true }
     );
     setPanelStatus('threatMapStatus', `Mapa atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
+  }
+
+  async function loadSecurityMap() {
+    const groupBy = document.getElementById('secMapGroupFilter').value || 'country';
+    const query = new URLSearchParams({
+      group_by: groupBy,
+      period: document.getElementById('secMapPeriodFilter').value || '24h',
+      campaign: document.getElementById('secMapCampaignFilter').value || 'all',
+      ai_status: document.getElementById('secMapAiFilter').value || 'all'
+    });
+    const severity = document.getElementById('secMapSeverityFilter').value;
+    const verdict = document.getElementById('secMapVerdictFilter').value;
+    const attackType = document.getElementById('secMapTypeFilter').value;
+    const status = document.getElementById('secMapStatusFilter').value;
+    if (severity) query.set('severity', severity);
+    if (verdict) query.set('verdict', verdict);
+    if (attackType) query.set('attack_type', attackType);
+    if (status) query.set('status', status);
+    const map = ensureMap();
+    setMapMeta('Ameaças detectadas', 'Eventos e campanhas agregados por localização, ASN ou campanha · determinístico', 'Situação de segurança', 'eventos');
+    map?.setLoading('Carregando situação de segurança...');
+    const payload = await apiRequest(`/api/threat-intelligence/security-map?${query}`);
+    map?.setData(
+      { nodes: securityMapNodes(payload.points), metric: 'flows', group_by: groupBy },
+      { metric: 'flows', mode: 'flows', visualization: 'points', groupBy, fit: true }
+    );
+    const summary = payload.summary || {};
+    setPanelStatus('threatMapStatus', `${number(summary.total_events)} evento(s) · ${number(summary.points)} ponto(s) · ${number(summary.unlocated || 0)} sem geolocalização · atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
+  }
+
+  function setMapLayer(layer) {
+    const security = layer === 'security';
+    const securityButton = document.getElementById('threatLayerSecurity');
+    const infraButton = document.getElementById('threatLayerInfra');
+    document.getElementById('threatSecurityFilters').hidden = !security;
+    document.getElementById('threatInfraFilters').hidden = security;
+    securityButton?.classList.toggle('btn-primary', security);
+    securityButton?.classList.toggle('btn-outline-secondary', !security);
+    securityButton?.setAttribute('aria-pressed', String(security));
+    infraButton?.classList.toggle('btn-primary', !security);
+    infraButton?.classList.toggle('btn-outline-secondary', security);
+    infraButton?.setAttribute('aria-pressed', String(!security));
+    const task = security ? loadSecurityMap() : loadMap();
+    return task.catch(error => {
+      setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
+      ensureMap()?.setError('Não foi possível carregar o mapa.');
+    });
+  }
+
+  function applySecurityPreset(preset) {
+    const period = document.getElementById('secMapPeriodFilter');
+    const severity = document.getElementById('secMapSeverityFilter');
+    const verdict = document.getElementById('secMapVerdictFilter');
+    const status = document.getElementById('secMapStatusFilter');
+    const ai = document.getElementById('secMapAiFilter');
+    if (preset === 'recent') {
+      period.value = '1h'; severity.value = ''; verdict.value = ''; status.value = ''; ai.value = 'all';
+    } else if (preset === 'critical') {
+      period.value = '24h'; severity.value = 'CRITICAL'; verdict.value = ''; status.value = ''; ai.value = 'all';
+    } else if (preset === 'confirmed') {
+      period.value = '24h'; severity.value = ''; verdict.value = 'CONFIRMED_ATTACK'; status.value = ''; ai.value = 'all';
+    } else if (preset === 'analyzing') {
+      period.value = '24h'; severity.value = ''; verdict.value = ''; status.value = 'active'; ai.value = 'not_analyzed';
+    } else {
+      period.value = '24h'; severity.value = ''; verdict.value = ''; status.value = ''; ai.value = 'all';
+    }
+    return loadSecurityMap();
   }
 
   function renderSecuritySummary(payload) {
@@ -1256,7 +1391,7 @@
         }
       });
       try {
-        await loadMap();
+        await loadSecurityMap();
       } catch (error) {
         failures.push('Mapa de Threat Intelligence');
         setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
@@ -1353,6 +1488,17 @@
       setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
       ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
     }));
+    document.getElementById('applySecMapFiltersButton')?.addEventListener('click', () => loadSecurityMap().catch(error => {
+      setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
+      ensureMap()?.setError('Não foi possível carregar o mapa de situação de segurança.');
+    }));
+    document.getElementById('threatLayerSecurity')?.addEventListener('click', () => setMapLayer('security'));
+    document.getElementById('threatLayerInfra')?.addEventListener('click', () => setMapLayer('infra'));
+    document.querySelectorAll('.sec-map-preset').forEach(button => {
+      button.addEventListener('click', () => applySecurityPreset(button.dataset.preset).catch(error => {
+        setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
+      }));
+    });
     document.getElementById('runThreatEngineButton')?.addEventListener('click', async () => {
       const button = document.getElementById('runThreatEngineButton');
       button.disabled = true;

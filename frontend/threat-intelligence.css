@@ -175,6 +175,48 @@
   border-color: #fde68a;
 }
 
+.threat-map-layer-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.threat-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: .72rem;
+  color: #64748b;
+}
+
+.threat-map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.threat-map-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.threat-map-popup__badge {
+  margin-bottom: 8px;
+}
+
+.threat-map-tier {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: .66rem;
+  font-weight: 750;
+  color: #0f172a;
+  background: color-mix(in srgb, var(--tier-color, #818cf8) 22%, white);
+  border: 1px solid var(--tier-color, #818cf8);
+}
+
 .threat-score {
   font-variant-numeric: tabular-nums;
   font-weight: 750;
