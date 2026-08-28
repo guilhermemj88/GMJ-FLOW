@@ -8971,6 +8971,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     OTHER: '#94a3b8'
   });
 
+  // Single owner for all GeoFlowMap basemaps (Global Map, Dashboard, Threat
+  // Intelligence). Dark = Esri World Dark Gray Canvas, Light = Esri World
+  // Street Map. Both are HTTPS, keyless and Leaflet-compatible.
+  const MAP_BASE_LAYERS = Object.freeze({
+    dark: {
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+      attribution: '&copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
+    },
+    light: {
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+      attribution: '&copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
+    }
+  });
+
   const DEFAULT_OPTIONS = Object.freeze({
     title: 'Tráfego geográfico',
     subtitle: 'Rotas e throughput em tempo real',
@@ -8987,9 +9001,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     fitMaxZoom: 6,
     initialCenter: [5, -35],
     initialZoom: 2,
-    tileUrl: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    lightTileUrl: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    tileAttribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+    tileUrl: MAP_BASE_LAYERS.dark.url,
+    lightTileUrl: MAP_BASE_LAYERS.light.url,
+    tileAttribution: MAP_BASE_LAYERS.dark.attribution
   });
 
   function finiteNumber(value) {
