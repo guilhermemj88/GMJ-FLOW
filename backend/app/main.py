@@ -9176,6 +9176,7 @@ def maxmind_geo_lookup(ip: str) -> dict[str, Any] | None:
         "city": clean_text(getattr(response.city, "name", "")),
         "latitude": getattr(response.location, "latitude", None),
         "longitude": getattr(response.location, "longitude", None),
+        "accuracy_radius": getattr(response.location, "accuracy_radius", None),
         "source": "maxmind",
     }
 

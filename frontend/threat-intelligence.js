@@ -241,6 +241,7 @@
       `<span class="threat-map-popup__chip">${esc(type)}</span>`).join('') || '<span class="subtle">Sem informação</span>';
     const subject = point.predominant_geo_subject === 'destination' ? 'Destino externo observado' : point.predominant_geo_subject === 'source' ? 'Origem observada' : '-';
     const directionLabel = ({ INBOUND: 'Inbound', OUTBOUND: 'Outbound', INTERNAL: 'Internal' })[point.predominant_direction] || point.predominant_direction || '-';
+    const geoSourceLabel = ({ MAXMIND_CITY: 'GeoIP: cidade/país', COUNTRY_CENTROID: 'País aproximado (centroid)', ASN_COUNTRY: 'País via ASN' })[point.geo_source] || '-';
     const analysis = [
       point.analyzed_count ? `${number(point.analyzed_count)} analisado(s)` : '',
       point.not_analyzed_count ? `${number(point.not_analyzed_count)} não analisado(s)` : ''
@@ -252,6 +253,7 @@
       <dl>
         <dt>Geografia</dt><dd>${esc(subject)}</dd>
         <dt>Direção</dt><dd>${esc(directionLabel)}</dd>
+        <dt>Precisão</dt><dd>${esc(geoSourceLabel)}</dd>
         <dt>Eventos</dt><dd><strong>${number(point.event_count)}</strong> (${number(point.critical_count)} crítico${point.critical_count === 1 ? '' : 's'} · ${number(point.high_count)} alto · ${number(point.warning_count)} alerta)</dd>
         <dt>Confirmados / Prováveis</dt><dd>${number(point.confirmed_count)} / ${number(point.likely_count)}</dd>
         <dt>Threat Score máx.</dt><dd>${number(point.max_threat_score)}</dd>

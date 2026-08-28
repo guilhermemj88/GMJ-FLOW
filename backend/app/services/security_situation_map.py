@@ -57,24 +57,6 @@ _BENIGN_STATUSES = {"benign", "resolved", "expired", "false_positive", "not_mali
 
 SEVERITY_PRIORITY = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "": 0}
 
-# Country centroids used as a fallback when the ASN/GeoIP lookup resolves a
-# country but returns no precise latitude/longitude. Kept in sync with the
-# COUNTRY_CENTERS map used by the frontend provider layer.
-COUNTRY_CENTERS = {
-    "AR": (-38.4, -63.6), "AU": (-25.3, 133.8), "AT": (47.5, 14.6), "BD": (23.7, 90.4), "BE": (50.5, 4.5),
-    "BG": (42.7, 25.5), "BR": (-14.2, -51.9), "CA": (56.1, -106.3), "CH": (46.8, 8.2), "CL": (-35.7, -71.5),
-    "CN": (35.9, 104.2), "CO": (4.6, -74.3), "CZ": (49.8, 15.5), "DE": (51.2, 10.5), "DK": (56.3, 9.5),
-    "EG": (26.8, 30.8), "ES": (40.5, -3.7), "FI": (61.9, 25.7), "FR": (46.2, 2.2), "GB": (55.4, -3.4),
-    "GR": (39.1, 21.8), "HK": (22.3, 114.2), "HU": (47.2, 19.5), "ID": (-0.8, 113.9), "IE": (53.1, -8.2),
-    "IL": (31.0, 34.9), "IN": (20.6, 79.0), "IR": (32.4, 53.7), "IT": (41.9, 12.6), "JP": (36.2, 138.3),
-    "KR": (35.9, 127.8), "MX": (23.6, -102.6), "MY": (4.2, 101.9), "NG": (9.1, 8.7), "NL": (52.1, 5.3),
-    "NO": (60.5, 8.5), "NZ": (-40.9, 174.9), "PE": (-9.2, -75.0), "PH": (12.9, 121.8), "PK": (30.4, 69.3),
-    "PL": (51.9, 19.1), "PT": (39.4, -8.2), "RO": (45.9, 24.9), "RS": (44.0, 21.0), "RU": (61.5, 105.3),
-    "SA": (23.9, 45.1), "SE": (60.1, 18.6), "SG": (1.35, 103.8), "TH": (15.9, 100.9), "TR": (39.0, 35.2),
-    "TW": (23.7, 121.0), "UA": (48.4, 31.2), "US": (37.1, -95.7), "AE": (23.4, 53.8), "VN": (14.1, 108.3),
-    "ZA": (-30.6, 22.9),
-}
-
 _PRIVATE_V4 = [ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 _LOOPBACK = ip_network("127.0.0.0/8")
 _LINKLOCAL = ip_network("169.254.0.0/16")
@@ -157,9 +139,9 @@ def tier_color(tier: str) -> str:
 
 def _geo_lookup() -> Any:
     try:
-        from app.main import geo_lookup_ip
+        from app.services.geoip_service import geoip_service
 
-        return geo_lookup_ip
+        return geoip_service.lookup_ip
     except Exception:
         def _fallback(ip: str, *_a: Any, **_k: Any) -> dict[str, Any]:
             return {
@@ -170,9 +152,10 @@ def _geo_lookup() -> Any:
                 "region": "",
                 "latitude": None,
                 "longitude": None,
+                "accuracy_radius": None,
                 "asn": 0,
                 "as_name": "",
-                "source": "unavailable",
+                "source": "NONE",
             }
 
         return _fallback
@@ -394,6 +377,8 @@ def build_security_map(
         city = ""
         asn = 0
         as_name = ""
+        geo_source = ""
+        accuracy_radius = None
 
         if geo_subject in ("source", "destination") and geo_ip:
             geo_item = resolve(geo_ip)
@@ -404,26 +389,24 @@ def build_security_map(
             city = clean_text(geo_item.get("city"))
             asn = safe_int(geo_item.get("asn"))
             as_name = clean_text(geo_item.get("as_name"))
+            geo_source = clean_text(geo_item.get("source")).upper()
+            accuracy_radius = geo_item.get("accuracy_radius")
             if not country_code and not (lat is not None and lon is not None):
                 # Public IP present but unresolved by ASN/GeoIP.
                 reason_counter["UNLOCATED_PUBLIC"] += 1
-            else:
-                # Resolved at least to a country; apply centroid for country/city grouping.
-                if (lat is None or lon is None) and country_code in COUNTRY_CENTERS:
-                    lat, lon = COUNTRY_CENTERS[country_code]
-                if lat is not None and lon is not None:
-                    located_events += 1
-                    reason_counter[geo_reason] += 1
-                    if geo_subject == "source":
-                        inbound_source_located += 1
-                    else:
-                        outbound_destination_located += 1
-                    if is_critical:
-                        critical_after += 1
-                    if is_confirmed:
-                        confirmed_after += 1
+            elif lat is not None and lon is not None:
+                located_events += 1
+                reason_counter[geo_reason] += 1
+                if geo_subject == "source":
+                    inbound_source_located += 1
                 else:
-                    reason_counter["UNLOCATED_PUBLIC"] += 1
+                    outbound_destination_located += 1
+                if is_critical:
+                    critical_after += 1
+                if is_confirmed:
+                    confirmed_after += 1
+            else:
+                reason_counter["UNLOCATED_PUBLIC"] += 1
         else:
             reason_counter[geo_reason] += 1
 
@@ -478,6 +461,7 @@ def build_security_map(
             "attack_types": Counter(),
             "directions": Counter(),
             "geo_subjects": Counter(),
+            "geo_sources": Counter(),
             "campaign_events": Counter(),
             "tiers": [],
             "ambiguous_geo": False,
@@ -521,6 +505,8 @@ def build_security_map(
         direction_value = clean_text(event.get("direction")).upper() or "UNKNOWN"
         bucket["directions"][direction_value] += 1
         bucket["geo_subjects"][geo_subject] += 1
+        if geo_source:
+            bucket["geo_sources"][geo_source] += 1
         bucket["tiers"].append(security_severity_tier(verdict_value, severity_value, event.get("status")))
 
     points = []
@@ -565,6 +551,7 @@ def build_security_map(
             "top_attack_types": top_attack_types,
             "predominant_direction": bucket["directions"].most_common(1)[0][0] if bucket["directions"] else "",
             "predominant_geo_subject": bucket["geo_subjects"].most_common(1)[0][0] if bucket["geo_subjects"] else "",
+            "geo_source": bucket["geo_sources"].most_common(1)[0][0] if bucket["geo_sources"] else "",
         })
 
     points.sort(key=lambda p: (tier_priority(p["tier"]), p["event_count"]), reverse=True)

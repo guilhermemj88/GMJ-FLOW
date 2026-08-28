@@ -29,19 +29,20 @@ def now_iso(**delta_kwargs) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-# geo_lookup stub: US (real lat/lon), BG (ASN country, no lat/lon), BR internal
-# (customer), NL (external destination), 186.232.x.x (customer CGNAT, BR).
+# geo_lookup stub simulating the offline GeoIP owner (V2.2): US via MaxMind City,
+# BG via ASN+centroid, BR internal (customer), NL external destination,
+# 186.232.x.x (customer CGNAT, BR).
 GEO = {
-    "8.8.8.8": {"country_code": "US", "country_name": "United States", "city": "", "latitude": 37.09, "longitude": -95.71, "asn": 15169, "as_name": "GOOGLE"},
-    "79.124.62.126": {"country_code": "BG", "country_name": "Bulgaria", "city": "", "latitude": None, "longitude": None, "asn": 207812, "as_name": "DM AUTO"},
-    "186.232.160.10": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": None, "longitude": None, "asn": 53194, "as_name": "VIP"},
-    "186.232.168.250": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": None, "longitude": None, "asn": 53194, "as_name": "VIP"},
-    "45.133.39.1": {"country_code": "NL", "country_name": "Netherlands", "city": "", "latitude": 52.1, "longitude": 5.3, "asn": 9009, "as_name": "M247"},
+    "8.8.8.8": {"country_code": "US", "country_name": "United States", "city": "Mountain View", "latitude": 37.42, "longitude": -122.08, "asn": 15169, "as_name": "GOOGLE", "source": "MAXMIND_CITY", "accuracy_radius": 50},
+    "79.124.62.126": {"country_code": "BG", "country_name": "Bulgaria", "city": "", "latitude": 42.7, "longitude": 25.5, "asn": 207812, "as_name": "DM AUTO", "source": "COUNTRY_CENTROID"},
+    "186.232.160.10": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": -14.2, "longitude": -51.9, "asn": 53194, "as_name": "VIP", "source": "COUNTRY_CENTROID"},
+    "186.232.168.250": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": -14.2, "longitude": -51.9, "asn": 53194, "as_name": "VIP", "source": "COUNTRY_CENTROID"},
+    "45.133.39.1": {"country_code": "NL", "country_name": "Netherlands", "city": "Amsterdam", "latitude": 52.37, "longitude": 4.89, "asn": 9009, "as_name": "M247", "source": "MAXMIND_CITY", "accuracy_radius": 100},
 }
 
 
 def geo_stub(ip: str) -> dict:
-    return GEO.get(ip, {"country_code": "", "country_name": "N/D", "city": "", "latitude": None, "longitude": None, "asn": 0, "as_name": ""})
+    return GEO.get(ip, {"country_code": "", "country_name": "N/D", "city": "", "latitude": None, "longitude": None, "asn": 0, "as_name": "", "source": "NONE"})
 
 
 def make_db() -> sqlite3.Connection:
@@ -227,7 +228,7 @@ class SecuritySituationMapTest(unittest.TestCase):
 
     def test_country_centroid_fallback(self):
         conn = make_db()
-        # BG tem country via ASN mas sem lat/lon -> centroid.
+        # O owner (stub) já entrega BG com centroid aplicado.
         insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER",
                      src_ip="79.124.62.126", severity="HIGH", verdict="LIKELY_ATTACK")
         result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
@@ -236,6 +237,7 @@ class SecuritySituationMapTest(unittest.TestCase):
         self.assertEqual(point["lat"], 42.7)
         self.assertEqual(point["lon"], 25.5)
         self.assertEqual(point["tier"], "elevated")
+        self.assertEqual(point["geo_source"], "COUNTRY_CENTROID")
 
     def test_public_without_geo_is_unlocated_public(self):
         conn = make_db()
