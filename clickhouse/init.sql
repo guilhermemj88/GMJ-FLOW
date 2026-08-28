@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS flow_1m
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
 ORDER BY (sensor, minute, exporter_ip, input_if, output_if, proto)
-TTL toDateTime(minute) + INTERVAL 720 HOUR DELETE;
+TTL toDateTime(minute) + INTERVAL 168 HOUR DELETE;
 
 CREATE TABLE IF NOT EXISTS flow_tops_1m
 (
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS flow_tops_1m
 ENGINE = SummingMergeTree((bytes, packets, flows))
 PARTITION BY toYYYYMM(minute)
 ORDER BY (dimension, sensor, minute, key)
-TTL toDateTime(minute) + INTERVAL 360 HOUR DELETE;
+TTL toDateTime(minute) + INTERVAL 168 HOUR DELETE;
 
 CREATE TABLE IF NOT EXISTS prefix_traffic_1m
 (

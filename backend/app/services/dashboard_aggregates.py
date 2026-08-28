@@ -56,7 +56,7 @@ def _summable_table(name: str, dimensions: list[tuple[str, str]]) -> str:
     ENGINE = SummingMergeTree((bytes, packets, flows))
     PARTITION BY toYYYYMM(minute)
     ORDER BY ({", ".join(order)})
-    TTL toDateTime(minute) + INTERVAL 30 DAY DELETE
+    TTL toDateTime(minute) + INTERVAL 7 DAY DELETE
     """
 
 
@@ -246,7 +246,7 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
                 src_ip, dst_ip, src_port, dst_port, proto,
                 src_asn, dst_asn, src_as_name, dst_as_name
             )
-            TTL toDateTime(minute) + INTERVAL 30 DAY DELETE
+            TTL toDateTime(minute) + INTERVAL 7 DAY DELETE
             """,
             f"""
             CREATE MATERIALIZED VIEW IF NOT EXISTS mv_{conversation_table}
