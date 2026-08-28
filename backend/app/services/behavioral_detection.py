@@ -373,6 +373,7 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
     }
     source_asns = sorted({row.src_asn for row in rows if row.src_asn})
     source_details: dict[str, dict[str, Any]] = {}
+    destination_details: dict[str, dict[str, Any]] = {}
     source_port_details: dict[int, dict[str, Any]] = {}
     destination_port_details: dict[int, dict[str, Any]] = {}
     protocol_details: dict[int, dict[str, Any]] = {}
@@ -387,6 +388,15 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         source["flows"] += row.flow_count
         if not source["source_asn"] and row.src_asn:
             source["source_asn"] = row.src_asn
+        destination = destination_details.setdefault(
+            row.dst_ip,
+            {"destination_ip": row.dst_ip, "dst_asn": row.dst_asn, "packets": 0, "bytes": 0, "flows": 0},
+        )
+        destination["packets"] += row.packets
+        destination["bytes"] += row.bytes
+        destination["flows"] += row.flow_count
+        if not destination["dst_asn"] and row.dst_asn:
+            destination["dst_asn"] = row.dst_asn
         for container, port in ((source_port_details, row.src_port), (destination_port_details, row.dst_port)):
             detail = container.setdefault(port, {"port": port, "packets": 0, "bytes": 0, "flows": 0})
             detail["packets"] += row.packets
@@ -449,6 +459,7 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
         # Investigation snapshots are bounded before they are persisted with the
         # event. They make the drawer useful without querying flow_raw.
         "top_source_details": ranked_details(source_details, 50),
+        "top_destination_details": ranked_details(destination_details, 50),
         "top_source_port_details": ranked_details(source_port_details, 20),
         "top_destination_port_details": ranked_details(destination_port_details, 20),
         "protocol_distribution": ranked_details(protocol_details, 20),

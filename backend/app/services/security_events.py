@@ -272,6 +272,35 @@ def _configured_detection_thresholds(attack_type: str, features: Mapping[str, An
     return {}
 
 
+def resolve_event_target(
+    target_ip: Any,
+    target_prefix: Any,
+    direction: Any,
+    features: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deterministic owner for the semantic target of a security event.
+
+    - INBOUND:  target is the customer/destination scope (our side).
+    - OUTBOUND: target is the observed external destination.
+
+    Never fabricates a single IP for a multi-target scan: when there is no
+    exact target and the event spans several destinations, it reports
+    `target_scope="multi"` and keeps `target_ip`/`target_prefix` empty. The
+    per-destination evidence remains available in `top_destination_details`.
+    """
+    ip = clean_text(target_ip)
+    prefix = clean_text(target_prefix)
+    features = dict(features or {})
+    if ip:
+        return {"target_ip": ip, "target_prefix": prefix or (f"{ip}/32" if ":" not in ip else f"{ip}/128"), "target_scope": "single"}
+    if prefix:
+        return {"target_ip": ip, "target_prefix": prefix, "target_scope": "prefix"}
+    unique_destinations = int(_feature(features, "unique_destinations", "unique_dst_ips", "target_hosts", default=0) or 0)
+    if unique_destinations > 1:
+        return {"target_ip": "", "target_prefix": "", "target_scope": "multi"}
+    return {"target_ip": "", "target_prefix": "", "target_scope": "none"}
+
+
 def vector_security_payload(vector: Any) -> dict[str, Any]:
     features = dict(getattr(vector, "features", {}) or {})
     network = dict(getattr(vector, "network_context", {}) or features.get("network_context") or {})
@@ -284,6 +313,7 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
     target_ip = clean_text(getattr(vector, "target_ip", ""))
     target_prefix = clean_text(getattr(vector, "target_prefix", ""))
     direction = clean_text(getattr(vector, "direction", "UNKNOWN")) or "UNKNOWN"
+    target_scope = resolve_event_target(target_ip, target_prefix, direction, features)["target_scope"]
     evidence = getattr(vector, "evidence", None) or features.get("evidence") or []
     if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes, dict)):
         evidence = {"facts": list(evidence)[-50:]}
@@ -301,8 +331,11 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
     event_key = canonical_event_key(getattr(vector, "detector", ""), attack_type, src_ip, target_ip, target_prefix, direction, protocol)
     first_seen = clean_text(getattr(vector, "first_seen", "")) or utc_now_iso()
     top_sources = list(features.get("top_source_details") or [])[:50]
+    top_destinations = list(features.get("top_destination_details") or [])[:50]
     investigation = {
         "top_sources": top_sources,
+        "top_destinations": top_destinations,
+        "target_scope": target_scope,
         "top_source_ports": list(features.get("top_source_port_details") or [])[:20],
         "top_destination_ports": list(features.get("top_destination_port_details") or [])[:20],
         "protocols": list(features.get("protocol_distribution") or [])[:20],
@@ -444,6 +477,8 @@ def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
             unique_dst_ports=MAX(security_events.unique_dst_ports, excluded.unique_dst_ports),
             unique_source_asns=MAX(security_events.unique_source_asns, excluded.unique_source_asns),
             baseline_deviation=MAX(security_events.baseline_deviation, excluded.baseline_deviation),
+            target_ip=CASE WHEN excluded.target_ip != '' THEN excluded.target_ip ELSE security_events.target_ip END,
+            target_prefix=CASE WHEN excluded.target_prefix != '' THEN excluded.target_prefix ELSE security_events.target_prefix END,
             src_role=excluded.src_role, dst_role=excluded.dst_role, direction=excluded.direction,
             src_prefix=excluded.src_prefix, protocol=excluded.protocol,
             input_if=excluded.input_if, output_if=excluded.output_if,
