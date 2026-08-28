@@ -137,6 +137,31 @@ def behavioral_clickhouse_schema_statements() -> tuple[str, ...]:
         GROUP BY bucket, sensor, exporter_ip, src_ip, dst_ip, src_port, dst_port,
                  proto, tcp_flags, input_if, output_if, src_asn, dst_asn
         """,
+        """
+        CREATE TABLE IF NOT EXISTS behavior_flow_10s_v2 (
+            bucket DateTime('UTC'), sensor LowCardinality(String), exporter_ip IPv6,
+            src_ip IPv6, dst_ip IPv6, src_port UInt16, dst_port UInt16,
+            proto UInt8, tcp_flags UInt16, input_if UInt32, output_if UInt32,
+            src_asn UInt32, dst_asn UInt32, bytes UInt64, packets UInt64, flows UInt64
+        ) ENGINE = SummingMergeTree((bytes, packets, flows))
+        PARTITION BY toYYYYMMDD(bucket)
+        ORDER BY (bucket, sensor, exporter_ip, src_ip, dst_ip, proto, dst_port,
+                  src_port, tcp_flags, input_if, output_if, src_asn, dst_asn)
+        TTL bucket + INTERVAL 24 HOUR DELETE
+        """,
+        """
+        CREATE MATERIALIZED VIEW IF NOT EXISTS mv_flow_raw_to_behavior_10s_v2 TO behavior_flow_10s_v2 AS
+        SELECT toStartOfInterval(flow_time, INTERVAL 10 SECOND) AS bucket,
+               sensor, exporter_ip, src_ip, dst_ip, src_port, dst_port, proto, tcp_flags,
+               input_if, output_if, src_asn, dst_asn,
+               sum(bytes * greatest(sample_rate, 1)) AS bytes,
+               sum(packets * greatest(sample_rate, 1)) AS packets,
+               sum(flow_count) AS flows
+        FROM flow_raw
+        WHERE time_classification = 'VALID_TIME'
+        GROUP BY bucket, sensor, exporter_ip, src_ip, dst_ip, src_port, dst_port,
+                 proto, tcp_flags, input_if, output_if, src_asn, dst_asn
+        """,
     )
 
 
