@@ -649,6 +649,144 @@
     });
   }
 
+  function isScanFamily(event) {
+    const family = String(event.attack_family || '').toUpperCase();
+    const type = String(event.attack_type || '').toUpperCase();
+    return family === 'SCAN_FAMILY' || ['PORT_SCAN_HORIZONTAL', 'PORT_SCAN_VERTICAL', 'NETWORK_SWEEP', 'LOW_SLOW_SCAN'].includes(type);
+  }
+
+  function eventSpanDays(event) {
+    const first = new Date(event.first_seen).getTime();
+    const last = new Date(event.last_seen).getTime();
+    if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return 0;
+    return Math.round((last - first) / 86400000);
+  }
+
+  function renderRecurrenceBadge(event) {
+    const count = Number(event.recurrence_count || 0);
+    if (count <= 1) return '';
+    const days = eventSpanDays(event);
+    return `<div class="security-recurrence-badge" role="note">
+      <span class="threat-intel-chip threat-intel-chip--hot">RECORRENTE</span>
+      <span>${number(count)} ocorrência${count === 1 ? '' : 's'}${days > 1 ? ` · observado em ~${days} dia${days === 1 ? '' : 's'}` : ''}</span>
+    </div>`;
+  }
+
+  function renderSnapshotVsAccumulated(event) {
+    const detection = event.investigation?.detection_evidence || {};
+    const observed = detection.observed || {};
+    const facts = event.evidence?.facts || [];
+    const duration = event.duration_seconds ?? 0;
+    const days = eventSpanDays(event);
+    return `<div class="security-scope-grid">
+      <div class="security-scope-card">
+        <h4>Janela que confirmou a detecção</h4>
+        ${detailGrid([
+          ['Destinos na janela', detection.destination_diversity ?? '-'],
+          ['Pacotes na janela', observed.packets ?? '-'],
+          ['Amostras', detection.samples ?? '-'],
+          ['Duração da janela', detection.window_seconds ? `${number(detection.window_seconds)} s` : '-']
+        ])}
+        ${facts.length ? `<div class="subtle">${facts.map(fact => esc(fact)).join(' · ')}</div>` : ''}
+      </div>
+      <div class="security-scope-card">
+        <h4>Evento acumulado</h4>
+        ${detailGrid([
+          ['Destinos únicos', event.unique_destinations ?? '-'],
+          ['Portas de destino', event.unique_dst_ports ?? '-'],
+          ['Pacotes / flows', `${number(event.packets)} / ${number(event.flows)}`],
+          ['Recorrências', event.recurrence_count ?? 1],
+          ['Primeira ocorrência', dateTime(event.first_seen)],
+          ['Última ocorrência', dateTime(event.last_seen)],
+          ['Duração total', days > 1 ? `${days} dia${days === 1 ? '' : 's'}` : `${number(duration, 0)} s`]
+        ])}
+      </div>
+    </div>`;
+  }
+
+  function renderDetectionScoreBlock(event) {
+    return `<div class="security-score-block">
+      <h4>Detecção</h4>
+      <div><strong>Detector score: ${number(event.detector_score)}/100</strong> <span class="subtle">· confiança ${number(event.confidence, 1)}%</span></div>
+      <div class="subtle">Mede a força da evidência da assinatura ${esc(event.attack_type || 'detectada')}.</div>
+    </div>`;
+  }
+
+  function scoreComponentLabel(key) {
+    return ({
+      cardinality: 'Cardinalidade', persistence: 'Persistência', syn_attempts: 'SYN sem ACK',
+      threat_intel: 'Threat Intel', baseline_deviation: 'Desvio do baseline', rate: 'Taxa', volume: 'Volume'
+    })[String(key)] || String(key);
+  }
+
+  function primaryEvidenceForEvent(event) {
+    const detection = event.investigation?.detection_evidence || {};
+    const facts = event.evidence?.facts || [];
+    if (isScanFamily(event)) {
+      const rows = [];
+      if (detection.destination_diversity !== undefined) {
+        const threshold = detection.configured_thresholds?.unique_destination_hosts;
+        rows.push(['Cardinalidade de destinos', `${number(detection.destination_diversity)} observados${threshold ? ` ≥ ${number(threshold)} threshold` : ''}`]);
+      }
+      const synFact = facts.find(fact => /SYN/i.test(fact));
+      if (synFact) rows.push(['SYN sem ACK', synFact]);
+      const persistenceFact = facts.find(fact => /persistência/i.test(fact));
+      if (persistenceFact) rows.push(['Persistência', persistenceFact]);
+      const recFact = facts.find(fact => /recorrência/i.test(fact));
+      if (!recFact && Number(event.recurrence_count || 0) > 1) rows.push(['Recorrência', `${number(event.recurrence_count)} ocorrências`]);
+      if (!rows.length) rows.push(['Cardinalidade', detection.destination_diversity ?? event.unique_destinations ?? '-']);
+      return rows;
+    }
+    const rows = [];
+    if (event.packets_per_second) rows.push(['pps', number(event.packets_per_second, 2)]);
+    if (event.bits_per_second) rows.push(['bps', number(event.bits_per_second, 1)]);
+    if (Number(event.baseline_deviation)) rows.push(['Desvio do baseline', `${number(event.baseline_deviation, 2)}x`]);
+    if (Number(event.unique_sources) > 1) rows.push(['Origens', number(event.unique_sources)]);
+    rows.push(['Protocolo / portas', `${event.protocol || '-'} / ${number(event.unique_dst_ports)}`]);
+    return rows;
+  }
+
+  function renderExternalReputation(event) {
+    const source = event.threat_intel?.source_intel || {};
+    const matched = Number(source.matched_source_count || source.matches || 0);
+    const looked = Number(source.lookup_count || 0);
+    return `<div class="security-reputation">
+      <h4>Reputação externa</h4>
+      ${matched > 0
+        ? `<p>${number(matched)} de ${number(looked)} origens consultadas possuem histórico em Threat Intelligence.</p>`
+        : '<p class="subtle">Sem dados disponíveis.</p>'}
+      <h4>Detecção local</h4>
+      <div><span class="threat-source-badge source-gmj">GMJ-FLOW</span> <strong>${esc(event.verdict || 'INFO')}</strong></div>
+      <p class="subtle">Ausência de reputação externa não invalida a evidência comportamental local.</p>
+    </div>`;
+  }
+
+  function renderSecurityTarget(event) {
+    const network = event.network_context || {};
+    const target = event.target_prefix || event.target_ip;
+    const distributed = isScanFamily(event) && Number(event.unique_destinations || 0) > 1;
+    if (!target && distributed) {
+      return detailGrid([
+        ['Alvo agregado', `Múltiplos clientes/destinos (${number(event.unique_destinations)} únicos)`],
+        ['Origem agregada', event.src_ip || 'distribuída'],
+        ['Role / contexto', event.dst_role || network.dst_role || 'CUSTOMER'],
+        ['Interface', `in ${event.input_if || '-'} / out ${event.output_if || '-'}`],
+        ['Sensor / exporter', `${event.sensor || '-'} / ${event.exporter || '-'}`],
+        ['CGNAT', event.cgnat_context || 'não identificado']
+      ]);
+    }
+    return detailGrid([
+      ['IP / prefixo', target || '-'],
+      ['Role / contexto', event.dst_role || network.dst_role || '-'],
+      ['ASN', network.dst_asn || network.target_asn || '-'],
+      ['ASN name', network.dst_as_name || network.target_as_name || '-'],
+      ['Interface', `in ${event.input_if || '-'} / out ${event.output_if || '-'}`],
+      ['Customer / network', network.customer_name || network.zone_name || network.network_name || network.description || '-'],
+      ['Sensor / exporter', `${event.sensor || '-'} / ${event.exporter || '-'}`],
+      ['CGNAT', event.cgnat_context || 'não identificado']
+    ]);
+  }
+
   function renderDetectionEvidence(event) {
     const detection = event.investigation?.detection_evidence || {};
     const observed = detection.observed || {};
@@ -667,7 +805,11 @@
             : `${key}: observado ${number(actual)} ${Number(actual) >= Number(value) ? '≥' : '<'} threshold ${number(value)}`;
         }).join(' · ')
       : (event.detection_reason || '-');
-    const e22Rows = [
+
+    // Baseline volumétrico é relevante apenas quando é o sinal dominante.
+    // Para SCAN_FAMILY o sinal é cardinalidade/SYN/persistência, não volume.
+    const scan = isScanFamily(event);
+    const baselineRows = [
       ['Baseline', detection.baseline],
       ['Observed', detection.observed_value],
       ['Delta', detection.delta],
@@ -678,16 +820,24 @@
       ['Bucket', detection.bucket],
       ['Classification', detection.classification]
     ].filter(([, value]) => value !== null && value !== undefined && value !== '');
-    return `${detailGrid([
-      ['Threshold observado', `${number(observed.pps ?? event.packets_per_second, 2)} pps · ${number(observed.bps ?? event.bits_per_second, 1)} bit/s · ${number(observed.packets ?? event.packets)} pacotes`],
-      ['Threshold configurado', thresholdEntries.map(([key, value]) => `${key}=${value}`).join(' · ') || 'Não persistido'],
-      ['Janela / amostras', `${number(detection.window_seconds)} s / ${number(detection.samples)}`],
-      ['Baseline / delta', `${number(detection.baseline, 2)} pps / ${number(detection.delta_baseline ?? event.baseline_deviation, 2)}x`],
-      ['Origens / ASNs / destinos', `${number(detection.source_count ?? event.unique_sources)} / ${number(detection.asn_diversity ?? event.unique_source_asns)} / ${number(detection.destination_diversity ?? event.unique_destinations)}`],
-      ['Detector (engine)', event.detector || '-'],
-      ['Regra responsável', `${event.attack_family || '-'} / ${event.attack_type || '-'}`],
-      ['Resultado', resultText]
-    ])}${e22Rows.length ? `<h4>Evidência estatística (baseline)</h4>${detailGrid(e22Rows)}` : ''}<h4>Fatos usados pelo detector</h4>${investigationList(event.evidence?.facts)}<h4>Por que score ${number(event.detector_score)}</h4>${detailGrid(Object.entries(event.score_components || {}))}`;
+    const hasBaseline = baselineRows.length > 0;
+
+    const scoreComponents = Object.entries(event.score_components || {}).map(([key, value]) => [scoreComponentLabel(key), value]);
+
+    return `<h4>Sinal principal da detecção</h4>${detailGrid(primaryEvidenceForEvent(event))}
+      <h4>Limiar que disparou</h4>${detailGrid([
+        ['Threshold configurado', thresholdEntries.map(([key, value]) => `${key}=${value}`).join(' · ') || 'Não persistido'],
+        ['Resultado', resultText],
+        ['Janela / amostras', `${number(detection.window_seconds)} s / ${number(detection.samples)}`],
+        ['Origens / ASNs / destinos (janela)', `${number(detection.source_count ?? '-')} / ${number(detection.asn_diversity ?? '-')} / ${number(detection.destination_diversity ?? '-')}`],
+        ['Detector (engine)', event.detector || '-'],
+        ['Regra responsável', `${event.attack_family || '-'} / ${event.attack_type || '-'}`]
+      ])}
+      ${hasBaseline
+        ? `<h4>Baseline volumétrico</h4>${scan && !Number(detection.baseline) ? '<div class="subtle">Não aplicável como sinal principal para esta família; exibido apenas como contexto.</div>' : ''}${detailGrid(baselineRows)}`
+        : (scan ? '<h4>Baseline volumétrico</h4><div class="subtle">Sem baseline volumétrico relevante para esta família.</div>' : '')}
+      <h4>Fatos usados pelo detector</h4>${investigationList(event.evidence?.facts)}
+      <h4>Composição do Detector Score</h4>${detailGrid(scoreComponents)}`;
   }
 
   function renderSecurityEventInvestigation(event, related, traffic, sources, aiState) {
@@ -699,26 +849,31 @@
     setInvestigationHeading('Security Event Investigation', `${event.attack_type} · ${event.event_id || `#${event.id}`}`);
     document.getElementById('securityEventDrawerBody').innerHTML = `
       <nav class="security-event-section-nav" aria-label="Seções da investigação">${[['summary','Resumo'],['traffic','Tráfego'],['sources','Origens'],['ports','Portas'],['intel','Threat Intelligence'],['evidence','Evidências'],['ai','Análise IA']].map(([id, label]) => `<a href="#security-event-${id}">${label}</a>`).join('')}</nav>
-      <section id="security-event-summary"><h3>Resumo</h3>${detailGrid([
-        ['Event ID', event.event_id || event.id], ['Event type', event.attack_type], ['Família', event.attack_family], ['Severity', event.severity],
-        ['Score / confiança', `${number(event.detector_score)} / ${number(event.confidence, 1)}%`], ['Status / verdict', `${event.status} / ${event.verdict}`],
-        ['Primeira / última ocorrência', `${dateTime(event.first_seen)} / ${dateTime(event.last_seen)}`], ['Duração / recorrências', `${number(duration, 0)} s / ${number(event.recurrence_count)}`],
-        ['Detector', event.detector], ['Detection reason', event.detection_reason || '-']
-      ])}${renderThreatScore(event)}${renderSecurityEventLineage(event)}<h4>Alvo</h4>${detailGrid([
-        ['IP / prefixo', event.target_prefix || event.target_ip || '-'], ['Role / contexto', event.dst_role || network.dst_role || '-'],
-        ['ASN', network.dst_asn || network.target_asn || '-'], ['ASN name', network.dst_as_name || network.target_as_name || '-'],
-        ['Interface', `in ${event.input_if || '-'} / out ${event.output_if || '-'}`], ['Customer / network', network.customer_name || network.zone_name || network.network_name || network.description || '-'],
-        ['Sensor / exporter', `${event.sensor || '-'} / ${event.exporter || '-'}`], ['CGNAT', event.cgnat_context || 'não identificado']
-      ])}</section>
-      <section id="security-event-traffic"><h3>Tráfego observado</h3>${detailGrid([
+      <section id="security-event-summary">
+        ${renderRecurrenceBadge(event)}
+        <h3>Resumo</h3>${detailGrid([
+          ['Event ID', event.event_id || event.id], ['Event type', event.attack_type], ['Família', event.attack_family], ['Severity', event.severity],
+          ['Status / verdict', `${event.status} / ${event.verdict}`],
+          ['Origem → alvo', `${event.src_ip || 'distribuída'} → ${event.target_prefix || event.target_ip || (Number(event.unique_destinations) > 1 ? `${number(event.unique_destinations)} destinos acumulados` : '-')}`],
+          ['Detector', event.detector]
+        ])}
+        <div class="security-score-stack">
+          ${renderDetectionScoreBlock(event)}
+          ${renderThreatScore(event)}
+        </div>
+        ${renderSnapshotVsAccumulated(event)}
+        ${renderSecurityEventLineage(event)}
+        <h4>Alvo</h4>${renderSecurityTarget(event)}
+      </section>
+      <section id="security-event-traffic"><h3>Tráfego observado (evento acumulado)</h3>${detailGrid([
         ['Protocolo', event.protocol], ['Origens / destinos', `${number(event.unique_sources)} / ${number(event.unique_destinations)}`],
         ['Pacotes / bytes', `${number(event.packets)} / ${securityBytes(event.bytes)}`], ['pps / bit/s', `${number(event.packets_per_second, 2)} / ${number(event.bits_per_second, 1)}`],
         ['Flows / flows/s', `${number(event.flows)} / ${number(event.flows_per_second, 2)}`], ['Portas src / dst', `${number(event.unique_src_ports)} / ${number(event.unique_dst_ports)}`]
-      ])}<h4>Timeline antes / durante / depois</h4>${renderSecurityTimeline(traffic)}</section>
+      ])}<h4>Timeline (janela limitada por segurança, não representa toda a duração acumulada)</h4>${renderSecurityTimeline(traffic)}</section>
       <section id="security-event-sources">${renderSecuritySources(sources.items || investigation.top_sources || [], Boolean(sources.distributed || event.unique_sources > 1))}</section>
       <section id="security-event-ports"><h3>Portas e protocolos</h3>${renderSecurityDistribution(investigation.top_destination_ports, 'Top Destination Ports')}${renderSecurityDistribution(investigation.top_source_ports, 'Top Source Ports')}${renderSecurityDistribution(investigation.protocols, 'Distribuição por protocolo')}${renderSecurityDistribution(investigation.tcp_flags, 'TCP Flags (SYN / ACK / RST)')}
         ${!(investigation.top_destination_ports || []).length && !(investigation.top_source_ports || []).length ? '<div class="subtle">Evento legado sem distribuição persistida. Use “Ver evidências” para consultar agregados limitados.</div>' : ''}</section>
-      <section id="security-event-intel"><h3>Threat Intelligence</h3>${renderPersistedThreatIntel(event)}</section>
+      <section id="security-event-intel"><h3>Threat Intelligence</h3>${renderExternalReputation(event)}${renderPersistedThreatIntel(event)}</section>
       <section id="security-event-evidence"><div class="security-section-heading"><h3>Evidências</h3><button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="evidence" data-event-id="${event.id}">VER EVIDÊNCIAS</button></div>${renderDetectionEvidence(event)}<div id="securityEventEvidenceSamples"></div></section>
       <section id="security-event-ai"><h3>Análise IA</h3>${renderSecurityAiInvestigation(event, aiState)}</section>
       <section><h3>Eventos relacionados</h3>${related.length ? investigationList(related.map(item => `${item.event_id || `#${item.id}`} ${item.attack_type} · ${item.verdict} · ${dateTime(item.last_seen)}`)) : '<div class="subtle">Nenhum evento relacionado.</div>'}</section>
@@ -753,13 +908,12 @@
   }
 
   function renderSecurityEventLineage(event) {
-    const campaign = event.campaign_id ? esc(event.campaign_id) : '-';
     return `<div class="security-event-lineage"><h4>Rastreabilidade</h4>${detailGrid([
       ['Observation / Security Event', event.event_id || `#${event.id}`],
       ['Detector (engine)', event.detector || '-'],
       ['Regra responsável', `${event.attack_family || '-'} / ${event.attack_type || '-'}`],
-      ['Anomaly', event.anomaly_id ? `#${number(event.anomaly_id)}` : '-'],
-      ['Campaign', campaign]
+      ['Anomaly', event.anomaly_id ? `#${number(event.anomaly_id)}` : 'Sem anomalia associada'],
+      ['Campanha', event.campaign_id ? esc(event.campaign_id) : 'Não correlacionada']
     ])}</div>`;
   }
 
@@ -1325,11 +1479,15 @@
     const score = event?.threat_score;
     if (!score || score.score === undefined || score.score === null) return '';
     const components = (score.components || []).map(component => `+${number(component.points)} ${esc(component.label)}`).join(' ');
-    return `<div class="security-threat-score">
-      <div><strong>Threat Score: ${number(score.score)}/100</strong> <span class="threat-score-band">${esc(score.band)}</span> <span class="subtle">(${esc(score.mode || 'shadow')})</span></div>
-      <div class="subtle">${esc(score.shadow_decision || '')} · ${esc(score.decision_reason || '')}</div>
+    const decision = score.shadow_decision || '';
+    const decisionLabel = decision === 'WOULD_BLOCK' ? 'seria bloqueado' : decision === 'WOULD_NOT_BLOCK' ? 'não seria bloqueado' : decision;
+    return `<div class="security-threat-score security-score-block">
+      <h4>Threat Score</h4>
+      <div><strong>${number(score.score)}/100</strong> <span class="threat-score-band">${esc(score.band)}</span> <span class="subtle">(${esc(score.mode || 'shadow')})</span></div>
+      <div class="subtle">Mede risco/prioridade contextual (consultivo).</div>
+      ${decision ? `<div class="subtle">Mitigation candidate · ${esc(decisionLabel)}${score.decision_reason ? ` · ${esc(score.decision_reason)}` : ''}</div>` : ''}
       ${components ? `<div class="subtle">${components}</div>` : ''}
-      <div class="subtle">Advisory only: o Threat Score não executa mitigação.</div>
+      <div class="subtle">Advisory only — nenhuma mitigação executada.</div>
     </div>`;
   }
 

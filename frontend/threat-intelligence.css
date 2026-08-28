@@ -398,6 +398,96 @@
   font-size: 1rem;
 }
 
+.security-score-stack {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.security-score-block {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--panel-muted, rgba(148, 163, 184, .06));
+}
+
+.security-score-block h4 {
+  margin: 0 0 6px;
+  font-size: .7rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+}
+
+.security-score-block .subtle {
+  margin-top: 2px;
+  font-size: .7rem;
+}
+
+.security-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.security-scope-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e2e8f0);
+  background: var(--panel-muted, rgba(148, 163, 184, .04));
+}
+
+.security-scope-card h4 {
+  margin: 0 0 8px;
+  font-size: .72rem;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+}
+
+.security-scope-card .subtle {
+  margin-top: 6px;
+  font-size: .68rem;
+  line-height: 1.5;
+}
+
+.security-recurrence-badge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  border: 1px solid #fecaca;
+  background: #fee2e2;
+  color: #7f1d1d;
+  font-size: .74rem;
+}
+
+.threat-intel-chip--hot {
+  color: #7f1d1d;
+  background: #fecaca;
+  border-color: #fca5a5;
+  font-weight: 700;
+}
+
+.security-reputation {
+  margin-bottom: 10px;
+}
+
+.security-reputation h4 {
+  margin: 8px 0 4px;
+  font-size: .7rem;
+  text-transform: uppercase;
+  color: var(--muted, #94a3b8);
+}
+
+.security-reputation .subtle {
+  font-size: .7rem;
+}
+
 .security-event-review-actions {
   display: flex;
   flex-wrap: wrap;
