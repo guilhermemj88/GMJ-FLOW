@@ -39,14 +39,18 @@ from app.services.campaign_score import calculate_campaign_risk_score
 from app.services.behavior_baseline import (
     BOOTSTRAP,
     DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS,
+    DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
     DEFAULT_MIN_QUARANTINE_SAMPLES,
+    DEFAULT_MIN_ROBUST_SAMPLES,
     DEFAULT_QUARANTINE_MINUTES,
     DEFAULT_SAFE_QUARANTINE_Z,
     ELIGIBLE,
     QUARANTINED,
     REJECTED,
     TRUSTED,
+    robust_z_score,
     safe_learning_decision,
+    safe_reason_bucket,
 )
 from app.services.config_effective import behavior_safe_learning_enabled
 from app.services.threat_contracts import (
@@ -1614,6 +1618,31 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(hour, metric)
         );
+        CREATE TABLE IF NOT EXISTS behavior_safe_learning_shadow_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at TEXT NOT NULL,
+            sensor TEXT NOT NULL DEFAULT '',
+            target_prefix TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            v1_would_update INTEGER NOT NULL DEFAULT 0,
+            safe_would_update INTEGER NOT NULL DEFAULT 0,
+            baseline_state TEXT NOT NULL DEFAULT '',
+            classification TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            observed_pps REAL NOT NULL DEFAULT 0,
+            observed_bps REAL NOT NULL DEFAULT 0,
+            baseline_pps REAL NOT NULL DEFAULT 0,
+            baseline_bps REAL NOT NULL DEFAULT 0,
+            mad_pps REAL NOT NULL DEFAULT 0,
+            robust_z REAL,
+            sample_count INTEGER NOT NULL DEFAULT 0,
+            bootstrap_clean_count INTEGER NOT NULL DEFAULT 0,
+            confirmed_attack INTEGER NOT NULL DEFAULT 0,
+            strong_detector_signal INTEGER NOT NULL DEFAULT 0,
+            quarantined_until TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_audit_time
+            ON behavior_safe_learning_shadow_audit(observed_at);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_status_time
             ON behavioral_attack_vectors(status, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_campaign
@@ -1651,6 +1680,7 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         "rejected_count": "rejected_count INTEGER NOT NULL DEFAULT 0",
         "quarantined_count": "quarantined_count INTEGER NOT NULL DEFAULT 0",
         "trusted_at": "trusted_at TEXT NOT NULL DEFAULT ''",
+        "mad_sample_count": "mad_sample_count INTEGER NOT NULL DEFAULT 0",
     }
     for column, ddl in baseline_additions.items():
         if column not in baseline_columns:
@@ -1710,6 +1740,7 @@ class BehavioralDetectionEngine:
         self.campaigns = CampaignEngine()
         self.network_context = NetworkContextEngine(connection_factory)
         self._last_observations: list[FlowObservation] = []
+        self._last_shadow_audit_cleanup = 0.0
 
     def ensure_schema(self) -> None:
         with self.connection_factory() as conn:
@@ -1751,11 +1782,30 @@ class BehavioralDetectionEngine:
         window_seconds: int = 60,
         vectors: Sequence[AttackVector] = (),
     ) -> None:
-        groups: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+        groups: dict[tuple[str, str], list[Any]] = defaultdict(lambda: [0, 0, ""])
         maximum = max(1000, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_PREFIX_GROUPS", "50000")))
-        latest = max((row.observed_at for row in observations), default=utc_now())
-        cutoff = latest - timedelta(seconds=window_seconds)
+        now_dt = utc_now()
+        now = utc_now_iso()
+        alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
+        safe_enabled = behavior_safe_learning_enabled(conn)
+
+        # Exclude future clock-skewed observations (documented NE8000 exporter
+        # bug): a far-future timestamp would otherwise become max(observed_at)
+        # and make the window cutoff discard every legitimate observation.
+        # Past-skew is already handled upstream by the SQL lookback and here by
+        # the 60s cutoff relative to the newest valid observation.
+        skewed_observations = 0
+        clean_observations: list[FlowObservation] = []
         for row in observations:
+            delta = (row.observed_at - now_dt).total_seconds()
+            if delta > DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS:
+                skewed_observations += 1
+                continue
+            clean_observations.append(row)
+
+        latest = max((row.observed_at for row in clean_observations), default=now_dt)
+        cutoff = latest - timedelta(seconds=window_seconds)
+        for row in clean_observations:
             if row.observed_at < cutoff:
                 continue
             protocol = "tcp" if row.protocol == 6 else "udp" if row.protocol == 17 else "other"
@@ -1765,9 +1815,8 @@ class BehavioralDetectionEngine:
                     break
                 groups[key][0] += row.packets
                 groups[key][1] += row.bytes
-        now = utc_now_iso()
-        alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
-        safe_enabled = behavior_safe_learning_enabled(conn)
+                if not groups[key][2]:
+                    groups[key][2] = row.sensor
 
         attack_networks: list[Any] = []
         confirmed_networks: list[Any] = []
@@ -1784,12 +1833,20 @@ class BehavioralDetectionEngine:
                 confirmed_networks.append(network)
 
         counters: dict[str, int] = defaultdict(int)
-        for (prefix, protocol), (packets, byte_count) in groups.items():
+        if skewed_observations:
+            counters["clock_skew_observations"] = skewed_observations
+            counters["safe_reason_clock_skew"] = skewed_observations
+
+        eligible_sample_rate = max(0, int(os.getenv("GMJFLOW_SAFE_SHADOW_AUDIT_ELIGIBLE_SAMPLE_RATE", "0")))
+        eligible_seen = 0
+
+        for (prefix, protocol), (packets, byte_count, sensor) in groups.items():
             pps = ratio(packets, max(1, window_seconds))
             bps = ratio(byte_count * 8, max(1, window_seconds))
             current = conn.execute(
                 "SELECT packets_per_second_ema, bits_per_second_ema, sample_count, baseline_state, "
-                "bootstrap_clean_count, mad_pps, quarantined_until, rejected_count, quarantined_count, trusted_at "
+                "bootstrap_clean_count, mad_pps, quarantined_until, rejected_count, quarantined_count, "
+                "trusted_at, mad_sample_count "
                 "FROM prefix_behavior_baselines WHERE prefix=? AND protocol=?",
                 (prefix, protocol),
             ).fetchone()
@@ -1798,9 +1855,11 @@ class BehavioralDetectionEngine:
             if current is None:
                 next_pps, next_bps, samples = pps, bps, 1
                 old_pps, old_bps, old_mad = pps, bps, 0.0
+                old_mad_sample_count = 0
             else:
                 old_pps, old_bps, old_samples = float(current[0] or 0), float(current[1] or 0), safe_int(current[2])
                 old_mad = float(current[5] or 0)
+                old_mad_sample_count = safe_int(current[10])
                 bounded_pps = min(pps, old_pps * 3) if old_samples >= 5 and old_pps > 0 else pps
                 bounded_bps = min(bps, old_bps * 3) if old_samples >= 5 and old_bps > 0 else bps
                 next_pps = old_pps * (1 - alpha) + bounded_pps * alpha
@@ -1809,6 +1868,7 @@ class BehavioralDetectionEngine:
 
             state, clean_count = self._safe_state(current, samples)
             strong_signal, confirmed_attack = _attack_signal(prefix, attack_networks, confirmed_networks)
+            robust_stats_ready = old_mad > 0 and old_mad_sample_count >= DEFAULT_MIN_ROBUST_SAMPLES
             decision = safe_learning_decision(
                 baseline_state=state,
                 bootstrap_clean_count=clean_count,
@@ -1820,6 +1880,7 @@ class BehavioralDetectionEngine:
                 strong_detector_signal=strong_signal,
                 quarantined_until=clean_text(current[6]) if current is not None else "",
                 now_iso=now,
+                robust_stats_ready=robust_stats_ready,
             )
             classification = decision["classification"]
             final_state = decision["next_state"]
@@ -1838,10 +1899,18 @@ class BehavioralDetectionEngine:
 
             if classification == ELIGIBLE and decision["should_update"]:
                 next_mad = old_mad * (1 - alpha) + abs(pps - next_pps) * alpha
+                next_mad_sample_count = old_mad_sample_count + 1
             else:
                 next_mad = old_mad
+                next_mad_sample_count = old_mad_sample_count
 
-            update_allowed = (not safe_enabled) or decision["should_update"]
+            # Explicit V1-vs-Safe observability. V1 legacy math always updates;
+            # Safe proposes should_update. While the feature is OFF the actual
+            # applied update remains V1.
+            v1_would_update = True
+            safe_would_update = bool(decision["should_update"])
+            divergence = v1_would_update != safe_would_update
+            update_allowed = (not safe_enabled) or safe_would_update
             applied_pps = next_pps if update_allowed else old_pps
             applied_bps = next_bps if update_allowed else old_bps
             applied_samples = samples if update_allowed else (safe_int(current[2]) if current is not None else 0)
@@ -1851,8 +1920,8 @@ class BehavioralDetectionEngine:
                 INSERT INTO prefix_behavior_baselines(
                     prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count,
                     baseline_state, bootstrap_clean_count, last_classification, quarantined_until,
-                    mad_pps, rejected_count, quarantined_count, trusted_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mad_pps, rejected_count, quarantined_count, trusted_at, mad_sample_count, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(prefix, protocol) DO UPDATE SET
                     packets_per_second_ema=excluded.packets_per_second_ema,
                     bits_per_second_ema=excluded.bits_per_second_ema,
@@ -1865,14 +1934,32 @@ class BehavioralDetectionEngine:
                     rejected_count=excluded.rejected_count,
                     quarantined_count=excluded.quarantined_count,
                     trusted_at=excluded.trusted_at,
+                    mad_sample_count=excluded.mad_sample_count,
                     updated_at=excluded.updated_at
                 """,
                 (
                     prefix, protocol, applied_pps, applied_bps, applied_samples,
                     final_state, final_clean, classification, next_quarantine,
-                    next_mad, rejected_count, quarantined_count, trusted_at, now,
+                    next_mad, rejected_count, quarantined_count, trusted_at,
+                    next_mad_sample_count, now,
                 ),
             )
+
+            # Hourly observability counters (V1 x Safe, reasons, readiness).
+            counters["v1_updates_allowed"] += 1
+            if safe_would_update:
+                counters["safe_updates_allowed"] += 1
+            else:
+                counters["safe_updates_blocked"] += 1
+            if divergence:
+                counters["safe_v1_divergence"] += 1
+            else:
+                counters["safe_v1_same"] += 1
+            if robust_stats_ready:
+                counters["robust_stats_ready"] += 1
+            else:
+                counters["robust_stats_not_ready"] += 1
+            counters[f"safe_reason_{safe_reason_bucket(decision['reason'])}"] += 1
 
             if final_state == BOOTSTRAP:
                 counters["bootstrap"] += 1
@@ -1889,7 +1976,39 @@ class BehavioralDetectionEngine:
             else:
                 counters["baseline_updates_blocked"] += 1
 
+            # Low-cardinality shadow audit: only divergences, blocked windows and
+            # promotions (plus an optional, off-by-default ELIGIBLE sample).
+            audit_z: float | None = None
+            if old_mad > 0 and old_pps > 0:
+                audit_z = round(robust_z_score(pps, old_pps, old_mad), 4)
+            if classification == ELIGIBLE:
+                eligible_seen += 1
+                sample_hit = eligible_sample_rate > 0 and eligible_seen % eligible_sample_rate == 0
+            else:
+                sample_hit = False
+            if divergence or classification in (REJECTED, QUARANTINED) or decision["promoted"] or sample_hit:
+                conn.execute(
+                    """
+                    INSERT INTO behavior_safe_learning_shadow_audit(
+                        observed_at, sensor, target_prefix, protocol,
+                        v1_would_update, safe_would_update, baseline_state, classification, reason,
+                        observed_pps, observed_bps, baseline_pps, baseline_bps, mad_pps, robust_z,
+                        sample_count, bootstrap_clean_count, confirmed_attack, strong_detector_signal,
+                        quarantined_until
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now, sensor, prefix, protocol,
+                        int(v1_would_update), int(safe_would_update), state, classification, decision["reason"],
+                        round(pps, 4), round(bps, 4), round(old_pps, 4), round(old_bps, 4), round(old_mad, 4), audit_z,
+                        samples, final_clean, int(confirmed_attack), int(strong_signal),
+                        next_quarantine,
+                    ),
+                )
+
         self._record_safe_learning_counters(conn, counters, now)
+        self._cleanup_shadow_audit(conn, now_dt)
+
 
     @staticmethod
     def _safe_state(current: Any, samples: int) -> tuple[str, int]:
@@ -1922,6 +2041,18 @@ class BehavioralDetectionEngine:
                 """,
                 (hour, metric, int(value), now_iso),
             )
+
+    def _cleanup_shadow_audit(self, conn: sqlite3.Connection, now_dt: datetime) -> None:
+        """Throttled retention for the shadow audit table (72h, no unbounded growth)."""
+        now_epoch = now_dt.timestamp()
+        if now_epoch - self._last_shadow_audit_cleanup < 3600:
+            return
+        self._last_shadow_audit_cleanup = now_epoch
+        cutoff_iso = (now_dt - timedelta(hours=72)).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            "DELETE FROM behavior_safe_learning_shadow_audit WHERE observed_at < ?",
+            (cutoff_iso,),
+        )
 
     def detect(self, raw_observations: Iterable[Mapping[str, Any]], customer_networks: Sequence[str] = ()) -> tuple[list[AttackVector], list[CampaignVector]]:
         limit = max(1000, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_OBSERVATIONS", "100000")))

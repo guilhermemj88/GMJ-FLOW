@@ -20,6 +20,7 @@ from app.services.behavior_baseline import (  # noqa: E402
     REJECTED,
     TRUSTED,
     safe_learning_decision,
+    safe_reason_bucket,
 )
 from app.services.behavioral_detection import (  # noqa: E402
     AttackVector,
@@ -260,6 +261,180 @@ class BaselineIntegrationTest(unittest.TestCase):
         row = self._ema_row("203.0.113.0/24", "tcp")
         self.assertIsNotNone(row)
         self.assertAlmostEqual(100.0, float(row["packets_per_second_ema"]), places=3)
+
+
+class SafeShadowObservabilityTest(unittest.TestCase):
+    """Phase 5D: shadow observability (V1 x Safe), MAD readiness and audit."""
+
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        ensure_behavioral_schema(self.conn)
+        self.engine = BehavioralDetectionEngine(lambda: self.conn, _NoIntel())
+        self.base_time = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def _observations(self, pps: int = 100, dst_ip: str = "203.0.113.50") -> list[FlowObservation]:
+        return [
+            FlowObservation(
+                observed_at=self.base_time,
+                src_ip="198.51.100.1", dst_ip=dst_ip, src_port=40000, dst_port=443,
+                protocol=6, tcp_flags=2, packets=pps * 60, bytes=pps * 60 * 100,
+            )
+        ]
+
+    def _counter(self, metric: str) -> int:
+        row = self.conn.execute(
+            "SELECT SUM(count) FROM behavior_safe_learning_counters WHERE metric=?",
+            (metric,),
+        ).fetchone()
+        return int(row[0] or 0)
+
+    def _baseline(self, prefix: str, protocol: str = "tcp"):
+        return self.conn.execute(
+            "SELECT * FROM prefix_behavior_baselines WHERE prefix=? AND protocol=?",
+            (prefix, protocol),
+        ).fetchone()
+
+    def test_safe_reason_bucket_mapping(self) -> None:
+        self.assertEqual("normal", safe_reason_bucket("normal"))
+        self.assertEqual("confirmed_attack", safe_reason_bucket("confirmed_attack"))
+        self.assertEqual("detector_signal", safe_reason_bucket("bootstrap_strong_signal"))
+        self.assertEqual("detector_signal", safe_reason_bucket("detector_signal"))
+        self.assertEqual("robust_z", safe_reason_bucket("robust_z"))
+        self.assertEqual("quarantine_active", safe_reason_bucket("quarantine_extended"))
+        self.assertEqual("quarantine_active", safe_reason_bucket("quarantine_frozen"))
+        self.assertEqual("bootstrap_not_mature", safe_reason_bucket("bootstrap_clean"))
+        self.assertEqual("clock_skew", safe_reason_bucket("clock_skew"))
+        self.assertEqual("other", safe_reason_bucket("unexpected_reason"))
+
+    def test_detector_signal_trusted_not_ready_rejects(self) -> None:
+        decision = safe_learning_decision(
+            baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=0.0,
+            window_pps=200.0, strong_detector_signal=True, robust_stats_ready=False,
+            now_iso=NOW,
+        )
+        self.assertEqual(REJECTED, decision["classification"])
+        self.assertFalse(decision["should_update"])
+        self.assertEqual("detector_signal", decision["reason"])
+
+    def test_detector_signal_trusted_ready_uses_z(self) -> None:
+        decision = safe_learning_decision(
+            baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=50.0,
+            window_pps=200.0, strong_detector_signal=True, robust_stats_ready=True,
+            now_iso=NOW,
+        )
+        self.assertEqual(ELIGIBLE, decision["classification"])
+        self.assertTrue(decision["should_update"])
+
+    def test_future_clock_skew_excluded_from_baseline(self) -> None:
+        future = FlowObservation(
+            observed_at=self.base_time + timedelta(days=2),
+            src_ip="198.51.100.9", dst_ip="203.0.113.99", src_port=40000, dst_port=443,
+            protocol=6, tcp_flags=2, packets=60_000_000, bytes=6_000_000_000,
+        )
+        self.engine.update_prefix_baselines(
+            self.conn, [future, *self._observations(pps=100)], window_seconds=60, vectors=[]
+        )
+        row = self._baseline("203.0.113.0/24")
+        self.assertIsNotNone(row)
+        self.assertAlmostEqual(100.0, float(row["packets_per_second_ema"]), places=3)
+        # The future-dated destination's own /27 must not have been created.
+        self.assertIsNone(self._baseline("203.0.113.96/27"))
+        self.assertGreater(self._counter("clock_skew_observations"), 0)
+
+    def test_divergence_records_counter_and_audit_but_v1_still_updates(self) -> None:
+        vector = AttackVector(
+            attack_type="SYN_FLOOD", detector="syn_flood", detector_score=90,
+            confidence=0.9, first_seen="2026-08-27T11:59:00Z", last_seen="2026-08-27T12:00:00Z",
+            target_prefix="203.0.113.0/24", verdict="CONFIRMED_ATTACK", severity="CRITICAL",
+        )
+        self.engine.update_prefix_baselines(
+            self.conn, self._observations(pps=100), window_seconds=60, vectors=[vector]
+        )
+        row = self._baseline("203.0.113.0/24")
+        self.assertEqual("REJECTED", row["last_classification"])
+        # Feature OFF: V1 still applies its own update (sample_count advanced).
+        self.assertEqual(1, row["sample_count"])
+        self.assertGreater(self._counter("safe_v1_divergence"), 0)
+        self.assertEqual(0, self._counter("safe_v1_same"))
+        self.assertGreater(self._counter("safe_updates_blocked"), 0)
+        audit = self.conn.execute(
+            "SELECT classification, reason, v1_would_update, safe_would_update "
+            "FROM behavior_safe_learning_shadow_audit ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertEqual("REJECTED", audit["classification"])
+        self.assertEqual(1, audit["v1_would_update"])
+        self.assertEqual(0, audit["safe_would_update"])
+
+    def test_normal_has_no_audit_explosion(self) -> None:
+        self.engine.update_prefix_baselines(
+            self.conn, self._observations(pps=100), window_seconds=60, vectors=[]
+        )
+        audit_count = self.conn.execute(
+            "SELECT COUNT(*) FROM behavior_safe_learning_shadow_audit"
+        ).fetchone()[0]
+        self.assertEqual(0, audit_count)
+        self.assertGreater(self._counter("safe_v1_same"), 0)
+        self.assertEqual(0, self._counter("safe_v1_divergence"))
+        self.assertGreater(self._counter("safe_reason_bootstrap_not_mature"), 0)
+
+    def test_quarantine_records_audit_with_robust_z(self) -> None:
+        self.conn.execute(
+            "INSERT INTO prefix_behavior_baselines(prefix, protocol, packets_per_second_ema, "
+            "bits_per_second_ema, sample_count, baseline_state, bootstrap_clean_count, "
+            "last_classification, quarantined_until, mad_pps, rejected_count, quarantined_count, "
+            "trusted_at, mad_sample_count, updated_at) "
+            "VALUES ('203.0.113.0/24', 'tcp', 100.0, 800.0, 100, 'TRUSTED', 0, '', '', 5.0, 0, 0, "
+            "'2026-08-27T11:00:00Z', 30, '2026-08-27T11:00:00Z')"
+        )
+        self.engine.update_prefix_baselines(
+            self.conn, self._observations(pps=1000), window_seconds=60, vectors=[]
+        )
+        audit = self.conn.execute(
+            "SELECT classification, reason, robust_z FROM behavior_safe_learning_shadow_audit "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(audit)
+        self.assertEqual("QUARANTINED", audit["classification"])
+        self.assertIsNotNone(audit["robust_z"])
+        self.assertGreater(abs(float(audit["robust_z"])), 4.0)
+        # V1 still updated the baseline (sample_count advanced).
+        row = self._baseline("203.0.113.0/24")
+        self.assertEqual(101, row["sample_count"])
+
+    def test_mad_and_sample_count_accumulate(self) -> None:
+        self.engine.update_prefix_baselines(
+            self.conn, self._observations(pps=100), window_seconds=60, vectors=[]
+        )
+        self.engine.update_prefix_baselines(
+            self.conn, self._observations(pps=120), window_seconds=60, vectors=[]
+        )
+        row = self._baseline("203.0.113.0/24")
+        self.assertEqual(2, row["sample_count"])
+        self.assertEqual(2, row["mad_sample_count"])
+        # second window deviates 120 vs EMA 102 => mad > 0
+        self.assertAlmostEqual(1.8, float(row["mad_pps"]), places=6)
+
+    def test_robust_stats_ready_counter(self) -> None:
+        self.conn.execute(
+            "INSERT INTO prefix_behavior_baselines(prefix, protocol, packets_per_second_ema, "
+            "bits_per_second_ema, sample_count, baseline_state, bootstrap_clean_count, "
+            "last_classification, quarantined_until, mad_pps, rejected_count, quarantined_count, "
+            "trusted_at, mad_sample_count, updated_at) "
+            "VALUES ('2001:db8::2/128', 'tcp', 100.0, 800.0, 100, 'TRUSTED', 0, '', '', 5.0, 0, 0, "
+            "'2026-08-27T11:00:00Z', 24, '2026-08-27T11:00:00Z')"
+        )
+        obs = FlowObservation(
+            observed_at=self.base_time, src_ip="2001:db8::1", dst_ip="2001:db8::2",
+            src_port=40000, dst_port=443, protocol=6, tcp_flags=2, packets=6000, bytes=600000,
+        )
+        self.engine.update_prefix_baselines(self.conn, [obs], window_seconds=60, vectors=[])
+        self.assertGreater(self._counter("robust_stats_ready"), 0)
+        self.assertEqual(0, self._counter("robust_stats_not_ready"))
 
 
 class _NoIntel:

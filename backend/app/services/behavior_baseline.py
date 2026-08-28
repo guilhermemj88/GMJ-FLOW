@@ -359,6 +359,39 @@ DEFAULT_MIN_QUARANTINE_SAMPLES = 24
 # How long a quarantined baseline stays frozen (per-window evaluation continues).
 DEFAULT_QUARANTINE_MINUTES = 15
 
+# Minimum deviation samples accumulated into the MAD EMA before the robust
+# statistics are considered "ready". This is an observability signal only: the
+# robust-z quarantine gate itself still keys off sample_count via
+# DEFAULT_MIN_QUARANTINE_SAMPLES. Readiness does not change the decision math.
+DEFAULT_MIN_ROBUST_SAMPLES = 24
+
+# Observations whose timestamp deviates from wall-clock beyond this tolerance
+# are treated as clock-skewed and excluded from the baseline update path.
+DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS = 3600
+
+
+def safe_reason_bucket(reason: str) -> str:
+    """Deterministic low-cardinality bucket for a safe-learning reason.
+
+    Keeps hourly counters bounded instead of persisting arbitrary strings.
+    """
+    value = (reason or "").strip().lower()
+    if value == "normal":
+        return "normal"
+    if value == "confirmed_attack":
+        return "confirmed_attack"
+    if value in {"bootstrap_strong_signal", "detector_signal"}:
+        return "detector_signal"
+    if value == "robust_z":
+        return "robust_z"
+    if value in {"quarantine_extended", "quarantine_frozen"}:
+        return "quarantine_active"
+    if value in {"bootstrap_clean", "bootstrap_promoted"}:
+        return "bootstrap_not_mature"
+    if value == "clock_skew":
+        return "clock_skew"
+    return "other"
+
 
 def _add_iso_minutes(iso: str, minutes: int) -> str:
     parsed = _parse_timestamp(iso)
@@ -383,6 +416,7 @@ def safe_learning_decision(
     quarantine_z: float = DEFAULT_SAFE_QUARANTINE_Z,
     min_quarantine_samples: int = DEFAULT_MIN_QUARANTINE_SAMPLES,
     quarantine_minutes: int = DEFAULT_QUARANTINE_MINUTES,
+    robust_stats_ready: bool = False,
 ) -> dict[str, Any]:
     """Deterministic Safe Learning decision for one baseline window.
 
@@ -462,6 +496,21 @@ def safe_learning_decision(
             "promoted": False,
             "reason": "quarantine_frozen",
             "next_quarantined_until": quarantined_until,
+        }
+
+    # A strong detector signal while robust statistics are not yet ready must
+    # not be learned into the baseline (cold-start protection without MAD).
+    # When the feature is OFF this only produces a shadow divergence; V1 still
+    # applies its own update.
+    if strong_detector_signal and not robust_stats_ready:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": TRUSTED,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "detector_signal",
+            "next_quarantined_until": "",
         }
 
     # Not frozen: quarantine only via a robust z-score against a mature baseline.
