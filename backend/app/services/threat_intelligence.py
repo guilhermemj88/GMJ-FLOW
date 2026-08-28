@@ -525,7 +525,7 @@ def greynoise_tag(raw: Any) -> dict[str, Any] | None:
 class GreyNoiseProvider(ThreatIntelProvider):
     provider = GREYNOISE
     display_name = "GreyNoise"
-    requires_credential = True
+    requires_credential = False
 
     def api_key(self) -> str:
         return os.getenv("GREYNOISE_API_KEY", "").strip()
@@ -561,15 +561,16 @@ class GreyNoiseProvider(ThreatIntelProvider):
         }
 
     def _query_page(self, query: str, scroll: str = "") -> Mapping[str, Any]:
-        if not self.api_key():
-            raise ThreatIntelAuthError("GREYNOISE_API_KEY nao configurada")
         params = {"query": query, "size": "1000", "exclude_raw": "true"}
         if scroll:
             params["scroll"] = scroll
         base = os.getenv("GREYNOISE_GNQL_URL", "https://api.greynoise.io/v3/gnql").strip()
+        headers: dict[str, str] = {}
+        if self.api_key():
+            headers["key"] = self.api_key()
         result = self._request_json(
             f"{base}?{urllib.parse.urlencode(params)}",
-            headers={"key": self.api_key()},
+            headers=headers,
         )
         if not isinstance(result, Mapping):
             raise ThreatIntelError("Resposta GNQL nao e um objeto")

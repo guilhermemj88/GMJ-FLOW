@@ -337,32 +337,55 @@ class Tailer:
             self.inode = 0
         self.commit(force=True)
 
-    def read_lines(self) -> list[str]:
+    def read_lines(
+        self,
+        max_bytes: int = 4 * 1024 * 1024,
+        max_lines: int = 20000,
+    ) -> list[str]:
         if not self.path.exists():
             return []
+
         stat = self.path.stat()
         size = stat.st_size
         inode = getattr(stat, "st_ino", 0)
+
         if inode and self.inode and inode != self.inode:
             self.offset = 0
+            self.pending_offset = 0
+
         self.inode = inode
+
         if size < self.offset:
             self.offset = 0
+            self.pending_offset = 0
+
+        lines: list[str] = []
+        consumed = 0
+
         with self.path.open("rb") as handle:
             handle.seek(self.offset)
-            data = handle.read()
-        if not data:
+
+            while len(lines) < max_lines and consumed < max_bytes:
+                raw = handle.readline()
+
+                if not raw:
+                    break
+
+                # Nao avanca o checkpoint sobre uma linha ainda incompleta.
+                if not raw.endswith(b"\n"):
+                    break
+
+                consumed += len(raw)
+                lines.append(
+                    raw.decode("utf-8", errors="ignore").rstrip("\r\n")
+                )
+
+        if consumed <= 0:
+            self.pending_offset = self.offset
             return []
-        if not data.endswith(b"\n"):
-            last_newline = data.rfind(b"\n")
-            if last_newline < 0:
-                self.pending_offset = self.offset
-                return []
-            process = data[: last_newline + 1]
-        else:
-            process = data
-        self.pending_offset = self.offset + len(process)
-        return process.decode("utf-8", errors="ignore").splitlines()
+
+        self.pending_offset = self.offset + consumed
+        return lines
 
 
 def parse_json_line(line: str) -> list[dict[str, Any]]:
@@ -470,68 +493,105 @@ def cleanup_old_rotations(directory: Path, keep_days: int, active_file: Path | N
     return deleted
 
 
-def _remove_rotation_partial_copy(path: Path) -> None:
-    """Remove SOMENTE a copia parcial da tentativa de rotacao que falhou.
-
-    Nunca remove o CSV ativo, um .gz valido ou um arquivo com processed.json
-    valido: o argumento `path` e exatamente o arquivo recem-criado por copy2
-    nesta tentativa (variavel local `rotated`), identificado de forma unica.
-    """
-    try:
-        path.unlink()
-        print(f"pmacct rotation WARN: active CSV changed during copy; partial copy removed: {path}", flush=True)
-    except FileNotFoundError:
-        # A copia parcial ja nao existe (ex.: copy2 nao chegou a cria-la).
-        pass
-    except OSError as exc:
-        print(f"pmacct rotation ERROR: failed to remove partial copy {path}: {exc}", flush=True)
-
-
 def rotate_output_file(output_file: Path, tailer: Tailer, compress: bool, keep_days: int) -> dict[str, Any]:
     if not output_file.exists():
         raise RuntimeError("active pmacct CSV does not exist")
-    source_size = output_file.stat().st_size
+
+    source_stat = output_file.stat()
+    source_size = source_stat.st_size
+
     try:
         checkpoint = json.loads(tailer.state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError("pmacct rotation requires a valid parser checkpoint") from exc
+
     checkpoint_offset = safe_int(checkpoint.get("offset"), default=-1, minimum=-1)
+
     if checkpoint.get("file") != str(output_file) or checkpoint_offset < source_size or tailer.offset < source_size:
         raise RuntimeError("pmacct rotation blocked: active CSV ingestion is not complete")
+
+    # Never start a large copy if disk space is unsafe.
+    # Require at least 20 GiB free or 1.5x the active CSV size, whichever is larger.
+    disk = shutil.disk_usage(output_file.parent)
+    required_free = max(20 * 1024**3, int(source_size * 1.5))
+
+    if disk.free < required_free:
+        raise RuntimeError(
+            "pmacct rotation blocked: insufficient free disk space "
+            f"(free={disk.free}, required={required_free}, source={source_size})"
+        )
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     rotated = output_file.with_name(f"{output_file.stem}-{timestamp}{output_file.suffix}")
-    shutil.copy2(output_file, rotated)
-    if output_file.stat().st_size != source_size:
-        # A copia parcial desta tentativa e invalida: remover somente ela e
-        # abortar. Nao tocar no CSV ativo, em .gz validos ou em outros arquivos.
-        _remove_rotation_partial_copy(rotated)
-        raise RuntimeError("pmacct rotation blocked: active CSV changed while it was copied; partial copy removed")
-    with output_file.open("w", encoding="utf-8"):
-        pass
-    final_path = compress_file(rotated) if compress else rotated
-    write_status(
-        rotation_checkpoint_path(final_path),
-        {
-            "archive": str(final_path),
-            "source_file": str(output_file),
-            "file_size": source_size,
-            "offset": checkpoint_offset,
-            "lag_bytes": 0,
-            "checkpoint_valid": True,
-            "ingestion_complete": True,
-            "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        },
-    )
-    tailer.reset_for_new_file()
-    deleted = cleanup_old_rotations(output_file.parent, keep_days, active_file=output_file)
-    return {
-        "rotated_to": str(final_path),
-        "method": "copytruncate",
-        "compressed": compress,
-        "deleted_old_rotations": deleted,
-        "rotated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
+    partial = output_file.with_name(f".{output_file.stem}-{timestamp}{output_file.suffix}.partial")
 
+    # Never reuse a stale partial from an earlier failed attempt.
+    partial.unlink(missing_ok=True)
+
+    try:
+        shutil.copy2(output_file, partial)
+
+        after_copy_stat = output_file.stat()
+
+        # Validate size, inode and modification timestamp.
+        # If pmacct wrote anything while the copy was running, abort and
+        # immediately remove the partial copy.
+        if (
+            after_copy_stat.st_size != source_stat.st_size
+            or after_copy_stat.st_ino != source_stat.st_ino
+            or after_copy_stat.st_mtime_ns != source_stat.st_mtime_ns
+        ):
+            raise RuntimeError("pmacct rotation blocked: active CSV changed while it was copied")
+
+        # Only expose the archive after the copy has been validated.
+        os.replace(partial, rotated)
+
+        try:
+            with output_file.open("w", encoding="utf-8"):
+                pass
+        except Exception:
+            # Active file was not truncated successfully. Do not leave a
+            # duplicate archive that could accumulate on repeated retries.
+            rotated.unlink(missing_ok=True)
+            raise
+
+        final_path = compress_file(rotated) if compress else rotated
+
+        write_status(
+            rotation_checkpoint_path(final_path),
+            {
+                "archive": str(final_path),
+                "source_file": str(output_file),
+                "file_size": source_size,
+                "offset": checkpoint_offset,
+                "lag_bytes": 0,
+                "checkpoint_valid": True,
+                "ingestion_complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+        tailer.reset_for_new_file()
+
+        deleted = cleanup_old_rotations(
+            output_file.parent,
+            keep_days,
+            active_file=output_file,
+        )
+
+        return {
+            "rotated_to": str(final_path),
+            "method": "copytruncate-protected",
+            "compressed": compress,
+            "deleted_old_rotations": deleted,
+            "rotated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
+    except Exception:
+        # Critical protection: failed rotations must never leave multi-GB
+        # temporary copies consuming the spool filesystem.
+        partial.unlink(missing_ok=True)
+        raise
 
 def main():
     output_file = Path(os.getenv("PMACCT_OUTPUT_FILE", "/var/spool/pmacct/nfacctd.csv"))
@@ -551,6 +611,7 @@ def main():
     rotate_keep_days = env_int("GMJFLOW_PMACCT_ROTATE_KEEP_DAYS", 3)
     rotate_compress = env_bool("GMJFLOW_PMACCT_ROTATE_COMPRESS", True)
     rotate_check_seconds = env_int("GMJFLOW_PMACCT_ROTATE_CHECK_SECONDS", 30)
+    rotate_failure_cooldown_seconds = env_int("GMJFLOW_PMACCT_ROTATE_FAILURE_COOLDOWN_SECONDS", 900)
     start_from_end = env_bool("PMACCT_PARSER_START_FROM_END_IF_NO_STATE", True)
 
     fallback_fields = csv_fields_from_env()
@@ -567,6 +628,7 @@ def main():
     last_error = ""
     last_rotation: dict[str, Any] | None = None
     last_rotate_check = 0.0
+    last_rotate_failure = 0.0
     rows_read_last_cycle = 0
     rows_inserted_last_cycle = 0
     rows_skipped_last_cycle = 0
@@ -620,7 +682,11 @@ def main():
             )
 
         now_monotonic = time.monotonic()
-        if rotate_enabled and now_monotonic - last_rotate_check >= rotate_check_seconds:
+        if (
+            rotate_enabled
+            and now_monotonic - last_rotate_check >= rotate_check_seconds
+            and now_monotonic - last_rotate_failure >= rotate_failure_cooldown_seconds
+        ):
             last_rotate_check = now_monotonic
             try:
                 if output_file.exists():
@@ -665,39 +731,47 @@ def main():
                             print(f"pmacct spool rotated: {last_rotation}", flush=True)
             except Exception as exc:
                 last_error = str(exc)
-                print(f"pmacct rotation failed: {exc}", flush=True)
+                last_rotate_failure = time.monotonic()
+                print(
+                    f"pmacct rotation failed: {exc}; "
+                    f"retry cooldown={rotate_failure_cooldown_seconds}s",
+                    flush=True,
+                )
 
         file_size = output_file.stat().st_size if output_file.exists() else 0
         lag_bytes = max(0, file_size - tailer.offset)
-        write_status(
-            status_file,
-            {
-                "sensor": sensor,
-                "exporter_ip": exporter_ip,
-                "file": str(output_file),
-                "file_size_mb": round(file_size / 1024 / 1024, 3),
-                "rotate_enabled": rotate_enabled,
-                "rotate_max_mb": rotate_max_mb,
-                "rotate_keep_days": rotate_keep_days,
-                "rotate_compress": rotate_compress,
-                "offset": tailer.offset,
-                "inode": tailer.inode,
-                "lag_bytes": lag_bytes,
-                "last_line_ts": last_line_ts,
-                "last_insert_at": last_insert_at,
-                "last_flow_time": last_line_ts,
-                "rows_read_last_cycle": rows_read_last_cycle,
-                "rows_inserted_last_cycle": rows_inserted_last_cycle,
-                "rows_skipped_last_cycle": rows_skipped_last_cycle,
-                "rows_read_total": lines_read,
-                "rows_inserted_total": lines_inserted,
-                "rows_skipped_total": lines_skipped,
-                "parser_status": "ok" if not last_error else "warning",
-                "last_error": last_error,
-                "last_rotation": last_rotation,
-                "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            },
-        )
+        try:
+            write_status(
+                status_file,
+                {
+                    "sensor": sensor,
+                    "exporter_ip": exporter_ip,
+                    "file": str(output_file),
+                    "file_size_mb": round(file_size / 1024 / 1024, 3),
+                    "rotate_enabled": rotate_enabled,
+                    "rotate_max_mb": rotate_max_mb,
+                    "rotate_keep_days": rotate_keep_days,
+                    "rotate_compress": rotate_compress,
+                    "offset": tailer.offset,
+                    "inode": tailer.inode,
+                    "lag_bytes": lag_bytes,
+                    "last_line_ts": last_line_ts,
+                    "last_insert_at": last_insert_at,
+                    "last_flow_time": last_line_ts,
+                    "rows_read_last_cycle": rows_read_last_cycle,
+                    "rows_inserted_last_cycle": rows_inserted_last_cycle,
+                    "rows_skipped_last_cycle": rows_skipped_last_cycle,
+                    "rows_read_total": lines_read,
+                    "rows_inserted_total": lines_inserted,
+                    "rows_skipped_total": lines_skipped,
+                    "parser_status": "ok" if not last_error else "warning",
+                    "last_error": last_error,
+                    "last_rotation": last_rotation,
+                    "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                },
+            )
+        except Exception as exc:
+            print(f"pmacct status write failed: {exc}", flush=True)
 
         time.sleep(poll_seconds)
 
