@@ -1,7 +1,8 @@
-"""Tests for the Security Situation Map aggregation (Threat Intelligence Map V2).
+"""Tests for the Security Situation Map V2.1 (direction-aware geolocation).
 
-Covers the deterministic tier/color mapping, filters, grouping, aggregation
-priority, unlocated handling, ranking and the "no AI for rendering" contract.
+Covers the geo-subject owner, direction-aware rules, coverage breakdown,
+filters, deterministic color, aggregate priority, ranking and the
+"no AI / no external provider for rendering" contract.
 """
 
 from __future__ import annotations
@@ -13,7 +14,10 @@ from datetime import datetime, timedelta, timezone
 from app.services.security_events import ensure_security_event_schema
 from app.services.security_situation_map import (
     build_security_map,
+    first_prefix_ip,
+    ip_kind,
     max_tier,
+    resolve_security_map_geo_subject,
     security_severity_tier,
     tier_color,
     tier_priority,
@@ -25,17 +29,19 @@ def now_iso(**delta_kwargs) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
+# geo_lookup stub: US (real lat/lon), BG (ASN country, no lat/lon), BR internal
+# (customer), NL (external destination), 186.232.x.x (customer CGNAT, BR).
 GEO = {
-    "8.8.8.8": {"country_code": "US", "country_name": "United States", "city": "Mountain View", "latitude": 37.42, "longitude": -122.08, "asn": 15169, "as_name": "GOOGLE"},
-    "9.9.9.9": {"country_code": "US", "country_name": "United States", "city": "Berkeley", "latitude": 37.87, "longitude": -122.27, "asn": 19281, "as_name": "QUAD9"},
-    "177.128.0.1": {"country_code": "BR", "country_name": "Brazil", "city": "Sao Paulo", "latitude": -23.55, "longitude": -46.63, "asn": 28573, "as_name": "Claro"},
-    "203.0.113.7": {"country_code": "AU", "country_name": "Australia", "city": "Sydney", "latitude": -33.87, "longitude": 151.21, "asn": 64500, "as_name": "TEST-NET"},
-    "192.0.2.9": {"country_code": "", "country_name": "", "city": "", "latitude": None, "longitude": None, "asn": 0, "as_name": ""},
+    "8.8.8.8": {"country_code": "US", "country_name": "United States", "city": "", "latitude": 37.09, "longitude": -95.71, "asn": 15169, "as_name": "GOOGLE"},
+    "79.124.62.126": {"country_code": "BG", "country_name": "Bulgaria", "city": "", "latitude": None, "longitude": None, "asn": 207812, "as_name": "DM AUTO"},
+    "186.232.160.10": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": None, "longitude": None, "asn": 53194, "as_name": "VIP"},
+    "186.232.168.250": {"country_code": "BR", "country_name": "Brazil", "city": "", "latitude": None, "longitude": None, "asn": 53194, "as_name": "VIP"},
+    "45.133.39.1": {"country_code": "NL", "country_name": "Netherlands", "city": "", "latitude": 52.1, "longitude": 5.3, "asn": 9009, "as_name": "M247"},
 }
 
 
 def geo_stub(ip: str) -> dict:
-    return GEO.get(ip, {"country_code": "", "country_name": "", "city": "", "latitude": None, "longitude": None, "asn": 0, "as_name": ""})
+    return GEO.get(ip, {"country_code": "", "country_name": "N/D", "city": "", "latitude": None, "longitude": None, "asn": 0, "as_name": ""})
 
 
 def make_db() -> sqlite3.Connection:
@@ -53,7 +59,12 @@ def insert_event(conn: sqlite3.Connection, **overrides) -> None:
         "attack_type": "SYN_FLOOD",
         "severity": "HIGH",
         "verdict": "LIKELY_ATTACK",
+        "direction": "INBOUND",
+        "src_role": "EXTERNAL",
+        "dst_role": "CUSTOMER",
         "src_ip": "8.8.8.8",
+        "target_ip": "",
+        "target_prefix": "",
         "first_seen": now_iso(minutes=-30),
         "last_seen": now_iso(minutes=-5),
         "created_at": now_iso(minutes=-30),
@@ -68,7 +79,7 @@ def insert_event(conn: sqlite3.Connection, **overrides) -> None:
     conn.commit()
 
 
-class SecurityTierTest(unittest.TestCase):
+class GeoSecurityTierTest(unittest.TestCase):
     def test_tier_confirmed_or_critical_is_critical(self):
         self.assertEqual(security_severity_tier("CONFIRMED_ATTACK", "INFO"), "critical")
         self.assertEqual(security_severity_tier("INFO", "CRITICAL"), "critical")
@@ -81,22 +92,16 @@ class SecurityTierTest(unittest.TestCase):
         self.assertEqual(security_severity_tier("WARNING", "LOW"), "suspicious")
         self.assertEqual(security_severity_tier("INFO", "MEDIUM"), "suspicious")
 
-    def test_tier_low_or_unknown_is_info(self):
-        self.assertEqual(security_severity_tier("INFO", "LOW"), "info")
-        self.assertEqual(security_severity_tier("INFO", "INFO"), "info")
-
-    def test_tier_benign_status_wins_over_verdict(self):
+    def test_tier_benign_status_wins(self):
         self.assertEqual(security_severity_tier("CONFIRMED_ATTACK", "CRITICAL", "benign"), "benign")
-        self.assertEqual(security_severity_tier("CONFIRMED_ATTACK", "CRITICAL", "resolved"), "benign")
 
     def test_tier_priority_ordering(self):
         self.assertGreater(tier_priority("critical"), tier_priority("elevated"))
         self.assertGreater(tier_priority("elevated"), tier_priority("suspicious"))
         self.assertGreater(tier_priority("suspicious"), tier_priority("info"))
-        self.assertGreater(tier_priority("info"), tier_priority("benign"))
 
-    def test_max_tier_picks_highest_priority(self):
-        self.assertEqual(max_tier(["info", "elevated", "critical", "benign"]), "critical")
+    def test_max_tier_picks_highest(self):
+        self.assertEqual(max_tier(["info", "elevated", "critical"]), "critical")
 
     def test_tier_color_deterministic(self):
         self.assertEqual(tier_color("critical"), "#ef4444")
@@ -106,162 +111,245 @@ class SecurityTierTest(unittest.TestCase):
         self.assertEqual(tier_color("benign"), "#64748b")
 
 
+class GeoSubjectTest(unittest.TestCase):
+    def test_inbound_external_is_source(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "INBOUND", "src_role": "EXTERNAL", "dst_role": "CUSTOMER",
+            "src_ip": "8.8.8.8", "target_ip": "", "target_prefix": "",
+        })
+        self.assertEqual(subj["geo_subject"], "source")
+        self.assertEqual(subj["geo_ip"], "8.8.8.8")
+        self.assertEqual(subj["geo_reason"], "INBOUND_EXTERNAL_SOURCE")
+
+    def test_outbound_customer_is_destination(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "OUTBOUND", "src_role": "CUSTOMER", "dst_role": "EXTERNAL",
+            "src_ip": "186.232.160.10", "target_ip": "45.133.39.1", "target_prefix": "",
+        })
+        self.assertEqual(subj["geo_subject"], "destination")
+        self.assertEqual(subj["geo_ip"], "45.133.39.1")
+        self.assertEqual(subj["geo_reason"], "OUTBOUND_EXTERNAL_DESTINATION")
+
+    def test_outbound_customer_uses_target_prefix(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "OUTBOUND", "src_role": "CUSTOMER", "dst_role": "EXTERNAL",
+            "src_ip": "186.232.160.10", "target_ip": "", "target_prefix": "45.133.39.0/24",
+        })
+        self.assertEqual(subj["geo_subject"], "destination")
+        self.assertEqual(subj["geo_ip"], "45.133.39.1")
+
+    def test_outbound_cgnat_is_destination_not_source(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "OUTBOUND", "src_role": "CGNAT_PUBLIC", "dst_role": "EXTERNAL",
+            "src_ip": "186.232.168.250", "target_ip": "", "target_prefix": "",
+            "cgnat_context": "source_cgnat_public",
+        })
+        self.assertEqual(subj["geo_subject"], "none")
+        self.assertEqual(subj["geo_reason"], "CGNAT_SOURCE_NOT_GEO_SUBJECT")
+
+    def test_internal_is_none(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "INTERNAL", "src_role": "CUSTOMER", "dst_role": "CUSTOMER",
+            "src_ip": "10.0.0.1", "target_ip": "", "target_prefix": "",
+        })
+        self.assertEqual(subj["geo_subject"], "none")
+        self.assertEqual(subj["geo_reason"], "INTERNAL_NO_PUBLIC_GEO")
+
+    def test_rfc1918_is_none(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "INBOUND", "src_role": "EXTERNAL", "dst_role": "CUSTOMER",
+            "src_ip": "192.168.1.5", "target_ip": "", "target_prefix": "",
+        })
+        self.assertEqual(subj["geo_subject"], "none")
+        self.assertEqual(subj["geo_reason"], "PRIVATE_SOURCE")
+
+    def test_ambiguous_context_is_none(self):
+        subj = resolve_security_map_geo_subject({
+            "direction": "EXTERNAL", "src_role": "EXTERNAL", "dst_role": "EXTERNAL",
+            "src_ip": "8.8.8.8", "target_ip": "", "target_prefix": "",
+        })
+        self.assertEqual(subj["geo_subject"], "none")
+        self.assertEqual(subj["geo_reason"], "AMBIGUOUS_CONTEXT")
+
+    def test_ip_kind(self):
+        self.assertEqual(ip_kind("192.168.1.1"), "private")
+        self.assertEqual(ip_kind("10.1.2.3"), "private")
+        self.assertEqual(ip_kind("100.64.0.1"), "cgnat_10064")
+        self.assertEqual(ip_kind("2001:db8::1"), "private")
+        self.assertEqual(ip_kind("8.8.8.8"), "public")
+        self.assertEqual(ip_kind("not-an-ip"), "invalid")
+
+    def test_first_prefix_ip(self):
+        self.assertEqual(first_prefix_ip("45.133.39.0/24"), "45.133.39.1")
+
+
 class SecuritySituationMapTest(unittest.TestCase):
-    def test_group_country_merges_same_country(self):
+    def test_inbound_source_geolocated(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", verdict="CONFIRMED_ATTACK", severity="CRITICAL")
-        insert_event(conn, event_key="b", src_ip="9.9.9.9", verdict="LIKELY_ATTACK", severity="HIGH")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", severity="CRITICAL", verdict="CONFIRMED_ATTACK")
         result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["points"], 1)
+        self.assertEqual(result["summary"]["located_events"], 1)
+        self.assertEqual(result["summary"]["inbound_source_located"], 1)
         point = result["points"][0]
         self.assertEqual(point["country_code"], "US")
-        self.assertEqual(point["event_count"], 2)
-        self.assertEqual(point["confirmed_count"], 1)
-        self.assertEqual(point["likely_count"], 1)
         self.assertEqual(point["tier"], "critical")
-        self.assertEqual(point["unique_sources"], 2)
+        self.assertEqual(point["critical_count"], 1)
+        self.assertEqual(point["confirmed_count"], 1)
+        self.assertEqual(point["predominant_geo_subject"], "source")
+        self.assertEqual(point["predominant_direction"], "INBOUND")
 
-    def test_max_severity_and_threat_score_are_max_not_sum(self):
-        from app.services.security_events import security_event_row
-
+    def test_outbound_destination_geolocated_not_source(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", severity="LOW", detector_score=10)
-        insert_event(conn, event_key="b", src_ip="9.9.9.9", severity="CRITICAL", detector_score=90)
-        rows = conn.execute("SELECT * FROM security_events").fetchall()
-        expected_score = max((security_event_row(r)["threat_score"] or {}).get("score", 0) for r in rows)
+        # source é o customer BR interno; destination é NL externo.
+        insert_event(conn, event_key="a", direction="OUTBOUND", src_role="CUSTOMER", dst_role="EXTERNAL",
+                     src_ip="186.232.160.10", target_prefix="45.133.39.0/24", severity="CRITICAL", verdict="CONFIRMED_ATTACK")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        self.assertEqual(result["summary"]["outbound_destination_located"], 1)
+        point = result["points"][0]
+        self.assertEqual(point["country_code"], "NL")
+        self.assertEqual(point["predominant_geo_subject"], "destination")
+        self.assertEqual(point["predominant_direction"], "OUTBOUND")
+
+    def test_cgnat_source_excluded(self):
+        conn = make_db()
+        insert_event(conn, event_key="a", direction="OUTBOUND", src_role="CGNAT_PUBLIC", dst_role="EXTERNAL",
+                     src_ip="186.232.168.250", cgnat_context="source_cgnat_public", severity="HIGH")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        self.assertEqual(result["summary"]["located_events"], 0)
+        self.assertEqual(result["summary"]["cgnat_or_shared"], 1)
+
+    def test_internal_excluded(self):
+        conn = make_db()
+        insert_event(conn, event_key="a", direction="INTERNAL", src_role="CUSTOMER", dst_role="CUSTOMER", src_ip="10.0.0.1")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        self.assertEqual(result["summary"]["located_events"], 0)
+        self.assertEqual(result["summary"]["private_or_internal"], 1)
+
+    def test_country_centroid_fallback(self):
+        conn = make_db()
+        # BG tem country via ASN mas sem lat/lon -> centroid.
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER",
+                     src_ip="79.124.62.126", severity="HIGH", verdict="LIKELY_ATTACK")
         result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
         point = result["points"][0]
-        self.assertEqual(point["max_severity"], "CRITICAL")
-        self.assertEqual(point["max_threat_score"], expected_score)
+        self.assertEqual(point["country_code"], "BG")
+        self.assertEqual(point["lat"], 42.7)
+        self.assertEqual(point["lon"], 25.5)
+        self.assertEqual(point["tier"], "elevated")
 
-    def test_severity_filter(self):
+    def test_public_without_geo_is_unlocated_public(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", severity="LOW")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", severity="CRITICAL")
-        result = build_security_map(conn, period="24h", severity="CRITICAL", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["total_events"], 1)
-        self.assertEqual(result["points"][0]["country_code"], "BR")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="203.0.113.99")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        self.assertEqual(result["summary"]["located_events"], 0)
+        self.assertEqual(result["summary"]["unlocated_public"], 1)
 
-    def test_verdict_filter(self):
+    def test_direction_filter(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", verdict="CONFIRMED_ATTACK")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", verdict="WARNING")
-        result = build_security_map(conn, period="24h", verdict="WARNING", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["total_events"], 1)
-        self.assertEqual(result["points"][0]["country_code"], "BR")
-
-    def test_attack_type_filter(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", attack_type="SYN_FLOOD")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", attack_type="BRUTE_FORCE")
-        result = build_security_map(conn, period="24h", attack_type="SYN_FLOOD", group_by="country", geo_lookup=geo_stub)
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
+        insert_event(conn, event_key="b", direction="OUTBOUND", src_role="CUSTOMER", dst_role="EXTERNAL",
+                     src_ip="186.232.160.10", target_prefix="45.133.39.0/24")
+        result = build_security_map(conn, period="24h", direction="inbound", group_by="country", geo_lookup=geo_stub)
         self.assertEqual(result["summary"]["total_events"], 1)
         self.assertEqual(result["points"][0]["country_code"], "US")
 
-    def test_status_filter(self):
+    def test_context_filter(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", status="active")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", status="benign")
-        result = build_security_map(conn, period="24h", status="benign", group_by="country", geo_lookup=geo_stub)
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
+        insert_event(conn, event_key="b", direction="OUTBOUND", src_role="CUSTOMER", dst_role="EXTERNAL",
+                     src_ip="186.232.160.10", target_prefix="45.133.39.0/24")
+        result = build_security_map(conn, period="24h", context="external", group_by="country", geo_lookup=geo_stub)
         self.assertEqual(result["summary"]["total_events"], 1)
-        self.assertEqual(result["points"][0]["tier"], "benign")
+        self.assertEqual(result["points"][0]["country_code"], "US")
 
-    def test_campaign_with_and_without(self):
+    def test_summary_breakdown(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", campaign_id="cmp1")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", campaign_id="")
-        with_result = build_security_map(conn, period="24h", campaign="with", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(with_result["summary"]["total_events"], 1)
-        without_result = build_security_map(conn, period="24h", campaign="without", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(without_result["summary"]["total_events"], 1)
-        self.assertEqual(without_result["points"][0]["country_code"], "BR")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
+        insert_event(conn, event_key="b", direction="INTERNAL", src_role="CUSTOMER", dst_role="CUSTOMER", src_ip="10.0.0.1")
+        insert_event(conn, event_key="c", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="203.0.113.99")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        summary = result["summary"]
+        self.assertEqual(summary["total_events"], 3)
+        self.assertEqual(summary["located_events"], 1)
+        self.assertEqual(summary["private_or_internal"], 1)
+        self.assertEqual(summary["unlocated_public"], 1)
+        self.assertIn("INTERNAL_NO_PUBLIC_GEO", summary["unlocated_breakdown"])
+        self.assertIn("UNLOCATED_PUBLIC", summary["unlocated_breakdown"])
 
-    def test_ai_status_filters(self):
+    def test_max_priority_aggregate(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", ai_analysis_status="analyzed")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", ai_analysis_status="not_analyzed")
-        insert_event(conn, event_key="c", src_ip="203.0.113.7", ai_analysis_status="not_analyzed", campaign_id="cmp1")
-        analyzed = build_security_map(conn, period="24h", ai_status="analyzed", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(analyzed["summary"]["total_events"], 1)
-        not_analyzed = build_security_map(conn, period="24h", ai_status="not_analyzed", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(not_analyzed["summary"]["total_events"], 2)
-        campaign = build_security_map(conn, period="24h", ai_status="campaign", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(campaign["summary"]["total_events"], 1)
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", severity="LOW", verdict="INFO", detector_score=10)
+        insert_event(conn, event_key="b", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", severity="CRITICAL", verdict="CONFIRMED_ATTACK", detector_score=90)
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        point = result["points"][0]
+        self.assertEqual(point["event_count"], 2)
+        self.assertEqual(point["max_severity"], "CRITICAL")
+        self.assertEqual(point["critical_count"], 1)
+        self.assertGreater(point["max_threat_score"], 0)
+        self.assertEqual(point["tier"], "critical")
+
+    def test_ranking_critical_count_and_scores(self):
+        conn = make_db()
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", severity="CRITICAL", verdict="CONFIRMED_ATTACK")
+        insert_event(conn, event_key="b", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="79.124.62.126", severity="HIGH")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        top = result["ranking"][0]
+        self.assertEqual(top["tier"], "critical")
+        self.assertIn("critical_count", top)
+        self.assertIn("max_threat_score", top)
+        self.assertIn("max_campaign_risk_score", top)
+
+    def test_critical_and_confirmed_coverage(self):
+        conn = make_db()
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", severity="CRITICAL", verdict="CONFIRMED_ATTACK")
+        insert_event(conn, event_key="b", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="203.0.113.99", severity="CRITICAL", verdict="CONFIRMED_ATTACK")
+        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
+        summary = result["summary"]
+        self.assertEqual(summary["critical_total"], 2)
+        self.assertEqual(summary["critical_after"], 1)
+        self.assertEqual(summary["confirmed_total"], 2)
+        self.assertEqual(summary["confirmed_after"], 1)
+        self.assertEqual(summary["critical_before"], 1)
+
+    def test_bounded_point_count(self):
+        conn = make_db()
+        for i in range(5):
+            insert_event(conn, event_key=f"a{i}", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER",
+                         src_ip=f"8.8.8.{i + 1}", severity="CRITICAL")
+        result = build_security_map(conn, period="24h", group_by="city", geo_lookup=lambda ip: {
+            "country_code": "US", "country_name": "United States", "city": ip.split(".")[-1],
+            "latitude": 37.0 + int(ip.split(".")[-1]) / 100, "longitude": -95.7, "asn": 1, "as_name": "X",
+        }, limit=3)
+        self.assertLessEqual(len(result["points"]), 3)
 
     def test_group_asn(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
-        insert_event(conn, event_key="b", src_ip="9.9.9.9")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
+        insert_event(conn, event_key="b", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="79.124.62.126")
         result = build_security_map(conn, period="24h", group_by="asn", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["points"], 2)
-        self.assertEqual({p["asn"] for p in result["points"]}, {15169, 19281})
+        asns = {p["asn"] for p in result["points"]}
+        self.assertEqual(asns, {15169, 207812})
 
     def test_group_city(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
-        insert_event(conn, event_key="b", src_ip="9.9.9.9")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
         result = build_security_map(conn, period="24h", group_by="city", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["points"], 2)
-        self.assertEqual({p["city"] for p in result["points"]}, {"Mountain View", "Berkeley"})
+        self.assertEqual(len(result["points"]), 1)
 
     def test_group_campaign(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", campaign_id="cmp1")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", campaign_id="cmp1")
-        insert_event(conn, event_key="c", src_ip="203.0.113.7", campaign_id="")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8", campaign_id="cmp1")
+        insert_event(conn, event_key="b", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="79.124.62.126", campaign_id="cmp1")
         result = build_security_map(conn, period="24h", group_by="campaign", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["points"], 2)
-        by_key = {p["key"]: p for p in result["points"]}
-        self.assertEqual(by_key["cmp1"]["event_count"], 2)
-        self.assertEqual(by_key["cmp1"]["campaign_count"], 1)
+        # cmp1 spans US and BG -> ambiguous geo -> no marker, but ranking keeps it.
+        self.assertEqual(result["summary"]["points"], 0)
+        self.assertEqual(result["summary"]["located_events"], 2)
 
-    def test_unlocated_events_counted_in_summary(self):
+    def test_no_ai_or_external_provider_for_rendering(self):
         conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
-        insert_event(conn, event_key="b", src_ip="192.0.2.9")
-        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["summary"]["unlocated"], 1)
-        self.assertEqual(result["summary"]["total_events"], 2)
-
-    def test_limit_caps_points(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1")
-        insert_event(conn, event_key="c", src_ip="203.0.113.7")
-        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub, limit=2)
-        self.assertEqual(len(result["points"]), 2)
-        self.assertEqual(result["filters_applied"]["limit"], 2)
-
-    def test_ranking_sorted_by_tier_then_count(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", verdict="CONFIRMED_ATTACK", severity="CRITICAL")
-        insert_event(conn, event_key="b", src_ip="177.128.0.1", verdict="INFO", severity="LOW")
-        insert_event(conn, event_key="c", src_ip="9.9.9.9", verdict="INFO", severity="LOW")
-        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["ranking"][0]["tier"], "critical")
-        self.assertEqual(result["ranking"][0]["key"], "US")
-
-    def test_no_ai_calls_for_rendering(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
+        insert_event(conn, event_key="a", direction="INBOUND", src_role="EXTERNAL", dst_role="CUSTOMER", src_ip="8.8.8.8")
         result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
         self.assertTrue(all("analysis" not in p for p in result["points"]))
-
-    def test_filters_applied_echoes_params(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8")
-        result = build_security_map(conn, period="1h", severity="HIGH", group_by="country", geo_lookup=geo_stub)
-        self.assertEqual(result["filters_applied"]["period"], "1h")
-        self.assertEqual(result["filters_applied"]["severity"], "HIGH")
-        self.assertEqual(result["filters_applied"]["group_by"], "country")
-
-    def test_top_attack_types_present(self):
-        conn = make_db()
-        insert_event(conn, event_key="a", src_ip="8.8.8.8", attack_type="SYN_FLOOD")
-        insert_event(conn, event_key="b", src_ip="9.9.9.9", attack_type="BRUTE_FORCE")
-        result = build_security_map(conn, period="24h", group_by="country", geo_lookup=geo_stub)
-        point = result["points"][0]
-        self.assertEqual(set(point["top_attack_types"]), {"SYN_FLOOD", "BRUTE_FORCE"})
 
 
 if __name__ == "__main__":

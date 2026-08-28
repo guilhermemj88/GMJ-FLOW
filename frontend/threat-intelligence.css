@@ -217,6 +217,29 @@
   border: 1px solid var(--tier-color, #818cf8);
 }
 
+.threat-map-coverage {
+  font-size: .74rem;
+  color: #475569;
+}
+
+.threat-map-coverage__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 4px;
+}
+
+.threat-map-coverage__stats strong {
+  color: #172033;
+}
+
+.threat-map-coverage__breakdown {
+  color: #94a3b8;
+  font-size: .68rem;
+  border-bottom: 1px dotted #94a3b8;
+  cursor: help;
+}
+
 .threat-score {
   font-variant-numeric: tabular-nums;
   font-weight: 750;

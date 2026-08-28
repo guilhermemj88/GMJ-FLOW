@@ -239,32 +239,49 @@
     const location = [point.city, point.country || point.country_code].filter(Boolean).join(', ') || point.country_code || 'Localização desconhecida';
     const attackTypes = (Array.isArray(point.top_attack_types) ? point.top_attack_types : []).map(type =>
       `<span class="threat-map-popup__chip">${esc(type)}</span>`).join('') || '<span class="subtle">Sem informação</span>';
+    const subject = point.predominant_geo_subject === 'destination' ? 'Destino externo observado' : point.predominant_geo_subject === 'source' ? 'Origem observada' : '-';
+    const directionLabel = ({ INBOUND: 'Inbound', OUTBOUND: 'Outbound', INTERNAL: 'Internal' })[point.predominant_direction] || point.predominant_direction || '-';
+    const analysis = [
+      point.analyzed_count ? `${number(point.analyzed_count)} analisado(s)` : '',
+      point.not_analyzed_count ? `${number(point.not_analyzed_count)} não analisado(s)` : ''
+    ].filter(Boolean).join(' · ') || '-';
+    const campaignInfo = point.campaign_count ? `${number(point.campaign_count)}${point.top_campaign ? ` · principal: ${esc(point.top_campaign)}` : ''}` : '-';
     return `<div class="threat-map-popup">
       <div class="threat-map-popup__title">${esc(point.label || point.key || location)}</div>
       <div class="threat-map-popup__badge"><span class="threat-map-tier" style="--tier-color:${esc(point.color || securityMapSeverityStyle(point.tier))}">${esc(securityTierLabel(point.tier))}</span></div>
       <dl>
-        <dt>Localização</dt><dd>${esc(location)}</dd>
-        <dt>Eventos detectados</dt><dd><strong>${number(point.event_count)}</strong></dd>
+        <dt>Geografia</dt><dd>${esc(subject)}</dd>
+        <dt>Direção</dt><dd>${esc(directionLabel)}</dd>
+        <dt>Eventos</dt><dd><strong>${number(point.event_count)}</strong> (${number(point.critical_count)} crítico${point.critical_count === 1 ? '' : 's'} · ${number(point.high_count)} alto · ${number(point.warning_count)} alerta)</dd>
         <dt>Confirmados / Prováveis</dt><dd>${number(point.confirmed_count)} / ${number(point.likely_count)}</dd>
-        <dt>Severidade máxima</dt><dd>${esc(point.max_severity || '-')}</dd>
         <dt>Threat Score máx.</dt><dd>${number(point.max_threat_score)}</dd>
-        <dt>Campanhas</dt><dd>${number(point.campaign_count)}</dd>
-        <dt>Última ocorrência</dt><dd>${dateTime(point.latest_seen)}</dd>
+        <dt>Campaign Risk máx.</dt><dd>${number(point.max_campaign_risk_score)}</dd>
+        <dt>Campanhas</dt><dd>${esc(campaignInfo)}</dd>
+        <dt>Análise</dt><dd>${esc(analysis)}</dd>
+        <dt>Primeira / última ocorrência</dt><dd>${dateTime(point.first_seen)} / ${dateTime(point.latest_seen)}</dd>
       </dl>
       <div class="threat-map-popup__section"><strong>Tipos de ataque</strong><div>${attackTypes}</div></div>
     </div>`;
   }
 
   function securityMapNodes(points) {
-    return (points || []).map((point, index) => ({
-      id: `sec-${index}-${point.key || point.label}`,
-      label: point.label || point.key,
-      lat: point.lat,
-      lon: point.lon,
-      value: Number(point.event_count || 0),
-      color: point.color || securityMapSeverityStyle(point.tier),
-      popup_html: securityMapPopup(point)
-    })).filter(node => node.lat !== null && node.lon !== null && node.lat !== undefined && node.lon !== undefined);
+    return (points || []).map((point, index) => {
+      const criticalPart = point.critical_count ? `${number(point.critical_count)} crítico${point.critical_count === 1 ? '' : 's'}` : '';
+      const threatPart = point.max_threat_score ? `Threat ${number(point.max_threat_score)}` : '';
+      const riskPart = point.max_campaign_risk_score > 0 ? `Risk ${number(point.max_campaign_risk_score)}` : '';
+      const rankingSub = [criticalPart, threatPart, riskPart].filter(Boolean).join(' · ');
+      return {
+        id: `sec-${index}-${point.key || point.label}`,
+        label: point.label || point.key,
+        lat: point.lat,
+        lon: point.lon,
+        value: Number(point.event_count || 0),
+        color: point.color || securityMapSeverityStyle(point.tier),
+        popup_html: securityMapPopup(point),
+        ranking_sub: rankingSub,
+        ranking_value: `${number(point.event_count)} evento${point.event_count === 1 ? '' : 's'}`
+      };
+    }).filter(node => node.lat !== null && node.lon !== null && node.lat !== undefined && node.lon !== undefined);
   }
 
   function classificationColor(value) {
@@ -1188,13 +1205,31 @@
     setPanelStatus('threatMapStatus', `Mapa atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
   }
 
+  function renderSecurityCoverage(summary) {
+    const element = document.getElementById('secMapCoverage');
+    if (!element) return;
+    const s = summary || {};
+    element.innerHTML = `<div class="threat-map-coverage__stats">
+      <span><strong>Eventos:</strong> ${number(s.total_events)}</span>
+      <span><strong>No mapa:</strong> ${number(s.located_events)} (${number(s.located_percent, 1)}%)</span>
+      <span><strong>Internos/CGNAT:</strong> ${number(s.private_or_internal)} + ${number(s.cgnat_or_shared)}</span>
+      <span><strong>GeoIP ausente:</strong> ${number(s.unlocated_public)} + ${number(s.missing_geo)}</span>
+      <span><strong>Ambíguos:</strong> ${number(s.ambiguous_context)}</span>
+    </div>
+    <div class="threat-map-coverage__breakdown" title="${esc(JSON.stringify(s.unlocated_breakdown || {}))}">
+      ${number(s.total_events - s.located_events)} evento(s) não exibidos no mapa — passe o mouse para ver o detalhamento.
+    </div>`;
+  }
+
   async function loadSecurityMap() {
     const groupBy = document.getElementById('secMapGroupFilter').value || 'country';
     const query = new URLSearchParams({
       group_by: groupBy,
       period: document.getElementById('secMapPeriodFilter').value || '24h',
       campaign: document.getElementById('secMapCampaignFilter').value || 'all',
-      ai_status: document.getElementById('secMapAiFilter').value || 'all'
+      ai_status: document.getElementById('secMapAiFilter').value || 'all',
+      direction: document.getElementById('secMapDirectionFilter').value || 'all',
+      context: document.getElementById('secMapContextFilter').value || 'all'
     });
     const severity = document.getElementById('secMapSeverityFilter').value;
     const verdict = document.getElementById('secMapVerdictFilter').value;
@@ -1205,7 +1240,7 @@
     if (attackType) query.set('attack_type', attackType);
     if (status) query.set('status', status);
     const map = ensureMap();
-    setMapMeta('Ameaças detectadas', 'Eventos e campanhas agregados por localização, ASN ou campanha · determinístico', 'Situação de segurança', 'eventos');
+    setMapMeta('Ameaças detectadas', 'Origem (inbound) e destino externo (outbound) · determinístico, sem IA', 'Situação de segurança', 'eventos');
     map?.setLoading('Carregando situação de segurança...');
     const payload = await apiRequest(`/api/threat-intelligence/security-map?${query}`);
     map?.setData(
@@ -1213,7 +1248,8 @@
       { metric: 'flows', mode: 'flows', visualization: 'points', groupBy, fit: true }
     );
     const summary = payload.summary || {};
-    setPanelStatus('threatMapStatus', `${number(summary.total_events)} evento(s) · ${number(summary.points)} ponto(s) · ${number(summary.unlocated || 0)} sem geolocalização · atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
+    renderSecurityCoverage(summary);
+    setPanelStatus('threatMapStatus', `${number(summary.total_events)} evento(s) · ${number(summary.located_events)} no mapa (${number(summary.located_percent, 1)}%) · ${number(summary.critical_after)} de ${number(summary.critical_total)} crítico(s) localizados · atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`);
   }
 
   function setMapLayer(layer) {
@@ -1241,8 +1277,10 @@
     const verdict = document.getElementById('secMapVerdictFilter');
     const status = document.getElementById('secMapStatusFilter');
     const ai = document.getElementById('secMapAiFilter');
+    const direction = document.getElementById('secMapDirectionFilter');
+    const context = document.getElementById('secMapContextFilter');
     if (preset === 'recent') {
-      period.value = '1h'; severity.value = ''; verdict.value = ''; status.value = ''; ai.value = 'all';
+      period.value = '30m'; severity.value = ''; verdict.value = ''; status.value = ''; ai.value = 'all';
     } else if (preset === 'critical') {
       period.value = '24h'; severity.value = 'CRITICAL'; verdict.value = ''; status.value = ''; ai.value = 'all';
     } else if (preset === 'confirmed') {
@@ -1252,6 +1290,8 @@
     } else {
       period.value = '24h'; severity.value = ''; verdict.value = ''; status.value = ''; ai.value = 'all';
     }
+    if (direction) direction.value = 'all';
+    if (context) context.value = 'all';
     return loadSecurityMap();
   }
 
