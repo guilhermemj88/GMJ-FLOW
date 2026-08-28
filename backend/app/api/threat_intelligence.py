@@ -155,6 +155,7 @@ def security_situation_map(
     ai_status: str = Query("all", pattern="^(analyzed|not_analyzed|campaign|all)$"),
     direction: str = Query("all", pattern="^(all|inbound|outbound|internal|external)$"),
     context: str = Query("all", pattern="^(all|external|customer|cgnat|infrastructure)$"),
+    target_scope: str = Query("all", pattern="^(all|single|prefix|multi)$"),
     group_by: str = Query("country", pattern="^(country|city|asn|campaign)$"),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
@@ -172,6 +173,7 @@ def security_situation_map(
             ai_status=ai_status,
             direction=direction,
             context=context,
+            target_scope=target_scope,
             group_by=group_by,
             limit=limit,
         )

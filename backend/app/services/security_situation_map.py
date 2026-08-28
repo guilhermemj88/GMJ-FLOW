@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 from typing import Any, Mapping, Sequence
 
-from app.services.security_events import ensure_security_event_schema, security_event_row
+from app.services.security_events import ensure_security_event_schema, resolve_event_target, security_event_row
 from app.services.threat_intelligence import clean_text
 
 
@@ -225,6 +225,43 @@ _MISSING_GEO_REASONS = {"MISSING_PUBLIC_GEO"}
 # Reasons assigned to events that WERE successfully placed on the map.
 _LOCATED_REASONS = {"INBOUND_EXTERNAL_SOURCE", "OUTBOUND_EXTERNAL_DESTINATION"}
 
+# OUTBOUND multi-target events fall back to their persisted top destinations.
+_OUTBOUND_NO_TARGET_REASONS = {"MISSING_PUBLIC_GEO", "CGNAT_SOURCE_NOT_GEO_SUBJECT"}
+
+# How many real destinations of a multi-target OUTBOUND event to represent.
+MULTI_TARGET_TOP_N = 3
+
+
+def multi_target_destinations(event: Mapping[str, Any], top_n: int = MULTI_TARGET_TOP_N) -> list[dict[str, Any]]:
+    """Extract the top-N real, public destinations of a multi-target event.
+
+    `investigation.top_destinations` is already ranked by packet volume. Only
+    public IPs are kept; private/CGNAT/test addresses are skipped. The result
+    is bounded and never fabricates a destination.
+    """
+    investigation = event.get("investigation")
+    if not isinstance(investigation, Mapping):
+        return []
+    tops = investigation.get("top_destinations") or []
+    if not isinstance(tops, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in tops:
+        if len(result) >= max(0, int(top_n)):
+            break
+        if not isinstance(item, Mapping):
+            continue
+        dst_ip = clean_text(item.get("destination_ip"))
+        if ip_kind(dst_ip) != "public":
+            continue
+        result.append({
+            "dst_ip": dst_ip,
+            "share": float(item.get("share") or 0.0),
+            "packets": safe_int(item.get("packets")),
+            "flows": safe_int(item.get("flows")),
+        })
+    return result
+
 
 def _campaign_risk_column(conn: Any) -> bool:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(threat_campaigns)").fetchall()}
@@ -243,6 +280,7 @@ def build_security_map(
     ai_status: str = "all",
     direction: str = "all",
     context: str = "all",
+    target_scope: str = "all",
     group_by: str = "country",
     limit: int = 200,
     geo_lookup: Any = None,
@@ -341,6 +379,10 @@ def build_security_map(
     confirmed_total = 0
     confirmed_before = 0
     confirmed_after = 0
+    multi_target_events = 0
+    multi_target_destinations_considered = 0
+    multi_target_destinations_located = 0
+    multi_target_events_with_geo = 0
     reason_counter: Counter[str] = Counter()
 
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -352,6 +394,20 @@ def build_security_map(
         is_critical = severity_value == "CRITICAL"
         is_confirmed = verdict_value == "CONFIRMED_ATTACK"
         src_ip = clean_text(event.get("src_ip"))
+
+        # target_scope filter (all/single/prefix/multi).
+        if target_scope != "all":
+            investigation = event.get("investigation")
+            event_scope = clean_text(investigation.get("target_scope")) if isinstance(investigation, Mapping) else ""
+            if not event_scope:
+                event_scope = resolve_event_target(
+                    event.get("target_ip"),
+                    event.get("target_prefix"),
+                    event.get("direction"),
+                    {"unique_destinations": event.get("unique_destinations")},
+                )["target_scope"]
+            if event_scope != target_scope:
+                continue
 
         # "Before" = legacy source-only geolocation (what V2 used).
         src_geo = resolve(src_ip)
@@ -370,144 +426,184 @@ def build_security_map(
         geo_reason = subj["geo_reason"]
         geo_ip = subj["geo_ip"]
 
-        lat = None
-        lon = None
-        country_code = ""
-        country_name = ""
-        city = ""
-        asn = 0
-        as_name = ""
-        geo_source = ""
-        accuracy_radius = None
+        campaign_id = clean_text(event.get("campaign_id"))
+        risk = campaign_risk.get(campaign_id, 0)
+        event_id = event.get("event_id") or event.get("id")
+        total_destinations = safe_int(event.get("unique_destinations"))
 
+        # Build the list of geographic targets this event contributes.
+        targets: list[dict[str, Any]] = []
         if geo_subject in ("source", "destination") and geo_ip:
-            geo_item = resolve(geo_ip)
+            targets.append({
+                "subject": geo_subject, "ip": geo_ip, "rank": 0, "share": 0.0,
+                "packets": 0, "flows": 0, "total_destinations": 1,
+            })
+        elif geo_subject == "none" and geo_reason in _OUTBOUND_NO_TARGET_REASONS:
+            destinations = multi_target_destinations(event)
+            if destinations:
+                multi_target_events += 1
+                multi_target_destinations_considered += len(destinations)
+                for rank, destination in enumerate(destinations, 1):
+                    targets.append({
+                        "subject": "multiple_destinations",
+                        "ip": destination["dst_ip"],
+                        "rank": rank,
+                        "share": destination["share"],
+                        "packets": destination["packets"],
+                        "flows": destination["flows"],
+                        "total_destinations": total_destinations or len(destinations),
+                    })
+
+        if not targets:
+            reason_counter[geo_reason] += 1
+            continue
+
+        # Geolocate each target and group located targets by bucket key.
+        located_by_bucket: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for target in targets:
+            geo_item = resolve(target["ip"])
             lat = geo_item.get("latitude")
             lon = geo_item.get("longitude")
+            if lat is None or lon is None:
+                continue
             country_code = clean_text(geo_item.get("country_code")).upper()
             country_name = clean_text(geo_item.get("country_name"))
             city = clean_text(geo_item.get("city"))
             asn = safe_int(geo_item.get("asn"))
             as_name = clean_text(geo_item.get("as_name"))
             geo_source = clean_text(geo_item.get("source")).upper()
-            accuracy_radius = geo_item.get("accuracy_radius")
-            if not country_code and not (lat is not None and lon is not None):
-                # Public IP present but unresolved by ASN/GeoIP.
-                reason_counter["UNLOCATED_PUBLIC"] += 1
-            elif lat is not None and lon is not None:
-                located_events += 1
-                reason_counter[geo_reason] += 1
-                if geo_subject == "source":
-                    inbound_source_located += 1
-                else:
-                    outbound_destination_located += 1
-                if is_critical:
-                    critical_after += 1
-                if is_confirmed:
-                    confirmed_after += 1
-            else:
-                reason_counter["UNLOCATED_PUBLIC"] += 1
-        else:
-            reason_counter[geo_reason] += 1
 
-        if lat is None or lon is None:
-            campaign_id = clean_text(event.get("campaign_id"))
-            risk = campaign_risk.get(campaign_id, 0)
-            # Non-located events still contribute to the semantic breakdown but
-            # never create a map point.
+            if group_by == "country":
+                key = country_code or "__unresolved__"
+                label = country_name or country_code or "N/D"
+            elif group_by == "city":
+                key = f"{city}|{country_code}" if city else country_code
+                label = city or country_code
+            elif group_by == "asn":
+                key = str(asn) if asn else "__unresolved__"
+                label = as_name or (f"AS{asn}" if asn else "N/D")
+            else:  # campaign
+                key = campaign_id or "__no_campaign__"
+                label = campaign_id or "Sem campanha"
+
+            located_by_bucket.setdefault((group_by, key), []).append({
+                "lat": lat, "lon": lon, "country_code": country_code, "country_name": country_name,
+                "city": city, "asn": asn, "as_name": as_name, "geo_source": geo_source,
+                "label": label, "subject": target["subject"],
+            })
+
+        event_located = bool(located_by_bucket)
+        if not event_located:
+            if geo_subject in ("source", "destination"):
+                reason_counter["UNLOCATED_PUBLIC"] += 1
+            else:
+                reason_counter["OUTBOUND_MULTI_DESTINATION"] += 1
             continue
 
-        campaign_id = clean_text(event.get("campaign_id"))
-        risk = campaign_risk.get(campaign_id, 0)
-
-        if group_by == "country":
-            key = country_code or "__unresolved__"
-            label = country_name or country_code or "N/D"
-        elif group_by == "city":
-            key = f"{city}|{country_code}" if city else country_code
-            label = city or country_code
-        elif group_by == "asn":
-            key = str(asn) if asn else "__unresolved__"
-            label = as_name or (f"AS{asn}" if asn else "N/D")
-        else:  # campaign
-            key = campaign_id or "__no_campaign__"
-            label = campaign_id or "Sem campanha"
-
-        bucket = groups.setdefault((group_by, key), {
-            "key": key,
-            "group_by": group_by,
-            "label": label,
-            "country_code": country_code if group_by != "asn" else "",
-            "country": country_name if group_by != "asn" else "",
-            "city": city if group_by == "city" else "",
-            "asn": asn,
-            "lat": lat,
-            "lon": lon,
-            "event_count": 0,
-            "critical_count": 0,
-            "high_count": 0,
-            "warning_count": 0,
-            "confirmed_count": 0,
-            "likely_count": 0,
-            "analyzed_count": 0,
-            "not_analyzed_count": 0,
-            "max_severity": "",
-            "max_threat_score": 0,
-            "max_campaign_risk_score": 0,
-            "unique_sources": set(),
-            "campaign_ids": set(),
-            "latest_seen": "",
-            "first_seen": "",
-            "attack_types": Counter(),
-            "directions": Counter(),
-            "geo_subjects": Counter(),
-            "geo_sources": Counter(),
-            "campaign_events": Counter(),
-            "tiers": [],
-            "ambiguous_geo": False,
-        })
-        if (bucket["lat"] is None or bucket["lon"] is None) and lat is not None and lon is not None:
-            bucket["lat"], bucket["lon"] = lat, lon
-        elif bucket["lat"] is not None and lat is not None and (bucket["lat"], bucket["lon"]) != (lat, lon) and group_by == "campaign":
-            # A campaign spanning multiple regions must not be pinned arbitrarily.
-            bucket["ambiguous_geo"] = True
-
-        bucket["event_count"] += 1
-        if severity_value == "CRITICAL":
-            bucket["critical_count"] += 1
-        elif severity_value == "HIGH":
-            bucket["high_count"] += 1
-        elif severity_value == "MEDIUM" or verdict_value == "WARNING":
-            bucket["warning_count"] += 1
-        if verdict_value == "CONFIRMED_ATTACK":
-            bucket["confirmed_count"] += 1
-        elif verdict_value == "LIKELY_ATTACK":
-            bucket["likely_count"] += 1
-        ai_status_value = clean_text(event.get("ai_analysis_status")).lower()
-        if ai_status_value == "analyzed":
-            bucket["analyzed_count"] += 1
+        # Event-level coverage accounting (once per event, not per target).
+        if geo_subject in ("source", "destination"):
+            located_events += 1
+            reason_counter[geo_reason] += 1
+            if geo_subject == "source":
+                inbound_source_located += 1
+            else:
+                outbound_destination_located += 1
         else:
-            bucket["not_analyzed_count"] += 1
-        if severity_priority(severity_value) > severity_priority(bucket["max_severity"]):
-            bucket["max_severity"] = severity_value
-        threat_score_payload_value = event.get("threat_score")
-        threat_score_value = threat_score_payload_value.get("score") if isinstance(threat_score_payload_value, Mapping) else threat_score_payload_value
-        bucket["max_threat_score"] = max(bucket["max_threat_score"], safe_int(threat_score_value))
-        bucket["max_campaign_risk_score"] = max(bucket["max_campaign_risk_score"], risk)
-        if src_ip:
-            bucket["unique_sources"].add(src_ip)
-        if campaign_id:
-            bucket["campaign_ids"].add(campaign_id)
-            bucket["campaign_events"][campaign_id] += 1
-        bucket["latest_seen"] = max(bucket["latest_seen"], clean_text(event.get("last_seen")))
-        bucket["first_seen"] = min(bucket["first_seen"], clean_text(event.get("first_seen"))) if bucket["first_seen"] else clean_text(event.get("first_seen"))
-        bucket["attack_types"][clean_text(event.get("attack_type")).upper() or "OTHER"] += 1
-        direction_value = clean_text(event.get("direction")).upper() or "UNKNOWN"
-        bucket["directions"][direction_value] += 1
-        bucket["geo_subjects"][geo_subject] += 1
-        if geo_source:
-            bucket["geo_sources"][geo_source] += 1
-        bucket["tiers"].append(security_severity_tier(verdict_value, severity_value, event.get("status")))
+            reason_counter["OUTBOUND_MULTI_DESTINATION"] += 1
+            located_events += 1
+            multi_target_events_with_geo += 1
+        if is_critical:
+            critical_after += 1
+        if is_confirmed:
+            confirmed_after += 1
+        multi_target_destinations_located += sum(
+            1 for target in targets if target["subject"] == "multiple_destinations"
+        )
+
+        for (g, k), located in located_by_bucket.items():
+            first = located[0]
+            bucket = groups.setdefault((g, k), {
+                "key": k,
+                "group_by": g,
+                "label": first["label"],
+                "country_code": first["country_code"] if g != "asn" else "",
+                "country": first["country_name"] if g != "asn" else "",
+                "city": first["city"] if g == "city" else "",
+                "asn": first["asn"],
+                "lat": first["lat"],
+                "lon": first["lon"],
+                "event_count": 0,
+                "critical_count": 0,
+                "high_count": 0,
+                "warning_count": 0,
+                "confirmed_count": 0,
+                "likely_count": 0,
+                "analyzed_count": 0,
+                "not_analyzed_count": 0,
+                "destination_count": 0,
+                "multi_target_events": 0,
+                "max_severity": "",
+                "max_threat_score": 0,
+                "max_campaign_risk_score": 0,
+                "unique_sources": set(),
+                "campaign_ids": set(),
+                "latest_seen": "",
+                "first_seen": "",
+                "attack_types": Counter(),
+                "directions": Counter(),
+                "geo_subjects": Counter(),
+                "geo_sources": Counter(),
+                "campaign_events": Counter(),
+                "tiers": [],
+                "ambiguous_geo": False,
+            })
+            # A campaign whose located targets span multiple regions must not be
+            # pinned to a single arbitrary coordinate.
+            if g == "campaign":
+                coords = {(item["lat"], item["lon"]) for item in located}
+                coords.add((bucket["lat"], bucket["lon"]))
+                if len(coords) > 1:
+                    bucket["ambiguous_geo"] = True
+
+            bucket["event_count"] += 1
+            bucket["destination_count"] += len(located)
+            if first["subject"] == "multiple_destinations":
+                bucket["multi_target_events"] += 1
+            if severity_value == "CRITICAL":
+                bucket["critical_count"] += 1
+            elif severity_value == "HIGH":
+                bucket["high_count"] += 1
+            elif severity_value == "MEDIUM" or verdict_value == "WARNING":
+                bucket["warning_count"] += 1
+            if verdict_value == "CONFIRMED_ATTACK":
+                bucket["confirmed_count"] += 1
+            elif verdict_value == "LIKELY_ATTACK":
+                bucket["likely_count"] += 1
+            ai_status_value = clean_text(event.get("ai_analysis_status")).lower()
+            if ai_status_value == "analyzed":
+                bucket["analyzed_count"] += 1
+            else:
+                bucket["not_analyzed_count"] += 1
+            if severity_priority(severity_value) > severity_priority(bucket["max_severity"]):
+                bucket["max_severity"] = severity_value
+            threat_score_payload_value = event.get("threat_score")
+            threat_score_value = threat_score_payload_value.get("score") if isinstance(threat_score_payload_value, Mapping) else threat_score_payload_value
+            bucket["max_threat_score"] = max(bucket["max_threat_score"], safe_int(threat_score_value))
+            bucket["max_campaign_risk_score"] = max(bucket["max_campaign_risk_score"], risk)
+            if src_ip:
+                bucket["unique_sources"].add(src_ip)
+            if campaign_id:
+                bucket["campaign_ids"].add(campaign_id)
+                bucket["campaign_events"][campaign_id] += 1
+            bucket["latest_seen"] = max(bucket["latest_seen"], clean_text(event.get("last_seen")))
+            bucket["first_seen"] = min(bucket["first_seen"], clean_text(event.get("first_seen"))) if bucket["first_seen"] else clean_text(event.get("first_seen"))
+            bucket["attack_types"][clean_text(event.get("attack_type")).upper() or "OTHER"] += 1
+            direction_value = clean_text(event.get("direction")).upper() or "UNKNOWN"
+            bucket["directions"][direction_value] += 1
+            bucket["geo_subjects"][first["subject"]] += 1
+            if first["geo_source"]:
+                bucket["geo_sources"][first["geo_source"]] += 1
+            bucket["tiers"].append(security_severity_tier(verdict_value, severity_value, event.get("status")))
 
     points = []
     for (_g, _k), bucket in groups.items():
@@ -540,6 +636,8 @@ def build_security_map(
             "likely_count": bucket["likely_count"],
             "analyzed_count": bucket["analyzed_count"],
             "not_analyzed_count": bucket["not_analyzed_count"],
+            "destination_count": bucket["destination_count"],
+            "multi_target_events": bucket["multi_target_events"],
             "max_severity": bucket["max_severity"],
             "max_threat_score": bucket["max_threat_score"],
             "max_campaign_risk_score": bucket["max_campaign_risk_score"],
@@ -599,6 +697,10 @@ def build_security_map(
             "confirmed_total": confirmed_total,
             "confirmed_before": confirmed_before,
             "confirmed_after": confirmed_after,
+            "multi_target_events": multi_target_events,
+            "multi_target_destinations_considered": multi_target_destinations_considered,
+            "multi_target_destinations_located": multi_target_destinations_located,
+            "multi_target_events_with_geo": multi_target_events_with_geo,
             "unlocated_breakdown": unlocated_breakdown,
         },
         "points": points,
@@ -613,6 +715,7 @@ def build_security_map(
             "ai_status": ai_status,
             "direction": direction,
             "context": context,
+            "target_scope": target_scope,
             "group_by": group_by,
             "limit": limit,
         },

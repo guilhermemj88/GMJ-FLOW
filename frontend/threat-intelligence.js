@@ -239,8 +239,12 @@
     const location = [point.city, point.country || point.country_code].filter(Boolean).join(', ') || point.country_code || 'Localização desconhecida';
     const attackTypes = (Array.isArray(point.top_attack_types) ? point.top_attack_types : []).map(type =>
       `<span class="threat-map-popup__chip">${esc(type)}</span>`).join('') || '<span class="subtle">Sem informação</span>';
-    const subject = point.predominant_geo_subject === 'destination' ? 'Destino externo observado' : point.predominant_geo_subject === 'source' ? 'Origem observada' : '-';
+    const subject = point.predominant_geo_subject === 'multiple_destinations'
+      ? 'Destino múltiplo observado (OUTBOUND)'
+      : point.predominant_geo_subject === 'destination' ? 'Destino externo observado' : point.predominant_geo_subject === 'source' ? 'Origem observada' : '-';
     const directionLabel = ({ INBOUND: 'Inbound', OUTBOUND: 'Outbound', INTERNAL: 'Internal' })[point.predominant_direction] || point.predominant_direction || '-';
+    const multiTargetNote = point.multi_target_events > 0
+      ? `<p class="subtle">Este ponto representa um dos principais destinos observados de evento(s) OUTBOUND multi-destino (${number(point.destination_count)} destino(s) nesta região).</p>` : '';
     const geoSourceLabel = ({ MAXMIND_CITY: 'GeoIP: cidade/país', COUNTRY_CENTROID: 'País aproximado (centroid)', ASN_COUNTRY: 'País via ASN' })[point.geo_source] || '-';
     const analysis = [
       point.analyzed_count ? `${number(point.analyzed_count)} analisado(s)` : '',
@@ -250,6 +254,7 @@
     return `<div class="threat-map-popup">
       <div class="threat-map-popup__title">${esc(point.label || point.key || location)}</div>
       <div class="threat-map-popup__badge"><span class="threat-map-tier" style="--tier-color:${esc(point.color || securityMapSeverityStyle(point.tier))}">${esc(securityTierLabel(point.tier))}</span></div>
+      ${multiTargetNote}
       <dl>
         <dt>Geografia</dt><dd>${esc(subject)}</dd>
         <dt>Direção</dt><dd>${esc(directionLabel)}</dd>
@@ -1385,7 +1390,8 @@
       campaign: document.getElementById('secMapCampaignFilter').value || 'all',
       ai_status: document.getElementById('secMapAiFilter').value || 'all',
       direction: document.getElementById('secMapDirectionFilter').value || 'all',
-      context: document.getElementById('secMapContextFilter').value || 'all'
+      context: document.getElementById('secMapContextFilter').value || 'all',
+      target_scope: document.getElementById('secMapScopeFilter').value || 'all'
     });
     const severity = document.getElementById('secMapSeverityFilter').value;
     const verdict = document.getElementById('secMapVerdictFilter').value;
