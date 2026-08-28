@@ -90,11 +90,21 @@ class SafeLearningDecisionTest(unittest.TestCase):
         # Anomalous window quarantines; a subsequent anomalous window extends.
         first = safe_learning_decision(
             baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=5.0,
-            window_pps=1000.0, now_iso=NOW,
+            window_pps=1000.0, now_iso=NOW, robust_stats_ready=True,
         )
         self.assertEqual(QUARANTINED, first["classification"])
         self.assertFalse(first["should_update"])
         self.assertTrue(first["next_quarantined_until"] > NOW)
+
+    def test_legacy_trusted_not_ready_spike_is_not_quarantined(self) -> None:
+        # Legacy TRUSTED row with mad_pps but no robust-sample maturity must not
+        # quarantine on an immature MAD (Phase I: robust_z only when ready).
+        decision = safe_learning_decision(
+            baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=5.0,
+            window_pps=1000.0, now_iso=NOW, robust_stats_ready=False,
+        )
+        self.assertEqual(ELIGIBLE, decision["classification"])
+        self.assertTrue(decision["should_update"])
 
     def test_isolated_spike_quarantines_then_recovers(self) -> None:
         frozen_until = "2026-08-27T12:10:00Z"
@@ -109,17 +119,17 @@ class SafeLearningDecisionTest(unittest.TestCase):
     def test_legitimate_high_traffic_learns_when_below_z(self) -> None:
         decision = safe_learning_decision(
             baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=50.0,
-            window_pps=200.0, now_iso=NOW,
+            window_pps=200.0, now_iso=NOW, robust_stats_ready=True,
         )
         # z = (200-100)/(1.4826*50) ~= 1.35 < 4 => eligible
         self.assertEqual(ELIGIBLE, decision["classification"])
         self.assertTrue(decision["should_update"])
 
     def test_low_maturity_does_not_quarantine_on_z(self) -> None:
-        # sample_count below min_quarantine_samples => no z gate.
+        # Robust stats not ready => no z gate regardless of sample_count.
         decision = safe_learning_decision(
             baseline_state=TRUSTED, sample_count=5, ema_pps=100.0, mad_pps=5.0,
-            window_pps=1000.0, now_iso=NOW,
+            window_pps=1000.0, now_iso=NOW, robust_stats_ready=False,
         )
         self.assertEqual(ELIGIBLE, decision["classification"])
         self.assertTrue(decision["should_update"])

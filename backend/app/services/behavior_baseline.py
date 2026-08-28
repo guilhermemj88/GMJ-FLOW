@@ -477,17 +477,18 @@ def safe_learning_decision(
 
     # TRUSTED state.
     if frozen:
-        z_score = robust_z_score(window_pps, ema_pps, mad_pps)
-        if abs(z_score) >= float(quarantine_z):
-            return {
-                "classification": QUARANTINED,
-                "should_update": False,
-                "next_state": TRUSTED,
-                "next_clean_count": 0,
-                "promoted": False,
-                "reason": "quarantine_extended",
-                "next_quarantined_until": _add_iso_minutes(now_iso, quarantine_minutes),
-            }
+        if robust_stats_ready:
+            z_score = robust_z_score(window_pps, ema_pps, mad_pps)
+            if abs(z_score) >= float(quarantine_z):
+                return {
+                    "classification": QUARANTINED,
+                    "should_update": False,
+                    "next_state": TRUSTED,
+                    "next_clean_count": 0,
+                    "promoted": False,
+                    "reason": "quarantine_extended",
+                    "next_quarantined_until": _add_iso_minutes(now_iso, quarantine_minutes),
+                }
         return {
             "classification": ELIGIBLE,
             "should_update": False,  # still frozen until the deadline expires
@@ -513,14 +514,11 @@ def safe_learning_decision(
             "next_quarantined_until": "",
         }
 
-    # Not frozen: quarantine only via a robust z-score against a mature baseline.
-    if (
-        int(sample_count) >= int(min_quarantine_samples)
-        and _finite_float(ema_pps) is not None
-        and _finite_float(ema_pps) > 0
-        and _finite_float(mad_pps) is not None
-        and _finite_float(mad_pps) > 0
-    ):
+    # Not frozen: quarantine only via a robust z-score once the robust
+    # statistics are ready (MAD accumulated over >= DEFAULT_MIN_ROBUST_SAMPLES
+    # deviation samples). Legacy baselines without ready stats are protected by
+    # confirmed_attack / strong_detector_signal above, never by an immature MAD.
+    if robust_stats_ready and _finite_float(ema_pps) is not None and _finite_float(ema_pps) > 0:
         z_score = robust_z_score(window_pps, ema_pps, mad_pps)
         if abs(z_score) >= float(quarantine_z):
             return {
