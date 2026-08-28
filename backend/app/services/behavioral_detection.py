@@ -2536,6 +2536,16 @@ class BehavioralThreatRuntime:
                     candidate_v2_error = clean_text(exc) or exc.__class__.__name__
             vectors, campaigns = self.engine.detect(rows, self.customer_networks())
             stats = self.engine.persist(vectors, campaigns)
+            # NETWORK_SWEEP shadow policy evaluator (Phase 6B) — read-only
+            # observer. Never returns ALLOW_AUTO, never calls mitigation.
+            try:
+                from app.services.network_sweep_policy import evaluate_and_audit_network_sweep_shadow
+
+                with self.connection_factory() as conn:
+                    evaluate_and_audit_network_sweep_shadow(conn)
+                    conn.commit()
+            except Exception:
+                LOGGER.exception("network_sweep_shadow_evaluator_failed")
             if candidate_v2 or candidate_v2_error:
                 v1_counts = Counter(item.detector for item in vectors)
                 comparison = {
