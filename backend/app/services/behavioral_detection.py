@@ -24,6 +24,7 @@ from app.services.threat_intelligence import (
     utc_now,
     utc_now_iso,
 )
+from app.services.behavior_flow_table import behavior_flow_table
 from app.services.network_context import NetworkContextEngine
 from app.services.security_events import (
     canonical_event_key,
@@ -2402,7 +2403,7 @@ def fetch_recent_observations(lookback_seconds: int = 300, limit: int = 100000) 
     """Fetch bounded 10-second flow dimensions; ClickHouse performs the heavy aggregation."""
     from app.services.clickhouse import query_clickhouse
 
-    return query_clickhouse(
+    sql = (
         """
         SELECT
             max(bucket) AS observed_at,
@@ -2429,7 +2430,10 @@ def fetch_recent_observations(lookback_seconds: int = 300, limit: int = 100000) 
             tcp_flags, input_if, output_if, src_asn, dst_asn
         ORDER BY observed_at DESC
         LIMIT {row_limit:UInt32}
-        """,
+        """
+    ).replace("behavior_flow_10s", behavior_flow_table())
+    return query_clickhouse(
+        sql,
         {
             "lookback_seconds": max(10, min(int(lookback_seconds), 3600)),
             "row_limit": max(1000, min(int(limit), 250000)),

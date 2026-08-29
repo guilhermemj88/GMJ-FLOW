@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.clickhouse import query_clickhouse
+from app.services.behavior_flow_table import behavior_flow_table
 
 
 CandidateQuery = Callable[[str, Optional[Dict[str, Any]]], List[Dict[str, Any]]]
@@ -22,6 +23,7 @@ def _run(
     limit: int,
     parameters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    sql = sql.replace("behavior_flow_10s", behavior_flow_table())
     values = dict(parameters or {})
     values.update({
         "lookback_seconds": max(60, min(int(lookback_seconds), 3600)),
