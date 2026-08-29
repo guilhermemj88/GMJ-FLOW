@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import unittest
 from datetime import datetime, timezone
@@ -156,14 +157,19 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
         *,
         aggregate_covered=False,
         flow_orientation="canonical",
+        asn_version=None,
     ):
         queries = []
         patches = self.common_patches(
             queries,
             aggregate_covered=aggregate_covered,
         )
-        with patches[0], patches[1], patches[2], patches[3], patches[4], \
-                patches[5], patches[6], patches[7], patches[8]:
+        env_patch = mock.patch.dict(
+            os.environ,
+            {"GMJFLOW_ASN_AGGREGATE_VERSION": asn_version} if asn_version else {},
+        )
+        with env_patch, patches[0], patches[1], patches[2], patches[3], \
+                patches[4], patches[5], patches[6], patches[7], patches[8]:
             backend_main.top_asn_dimension(
                 dimension=dimension,
                 range_minutes=60,
@@ -327,7 +333,10 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
             expectations.items()
         ):
             with self.subTest(dimension=dimension, source="raw"):
-                raw_query, _params = self.run_asn_ranking(dimension)[0]
+                raw_query, _params = self.run_asn_ranking(
+                    dimension,
+                    asn_version="v1",
+                )[0]
                 self.assertIn(select_sql, raw_query)
                 self.assertIn("GROUP BY asn", raw_query)
                 self.assertIn(direction_sql, raw_query)
@@ -336,6 +345,7 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
                 hybrid_query, _params = self.run_asn_ranking(
                     dimension,
                     aggregate_covered=True,
+                    asn_version="v1",
                 )[0]
                 self.assertIn(select_sql, hybrid_query)
                 self.assertIn("FROM flow_raw", hybrid_query)
@@ -346,10 +356,42 @@ class DashboardSensorFilterSqlTest(unittest.TestCase):
             "dst",
             aggregate_covered=True,
             flow_orientation="reversed",
+            asn_version="v1",
         )[0]
         self.assertIn("toUInt32(src_asn) AS asn", reversed_query)
         self.assertIn("FROM flow_dashboard_asn_src_1m", reversed_query)
         self.assertIn("input_if > 0", reversed_query)
+
+    def test_asn_rankings_v2_use_compact_aggregate_and_dictget(self):
+        for dimension, aggregate_table, raw_asn_col, raw_ip_col in (
+            ("src", "flow_dashboard_asn_src_1m_v2", "src_asn", "src_ip"),
+            ("dst", "flow_dashboard_asn_dst_1m_v2", "dst_asn", "dst_ip"),
+        ):
+            with self.subTest(dimension=dimension, source="raw"):
+                raw_query, _params = self.run_asn_ranking(
+                    dimension,
+                    asn_version="v2",
+                )[0]
+                self.assertIn("toUInt32(%s) AS asn" % raw_asn_col, raw_query)
+                self.assertNotIn(aggregate_table, raw_query)
+            with self.subTest(dimension=dimension, source="hybrid"):
+                hybrid_query, _params = self.run_asn_ranking(
+                    dimension,
+                    aggregate_covered=True,
+                    asn_version="v2",
+                )[0]
+                self.assertIn("FROM %s" % aggregate_table, hybrid_query)
+                self.assertIn("toUInt32(asn) AS asn", hybrid_query)
+                self.assertIn("any(as_name) AS as_name", hybrid_query)
+                self.assertIn("'' AS ip", hybrid_query)
+                self.assertIn(
+                    "dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', %s, 0)" % raw_ip_col,
+                    hybrid_query,
+                )
+                self.assertNotIn(
+                    "toUInt32(%s) AS asn" % raw_asn_col,
+                    hybrid_query,
+                )
 
     def test_zone_direction_respects_selected_asn_dimension_and_orientation(self):
         cases = (
