@@ -182,6 +182,30 @@ class BgpMitigationTest(unittest.TestCase):
             )
         )
 
+    def test_dns_seed_does_not_hardcode_connector_id_on_fresh_db(self):
+        """Regressao: o seed/UPDATE do perfil DNS nao pode hardcodar connector_id.
+
+        Em um banco novo nao existe conector id=2; o seed deve deixar o perfil
+        FLOWSPEC_AUTO_BLOCK_DST_DNS com connector_id NULL (seguro para FK) em vez
+        de falhar com 'FOREIGN KEY constraint failed' durante a inicializacao.
+        """
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            row = conn.execute(
+                "SELECT id, connector_id, approval_mode FROM bgp_response_profiles "
+                "WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'"
+            ).fetchone()
+            self.assertIsNotNone(row, "FLOWSPEC_AUTO_BLOCK_DST_DNS deve existir apos o seed")
+            self.assertIsNone(
+                row["connector_id"],
+                "connector_id nao deve ser hardcoded; deve ficar NULL ate configuracao explicita",
+            )
+            self.assertEqual(
+                0,
+                conn.execute("SELECT count(*) FROM bgp_connectors WHERE id = 2").fetchone()[0],
+                "nao deve existir referencia a um conector id=2 inexistente no banco novo",
+            )
+
     def _connector_and_profile(self, max_duration=3600):
         conn = main.sqlite_connection()
         now = main.utc_now_iso()
