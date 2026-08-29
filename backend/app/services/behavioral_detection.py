@@ -751,19 +751,27 @@ def _record_safe_learning_audit_v2(
     audit_z: float | None,
     baseline_state: str,
 ) -> None:
-    """Aggregated (per-hour) Safe Learning shadow audit write."""
+    """Aggregated (per-hour, per classification/reason) Safe Learning shadow audit.
+
+    The key is (hour_bucket, protocol, classification, reason) — NOT target_prefix.
+    The detector fans each destination across 9 prefix lengths (IPv4 /22../32 +
+    IPv6 /128), so a per-prefix key retained ~30% of rows. The meta-only key
+    yields ~15-20 rows/hour (99.99% reduction); the last-seen prefix is kept in
+    sample_prefix for traceability, and per-prefix detail remains available in
+    behavior_safe_learning_shadow_audit (72h retention).
+    """
     hour_bucket = clean_text(now_iso)[:13] + ":00:00Z"
     conn.execute(
         """
         INSERT INTO behavior_safe_learning_shadow_audit_v2(
-            hour_bucket, target_prefix, protocol, classification, reason, policy_version,
+            hour_bucket, protocol, classification, reason, policy_version,
             evaluation_count, would_learn_count, rejected_count, quarantined_count,
             confirmed_attack_count, strong_detector_signal_count,
             protected_or_internal_count, campaign_blocked_count,
             robust_z_min, robust_z_max, robust_z_sum, robust_z_count,
-            baseline_state, first_seen, last_seen
+            baseline_state, sample_prefix, first_seen, last_seen
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(hour_bucket, target_prefix, protocol, classification, reason) DO UPDATE SET
+        ON CONFLICT(hour_bucket, protocol, classification, reason) DO UPDATE SET
             evaluation_count = evaluation_count + 1,
             would_learn_count = would_learn_count + excluded.would_learn_count,
             rejected_count = rejected_count + excluded.rejected_count,
@@ -781,14 +789,15 @@ def _record_safe_learning_audit_v2(
             robust_z_sum = COALESCE(robust_z_sum, 0) + COALESCE(excluded.robust_z_sum, 0),
             robust_z_count = robust_z_count + excluded.robust_z_count,
             baseline_state = excluded.baseline_state,
+            sample_prefix = excluded.sample_prefix,
             last_seen = excluded.last_seen
         """,
         (
-            hour_bucket, prefix, protocol, classification, reason, "safe_learning_shadow_v2",
+            hour_bucket, protocol, classification, reason, "safe_learning_shadow_v2",
             1, int(safe_would_update), int(classification == REJECTED), int(classification == QUARANTINED),
             int(confirmed_attack), int(strong_signal), int(protected_or_internal), int(campaign_blocked),
             audit_z, audit_z, audit_z, 1 if audit_z is not None else 0,
-            baseline_state, now_iso, now_iso,
+            baseline_state, prefix, now_iso, now_iso,
         ),
     )
 
@@ -1619,6 +1628,15 @@ def compromised_host_score(vectors: Sequence[AttackVector], c2_match: bool, recu
 
 
 def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
+    # One-time migration: the first v2 draft keyed on target_prefix. Because the
+    # detector fans each destination out across 9 prefix lengths (IPv4 /22../32
+    # + IPv6 /128), a per-prefix key still retained ~30% of rows. Rebuild the
+    # (empty, shadow-only) table with the meta-only key defined below.
+    _v2_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='behavior_safe_learning_shadow_audit_v2'"
+    ).fetchone()
+    if _v2_sql and "target_prefix" in (_v2_sql[0] or ""):
+        conn.execute("DROP TABLE behavior_safe_learning_shadow_audit_v2")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS behavioral_attack_vectors (
@@ -1761,7 +1779,6 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS behavior_safe_learning_shadow_audit_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             hour_bucket TEXT NOT NULL,
-            target_prefix TEXT NOT NULL,
             protocol TEXT NOT NULL,
             classification TEXT NOT NULL,
             reason TEXT NOT NULL,
@@ -1779,9 +1796,10 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
             robust_z_sum REAL,
             robust_z_count INTEGER NOT NULL DEFAULT 0,
             baseline_state TEXT NOT NULL DEFAULT '',
+            sample_prefix TEXT NOT NULL DEFAULT '',
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL,
-            UNIQUE(hour_bucket, target_prefix, protocol, classification, reason)
+            UNIQUE(hour_bucket, protocol, classification, reason)
         );
         CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_v2_time
             ON behavior_safe_learning_shadow_audit_v2(hour_bucket);

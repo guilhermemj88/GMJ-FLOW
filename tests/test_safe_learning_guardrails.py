@@ -113,7 +113,6 @@ V2_DDL = """
 CREATE TABLE behavior_safe_learning_shadow_audit_v2 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hour_bucket TEXT NOT NULL,
-    target_prefix TEXT NOT NULL,
     protocol TEXT NOT NULL,
     classification TEXT NOT NULL,
     reason TEXT NOT NULL,
@@ -131,9 +130,10 @@ CREATE TABLE behavior_safe_learning_shadow_audit_v2 (
     robust_z_sum REAL,
     robust_z_count INTEGER NOT NULL DEFAULT 0,
     baseline_state TEXT NOT NULL DEFAULT '',
+    sample_prefix TEXT NOT NULL DEFAULT '',
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
-    UNIQUE(hour_bucket, target_prefix, protocol, classification, reason)
+    UNIQUE(hour_bucket, protocol, classification, reason)
 );
 """
 
@@ -202,6 +202,18 @@ class SafeLearningAuditV2AggregationTest(unittest.TestCase):
         self.assertEqual(4.0, row[1])
         self.assertEqual(6.0, row[2])
         self.assertEqual(2, row[3])
+
+    def test_different_prefixes_same_meta_aggregate(self):
+        # The v2 key deliberately excludes target_prefix (which fans each target
+        # into 9 prefix lengths); same-meta rows must collapse to one bucket.
+        self._record(prefix="10.0.0.0/24", reason="robust_z")
+        self._record(prefix="10.0.0.0/32", reason="robust_z")
+        self._record(prefix="192.0.2.0/24", reason="robust_z")
+        n = self.conn.execute("SELECT COUNT(*) FROM behavior_safe_learning_shadow_audit_v2").fetchone()[0]
+        self.assertEqual(1, n)
+        row = self.conn.execute("SELECT evaluation_count, sample_prefix FROM behavior_safe_learning_shadow_audit_v2").fetchone()
+        self.assertEqual(3, row[0])
+        self.assertEqual("192.0.2.0/24", row[1])
 
     def test_guardrail_counts_aggregate(self):
         self._record(classification=REJECTED, reason="campaign_rejected", campaign_blocked=True)
