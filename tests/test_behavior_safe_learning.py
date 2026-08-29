@@ -341,7 +341,7 @@ class SafeShadowObservabilityTest(unittest.TestCase):
 
     def test_future_clock_skew_excluded_from_baseline(self) -> None:
         future = FlowObservation(
-            observed_at=self.base_time + timedelta(days=2),
+            observed_at=datetime.now(timezone.utc) + timedelta(days=2),
             src_ip="198.51.100.9", dst_ip="203.0.113.99", src_port=40000, dst_port=443,
             protocol=6, tcp_flags=2, packets=60_000_000, bytes=6_000_000_000,
         )
@@ -372,20 +372,22 @@ class SafeShadowObservabilityTest(unittest.TestCase):
         self.assertEqual(0, self._counter("safe_v1_same"))
         self.assertGreater(self._counter("safe_updates_blocked"), 0)
         audit = self.conn.execute(
-            "SELECT classification, reason, v1_would_update, safe_would_update "
-            "FROM behavior_safe_learning_shadow_audit ORDER BY id DESC LIMIT 1"
+            "SELECT classification, reason, would_learn_count, rejected_count, confirmed_attack_count "
+            "FROM behavior_safe_learning_shadow_audit_v2 ORDER BY id DESC LIMIT 1"
         ).fetchone()
         self.assertIsNotNone(audit)
         self.assertEqual("REJECTED", audit["classification"])
-        self.assertEqual(1, audit["v1_would_update"])
-        self.assertEqual(0, audit["safe_would_update"])
+        self.assertEqual("confirmed_attack", audit["reason"])
+        self.assertEqual(0, audit["would_learn_count"])
+        self.assertEqual(1, audit["rejected_count"])
+        self.assertEqual(1, audit["confirmed_attack_count"])
 
     def test_normal_has_no_audit_explosion(self) -> None:
         self.engine.update_prefix_baselines(
             self.conn, self._observations(pps=100), window_seconds=60, vectors=[]
         )
         audit_count = self.conn.execute(
-            "SELECT COUNT(*) FROM behavior_safe_learning_shadow_audit"
+            "SELECT COUNT(*) FROM behavior_safe_learning_shadow_audit_v2"
         ).fetchone()[0]
         self.assertEqual(0, audit_count)
         self.assertGreater(self._counter("safe_v1_same"), 0)
@@ -405,13 +407,14 @@ class SafeShadowObservabilityTest(unittest.TestCase):
             self.conn, self._observations(pps=1000), window_seconds=60, vectors=[]
         )
         audit = self.conn.execute(
-            "SELECT classification, reason, robust_z FROM behavior_safe_learning_shadow_audit "
+            "SELECT classification, reason, robust_z_max, robust_z_count FROM behavior_safe_learning_shadow_audit_v2 "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
         self.assertIsNotNone(audit)
         self.assertEqual("QUARANTINED", audit["classification"])
-        self.assertIsNotNone(audit["robust_z"])
-        self.assertGreater(abs(float(audit["robust_z"])), 4.0)
+        self.assertGreater(audit["robust_z_count"], 0)
+        self.assertIsNotNone(audit["robust_z_max"])
+        self.assertGreater(abs(float(audit["robust_z_max"])), 4.0)
         # V1 still updated the baseline (sample_count advanced).
         row = self._baseline("203.0.113.0/24")
         self.assertEqual(101, row["sample_count"])
