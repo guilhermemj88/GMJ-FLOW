@@ -44853,22 +44853,12 @@ def top_asn_dimension(
             else "asn_dst"
         )
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
-        if aggregate_key in {"asn_src", "asn_dst"} and asn_aggregate_version() == "v2":
+        use_asn_v2 = (
+            aggregate_key in {"asn_src", "asn_dst"}
+            and asn_aggregate_version() == "v2"
+        )
+        if use_asn_v2:
             aggregate_table = ASN_AGGREGATE_TABLES[aggregate_key]["v2"]
-            asn_col = "asn"
-            as_name_col = "as_name"
-            ip_select_expr = "''"
-            asn_aggregate_agg_dims = ["asn", "as_name"]
-            if physical_dimension == "src":
-                asn_aggregate_dims = [
-                    "if(src_asn > 0, src_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', src_ip, 0)) AS asn",
-                    "if(src_asn > 0, src_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', src_ip, '')) AS as_name",
-                ]
-            else:
-                asn_aggregate_dims = [
-                    "if(dst_asn > 0, dst_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', dst_ip, 0)) AS asn",
-                    "if(dst_asn > 0, dst_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', dst_ip, '')) AS as_name",
-                ]
         if dashboard_aggregate_range_covered(
             aggregate_table,
             start_dt,
@@ -44876,6 +44866,21 @@ def top_asn_dimension(
             sensor_id,
             sensor,
         ):
+            if use_asn_v2:
+                asn_col = "asn"
+                as_name_col = "as_name"
+                ip_select_expr = "''"
+                asn_aggregate_agg_dims = ["asn", "as_name"]
+                if physical_dimension == "src":
+                    asn_aggregate_dims = [
+                        "if(src_asn > 0, src_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', src_ip, 0)) AS asn",
+                        "if(src_asn > 0, src_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', src_ip, '')) AS as_name",
+                    ]
+                else:
+                    asn_aggregate_dims = [
+                        "if(dst_asn > 0, dst_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', dst_ip, 0)) AS asn",
+                        "if(dst_asn > 0, dst_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', dst_ip, '')) AS as_name",
+                    ]
             query_prefix = dashboard_hybrid_source_cte(
                 aggregate_table,
                 where,
