@@ -41,6 +41,8 @@ from app.services.behavior_baseline import (
     BOOTSTRAP,
     DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS,
     DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
+    DEFAULT_MAD_ABSOLUTE_FLOOR_PPS,
+    DEFAULT_MAD_RELATIVE_FLOOR_RATIO,
     DEFAULT_MIN_QUARANTINE_SAMPLES,
     DEFAULT_MIN_ROBUST_SAMPLES,
     DEFAULT_QUARANTINE_MINUTES,
@@ -49,6 +51,7 @@ from app.services.behavior_baseline import (
     QUARANTINED,
     REJECTED,
     TRUSTED,
+    effective_mad,
     robust_z_score,
     safe_learning_decision,
     safe_reason_bucket,
@@ -1948,6 +1951,8 @@ class BehavioralDetectionEngine:
         now = utc_now_iso()
         alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
         safe_enabled = behavior_safe_learning_enabled(conn)
+        mad_absolute_floor = max(0.0, float(os.getenv("GMJFLOW_SAFE_MAD_ABSOLUTE_FLOOR_PPS", str(DEFAULT_MAD_ABSOLUTE_FLOOR_PPS))))
+        mad_relative_floor_ratio = max(0.0, float(os.getenv("GMJFLOW_SAFE_MAD_RELATIVE_FLOOR_RATIO", str(DEFAULT_MAD_RELATIVE_FLOOR_RATIO))))
 
         # Guardrail inputs (deterministic, reused system owners).
         customer_networks: list[Any] = []
@@ -2067,6 +2072,8 @@ class BehavioralDetectionEngine:
                 robust_stats_ready=robust_stats_ready,
                 protected_or_internal=protected_or_internal,
                 campaign_blocked=campaign_blocked,
+                mad_absolute_floor=mad_absolute_floor,
+                mad_relative_floor_ratio=mad_relative_floor_ratio,
             )
             classification = decision["classification"]
             final_state = decision["next_state"]
@@ -2167,8 +2174,13 @@ class BehavioralDetectionEngine:
             # collapses the repetitive quarantine_frozen / quarantine_extended /
             # robust_z re-evaluations into a few counter rows per hour.
             audit_z: float | None = None
-            if old_mad > 0 and old_pps > 0:
-                audit_z = round(robust_z_score(pps, old_pps, old_mad), 4)
+            if old_pps > 0:
+                audit_z = round(robust_z_score(
+                    pps, old_pps,
+                    effective_mad(old_pps, old_mad,
+                                  absolute_floor=mad_absolute_floor,
+                                  relative_floor_ratio=mad_relative_floor_ratio),
+                ), 4)
             if classification == ELIGIBLE:
                 eligible_seen += 1
                 sample_hit = eligible_sample_rate > 0 and eligible_seen % eligible_sample_rate == 0
