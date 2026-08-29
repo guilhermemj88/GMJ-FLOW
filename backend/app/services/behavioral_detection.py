@@ -2557,6 +2557,17 @@ class BehavioralThreatRuntime:
                     conn.commit()
             except Exception:
                 LOGGER.exception("network_sweep_shadow_evaluator_failed")
+            # NETWORK_SWEEP NO-OP adapter — simulates the full execution path
+            # (policy -> proposal -> adapter -> audit) with executed=false.
+            # Never writes BGP/FlowSpec/exabgp/FIFO.
+            try:
+                from app.services.network_sweep_noop_adapter import run_noop_adapter
+
+                with self.connection_factory() as conn:
+                    run_noop_adapter(conn)
+                    conn.commit()
+            except Exception:
+                LOGGER.exception("network_sweep_noop_adapter_failed")
             if candidate_v2 or candidate_v2_error:
                 v1_counts = Counter(item.detector for item in vectors)
                 comparison = {
