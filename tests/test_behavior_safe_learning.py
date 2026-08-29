@@ -379,8 +379,10 @@ class SafeShadowObservabilityTest(unittest.TestCase):
         self.assertEqual("REJECTED", audit["classification"])
         self.assertEqual("confirmed_attack", audit["reason"])
         self.assertEqual(0, audit["would_learn_count"])
-        self.assertEqual(1, audit["rejected_count"])
-        self.assertEqual(1, audit["confirmed_attack_count"])
+        # The destination fans into 9 prefix lengths (IPv4 /22../32); all are
+        # rejected by confirmed_attack and aggregate into one meta-keyed v2 row.
+        self.assertEqual(9, audit["rejected_count"])
+        self.assertEqual(9, audit["confirmed_attack_count"])
 
     def test_normal_has_no_audit_explosion(self) -> None:
         self.engine.update_prefix_baselines(
