@@ -54,6 +54,7 @@ from app.services.behavior_baseline import (
     safe_reason_bucket,
 )
 from app.services.config_effective import behavior_safe_learning_enabled
+from app.services.network_sweep_policy import _is_protected_subject
 from app.services.threat_contracts import (
     FLOOD_ATTACK_TYPES,
     SCAN_ATTACK_TYPES,
@@ -713,6 +714,83 @@ def target_prefixes(ip_text: str) -> Iterable[str]:
             yield str(ip_network(f"{parsed}/{length}", strict=False))
     else:
         yield str(ip_network(f"{parsed}/128", strict=False))
+
+
+def _overlaps_any_network(prefix: str, networks: Sequence[Any]) -> bool:
+    """True if the prefix overlaps any network in the sequence (lazy parse)."""
+    if not networks:
+        return False
+    try:
+        net = ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    for other in networks:
+        if isinstance(other, str):
+            try:
+                other = ip_network(other, strict=False)
+            except ValueError:
+                continue
+        if net.overlaps(other):
+            return True
+    return False
+
+
+def _record_safe_learning_audit_v2(
+    conn: sqlite3.Connection,
+    *,
+    now_iso: str,
+    prefix: str,
+    protocol: str,
+    classification: str,
+    reason: str,
+    safe_would_update: bool,
+    confirmed_attack: bool,
+    strong_signal: bool,
+    protected_or_internal: bool,
+    campaign_blocked: bool,
+    audit_z: float | None,
+    baseline_state: str,
+) -> None:
+    """Aggregated (per-hour) Safe Learning shadow audit write."""
+    hour_bucket = clean_text(now_iso)[:13] + ":00:00Z"
+    conn.execute(
+        """
+        INSERT INTO behavior_safe_learning_shadow_audit_v2(
+            hour_bucket, target_prefix, protocol, classification, reason, policy_version,
+            evaluation_count, would_learn_count, rejected_count, quarantined_count,
+            confirmed_attack_count, strong_detector_signal_count,
+            protected_or_internal_count, campaign_blocked_count,
+            robust_z_min, robust_z_max, robust_z_sum, robust_z_count,
+            baseline_state, first_seen, last_seen
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(hour_bucket, target_prefix, protocol, classification, reason) DO UPDATE SET
+            evaluation_count = evaluation_count + 1,
+            would_learn_count = would_learn_count + excluded.would_learn_count,
+            rejected_count = rejected_count + excluded.rejected_count,
+            quarantined_count = quarantined_count + excluded.quarantined_count,
+            confirmed_attack_count = confirmed_attack_count + excluded.confirmed_attack_count,
+            strong_detector_signal_count = strong_detector_signal_count + excluded.strong_detector_signal_count,
+            protected_or_internal_count = protected_or_internal_count + excluded.protected_or_internal_count,
+            campaign_blocked_count = campaign_blocked_count + excluded.campaign_blocked_count,
+            robust_z_min = CASE WHEN robust_z_min IS NULL THEN excluded.robust_z_min
+                                WHEN excluded.robust_z_min IS NULL THEN robust_z_min
+                                ELSE MIN(robust_z_min, excluded.robust_z_min) END,
+            robust_z_max = CASE WHEN robust_z_max IS NULL THEN excluded.robust_z_max
+                                WHEN excluded.robust_z_max IS NULL THEN robust_z_max
+                                ELSE MAX(robust_z_max, excluded.robust_z_max) END,
+            robust_z_sum = COALESCE(robust_z_sum, 0) + COALESCE(excluded.robust_z_sum, 0),
+            robust_z_count = robust_z_count + excluded.robust_z_count,
+            baseline_state = excluded.baseline_state,
+            last_seen = excluded.last_seen
+        """,
+        (
+            hour_bucket, prefix, protocol, classification, reason, "safe_learning_shadow_v2",
+            1, int(safe_would_update), int(classification == REJECTED), int(classification == QUARANTINED),
+            int(confirmed_attack), int(strong_signal), int(protected_or_internal), int(campaign_blocked),
+            audit_z, audit_z, audit_z, 1 if audit_z is not None else 0,
+            baseline_state, now_iso, now_iso,
+        ),
+    )
 
 
 def _attack_signal(prefix: str, attack_networks: Sequence[Any], confirmed_networks: Sequence[Any]) -> tuple[bool, bool]:
@@ -1680,6 +1758,33 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_audit_time
             ON behavior_safe_learning_shadow_audit(observed_at);
+        CREATE TABLE IF NOT EXISTS behavior_safe_learning_shadow_audit_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hour_bucket TEXT NOT NULL,
+            target_prefix TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            policy_version TEXT NOT NULL DEFAULT 'safe_learning_shadow_v2',
+            evaluation_count INTEGER NOT NULL DEFAULT 0,
+            would_learn_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            quarantined_count INTEGER NOT NULL DEFAULT 0,
+            confirmed_attack_count INTEGER NOT NULL DEFAULT 0,
+            strong_detector_signal_count INTEGER NOT NULL DEFAULT 0,
+            protected_or_internal_count INTEGER NOT NULL DEFAULT 0,
+            campaign_blocked_count INTEGER NOT NULL DEFAULT 0,
+            robust_z_min REAL,
+            robust_z_max REAL,
+            robust_z_sum REAL,
+            robust_z_count INTEGER NOT NULL DEFAULT 0,
+            baseline_state TEXT NOT NULL DEFAULT '',
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(hour_bucket, target_prefix, protocol, classification, reason)
+        );
+        CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_v2_time
+            ON behavior_safe_learning_shadow_audit_v2(hour_bucket);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_status_time
             ON behavioral_attack_vectors(status, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_campaign
@@ -1826,6 +1931,25 @@ class BehavioralDetectionEngine:
         alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
         safe_enabled = behavior_safe_learning_enabled(conn)
 
+        # Guardrail inputs (deterministic, reused system owners).
+        customer_networks: list[Any] = []
+        try:
+            rows = conn.execute(
+                "SELECT p.cidr FROM ip_zone_prefixes p "
+                "JOIN ip_zones z ON z.id = p.zone_id "
+                "WHERE p.active = 1 AND z.active = 1"
+            ).fetchall()
+            for row in rows:
+                cidr = clean_text(row[0])
+                if not cidr:
+                    continue
+                try:
+                    customer_networks.append(ip_network(cidr, strict=False))
+                except ValueError:
+                    continue
+        except sqlite3.OperationalError:
+            customer_networks = []
+
         # Exclude future clock-skewed observations (documented NE8000 exporter
         # bug): a far-future timestamp would otherwise become max(observed_at)
         # and make the window cutoff discard every legitimate observation.
@@ -1857,6 +1981,7 @@ class BehavioralDetectionEngine:
 
         attack_networks: list[Any] = []
         confirmed_networks: list[Any] = []
+        campaign_networks: list[Any] = []
         for vector in vectors:
             target = vector.target_prefix or (f"{vector.target_ip}/32" if vector.target_ip else "")
             if not target:
@@ -1868,6 +1993,8 @@ class BehavioralDetectionEngine:
             attack_networks.append(network)
             if vector.verdict == "CONFIRMED_ATTACK" or clean_text(vector.severity).upper() == "CRITICAL":
                 confirmed_networks.append(network)
+            if clean_text(getattr(vector, "campaign_id", "") or ""):
+                campaign_networks.append(network)
 
         counters: dict[str, int] = defaultdict(int)
         if skewed_observations:
@@ -1905,6 +2032,8 @@ class BehavioralDetectionEngine:
 
             state, clean_count = self._safe_state(current, samples)
             strong_signal, confirmed_attack = _attack_signal(prefix, attack_networks, confirmed_networks)
+            protected_or_internal = _is_protected_subject(conn, prefix) or _overlaps_any_network(prefix, customer_networks)
+            campaign_blocked = _overlaps_any_network(prefix, campaign_networks)
             robust_stats_ready = old_mad > 0 and old_mad_sample_count >= DEFAULT_MIN_ROBUST_SAMPLES
             decision = safe_learning_decision(
                 baseline_state=state,
@@ -1918,6 +2047,8 @@ class BehavioralDetectionEngine:
                 quarantined_until=clean_text(current[6]) if current is not None else "",
                 now_iso=now,
                 robust_stats_ready=robust_stats_ready,
+                protected_or_internal=protected_or_internal,
+                campaign_blocked=campaign_blocked,
             )
             classification = decision["classification"]
             final_state = decision["next_state"]
@@ -2013,8 +2144,10 @@ class BehavioralDetectionEngine:
             else:
                 counters["baseline_updates_blocked"] += 1
 
-            # Low-cardinality shadow audit: only divergences, blocked windows and
-            # promotions (plus an optional, off-by-default ELIGIBLE sample).
+            # Compact shadow audit v2: aggregate by (hour, prefix, protocol,
+            # classification, reason) instead of one row per evaluation. This
+            # collapses the repetitive quarantine_frozen / quarantine_extended /
+            # robust_z re-evaluations into a few counter rows per hour.
             audit_z: float | None = None
             if old_mad > 0 and old_pps > 0:
                 audit_z = round(robust_z_score(pps, old_pps, old_mad), 4)
@@ -2024,23 +2157,20 @@ class BehavioralDetectionEngine:
             else:
                 sample_hit = False
             if divergence or classification in (REJECTED, QUARANTINED) or decision["promoted"] or sample_hit:
-                conn.execute(
-                    """
-                    INSERT INTO behavior_safe_learning_shadow_audit(
-                        observed_at, sensor, target_prefix, protocol,
-                        v1_would_update, safe_would_update, baseline_state, classification, reason,
-                        observed_pps, observed_bps, baseline_pps, baseline_bps, mad_pps, robust_z,
-                        sample_count, bootstrap_clean_count, confirmed_attack, strong_detector_signal,
-                        quarantined_until
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        now, sensor, prefix, protocol,
-                        int(v1_would_update), int(safe_would_update), state, classification, decision["reason"],
-                        round(pps, 4), round(bps, 4), round(old_pps, 4), round(old_bps, 4), round(old_mad, 4), audit_z,
-                        samples, final_clean, int(confirmed_attack), int(strong_signal),
-                        next_quarantine,
-                    ),
+                _record_safe_learning_audit_v2(
+                    conn,
+                    now_iso=now,
+                    prefix=prefix,
+                    protocol=protocol,
+                    classification=classification,
+                    reason=decision["reason"],
+                    safe_would_update=bool(safe_would_update),
+                    confirmed_attack=bool(confirmed_attack),
+                    strong_signal=bool(strong_signal),
+                    protected_or_internal=bool(protected_or_internal),
+                    campaign_blocked=bool(campaign_blocked),
+                    audit_z=audit_z,
+                    baseline_state=final_state,
                 )
 
         self._record_safe_learning_counters(conn, counters, now)
@@ -2088,6 +2218,10 @@ class BehavioralDetectionEngine:
         cutoff_iso = (now_dt - timedelta(hours=72)).isoformat().replace("+00:00", "Z")
         conn.execute(
             "DELETE FROM behavior_safe_learning_shadow_audit WHERE observed_at < ?",
+            (cutoff_iso,),
+        )
+        conn.execute(
+            "DELETE FROM behavior_safe_learning_shadow_audit_v2 WHERE hour_bucket < ?",
             (cutoff_iso,),
         )
 
