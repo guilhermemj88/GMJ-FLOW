@@ -417,6 +417,8 @@ def safe_learning_decision(
     min_quarantine_samples: int = DEFAULT_MIN_QUARANTINE_SAMPLES,
     quarantine_minutes: int = DEFAULT_QUARANTINE_MINUTES,
     robust_stats_ready: bool = False,
+    protected_or_internal: bool = False,
+    campaign_blocked: bool = False,
 ) -> dict[str, Any]:
     """Deterministic Safe Learning decision for one baseline window.
 
@@ -427,6 +429,32 @@ def safe_learning_decision(
     """
     state = baseline_state if baseline_state in (BOOTSTRAP, TRUSTED) else BOOTSTRAP
     frozen = bool(quarantined_until and now_iso and str(quarantined_until) > str(now_iso))
+
+    # A destination associated with a known malicious campaign always rejects
+    # the window and never feeds the baseline (deterministic, no LLM).
+    if campaign_blocked:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": state,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "campaign_rejected",
+            "next_quarantined_until": "",
+        }
+
+    # Protected / internal / customer / CGNAT destinations never feed the
+    # baseline (same classification the rest of the system uses).
+    if protected_or_internal:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": state,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "protected_or_internal",
+            "next_quarantined_until": "",
+        }
 
     # A confirmed attack (or CRITICAL) signal always rejects the window and
     # never feeds the baseline.
