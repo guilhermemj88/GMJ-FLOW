@@ -142,8 +142,10 @@ from app.services.auth_access import (
 from app.services.dashboard_cache import DashboardCacheConfig, MemoryDashboardCache
 from app.services.dashboard_performance import DashboardPerformanceTrace
 from app.services.dashboard_aggregates import (
+    ASN_AGGREGATE_TABLES,
     DASHBOARD_AGGREGATE_TABLES,
     aggregate_boundaries,
+    asn_aggregate_version,
     dashboard_aggregate_schema_statements,
     dashboard_effective_sample_rate_expr,
     dashboard_sample_rate_join_sql,
@@ -42194,12 +42196,13 @@ def dashboard_hybrid_source_cte(
     params: dict[str, Any],
     dimensions: list[str],
     include_time_bounds: bool = False,
+    aggregate_dimensions: list[str] | None = None,
 ) -> str:
     interior_start, interior_end = aggregate_boundaries(start_dt, end_dt)
     params["aggregate_start"] = interior_start
     params["aggregate_end"] = interior_end
     raw_dimensions = ", ".join(dimensions)
-    aggregate_dimensions = ", ".join(dimensions)
+    aggregate_dimensions = ", ".join(aggregate_dimensions if aggregate_dimensions is not None else dimensions)
     if raw_dimensions:
         raw_dimensions = f", {raw_dimensions}"
         aggregate_dimensions = f", {aggregate_dimensions}"
@@ -44749,6 +44752,9 @@ def top_asn_dimension(
         "src_as_name" if physical_dimension == "src" else "dst_as_name"
     )
     ip_col = "src_ip" if physical_dimension == "src" else "dst_ip"
+    ip_select_expr = f"if(asn > 0, '', toString({ip_col}))"
+    asn_aggregate_dims = [asn_col, as_name_col, ip_col]
+    asn_aggregate_agg_dims: list[str] | None = None
     rate_direction = "auto"
     if zone_id is not None:
         requested_zone_direction = normalize_zone_direction(zone_direction)
@@ -44847,6 +44853,22 @@ def top_asn_dimension(
             else "asn_dst"
         )
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
+        if aggregate_key in {"asn_src", "asn_dst"} and asn_aggregate_version() == "v2":
+            aggregate_table = ASN_AGGREGATE_TABLES[aggregate_key]["v2"]
+            asn_col = "asn"
+            as_name_col = "as_name"
+            ip_select_expr = "''"
+            asn_aggregate_agg_dims = ["asn", "as_name"]
+            if physical_dimension == "src":
+                asn_aggregate_dims = [
+                    "if(src_asn > 0, src_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', src_ip, 0)) AS asn",
+                    "if(src_asn > 0, src_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', src_ip, '')) AS as_name",
+                ]
+            else:
+                asn_aggregate_dims = [
+                    "if(dst_asn > 0, dst_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', dst_ip, 0)) AS asn",
+                    "if(dst_asn > 0, dst_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', dst_ip, '')) AS as_name",
+                ]
         if dashboard_aggregate_range_covered(
             aggregate_table,
             start_dt,
@@ -44871,8 +44893,9 @@ def top_asn_dimension(
                         "proto",
                     ]
                     if prefix_filter_active(prefix_filter)
-                    else [asn_col, as_name_col, ip_col]
+                    else asn_aggregate_dims
                 ),
+                aggregate_dimensions=asn_aggregate_agg_dims,
             )
             source_table = "rated_source"
             query_source = dashboard_aggregate_query_source(start_dt, end_dt)
@@ -44897,7 +44920,7 @@ def top_asn_dimension(
             aggregation_base AS (
                 SELECT
                     toUInt32({asn_col}) AS asn,
-                    if(asn > 0, '', toString({ip_col})) AS ip,
+                    {ip_select_expr} AS ip,
                     any({as_name_col}) AS as_name,
                     sum(weighted_bytes_value) AS weighted_bytes_total,
                     sum(weighted_packets_value) AS weighted_packets_total,
