@@ -26,6 +26,7 @@ from app.services.behavior_baseline import (  # noqa: E402
     baseline_confidence,
     baseline_distribution,
     classify_candidate_window,
+    effective_mad,
     mad,
     median,
     percentile,
@@ -118,6 +119,24 @@ class RobustZScoreTest(unittest.TestCase):
         score = robust_z_score(1e12, 0.0, 1e-9)
         self.assertTrue(math.isfinite(score))
         self.assertLessEqual(abs(score), MAX_ROBUST_Z)
+
+
+class EffectiveMadTest(unittest.TestCase):
+    def test_returns_raw_deviation_when_above_floors(self):
+        self.assertEqual(10.0, effective_mad(100.0, 10.0, absolute_floor=0.5, relative_floor_ratio=0.05))
+
+    def test_absolute_floor_applies_for_near_zero_mad(self):
+        # center=1.0 -> relative floor 0.05 < absolute floor 0.5.
+        self.assertEqual(0.5, effective_mad(1.0, 0.001, absolute_floor=0.5, relative_floor_ratio=0.05))
+
+    def test_relative_floor_applies_for_stable_high_volume(self):
+        self.assertEqual(50.0, effective_mad(1000.0, 1.0, absolute_floor=0.5, relative_floor_ratio=0.05))
+
+    def test_non_finite_inputs_are_clamped_to_zero(self):
+        self.assertEqual(0.0, effective_mad(None, None, absolute_floor=0.0, relative_floor_ratio=0.0))
+
+    def test_negative_deviation_is_clamped_to_zero(self):
+        self.assertEqual(0.5, effective_mad(100.0, -5.0, absolute_floor=0.5, relative_floor_ratio=0.0))
 
 
 class ConfidenceTest(unittest.TestCase):

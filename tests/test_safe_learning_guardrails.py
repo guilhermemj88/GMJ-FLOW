@@ -153,6 +153,34 @@ class SafeLearningGuardrailTest(unittest.TestCase):
         self.assertFalse(d["should_update"])
         self.assertEqual("quarantine_frozen", d["reason"])
 
+    def test_near_zero_mad_trivial_deviation_not_quarantined(self):
+        # mad=0.001, 0.5 pps deviation: with the default floor (abs 0.5, rel 5%)
+        # z stays tiny instead of saturating -> no spurious quarantine.
+        d = _decision(ema_pps=100.0, mad_pps=0.001, window_pps=100.5, robust_stats_ready=True)
+        self.assertEqual(ELIGIBLE, d["classification"])
+        self.assertTrue(d["should_update"])
+        self.assertEqual("normal", d["reason"])
+
+    def test_near_zero_mad_large_deviation_still_quarantined(self):
+        # A 100 pps deviation on the same near-zero MAD must still quarantine
+        # (real anomalies are never relaxed by the floor).
+        d = _decision(ema_pps=100.0, mad_pps=0.001, window_pps=200.0, robust_stats_ready=True)
+        self.assertEqual(QUARANTINED, d["classification"])
+        self.assertFalse(d["should_update"])
+
+    def test_high_volume_small_relative_mad_not_quarantined(self):
+        # 1000 pps baseline, mad=1, 10 pps deviation: relative floor (50 pps)
+        # keeps z small -> no false quarantine on a stable high-volume prefix.
+        d = _decision(ema_pps=1000.0, mad_pps=1.0, window_pps=1010.0, robust_stats_ready=True)
+        self.assertEqual(ELIGIBLE, d["classification"])
+
+    def test_mad_floor_never_overrides_guardrails(self):
+        # Even with a tiny MAD and small deviation, confirmed_attack must still reject.
+        d = _decision(ema_pps=100.0, mad_pps=0.001, window_pps=100.5,
+                      confirmed_attack=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+        self.assertFalse(d["should_update"])
+
 
 V2_DDL = """
 CREATE TABLE behavior_safe_learning_shadow_audit_v2 (
