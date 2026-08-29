@@ -426,6 +426,16 @@ def safe_learning_decision(
     baseline should update, the next maturity state/clean-count, promotion and
     the next quarantine deadline. The caller decides whether to actually apply
     the update (feature switch) and what to persist.
+
+    Guardrail precedence (highest first):
+      1. malicious campaign (campaign_rejected)
+      2. protected / internal / customer / CGNAT (protected_or_internal)
+      3. confirmed attack (confirmed_attack)
+      4. strong detector signal (detector_signal / bootstrap_strong_signal)
+      5. robust-z quarantine (robust_z / quarantine_extended)
+      6. normal learning (normal / bootstrap_clean / bootstrap_promoted)
+    A strong detector signal is an ABSOLUTE gate and is never learned,
+    regardless of robust-stat readiness or z-score.
     """
     state = baseline_state if baseline_state in (BOOTSTRAP, TRUSTED) else BOOTSTRAP
     frozen = bool(quarantined_until and now_iso and str(quarantined_until) > str(now_iso))
@@ -469,10 +479,12 @@ def safe_learning_decision(
             "next_quarantined_until": "",
         }
 
-    if state == BOOTSTRAP:
-        # During bootstrap there is no trusted baseline to z-score against, so
-        # "clean" is decided by absolute detector evidence only.
-        if strong_detector_signal:
+    # Strong detector signal is an ABSOLUTE gate: it is never learned into the
+    # baseline, regardless of robust-stat readiness or z-score (robust_z must
+    # never override strong_detector_signal). BOOTSTRAP keeps its distinct
+    # reason; TRUSTED reuses detector_signal (same contract as before).
+    if strong_detector_signal:
+        if state == BOOTSTRAP:
             return {
                 "classification": REJECTED,
                 "should_update": False,
@@ -482,6 +494,19 @@ def safe_learning_decision(
                 "reason": "bootstrap_strong_signal",
                 "next_quarantined_until": "",
             }
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": TRUSTED,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "detector_signal",
+            "next_quarantined_until": "",
+        }
+
+    if state == BOOTSTRAP:
+        # During bootstrap there is no trusted baseline to z-score against, so
+        # "clean" is decided by absolute detector evidence only.
         clean_count = max(0, int(bootstrap_clean_count)) + 1
         if clean_count >= max(1, int(bootstrap_min_clean_windows)):
             return {
@@ -525,21 +550,6 @@ def safe_learning_decision(
             "promoted": False,
             "reason": "quarantine_frozen",
             "next_quarantined_until": quarantined_until,
-        }
-
-    # A strong detector signal while robust statistics are not yet ready must
-    # not be learned into the baseline (cold-start protection without MAD).
-    # When the feature is OFF this only produces a shadow divergence; V1 still
-    # applies its own update.
-    if strong_detector_signal and not robust_stats_ready:
-        return {
-            "classification": REJECTED,
-            "should_update": False,
-            "next_state": TRUSTED,
-            "next_clean_count": 0,
-            "promoted": False,
-            "reason": "detector_signal",
-            "next_quarantined_until": "",
         }
 
     # Not frozen: quarantine only via a robust z-score once the robust

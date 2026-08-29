@@ -103,6 +103,51 @@ class SafeLearningGuardrailTest(unittest.TestCase):
             d = _decision(robust_stats_ready=True, **kw)
             self.assertFalse(d["should_update"])
 
+    def test_trusted_ready_z_zero_strong_signal_rejected(self):
+        # z == 0 (window equals ema) with a strong signal must still reject.
+        d = _decision(ema_pps=100.0, mad_pps=10.0, window_pps=100.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+        self.assertFalse(d["should_update"])
+        self.assertEqual("detector_signal", d["reason"])
+
+    def test_trusted_ready_z_small_strong_signal_rejected(self):
+        d = _decision(ema_pps=100.0, mad_pps=50.0, window_pps=200.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+        self.assertEqual("detector_signal", d["reason"])
+
+    def test_trusted_ready_z_high_strong_signal_rejected(self):
+        # High z would normally quarantine; strong signal must reject first.
+        d = _decision(ema_pps=100.0, mad_pps=5.0, window_pps=1000.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+        self.assertEqual("detector_signal", d["reason"])
+
+    def test_trusted_ready_normal_no_signal_learns(self):
+        d = _decision(ema_pps=100.0, mad_pps=50.0, window_pps=110.0,
+                      strong_detector_signal=False, robust_stats_ready=True)
+        self.assertEqual(ELIGIBLE, d["classification"])
+        self.assertTrue(d["should_update"])
+        self.assertEqual("normal", d["reason"])
+
+    def test_network_sweep_ready_strong_signal_rejected(self):
+        d = _decision(ema_pps=100.0, mad_pps=50.0, window_pps=105.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+        self.assertEqual("detector_signal", d["reason"])
+
+    def test_carpet_bombing_ready_strong_signal_rejected(self):
+        d = _decision(ema_pps=100.0, mad_pps=50.0, window_pps=105.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertEqual(REJECTED, d["classification"])
+
+    def test_udp_flood_ready_strong_signal_rejected(self):
+        d = _decision(ema_pps=100.0, mad_pps=50.0, window_pps=105.0,
+                      strong_detector_signal=True, robust_stats_ready=True)
+        self.assertFalse(d["should_update"])
+        self.assertEqual("detector_signal", d["reason"])
+
     def test_future_quarantine_frozen_does_not_learn(self):
         d = _decision(quarantined_until="2026-08-29T20:15:00Z", now_iso="2026-08-29T20:00:00Z")
         self.assertFalse(d["should_update"])

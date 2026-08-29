@@ -330,14 +330,17 @@ class SafeShadowObservabilityTest(unittest.TestCase):
         self.assertFalse(decision["should_update"])
         self.assertEqual("detector_signal", decision["reason"])
 
-    def test_detector_signal_trusted_ready_uses_z(self) -> None:
+    def test_detector_signal_trusted_ready_rejects_regardless_of_z(self) -> None:
+        # Strong detector signal is an absolute gate: even with ready robust
+        # stats and a small z-score it must never be learned.
         decision = safe_learning_decision(
             baseline_state=TRUSTED, sample_count=100, ema_pps=100.0, mad_pps=50.0,
             window_pps=200.0, strong_detector_signal=True, robust_stats_ready=True,
             now_iso=NOW,
         )
-        self.assertEqual(ELIGIBLE, decision["classification"])
-        self.assertTrue(decision["should_update"])
+        self.assertEqual(REJECTED, decision["classification"])
+        self.assertFalse(decision["should_update"])
+        self.assertEqual("detector_signal", decision["reason"])
 
     def test_future_clock_skew_excluded_from_baseline(self) -> None:
         future = FlowObservation(
