@@ -3573,7 +3573,9 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
         ("PREFIX_SUBNET_HIGH_PPS", "subnet", "transmits", "ALL", "packets_s", 1_000_000, 3_000_000),
         ("DNS_INTERNAL_IP_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 10_000, 30_000),
         ("DNS_INTERNAL_IP_HIGH_BITS", "internal_ip", "transmits", "DNS", "bits_s", 20_000_000, 50_000_000),
-        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 5_000, 15_000),
+        # DNS_INTERNAL_IP_TO_DST_HIGH_PPS e removido deste seed default: a regra
+        # oficial (ensure_official_dns_detection_rules) ja a cria com perfil de
+        # mitigacao. Manter aqui gerava uma regra duplicada DETECTION_ONLY.
     ]
     for vector, domain, direction, protocol, metric, warning, critical in defaults:
         conn.execute(
