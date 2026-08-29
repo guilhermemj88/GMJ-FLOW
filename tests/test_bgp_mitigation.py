@@ -285,6 +285,7 @@ class BgpMitigationTest(unittest.TestCase):
         protocol="udp",
         port_start=1,
         port_end=65535,
+        batch_id=None,
     ):
         main.ensure_cgnat_schema(conn)
         existing = conn.execute(
@@ -299,19 +300,20 @@ class BgpMitigationTest(unittest.TestCase):
         if existing:
             return int(existing["id"])
         now = main.utc_now_iso()
-        batch_id = conn.execute(
-            """
-            INSERT INTO cgnat_import_batches (
-                filename, original_filename, file_size, source_type_detected,
-                source_type_confirmed, device_name, pool_name, connector_id, status,
-                file_hash, total_rows, valid_rows, created_at, activated_at, created_by
-            )
-            VALUES ('fixture-map.txt', 'fixture-map.txt', 0, 'manual',
-                    'manual', 'NE8000-FIXTURE', 'fixture-pool', ?, 'active',
-                    'fixture-hash', 1, 1, ?, ?, 'fixture')
-            """,
-            (connector_id, now, now),
-        ).lastrowid
+        if batch_id is None:
+            batch_id = conn.execute(
+                """
+                INSERT INTO cgnat_import_batches (
+                    filename, original_filename, file_size, source_type_detected,
+                    source_type_confirmed, device_name, pool_name, connector_id, status,
+                    file_hash, total_rows, valid_rows, created_at, activated_at, created_by
+                )
+                VALUES ('fixture-map.txt', 'fixture-map.txt', 0, 'manual',
+                        'manual', 'NE8000-FIXTURE', 'fixture-pool', ?, 'active',
+                        'fixture-hash', 1, 1, ?, ?, 'fixture')
+                """,
+                (connector_id, now, now),
+            ).lastrowid
         mapping_id = conn.execute(
             """
             INSERT INTO cgnat_port_mappings (
@@ -1835,7 +1837,7 @@ class BgpMitigationTest(unittest.TestCase):
                 "rule_id": int(row["id"]),
                 "rule_name": "DNS_QUERY_OUTBOUND_CLIENT",
                 "display_name": "DNS outbound por cliente",
-                "rule_config": {"dst_port": "53", "group_by": "src_ip,dst_ip,dst_port,proto"},
+                "rule_config": {"dst_port": "53", "group_by": "src_ip,dst_ip,dst_port,proto", "allow_instant_critical_auto": True},
                 "prefix_id": int(prefix_id),
                 "prefix_cidr": "45.5.248.0/24",
                 "domain": "internal_ip",
@@ -1855,12 +1857,12 @@ class BgpMitigationTest(unittest.TestCase):
                 "top_dst_ip": "103.100.169.200",
                 "top_src_port": 62129,
                 "top_dst_port": 53,
-                "top_packets": 13000,
-                "top_bytes": 1000000,
-                "packets": 13000,
-                "bytes": 1000000,
-                "packets_s": 13000,
-                "bits_s": 8000000,
+                "top_packets": 20000,
+                "top_bytes": 2000000,
+                "packets": 20000,
+                "bytes": 2000000,
+                "packets_s": 20000,
+                "bits_s": 16000000,
                 "flows": 1,
                 "unique_dst_ips": 1,
                 "unique_dst_ports": 1,
@@ -1869,7 +1871,7 @@ class BgpMitigationTest(unittest.TestCase):
                 "threshold_warning": 5000,
                 "threshold_critical": 15000,
                 "metric": "packets_s",
-                "metric_value": 13000,
+                "metric_value": 20000,
                 "warning_response_profile_id": profile["id"],
                 "critical_response_profile_id": profile["id"],
                 "fallback_response_profile_id": profile["id"],
@@ -1899,8 +1901,8 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(event["top_dst_ip"], "103.100.169.200")
             self.assertEqual(event["top_src_port"], 62129)
             self.assertEqual(event["top_dst_port"], 53)
-            self.assertEqual(event["top_packets"], 13000)
-            self.assertEqual(event["top_bytes"], 1000000)
+            self.assertEqual(event["top_packets"], 20000)
+            self.assertEqual(event["top_bytes"], 2000000)
             self.assertEqual(event["protocol"], "udp")
             self.assertEqual(event["target_port"], 53)
             self.assertEqual(event["mitigation_basis"], "dns_outbound_destination")
@@ -3310,9 +3312,23 @@ class BgpMitigationTest(unittest.TestCase):
 
     def test_cgnat_gate_fails_closed_on_ambiguous_port_mapping(self):
         with temporary_main_db():
-            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False)
-            # Segunda identidade para o mesmo public_ip/porta → ambiguidade.
-            self._insert_cgnat_mapping(conn, public_ip="45.5.248.205", private_ip="100.64.0.20")
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            # Segunda identidade para o mesmo public_ip/porta, no mesmo batch e
+            # com o mesmo conector, para empatar na prioridade e gerar ambiguidade.
+            first_batch = conn.execute(
+                """
+                SELECT batch_id FROM cgnat_port_mappings
+                WHERE public_ip = '45.5.248.205' AND private_ip = '100.64.0.10' AND active = 1
+                ORDER BY id LIMIT 1
+                """
+            ).fetchone()
+            self._insert_cgnat_mapping(
+                conn,
+                public_ip="45.5.248.205",
+                private_ip="100.64.0.20",
+                connector_id=connector["id"],
+                batch_id=int(first_batch["batch_id"]),
+            )
             event_id = self._insert_dns_query_anomaly_event(conn)
             conn.commit()
             conn.close()
