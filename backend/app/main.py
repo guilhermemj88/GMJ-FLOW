@@ -56,25 +56,33 @@ from app.services.cgnat_mapping import (
     CGNAT_AI_PROMPT_VERSION,
     CGNAT_AI_SCHEMA,
     CGNAT_AI_SYSTEM_PROMPT,
+    CGNAT_POOL_MODES,
     CGNAT_SOURCE_MODES,
     CGNAT_SOURCE_TYPES,
     activate_cgnat_batch,
     approve_cgnat_batch,
     build_cgnat_ai_prompt,
+    cgnat_pool_evidence,
+    cgnat_pool_match,
+    cgnat_pool_overlap_context,
     cgnat_upload_limits,
     consolidate_cgnat_chunks,
     create_cgnat_import_batch,
+    create_cgnat_pool,
     deactivate_cgnat_batch,
+    delete_cgnat_pool,
     ensure_cgnat_schema,
     get_cgnat_batch,
     list_active_cgnat_mappings,
     list_cgnat_batches,
     list_cgnat_import_errors,
+    list_cgnat_pools,
     parse_known_cgnat_text,
     reject_cgnat_batch,
     resolve_cgnat_subscriber,
     split_cgnat_content,
     store_cgnat_preview,
+    update_cgnat_pool,
 )
 from app.services.ai_integration import (
     AI_FUNCTIONS,
@@ -5938,6 +5946,96 @@ def cgnat_mapping_resolve(
             timestamp=timestamp,
             connector_id=connector_id,
         )
+
+
+class CgnatPoolPayload(BaseModel):
+    name: str = ""
+    prefix: str = ""
+    mode: str = "non_deterministic"
+    active: bool = True
+    notes: str = ""
+
+
+@app.get("/api/cgnat/pools")
+def cgnat_pool_list(
+    request: Request,
+    search: str = "",
+    include_inactive: bool = False,
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {
+            "items": list_cgnat_pools(
+                conn,
+                search=search,
+                include_inactive=include_inactive,
+            )
+        }
+
+
+@app.post("/api/cgnat/pools")
+def cgnat_pool_create(request: Request, payload: CgnatPoolPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            return create_cgnat_pool(conn, payload.model_dump() if hasattr(payload, "model_dump") else payload.dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/cgnat/pools/{pool_id}")
+def cgnat_pool_update(request: Request, pool_id: int, payload: CgnatPoolPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            return update_cgnat_pool(
+                conn,
+                pool_id,
+                payload.model_dump() if hasattr(payload, "model_dump") else payload.dict(),
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/cgnat/pools/{pool_id}")
+def cgnat_pool_delete(request: Request, pool_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        deleted = delete_cgnat_pool(conn, pool_id)
+    return {"ok": deleted}
+
+
+@app.get("/api/cgnat/pool-match")
+def cgnat_pool_match_endpoint(
+    request: Request,
+    ip: str = "",
+    target: str = "",
+    unique_targets: int = Query(0, ge=0),
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if clean_text(target):
+            return {
+                "ip_match": cgnat_pool_match(conn, target),
+                "target_context": cgnat_pool_overlap_context(
+                    conn,
+                    target,
+                    unique_targets=int(unique_targets),
+                ),
+            }
+        return {
+            "ip_match": cgnat_pool_match(conn, ip),
+            "target_context": cgnat_pool_overlap_context(
+                conn,
+                ip,
+                unique_targets=int(unique_targets),
+            ),
+        }
 
 
 def collectors_dir() -> Path:
@@ -17445,6 +17543,36 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     enriched["unique_conversations"] = unique_conversations
     coordinates = cgnat_event_lookup_coordinates(enriched)
     addressing = resolve_subscriber_addressing(conn, enriched, coordinates)
+    pool_source_ip = clean_text(coordinates.get("public_ip")) or addressing.get("source_ip")
+    source_pool = cgnat_pool_match(conn, pool_source_ip)
+    enriched.update(
+        {
+            "is_cgnat": bool(source_pool.get("is_cgnat")),
+            "cgnat_mode": source_pool.get("cgnat_mode") or "",
+            "cgnat_pool": source_pool.get("cgnat_pool") or "",
+            "cgnat_pool_name": source_pool.get("cgnat_pool_name") or "",
+            "subscriber_attribution_available": bool(source_pool.get("subscriber_attribution_available")),
+            "cgnat_pool_size": int(source_pool.get("pool_size") or 0),
+        }
+    )
+    target_text = clean_text(
+        enriched.get("target_cidr")
+        or enriched.get("target_ip")
+        or source_details.get("target_cidr")
+        or source_details.get("target_ip")
+    )
+    target_context = cgnat_pool_overlap_context(conn, target_text, unique_targets=unique_destinations)
+    enriched["target_context"] = target_context
+    if target_context.get("context") == "CGNAT_POOL":
+        enriched.update(
+            {
+                "target_is_cgnat": True,
+                "cgnat_mode": target_context.get("cgnat_mode") or enriched.get("cgnat_mode"),
+                "cgnat_pool": target_context.get("cgnat_pool") or enriched.get("cgnat_pool"),
+                "cgnat_pool_name": target_context.get("cgnat_pool_name") or enriched.get("cgnat_pool_name"),
+                "cgnat_pool_coverage": target_context.get("cgnat_pool_coverage") or 0.0,
+            }
+        )
     enriched["cgnat_lookup_direction"] = coordinates["lookup_direction"]
     enriched["subscriber_addressing_resolution"] = addressing
     enriched["subscriber_addressing_mode"] = addressing["configured_mode"]
@@ -17491,18 +17619,23 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
             }
         )
         return enriched
+    pool_non_deterministic = bool(enriched.get("is_cgnat")) and clean_text(enriched.get("cgnat_mode")) == "non_deterministic"
     if not coordinates["lookup_supported"]:
         enriched.update(
             {
                 "cgnat_matched": False,
                 "cgnat_ambiguous": False,
                 "cgnat_shared_public_ip": True,
-                "cgnat_mapping_status": "not_looked_up",
+                "cgnat_mapping_status": "pool_non_deterministic" if pool_non_deterministic else "not_looked_up",
                 "unique_private_subscribers": 0,
                 "cgnat_mapping_message": (
-                    "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
-                    if coordinates["lookup_direction"].startswith("inbound_")
-                    else "Cliente CGNAT nao identificado."
+                    "Pool CGNAT não determinístico; atribuição de assinante indisponível."
+                    if pool_non_deterministic
+                    else (
+                        "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
+                        if coordinates["lookup_direction"].startswith("inbound_")
+                        else "Cliente CGNAT nao identificado."
+                    )
                 ),
                 "cgnat_mitigation_block_reason": "cgnat_subscriber_not_resolved",
             }
@@ -17543,11 +17676,15 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     enriched["subscriber_addressing_resolution"] = addressing
     enriched["cgnat_lookup_performed"] = True
     status = "ambiguous" if ambiguous else "matched" if matched else "not_found"
+    if not matched and pool_non_deterministic:
+        status = "pool_non_deterministic"
     message = (
         "Mapeamento CGNAT ambiguo."
         if ambiguous
         else "Cliente CGNAT identificado."
         if matched
+        else "Pool CGNAT não determinístico; atribuição de assinante indisponível."
+        if pool_non_deterministic
         else "Cliente CGNAT nao identificado."
     )
     if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and unique_conversations == 1:
@@ -24007,6 +24144,33 @@ def generate_rtbh_candidates_from_behavioral_decision(
         vector.campaign_id if isinstance(vector, CampaignVector) else event_key_for_behavioral_vector(vector)
     )
     incident["threat_assessment_id"] = incident["incident_id"]
+
+    # Context-only CGNAT evidence for future decisions: never changes
+    # candidate selection, thresholds or execution paths. A shared
+    # non-deterministic CGNAT pool must not be read as many independent
+    # customers.
+    try:
+        with sqlite_connection() as conn:
+            pool_context = cgnat_pool_overlap_context(
+                conn,
+                incident.get("target_prefix"),
+                unique_targets=0,
+            )
+        if pool_context.get("context") == "CGNAT_POOL":
+            evidence = incident.get("evidence")
+            if not isinstance(evidence, dict):
+                evidence = {}
+                incident["evidence"] = evidence
+            evidence.update(
+                {
+                    "target_is_cgnat": True,
+                    "cgnat_mode": pool_context.get("cgnat_mode") or "",
+                    "cgnat_pool": pool_context.get("cgnat_pool") or "",
+                    "cgnat_pool_coverage": pool_context.get("cgnat_pool_coverage") or 0.0,
+                }
+            )
+    except Exception as exc:  # pragma: no cover - evidence must never break generation
+        logger.warning("RTBH CGNAT pool context lookup failed: %s", exc)
 
     start = parse_datetime_text(incident.get("first_seen"))
     end = parse_datetime_text(incident.get("last_seen"))

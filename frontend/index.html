@@ -7286,7 +7286,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
-          <section class="panel p-3">
+          <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div class="panel-title">Mapeamentos ativos</div>
               <input id="cgnatMappingSearch" class="form-control form-control-sm" style="max-width:320px" placeholder="Pesquisar IP, cliente, pool ou equipamento">
@@ -7295,6 +7295,29 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <table class="table table-sm table-hover align-middle mb-0">
                 <thead><tr><th>IP público</th><th>Faixa</th><th>Protocolo</th><th>Cliente privado</th><th>Equipamento/pool</th><th>Subscriber</th><th>Lote</th><th>Confiança</th></tr></thead>
                 <tbody id="cgnatMappingsTable"><tr><td colspan="8" class="text-muted">Nenhum mapeamento ativo.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3">
+            <div class="panel-title mb-2">Pools CGNAT</div>
+            <div class="subtle mb-2">Prefixos públicos usados como pool CGNAT. Modo não determinístico não exige portas: o GMJ-FLOW reconhece o pool, mas nunca inventa cliente, porta ou IP privado.</div>
+            <div class="flow-search-grid mb-2">
+              <input id="cgnatPoolId" type="hidden">
+              <div class="field"><label for="cgnatPoolName">Nome</label><input id="cgnatPoolName" class="form-control form-control-sm" placeholder="POOL-NAT-01"></div>
+              <div class="field"><label for="cgnatPoolPrefix">CIDR</label><input id="cgnatPoolPrefix" class="form-control form-control-sm" placeholder="45.168.202.0/24"></div>
+              <div class="field"><label for="cgnatPoolMode">Modo</label><select id="cgnatPoolMode" class="form-select form-select-sm"><option value="deterministic">Determinístico</option><option value="non_deterministic" selected>Não determinístico</option></select></div>
+              <div class="field"><label for="cgnatPoolActive">Ativo</label><select id="cgnatPoolActive" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+              <div class="field"><label for="cgnatPoolNotes">Observação</label><input id="cgnatPoolNotes" class="form-control form-control-sm" placeholder="Pool dinâmico cliente X"></div>
+            </div>
+            <div class="toolbar mb-3">
+              <button id="saveCgnatPoolButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar pool</span></button>
+              <button id="clearCgnatPoolButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>Nome</th><th>Prefix</th><th>Modo</th><th>IPs do pool</th><th>Ativo</th><th>Observação</th><th>Ações</th></tr></thead>
+                <tbody id="cgnatPoolsTable"><tr><td colspan="7" class="text-muted">Nenhum pool cadastrado.</td></tr></tbody>
               </table>
             </div>
           </section>
@@ -9889,7 +9912,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         approveCgnatBatchButton: 'cgnat.manage',
         approveActivateCgnatBatchButton: 'cgnat.manage',
         replaceActivateCgnatBatchButton: 'cgnat.manage',
-        rejectCgnatBatchButton: 'cgnat.manage'
+        rejectCgnatBatchButton: 'cgnat.manage',
+        saveCgnatPoolButton: 'cgnat.manage',
+        clearCgnatPoolButton: 'cgnat.manage'
       };
       Object.entries(controls).forEach(([id, permission]) => {
         document.getElementById(id)?.classList.toggle('auth-hidden', !hasPermission(permission));
@@ -19650,7 +19675,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ? '<span class="badge-soft warn">Mapeamento CGNAT ambíguo</span>'
         : event.cgnat_matched
           ? '<span class="badge-soft ok">Cliente CGNAT identificado</span>'
-          : '<span class="badge-soft off">Cliente CGNAT não identificado</span>';
+          : event.is_cgnat
+            ? `<span class="badge-soft ok">CGNAT: Sim · Pool: ${escapeHtml(event.cgnat_pool || '-')} · Modo: ${event.cgnat_mode === 'deterministic' ? 'Determinístico' : 'Não determinístico'}${event.subscriber_attribution_available === false ? ' · Atribuição de assinante: indisponível' : ''}</span>`
+            : '<span class="badge-soft off">Cliente CGNAT não identificado</span>';
       const subscriberAddressingFields = [
         ['Modo configurado da zona', configuredAddressingMode],
         ['Modo efetivo da origem', effectiveAddressingMode],
@@ -19681,12 +19708,27 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Participação da conversa', event.cgnat_conversation_share !== null && event.cgnat_conversation_share !== undefined ? `${(Number(event.cgnat_conversation_share) * 100).toFixed(1)}%` : '-'],
         ['Bloqueio CGNAT', event.cgnat_mitigation_block_reason || '-']
       ] : [];
+      const cgnatPoolFields = event.is_cgnat ? [
+        ['CGNAT', 'Sim'],
+        ['Pool CGNAT', event.cgnat_pool || '-'],
+        ['Nome do pool', event.cgnat_pool_name || '-'],
+        ['Modo do pool', event.cgnat_mode === 'deterministic' ? 'Determinístico' : 'Não determinístico'],
+        ['Atribuição de assinante', event.subscriber_attribution_available ? 'disponível' : 'indisponível']
+      ] : [];
+      const targetContextFields = event.target_context?.context === 'CGNAT_POOL' ? [
+        ['Contexto do alvo', 'CGNAT_POOL'],
+        ['Pool do alvo', event.target_context.cgnat_pool || '-'],
+        ['Tamanho do pool', `${formatNumber(event.target_context.pool_size || 0)} IPs`],
+        ['Destinos únicos atingidos', `${formatNumber(event.target_context.unique_targets_reached || 0)} / ${formatNumber(event.target_context.pool_size || 0)} — ${((event.target_context.cgnat_pool_coverage || 0) * 100).toFixed(1)}% do pool`]
+      ] : [];
       const fields = [
         ['Nome', anomalyTypeLabel(event)],
         ['Severidade disparada', triggeredSeverity],
         ...dnsSingleFlowFields,
         ...subscriberAddressingFields,
         ...cgnatFields,
+        ...cgnatPoolFields,
+        ...targetContextFields,
         ['Origem', anomalySourceLabel(event.anomaly_source)],
         ['Engine', event.source_engine || '-'],
         ['Fonte', anomalySourceSummary(event)],
@@ -26797,6 +26839,92 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderCgnatMappings(result.items || []);
     }
 
+    function renderCgnatPools(items) {
+      document.getElementById('cgnatPoolsTable').innerHTML = (items || []).map(item => `
+        <tr>
+          <td>${escapeHtml(item.name || '-')}</td>
+          <td>${escapeHtml(item.prefix || '-')}</td>
+          <td>${escapeHtml(item.mode === 'deterministic' ? 'Determinístico' : 'Não determinístico')}</td>
+          <td>${formatNumber(item.pool_size || 0)}</td>
+          <td><span class="badge-soft ${item.active ? 'ok' : 'off'}">${item.active ? 'Ativo' : 'Desativado'}</span></td>
+          <td>${escapeHtml(item.notes || '-')}</td>
+          <td>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-cgnat-pool-action="edit" data-id="${item.id}">Editar</button>
+            <button type="button" class="btn btn-sm btn-outline-${item.active ? 'warning' : 'success'}" data-cgnat-pool-action="toggle" data-id="${item.id}">${item.active ? 'Desativar' : 'Ativar'}</button>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-cgnat-pool-action="delete" data-id="${item.id}">Excluir</button>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="7" class="text-muted">Nenhum pool cadastrado.</td></tr>';
+    }
+
+    async function loadCgnatPools() {
+      const result = await apiRequest('/api/cgnat/pools?include_inactive=true');
+      renderCgnatPools(result.items || []);
+    }
+
+    function clearCgnatPoolForm() {
+      setValue('cgnatPoolId', '');
+      setValue('cgnatPoolName', '');
+      setValue('cgnatPoolPrefix', '');
+      setValue('cgnatPoolMode', 'non_deterministic');
+      setValue('cgnatPoolNotes', '');
+      setBoolSelect('cgnatPoolActive', true);
+    }
+
+    function cgnatPoolFormPayload() {
+      return {
+        name: selectValue('cgnatPoolName').trim(),
+        prefix: selectValue('cgnatPoolPrefix').trim(),
+        mode: selectValue('cgnatPoolMode'),
+        active: boolSelectValue('cgnatPoolActive'),
+        notes: selectValue('cgnatPoolNotes').trim()
+      };
+    }
+
+    async function saveCgnatPool() {
+      const id = selectValue('cgnatPoolId');
+      const payload = cgnatPoolFormPayload();
+      if (!payload.name) throw new Error('Informe o nome do pool.');
+      if (!payload.prefix) throw new Error('Informe o CIDR do pool.');
+      await apiRequest(id ? `/api/cgnat/pools/${id}` : '/api/cgnat/pools', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      clearCgnatPoolForm();
+      await loadCgnatPools();
+    }
+
+    async function handleCgnatPoolAction(button) {
+      const poolId = Number(button.dataset.id);
+      const action = button.dataset.action;
+      if (action === 'delete') {
+        if (!confirm('Excluir o pool CGNAT?')) return;
+        await apiRequest(`/api/cgnat/pools/${poolId}`, { method: 'DELETE' });
+        await loadCgnatPools();
+        return;
+      }
+      if (action === 'toggle') {
+        const item = (await apiRequest('/api/cgnat/pools?include_inactive=true')).items.find(p => Number(p.id) === poolId);
+        if (!item) return;
+        await apiRequest(`/api/cgnat/pools/${poolId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: item.name, prefix: item.prefix, mode: item.mode, notes: item.notes, active: !item.active })
+        });
+        await loadCgnatPools();
+        return;
+      }
+      const item = (await apiRequest('/api/cgnat/pools?include_inactive=true')).items.find(p => Number(p.id) === poolId);
+      if (!item) return;
+      setValue('cgnatPoolId', item.id);
+      setValue('cgnatPoolName', item.name || '');
+      setValue('cgnatPoolPrefix', item.prefix || '');
+      setValue('cgnatPoolMode', item.mode || 'non_deterministic');
+      setValue('cgnatPoolNotes', item.notes || '');
+      setBoolSelect('cgnatPoolActive', item.active !== false);
+    }
+
     async function loadCgnatWorkspace() {
       setText('cgnatStatus', 'Carregando configuração, lotes e mapeamentos...');
       const [config, history, connectors] = await Promise.all([
@@ -26809,6 +26937,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('cgnatConnector').innerHTML = '<option value="">Sem vínculo</option>' + connectorItems.map(item => `<option value="${item.id}">${escapeHtml(item.name || `#${item.id}`)}</option>`).join('');
       renderCgnatHistory(history.items || []);
       await loadCgnatMappings();
+      await loadCgnatPools();
       const ai = config.ai || {};
       setText(
         'cgnatStatus',
@@ -27859,6 +27988,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (button) handleCgnatHistoryAction(button).catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
     });
     document.getElementById('cgnatMappingSearch').addEventListener('input', () => loadCgnatMappings().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));
+    document.getElementById('saveCgnatPoolButton').addEventListener('click', () => saveCgnatPool().catch(error => setText('cgnatStatus', `Falha ao salvar pool: ${error.message}`)));
+    document.getElementById('clearCgnatPoolButton').addEventListener('click', () => clearCgnatPoolForm());
+    document.getElementById('cgnatPoolsTable').addEventListener('click', event => {
+      const button = event.target.closest('[data-cgnat-pool-action]');
+      if (button) handleCgnatPoolAction(button).catch(error => setText('cgnatStatus', `Falha no pool: ${error.message}`));
+    });
     document.getElementById('appearanceTheme').addEventListener('change', event => {
       setAppearanceTheme(event.target.value);
     });

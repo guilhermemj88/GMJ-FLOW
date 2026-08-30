@@ -248,6 +248,17 @@ def ensure_cgnat_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(batch_id) REFERENCES cgnat_import_batches(id) ON DELETE RESTRICT
         );
 
+        CREATE TABLE IF NOT EXISTS cgnat_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            prefix TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'non_deterministic',
+            active INTEGER NOT NULL DEFAULT 1,
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         """
     )
     batch_columns = {
@@ -330,6 +341,17 @@ def ensure_cgnat_schema(conn: sqlite3.Connection) -> None:
     }
     for column, ddl in mapping_columns.items():
         ensure_column(conn, "cgnat_port_mappings", column, ddl)
+    pool_columns = {
+        "name": "name TEXT NOT NULL DEFAULT ''",
+        "prefix": "prefix TEXT NOT NULL DEFAULT ''",
+        "mode": "mode TEXT NOT NULL DEFAULT 'non_deterministic'",
+        "active": "active INTEGER NOT NULL DEFAULT 1",
+        "notes": "notes TEXT NOT NULL DEFAULT ''",
+        "created_at": "created_at TEXT NOT NULL DEFAULT ''",
+        "updated_at": "updated_at TEXT NOT NULL DEFAULT ''",
+    }
+    for column, ddl in pool_columns.items():
+        ensure_column(conn, "cgnat_pools", column, ddl)
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_cgnat_batches_hash ON cgnat_import_batches(file_hash);
@@ -345,6 +367,7 @@ def ensure_cgnat_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_cgnat_mappings_batch ON cgnat_port_mappings(batch_id, active);
         CREATE INDEX IF NOT EXISTS idx_cgnat_mappings_active ON cgnat_port_mappings(active, valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_cgnat_mappings_connector ON cgnat_port_mappings(connector_id, public_ip, active);
+        CREATE INDEX IF NOT EXISTS idx_cgnat_pools_active ON cgnat_pools(active);
         """
     )
 
@@ -2412,11 +2435,293 @@ def list_active_cgnat_mappings(
     return [mapping_to_dict(row) for row in rows]
 
 
+CGNAT_POOL_MODES = {"deterministic", "non_deterministic"}
+
+
+def _pool_prefixes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    ensure_cgnat_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT id, name, prefix, mode, active, notes, created_at, updated_at
+        FROM cgnat_pools
+        ORDER BY id
+        """
+    ).fetchall()
+    pools = []
+    for row in rows:
+        item = dict(row)
+        try:
+            network = ip_network(clean_text(item.get("prefix")), strict=False)
+        except ValueError:
+            continue
+        item["_network"] = network
+        pools.append(item)
+    return pools
+
+
+def pool_to_dict(item: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+    data = dict(item)
+    data.pop("_network", None)
+    prefix = clean_text(data.get("prefix"))
+    try:
+        pool_size = int(ip_network(prefix, strict=False).num_addresses)
+    except ValueError:
+        pool_size = 0
+    return {
+        "id": int(data.get("id") or 0),
+        "name": clean_text(data.get("name")),
+        "prefix": prefix,
+        "mode": clean_text(data.get("mode")) or "non_deterministic",
+        "active": bool(int(data.get("active") or 0)),
+        "notes": clean_text(data.get("notes")),
+        "pool_size": pool_size,
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
+def list_cgnat_pools(
+    conn: sqlite3.Connection,
+    *,
+    search: str = "",
+    include_inactive: bool = False,
+) -> list[dict[str, Any]]:
+    pools = [pool_to_dict(p) for p in _pool_prefixes(conn)]
+    needle = clean_text(search).lower()
+    if needle:
+        pools = [
+            p for p in pools
+            if needle in p["name"].lower()
+            or needle in p["prefix"].lower()
+            or needle in p["notes"].lower()
+            or needle in p["mode"].lower()
+        ]
+    if not include_inactive:
+        pools = [p for p in pools if p["active"]]
+    return pools
+
+
+def _normalized_pool_payload(values: dict[str, Any]) -> dict[str, Any]:
+    name = clean_text(values.get("name"))
+    if not name:
+        raise ValueError("cgnat_pool_name_required")
+    prefix = clean_text(values.get("prefix"))
+    try:
+        ip_network(prefix, strict=False)
+    except ValueError:
+        raise ValueError("cgnat_pool_prefix_invalid") from None
+    mode = clean_text(values.get("mode")).lower() or "non_deterministic"
+    if mode not in CGNAT_POOL_MODES:
+        raise ValueError("cgnat_pool_mode_invalid")
+    return {
+        "name": name,
+        "prefix": prefix,
+        "mode": mode,
+        "active": 1 if values.get("active", True) else 0,
+        "notes": clean_text(values.get("notes")),
+    }
+
+
+def create_cgnat_pool(conn: sqlite3.Connection, values: dict[str, Any]) -> dict[str, Any]:
+    ensure_cgnat_schema(conn)
+    normalized = _normalized_pool_payload(values)
+    now = utc_now_iso()
+    cursor = conn.execute(
+        """
+        INSERT INTO cgnat_pools (name, prefix, mode, active, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            normalized["name"],
+            normalized["prefix"],
+            normalized["mode"],
+            normalized["active"],
+            normalized["notes"],
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM cgnat_pools WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+    return pool_to_dict(row)
+
+
+def update_cgnat_pool(conn: sqlite3.Connection, pool_id: int, values: dict[str, Any]) -> dict[str, Any]:
+    ensure_cgnat_schema(conn)
+    row = conn.execute("SELECT * FROM cgnat_pools WHERE id = ?", (int(pool_id),)).fetchone()
+    if row is None:
+        raise ValueError("cgnat_pool_not_found")
+    current = pool_to_dict(row)
+    merged = {
+        "name": values.get("name", current["name"]),
+        "prefix": values.get("prefix", current["prefix"]),
+        "mode": values.get("mode", current["mode"]),
+        "active": values.get("active", current["active"]),
+        "notes": values.get("notes", current["notes"]),
+    }
+    normalized = _normalized_pool_payload(merged)
+    conn.execute(
+        """
+        UPDATE cgnat_pools
+        SET name = ?, prefix = ?, mode = ?, active = ?, notes = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            normalized["name"],
+            normalized["prefix"],
+            normalized["mode"],
+            normalized["active"],
+            normalized["notes"],
+            utc_now_iso(),
+            int(pool_id),
+        ),
+    )
+    conn.commit()
+    updated = conn.execute("SELECT * FROM cgnat_pools WHERE id = ?", (int(pool_id),)).fetchone()
+    return pool_to_dict(updated)
+
+
+def delete_cgnat_pool(conn: sqlite3.Connection, pool_id: int) -> bool:
+    ensure_cgnat_schema(conn)
+    cursor = conn.execute("DELETE FROM cgnat_pools WHERE id = ?", (int(pool_id),))
+    conn.commit()
+    return bool(cursor.rowcount)
+
+
+def cgnat_pool_match(conn: sqlite3.Connection, ip_text: Any) -> dict[str, Any]:
+    """Most specific active pool containing the IP (or CIDR's network address).
+
+    Never invents subscriber/port/private IP: for non_deterministic pools the
+    result explicitly says subscriber attribution is unavailable.
+    """
+    ensure_cgnat_schema(conn)
+    result = {
+        "matched": False,
+        "is_cgnat": False,
+        "cgnat_mode": "",
+        "cgnat_pool": "",
+        "cgnat_pool_name": "",
+        "subscriber_attribution_available": False,
+        "pool_size": 0,
+    }
+    text = clean_text(ip_text)
+    try:
+        network = ip_network(text, strict=False)
+        address = network.network_address
+    except ValueError:
+        return result
+    best: dict[str, Any] | None = None
+    for pool in _pool_prefixes(conn):
+        if not int(pool.get("active") or 0):
+            continue
+        pool_network = pool["_network"]
+        if address.version != pool_network.version or address not in pool_network:
+            continue
+        if best is None or pool_network.prefixlen > best["_network"].prefixlen:
+            best = pool
+    if best is None:
+        return result
+    mode = clean_text(best.get("mode")) or "non_deterministic"
+    return {
+        "matched": True,
+        "is_cgnat": True,
+        "cgnat_mode": mode,
+        "cgnat_pool": clean_text(best.get("prefix")),
+        "cgnat_pool_name": clean_text(best.get("name")),
+        "pool_id": int(best.get("id") or 0),
+        "pool_size": int(best["_network"].num_addresses),
+        "subscriber_attribution_available": mode == "deterministic",
+    }
+
+
+def cgnat_pool_overlap_context(
+    conn: sqlite3.Connection,
+    target_text: Any,
+    *,
+    unique_targets: int = 0,
+) -> dict[str, Any]:
+    """Target-prefix context against active CGNAT pools.
+
+    Picks the most specific active pool overlapping the target and reports
+    pool size, unique targets reached and pool coverage. Never estimates
+    subscribers.
+    """
+    ensure_cgnat_schema(conn)
+    result = {
+        "context": "",
+        "cgnat_pool": "",
+        "cgnat_pool_name": "",
+        "cgnat_mode": "",
+        "pool_size": 0,
+        "unique_targets_reached": 0,
+        "cgnat_pool_coverage": 0.0,
+        "overlap": "",
+        "target_inside_pool": False,
+        "pool_inside_target": False,
+    }
+    text = clean_text(target_text)
+    try:
+        target = ip_network(text, strict=False)
+    except ValueError:
+        return result
+    best: dict[str, Any] | None = None
+    for pool in _pool_prefixes(conn):
+        if not int(pool.get("active") or 0):
+            continue
+        pool_network = pool["_network"]
+        if target.version != pool_network.version or not target.overlaps(pool_network):
+            continue
+        if best is None or pool_network.prefixlen > best["_network"].prefixlen:
+            best = pool
+    if best is None:
+        return result
+    pool_network = best["_network"]
+    pool_size = int(pool_network.num_addresses)
+    reached = max(0, int(unique_targets or 0))
+    coverage = round(min(1.0, reached / pool_size), 4) if pool_size > 0 else 0.0
+    target_inside_pool = target.subnet_of(pool_network)
+    pool_inside_target = pool_network.subnet_of(target)
+    if target_inside_pool and pool_inside_target:
+        overlap = "equal"
+    elif target_inside_pool:
+        overlap = "target_inside_pool"
+    elif pool_inside_target:
+        overlap = "pool_inside_target"
+    else:
+        overlap = "partial"
+    return {
+        "context": "CGNAT_POOL",
+        "cgnat_pool": clean_text(best.get("prefix")),
+        "cgnat_pool_name": clean_text(best.get("name")),
+        "cgnat_mode": clean_text(best.get("mode")) or "non_deterministic",
+        "pool_size": pool_size,
+        "unique_targets_reached": reached,
+        "cgnat_pool_coverage": coverage,
+        "overlap": overlap,
+        "target_inside_pool": target_inside_pool,
+        "pool_inside_target": pool_inside_target,
+    }
+
+
+def cgnat_pool_evidence(conn: sqlite3.Connection, ip_text: Any) -> dict[str, Any]:
+    """Compact enrichment block for any analyzed IP/prefix."""
+    match = cgnat_pool_match(conn, ip_text)
+    return {
+        "is_cgnat": bool(match.get("is_cgnat")),
+        "cgnat_mode": match.get("cgnat_mode") or "",
+        "cgnat_pool": match.get("cgnat_pool") or "",
+        "cgnat_pool_name": match.get("cgnat_pool_name") or "",
+        "subscriber_attribution_available": bool(match.get("subscriber_attribution_available")),
+        "cgnat_pool_size": int(match.get("pool_size") or 0),
+    }
+
+
 __all__ = [
     "CGNAT_AI_PROMPT_VERSION",
     "CGNAT_AI_SCHEMA",
     "CGNAT_AI_SYSTEM_PROMPT",
     "CGNAT_IMPORT_STATUSES",
+    "CGNAT_POOL_MODES",
     "CGNAT_PROTOCOLS",
     "CGNAT_SOURCE_MODES",
     "CGNAT_SOURCE_TYPES",
@@ -2424,22 +2729,30 @@ __all__ = [
     "approve_cgnat_batch",
     "batch_to_dict",
     "build_cgnat_ai_prompt",
+    "cgnat_pool_evidence",
+    "cgnat_pool_match",
+    "cgnat_pool_overlap_context",
     "cgnat_upload_limits",
     "consolidate_cgnat_chunks",
     "create_cgnat_import_batch",
+    "create_cgnat_pool",
     "deactivate_cgnat_batch",
+    "delete_cgnat_pool",
     "ensure_cgnat_schema",
     "get_cgnat_batch",
     "list_active_cgnat_mappings",
     "list_cgnat_batches",
     "list_cgnat_import_errors",
+    "list_cgnat_pools",
     "parse_cgnat_ai_json",
     "parse_expanded_mapping_table",
     "parse_known_cgnat_text",
     "parse_mikrotik_netmap",
+    "pool_to_dict",
     "reject_cgnat_batch",
     "resolve_cgnat_subscriber",
     "split_cgnat_content",
     "store_cgnat_preview",
+    "update_cgnat_pool",
     "validate_cgnat_records",
 ]
