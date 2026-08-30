@@ -512,6 +512,7 @@ IF_OPER_STATUS_LABELS = {
 CALIBRATION_METHOD = "snmp_vs_flow"
 CALIBRATION_MIN_BPS = float(os.getenv("GMJFLOW_CALIBRATION_MIN_BPS", "10000"))
 CALIBRATION_MIN_CONFIDENCE = float(os.getenv("GMJFLOW_CALIBRATION_MIN_CONFIDENCE", "0.6"))
+SNMP_PAIR_SCAN_LIMIT = 20
 SNMP_POLL_STOP = threading.Event()
 SNMP_POLL_THREAD: threading.Thread | None = None
 
@@ -4919,16 +4920,18 @@ def calibration_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sensor_id: int) -> dict[str, Any]:
     if_index = int(item.get("if_index") or 0)
-    sample = conn.execute(
+    samples = conn.execute(
         """
-        SELECT sample_time, in_bps, out_bps, if_oper_status
+        SELECT sample_time, in_octets, out_octets, in_bps, out_bps, if_oper_status
         FROM interface_snmp_samples
         WHERE sensor_id = ? AND if_index = ?
         ORDER BY sample_time DESC
-        LIMIT 1
+        LIMIT ?
         """,
-        (sensor_id, if_index),
-    ).fetchone()
+        (sensor_id, if_index, SNMP_PAIR_SCAN_LIMIT),
+    ).fetchall()
+    latest = samples[0] if samples else None
+    pair = select_snmp_sample_pair(samples)
     calibration = conn.execute(
         """
         SELECT *
@@ -4937,10 +4940,10 @@ def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sen
         """,
         (sensor_id, if_index),
     ).fetchone()
-    item["snmp_in_bps"] = round(float(sample["in_bps"] or 0), 2) if sample else 0
-    item["snmp_out_bps"] = round(float(sample["out_bps"] or 0), 2) if sample else 0
-    item["snmp_sample_time"] = sample["sample_time"] if sample else ""
-    item["snmp_if_oper_status"] = sample["if_oper_status"] if sample else ""
+    item["snmp_in_bps"] = round(float(pair["in_bps"] or 0), 2) if pair.get("ok") else 0
+    item["snmp_out_bps"] = round(float(pair["out_bps"] or 0), 2) if pair.get("ok") else 0
+    item["snmp_sample_time"] = latest["sample_time"] if latest else ""
+    item["snmp_if_oper_status"] = latest["if_oper_status"] if latest else ""
     item["calibration"] = calibration_row_to_dict(calibration)
     item["effective_sample_rate_in"] = get_effective_sample_rate(sensor_id, if_index, "input")
     item["effective_sample_rate_out"] = get_effective_sample_rate(sensor_id, if_index, "output")
@@ -6848,6 +6851,82 @@ def counter_bps(current_value: int, previous_value: int, elapsed_seconds: float)
     if delta < 0:
         return 0.0
     return max(0.0, (delta * 8) / elapsed_seconds)
+
+
+def select_snmp_sample_pair(sample_rows: Iterable[Any]) -> dict[str, Any]:
+    """Escolhe o par consecutivo de amostras SNMP mais recente e válido.
+
+    Polls forçados podem gravar uma amostra poucos segundos após a anterior
+    com os MESMOS ifHCInOctets/ifHCOutOctets (delta zero). Em vez de usar
+    cegamente as duas últimas linhas, percorre as amostras (mais recente
+    primeiro) e devolve o primeiro par com:
+
+      - timestamps válidos e interval_seconds > 0
+      - contadores sem regressão (reset/counter wrap aparente é pulado)
+      - pelo menos uma direção com delta > 0
+
+    Recalcula in_bps/out_bps a partir dos octetos; nunca confia no
+    in_bps/out_bps pré-calculado da linha.
+    """
+    parsed: list[dict[str, Any]] = []
+    for raw in sample_rows:
+        item = dict(raw)
+        sample_time = parse_datetime_text(item.get("sample_time"))
+        if sample_time is None:
+            continue
+        parsed.append(
+            {
+                "sample_time": sample_time,
+                "in_octets": int(item.get("in_octets") or 0),
+                "out_octets": int(item.get("out_octets") or 0),
+            }
+        )
+    result: dict[str, Any] = {
+        "ok": False,
+        "in_octets_1": 0,
+        "out_octets_1": 0,
+        "in_octets_2": 0,
+        "out_octets_2": 0,
+        "interval_seconds": 0,
+        "in_bps": 0.0,
+        "out_bps": 0.0,
+        "error": "",
+    }
+    if len(parsed) < 2:
+        result["error"] = "SNMP sem ifHCInOctets/ifHCOutOctets"
+        return result
+    for index in range(len(parsed) - 1):
+        current = parsed[index]
+        previous = parsed[index + 1]
+        interval = (current["sample_time"] - previous["sample_time"]).total_seconds()
+        if interval <= 0:
+            continue
+        in_prev = int(previous["in_octets"])
+        out_prev = int(previous["out_octets"])
+        in_cur = int(current["in_octets"])
+        out_cur = int(current["out_octets"])
+        if in_cur < in_prev or out_cur < out_prev:
+            continue  # counter reset/regressão: par não utilizável
+        in_delta = in_cur - in_prev
+        out_delta = out_cur - out_prev
+        if in_delta <= 0 and out_delta <= 0:
+            continue  # poll duplicado: mesmos contadores, delta zero
+        result.update(
+            {
+                "ok": True,
+                "in_octets_1": in_prev,
+                "out_octets_1": out_prev,
+                "in_octets_2": in_cur,
+                "out_octets_2": out_cur,
+                "interval_seconds": round(interval, 3),
+                "in_bps": round(max(0.0, (in_delta * 8) / interval), 2),
+                "out_bps": round(max(0.0, (out_delta * 8) / interval), 2),
+                "error": "",
+            }
+        )
+        return result
+    result["error"] = "SNMP sem intervalo com delta nas ultimas amostras (poll duplicado ou contadores parados)"
+    return result
 
 
 def insert_snmp_counter_sample(
@@ -41598,9 +41677,9 @@ def calibration_diagnostics(sensor_id: int, if_index: int, window_minutes: int =
             FROM interface_snmp_samples
             WHERE sensor_id = ? AND if_index = ?
             ORDER BY sample_time DESC
-            LIMIT 2
+            LIMIT ?
             """,
-            (sensor_id, if_index),
+            (sensor_id, if_index, SNMP_PAIR_SCAN_LIMIT),
         ).fetchall()
 
     exporter_ip = clean_text(sensor.get("exporter_ip"))
@@ -41624,29 +41703,22 @@ def calibration_diagnostics(sensor_id: int, if_index: int, window_minutes: int =
         "out_bps": 0.0,
         "error": "",
     }
-    if len(sample_rows) < 2:
-        snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
+    pair = select_snmp_sample_pair(sample_rows)
+    snmp.update(
+        {
+            "in_octets_1": int(pair.get("in_octets_1") or 0),
+            "out_octets_1": int(pair.get("out_octets_1") or 0),
+            "in_octets_2": int(pair.get("in_octets_2") or 0),
+            "out_octets_2": int(pair.get("out_octets_2") or 0),
+            "interval_seconds": round(float(pair.get("interval_seconds") or 0), 3),
+            "in_bps": round(float(pair.get("in_bps") or 0), 2),
+            "out_bps": round(float(pair.get("out_bps") or 0), 2),
+        }
+    )
+    if pair.get("ok"):
+        snmp["ok"] = True
     else:
-        current = sample_rows[0]
-        previous = sample_rows[1]
-        current_time = parse_datetime_text(current["sample_time"])
-        previous_time = parse_datetime_text(previous["sample_time"])
-        interval = (current_time - previous_time).total_seconds() if current_time and previous_time else 0
-        snmp.update(
-            {
-                "in_octets_1": int(previous["in_octets"] or 0),
-                "out_octets_1": int(previous["out_octets"] or 0),
-                "in_octets_2": int(current["in_octets"] or 0),
-                "out_octets_2": int(current["out_octets"] or 0),
-                "interval_seconds": round(interval, 3),
-                "in_bps": round(float(current["in_bps"] or 0), 2),
-                "out_bps": round(float(current["out_bps"] or 0), 2),
-            }
-        )
-        if interval <= 0 or (float(current["in_bps"] or 0) <= 0 and float(current["out_bps"] or 0) <= 0):
-            snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
-        else:
-            snmp["ok"] = True
+        snmp_error = clean_text(pair.get("error")) or "SNMP sem ifHCInOctets/ifHCOutOctets"
     snmp["error"] = snmp_error
 
     params = {
@@ -41741,7 +41813,7 @@ def calibrate_interface_sample_rate(
 
         rows = conn.execute(
             """
-            SELECT sample_time, in_bps, out_bps
+            SELECT sample_time, in_octets, out_octets, in_bps, out_bps
             FROM interface_snmp_samples
             WHERE sensor_id = ? AND if_index = ? AND sample_time >= ?
             ORDER BY sample_time ASC
@@ -41755,21 +41827,34 @@ def calibrate_interface_sample_rate(
     snmp_out_values: list[float] = []
     flow_in_values: list[float] = []
     flow_out_values: list[float] = []
-    previous_time: datetime | None = None
+    previous_row: sqlite3.Row | None = None
 
     for row in rows:
         sample_time = parse_datetime_text(row["sample_time"])
         if sample_time is None:
             continue
-        if previous_time is None:
-            previous_time = sample_time
+        if previous_row is None:
+            previous_row = row
             continue
         if sample_time < now - timedelta(minutes=window_minutes):
-            previous_time = sample_time
+            previous_row = row
             continue
-
-        snmp_in = float(row["in_bps"] or 0)
-        snmp_out = float(row["out_bps"] or 0)
+        previous_time = parse_datetime_text(previous_row["sample_time"])
+        if previous_time is None:
+            previous_row = row
+            continue
+        interval = (sample_time - previous_time).total_seconds()
+        if interval <= 0:
+            continue
+        # Recalcula bps a partir dos octetos (delta real), nunca do
+        # in_bps/out_bps pré-calculado da linha. Polls duplicados gravam
+        # amostras com os mesmos contadores: delta zero nas duas direções é
+        # ignorado SEM avançar previous_row, para o par seguinte cobrir o
+        # intervalo real e a amostra zero não entrar no robust_ratio.
+        snmp_in = counter_bps(int(row["in_octets"] or 0), int(previous_row["in_octets"] or 0), interval)
+        snmp_out = counter_bps(int(row["out_octets"] or 0), int(previous_row["out_octets"] or 0), interval)
+        if snmp_in <= 0 and snmp_out <= 0:
+            continue
         flow_in = flow_interface_direction_bps(exporter_ip, if_index, "in", previous_time, sample_time)
         flow_out = flow_interface_direction_bps(exporter_ip, if_index, "out", previous_time, sample_time)
 
@@ -41782,7 +41867,7 @@ def calibrate_interface_sample_rate(
             snmp_out_values.append(snmp_out)
             flow_out_values.append(flow_out)
 
-        previous_time = sample_time
+        previous_row = row
 
     estimated_in, confidence_in, samples_in = robust_ratio_estimate(ratios_in)
     estimated_out, confidence_out, samples_out = robust_ratio_estimate(ratios_out)
