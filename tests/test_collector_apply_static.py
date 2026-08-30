@@ -606,6 +606,77 @@ class CollectorApplyStaticTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_sensor_update_preserves_custom_snmp_community_on_empty_payload(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            tmp_path = Path(tmpdir)
+            collectors_dir = tmp_path / "collectors"
+            compose_path = tmp_path / "docker-compose.collectors.yml"
+            collectors_dir.mkdir(parents=True, exist_ok=True)
+            compose_path.write_text("", encoding="utf-8")
+            env = {
+                "GMJFLOW_DB_PATH": str(tmp_path / "gmjflow.db"),
+                "GMJFLOW_COLLECTORS_DIR": "",
+                "GMJFLOW_PROJECT_DIR": "",
+                "GMJFLOW_DOCKER_NETWORK": "gmj-flow_default",
+            }
+            apply_result = {
+                "services_updated": True, "message": "ok",
+                "stdout": "", "stderr": "", "returncode": 0,
+            }
+
+            def make_payload(community):
+                return backend_main.SensorPayload(
+                    name="sensor-community",
+                    exporter_ip="192.0.2.10",
+                    listener_port=9995,
+                    snmp_ip="192.0.2.10",
+                    snmp_port=161,
+                    snmp_community=community,
+                    granularity_seconds=60,
+                    snmp_polling_seconds=60,
+                    flow_collector_enabled=True,
+                    active=True,
+                    interfaces=[],
+                )
+
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(backend_main, "COLLECTORS_DIR", collectors_dir), \
+                 mock.patch.object(backend_main, "COLLECTORS_COMPOSE_PATH", compose_path), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
+                 mock.patch.object(backend_main, "run_apply_collectors_script", return_value=apply_result):
+                backend_main.ensure_sensor_db()
+                with backend_main.sqlite_connection() as conn:
+                    conn.execute("DELETE FROM sensors")
+                    conn.commit()
+                created = backend_main.create_sensor(make_payload("custom-secret-xyz"))
+            sensor_id = int(created["id"])
+            self.assertEqual("custom-secret-xyz", created["snmp_community"])
+
+            # Empty community on update (modal round-trip did not change it) must
+            # preserve the saved custom value instead of resetting to "public".
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(backend_main, "COLLECTORS_DIR", collectors_dir), \
+                 mock.patch.object(backend_main, "COLLECTORS_COMPOSE_PATH", compose_path), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
+                 mock.patch.object(backend_main, "run_apply_collectors_script", return_value=apply_result):
+                updated = backend_main.update_sensor(sensor_id, make_payload(""))
+            self.assertEqual("custom-secret-xyz", updated["snmp_community"])
+
+            # An explicit new community must still be applied.
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(backend_main, "COLLECTORS_DIR", collectors_dir), \
+                 mock.patch.object(backend_main, "COLLECTORS_COMPOSE_PATH", compose_path), \
+                 mock.patch.object(backend_main, "SENSOR_DB_READY", False), \
+                 mock.patch.object(backend_main, "hash_password", return_value="test-hash"), \
+                 mock.patch.object(backend_main, "run_apply_collectors_script", return_value=apply_result):
+                updated = backend_main.update_sensor(sensor_id, make_payload("other-community"))
+            self.assertEqual("other-community", updated["snmp_community"])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class IpAndAsnEnrichmentContractTest(unittest.TestCase):
     def test_ip_with_ptr_and_rdap_prefix_keeps_identity_fields(self):

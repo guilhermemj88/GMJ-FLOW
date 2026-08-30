@@ -1144,7 +1144,7 @@ class SensorPayload(BaseModel):
     snmp_port: int = 161
     snmp_mib: str = "generic"
     snmp_version: str = "2c"
-    snmp_community: str = "public"
+    snmp_community: str | None = None
     snmp_security_level: str = "noAuthNoPriv"
     snmp_security_name: str = ""
     snmp_auth_protocol: str = ""
@@ -40250,6 +40250,10 @@ def list_dashboard_sensors():
 def create_sensor(payload: SensorPayload):
     ensure_sensor_db()
     sensor_data, interfaces = normalize_sensor_payload(payload)
+    # Default community applies only to a NEW sensor. An empty value here means
+    # the user did not inform one; for existing sensors the update path
+    # preserves whatever is already stored.
+    sensor_data["snmp_community"] = sensor_data.get("snmp_community") or "public"
     now = utc_now_iso()
     columns = [*SENSOR_COLUMNS, "created_at", "updated_at"]
     placeholders = ", ".join("?" for _ in columns)
@@ -40301,12 +40305,16 @@ def update_sensor(sensor_id: int, payload: SensorPayload):
     sensor_data, interfaces = normalize_sensor_payload(payload)
     now = utc_now_iso()
     assignments = ", ".join(f"{column} = ?" for column in SENSOR_COLUMNS)
-    values = [*[sensor_data[column] for column in SENSOR_COLUMNS], now, sensor_id]
 
     with sqlite_connection() as conn:
-        existing = conn.execute("SELECT id FROM sensors WHERE id = ?", (sensor_id,)).fetchone()
+        existing = conn.execute("SELECT id, snmp_community FROM sensors WHERE id = ?", (sensor_id,)).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="Sensor nao encontrado")
+        # Never reset a saved custom community back to the default just because
+        # the incoming payload omitted/emptied the field (modal round-trip).
+        if not sensor_data.get("snmp_community"):
+            sensor_data["snmp_community"] = clean_text(existing["snmp_community"]) or "public"
+        values = [*[sensor_data[column] for column in SENSOR_COLUMNS], now, sensor_id]
         validate_active_sensor_listener(conn, sensor_data, sensor_id)
         conn.execute(
             f"UPDATE sensors SET {assignments}, updated_at = ? WHERE id = ?",
