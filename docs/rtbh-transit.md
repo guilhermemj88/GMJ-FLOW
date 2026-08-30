@@ -121,6 +121,21 @@ providers transportam o ataque; cada provider gera seus próprios candidatos
 CIRION, via SEABORN e via SEMPRE. Bloquear em um provider não resolve os
 demais.
 
+## Auditoria de amostragem e magnitude (validado em 2026-08-29/30)
+
+- O parser pmacct grava contagens **cruas** no ClickHouse
+  (`RAW_BYTES_ALREADY_SCALED=false` etc.); `flow_raw.sample_rate` fica `1`.
+- O multiplicador `GMJFLOW_RTBH_ESTIMATE_MULTIPLIER` (default 1000, NE8000
+  amostra 1:1000) é aplicado **uma única vez** na geração de candidatos
+  (`generate_rtbh_candidates_from_rows`); nada mais escala.
+- **Cross-check SNMP × NetFlow inconclusivo**: não há amostras SNMP do
+  sensor `NE8000-F1A-IMPLANTAR` durante a janela do incidente (o polling
+  SNMP desse sensor iniciou às ~00:55 UTC, após o fim da janela). Os
+  valores estimados (×1000) são portanto **limites superiores NÃO
+  validados** (o pico observado de ~593 Mbps estima ~593 Gbps).
+- Consequência: o gate de magnitude da política (`min_attack_bps`) usa o
+  valor **observado** (físico) por provider, nunca o estimado
+  (`evidence.gate_bps_basis = "observed"`). A recomendação de scrubbing
   continua usando o limite superior estimado (conservador, apenas
   recomendação).
 - `baseline_available=false` no incidente: nenhuma razão baseline foi

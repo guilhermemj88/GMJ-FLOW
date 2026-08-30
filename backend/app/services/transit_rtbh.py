@@ -1224,14 +1224,17 @@ def generate_rtbh_candidates_from_rows(
                 action_type = ACTION_TYPE_RTBH
                 collateral = COLLATERAL_MEDIUM if target_network.prefixlen < 32 else COLLATERAL_LOW
                 reason = "Vítima seletiva com concentração de ataque."
-            provider_attack_bps = estimated_bps * provider_share if provider_share > 0 else estimated_bps
+            # Policy magnitude gate uses OBSERVED (physical) bps. The x1000
+            # estimate is an unvalidated upper bound (see sampling audit) and
+            # must never make a physically small attack pass a big threshold.
+            provider_observed_bps = observed_bps * provider_share if provider_share > 0 else observed_bps
             status, status_reason, eligible = required_candidate_status(
                 policy=policy,
                 prefix_length=target_network.prefixlen,
                 selective=not no_selective,
                 large_prefix_manual=large_prefix_manual,
                 confidence=confidence,
-                attack_bps=provider_attack_bps,
+                attack_bps=provider_observed_bps,
                 duration_seconds=duration_seconds,
             )
             if not eligible:
@@ -1255,8 +1258,35 @@ def generate_rtbh_candidates_from_rows(
                     "provider_share": round(provider_share, 4),
                     "target_share": round(target_share, 4),
                     "baseline_available": bool(incident.get("baseline_available")),
+                    "observed_provider_bps": round(provider_observed_bps, 1),
+                    "gate_bps_basis": "observed",
                 }
             )
+            if large_prefix_manual:
+                collateral_info = protected_services_inside(conn, candidate_prefix)
+                evidence["protected_services_affected"] = safe_int(
+                    collateral_info.get("protected_service_count")
+                )
+                evidence["affected_service_names"] = list(
+                    collateral_info.get("affected_service_names") or []
+                )
+                evidence["affected_host_count"] = safe_int(
+                    collateral_info.get("affected_host_count")
+                )
+                evidence["estimated_legitimate_traffic_available"] = False
+                evidence["estimated_legitimate_traffic"] = None
+                if evidence["protected_services_affected"]:
+                    reason += (
+                        f" Serviços protegidos afetados: "
+                        f"{', '.join(evidence['affected_service_names'])}."
+                    )
+            else:
+                metrics = host_metrics.get(str(target_network.network_address), {})
+                evidence["duration_seconds"] = safe_float(metrics.get("duration_seconds"))
+                evidence["window_seconds"] = window_seconds
+                evidence["active_buckets"] = safe_float(metrics.get("active_buckets"))
+                evidence["unique_sources"] = safe_int(metrics.get("unique_sources"))
+                evidence["unique_sources_max"] = max_usrc
             candidate = {
                 "incident_id": clean_text(incident.get("incident_id")),
                 "threat_assessment_id": clean_text(incident.get("threat_assessment_id")),
