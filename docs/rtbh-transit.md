@@ -144,6 +144,25 @@ demais.
 ## Ordenação por persistência (adotada, apenas ordenação)
 
 `candidate_rank_key` combina volume estimado, persistência (duração
+normalizada, buckets ativos, diversidade de origens) e share do provider,
+com penalidade de colateral. A simulação sobre o incidente real
+(45.163.144.0/22, ataque uniforme) mostrou **zero** mudança de ordem — o
+gate de concentração já decide. No cenário concentrado sintético, a vítima
+persistente passa à frente de um spike de mesmo volume. A persistência
+**nunca** altera gates (concentração contra `total_bps` é obrigatória);
+serve apenas para ordenar candidatos no corte `max_candidates_per_incident`
+e na apresentação.
+
+## Proveniência de validação
+
+`validation_only` (default 0) existe em `transit_providers`,
+`transit_rtbh_policies` e `rtbh_mitigation_candidates`. Os artefatos do
+incidente real de validação no servidor Fibinet (providers CIRION,
+IP-SEABORN, SEMPRE INTERNET, incidente `INC-45.163.144.0/22-...`) foram
+carimbados com `validation_only=1` — incluindo a community de teste
+`64512:666` do SEABORN, que **não é uma community real de produção** e não
+deve ser confundida com configuração operacional.
+
 ## Dry run
 
 ```text

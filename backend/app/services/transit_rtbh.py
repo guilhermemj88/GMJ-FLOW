@@ -391,13 +391,52 @@ def ensure_transit_rtbh_columns(conn: sqlite3.Connection) -> None:
     provider_columns = {row[1] for row in conn.execute("PRAGMA table_info(transit_providers)").fetchall()}
     for column, ddl in (
         ("notes", "notes TEXT NOT NULL DEFAULT ''"),
+        ("validation_only", "validation_only INTEGER NOT NULL DEFAULT 0"),
     ):
         _json_column(provider_columns, "transit_providers", column, ddl, conn)
     policy_columns = {row[1] for row in conn.execute("PRAGMA table_info(transit_rtbh_policies)").fetchall()}
     for column, ddl in (
         ("communities_sensitive", "communities_sensitive INTEGER NOT NULL DEFAULT 1"),
+        ("validation_only", "validation_only INTEGER NOT NULL DEFAULT 0"),
     ):
         _json_column(policy_columns, "transit_rtbh_policies", column, ddl, conn)
+    candidate_columns = {row[1] for row in conn.execute("PRAGMA table_info(rtbh_mitigation_candidates)").fetchall()}
+    for column, ddl in (
+        ("validation_only", "validation_only INTEGER NOT NULL DEFAULT 0"),
+    ):
+        _json_column(candidate_columns, "rtbh_mitigation_candidates", column, ddl, conn)
+
+
+def mark_validation_artifacts(
+    conn: sqlite3.Connection,
+    *,
+    provider_names: Iterable[str] | None = None,
+    incident_id: str = "",
+) -> dict[str, int]:
+    """Stamp validation-only provenance on test/demo rows. Never deletes."""
+    ensure_transit_rtbh_schema(conn)
+    counts: dict[str, int] = {"providers": 0, "policies": 0, "candidates": 0}
+    for name in provider_names or []:
+        cursor = conn.execute(
+            "UPDATE transit_providers SET validation_only = 1 WHERE name = ?",
+            (clean_text(name),),
+        )
+        counts["providers"] += int(cursor.rowcount or 0)
+    conn.execute(
+        """
+        UPDATE transit_rtbh_policies
+        SET validation_only = 1
+        WHERE provider_id IN (SELECT id FROM transit_providers WHERE validation_only = 1)
+        """
+    )
+    counts["policies"] = int(conn.execute("SELECT changes()").fetchone()[0])
+    if clean_text(incident_id):
+        cursor = conn.execute(
+            "UPDATE rtbh_mitigation_candidates SET validation_only = 1 WHERE incident_id = ?",
+            (clean_text(incident_id),),
+        )
+        counts["candidates"] = int(cursor.rowcount or 0)
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +453,7 @@ def provider_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]
         "input_if": safe_int(item.get("input_if")),
         "enabled": bool(int(item.get("enabled") or 0)),
         "notes": clean_text(item.get("notes")),
+        "validation_only": bool(int(item.get("validation_only") or 0)),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -450,6 +490,7 @@ def policy_row_to_dict(row: sqlite3.Row | Mapping[str, Any], *, include_communit
         "cooldown_seconds": safe_int(item.get("cooldown_seconds"), 3600),
         "allow_auto": bool(int(item.get("allow_auto") or 0)),
         "require_manual_approval": bool(int(item.get("require_manual_approval") or 1)),
+        "validation_only": bool(int(item.get("validation_only") or 0)),
         "execution_enabled_env": rtbh_execution_enabled_env(),
         "execution_effective": effective_execution_allowed(item),
         "created_at": item["created_at"],
@@ -491,6 +532,7 @@ def candidate_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any
         "no_safe_selective_rtbh_candidate": bool(int(item.get("no_safe_selective_rtbh_candidate") or 0)),
         "large_prefix_manual_only": bool(int(item.get("large_prefix_manual_only") or 0)),
         "dry_run": dry_run,
+        "validation_only": bool(int(item.get("validation_only") or 0)),
         "protected_services_affected": safe_int(evidence.get("protected_services_affected")),
         "affected_service_names": list(evidence.get("affected_service_names") or []),
         "affected_host_count": safe_int(evidence.get("affected_host_count")),
