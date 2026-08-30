@@ -45,6 +45,7 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.api.rtbh import router as rtbh_router
 from app.api.threat_intelligence import router as threat_intelligence_router
 from app.api.threat_engine import api_security_router, router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
@@ -245,6 +246,13 @@ from app.services.behavioral_detection import (
     event_key,
 )
 from app.services.security_events import update_security_event_mitigation_status_by_reference
+from app.services.transit_rtbh import (
+    audit_candidate_event as rtbh_audit_candidate_event,
+    build_incident_from_vector,
+    candidate_row_to_dict as rtbh_candidate_row_to_dict,
+    ensure_transit_rtbh_schema,
+    generate_rtbh_candidates_from_rows,
+)
 from app.services.threat_policy import (
     MitigationProposal,
     PolicyDecision,
@@ -301,6 +309,7 @@ app.add_middleware(
 )
 app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
+app.include_router(rtbh_router)
 app.include_router(threat_intelligence_router)
 app.include_router(threat_engine_router)
 app.include_router(security_router)
@@ -1644,6 +1653,9 @@ class BgpProtectedPrefixPayload(BaseModel):
     block_rtbh: bool = True
     block_flowspec: bool = True
     block_diversion: bool = False
+    block_auto_rtbh: bool = False
+    require_manual_rtbh: bool = True
+    block_all_rtbh: bool = False
 
 
 class BgpAnnouncementDryRunPayload(BaseModel):
@@ -4172,11 +4184,19 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             block_rtbh INTEGER NOT NULL DEFAULT 1,
             block_flowspec INTEGER NOT NULL DEFAULT 1,
             block_diversion INTEGER NOT NULL DEFAULT 0,
+            block_auto_rtbh INTEGER NOT NULL DEFAULT 0,
+            require_manual_rtbh INTEGER NOT NULL DEFAULT 1,
+            block_all_rtbh INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """
     )
+    # Incremental RTBH protection columns. Legacy ``block_rtbh`` remains the
+    # compatibility switch and existing rows are never overwritten.
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_auto_rtbh", "block_auto_rtbh INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "require_manual_rtbh", "require_manual_rtbh INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_all_rtbh", "block_all_rtbh INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_response_profiles (
@@ -4591,6 +4611,7 @@ def ensure_sensor_db() -> None:
         ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
+        ensure_transit_rtbh_schema(conn)
         ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
         ensure_peak_analysis_db(conn)
@@ -4650,6 +4671,7 @@ def startup() -> None:
     run_startup_preflight()
     THREAT_INTEL_MANAGER.start()
     BEHAVIORAL_THREAT_RUNTIME.set_mitigation_handler(apply_behavioral_policy_decision)
+    BEHAVIORAL_THREAT_RUNTIME.set_rtbh_candidate_handler(generate_rtbh_candidates_from_behavioral_decision)
     BEHAVIORAL_THREAT_RUNTIME.start()
     DASHBOARD_CACHE.start_monitor()
     try:
@@ -5398,6 +5420,16 @@ def require_permission(request: Request, permission_key: str) -> dict[str, Any]:
 def permission_for_legacy_admin_route(request: Request) -> str:
     path = request.url.path
     method = request.method.upper()
+    if path.startswith("/api/rtbh"):
+        if "/audit" in path:
+            return "bgp.view" if method == "GET" else "bgp.manage"
+        if "/candidates" in path and method != "GET" and "/dry-run" not in path and "/reject" not in path and "/review" not in path:
+            return "bgp.manage"
+        if "/candidates" in path and method == "GET":
+            return "mitigations.view"
+        if "/providers" in path and method == "GET":
+            return "bgp.view"
+        return "bgp.manage"
     if path.startswith("/api/bgp"):
         if "/announcements" in path and method != "GET" and "dry-run" not in path:
             return "bgp.apply"
@@ -5445,6 +5477,8 @@ def permission_for_protected_api_route(request: Request) -> str:
     if path.startswith(("/api/auth", "/api/v1/auth", "/api/v1/users", "/api/v1/roles", "/api/v1/permissions", "/api/v1/audit")):
         return ""
     if path.startswith("/api/bgp"):
+        return permission_for_legacy_admin_route(request)
+    if path.startswith("/api/rtbh"):
         return permission_for_legacy_admin_route(request)
     if "/mitigation" in path:
         return permission_for_legacy_admin_route(request)
@@ -11516,6 +11550,9 @@ def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "block_rtbh": sqlite_bool(item.get("block_rtbh")),
         "block_flowspec": sqlite_bool(item.get("block_flowspec")),
         "block_diversion": sqlite_bool(item.get("block_diversion")),
+        "block_auto_rtbh": sqlite_bool(item.get("block_auto_rtbh")),
+        "require_manual_rtbh": sqlite_bool(item.get("require_manual_rtbh", 1)),
+        "block_all_rtbh": sqlite_bool(item.get("block_all_rtbh")),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -23855,6 +23892,113 @@ def event_key_for_behavioral_vector(vector: AttackVector) -> str:
     return event_key(vector)
 
 
+def generate_rtbh_candidates_from_behavioral_decision(
+    vector: AttackVector | CampaignVector,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Threat Intelligence -> RTBH mitigation candidates (RECOMMEND_ONLY).
+
+    Builds per-/32 destination distribution and per-input_if ingress from
+    ClickHouse, then delegates to the transit RTBH engine. Never announces
+    anything; candidates stop at PROPOSED / REVIEW_REQUIRED / DRY_RUN.
+    """
+    enabled = clean_text(os.getenv("GMJFLOW_RTBH_CANDIDATE_GENERATION_ENABLED", "true")).lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return {"status": "disabled", "candidates": 0}
+    incident = build_incident_from_vector(vector, decision)
+    if not incident.get("rtbh_eligible") or not clean_text(incident.get("target_prefix")):
+        return {"status": "skipped", "reason": "not_rtbh_eligible", "candidates": 0}
+    incident["incident_id"] = (
+        vector.campaign_id if isinstance(vector, CampaignVector) else event_key_for_behavioral_vector(vector)
+    )
+    incident["threat_assessment_id"] = incident["incident_id"]
+
+    start = parse_datetime_text(incident.get("first_seen"))
+    end = parse_datetime_text(incident.get("last_seen"))
+    if start is None or end is None or end <= start:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(seconds=300)
+    duration = max(60.0, (end - start).total_seconds())
+    try:
+        mapped_target = clickhouse_cidr_string_param(incident["target_prefix"])
+    except HTTPException:
+        return {"status": "skipped", "reason": "invalid_target_prefix", "candidates": 0}
+    params: dict[str, Any] = {
+        "start": start.astimezone(timezone.utc).replace(tzinfo=None),
+        "end": end.astimezone(timezone.utc).replace(tzinfo=None),
+        "target": mapped_target,
+        "duration": duration,
+    }
+    try:
+        per_host = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    dst_ip AS host,
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps,
+                    sum(toFloat64(packets)) / {duration:Float64} AS pps,
+                    sum(bytes) AS bytes
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                GROUP BY dst_ip
+                ORDER BY bps DESC
+                LIMIT 64
+                """,
+                params,
+            )
+        )
+        ingress = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    input_if,
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps,
+                    sum(toFloat64(packets)) / {duration:Float64} AS pps
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                GROUP BY input_if
+                ORDER BY bps DESC
+                LIMIT 64
+                """,
+                params,
+            )
+        )
+    except Exception as exc:
+        logger.warning("RTBH candidate generation ClickHouse query failed: %s", exc)
+        return {"status": "skipped", "reason": "clickhouse_unavailable", "candidates": 0}
+
+    try:
+        estimate_multiplier = float(os.getenv("GMJFLOW_RTBH_ESTIMATE_MULTIPLIER", "1000"))
+    except ValueError:
+        estimate_multiplier = 1000.0
+    try:
+        local_capacity = float(os.getenv("GMJFLOW_RTBH_LOCAL_CAPACITY_BPS", "0")) or None
+    except ValueError:
+        local_capacity = None
+    with sqlite_connection() as conn:
+        ensure_transit_rtbh_schema(conn)
+        created = generate_rtbh_candidates_from_rows(
+            conn,
+            incident,
+            per_host,
+            ingress,
+            estimate_multiplier=estimate_multiplier,
+            local_capacity_bps=local_capacity,
+        )
+        conn.commit()
+    if created:
+        logger.info(
+            "RTBH_CANDIDATES_GENERATED incident=%s count=%s",
+            incident.get("incident_id"),
+            len(created),
+        )
+    return {"status": "ok", "candidates": len(created)}
+
+
 def apply_mitigation_candidates(
     conn: sqlite3.Connection,
     candidates: list[dict[str, Any]],
@@ -26526,8 +26670,8 @@ def create_bgp_protected_prefix(request: Request, payload: BgpProtectedPrefixPay
     now = utc_now_iso()
     with sqlite_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, now, now),
+            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, block_auto_rtbh, require_manual_rtbh, block_all_rtbh, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
@@ -26543,8 +26687,8 @@ def update_bgp_protected_prefix(request: Request, prefix_id: int, payload: BgpPr
         if row is None:
             raise HTTPException(status_code=404, detail="Prefixo protegido nao encontrado")
         conn.execute(
-            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, updated_at = ? WHERE id = ?",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, utc_now_iso(), prefix_id),
+            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, block_auto_rtbh = ?, require_manual_rtbh = ?, block_all_rtbh = ?, updated_at = ? WHERE id = ?",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, utc_now_iso(), prefix_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (prefix_id,)).fetchone()

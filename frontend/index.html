@@ -7091,6 +7091,64 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>CIDR</th><th>Nome</th><th>Motivo</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpProtectedTable"></tbody></table></div>
           </section>
 
+          <section class="panel p-3 mt-3" id="rtbhPanel">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Blackhole / RTBH (Transit Providers)</div>
+                <div id="rtbhKillSwitch" class="metric-readout">RECOMMEND_ONLY / DRY RUN. Nenhum anúncio BGP é realizado.</div>
+              </div>
+              <div class="toolbar">
+                <button id="refreshRtbhButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+              </div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="rtbhTabProviders" type="button" class="btn btn-sm btn-outline-secondary active">Transit Providers</button>
+              <button id="rtbhTabPolicies" type="button" class="btn btn-sm btn-outline-secondary">Políticas</button>
+              <button id="rtbhTabCandidates" type="button" class="btn btn-sm btn-outline-secondary">Candidates</button>
+            </div>
+
+            <div id="rtbhProvidersPane">
+              <div class="flow-search-grid mb-2">
+                <input id="rtbhProviderId" type="hidden">
+                <div class="field"><label for="rtbhProviderName">Nome</label><input id="rtbhProviderName" class="form-control form-control-sm" placeholder="CIRION"></div>
+                <div class="field"><label for="rtbhProviderInputIf">ifIndex de entrada (input_if)</label><input id="rtbhProviderInputIf" type="number" min="0" class="form-control form-control-sm" placeholder="284"></div>
+                <div class="field"><label for="rtbhProviderEnabled">Ativo</label><select id="rtbhProviderEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+              </div>
+              <div class="toolbar mb-2">
+                <button id="saveRtbhProviderButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar provider</span></button>
+                <button id="clearRtbhProviderButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Novo</span></button>
+              </div>
+              <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Nome</th><th>ifIndex</th><th>Status</th><th>Modo RTBH</th><th>Communities</th><th>Ações</th></tr></thead><tbody id="rtbhProvidersTable"></tbody></table></div>
+            </div>
+
+            <div id="rtbhPoliciesPane" class="d-none">
+              <div id="rtbhPolicyHeader" class="subtle mb-2">Selecione um transit provider para editar a política de blackhole.</div>
+              <div class="flow-search-grid mb-2">
+                <div class="field"><label for="rtbhPolicyMode">Modo</label><select id="rtbhPolicyMode" class="form-select form-select-sm"><option value="OFF">OFF</option><option value="RECOMMEND_ONLY">RECOMMEND_ONLY</option><option value="MANUAL_APPROVAL">MANUAL_APPROVAL</option><option value="AUTO">AUTO</option></select></div>
+                <div class="field"><label for="rtbhPolicyFamily">Família de endereço</label><select id="rtbhPolicyFamily" class="form-select form-select-sm"><option value="ipv4">ipv4</option><option value="ipv6">ipv6</option></select></div>
+                <div class="field"><label for="rtbhPolicyMinPrefix">Min prefix len</label><input id="rtbhPolicyMinPrefix" type="number" min="0" max="128" class="form-control form-control-sm" value="32"></div>
+                <div class="field"><label for="rtbhPolicyMaxPrefix">Max prefix len</label><input id="rtbhPolicyMaxPrefix" type="number" min="0" max="128" class="form-control form-control-sm" value="32"></div>
+                <div class="field"><label for="rtbhPolicyMinConfidence">Confiança mínima</label><input id="rtbhPolicyMinConfidence" type="number" min="0" max="1" step="0.05" class="form-control form-control-sm" value="0.90"></div>
+                <div class="field"><label for="rtbhPolicyMinBps">Volume mínimo (bps)</label><input id="rtbhPolicyMinBps" type="number" min="0" class="form-control form-control-sm" value="1000000000"></div>
+                <div class="field"><label for="rtbhPolicyMinDuration">Duração mínima (s)</label><input id="rtbhPolicyMinDuration" type="number" min="0" class="form-control form-control-sm" value="60"></div>
+                <div class="field"><label for="rtbhPolicyCooldown">Cooldown (s)</label><input id="rtbhPolicyCooldown" type="number" min="0" class="form-control form-control-sm" value="3600"></div>
+                <div class="field"><label for="rtbhPolicyEnabled">Política ativa</label><select id="rtbhPolicyEnabled" class="form-select form-select-sm"><option value="true">Ativa</option><option value="false">Desativada</option></select></div>
+              </div>
+              <div class="flow-search-grid mb-2">
+                <div class="field"><label for="rtbhPolicyStandardInput">Standard community (ASN:VALOR)</label><div class="d-flex gap-1"><input id="rtbhPolicyStandardInput" class="form-control form-control-sm" placeholder="65000:666"><button id="addRtbhStandardCommunityButton" type="button" class="btn btn-sm btn-outline-secondary">+</button></div><div id="rtbhPolicyStandardList" class="mt-1"></div></div>
+                <div class="field"><label for="rtbhPolicyLargeInput">Large community (ASN:A:B)</label><div class="d-flex gap-1"><input id="rtbhPolicyLargeInput" class="form-control form-control-sm" placeholder="65000:1:666"><button id="addRtbhLargeCommunityButton" type="button" class="btn btn-sm btn-outline-secondary">+</button></div><div id="rtbhPolicyLargeList" class="mt-1"></div></div>
+                <div class="field"><label for="rtbhPolicySensitive">Communities sensíveis (mascarar)</label><select id="rtbhPolicySensitive" class="form-select form-select-sm"><option value="true">Sim (mascaradas)</option><option value="false">Não</option></select></div>
+              </div>
+              <div class="toolbar">
+                <button id="saveRtbhPolicyButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar política</span></button>
+              </div>
+            </div>
+
+            <div id="rtbhCandidatesPane" class="d-none">
+              <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>Alvo</th><th>Provider</th><th>Tipo de ataque</th><th>Share</th><th>Observado</th><th>Estimado</th><th>Confiança</th><th>Colateral</th><th>RTBH disponível</th><th>Status</th><th>Ações</th></tr></thead><tbody id="rtbhCandidatesTable"></tbody></table></div>
+            </div>
+          </section>
+
           <section class="panel p-3 mt-3">
             <div class="panel-title mb-2">Teste manual / laboratorio</div>
             <div class="subtle mb-2">O TTL controla a retirada automática no GMJ-FLOW e não comprova anúncio ao peer. O estado abaixo informa se houve somente prévia, envio ao ExaBGP ou confirmação operacional local.</div>
@@ -14809,12 +14867,280 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderOpsSummary(summary);
       renderMitigationWorkspace();
       await loadMitigationAiSummary().catch(error => setText('mitigationAiState', `Falha IA: ${error.message}`));
+      loadRtbhView().catch(error => setText('rtbhKillSwitch', `Blackhole / RTBH indisponível: ${error.message}`));
       setText('bgpStatus', `Perfis: ${bgpProfiles.length} / Execuções automáticas: ${automaticMitigationExecutions.length} / Registros BGP: ${bgpAnnouncements.length}`);
     }
 
     async function loadBgpView() {
       return loadMitigationView();
     }
+
+    // -------------------------------------------------------------------
+    // Blackhole / RTBH — Transit Providers, Policies and Candidates.
+    // RECOMMEND_ONLY / DRY RUN: esta tela nunca envia anúncio BGP.
+    // -------------------------------------------------------------------
+    let rtbhProviders = [];
+    let rtbhCandidates = [];
+    let rtbhSelectedProviderId = null;
+    let rtbhStandardCommunities = [];
+    let rtbhLargeCommunities = [];
+
+    function rtbhRateText(value) {
+      const bps = Number(value) || 0;
+      if (bps >= 1e12) return `${(bps / 1e12).toFixed(2)} Tbps`;
+      if (bps >= 1e9) return `${(bps / 1e9).toFixed(2)} Gbps`;
+      if (bps >= 1e6) return `${(bps / 1e6).toFixed(2)} Mbps`;
+      if (bps >= 1e3) return `${(bps / 1e3).toFixed(2)} Kbps`;
+      return `${bps.toFixed(0)} bps`;
+    }
+
+    function rtbhStatusBadge(status) {
+      const normalized = String(status || 'PROPOSED').toUpperCase();
+      const classes = {
+        PROPOSED: 'badge-soft',
+        REVIEW_REQUIRED: 'badge-soft warn',
+        REJECTED: 'badge-soft danger',
+        DRY_RUN: 'badge-soft info',
+        FAILED: 'badge-soft danger',
+      };
+      return `<span class="${classes[normalized] || 'badge-soft'}">${escapeHtml(normalized)}</span>`;
+    }
+
+    function showRtbhPane(pane) {
+      ['rtbhProvidersPane', 'rtbhPoliciesPane', 'rtbhCandidatesPane'].forEach(id => {
+        document.getElementById(id).classList.toggle('d-none', id !== pane);
+      });
+      ['rtbhTabProviders', 'rtbhTabPolicies', 'rtbhTabCandidates'].forEach(id => {
+        document.getElementById(id).classList.toggle('active', id === `rtbhTab${pane.replace('rtbh', '').replace('Pane', '')}Tab` || (pane === 'rtbhProvidersPane' && id === 'rtbhTabProviders') || (pane === 'rtbhPoliciesPane' && id === 'rtbhTabPolicies') || (pane === 'rtbhCandidatesPane' && id === 'rtbhTabCandidates'));
+      });
+    }
+
+    async function loadRtbhView() {
+      setText('rtbhKillSwitch', 'Carregando Blackhole / RTBH...');
+      const [overview, providers, candidates] = await Promise.all([
+        apiRequest('/api/rtbh/overview'),
+        apiRequest('/api/rtbh/providers'),
+        apiRequest('/api/rtbh/candidates?limit=100'),
+      ]);
+      rtbhProviders = Array.isArray(providers.items) ? providers.items : [];
+      rtbhCandidates = Array.isArray(candidates.items) ? candidates.items : [];
+      const kill = overview?.kill_switch || {};
+      setText('rtbhKillSwitch', `RTBH_EXECUTION_ENABLED=${kill.environment_execution_enabled ? 'true' : 'false'} · versão ${kill.version_allows_execution ? 'permite execução' : 'RECOMMEND_ONLY / DRY RUN'} · ${rtbhProviders.length} provider(s) · ${rtbhCandidates.length} candidate(s). Nenhum anúncio BGP é realizado.`);
+      renderRtbhProviders();
+      renderRtbhCandidates();
+    }
+
+    function renderRtbhProviders() {
+      const tbody = document.getElementById('rtbhProvidersTable');
+      if (!rtbhProviders.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-muted">Nenhum transit provider cadastrado. Cadastre CIRION, IP-SEABORN, SEMPRE INTERNET, SPARKNET, VS-IMPLANTAR-IXBR etc. com seus ifIndex de entrada.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rtbhProviders.map(item => {
+        const policy = item.policy || {};
+        const mode = policy.mode || 'SEM POLÍTICA';
+        const configured = policy.communities_configured ? 'Configurada' : 'Não configurada';
+        const editBtn = `<button type="button" class="btn btn-sm btn-outline-secondary" data-action="edit" data-id="${item.id}"><i data-lucide="edit-3"></i> Editar</button>`;
+        const policyBtn = `<button type="button" class="btn btn-sm btn-outline-secondary" data-action="policy" data-id="${item.id}">Política</button>`;
+        const removeBtn = `<button type="button" class="btn btn-sm btn-outline-danger" data-action="remove" data-id="${item.id}"><i data-lucide="trash-2"></i></button>`;
+        return `<tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${item.input_if}</td>
+          <td>${item.enabled ? '<span class="badge-soft">Ativo</span>' : '<span class="badge-soft warn">Desativado</span>'}</td>
+          <td>${escapeHtml(mode)}</td>
+          <td>${configured}</td>
+          <td>${editBtn} ${policyBtn} ${removeBtn}</td>
+        </tr>`;
+      }).join('');
+      createIcons();
+    }
+
+    function renderRtbhCandidates() {
+      const tbody = document.getElementById('rtbhCandidatesTable');
+      if (!rtbhCandidates.length) {
+        tbody.innerHTML = '<tr><td colspan="11" class="text-muted">Nenhum candidate RTBH gerado. Candidates aparecem quando o Threat Intelligence classifica incidentes elegíveis (ex.: UDP volumetric carpet bombing).</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rtbhCandidates.map(item => {
+        const suitability = item.suitability || {};
+        const dryRun = item.dry_run || {};
+        const available = (dryRun.policy_configured && (dryRun.standard_communities || []).length + (dryRun.large_communities || []).length > 0)
+          ? 'Sim' : 'Não';
+        const actions = [
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-candidate="review" data-id="${item.id}">Review</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-candidate="dry-run" data-id="${item.id}">Dry Run</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-danger" data-candidate="reject" data-id="${item.id}">Reject</button>`,
+        ].join(' ');
+        return `<tr>
+          <td><code>${escapeHtml(item.target_prefix)}</code>${item.large_prefix_manual_only ? '<br><span class="badge-soft danger">PREFIXO GRANDE</span>' : ''}</td>
+          <td>${escapeHtml(item.provider_name || '-')}</td>
+          <td>${escapeHtml(item.classification)}</td>
+          <td>${((Number(item.attack_share_provider) || 0) * 100).toFixed(1)}%</td>
+          <td>${rtbhRateText(item.attack_bps_observed)}</td>
+          <td>${rtbhRateText(item.attack_bps_estimated)}</td>
+          <td>${((Number(item.confidence) || 0) * 100).toFixed(0)}%</td>
+          <td>${escapeHtml(item.collateral_risk)}</td>
+          <td>${available}</td>
+          <td>${rtbhStatusBadge(item.status)}</td>
+          <td>${actions}</td>
+        </tr>`;
+      }).join('');
+      createIcons();
+    }
+
+    function rtbhCommunityChips(listId, values, kind) {
+      const container = document.getElementById(listId);
+      if (!values.length) {
+        container.innerHTML = '<span class="subtle">nenhuma</span>';
+        return;
+      }
+      container.innerHTML = values.map((value, index) => `<span class="badge-soft me-1">${escapeHtml(value)} <button type="button" class="btn btn-link btn-sm p-0 ms-1" data-kind="${kind}" data-index="${index}" aria-label="Remover ${escapeHtml(value)}">&times;</button></span>`).join('');
+    }
+
+    function clearRtbhProviderForm() {
+      document.getElementById('rtbhProviderId').value = '';
+      document.getElementById('rtbhProviderName').value = '';
+      document.getElementById('rtbhProviderInputIf').value = '';
+      document.getElementById('rtbhProviderEnabled').value = 'true';
+    }
+
+    async function saveRtbhProvider() {
+      const id = document.getElementById('rtbhProviderId').value;
+      const payload = {
+        name: document.getElementById('rtbhProviderName').value.trim(),
+        input_if: Number(document.getElementById('rtbhProviderInputIf').value) || 0,
+        enabled: document.getElementById('rtbhProviderEnabled').value === 'true',
+        notes: '',
+      };
+      if (!payload.name) {
+        setText('rtbhKillSwitch', 'Nome do transit provider é obrigatório.');
+        return;
+      }
+      const path = id ? `/api/rtbh/providers/${id}` : '/api/rtbh/providers';
+      const method = id ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, { method, body: JSON.stringify(payload), headers: { 'Content-Type': 'application/json' } });
+        await loadRtbhView();
+      } catch (error) {
+        setText('rtbhKillSwitch', `Falha ao salvar provider: ${error.message}`);
+      }
+    }
+
+    function fillRtbhPolicyForm(provider) {
+      rtbhSelectedProviderId = provider.id;
+      const policy = provider.policy || {};
+      rtbhStandardCommunities = Array.isArray(policy.standard_communities) ? policy.standard_communities.filter(v => v !== 'Configured') : [];
+      rtbhLargeCommunities = Array.isArray(policy.large_communities) ? policy.large_communities.filter(v => v !== 'Configured') : [];
+      document.getElementById('rtbhPolicyHeader').textContent = `Política de blackhole: ${provider.name} (ifIndex ${provider.input_if})`;
+      document.getElementById('rtbhPolicyMode').value = policy.mode || 'RECOMMEND_ONLY';
+      document.getElementById('rtbhPolicyFamily').value = policy.address_family || 'ipv4';
+      document.getElementById('rtbhPolicyMinPrefix').value = policy.min_prefix_length ?? 32;
+      document.getElementById('rtbhPolicyMaxPrefix').value = policy.max_prefix_length ?? 32;
+      document.getElementById('rtbhPolicyMinConfidence').value = policy.min_confidence ?? 0.9;
+      document.getElementById('rtbhPolicyMinBps').value = policy.min_attack_bps ?? 1000000000;
+      document.getElementById('rtbhPolicyMinDuration').value = policy.min_duration_seconds ?? 60;
+      document.getElementById('rtbhPolicyCooldown').value = policy.cooldown_seconds ?? 3600;
+      document.getElementById('rtbhPolicyEnabled').value = String(policy.enabled !== false);
+      document.getElementById('rtbhPolicySensitive').value = String(policy.communities_sensitive !== false);
+      rtbhCommunityChips('rtbhPolicyStandardList', rtbhStandardCommunities, 'standard');
+      rtbhCommunityChips('rtbhPolicyLargeList', rtbhLargeCommunities, 'large');
+      showRtbhPane('rtbhPoliciesPane');
+    }
+
+    async function saveRtbhPolicy() {
+      if (!rtbhSelectedProviderId) return;
+      const payload = {
+        enabled: document.getElementById('rtbhPolicyEnabled').value === 'true',
+        standard_communities: rtbhStandardCommunities,
+        large_communities: rtbhLargeCommunities,
+        communities_sensitive: document.getElementById('rtbhPolicySensitive').value === 'true',
+        address_family: document.getElementById('rtbhPolicyFamily').value,
+        mode: document.getElementById('rtbhPolicyMode').value,
+        min_prefix_length: Number(document.getElementById('rtbhPolicyMinPrefix').value) || 32,
+        max_prefix_length: Number(document.getElementById('rtbhPolicyMaxPrefix').value) || 32,
+        min_confidence: Number(document.getElementById('rtbhPolicyMinConfidence').value) || 0,
+        min_attack_bps: Number(document.getElementById('rtbhPolicyMinBps').value) || 0,
+        min_duration_seconds: Number(document.getElementById('rtbhPolicyMinDuration').value) || 0,
+        cooldown_seconds: Number(document.getElementById('rtbhPolicyCooldown').value) || 0,
+        allow_auto: false,
+        require_manual_approval: true,
+      };
+      try {
+        await apiRequest(`/api/rtbh/providers/${rtbhSelectedProviderId}/policy`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+          headers: { 'Content-Type': 'application/json' },
+        });
+        await loadRtbhView();
+        showRtbhPane('rtbhProvidersPane');
+      } catch (error) {
+        setText('rtbhPolicyHeader', `Falha ao salvar política: ${error.message}`);
+      }
+    }
+
+    async function rtbhCandidateAction(candidateId, action) {
+      const reasonByAction = {
+        review: 'revisão solicitada pelo operador',
+        reject: 'rejeitado pelo operador',
+        'dry-run': 'dry run solicitado pelo operador',
+      };
+      const endpoint = `/api/rtbh/candidates/${candidateId}/${action === 'dry-run' ? 'dry-run' : action}`;
+      try {
+        const result = await apiRequest(endpoint, {
+          method: 'POST',
+          body: JSON.stringify({ reason: reasonByAction[action] || 'ação do operador' }),
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const dryRun = result?.dry_run || {};
+        if (action === 'dry-run') {
+          alert(`RTBH DRY RUN\n\nProvider: ${dryRun.provider || '-'}\nTarget: ${dryRun.target || '-'}\nStandard: ${(dryRun.standard_communities || []).join(', ') || 'nenhuma'}\nLarge: ${(dryRun.large_communities || []).join(', ') || 'nenhuma'}\nWould announce: ${dryRun.would_announce ? 'YES' : 'NO'}\nActually announced: ${dryRun.actually_announced ? 'YES' : 'NO'}\nReason: ${dryRun.reason || '-'}`);
+        }
+        await loadRtbhView();
+      } catch (error) {
+        setText('rtbhKillSwitch', `Falha na ação do candidate: ${error.message}`);
+      }
+    }
+
+    document.addEventListener('click', (event) => {
+      const providerAction = event.target.closest?.('[data-action]');
+      if (providerAction && document.getElementById('rtbhPanel').contains(providerAction)) {
+        const id = Number(providerAction.dataset.id);
+        const action = providerAction.dataset.action;
+        const provider = rtbhProviders.find(item => item.id === id);
+        if (!provider) return;
+        if (action === 'edit') {
+          document.getElementById('rtbhProviderId').value = provider.id;
+          document.getElementById('rtbhProviderName').value = provider.name;
+          document.getElementById('rtbhProviderInputIf').value = provider.input_if;
+          document.getElementById('rtbhProviderEnabled').value = String(provider.enabled);
+          showRtbhPane('rtbhProvidersPane');
+        } else if (action === 'policy') {
+          fillRtbhPolicyForm(provider);
+        } else if (action === 'remove') {
+          apiRequest(`/api/rtbh/providers/${id}`, { method: 'DELETE' })
+            .then(() => loadRtbhView())
+            .catch(error => setText('rtbhKillSwitch', `Falha ao remover provider: ${error.message}`));
+        }
+        return;
+      }
+      const candidateAction = event.target.closest?.('[data-candidate]');
+      if (candidateAction && document.getElementById('rtbhPanel').contains(candidateAction)) {
+        rtbhCandidateAction(Number(candidateAction.dataset.id), candidateAction.dataset.candidate);
+        return;
+      }
+      const chipRemove = event.target.closest?.('[data-kind]');
+      if (chipRemove && document.getElementById('rtbhPanel').contains(chipRemove)) {
+        const kind = chipRemove.dataset.kind;
+        const index = Number(chipRemove.dataset.index);
+        if (kind === 'standard') {
+          rtbhStandardCommunities.splice(index, 1);
+          rtbhCommunityChips('rtbhPolicyStandardList', rtbhStandardCommunities, 'standard');
+        } else if (kind === 'large') {
+          rtbhLargeCommunities.splice(index, 1);
+          rtbhCommunityChips('rtbhPolicyLargeList', rtbhLargeCommunities, 'large');
+        }
+      }
+    });
 
     function aiStatusLabel(value) {
       return ({
@@ -27837,6 +28163,40 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     });
 
     document.getElementById('refreshBgpButton').addEventListener('click', () => loadBgpView().catch(console.error));
+    document.getElementById('refreshRtbhButton').addEventListener('click', () => loadRtbhView().catch(console.error));
+    document.getElementById('saveRtbhProviderButton').addEventListener('click', saveRtbhProvider);
+    document.getElementById('clearRtbhProviderButton').addEventListener('click', clearRtbhProviderForm);
+    document.getElementById('saveRtbhPolicyButton').addEventListener('click', saveRtbhPolicy);
+    document.getElementById('rtbhTabProviders').addEventListener('click', () => showRtbhPane('rtbhProvidersPane'));
+    document.getElementById('rtbhTabPolicies').addEventListener('click', () => {
+      if (rtbhSelectedProviderId === null) {
+        setText('rtbhPolicyHeader', 'Selecione um transit provider (aba Transit Providers → botão Política).');
+      }
+      showRtbhPane('rtbhPoliciesPane');
+    });
+    document.getElementById('rtbhTabCandidates').addEventListener('click', () => showRtbhPane('rtbhCandidatesPane'));
+    document.getElementById('addRtbhStandardCommunityButton').addEventListener('click', () => {
+      const value = document.getElementById('rtbhPolicyStandardInput').value.trim();
+      if (!value) return;
+      if (!/^\d{1,10}:\d{1,10}$/.test(value)) {
+        setText('rtbhPolicyHeader', `Standard community inválida: ${value}`);
+        return;
+      }
+      if (!rtbhStandardCommunities.includes(value)) rtbhStandardCommunities.push(value);
+      document.getElementById('rtbhPolicyStandardInput').value = '';
+      rtbhCommunityChips('rtbhPolicyStandardList', rtbhStandardCommunities, 'standard');
+    });
+    document.getElementById('addRtbhLargeCommunityButton').addEventListener('click', () => {
+      const value = document.getElementById('rtbhPolicyLargeInput').value.trim();
+      if (!value) return;
+      if (!/^\d{1,10}:\d{1,10}:\d{1,10}$/.test(value)) {
+        setText('rtbhPolicyHeader', `Large community inválida: ${value}`);
+        return;
+      }
+      if (!rtbhLargeCommunities.includes(value)) rtbhLargeCommunities.push(value);
+      document.getElementById('rtbhPolicyLargeInput').value = '';
+      rtbhCommunityChips('rtbhPolicyLargeList', rtbhLargeCommunities, 'large');
+    });
     document.getElementById('refreshBgpConnectorsButton').addEventListener('click', () => loadBgpConnectorsView().catch(error => setText('bgpConnectorsStatus', `Falha: ${error.message}`)));
     document.getElementById('checkAllBgpConnectorsButton').addEventListener('click', () => checkBgpConnectorStatusesNow().catch(error => setText('bgpPeerStatusText', `Falha: ${error.message}`)));
     document.getElementById('recoverBgpSessionsButton').addEventListener('click', () => recoverBgpSessions().catch(error => setText('bgpPeerStatusText', `Falha na recuperação: ${error.message}`)));

@@ -2619,6 +2619,10 @@ class BehavioralThreatRuntime:
         self.policy_engine: Any = None
         self.observation_loader = observation_loader
         self.mitigation_handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None = None
+        # Threat Intelligence -> RTBH candidate generation (RECOMMEND_ONLY).
+        # The handler is invoked after every policy evaluation regardless of
+        # the FlowSpec decision; it never announces anything.
+        self.rtbh_candidate_handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_lock = threading.Lock()
@@ -2631,6 +2635,7 @@ class BehavioralThreatRuntime:
             "policy_decisions": 0,
             "automatic_authorizations": 0,
             "mitigations_submitted": 0,
+            "rtbh_candidates": 0,
             "mode": "shadow",
         }
 
@@ -2639,6 +2644,12 @@ class BehavioralThreatRuntime:
         handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None,
     ) -> None:
         self.mitigation_handler = handler
+
+    def set_rtbh_candidate_handler(
+        self,
+        handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None,
+    ) -> None:
+        self.rtbh_candidate_handler = handler
 
     def get_policy_engine(self) -> Any:
         if self.policy_engine is None:
@@ -2782,6 +2793,16 @@ class BehavioralThreatRuntime:
             for candidate in candidates[:maximum_evaluations]:
                 decision = self.get_policy_engine().evaluate(candidate)
                 decisions += 1
+                # Threat Intelligence -> RTBH candidates: generated after every
+                # evaluation, independent of the FlowSpec decision. RECOMMEND_ONLY.
+                if self.rtbh_candidate_handler is not None:
+                    try:
+                        rtbh_result = self.rtbh_candidate_handler(candidate, decision)
+                        created = safe_int(rtbh_result.get("candidates")) if isinstance(rtbh_result, Mapping) else 0
+                        if created:
+                            self.state["rtbh_candidates"] = safe_int(self.state.get("rtbh_candidates")) + created
+                    except Exception as exc:
+                        mitigation_errors.append("rtbh_candidates:" + (clean_text(exc) or exc.__class__.__name__))
                 if not decision.allowed:
                     if decision.gates.get("shadow_policy_verdict") == "WOULD_BLOCK":
                         self.mark_mitigation_status(candidate, "shadow", decision.decision_source)
