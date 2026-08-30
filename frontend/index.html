@@ -4511,7 +4511,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <input id="snmpPort" value="161">
                 <input id="snmpMib" value="generic">
                 <input id="snmpVersion" value="2c">
-                <input id="snmpCommunity" value="public">
+                <input id="snmpCommunity">
                 <input id="snmpSecurityLevel" value="noAuthNoPriv">
                 <input id="snmpSecurityName">
                 <input id="snmpAuthProtocol">
@@ -8125,7 +8125,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </div>
           <div class="field">
             <label for="modalSnmpCommunity">Community String</label>
-            <input id="modalSnmpCommunity" class="form-control form-control-sm" value="public">
+            <input id="modalSnmpCommunity" class="form-control form-control-sm">
           </div>
           <div class="field">
             <label for="modalSnmpSecurityLevel">Security Level</label>
@@ -25160,6 +25160,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }, interval);
     }
 
+    const DEFAULT_SNMP_COMMUNITY = 'public';
+
     function defaultSensor() {
       return {
         id: null,
@@ -25185,7 +25187,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         snmp_port: 161,
         snmp_mib: 'generic',
         snmp_version: '2c',
-        snmp_community: 'public',
+        snmp_community: DEFAULT_SNMP_COMMUNITY,
         snmp_security_level: 'noAuthNoPriv',
         snmp_security_name: '',
         snmp_auth_protocol: '',
@@ -25306,7 +25308,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         snmp_port: numberValue('snmpPort', 161),
         snmp_mib: selectValue('snmpMib', 'generic'),
         snmp_version: selectValue('snmpVersion', '2c'),
-        snmp_community: selectValue('snmpCommunity', 'public'),
+        snmp_community: selectValue('snmpCommunity'),
         snmp_security_level: selectValue('snmpSecurityLevel', 'noAuthNoPriv'),
         snmp_security_name: selectValue('snmpSecurityName').trim(),
         snmp_auth_protocol: selectValue('snmpAuthProtocol'),
@@ -26066,7 +26068,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         snmp_ip: selectValue('modalSnmpIp').trim() || selectValue('snmpIp').trim() || selectValue('exporterIp').trim(),
         snmp_port: numberValue('modalSnmpPort', numberValue('snmpPort', 161)),
         snmp_version: selectValue('modalSnmpVersion') || selectValue('snmpVersion', '2c'),
-        snmp_community: selectValue('modalSnmpCommunity') || selectValue('snmpCommunity', 'public'),
+        snmp_community: selectValue('modalSnmpCommunity') || selectValue('snmpCommunity'),
         snmp_security_level: selectValue('modalSnmpSecurityLevel') || selectValue('snmpSecurityLevel', 'noAuthNoPriv'),
         snmp_security_name: selectValue('modalSnmpSecurityName') || selectValue('snmpSecurityName'),
         snmp_auth_protocol: selectValue('modalSnmpAuthProtocol') || selectValue('snmpAuthProtocol'),
@@ -26081,7 +26083,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('modalSnmpPort', selectValue('snmpPort', '161'));
       setValue('modalSnmpMib', selectValue('snmpMib', 'generic'));
       setValue('modalSnmpVersion', selectValue('snmpVersion', '2c'));
-      setValue('modalSnmpCommunity', selectValue('snmpCommunity', 'public'));
+      setValue('modalSnmpCommunity', selectValue('snmpCommunity'));
       setValue('modalSnmpSecurityLevel', selectValue('snmpSecurityLevel', 'noAuthNoPriv'));
       setValue('modalSnmpSecurityName', selectValue('snmpSecurityName'));
       setValue('modalSnmpAuthProtocol', selectValue('snmpAuthProtocol'));
@@ -26110,12 +26112,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
     }
 
-    function saveSnmpOptions() {
+    async function saveSnmpOptions() {
       setValue('snmpIp', selectValue('modalSnmpIp').trim());
       setValue('snmpPort', numberValue('modalSnmpPort', 161));
       setValue('snmpMib', selectValue('modalSnmpMib', 'generic'));
       setValue('snmpVersion', selectValue('modalSnmpVersion', '2c'));
-      setValue('snmpCommunity', selectValue('modalSnmpCommunity', 'public'));
+      setValue('snmpCommunity', selectValue('modalSnmpCommunity'));
       setValue('snmpSecurityLevel', selectValue('modalSnmpSecurityLevel', 'noAuthNoPriv'));
       setValue('snmpSecurityName', selectValue('modalSnmpSecurityName').trim());
       setValue('snmpAuthProtocol', selectValue('modalSnmpAuthProtocol'));
@@ -26127,7 +26129,26 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('snmpPollingSeconds', numberValue('modalSnmpPollingSeconds', 60));
       setBoolSelect('exporterSnmpEnabled', true);
       closeModal('snmpModal');
-      setSensorStatus('Opcoes SNMP atualizadas no formulario');
+
+      // Persist immediately for an existing sensor (SNMP options do not affect
+      // the collector, so we skip the collector apply).
+      if (!currentSensorId) {
+        setSensorStatus('Opcoes SNMP atualizadas no formulario (salve o sensor para persistir)');
+        return;
+      }
+      const payload = collectSensorForm();
+      try {
+        await apiRequest(`/api/sensors/${currentSensorId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        await loadSensors();
+        await loadDashboardSensors();
+        setSensorStatus('Opcoes SNMP salvas no sensor');
+      } catch (error) {
+        setSensorStatus(`Falha ao salvar opcoes SNMP: ${error.message}`, 'error');
+      }
     }
 
     async function querySnmp() {
