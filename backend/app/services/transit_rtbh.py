@@ -31,6 +31,7 @@ import os
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from ipaddress import ip_address, ip_network
 from typing import Any, Iterable, Mapping
 
@@ -1134,6 +1135,48 @@ def generate_rtbh_candidates_from_rows(
         for row in selective:
             targets.append((ip_network(row["prefix"], strict=False), row["share"]))
 
+    # Persistence metrics per host (ordering-only; the concentration gate
+    # against total_bps remains mandatory and is computed above).
+    window_seconds = safe_float(incident.get("duration_seconds"))
+    host_metrics: dict[str, dict[str, Any]] = {}
+    max_usrc = 1
+
+    def _ts(value: Any):
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+    for raw in per_host_rows:
+        item = dict(raw)
+        host_text = clean_text(item.get("host") or item.get("dst_ip"))
+        if not host_text:
+            continue
+        try:
+            host = ip_address(host_text)
+            if getattr(host, "ipv4_mapped", None) is not None:
+                host = host.ipv4_mapped
+        except ValueError:
+            continue
+        if host.version != network.version or host not in network:
+            continue
+        first = _ts(item.get("first"))
+        last = _ts(item.get("last"))
+        duration = 0.0
+        if first is not None and last is not None and last > first:
+            duration = (last - first).total_seconds()
+        usrc = safe_int(item.get("usrc") or item.get("unique_sources"))
+        max_usrc = max(max_usrc, usrc)
+        host_metrics[str(host)] = {
+            "duration_seconds": duration,
+            "active_buckets": safe_float(item.get("active_buckets")),
+            "unique_sources": usrc,
+        }
+
     confidence = safe_float(incident.get("confidence"))
     duration_seconds = safe_float(incident.get("duration_seconds"))
     for provider_id, provider in provider_rows.items():
@@ -1284,13 +1327,11 @@ def generate_rtbh_candidates_from_rows(
                 continue
     # Limit the number of persistent RTBH candidates per incident. The
     # remaining /32 analysis stays aggregate data, not mitigation candidates.
+    # Ordering uses the composite key (volume + persistence + diversity -
+    # collateral penalty); safety gates are never affected by ordering.
     cap = safe_int(max_candidates_per_incident, 0)
     if cap and len(created) > cap:
-        def candidate_score(item: Mapping[str, Any]) -> float:
-            share = safe_float(item.get("attack_share_provider"))
-            return safe_float(item.get("attack_bps_estimated")) * max(share, 0.0001)
-
-        ranked = sorted(created, key=candidate_score, reverse=True)
+        ranked = sorted(created, key=candidate_rank_key, reverse=True)
         for dropped in ranked[cap:]:
             audit_candidate_event(
                 conn,
@@ -1540,6 +1581,64 @@ def apply_candidate_status(
         (candidate_id,),
     ).fetchone()
     return candidate_row_to_dict(updated)
+
+
+# ---------------------------------------------------------------------------
+# Ranking proposal (SIMULATION ONLY — not wired into production yet)
+# ---------------------------------------------------------------------------
+
+
+def persistence_score(metrics: Mapping[str, Any]) -> float:
+    """PROPOSAL: persistence component for candidate ordering (0..1).
+
+    Combines duration coverage, active buckets and recurrence. Pure function;
+    used by simulations and tests only in this phase.
+    """
+    duration = safe_float(metrics.get("duration_seconds"))
+    window = safe_float(metrics.get("window_seconds"))
+    active_buckets = safe_float(metrics.get("active_buckets"))
+    duration_ratio = min(1.0, duration / window) if window > 0 else 0.0
+    bucket_capacity = max(1.0, window / 60.0)
+    recurrence = min(1.0, safe_float(metrics.get("recurrence_count")) / 3.0)
+    return round(
+        min(
+            1.0,
+            0.6 * duration_ratio
+            + 0.2 * min(1.0, active_buckets / bucket_capacity)
+            + 0.2 * recurrence,
+        ),
+        4,
+    )
+
+
+def candidate_rank_key(item: Mapping[str, Any]) -> float:
+    """PROPOSAL (simulation only): volume + persistence + source diversity
+    - collateral penalty.
+
+    The concentration gate against total_bps remains MANDATORY before this
+    ordering is ever applied: persistence only orders candidates that already
+    passed the safety gates. It must never turn a /32 into a selective
+    candidate by itself.
+    """
+    volume = safe_float(item.get("attack_bps_estimated")) * max(
+        safe_float(item.get("attack_share_provider")), 0.0001
+    )
+    evidence = (
+        item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    )
+    persistence = persistence_score(evidence)
+    diversity = min(
+        1.0,
+        safe_float(evidence.get("unique_sources"))
+        / max(1.0, safe_float(evidence.get("unique_sources_max", 1))),
+    )
+    collateral_penalty = 0.0
+    if safe_int(evidence.get("protected_services_affected")):
+        collateral_penalty = 0.35
+    elif safe_int(evidence.get("affected_host_count")):
+        collateral_penalty = 0.10
+    composite = volume * (0.6 + 0.25 * persistence + 0.15 * diversity)
+    return round(composite * (1.0 - collateral_penalty), 2)
 
 
 # ---------------------------------------------------------------------------

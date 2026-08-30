@@ -121,6 +121,14 @@ providers transportam o ataque; cada provider gera seus próprios candidatos
 CIRION, via SEABORN e via SEMPRE. Bloquear em um provider não resolve os
 demais.
 
+  continua usando o limite superior estimado (conservador, apenas
+  recomendação).
+- `baseline_available=false` no incidente: nenhuma razão baseline foi
+  inventada; candidatos não dependem de baseline.
+
+## Ordenação por persistência (adotada, apenas ordenação)
+
+`candidate_rank_key` combina volume estimado, persistência (duração
 ## Dry run
 
 ```text

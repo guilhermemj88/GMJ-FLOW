@@ -23953,7 +23953,10 @@ def generate_rtbh_candidates_from_behavioral_decision(
                     dst_ip AS host,
                     sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps,
                     sum(toFloat64(packets)) / {duration:Float64} AS pps,
-                    sum(bytes) AS bytes
+                    sum(bytes) AS bytes,
+                    min(flow_time) AS first,
+                    max(flow_time) AS last,
+                    uniqExact(src_ip) AS usrc
                 FROM flow_raw
                 WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
                   AND proto = 17
