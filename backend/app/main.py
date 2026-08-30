@@ -23967,6 +23967,20 @@ def generate_rtbh_candidates_from_behavioral_decision(
                 params,
             )
         )
+        totals = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                """,
+                params,
+            )
+        )
+        total_bps = float(totals[0].get("bps") or 0) if totals else None
     except Exception as exc:
         logger.warning("RTBH candidate generation ClickHouse query failed: %s", exc)
         return {"status": "skipped", "reason": "clickhouse_unavailable", "candidates": 0}
@@ -23979,6 +23993,14 @@ def generate_rtbh_candidates_from_behavioral_decision(
         local_capacity = float(os.getenv("GMJFLOW_RTBH_LOCAL_CAPACITY_BPS", "0")) or None
     except ValueError:
         local_capacity = None
+    try:
+        min_provider_share = float(os.getenv("GMJFLOW_RTBH_PROVIDER_MIN_SHARE", "0.05"))
+    except ValueError:
+        min_provider_share = 0.05
+    try:
+        max_candidates = int(os.getenv("GMJFLOW_RTBH_MAX_CANDIDATES_PER_INCIDENT", "20"))
+    except ValueError:
+        max_candidates = 20
     with sqlite_connection() as conn:
         ensure_transit_rtbh_schema(conn)
         created = generate_rtbh_candidates_from_rows(
@@ -23987,7 +24009,10 @@ def generate_rtbh_candidates_from_behavioral_decision(
             per_host,
             ingress,
             estimate_multiplier=estimate_multiplier,
+            min_provider_share=min_provider_share,
+            max_candidates_per_incident=max_candidates,
             local_capacity_bps=local_capacity,
+            total_bps=total_bps,
         )
         conn.commit()
     if created:

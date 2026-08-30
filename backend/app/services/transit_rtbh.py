@@ -112,6 +112,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 ACTION_TYPE_RTBH = "RTBH"
 ACTION_TYPE_MANUAL_LARGE_PREFIX_RTBH = "MANUAL_LARGE_PREFIX_RTBH"
+ACTION_TYPE_UPSTREAM_SCRUBBING = "UPSTREAM_SCRUBBING"
 
 COLLATERAL_NONE = "NONE"
 COLLATERAL_LOW = "LOW"
@@ -621,15 +622,22 @@ def selective_targets(
     min_host_share: float = 0.05,
     min_host_bps: float = 0.0,
     max_targets: int = 8,
+    total_bps: float | None = None,
 ) -> list[dict[str, Any]]:
     """Choose selective /32 victims inside the incident target prefix.
 
-    Only hosts with meaningful concentration are returned. If the attack is
-    spread uniformly across the prefix, the returned list is empty and the
-    caller must flag ``no_safe_selective_rtbh_candidate``.
+    Only hosts with meaningful concentration are returned. Concentration is
+    measured against the TOTAL attack volume of the target prefix
+    (``total_bps`` when provided, otherwise the sum of the supplied rows).
+    Supplying only a truncated top-N subset WITHOUT ``total_bps`` would
+    inflate each host share and select "concentrated" victims that are not
+    actually concentrated — callers must pass the real total.
+
+    When the attack is spread uniformly, the list is empty and the caller
+    must flag ``no_safe_selective_rtbh_candidate``.
     """
     network = ip_network(target_prefix, strict=False)
-    total_bps = 0.0
+    rows_sum_bps = 0.0
     rows: list[dict[str, Any]] = []
     for raw in per_host_rows:
         item = dict(raw)
@@ -646,13 +654,14 @@ def selective_targets(
             continue
         bps = safe_float(item.get("bps") or item.get("attack_bps_observed"))
         pps = safe_float(item.get("pps") or item.get("attack_pps_observed"))
-        total_bps += bps
+        rows_sum_bps += bps
         rows.append({"host": str(host), "bps": bps, "pps": pps, "bytes": safe_float(item.get("bytes"))})
-    if total_bps <= 0:
+    effective_total = safe_float(total_bps) if total_bps is not None else rows_sum_bps
+    if effective_total <= 0:
         return []
     selected: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: item["bps"], reverse=True):
-        share = row["bps"] / total_bps
+        share = row["bps"] / effective_total
         if share < float(min_host_share):
             continue
         if row["bps"] < float(min_host_bps):
@@ -978,13 +987,23 @@ def generate_rtbh_candidates_from_rows(
     *,
     estimate_multiplier: float = 1000.0,
     max_selective_targets: int = 8,
+    min_provider_share: float = 0.0,
+    max_candidates_per_incident: int | None = None,
     local_capacity_bps: float | None = None,
+    total_bps: float | None = None,
 ) -> list[dict[str, Any]]:
     """Generate and persist RTBH candidates for one incident.
 
     Threat Intelligence provides action=RTBH + provider + target_prefix.
     This engine resolves provider -> TransitRtbhPolicy -> communities/prefix
     policy/approval/execution-mode. Communities are never invented here.
+
+    - Providers whose ingress share is below ``min_provider_share`` are
+      skipped (no useless candidates for irrelevant transits).
+    - At most ``max_candidates_per_incident`` RTBH candidates are created;
+      the remaining analysis stays aggregate, not mitigation candidates.
+    - When the attack exceeds local capacity, a single UPSTREAM_SCRUBBING
+      recommendation is created instead of pretending RTBH solves it.
     """
     ensure_transit_rtbh_schema(conn)
     created: list[dict[str, Any]] = []
@@ -1016,12 +1035,14 @@ def generate_rtbh_candidates_from_rows(
         target_prefix,
         per_host_rows,
         max_targets=int(max_selective_targets),
+        total_bps=total_bps,
     )
     no_selective = not selective
     suitability["no_safe_selective_rtbh_candidate"] = no_selective
 
     ingress = provider_ingress_rows(ingress_rows)
     share_by_provider = attack_share_by_provider(ingress)
+    has_ingress = bool(share_by_provider)
     policies = provider_policy_lookup(conn)
     provider_rows = {
         int(row["id"]): provider_row_to_dict(row)
@@ -1044,6 +1065,9 @@ def generate_rtbh_candidates_from_rows(
             continue
         input_if = safe_int(provider.get("input_if"))
         provider_share = share_by_provider.get(input_if, 0.0)
+        if has_ingress and provider_share < float(min_provider_share):
+            # Transit with immaterial contribution: no candidate for it.
+            continue
         policy = policies.get(provider_id)
         for target_network, target_share in targets:
             candidate_prefix = str(target_network)
@@ -1085,8 +1109,8 @@ def generate_rtbh_candidates_from_rows(
             }:
                 status = CANDIDATE_STATUS_REVIEW_REQUIRED
                 status_reason = "protected_prefix_requires_manual_rtbh"
-            baseline_bps = 0.0
-            attack_baseline_ratio = 0.0
+            baseline_bps = safe_float(incident.get("baseline_bps"))
+            attack_baseline_ratio = round(estimated_bps / baseline_bps, 4) if baseline_bps > 0 else 0.0
             evidence = dict(incident.get("evidence") or {}) if isinstance(incident.get("evidence"), Mapping) else {}
             evidence.update(
                 {
@@ -1098,6 +1122,7 @@ def generate_rtbh_candidates_from_rows(
                     "selective": not no_selective,
                     "provider_share": round(provider_share, 4),
                     "target_share": round(target_share, 4),
+                    "baseline_available": bool(incident.get("baseline_available")),
                 }
             )
             candidate = {
@@ -1168,6 +1193,94 @@ def generate_rtbh_candidates_from_rows(
                 )
             except sqlite3.IntegrityError:
                 continue
+    # Limit the number of persistent RTBH candidates per incident. The
+    # remaining /32 analysis stays aggregate data, not mitigation candidates.
+    cap = safe_int(max_candidates_per_incident, 0)
+    if cap and len(created) > cap:
+        def candidate_score(item: Mapping[str, Any]) -> float:
+            share = safe_float(item.get("attack_share_provider"))
+            return safe_float(item.get("attack_bps_estimated")) * max(share, 0.0001)
+
+        ranked = sorted(created, key=candidate_score, reverse=True)
+        for dropped in ranked[cap:]:
+            audit_candidate_event(
+                conn,
+                actor="GMJ_FLOW",
+                action="candidate_skipped_cap",
+                incident_id=clean_text(dropped.get("incident_id")),
+                provider_id=dropped.get("provider_id"),
+                target_prefix=clean_text(dropped.get("target_prefix")),
+                reason=f"max_candidates_per_incident={cap}",
+            )
+            conn.execute(
+                "DELETE FROM rtbh_mitigation_candidates WHERE id = ?",
+                (safe_int(dropped.get("id")),),
+            )
+        created = ranked[:cap]
+    if suitability.get("scrubbing_suitability") == SUITABILITY_VERY_HIGH:
+        scrubbing = {
+            "incident_id": clean_text(incident.get("incident_id")),
+            "threat_assessment_id": clean_text(incident.get("threat_assessment_id")),
+            "classification": clean_text(incident.get("classification")),
+            "action_type": ACTION_TYPE_UPSTREAM_SCRUBBING,
+            "target_prefix": str(network),
+            "provider_id": None,
+            "input_if": 0,
+            "confidence": round(confidence, 4),
+            "attack_bps_observed": round(observed_bps, 2),
+            "attack_bps_estimated": round(estimated_bps, 2),
+            "attack_pps_observed": round(observed_pps, 2),
+            "attack_pps_estimated": round(estimated_pps, 2),
+            "baseline_bps": 0.0,
+            "attack_baseline_ratio": 0.0,
+            "attack_share_provider": 0.0,
+            "suitability": suitability,
+            "collateral_risk": COLLATERAL_MEDIUM,
+            "reason": "Ataque excede a capacidade local; desvio para centro de limpeza (scrubbing) recomendado.",
+            "evidence": dict(incident.get("evidence") or {}),
+            "status": CANDIDATE_STATUS_REVIEW_REQUIRED,
+            "no_safe_selective_rtbh_candidate": 1 if no_selective else 0,
+            "large_prefix_manual_only": 0,
+            "dry_run": {},
+            "created_by": "GMJ_FLOW",
+        }
+        duplicate = conn.execute(
+            """
+            SELECT id FROM rtbh_mitigation_candidates
+            WHERE incident_id = ? AND COALESCE(provider_id, 0) = 0 AND target_prefix = ?
+            LIMIT 1
+            """,
+            (scrubbing["incident_id"], scrubbing["target_prefix"]),
+        ).fetchone()
+        if duplicate is None:
+            scrubbing_columns, scrubbing_values = candidate_insert_values(scrubbing)
+            scrubbing_placeholders = ", ".join("?" for _ in scrubbing_columns)
+            cursor = conn.execute(
+                f"INSERT INTO rtbh_mitigation_candidates ({', '.join(scrubbing_columns)}) "
+                f"VALUES ({scrubbing_placeholders})",
+                scrubbing_values,
+            )
+            scrubbing_id = int(cursor.lastrowid)
+            audit_candidate_event(
+                conn,
+                actor="GMJ_FLOW",
+                action="candidate_created",
+                incident_id=scrubbing["incident_id"],
+                candidate_id=scrubbing_id,
+                target_prefix=scrubbing["target_prefix"],
+                old_state="",
+                new_state=scrubbing["status"],
+                reason="upstream_scrubbing_recommended",
+            )
+            created.append(
+                {
+                    **scrubbing,
+                    "id": scrubbing_id,
+                    "status_reason": "upstream_scrubbing_recommended",
+                    "policy_configured": False,
+                    "provider_name": "",
+                }
+            )
     return created
 
 
@@ -1233,11 +1346,11 @@ def rtbh_dry_run(
     configured = policy is not None and bool(policy.get("enabled"))
     has_communities = bool(standard or large)
     mode = clean_text((policy or {}).get("mode") or RTBH_MODE_OFF).upper() if policy is not None else "NOT_CONFIGURED"
-    would_announce = (
-        configured
-        and has_communities
-        and mode != RTBH_MODE_OFF
-        and rtbh_execution_enabled_env()
+    # Policy readiness: would the action be announced under a normal
+    # execution path (policy + communities + mode)? Actual announcement is
+    # always NO in this dry-run-only version and without the kill switch.
+    would_announce = bool(
+        configured and has_communities and mode != RTBH_MODE_OFF
     )
     reasons: list[str] = []
     if policy is None:
@@ -1248,7 +1361,7 @@ def rtbh_dry_run(
         reasons.append("no_communities_configured")
     if mode == RTBH_MODE_OFF:
         reasons.append("policy_mode_off")
-    if not rtbh_execution_enabled_env():
+    if would_announce and not rtbh_execution_enabled_env():
         reasons.append("rtbh_execution_kill_switch_disabled")
     reasons.append("dry_run_only_version_never_announces")
     result = RtbhDryRunResult(

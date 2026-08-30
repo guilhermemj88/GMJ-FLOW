@@ -287,6 +287,41 @@ class CandidateGenerationLogicTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertGreaterEqual(skipped, 1)
 
+    def test_selective_targets_with_total_bps_prevents_truncated_subset_inflation(self):
+        # Uniform carpet bombing: the top-20 subset alone would look
+        # "concentrated" (5% each within the subset), but the real share of
+        # each /32 against the whole /22 attack is ~0.74%.
+        rows = [
+            {"host": f"45.163.145.{host}", "bps": 17.0, "pps": 1700.0}
+            for host in range(72, 92)
+        ]
+        inflated = rtbh.selective_targets("45.163.144.0/22", rows)
+        self.assertTrue(inflated)  # without total, the subset looks selective
+        correct = rtbh.selective_targets("45.163.144.0/22", rows, total_bps=2297.0)
+        self.assertEqual(correct, [])
+
+    def test_uniform_attack_with_total_bps_generates_manual_large_prefix_only(self):
+        conn = memory_connection()
+        setup_providers(conn, [("CIRION", 284)], {1: {}})
+        ingress = [{"input_if": 284, "bps": 200_000_000.0, "pps": 20_000.0}]
+        hosts = [
+            {"host": f"45.163.145.{host}", "bps": 17_000_000.0, "pps": 1700.0}
+            for host in range(72, 92)
+        ]
+        created = rtbh.generate_rtbh_candidates_from_rows(
+            conn,
+            carpet_incident(),
+            hosts,
+            ingress,
+            estimate_multiplier=1.0,
+            total_bps=2_297_000_000.0,  # real /22 total >> top subset
+        )
+        self.assertEqual(len(created), 1)
+        self.assertEqual(
+            created[0]["action_type"], rtbh.ACTION_TYPE_MANUAL_LARGE_PREFIX_RTBH
+        )
+        self.assertTrue(created[0]["no_safe_selective_rtbh_candidate"])
+
     def test_audit_trail_records_creation(self):
         conn = memory_connection()
         setup_providers(conn, [("CIRION", 284)], {1: {}})
@@ -302,6 +337,124 @@ class CandidateGenerationLogicTests(unittest.TestCase):
             self.assertTrue(row["actor"])
             self.assertTrue(row["action"])
             self.assertTrue(row["created_at"])
+
+    def test_provider_share_threshold_skips_irrelevant_transit(self):
+        conn = memory_connection()
+        setup_providers(
+            conn,
+            [("CIRION", 284), ("SEABORN", 220), ("SEMPRE", 202)],
+            {1: {}, 2: {}, 3: {}},
+        )
+        ingress = [
+            {"input_if": 284, "bps": 940_000_000.0, "pps": 94_000.0},
+            {"input_if": 220, "bps": 50_000_000.0, "pps": 5_000.0},
+            {"input_if": 202, "bps": 10_000_000.0, "pps": 1_000.0},  # 1% share
+        ]
+        created = rtbh.generate_rtbh_candidates_from_rows(
+            conn,
+            carpet_incident(),
+            concentrated_hosts(),
+            ingress,
+            estimate_multiplier=1.0,
+            min_provider_share=0.05,
+        )
+        providers = {item["provider_name"] for item in created}
+        self.assertIn("CIRION", providers)
+        self.assertIn("SEABORN", providers)
+        self.assertNotIn("SEMPRE", providers)
+
+    def test_max_candidates_per_incident_caps(self):
+        conn = memory_connection()
+        setup_providers(conn, [("CIRION", 284), ("SEABORN", 220)], {1: {}, 2: {}})
+        hosts = [
+            {"host": f"45.163.145.{host}", "bps": 5_000_000_000.0, "pps": 500.0}
+            for host in range(10, 22)  # 12 hosts, each ~4-8% share
+        ]
+        ingress = [
+            {"input_if": 284, "bps": 600_000_000.0, "pps": 60_000.0},
+            {"input_if": 220, "bps": 400_000_000.0, "pps": 40_000.0},
+        ]
+        created = rtbh.generate_rtbh_candidates_from_rows(
+            conn,
+            carpet_incident(),
+            hosts,
+            ingress,
+            estimate_multiplier=1.0,
+            max_candidates_per_incident=5,
+        )
+        self.assertLessEqual(len(created), 5)
+        total = conn.execute("SELECT COUNT(*) FROM rtbh_mitigation_candidates").fetchone()[0]
+        self.assertLessEqual(total, 5)
+        skipped = conn.execute(
+            "SELECT COUNT(*) FROM rtbh_candidate_audit WHERE action = 'candidate_skipped_cap'"
+        ).fetchone()[0]
+        self.assertGreaterEqual(skipped, 1)
+
+    def test_scrubbing_recommendation_when_over_local_capacity(self):
+        conn = memory_connection()
+        setup_providers(conn, [("CIRION", 284)], {1: {}})
+        ingress = [{"input_if": 284, "bps": 200_000_000.0, "pps": 20_000.0}]
+        created = rtbh.generate_rtbh_candidates_from_rows(
+            conn,
+            carpet_incident(),
+            concentrated_hosts(),
+            ingress,
+            estimate_multiplier=1000.0,  # 200 Gbps estimated
+            local_capacity_bps=10_000_000_000.0,  # 10 Gbps local capacity
+        )
+        scrub = [
+            item
+            for item in created
+            if item["action_type"] == rtbh.ACTION_TYPE_UPSTREAM_SCRUBBING
+        ]
+        self.assertEqual(len(scrub), 1)
+        self.assertEqual(scrub[0]["provider_id"], None)
+        self.assertEqual(scrub[0]["status"], rtbh.CANDIDATE_STATUS_REVIEW_REQUIRED)
+
+    def test_dry_run_would_announce_reflects_policy_readiness_not_execution(self):
+        conn = memory_connection()
+        setup_providers(
+            conn,
+            [("CIRION", 284)],
+            {1: {"standard": ["64512:666"], "mode": "MANUAL_APPROVAL"}},
+        )
+        with mock.patch.dict(os.environ, {"RTBH_EXECUTION_ENABLED": "false"}):
+            result = rtbh.rtbh_dry_run(
+                conn,
+                {"provider_id": 1, "target_prefix": "45.163.145.74/32", "input_if": 284},
+            )
+        # Kill switch off: the action WOULD be announced (policy ready) but
+        # is never actually announced in this dry-run-only version.
+        self.assertTrue(result["would_announce"])
+        self.assertFalse(result["actually_announced"])
+        self.assertFalse(result["execution_enabled_env"])
+        self.assertIn("rtbh_execution_kill_switch_disabled", result["reason"])
+        self.assertIn("dry_run_only_version_never_announces", result["reason"])
+
+    def test_dry_run_rejects_policy_without_community(self):
+        conn = memory_connection()
+        setup_providers(
+            conn,
+            [("CIRION", 284)],
+            {1: {"standard": [], "large": [], "mode": "MANUAL_APPROVAL"}},
+        )
+        result = rtbh.rtbh_dry_run(
+            conn,
+            {"provider_id": 1, "target_prefix": "45.163.145.74/32", "input_if": 284},
+        )
+        self.assertFalse(result["would_announce"])
+        self.assertIn("no_communities_configured", result["reason"])
+
+    def test_dry_run_rejects_provider_without_policy(self):
+        conn = memory_connection()
+        setup_providers(conn, [("CIRION", 284)], {})
+        result = rtbh.rtbh_dry_run(
+            conn,
+            {"provider_id": 1, "target_prefix": "45.163.145.74/32", "input_if": 284},
+        )
+        self.assertFalse(result["would_announce"])
+        self.assertFalse(result["policy_configured"])
+        self.assertIn("provider_policy_not_configured", result["reason"])
 
 
 if __name__ == "__main__":

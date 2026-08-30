@@ -88,12 +88,17 @@ Suitability avaliada por candidato:
 | blocklist_value | LOW |
 
 **Nunca blackhole automático do /22.** A distribuição por /32 (attack bps,
-pps, baseline, duração, share por provider) é calculada no ClickHouse. Com
-concentração suficiente, são criados candidatos seletivos por /32; caso
-contrário `no_safe_selective_rtbh_candidate = true` e é oferecida a ação
-`MANUAL_LARGE_PREFIX_RTBH` com `collateral_risk = CRITICAL` e o texto
+pps, baseline, duração, share por provider) é calculada no ClickHouse. A
+concentração de cada /32 é medida contra o **volume total do prefixo**
+(`total_bps`), nunca contra um subset TOP-N — validado no incidente real de
+45.163.144.0/22, onde o /32 mais atacado tinha apenas 0,74% do total
+(ataque uniforme). Com concentração suficiente, são criados candidatos
+seletivos por /32; caso contrário
+`no_safe_selective_rtbh_candidate = true` e são oferecidas apenas as ações
+`MANUAL_LARGE_PREFIX_RTBH` (com `collateral_risk = CRITICAL` e o texto
 explícito: *"Esta ação tornará todo o prefixo indisponível através deste
-trânsito."*
+trânsito."*) e/ou `UPSTREAM_SCRUBBING` (quando o ataque excede a capacidade
+local).
 
 ## Multi-trânsito
 
