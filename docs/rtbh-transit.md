@@ -62,11 +62,24 @@ existente:
 - `block_auto_rtbh` (default 0)
 - `require_manual_rtbh` (default 1)
 - `block_all_rtbh` (default 0)
+- `service_name` (default '') — identifica o serviço legítimo no host
+- `protocol` (default '') — `tcp`/`udp`/`icmp` do serviço
+- `port` (nullable) — porta do serviço
+- `protection_level` (default `NORMAL`) — `NORMAL`/`IMPORTANT`/`CRITICAL`
 
 O booleano legado `block_rtbh` é preservado e continua governando o caminho
 BGP legado. Na geração de candidatos RTBH: `block_all_rtbh` → candidato
 pulado com auditoria; `require_manual_rtbh` → status forçado para
-`REVIEW_REQUIRED`.
+`REVIEW_REQUIRED`. O formulário da UI aceita os novos campos de serviço.
+
+Um /32 que hospede serviço protegido **nunca** vira candidato de RTBH
+seletivo — o host é pulado com auditoria
+`candidate_skipped_protected_service/protected_service_collateral`. Quando
+não há vítima seletiva segura e a alternativa é o prefixo pai inteiro, o
+candidato MANUAL_LARGE_PREFIX_RTBH carrega em `evidence` os serviços
+afetados (`protected_services_affected`, `affected_service_names`,
+`affected_host_count`) e o motivo lista os nomes.
+
 
 ## Lógica de carpet bombing
 

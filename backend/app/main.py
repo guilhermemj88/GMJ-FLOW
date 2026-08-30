@@ -1656,6 +1656,10 @@ class BgpProtectedPrefixPayload(BaseModel):
     block_auto_rtbh: bool = False
     require_manual_rtbh: bool = True
     block_all_rtbh: bool = False
+    service_name: str = ""
+    protocol: str = ""
+    port: int | None = None
+    protection_level: str = "NORMAL"
 
 
 class BgpAnnouncementDryRunPayload(BaseModel):
@@ -4187,6 +4191,10 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             block_auto_rtbh INTEGER NOT NULL DEFAULT 0,
             require_manual_rtbh INTEGER NOT NULL DEFAULT 1,
             block_all_rtbh INTEGER NOT NULL DEFAULT 0,
+            service_name TEXT NOT NULL DEFAULT '',
+            protocol TEXT NOT NULL DEFAULT '',
+            port INTEGER,
+            protection_level TEXT NOT NULL DEFAULT 'NORMAL',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -4197,6 +4205,10 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_auto_rtbh", "block_auto_rtbh INTEGER NOT NULL DEFAULT 0")
     ensure_sqlite_column(conn, "bgp_protected_prefixes", "require_manual_rtbh", "require_manual_rtbh INTEGER NOT NULL DEFAULT 1")
     ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_all_rtbh", "block_all_rtbh INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "service_name", "service_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "protocol", "protocol TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "port", "port INTEGER")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "protection_level", "protection_level TEXT NOT NULL DEFAULT 'NORMAL'")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_response_profiles (
@@ -11553,6 +11565,10 @@ def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "block_auto_rtbh": sqlite_bool(item.get("block_auto_rtbh")),
         "require_manual_rtbh": sqlite_bool(item.get("require_manual_rtbh", 1)),
         "block_all_rtbh": sqlite_bool(item.get("block_all_rtbh")),
+        "service_name": clean_text(item.get("service_name")),
+        "protocol": clean_text(item.get("protocol")),
+        "port": (int(item["port"]) if item.get("port") is not None else None),
+        "protection_level": clean_text(item.get("protection_level") or "NORMAL").upper(),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -26695,8 +26711,8 @@ def create_bgp_protected_prefix(request: Request, payload: BgpProtectedPrefixPay
     now = utc_now_iso()
     with sqlite_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, block_auto_rtbh, require_manual_rtbh, block_all_rtbh, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, now, now),
+            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, block_auto_rtbh, require_manual_rtbh, block_all_rtbh, service_name, protocol, port, protection_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, clean_text(payload.service_name), clean_text(payload.protocol).lower(), payload.port, clean_text(payload.protection_level).upper() or "NORMAL", now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
@@ -26712,8 +26728,8 @@ def update_bgp_protected_prefix(request: Request, prefix_id: int, payload: BgpPr
         if row is None:
             raise HTTPException(status_code=404, detail="Prefixo protegido nao encontrado")
         conn.execute(
-            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, block_auto_rtbh = ?, require_manual_rtbh = ?, block_all_rtbh = ?, updated_at = ? WHERE id = ?",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, utc_now_iso(), prefix_id),
+            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, block_auto_rtbh = ?, require_manual_rtbh = ?, block_all_rtbh = ?, service_name = ?, protocol = ?, port = ?, protection_level = ?, updated_at = ? WHERE id = ?",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, clean_text(payload.service_name), clean_text(payload.protocol).lower(), payload.port, clean_text(payload.protection_level).upper() or "NORMAL", utc_now_iso(), prefix_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (prefix_id,)).fetchone()

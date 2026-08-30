@@ -490,6 +490,10 @@ def candidate_row_to_dict(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any
         "no_safe_selective_rtbh_candidate": bool(int(item.get("no_safe_selective_rtbh_candidate") or 0)),
         "large_prefix_manual_only": bool(int(item.get("large_prefix_manual_only") or 0)),
         "dry_run": dry_run,
+        "protected_services_affected": safe_int(evidence.get("protected_services_affected")),
+        "affected_service_names": list(evidence.get("affected_service_names") or []),
+        "affected_host_count": safe_int(evidence.get("affected_host_count")),
+        "estimated_legitimate_traffic_available": bool(evidence.get("estimated_legitimate_traffic_available")),
         "created_by": clean_text(item.get("created_by") or "GMJ_FLOW"),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
@@ -817,19 +821,36 @@ def protected_prefix_rtbh_check(
 
     Preserves compatibility with the legacy ``block_rtbh`` boolean and adds
     the incremental columns ``block_auto_rtbh`` / ``require_manual_rtbh`` /
-    ``block_all_rtbh`` when present.
+    ``block_all_rtbh`` when present. Entries with ``service_name`` are
+    explicit protected services and additionally block SELECTIVE /32 RTBH
+    (dropping a /32 takes the whole address, including legitimate services).
     """
     try:
         network = ip_network(target_prefix, strict=False)
     except ValueError:
-        return {"matched": False, "block_all_rtbh": False, "require_manual_rtbh": False, "matches": []}
+        return {
+            "matched": False,
+            "block_all_rtbh": False,
+            "require_manual_rtbh": False,
+            "matches": [],
+            "protected_services": [],
+            "protected_service_count": 0,
+        }
     try:
         rows = conn.execute(
             "SELECT * FROM bgp_protected_prefixes WHERE enabled = 1"
         ).fetchall()
     except sqlite3.OperationalError:
-        return {"matched": False, "block_all_rtbh": False, "require_manual_rtbh": False, "matches": []}
+        return {
+            "matched": False,
+            "block_all_rtbh": False,
+            "require_manual_rtbh": False,
+            "matches": [],
+            "protected_services": [],
+            "protected_service_count": 0,
+        }
     matches: list[dict[str, Any]] = []
+    protected_services: list[dict[str, Any]] = []
     block_all = False
     require_manual = False
     for row in rows:
@@ -847,14 +868,20 @@ def protected_prefix_rtbh_check(
         require_value = item.get("require_manual_rtbh")
         if require_value is None:
             require_value = 1
-        matches.append(
-            {
-                "cidr": str(protected),
-                "name": clean_text(item.get("name")),
-                "block_all_rtbh": bool(int(block_all_value or 0)),
-                "require_manual_rtbh": bool(int(require_value or 0)),
-            }
-        )
+        service_name = clean_text(item.get("service_name"))
+        match_entry = {
+            "cidr": str(protected),
+            "name": clean_text(item.get("name")),
+            "service_name": service_name,
+            "protocol": clean_text(item.get("protocol")),
+            "port": int(item["port"]) if item.get("port") is not None else None,
+            "protection_level": clean_text(item.get("protection_level") or "NORMAL").upper(),
+            "block_all_rtbh": bool(int(block_all_value or 0)),
+            "require_manual_rtbh": bool(int(require_value or 0)),
+        }
+        matches.append(match_entry)
+        if service_name:
+            protected_services.append(match_entry)
         if bool(int(block_all_value or 0)):
             block_all = True
         if bool(int(require_value or 0)):
@@ -864,6 +891,55 @@ def protected_prefix_rtbh_check(
         "block_all_rtbh": block_all,
         "require_manual_rtbh": require_manual,
         "matches": matches,
+        "protected_services": protected_services,
+        "protected_service_count": len(protected_services),
+    }
+
+
+def protected_services_inside(
+    conn: sqlite3.Connection,
+    target_prefix: str,
+) -> dict[str, Any]:
+    """Aggregated collateral view for LARGE-PREFIX manual RTBH reviews."""
+    try:
+        network = ip_network(target_prefix, strict=False)
+    except ValueError:
+        return {
+            "protected_service_count": 0,
+            "affected_service_names": [],
+            "affected_host_count": 0,
+        }
+    try:
+        rows = conn.execute(
+            "SELECT * FROM bgp_protected_prefixes WHERE enabled = 1"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {
+            "protected_service_count": 0,
+            "affected_service_names": [],
+            "affected_host_count": 0,
+        }
+    affected_hosts = 0
+    service_names: list[str] = []
+    service_count = 0
+    for row in rows:
+        item = dict(row)
+        try:
+            protected = ip_network(clean_text(item.get("cidr")), strict=False)
+        except ValueError:
+            continue
+        if network.version != protected.version or not network.overlaps(protected):
+            continue
+        affected_hosts += 1
+        service_name = clean_text(item.get("service_name"))
+        if service_name:
+            service_count += 1
+            if service_name not in service_names:
+                service_names.append(service_name)
+    return {
+        "protected_service_count": service_count,
+        "affected_service_names": service_names,
+        "affected_host_count": affected_hosts,
     }
 
 
@@ -1084,6 +1160,19 @@ def generate_rtbh_candidates_from_rows(
                 )
                 continue
             large_prefix_manual = no_selective and target_network.prefixlen < 32
+            if not large_prefix_manual and protection.get("protected_service_count"):
+                # Selective /32 RTBH would take the whole address, including
+                # legitimate services (e.g. Ookla TCP/8080). Never selective.
+                audit_candidate_event(
+                    conn,
+                    actor="GMJ_FLOW",
+                    action="candidate_skipped_protected_service",
+                    incident_id=clean_text(incident.get("incident_id")),
+                    provider_id=provider_id,
+                    target_prefix=candidate_prefix,
+                    reason="protected_service_collateral",
+                )
+                continue
             if no_selective:
                 action_type = ACTION_TYPE_MANUAL_LARGE_PREFIX_RTBH
                 collateral = COLLATERAL_CRITICAL
@@ -1218,6 +1307,11 @@ def generate_rtbh_candidates_from_rows(
             )
         created = ranked[:cap]
     if suitability.get("scrubbing_suitability") == SUITABILITY_VERY_HIGH:
+        scrubbing_reasons = ["attack_above_local_capacity"]
+        if no_selective:
+            scrubbing_reasons.extend(
+                ["uniform_distribution", "large_prefix", "high_collateral"]
+            )
         scrubbing = {
             "incident_id": clean_text(incident.get("incident_id")),
             "threat_assessment_id": clean_text(incident.get("threat_assessment_id")),
@@ -1236,8 +1330,17 @@ def generate_rtbh_candidates_from_rows(
             "attack_share_provider": 0.0,
             "suitability": suitability,
             "collateral_risk": COLLATERAL_MEDIUM,
-            "reason": "Ataque excede a capacidade local; desvio para centro de limpeza (scrubbing) recomendado.",
-            "evidence": dict(incident.get("evidence") or {}),
+            "reason": (
+                "Ataque excede a capacidade local; desvio para centro de "
+                "limpeza (scrubbing) recomendado. Motivos: "
+                + "; ".join(scrubbing_reasons)
+                + "."
+            ),
+            "evidence": {
+                **(dict(incident.get("evidence") or {}) if isinstance(incident.get("evidence"), Mapping) else {}),
+                "scrubbing_reasons": scrubbing_reasons,
+                "recommendation_priority": "PRIMARY" if no_selective else "SECONDARY",
+            },
             "status": CANDIDATE_STATUS_REVIEW_REQUIRED,
             "no_safe_selective_rtbh_candidate": 1 if no_selective else 0,
             "large_prefix_manual_only": 0,

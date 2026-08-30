@@ -7079,9 +7079,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="panel-title mb-2">Prefixos Protegidos</div>
             <div class="flow-search-grid mb-2">
               <input id="bgpProtectedId" type="hidden">
-              <div class="field"><label for="bgpProtectedCidr">CIDR</label><input id="bgpProtectedCidr" class="form-control form-control-sm" placeholder="168.232.197.0/24"></div>
+              <div class="field"><label for="bgpProtectedCidr">CIDR</label><input id="bgpProtectedCidr" class="form-control form-control-sm" placeholder="45.163.146.23/32"></div>
               <div class="field"><label for="bgpProtectedName">Nome</label><input id="bgpProtectedName" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpProtectedReason">Motivo</label><input id="bgpProtectedReason" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpProtectedServiceName">Serviço (vazio = prefixo genérico)</label><input id="bgpProtectedServiceName" class="form-control form-control-sm" placeholder="Ookla Speedtest"></div>
+              <div class="field"><label for="bgpProtectedProtocol">Protocolo (opcional)</label><select id="bgpProtectedProtocol" class="form-select form-select-sm"><option value="">qualquer</option><option value="tcp">tcp</option><option value="udp">udp</option><option value="icmp">icmp</option></select></div>
+              <div class="field"><label for="bgpProtectedPort">Porta (opcional)</label><input id="bgpProtectedPort" type="number" min="1" max="65535" class="form-control form-control-sm" placeholder="8080"></div>
+              <div class="field"><label for="bgpProtectedProtectionLevel">Nível de proteção</label><select id="bgpProtectedProtectionLevel" class="form-select form-select-sm"><option value="NORMAL">NORMAL</option><option value="IMPORTANT">IMPORTANT</option><option value="CRITICAL">CRITICAL</option></select></div>
               <div class="field"><label for="bgpProtectedEnabled">Ativo</label><select id="bgpProtectedEnabled" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
             </div>
             <div class="toolbar mb-2">
@@ -16008,6 +16012,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProtectedCidr', '');
       setValue('bgpProtectedName', '');
       setValue('bgpProtectedReason', '');
+      setValue('bgpProtectedServiceName', '');
+      setValue('bgpProtectedProtocol', '');
+      setValue('bgpProtectedPort', '');
+      setValue('bgpProtectedProtectionLevel', 'NORMAL');
       setBoolSelect('bgpProtectedEnabled', true);
     }
 
@@ -16018,6 +16026,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       setValue('bgpProtectedCidr', item.cidr);
       setValue('bgpProtectedName', item.name || '');
       setValue('bgpProtectedReason', item.reason || '');
+      setValue('bgpProtectedServiceName', item.service_name || '');
+      setValue('bgpProtectedProtocol', item.protocol || '');
+      setValue('bgpProtectedPort', item.port ?? '');
+      setValue('bgpProtectedProtectionLevel', item.protection_level || 'NORMAL');
       setBoolSelect('bgpProtectedEnabled', item.enabled);
     }
 
@@ -16030,7 +16042,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         enabled: boolSelectValue('bgpProtectedEnabled'),
         block_rtbh: true,
         block_flowspec: true,
-        block_diversion: false
+        block_diversion: false,
+        block_auto_rtbh: true,
+        require_manual_rtbh: true,
+        block_all_rtbh: false,
+        service_name: selectValue('bgpProtectedServiceName').trim(),
+        protocol: selectValue('bgpProtectedProtocol').trim(),
+        port: selectValue('bgpProtectedPort').trim() ? Number(selectValue('bgpProtectedPort').trim()) : null,
+        protection_level: selectValue('bgpProtectedProtectionLevel').trim() || 'NORMAL'
       };
       await apiRequest(id ? `/api/bgp/protected-prefixes/${id}` : '/api/bgp/protected-prefixes', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       clearBgpProtectedForm();
