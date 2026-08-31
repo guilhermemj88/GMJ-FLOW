@@ -643,3 +643,12 @@ body.security-event-drawer-open {
   .security-event-drawer__panel { width: 100%; }
   .security-event-detail-grid { grid-template-columns: 1fr; }
 }
+
+.threat-ioc-priority { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: .72rem; font-weight: 700; line-height: 1.4; }
+.threat-ioc-p1 { color: #fff; background: #b91c1c; }
+.threat-ioc-p2 { color: #fff; background: #c2410c; }
+.threat-ioc-p3 { color: #fff; background: #b45309; }
+.threat-ioc-p4 { color: #fff; background: #0369a1; }
+.threat-ioc-p5 { color: #334155; background: #e2e8f0; }
+tr.threat-ioc-c2 { background: rgba(185, 28, 28, .07); }
+tr.threat-ioc-c2:hover { background: rgba(185, 28, 28, .12); }

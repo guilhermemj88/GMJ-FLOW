@@ -7380,6 +7380,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           <section class="panel p-3 mb-3">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
               <div>
+                <div class="panel-title">IOCs consolidados</div>
+                <div class="subtle">Um registro por IP. Prioridade P1–P5 (inteligência/UI) e fontes independentes contadas por origem primária — nunca por agregador.</div>
+                <div id="threatIocsStatus" class="subtle" role="status"></div>
+              </div>
+            </div>
+            <div class="flow-search-grid mb-3">
+              <div class="field"><label for="iocTierFilter">Prioridade</label><select id="iocTierFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="1">P1 — C2</option><option value="2">P2 — Botnet/DDoS</option><option value="3">P3 — Malware/Comprometido</option><option value="4">P4 — Abuso</option><option value="5">P5 — Baixo sinal</option></select></div>
+              <div class="field"><label for="iocCategoryFilter">Categoria</label><select id="iocCategoryFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="c2">C2</option><option value="ddos">DDoS</option><option value="botnet">Botnet</option><option value="malware">Malware</option><option value="compromised">Compromised</option><option value="scanner">Scanner</option><option value="brute_force">Brute force</option><option value="abuse">Abuse</option><option value="reputation_malicious">Reputation malicious</option><option value="unknown">Unknown</option></select></div>
+              <div class="field"><label for="iocProviderFilter">Provider</label><select id="iocProviderFilter" class="form-select form-select-sm"><option value="">Todos</option></select></div>
+              <div class="field"><label for="iocFreshnessFilter">Freshness</label><select id="iocFreshnessFilter" class="form-select form-select-sm"><option value="">Todas</option><option value="excellent">≤1h</option><option value="good">≤24h</option><option value="acceptable">≤7d</option></select></div>
+              <div class="field"><label for="iocSearchFilter">Buscar IP</label><input id="iocSearchFilter" class="form-control form-control-sm" placeholder="1.2.3.4"></div>
+              <div class="field"><label>&nbsp;</label><button id="applyIocFiltersButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="filter"></i><span>Aplicar</span></button></div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>IP</th><th>Prioridade</th><th>Categoria</th><th>Fonte principal</th><th>Fontes indep.</th><th>Confidence</th><th>Last seen</th><th>Freshness</th><th>Evidências</th></tr></thead>
+                <tbody id="threatIocRows"><tr><td colspan="9" class="text-muted">Nenhum IOC consolidado.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
                 <div class="panel-title">Mapa de situação de segurança</div>
                 <div class="subtle">Ameaças detectadas (eventos + campanhas) agregadas por localização, ASN ou campanha. Determinístico: nenhuma chamada de IA para renderizar.</div>
               </div>
@@ -7466,6 +7490,18 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </header>
               <div id="securityEventDrawerStatus" class="subtle"></div>
               <div id="securityEventDrawerBody" class="security-event-drawer__body"></div>
+            </section>
+          </aside>
+
+          <aside id="iocDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="iocDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-ioc-action="close" aria-label="Fechar detalhes"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div class="subtle">IOC consolidado</div><h2 id="iocDrawerTitle">IP</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-ioc-action="close" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="iocDrawerStatus" class="subtle"></div>
+              <div id="iocDrawerBody" class="security-event-drawer__body"></div>
             </section>
           </aside>
         </section>
