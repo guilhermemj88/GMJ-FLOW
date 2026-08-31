@@ -19,6 +19,9 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterable, Mapping
 
 
+from app.services.sqlite_managed import open_managed
+
+
 LOGGER = logging.getLogger("gmj-flow")
 
 ACTIVE = "ACTIVE"
@@ -88,7 +91,7 @@ def json_dump(value: Any) -> str:
 def sqlite_connection() -> sqlite3.Connection:
     path = Path(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = open_managed(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")

@@ -198,6 +198,7 @@ class NetworkContextEngine:
         conn: sqlite3.Connection | None = None,
     ) -> NetworkContext:
         connection = conn or self.connection_factory()
+        owns_connection = conn is None
         try:
             prefixes = self._registered_prefixes(connection)
             matched_context = ""
@@ -236,9 +237,8 @@ class NetworkContextEngine:
                 matched_context=matched_context,
             )
         finally:
-            # Connection lifetime belongs to the supplied factory, matching the
-            # repository's existing sqlite_connection usage pattern.
-            pass
+            if owns_connection and connection is not None:
+                connection.close()
 
 
 def resolve_network_context(

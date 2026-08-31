@@ -9,6 +9,7 @@ from typing import Any
 import clickhouse_connect
 
 from app.services.peak_hunter import PeakHunterRequest
+from app.services.sqlite_managed import open_managed
 
 
 SAMPLE_RATE_MODES = {"sensor_default", "per_interface", "snmp_auto"}
@@ -506,7 +507,7 @@ def sample_rate_literal(value: Any) -> str:
 
 
 def sqlite_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"), timeout=30, check_same_thread=False)
+    conn = open_managed(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:

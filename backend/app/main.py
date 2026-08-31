@@ -50,6 +50,7 @@ from app.api.threat_intelligence import router as threat_intelligence_router
 from app.api.threat_engine import api_security_router, router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
+from app.services.sqlite_managed import open_managed
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
 from app.services.cgnat_mapping import (
@@ -2104,7 +2105,7 @@ def sqlite_path() -> Path:
 def sqlite_connection() -> sqlite3.Connection:
     path = sqlite_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = open_managed(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:
@@ -7091,6 +7092,11 @@ def insert_snmp_counter_sample(
             item["if_oper_status"],
         ),
     )
+    # Release the WAL write lock immediately: polling spans slow SNMP network
+    # I/O, and a single transaction held across every interface/sensor was
+    # starving the BGP checks, threat intel scheduler and anomaly workers
+    # (sqlite3.OperationalError: database is locked).
+    conn.commit()
     return item
 
 

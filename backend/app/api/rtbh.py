@@ -21,6 +21,7 @@ except ImportError:  # Pragmatic compatibility with the repository static-test s
     from fastapi import FastAPI as APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.services.sqlite_managed import open_managed
 from app.services.threat_intelligence import clean_text
 from app.services.transit_rtbh import (
     ACTION_TYPE_MANUAL_LARGE_PREFIX_RTBH,
@@ -49,7 +50,7 @@ ADDRESS_FAMILIES = {"ipv4", "ipv6"}
 def sqlite_connection() -> sqlite3.Connection:
     path = Path(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = open_managed(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
