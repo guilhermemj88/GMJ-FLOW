@@ -55,6 +55,56 @@ DEFAULT_INTERVALS = {
     BLOCKLIST_DE: 15 * 60,
 }
 
+# Semantic priority profile: classification (lowercased) -> (tier, category).
+# Tier 1 (P1) = C2, P2 = botnet/DDoS, P3 = malware/compromised, P4 = abuse, P5 = low signal.
+# GreyNoise "malicious" gets its own category "reputation_malicious" so it never mixes
+# with reported_attack_source / scanner / brute_force / abuse.
+SEMANTIC_PROFILE: dict[str, tuple[int, str]] = {
+    "c2": (1, "c2"),
+    "botnet_cc": (1, "c2"),
+    "command_and_control": (1, "c2"),
+    "c2_confirmed": (1, "c2"),
+    "active_botnet": (2, "botnet"),
+    "ddos_source": (2, "ddos"),
+    "ddos": (2, "ddos"),
+    "payload_delivery": (3, "malware"),
+    "malware_distribution": (3, "malware"),
+    "compromised_host": (3, "compromised"),
+    "compromised": (3, "compromised"),
+    "scanner": (4, "scanner"),
+    "brute_force": (4, "brute_force"),
+    "bruteforce": (4, "brute_force"),
+    "reported_attack_source": (4, "abuse"),
+    "abuse": (4, "abuse"),
+    "malicious": (4, "reputation_malicious"),
+    "reputation_malicious": (4, "reputation_malicious"),
+    "suspicious": (5, "unknown"),
+    "unknown": (5, "unknown"),
+    "noise": (5, "unknown"),
+    "benign": (5, "benign"),
+}
+SEMANTIC_DEFAULT: tuple[int, str] = (5, "unknown")
+
+
+def semantic_tier(classification: Any) -> int:
+    return SEMANTIC_PROFILE.get(clean_text(classification).lower(), SEMANTIC_DEFAULT)[0]
+
+
+def semantic_category(classification: Any) -> str:
+    return SEMANTIC_PROFILE.get(clean_text(classification).lower(), SEMANTIC_DEFAULT)[1]
+
+
+def semantic_case(column_expr: str, value_index: int) -> str:
+    branches = []
+    for key, value in SEMANTIC_PROFILE.items():
+        escaped = key.replace("'", "''")
+        literal = value[value_index]
+        literal_sql = f"'{literal.replace(chr(39), chr(39) + chr(39))}'" if isinstance(literal, str) else str(literal)
+        branches.append(f"WHEN {column_expr} = '{escaped}' THEN {literal_sql}")
+    default = SEMANTIC_DEFAULT[value_index]
+    default_sql = f"'{default.replace(chr(39), chr(39) + chr(39))}'" if isinstance(default, str) else str(default)
+    return f"CASE {' '.join(branches)} ELSE {default_sql} END"
+
 GREYNOISE_QUERIES = (
     'last_seen:1d classification:"malicious"',
     'last_seen:1d classification:"suspicious"',
@@ -1701,6 +1751,218 @@ class ThreatIntelManager:
                 }
             )
         return items
+
+    def consolidated_iocs(
+        self,
+        *,
+        tier: str = "",
+        category: str = "",
+        provider: str = "",
+        freshness: str = "",
+        search: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        tier_case = semantic_case("i.classification", 0)
+        category_case = semantic_case("i.classification", 1)
+        where = ["i.active = 1", "i.ip <> ''"]
+        inner_params: list[Any] = []
+        if clean_text(provider):
+            where.append("i.provider = ?")
+            inner_params.append(clean_text(provider).upper())
+        if clean_text(search):
+            where.append("i.ip LIKE ?")
+            inner_params.append(f"%{clean_text(search)}%")
+        where_clause = " AND ".join(where)
+
+        inner = f"""
+            SELECT i.ip AS ip,
+                   COALESCE(json_extract(i.metadata_json, '$.primary_source'), i.provider) AS primary_source,
+                   i.classification AS classification,
+                   {tier_case} AS tier,
+                   {category_case} AS category,
+                   COALESCE(CAST(json_extract(i.metadata_json, '$.confidence_original') AS INTEGER), 0) AS confidence,
+                   i.last_seen AS last_seen,
+                   i.first_seen AS first_seen,
+                   i.botnet_family AS botnet_family,
+                   COALESCE(i.last_seen, i.updated_at) AS fresh_ts
+            FROM threat_intel_indicators i
+            WHERE {where_clause}
+        """
+        ranked = f"""
+            SELECT inner_q.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY inner_q.ip
+                       ORDER BY inner_q.tier ASC, inner_q.confidence DESC,
+                                inner_q.last_seen DESC, inner_q.primary_source ASC
+                   ) AS rn
+            FROM ({inner}) AS inner_q
+        """
+        grouped = f"""
+            SELECT r.ip AS ip,
+                   MAX(CASE WHEN r.rn = 1 THEN r.tier END) AS priority,
+                   MAX(CASE WHEN r.rn = 1 THEN r.category END) AS category,
+                   MAX(CASE WHEN r.rn = 1 THEN r.primary_source END) AS primary_source,
+                   MAX(CASE WHEN r.rn = 1 THEN r.confidence END) AS confidence,
+                   MAX(CASE WHEN r.rn = 1 THEN r.last_seen END) AS last_seen,
+                   MAX(CASE WHEN r.rn = 1 THEN r.first_seen END) AS first_seen,
+                   MAX(CASE WHEN r.rn = 1 THEN r.botnet_family END) AS botnet_family,
+                   MAX(CASE WHEN r.rn = 1 THEN r.fresh_ts END) AS fresh_ts,
+                   COUNT(DISTINCT r.primary_source) AS independent_sources,
+                   COUNT(*) AS evidence_count
+            FROM ({ranked}) AS r
+            GROUP BY r.ip
+        """
+
+        outer_where: list[str] = []
+        outer_params: list[Any] = []
+        if clean_text(tier) and clean_text(tier).isdigit():
+            outer_where.append("g.priority = ?")
+            outer_params.append(int(clean_text(tier)))
+        if clean_text(category):
+            outer_where.append("g.category = ?")
+            outer_params.append(clean_text(category).lower())
+        if clean_text(freshness):
+            cutoff = self._freshness_cutoff(freshness)
+            if cutoff:
+                outer_where.append("g.fresh_ts >= ?")
+                outer_params.append(cutoff)
+        outer_clause = ("WHERE " + " AND ".join(outer_where)) if outer_where else ""
+
+        with self.connection_factory() as conn:
+            count_sql = f"SELECT COUNT(*) FROM ({grouped}) AS g {outer_clause}"
+            total = int(conn.execute(count_sql, inner_params + outer_params).fetchone()[0])
+            page_sql = f"""
+                SELECT * FROM ({grouped}) AS g {outer_clause}
+                ORDER BY g.priority ASC, g.independent_sources DESC, g.fresh_ts DESC, g.ip ASC
+                LIMIT ? OFFSET ?
+            """
+            rows = conn.execute(page_sql, inner_params + outer_params + [max(1, min(int(limit), 500)), max(0, int(offset))]).fetchall()
+
+        now = utc_now()
+        items = []
+        for row in rows:
+            fresh_ts = clean_text(row["fresh_ts"])
+            items.append(
+                {
+                    "ip": row["ip"],
+                    "priority": int(row["priority"] or SEMANTIC_DEFAULT[0]),
+                    "category": clean_text(row["category"]) or SEMANTIC_DEFAULT[1],
+                    "primary_source": clean_text(row["primary_source"]),
+                    "confidence": int(row["confidence"] or 0),
+                    "last_seen": fresh_ts or None,
+                    "first_seen": clean_text(row["first_seen"]) or None,
+                    "botnet_family": clean_text(row["botnet_family"]),
+                    "independent_sources": int(row["independent_sources"] or 0),
+                    "evidence_count": int(row["evidence_count"] or 0),
+                    "freshness": self._freshness_label(fresh_ts, now),
+                }
+            )
+        return {"items": items, "total": total, "limit": max(1, min(int(limit), 500)), "offset": max(0, int(offset))}
+
+    def consolidated_ioc(self, ip: str) -> dict[str, Any]:
+        try:
+            parsed = ip_address(ip)
+            normalized = str(parsed)
+        except ValueError:
+            return {"summary": {"ip": clean_text(ip), "found": False}, "evidence": []}
+        with self.connection_factory() as conn:
+            rows = conn.execute(
+                "SELECT * FROM threat_intel_indicators WHERE ip=? AND active=1 ORDER BY provider",
+                (normalized,),
+            ).fetchall()
+            packed = parsed.packed
+            bogon_rows = conn.execute(
+                """
+                SELECT kind, prefix FROM threat_intel_bogons
+                WHERE active=1 AND ip_version=? AND start_bin <= ? AND end_bin >= ?
+                ORDER BY CASE kind WHEN 'BOGON' THEN 0 ELSE 1 END, prefix_length DESC
+                """,
+                (parsed.version, packed, packed),
+            ).fetchall()
+
+        evidences: list[dict[str, Any]] = []
+        for row in rows:
+            item = indicator_row(row)
+            metadata = item.get("metadata") or {}
+            classification = clean_text(item.get("classification"))
+            ports = metadata.get("ports")
+            evidences.append(
+                {
+                    "provider": item["provider"],
+                    "classification": classification,
+                    "category": semantic_category(classification),
+                    "tier": semantic_tier(classification),
+                    "confidence": metadata.get("confidence_original"),
+                    "malware": clean_text(item.get("botnet_family")),
+                    "ports": ports if isinstance(ports, list) else [],
+                    "first_seen": item.get("first_seen"),
+                    "last_seen": item.get("last_seen"),
+                    "updated_at": item.get("updated_at"),
+                    "tags": item.get("tags") or [],
+                    "primary_source": clean_text(metadata.get("primary_source")) or item["provider"],
+                    "aggregator_source": metadata.get("aggregator_source"),
+                    "source_record_id": metadata.get("source_record_id"),
+                    "source_url": clean_text(metadata.get("source_url")),
+                    "service": metadata.get("service"),
+                }
+            )
+
+        ordered = sorted(
+            evidences,
+            key=lambda evidence: (
+                evidence["tier"],
+                -(evidence["confidence"] or 0),
+                -(len(clean_text(evidence["last_seen"] or ""))),
+                evidence["primary_source"],
+            ),
+        )
+        primary = ordered[0] if ordered else None
+        independent = len({evidence["primary_source"] for evidence in evidences})
+        now = utc_now()
+        summary = {
+            "ip": normalized,
+            "found": bool(evidences),
+            "priority": primary["tier"] if primary else None,
+            "category": primary["category"] if primary else None,
+            "primary_source": primary["primary_source"] if primary else None,
+            "confidence": primary["confidence"] if primary else None,
+            "last_seen": (primary["last_seen"] or primary["updated_at"]) if primary else None,
+            "independent_sources": independent,
+            "evidence_count": len(evidences),
+            "freshness": self._freshness_label((primary["last_seen"] or primary["updated_at"]) if primary else "", now),
+            "bogon": [{"kind": row["kind"], "prefix": row["prefix"]} for row in bogon_rows],
+        }
+        return {"summary": summary, "evidence": evidences}
+
+    @staticmethod
+    def _freshness_cutoff(freshness: str) -> str:
+        key = clean_text(freshness).lower()
+        delta = {
+            "excellent": timedelta(hours=1),
+            "good": timedelta(days=1),
+            "acceptable": timedelta(days=7),
+        }.get(key)
+        if delta is None:
+            return ""
+        return (utc_now() - delta).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _freshness_label(timestamp: str, now: datetime) -> str:
+        if not clean_text(timestamp):
+            return "poor"
+        try:
+            parsed = datetime.fromisoformat(clean_text(timestamp).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            return "poor"
+        age = now - parsed
+        if age <= timedelta(hours=1):
+            return "excellent"
+        if age <= timedelta(days=1):
+            return "good"
+        if age <= timedelta(days=7):
+            return "acceptable"
+        return "poor"
 
     def audit(self, provider: str = "", limit: int = 100) -> list[dict[str, Any]]:
         with self.connection_factory() as conn:
