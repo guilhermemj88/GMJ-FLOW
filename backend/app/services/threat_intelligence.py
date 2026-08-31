@@ -1217,19 +1217,27 @@ class BlocklistDeProvider(ThreatIntelProvider):
         if not rows:
             return 0, 0
         started = time.monotonic()
-        with self.connection_factory() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        for attempt in range(3):
             try:
-                for start in range(0, len(rows), 2000):
-                    conn.executemany(self._INDICATOR_UPSERT_SQL, rows[start:start + 2000])
-                conn.execute(
-                    "UPDATE threat_intel_indicators SET active=0 WHERE provider=? AND sync_token<>?",
-                    (self.provider, sync_token),
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                with self.connection_factory() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        for start in range(0, len(rows), 2000):
+                            conn.executemany(self._INDICATOR_UPSERT_SQL, rows[start:start + 2000])
+                        conn.execute(
+                            "UPDATE threat_intel_indicators SET active=0 WHERE provider=? AND sync_token<>?",
+                            (self.provider, sync_token),
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                LOGGER.warning("THREAT_INTEL_WRITE_LOCKED provider=%s attempt=%d", self.provider, attempt + 1)
+                time.sleep(0.5 * (attempt + 1))
         write_ms = max(0, int((time.monotonic() - started) * 1000))
         LOGGER.info("THREAT_INTEL_WRITE provider=%s rows=%d write_duration_ms=%d", self.provider, len(rows), write_ms)
         return len(rows), write_ms
