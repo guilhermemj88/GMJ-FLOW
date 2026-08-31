@@ -405,10 +405,38 @@ class ThreatIntelProvider(ABC):
         except json.JSONDecodeError as exc:
             raise ThreatIntelError(f"JSON invalido: {exc.msg}") from None
 
+    def _request_raw(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, bytes, Mapping[str, str]]:
+        request_headers = {"Accept": "application/json", "User-Agent": "GMJ-FLOW/1.0"}
+        request_headers.update(dict(headers or {}))
+        request = urllib.request.Request(url, headers=request_headers, method="GET")
+        try:
+            with self.opener(request, timeout=timeout or self.timeout_seconds()) as response:
+                response_headers = dict(getattr(response, "headers", {}) or {})
+                status = int(getattr(response, "status", 200) or 200)
+                return status, response.read(), response_headers
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return 304, b"", {}
+            if exc.code in {401, 403}:
+                raise ThreatIntelAuthError(f"HTTP {exc.code}: credencial rejeitada") from None
+            if exc.code == 429:
+                raise ThreatIntelRateLimitError("HTTP 429: limite do provider atingido") from None
+            if 500 <= exc.code < 600:
+                raise ThreatIntelOfflineError(f"HTTP {exc.code}: provider indisponivel") from None
+            raise ThreatIntelError(f"HTTP {exc.code}: requisicao rejeitada") from None
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            raise ThreatIntelOfflineError(clean_text(getattr(exc, "reason", exc)) or "provider indisponivel") from None
+
     def timeout_seconds(self) -> int:
         return max(2, min(int(os.getenv("GMJFLOW_THREAT_INTEL_HTTP_TIMEOUT_SECONDS", "30")), 120))
 
-    def _upsert_indicators(self, items: Iterable[dict[str, Any]], sync_token: str) -> int:
+    def _indicator_rows(self, items: Iterable[dict[str, Any]], sync_token: str) -> list[tuple[Any, ...]]:
         rows = []
         now = utc_now_iso()
         for item in items:
@@ -442,30 +470,33 @@ class ThreatIntelProvider(ABC):
                     now,
                 )
             )
+        return rows
+
+    _INDICATOR_UPSERT_SQL = """
+        INSERT INTO threat_intel_indicators (
+            provider, indicator_type, ip, network, classification, actor, asn,
+            organization, country, country_code, city, spoofable, vpn, tor,
+            first_seen, last_seen, botnet_family, recency_seconds, tags_json,
+            metadata_json, sync_token, active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(provider, indicator_type, ip, network) DO UPDATE SET
+            classification=excluded.classification, actor=excluded.actor, asn=excluded.asn,
+            organization=excluded.organization, country=excluded.country,
+            country_code=excluded.country_code, city=excluded.city,
+            spoofable=excluded.spoofable, vpn=excluded.vpn, tor=excluded.tor,
+            first_seen=COALESCE(excluded.first_seen, threat_intel_indicators.first_seen),
+            last_seen=excluded.last_seen, botnet_family=excluded.botnet_family,
+            recency_seconds=excluded.recency_seconds, tags_json=excluded.tags_json,
+            metadata_json=excluded.metadata_json, sync_token=excluded.sync_token,
+            active=1, updated_at=excluded.updated_at
+    """
+
+    def _upsert_indicators(self, items: Iterable[dict[str, Any]], sync_token: str) -> int:
+        rows = self._indicator_rows(items, sync_token)
         if not rows:
             return 0
         with self.connection_factory() as conn:
-            conn.executemany(
-                """
-                INSERT INTO threat_intel_indicators (
-                    provider, indicator_type, ip, network, classification, actor, asn,
-                    organization, country, country_code, city, spoofable, vpn, tor,
-                    first_seen, last_seen, botnet_family, recency_seconds, tags_json,
-                    metadata_json, sync_token, active, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                ON CONFLICT(provider, indicator_type, ip, network) DO UPDATE SET
-                    classification=excluded.classification, actor=excluded.actor, asn=excluded.asn,
-                    organization=excluded.organization, country=excluded.country,
-                    country_code=excluded.country_code, city=excluded.city,
-                    spoofable=excluded.spoofable, vpn=excluded.vpn, tor=excluded.tor,
-                    first_seen=COALESCE(excluded.first_seen, threat_intel_indicators.first_seen),
-                    last_seen=excluded.last_seen, botnet_family=excluded.botnet_family,
-                    recency_seconds=excluded.recency_seconds, tags_json=excluded.tags_json,
-                    metadata_json=excluded.metadata_json, sync_token=excluded.sync_token,
-                    active=1, updated_at=excluded.updated_at
-                """,
-                rows,
-            )
+            conn.executemany(self._INDICATOR_UPSERT_SQL, rows)
             conn.commit()
         return len(rows)
 
@@ -1076,13 +1107,152 @@ class BlocklistDeProvider(ThreatIntelProvider):
         return os.getenv("BLOCKLIST_DE_FEED_URL", "https://lists.blocklist.de/lists/all.txt").strip()
 
     def normalize(self, raw: Mapping[str, Any]) -> dict[str, Any] | None:
-        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+        ip_text = clean_text(raw.get("ip"))
+        try:
+            ip_text = str(ip_address(ip_text))
+        except ValueError:
+            return None
+        return {
+            "indicator_type": "IP",
+            "ip": ip_text,
+            "classification": "reported_attack_source",
+            "first_seen": None,
+            "last_seen": None,
+            "botnet_family": "",
+            "tags": [],
+            "metadata": self._metadata(),
+        }
+
+    def _metadata(self) -> dict[str, Any]:
+        return {
+            "primary_source": BLOCKLIST_DE,
+            "aggregator_source": None,
+            "source_mode": "list_txt",
+            "category": "abuse",
+            "classification_original": "reported_attack_source",
+            "confidence_original": None,
+            "source_url": self.feed_url,
+            "source_record_id": None,
+            "service": None,
+            "expires_at": None,
+            "retrieved_at": None,
+        }
+
+    def _active_count(self) -> int:
+        with self.connection_factory() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM threat_intel_indicators WHERE provider=? AND active=1",
+                (self.provider,),
+            ).fetchone()[0])
+
+    def _load_config(self) -> dict[str, Any]:
+        with self.connection_factory() as conn:
+            row = conn.execute(
+                "SELECT config_json FROM threat_intel_providers WHERE provider=?", (self.provider,)
+            ).fetchone()
+        return safe_json(row["config_json"] if row else "{}", {})
+
+    def _save_config(self, config: Mapping[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.connection_factory() as conn:
+            ensure_threat_intel_schema(conn)
+            conn.execute(
+                "UPDATE threat_intel_providers SET config_json=?, updated_at=? WHERE provider=?",
+                (json_dump(config), now, self.provider),
+            )
+            conn.commit()
+
+    def _replace_indicators_atomic(self, items: list[dict[str, Any]], sync_token: str) -> tuple[int, int]:
+        rows = self._indicator_rows(items, sync_token)
+        if not rows:
+            return 0, 0
+        started = time.monotonic()
+        with self.connection_factory() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for start in range(0, len(rows), 2000):
+                    conn.executemany(self._INDICATOR_UPSERT_SQL, rows[start:start + 2000])
+                conn.execute(
+                    "UPDATE threat_intel_indicators SET active=0 WHERE provider=? AND sync_token<>?",
+                    (self.provider, sync_token),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        write_ms = max(0, int((time.monotonic() - started) * 1000))
+        LOGGER.info("THREAT_INTEL_WRITE provider=%s rows=%d write_duration_ms=%d", self.provider, len(rows), write_ms)
+        return len(rows), write_ms
+
+    def _min_records(self) -> int:
+        return max(1, int(os.getenv("GMJFLOW_BLOCKLIST_DE_MIN_RECORDS", "5000")))
 
     def health_check(self) -> dict[str, Any]:
-        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+        started = time.monotonic()
+        status, body, _ = self._request_raw(self.feed_url)
+        ok = status == 304 or (bool(body) and not body.lstrip()[:1].startswith(b"<"))
+        return {
+            "ok": ok,
+            "status": ACTIVE if ok else DEGRADED,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
 
     def sync(self) -> SyncResult:
-        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+        started = time.monotonic()
+        now = utc_now_iso()
+        token = uuid.uuid4().hex
+        config = self._load_config()
+        request_headers: dict[str, str] = {}
+        if clean_text(config.get("etag")):
+            request_headers["If-None-Match"] = clean_text(config["etag"])
+        if clean_text(config.get("last_modified")):
+            request_headers["If-Modified-Since"] = clean_text(config["last_modified"])
+
+        status, body, response_headers = self._request_raw(self.feed_url, headers=request_headers)
+        if status == 304:
+            config["last_not_modified_at"] = now
+            self._save_config(config)
+            return SyncResult(self.provider, ACTIVE, 0, 0, self._active_count(), int((time.monotonic() - started) * 1000))
+
+        config["etag"] = clean_text(response_headers.get("ETag") or response_headers.get("etag"))
+        config["last_modified"] = clean_text(response_headers.get("Last-Modified") or response_headers.get("last-modified"))
+
+        text = body.decode("utf-8", errors="replace")
+        if text.lstrip()[:1] == "<":
+            raise ThreatIntelError("BLOCKLIST_DE resposta inesperada (HTML/WAF)")
+
+        parsed: list[dict[str, Any]] = []
+        invalid = 0
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            item = self.normalize({"ip": line})
+            if item is not None:
+                parsed.append(item)
+            else:
+                invalid += 1
+
+        total = len(parsed)
+        minimum = self._min_records()
+        previous = self.item_count
+        if total < minimum:
+            raise ThreatIntelError(f"BLOCKLIST_DE volume anormal ({total} IPs < minimo {minimum})")
+        if previous and total < previous * 0.5:
+            raise ThreatIntelError(f"BLOCKLIST_DE reducao abrupta ({previous} -> {total})")
+        if invalid > max(1, total * 0.01):
+            raise ThreatIntelError("BLOCKLIST_DE linhas invalidas demais")
+
+        expires_at = (utc_now() + timedelta(hours=48)).isoformat().replace("+00:00", "Z")
+        for item in parsed:
+            item["metadata"]["retrieved_at"] = now
+            item["metadata"]["expires_at"] = expires_at
+
+        processed, write_ms = self._replace_indicators_atomic(parsed, token)
+        config["last_write_duration_ms"] = write_ms
+        config["last_success_at"] = now
+        self._save_config(config)
+        return SyncResult(self.provider, ACTIVE, 1, processed, self._active_count(), int((time.monotonic() - started) * 1000))
 
 
 def indicator_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
