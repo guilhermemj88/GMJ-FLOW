@@ -142,6 +142,14 @@ class SqliteConnectionDefinitionTests(unittest.TestCase):
         self.assertIn("conn.commit()", insert)
         self.assertIn("Release the WAL write lock", insert)
 
+    def test_anomaly_workers_commit_between_slow_queries(self):
+        template = MAIN[MAIN.find("def run_detection_template_rules_once"):MAIN.find("def detect_anomalies_once")]
+        self.assertIn("conn.commit()", template)
+        self.assertIn("evaluate_detection_template_rule runs ClickHouse queries", template)
+        anomaly = MAIN[MAIN.find("def detect_anomalies_once"):MAIN.find("def anomaly_detection_enabled")]
+        self.assertIn("conn.commit()", anomaly)
+        self.assertIn("Each vector runs its own ClickHouse query", anomaly)
+
 
 if __name__ == "__main__":
     unittest.main()

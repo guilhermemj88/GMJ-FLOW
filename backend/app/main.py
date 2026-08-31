@@ -34228,6 +34228,11 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
                 if reason:
                     key = reason.split(":", 1)[0]
                     skipped_reasons[key] = skipped_reasons.get(key, 0) + 1
+                # evaluate_detection_template_rule runs ClickHouse queries and
+                # writes anomalies on this same connection; commit each rule so
+                # the WAL write lock is never held across the next rule's slow
+                # ClickHouse round-trip (database is locked starvation).
+                conn.commit()
             conn.commit()
         update_detection_scheduler_status(
             last_run_at=started_at,
@@ -34310,6 +34315,9 @@ def detect_anomalies_once() -> dict[str, Any]:
                         vector.get("decoder"),
                         action,
                     )
+        # Each vector runs its own ClickHouse query; commit before the next
+        # vector so the WAL write lock is never held across slow flow queries.
+        conn.commit()
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
     mitigation = {
