@@ -305,7 +305,7 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
         (CEREAL2, "Cereal2", 1),
         (TEAM_CYMRU, "Team Cymru", 1),
         (FEODO, "Feodo Tracker", 1),
-        (BLOCKLIST_DE, "Blocklist.de", 0),
+        (BLOCKLIST_DE, "Blocklist.de", 1),
     )
     for provider, display_name, public_default in defaults:
         env_enabled = os.getenv(f"GMJFLOW_THREAT_INTEL_{provider}_ENABLED")
