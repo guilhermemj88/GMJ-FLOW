@@ -44,13 +44,15 @@ GREYNOISE = "GREYNOISE"
 CEREAL2 = "CEREAL2"
 TEAM_CYMRU = "TEAM_CYMRU"
 FEODO = "FEODO"
-INTEL_SOURCES = {GREYNOISE, CEREAL2, TEAM_CYMRU, FEODO}
+BLOCKLIST_DE = "BLOCKLIST_DE"
+INTEL_SOURCES = {GREYNOISE, CEREAL2, TEAM_CYMRU, FEODO, BLOCKLIST_DE}
 
 DEFAULT_INTERVALS = {
     GREYNOISE: 8 * 60 * 60,
     CEREAL2: 15 * 60,
     TEAM_CYMRU: 4 * 60 * 60,
     FEODO: 15 * 60,
+    BLOCKLIST_DE: 15 * 60,
 }
 
 GREYNOISE_QUERIES = (
@@ -253,6 +255,7 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
         (CEREAL2, "Cereal2", 1),
         (TEAM_CYMRU, "Team Cymru", 1),
         (FEODO, "Feodo Tracker", 1),
+        (BLOCKLIST_DE, "Blocklist.de", 0),
     )
     for provider, display_name, public_default in defaults:
         env_enabled = os.getenv(f"GMJFLOW_THREAT_INTEL_{provider}_ENABLED")
@@ -1064,6 +1067,24 @@ class TeamCymruProvider(ThreatIntelProvider):
         ]
 
 
+class BlocklistDeProvider(ThreatIntelProvider):
+    provider = BLOCKLIST_DE
+    display_name = "Blocklist.de"
+
+    @property
+    def feed_url(self) -> str:
+        return os.getenv("BLOCKLIST_DE_FEED_URL", "https://lists.blocklist.de/lists/all.txt").strip()
+
+    def normalize(self, raw: Mapping[str, Any]) -> dict[str, Any] | None:
+        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+
+    def health_check(self) -> dict[str, Any]:
+        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+
+    def sync(self) -> SyncResult:
+        raise ThreatIntelError("BLOCKLIST_DE ainda nao implementado")
+
+
 def indicator_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["spoofable"] = bool(item.get("spoofable"))
@@ -1085,6 +1106,7 @@ class ThreatIntelManager:
             CEREAL2: Cereal2Provider(connection_factory, opener),
             TEAM_CYMRU: TeamCymruProvider(connection_factory, opener),
             FEODO: FeodoProvider(connection_factory, opener),
+            BLOCKLIST_DE: BlocklistDeProvider(connection_factory, opener),
         }
         self._sync_locks = {name: Lock() for name in self.providers}
         self._stop = Event()
