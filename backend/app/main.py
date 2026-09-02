@@ -45,35 +45,60 @@ from starlette.responses import JSONResponse, Response
 
 from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
+from app.api.rtbh import router as rtbh_router
 from app.api.threat_intelligence import router as threat_intelligence_router
 from app.api.threat_engine import api_security_router, router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
+from app.services.sqlite_managed import open_managed
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
 from app.services.cgnat_mapping import (
     CGNAT_AI_PROMPT_VERSION,
     CGNAT_AI_SCHEMA,
     CGNAT_AI_SYSTEM_PROMPT,
+    CGNAT_POOL_MODES,
     CGNAT_SOURCE_MODES,
     CGNAT_SOURCE_TYPES,
     activate_cgnat_batch,
     approve_cgnat_batch,
     build_cgnat_ai_prompt,
+    cgnat_pool_evidence,
+    cgnat_pool_match,
+    cgnat_pool_overlap_context,
     cgnat_upload_limits,
     consolidate_cgnat_chunks,
     create_cgnat_import_batch,
+    create_cgnat_pool,
     deactivate_cgnat_batch,
+    delete_cgnat_pool,
     ensure_cgnat_schema,
     get_cgnat_batch,
     list_active_cgnat_mappings,
     list_cgnat_batches,
     list_cgnat_import_errors,
+    list_cgnat_pools,
     parse_known_cgnat_text,
     reject_cgnat_batch,
     resolve_cgnat_subscriber,
     split_cgnat_content,
     store_cgnat_preview,
+    update_cgnat_pool,
+)
+from app.services.network_assets import (
+    ADDRESSING_MODES,
+    CGNAT_POOL,
+    NETWORK_ROLES,
+    SERVICE_DIRECTIONS,
+    SOURCE_TYPES,
+    delete_network_asset,
+    ensure_network_assets_schema,
+    fetch_network_asset,
+    list_network_asset_services,
+    list_network_assets,
+    replace_network_asset_services,
+    resolve_network_context as resolve_network_asset_context,
+    upsert_network_asset,
 )
 from app.services.ai_integration import (
     AI_FUNCTIONS,
@@ -142,8 +167,10 @@ from app.services.auth_access import (
 from app.services.dashboard_cache import DashboardCacheConfig, MemoryDashboardCache
 from app.services.dashboard_performance import DashboardPerformanceTrace
 from app.services.dashboard_aggregates import (
+    ASN_AGGREGATE_TABLES,
     DASHBOARD_AGGREGATE_TABLES,
     aggregate_boundaries,
+    asn_aggregate_version,
     dashboard_aggregate_schema_statements,
     dashboard_effective_sample_rate_expr,
     dashboard_sample_rate_join_sql,
@@ -242,7 +269,21 @@ from app.services.behavioral_detection import (
     ensure_behavioral_schema,
     event_key,
 )
-from app.services.security_events import update_security_event_mitigation_status_by_reference
+from app.services.security_events import (
+    security_event_row,
+    update_security_event_mitigation_status_by_reference,
+)
+from app.services.carpet_replay import (
+    replay_carpet_event,
+    summarize_replay,
+)
+from app.services.transit_rtbh import (
+    audit_candidate_event as rtbh_audit_candidate_event,
+    build_incident_from_vector,
+    candidate_row_to_dict as rtbh_candidate_row_to_dict,
+    ensure_transit_rtbh_schema,
+    generate_rtbh_candidates_from_rows,
+)
 from app.services.threat_policy import (
     MitigationProposal,
     PolicyDecision,
@@ -299,6 +340,7 @@ app.add_middleware(
 )
 app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
+app.include_router(rtbh_router)
 app.include_router(threat_intelligence_router)
 app.include_router(threat_engine_router)
 app.include_router(security_router)
@@ -501,6 +543,7 @@ IF_OPER_STATUS_LABELS = {
 CALIBRATION_METHOD = "snmp_vs_flow"
 CALIBRATION_MIN_BPS = float(os.getenv("GMJFLOW_CALIBRATION_MIN_BPS", "10000"))
 CALIBRATION_MIN_CONFIDENCE = float(os.getenv("GMJFLOW_CALIBRATION_MIN_CONFIDENCE", "0.6"))
+SNMP_PAIR_SCAN_LIMIT = 20
 SNMP_POLL_STOP = threading.Event()
 SNMP_POLL_THREAD: threading.Thread | None = None
 
@@ -1642,6 +1685,13 @@ class BgpProtectedPrefixPayload(BaseModel):
     block_rtbh: bool = True
     block_flowspec: bool = True
     block_diversion: bool = False
+    block_auto_rtbh: bool = False
+    require_manual_rtbh: bool = True
+    block_all_rtbh: bool = False
+    service_name: str = ""
+    protocol: str = ""
+    port: int | None = None
+    protection_level: str = "NORMAL"
 
 
 class BgpAnnouncementDryRunPayload(BaseModel):
@@ -2077,7 +2127,7 @@ def sqlite_path() -> Path:
 def sqlite_connection() -> sqlite3.Connection:
     path = sqlite_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = open_managed(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:
@@ -3573,9 +3623,7 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
         ("PREFIX_SUBNET_HIGH_PPS", "subnet", "transmits", "ALL", "packets_s", 1_000_000, 3_000_000),
         ("DNS_INTERNAL_IP_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 10_000, 30_000),
         ("DNS_INTERNAL_IP_HIGH_BITS", "internal_ip", "transmits", "DNS", "bits_s", 20_000_000, 50_000_000),
-        # DNS_INTERNAL_IP_TO_DST_HIGH_PPS e removido deste seed default: a regra
-        # oficial (ensure_official_dns_detection_rules) ja a cria com perfil de
-        # mitigacao. Manter aqui gerava uma regra duplicada DETECTION_ONLY.
+        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 5_000, 15_000),
     ]
     for vector, domain, direction, protocol, metric, warning, critical in defaults:
         conn.execute(
@@ -4172,11 +4220,27 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             block_rtbh INTEGER NOT NULL DEFAULT 1,
             block_flowspec INTEGER NOT NULL DEFAULT 1,
             block_diversion INTEGER NOT NULL DEFAULT 0,
+            block_auto_rtbh INTEGER NOT NULL DEFAULT 0,
+            require_manual_rtbh INTEGER NOT NULL DEFAULT 1,
+            block_all_rtbh INTEGER NOT NULL DEFAULT 0,
+            service_name TEXT NOT NULL DEFAULT '',
+            protocol TEXT NOT NULL DEFAULT '',
+            port INTEGER,
+            protection_level TEXT NOT NULL DEFAULT 'NORMAL',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
         """
     )
+    # Incremental RTBH protection columns. Legacy ``block_rtbh`` remains the
+    # compatibility switch and existing rows are never overwritten.
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_auto_rtbh", "block_auto_rtbh INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "require_manual_rtbh", "require_manual_rtbh INTEGER NOT NULL DEFAULT 1")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "block_all_rtbh", "block_all_rtbh INTEGER NOT NULL DEFAULT 0")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "service_name", "service_name TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "protocol", "protocol TEXT NOT NULL DEFAULT ''")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "port", "port INTEGER")
+    ensure_sqlite_column(conn, "bgp_protected_prefixes", "protection_level", "protection_level TEXT NOT NULL DEFAULT 'NORMAL'")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bgp_response_profiles (
@@ -4591,8 +4655,10 @@ def ensure_sensor_db() -> None:
         ensure_ip_zone_detection_db(conn)
         ensure_asn_db(conn)
         ensure_bgp_db(conn)
+        ensure_transit_rtbh_schema(conn)
         ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
+        ensure_network_assets_schema(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
@@ -4650,6 +4716,7 @@ def startup() -> None:
     run_startup_preflight()
     THREAT_INTEL_MANAGER.start()
     BEHAVIORAL_THREAT_RUNTIME.set_mitigation_handler(apply_behavioral_policy_decision)
+    BEHAVIORAL_THREAT_RUNTIME.set_rtbh_candidate_handler(generate_rtbh_candidates_from_behavioral_decision)
     BEHAVIORAL_THREAT_RUNTIME.start()
     DASHBOARD_CACHE.start_monitor()
     try:
@@ -4885,16 +4952,18 @@ def calibration_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sensor_id: int) -> dict[str, Any]:
     if_index = int(item.get("if_index") or 0)
-    sample = conn.execute(
+    samples = conn.execute(
         """
-        SELECT sample_time, in_bps, out_bps, if_oper_status
+        SELECT sample_time, in_octets, out_octets, in_bps, out_bps, if_oper_status
         FROM interface_snmp_samples
         WHERE sensor_id = ? AND if_index = ?
         ORDER BY sample_time DESC
-        LIMIT 1
+        LIMIT ?
         """,
-        (sensor_id, if_index),
-    ).fetchone()
+        (sensor_id, if_index, SNMP_PAIR_SCAN_LIMIT),
+    ).fetchall()
+    latest = samples[0] if samples else None
+    pair = select_snmp_sample_pair(samples)
     calibration = conn.execute(
         """
         SELECT *
@@ -4903,10 +4972,10 @@ def enrich_interface_metrics(conn: sqlite3.Connection, item: dict[str, Any], sen
         """,
         (sensor_id, if_index),
     ).fetchone()
-    item["snmp_in_bps"] = round(float(sample["in_bps"] or 0), 2) if sample else 0
-    item["snmp_out_bps"] = round(float(sample["out_bps"] or 0), 2) if sample else 0
-    item["snmp_sample_time"] = sample["sample_time"] if sample else ""
-    item["snmp_if_oper_status"] = sample["if_oper_status"] if sample else ""
+    item["snmp_in_bps"] = round(float(pair["in_bps"] or 0), 2) if pair.get("ok") else 0
+    item["snmp_out_bps"] = round(float(pair["out_bps"] or 0), 2) if pair.get("ok") else 0
+    item["snmp_sample_time"] = latest["sample_time"] if latest else ""
+    item["snmp_if_oper_status"] = latest["if_oper_status"] if latest else ""
     item["calibration"] = calibration_row_to_dict(calibration)
     item["effective_sample_rate_in"] = get_effective_sample_rate(sensor_id, if_index, "input")
     item["effective_sample_rate_out"] = get_effective_sample_rate(sensor_id, if_index, "output")
@@ -5398,6 +5467,16 @@ def require_permission(request: Request, permission_key: str) -> dict[str, Any]:
 def permission_for_legacy_admin_route(request: Request) -> str:
     path = request.url.path
     method = request.method.upper()
+    if path.startswith("/api/rtbh"):
+        if "/audit" in path:
+            return "bgp.view" if method == "GET" else "bgp.manage"
+        if "/candidates" in path and method != "GET" and "/dry-run" not in path and "/reject" not in path and "/review" not in path:
+            return "bgp.manage"
+        if "/candidates" in path and method == "GET":
+            return "mitigations.view"
+        if "/providers" in path and method == "GET":
+            return "bgp.view"
+        return "bgp.manage"
     if path.startswith("/api/bgp"):
         if "/announcements" in path and method != "GET" and "dry-run" not in path:
             return "bgp.apply"
@@ -5445,6 +5524,8 @@ def permission_for_protected_api_route(request: Request) -> str:
     if path.startswith(("/api/auth", "/api/v1/auth", "/api/v1/users", "/api/v1/roles", "/api/v1/permissions", "/api/v1/audit")):
         return ""
     if path.startswith("/api/bgp"):
+        return permission_for_legacy_admin_route(request)
+    if path.startswith("/api/rtbh"):
         return permission_for_legacy_admin_route(request)
     if "/mitigation" in path:
         return permission_for_legacy_admin_route(request)
@@ -5889,6 +5970,96 @@ def cgnat_mapping_resolve(
             timestamp=timestamp,
             connector_id=connector_id,
         )
+
+
+class CgnatPoolPayload(BaseModel):
+    name: str = ""
+    prefix: str = ""
+    mode: str = "non_deterministic"
+    active: bool = True
+    notes: str = ""
+
+
+@app.get("/api/cgnat/pools")
+def cgnat_pool_list(
+    request: Request,
+    search: str = "",
+    include_inactive: bool = False,
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {
+            "items": list_cgnat_pools(
+                conn,
+                search=search,
+                include_inactive=include_inactive,
+            )
+        }
+
+
+@app.post("/api/cgnat/pools")
+def cgnat_pool_create(request: Request, payload: CgnatPoolPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            return create_cgnat_pool(conn, payload.model_dump() if hasattr(payload, "model_dump") else payload.dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/cgnat/pools/{pool_id}")
+def cgnat_pool_update(request: Request, pool_id: int, payload: CgnatPoolPayload):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            return update_cgnat_pool(
+                conn,
+                pool_id,
+                payload.model_dump() if hasattr(payload, "model_dump") else payload.dict(),
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/cgnat/pools/{pool_id}")
+def cgnat_pool_delete(request: Request, pool_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        deleted = delete_cgnat_pool(conn, pool_id)
+    return {"ok": deleted}
+
+
+@app.get("/api/cgnat/pool-match")
+def cgnat_pool_match_endpoint(
+    request: Request,
+    ip: str = "",
+    target: str = "",
+    unique_targets: int = Query(0, ge=0),
+):
+    require_admin(request)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if clean_text(target):
+            return {
+                "ip_match": cgnat_pool_match(conn, target),
+                "target_context": cgnat_pool_overlap_context(
+                    conn,
+                    target,
+                    unique_targets=int(unique_targets),
+                ),
+            }
+        return {
+            "ip_match": cgnat_pool_match(conn, ip),
+            "target_context": cgnat_pool_overlap_context(
+                conn,
+                ip,
+                unique_targets=int(unique_targets),
+            ),
+        }
 
 
 def collectors_dir() -> Path:
@@ -6804,6 +6975,82 @@ def counter_bps(current_value: int, previous_value: int, elapsed_seconds: float)
     return max(0.0, (delta * 8) / elapsed_seconds)
 
 
+def select_snmp_sample_pair(sample_rows: Iterable[Any]) -> dict[str, Any]:
+    """Escolhe o par consecutivo de amostras SNMP mais recente e válido.
+
+    Polls forçados podem gravar uma amostra poucos segundos após a anterior
+    com os MESMOS ifHCInOctets/ifHCOutOctets (delta zero). Em vez de usar
+    cegamente as duas últimas linhas, percorre as amostras (mais recente
+    primeiro) e devolve o primeiro par com:
+
+      - timestamps válidos e interval_seconds > 0
+      - contadores sem regressão (reset/counter wrap aparente é pulado)
+      - pelo menos uma direção com delta > 0
+
+    Recalcula in_bps/out_bps a partir dos octetos; nunca confia no
+    in_bps/out_bps pré-calculado da linha.
+    """
+    parsed: list[dict[str, Any]] = []
+    for raw in sample_rows:
+        item = dict(raw)
+        sample_time = parse_datetime_text(item.get("sample_time"))
+        if sample_time is None:
+            continue
+        parsed.append(
+            {
+                "sample_time": sample_time,
+                "in_octets": int(item.get("in_octets") or 0),
+                "out_octets": int(item.get("out_octets") or 0),
+            }
+        )
+    result: dict[str, Any] = {
+        "ok": False,
+        "in_octets_1": 0,
+        "out_octets_1": 0,
+        "in_octets_2": 0,
+        "out_octets_2": 0,
+        "interval_seconds": 0,
+        "in_bps": 0.0,
+        "out_bps": 0.0,
+        "error": "",
+    }
+    if len(parsed) < 2:
+        result["error"] = "SNMP sem ifHCInOctets/ifHCOutOctets"
+        return result
+    for index in range(len(parsed) - 1):
+        current = parsed[index]
+        previous = parsed[index + 1]
+        interval = (current["sample_time"] - previous["sample_time"]).total_seconds()
+        if interval <= 0:
+            continue
+        in_prev = int(previous["in_octets"])
+        out_prev = int(previous["out_octets"])
+        in_cur = int(current["in_octets"])
+        out_cur = int(current["out_octets"])
+        if in_cur < in_prev or out_cur < out_prev:
+            continue  # counter reset/regressão: par não utilizável
+        in_delta = in_cur - in_prev
+        out_delta = out_cur - out_prev
+        if in_delta <= 0 and out_delta <= 0:
+            continue  # poll duplicado: mesmos contadores, delta zero
+        result.update(
+            {
+                "ok": True,
+                "in_octets_1": in_prev,
+                "out_octets_1": out_prev,
+                "in_octets_2": in_cur,
+                "out_octets_2": out_cur,
+                "interval_seconds": round(interval, 3),
+                "in_bps": round(max(0.0, (in_delta * 8) / interval), 2),
+                "out_bps": round(max(0.0, (out_delta * 8) / interval), 2),
+                "error": "",
+            }
+        )
+        return result
+    result["error"] = "SNMP sem intervalo com delta nas ultimas amostras (poll duplicado ou contadores parados)"
+    return result
+
+
 def insert_snmp_counter_sample(
     conn: sqlite3.Connection,
     sensor_id: int,
@@ -6868,6 +7115,11 @@ def insert_snmp_counter_sample(
             item["if_oper_status"],
         ),
     )
+    # Release the WAL write lock immediately: polling spans slow SNMP network
+    # I/O, and a single transaction held across every interface/sensor was
+    # starving the BGP checks, threat intel scheduler and anomaly workers
+    # (sqlite3.OperationalError: database is locked).
+    conn.commit()
     return item
 
 
@@ -11516,6 +11768,13 @@ def bgp_protected_prefix_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[
         "block_rtbh": sqlite_bool(item.get("block_rtbh")),
         "block_flowspec": sqlite_bool(item.get("block_flowspec")),
         "block_diversion": sqlite_bool(item.get("block_diversion")),
+        "block_auto_rtbh": sqlite_bool(item.get("block_auto_rtbh")),
+        "require_manual_rtbh": sqlite_bool(item.get("require_manual_rtbh", 1)),
+        "block_all_rtbh": sqlite_bool(item.get("block_all_rtbh")),
+        "service_name": clean_text(item.get("service_name")),
+        "protocol": clean_text(item.get("protocol")),
+        "port": (int(item["port"]) if item.get("port") is not None else None),
+        "protection_level": clean_text(item.get("protection_level") or "NORMAL").upper(),
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
@@ -13082,11 +13341,16 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         else status.get("passive_listen_enabled")
     )
     transport_ready = bool(listener_ok or bgp_ok)
+    service_proven_operational = bool(bgp_ok or flowspec_ok)
+    service_gate_ok = bool(
+        service_active or (not service_checked and service_proven_operational)
+    )
     failed_reasons: list[str] = []
     if not service_active:
-        failed_reasons.append(
-            "exabgp_service_inactive" if service_checked else "exabgp_service_unverified"
-        )
+        if service_checked:
+            failed_reasons.append("exabgp_service_inactive")
+        elif not service_proven_operational:
+            failed_reasons.append("exabgp_service_unverified")
     if not bgp_ok:
         failed_reasons.append(
             "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
@@ -13130,7 +13394,8 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         else "peer_not_verified"
     )
     checks = {
-        "service_ok": service_active,
+        "service_ok": service_gate_ok,
+        "service_active": service_active,
         "listener_ok": listener_ok,
         "bgp_ok": bgp_ok,
         "flowspec_ok": flowspec_ok,
@@ -13140,7 +13405,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "delivery_path_ready": delivery_path_ready,
     }
     required_checks = {
-        "service_ok": service_active,
+        "service_ok": service_gate_ok,
         "bgp_ok": bgp_ok,
         "flowspec_ok": flowspec_ok,
         "pipe_ok": pipe_ok,
@@ -17313,6 +17578,36 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     enriched["unique_conversations"] = unique_conversations
     coordinates = cgnat_event_lookup_coordinates(enriched)
     addressing = resolve_subscriber_addressing(conn, enriched, coordinates)
+    pool_source_ip = clean_text(coordinates.get("public_ip")) or addressing.get("source_ip")
+    source_pool = cgnat_pool_match(conn, pool_source_ip)
+    enriched.update(
+        {
+            "is_cgnat": bool(source_pool.get("is_cgnat")),
+            "cgnat_mode": source_pool.get("cgnat_mode") or "",
+            "cgnat_pool": source_pool.get("cgnat_pool") or "",
+            "cgnat_pool_name": source_pool.get("cgnat_pool_name") or "",
+            "subscriber_attribution_available": bool(source_pool.get("subscriber_attribution_available")),
+            "cgnat_pool_size": int(source_pool.get("pool_size") or 0),
+        }
+    )
+    target_text = clean_text(
+        enriched.get("target_cidr")
+        or enriched.get("target_ip")
+        or source_details.get("target_cidr")
+        or source_details.get("target_ip")
+    )
+    target_context = cgnat_pool_overlap_context(conn, target_text, unique_targets=unique_destinations)
+    enriched["target_context"] = target_context
+    if target_context.get("context") == "CGNAT_POOL":
+        enriched.update(
+            {
+                "target_is_cgnat": True,
+                "cgnat_mode": target_context.get("cgnat_mode") or enriched.get("cgnat_mode"),
+                "cgnat_pool": target_context.get("cgnat_pool") or enriched.get("cgnat_pool"),
+                "cgnat_pool_name": target_context.get("cgnat_pool_name") or enriched.get("cgnat_pool_name"),
+                "cgnat_pool_coverage": target_context.get("cgnat_pool_coverage") or 0.0,
+            }
+        )
     enriched["cgnat_lookup_direction"] = coordinates["lookup_direction"]
     enriched["subscriber_addressing_resolution"] = addressing
     enriched["subscriber_addressing_mode"] = addressing["configured_mode"]
@@ -17359,18 +17654,23 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
             }
         )
         return enriched
+    pool_non_deterministic = bool(enriched.get("is_cgnat")) and clean_text(enriched.get("cgnat_mode")) == "non_deterministic"
     if not coordinates["lookup_supported"]:
         enriched.update(
             {
                 "cgnat_matched": False,
                 "cgnat_ambiguous": False,
                 "cgnat_shared_public_ip": True,
-                "cgnat_mapping_status": "not_looked_up",
+                "cgnat_mapping_status": "pool_non_deterministic" if pool_non_deterministic else "not_looked_up",
                 "unique_private_subscribers": 0,
                 "cgnat_mapping_message": (
-                    "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
-                    if coordinates["lookup_direction"].startswith("inbound_")
-                    else "Cliente CGNAT nao identificado."
+                    "Pool CGNAT não determinístico; atribuição de assinante indisponível."
+                    if pool_non_deterministic
+                    else (
+                        "Mapeamento inbound exige campos publicos pos-NAT explicitos; src/dst do NetFlow nao foram assumidos."
+                        if coordinates["lookup_direction"].startswith("inbound_")
+                        else "Cliente CGNAT nao identificado."
+                    )
                 ),
                 "cgnat_mitigation_block_reason": "cgnat_subscriber_not_resolved",
             }
@@ -17411,11 +17711,15 @@ def enrich_anomaly_event_with_cgnat(conn: sqlite3.Connection, event: dict[str, A
     enriched["subscriber_addressing_resolution"] = addressing
     enriched["cgnat_lookup_performed"] = True
     status = "ambiguous" if ambiguous else "matched" if matched else "not_found"
+    if not matched and pool_non_deterministic:
+        status = "pool_non_deterministic"
     message = (
         "Mapeamento CGNAT ambiguo."
         if ambiguous
         else "Cliente CGNAT identificado."
         if matched
+        else "Pool CGNAT não determinístico; atribuição de assinante indisponível."
+        if pool_non_deterministic
         else "Cliente CGNAT nao identificado."
     )
     if event_vector == DNS_SINGLE_FLOW_OUTBOUND_VECTOR and unique_conversations == 1:
@@ -17974,6 +18278,97 @@ def equivalent_mitigation_announcement(
     return bgp_announcement_row_to_dict(row) if row is not None else None
 
 
+def automatic_mitigation_blockers(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Decompose the automatic-mitigation gate into one entry per guardrail so the
+    UI can show each blocker separately (ExaBGP readiness / time series /
+    connector / whitelist / policy / validation / cooldown) instead of a single
+    generic message."""
+    gate = state.get("automatic_gate") if isinstance(state.get("automatic_gate"), dict) else {}
+    policy = state.get("policy") if isinstance(state.get("policy"), dict) else {}
+    readiness = state.get("readiness") if isinstance(state.get("readiness"), dict) else {}
+    validation = state.get("validation") if isinstance(state.get("validation"), dict) else {}
+    preview_connector = state.get("preview_connector")
+    requires_connector_selection = bool(state.get("requires_connector_selection"))
+    resolution_reason = clean_text(
+        state.get("resolution_reason")
+        or state.get("connector_resolution_reason")
+        or state.get("resolution_error")
+    )
+    gate_reasons = normalize_string_list(gate.get("reasons"))
+    policy_reasons = normalize_string_list(policy.get("reasons"))
+    policy_warnings = normalize_string_list(policy.get("warnings"))
+    policy_decision = clean_text(policy.get("decision"))
+    whitelist_hits = state.get("whitelist_hits") or []
+
+    ts_blocked = "insufficient_time_series_evidence" in gate_reasons
+    ts_reason = clean_text(gate.get("time_series_reason")) or (
+        "insufficient_time_series_evidence" if ts_blocked else "sufficient_time_series_evidence"
+    )
+
+    if preview_connector is not None and not requires_connector_selection:
+        connector_status = "PASSED"
+        connector_reason = clean_text(state.get("resolution_reason")) or "connector_resolved"
+    else:
+        connector_status = "FAILED"
+        connector_reason = resolution_reason or (
+            "ambiguous_connector_resolution" if requires_connector_selection else "connector_unresolved"
+        )
+
+    whitelist_blocked = "whitelist_match" in policy_warnings or bool(whitelist_hits)
+    whitelist_status = "FAILED" if whitelist_blocked else "PASSED"
+    whitelist_reason = "whitelist_match" if whitelist_blocked else "no_whitelist_match"
+
+    policy_auto_allowed = policy_decision == "allow_auto" and any(
+        "AUTO_ALLOWED" in reason.upper() for reason in policy_reasons
+    )
+    policy_status = "PASSED" if policy_auto_allowed else "FAILED"
+    policy_reason = (
+        "policy_auto_allowed"
+        if policy_auto_allowed
+        else (policy_reasons[0] if policy_reasons else policy_decision or "policy_not_auto_allowed")
+    )
+
+    if not isinstance(readiness, dict) or "ready" not in readiness:
+        readiness_status = "SKIPPED"
+        readiness_reason = "readiness_not_checked"
+    elif readiness.get("ready") is True:
+        readiness_status = "PASSED"
+        readiness_reason = "exabgp_ready"
+    else:
+        readiness_status = "FAILED"
+        readiness_reason = clean_text(readiness.get("reason")) or "exabgp_not_ready"
+
+    blockers = [
+        {"key": "exabgp_readiness", "label": "ExaBGP readiness", "status": readiness_status, "reason": readiness_reason},
+        {"key": "time_series", "label": "time series", "status": "PASSED" if not ts_blocked else "FAILED", "reason": ts_reason},
+        {"key": "connector", "label": "connector", "status": connector_status, "reason": connector_reason},
+        {"key": "whitelist", "label": "whitelist", "status": whitelist_status, "reason": whitelist_reason},
+        {"key": "policy", "label": "policy", "status": policy_status, "reason": policy_reason},
+    ]
+
+    validation_errors = normalize_string_list(validation.get("errors"))
+    validation_blocked = bool(validation_errors)
+    blockers.append(
+        {
+            "key": "validation",
+            "label": "validation",
+            "status": "FAILED" if validation_blocked else "PASSED",
+            "reason": validation_errors[0] if validation_errors else "flowspec_valid",
+        }
+    )
+
+    cooldown_allowed = bool(state.get("cooldown_allowed", True))
+    blockers.append(
+        {
+            "key": "cooldown",
+            "label": "cooldown",
+            "status": "PASSED" if cooldown_allowed else "FAILED",
+            "reason": "cooldown_allows" if cooldown_allowed else "cooldown_active",
+        }
+    )
+    return blockers
+
+
 def evaluated_mitigation_candidates(
     anomaly_id: int,
     operator_connector_id: int | None = None,
@@ -18135,6 +18530,19 @@ def evaluated_mitigation_candidates(
             else "candidate_generated"
         )
         informational_candidate = candidate_state == "informational_candidate"
+        automatic_blockers = automatic_mitigation_blockers(
+            {
+                "automatic_gate": automatic_gate,
+                "policy": policy,
+                "readiness": readiness,
+                "validation": validation,
+                "preview_connector": preview_connector,
+                "requires_connector_selection": requires_connector_selection,
+                "connector_resolution_reason": connector_resolution_reason,
+                "cooldown_allowed": cooldown_allowed,
+                "whitelist_hits": candidate.get("dns_whitelist_hits") or [],
+            }
+        )
         evaluated.append(
             {
                 **candidate,
@@ -18162,6 +18570,10 @@ def evaluated_mitigation_candidates(
                 "candidate_version": candidate_version,
                 "automatic_not_applied_reason": automatic_gate.get("reason") or connector_resolution_reason,
                 "automatic_gate": automatic_gate,
+                "automatic_blockers": automatic_blockers,
+                "automatic_blocked": any(
+                    blocker.get("status") == "FAILED" for blocker in automatic_blockers
+                ),
                 "deterministic_gate_reasons": automatic_gate.get("reasons") or [],
                 "analysis_mode": automatic_gate.get("analysis_mode") or "automatic_authorization",
                 "mitigation_state": candidate_state,
@@ -23855,6 +24267,168 @@ def event_key_for_behavioral_vector(vector: AttackVector) -> str:
     return event_key(vector)
 
 
+def generate_rtbh_candidates_from_behavioral_decision(
+    vector: AttackVector | CampaignVector,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Threat Intelligence -> RTBH mitigation candidates (RECOMMEND_ONLY).
+
+    Builds per-/32 destination distribution and per-input_if ingress from
+    ClickHouse, then delegates to the transit RTBH engine. Never announces
+    anything; candidates stop at PROPOSED / REVIEW_REQUIRED / DRY_RUN.
+    """
+    enabled = clean_text(os.getenv("GMJFLOW_RTBH_CANDIDATE_GENERATION_ENABLED", "true")).lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return {"status": "disabled", "candidates": 0}
+    incident = build_incident_from_vector(vector, decision)
+    if not incident.get("rtbh_eligible") or not clean_text(incident.get("target_prefix")):
+        return {"status": "skipped", "reason": "not_rtbh_eligible", "candidates": 0}
+    incident["incident_id"] = (
+        vector.campaign_id if isinstance(vector, CampaignVector) else event_key_for_behavioral_vector(vector)
+    )
+    incident["threat_assessment_id"] = incident["incident_id"]
+
+    # Context-only CGNAT evidence for future decisions: never changes
+    # candidate selection, thresholds or execution paths. A shared
+    # non-deterministic CGNAT pool must not be read as many independent
+    # customers.
+    try:
+        with sqlite_connection() as conn:
+            pool_context = cgnat_pool_overlap_context(
+                conn,
+                incident.get("target_prefix"),
+                unique_targets=0,
+            )
+        if pool_context.get("context") == "CGNAT_POOL":
+            evidence = incident.get("evidence")
+            if not isinstance(evidence, dict):
+                evidence = {}
+                incident["evidence"] = evidence
+            evidence.update(
+                {
+                    "target_is_cgnat": True,
+                    "cgnat_mode": pool_context.get("cgnat_mode") or "",
+                    "cgnat_pool": pool_context.get("cgnat_pool") or "",
+                    "cgnat_pool_coverage": pool_context.get("cgnat_pool_coverage") or 0.0,
+                }
+            )
+    except Exception as exc:  # pragma: no cover - evidence must never break generation
+        logger.warning("RTBH CGNAT pool context lookup failed: %s", exc)
+
+    start = parse_datetime_text(incident.get("first_seen"))
+    end = parse_datetime_text(incident.get("last_seen"))
+    if start is None or end is None or end <= start:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(seconds=300)
+    duration = max(60.0, (end - start).total_seconds())
+    try:
+        mapped_target = clickhouse_cidr_string_param(incident["target_prefix"])
+    except HTTPException:
+        return {"status": "skipped", "reason": "invalid_target_prefix", "candidates": 0}
+    params: dict[str, Any] = {
+        "start": start.astimezone(timezone.utc).replace(tzinfo=None),
+        "end": end.astimezone(timezone.utc).replace(tzinfo=None),
+        "target": mapped_target,
+        "duration": duration,
+    }
+    try:
+        per_host = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    dst_ip AS host,
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps,
+                    sum(toFloat64(packets)) / {duration:Float64} AS pps,
+                    sum(bytes) AS bytes,
+                    min(flow_time) AS first,
+                    max(flow_time) AS last,
+                    uniqExact(src_ip) AS usrc
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                GROUP BY dst_ip
+                ORDER BY bps DESC
+                LIMIT 64
+                """,
+                params,
+            )
+        )
+        ingress = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    input_if,
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps,
+                    sum(toFloat64(packets)) / {duration:Float64} AS pps
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                GROUP BY input_if
+                ORDER BY bps DESC
+                LIMIT 64
+                """,
+                params,
+            )
+        )
+        totals = rows_as_dicts(
+            query_clickhouse(
+                """
+                SELECT
+                    sum(toFloat64(bytes) * 8) / {duration:Float64} AS bps
+                FROM flow_raw
+                WHERE flow_time >= {start:DateTime} AND flow_time <= {end:DateTime}
+                  AND proto = 17
+                  AND isIPAddressInRange(toString(dst_ip), {target:String})
+                """,
+                params,
+            )
+        )
+        total_bps = float(totals[0].get("bps") or 0) if totals else None
+    except Exception as exc:
+        logger.warning("RTBH candidate generation ClickHouse query failed: %s", exc)
+        return {"status": "skipped", "reason": "clickhouse_unavailable", "candidates": 0}
+
+    try:
+        estimate_multiplier = float(os.getenv("GMJFLOW_RTBH_ESTIMATE_MULTIPLIER", "1000"))
+    except ValueError:
+        estimate_multiplier = 1000.0
+    try:
+        local_capacity = float(os.getenv("GMJFLOW_RTBH_LOCAL_CAPACITY_BPS", "0")) or None
+    except ValueError:
+        local_capacity = None
+    try:
+        min_provider_share = float(os.getenv("GMJFLOW_RTBH_PROVIDER_MIN_SHARE", "0.05"))
+    except ValueError:
+        min_provider_share = 0.05
+    try:
+        max_candidates = int(os.getenv("GMJFLOW_RTBH_MAX_CANDIDATES_PER_INCIDENT", "20"))
+    except ValueError:
+        max_candidates = 20
+    with sqlite_connection() as conn:
+        ensure_transit_rtbh_schema(conn)
+        created = generate_rtbh_candidates_from_rows(
+            conn,
+            incident,
+            per_host,
+            ingress,
+            estimate_multiplier=estimate_multiplier,
+            min_provider_share=min_provider_share,
+            max_candidates_per_incident=max_candidates,
+            local_capacity_bps=local_capacity,
+            total_bps=total_bps,
+        )
+        conn.commit()
+    if created:
+        logger.info(
+            "RTBH_CANDIDATES_GENERATED incident=%s count=%s",
+            incident.get("incident_id"),
+            len(created),
+        )
+    return {"status": "ok", "candidates": len(created)}
+
+
 def apply_mitigation_candidates(
     conn: sqlite3.Connection,
     candidates: list[dict[str, Any]],
@@ -26526,8 +27100,8 @@ def create_bgp_protected_prefix(request: Request, payload: BgpProtectedPrefixPay
     now = utc_now_iso()
     with sqlite_connection() as conn:
         cursor = conn.execute(
-            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, now, now),
+            "INSERT INTO bgp_protected_prefixes (cidr, name, reason, enabled, block_rtbh, block_flowspec, block_diversion, block_auto_rtbh, require_manual_rtbh, block_all_rtbh, service_name, protocol, port, protection_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, clean_text(payload.service_name), clean_text(payload.protocol).lower(), payload.port, clean_text(payload.protection_level).upper() or "NORMAL", now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
@@ -26543,8 +27117,8 @@ def update_bgp_protected_prefix(request: Request, prefix_id: int, payload: BgpPr
         if row is None:
             raise HTTPException(status_code=404, detail="Prefixo protegido nao encontrado")
         conn.execute(
-            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, updated_at = ? WHERE id = ?",
-            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, utc_now_iso(), prefix_id),
+            "UPDATE bgp_protected_prefixes SET cidr = ?, name = ?, reason = ?, enabled = ?, block_rtbh = ?, block_flowspec = ?, block_diversion = ?, block_auto_rtbh = ?, require_manual_rtbh = ?, block_all_rtbh = ?, service_name = ?, protocol = ?, port = ?, protection_level = ?, updated_at = ? WHERE id = ?",
+            (normalize_required_cidr(payload.cidr), clean_text(payload.name), clean_text(payload.reason), 1 if payload.enabled else 0, 1 if payload.block_rtbh else 0, 1 if payload.block_flowspec else 0, 1 if payload.block_diversion else 0, 1 if payload.block_auto_rtbh else 0, 1 if payload.require_manual_rtbh else 0, 1 if payload.block_all_rtbh else 0, clean_text(payload.service_name), clean_text(payload.protocol).lower(), payload.port, clean_text(payload.protection_level).upper() or "NORMAL", utc_now_iso(), prefix_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bgp_protected_prefixes WHERE id = ?", (prefix_id,)).fetchone()
@@ -27333,6 +27907,101 @@ def purge_ip_zone_prefix(zone_id: int, prefix_id: int):
         conn.execute("DELETE FROM ip_zone_prefixes WHERE id = ? AND zone_id = ?", (prefix_id, zone_id))
         conn.commit()
         return {"status": "purged", "id": prefix_id, "cidr": prefix["cidr"], "zone_id": zone_id}
+
+
+@app.get("/api/network-assets")
+def network_assets_list(include_cgnat: bool = True):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_network_assets(conn, include_cgnat=include_cgnat)}
+
+
+@app.post("/api/network-assets", status_code=201)
+def network_assets_create(payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        asset = upsert_network_asset(conn, payload)
+        conn.commit()
+        return asset
+
+
+@app.put("/api/network-assets/{asset_id}")
+def network_assets_update(asset_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if fetch_network_asset(conn, asset_id) is None:
+            raise HTTPException(status_code=404, detail="network_asset_not_found")
+        asset = upsert_network_asset(conn, payload, asset_id=asset_id)
+        conn.commit()
+        return asset
+
+
+@app.delete("/api/network-assets/{asset_id}")
+def network_assets_delete(asset_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        changed = delete_network_asset(conn, asset_id)
+        conn.commit()
+        return {"status": "deleted" if changed else "not_found", "id": asset_id}
+
+
+@app.get("/api/network-assets/{asset_id}/services")
+def network_asset_services_list(asset_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_network_asset_services(conn, asset_id)}
+
+
+@app.put("/api/network-assets/{asset_id}/services")
+def network_asset_services_replace(asset_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if fetch_network_asset(conn, asset_id) is None:
+            raise HTTPException(status_code=404, detail="network_asset_not_found")
+        services = payload.get("services") if isinstance(payload.get("services"), list) else payload.get("items") or []
+        result = replace_network_asset_services(conn, asset_id, services)
+        conn.commit()
+        return {"items": result}
+
+
+@app.get("/api/network-context/resolve")
+def network_context_resolve_api(ip: str):
+    ensure_sensor_db()
+    return resolve_network_asset_context(ip)
+
+
+@app.post("/api/carpet-replay")
+def carpet_replay_api(payload: dict[str, Any]):
+    """Read-only shadow replay of historical CARPET_BOMBING events through the
+    current detector decision rules. Never writes events, never touches BGP."""
+    ensure_sensor_db()
+    event_id = int_or_none(payload.get("event_id"))
+    last_n = int(payload.get("last_n") or 0)
+    start = clean_text(payload.get("start"))
+    end = clean_text(payload.get("end"))
+    with sqlite_connection() as conn:
+        clauses = ["attack_type = 'CARPET_BOMBING'"]
+        values: list[Any] = []
+        if event_id is not None:
+            clauses.append("id = ?")
+            values.append(event_id)
+        elif start:
+            clauses.append("first_seen >= ?")
+            values.append(start)
+            if end:
+                clauses.append("first_seen <= ?")
+                values.append(end)
+        order = " ORDER BY first_seen DESC"
+        limit = ""
+        if event_id is None and last_n and last_n > 0:
+            limit = f" LIMIT {int(last_n)}"
+        rows = conn.execute(
+            f"SELECT * FROM security_events WHERE {' AND '.join(clauses)}{order}{limit}",
+            values,
+        ).fetchall()
+        events = [security_event_row(row) for row in rows]
+    results = [replay_carpet_event(event) for event in events]
+    return {"items": results, "summary": summarize_replay(results)}
 
 
 @app.get("/api/ip-zones/{zone_id}/flow-coverage")
@@ -28717,6 +29386,14 @@ def detection_additional_conditions(candidate: dict[str, Any]) -> list[dict[str,
     return conditions
 
 
+def detection_rule_is_automatic(rule_config: dict[str, Any] | None) -> bool:
+    """True quando a regra de detecção está configurada para mitigação automática."""
+    rule_config = rule_config if isinstance(rule_config, dict) else {}
+    mode = clean_text(rule_config.get("mitigation_mode")).lower()
+    response = clean_text(rule_config.get("response")).upper()
+    return mode in {"response_profile", "auto", "automatic"} or response == "RESPONSE_PROFILE"
+
+
 def build_detection_threshold_state(
     candidate: dict[str, Any],
     previous_source_details: dict[str, Any] | None = None,
@@ -28804,11 +29481,29 @@ def build_detection_threshold_state(
     first_time = parse_datetime_text(immutable_trigger.get("triggered_at"))
     last_time = parse_datetime_text(last_seen)
     duration_seconds = max(0, int((last_time - first_time).total_seconds())) if first_time and last_time else 0
-    required_points = max(2, int(rule_config.get("consecutive_windows") or 1))
+    consecutive_windows = int(rule_config.get("consecutive_windows") or 1)
+    time_series_bypassed_for_critical = bool(
+        triggered_severity == "critical"
+        and detection_rule_is_automatic(rule_config)
+        and consecutive_windows <= 1
+    )
     instant_critical_allowed = sqlite_bool(
         rule_config.get("allow_instant_critical_auto")
         or rule_config.get("instant_critical_auto")
+        or time_series_bypassed_for_critical
     )
+    if time_series_bypassed_for_critical:
+        required_points = 1
+    else:
+        required_points = max(2, consecutive_windows)
+    if points_count >= required_points:
+        time_series_reason = (
+            "bypassed_critical_auto_single_window"
+            if time_series_bypassed_for_critical
+            else "sufficient_time_series_evidence"
+        )
+    else:
+        time_series_reason = "insufficient_time_series_evidence"
     temporal_evidence = {
         "points_count": points_count,
         "duration_seconds": duration_seconds,
@@ -28819,6 +29514,10 @@ def build_detection_threshold_state(
             points_count >= required_points
             or (triggered_severity == "critical" and instant_critical_allowed)
         ),
+        "time_series_required_windows": required_points,
+        "time_series_observed_windows": points_count,
+        "time_series_gate_bypassed_for_critical": time_series_bypassed_for_critical,
+        "time_series_reason": time_series_reason,
     }
     previous_peak = detection_number(previous_current.get("peak_value")) or detection_number(immutable_trigger.get("trigger_value")) or 0.0
     current = {
@@ -28980,12 +29679,30 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         comparison,
     ):
         reasons.append("below_automatic_mitigation_threshold")
-    if (
+    time_series_bypassed_for_critical = bool(
+        sqlite_bool(evidence.get("time_series_gate_bypassed_for_critical"))
+    )
+    time_series_required = bool(
         evidence
         and vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+    )
+    if (
+        time_series_required
         and not sqlite_bool(evidence.get("sufficient_for_automatic"))
     ):
         reasons.append("insufficient_time_series_evidence")
+    if evidence and sqlite_bool(evidence.get("sufficient_for_automatic")):
+        time_series_reason = (
+            "bypassed_critical_auto_single_window"
+            if time_series_bypassed_for_critical
+            else "sufficient_time_series_evidence"
+        )
+    elif not evidence:
+        time_series_reason = "no_temporal_evidence"
+    elif time_series_required:
+        time_series_reason = "insufficient_time_series_evidence"
+    else:
+        time_series_reason = "time_series_not_required"
     priority = (
         "warning_manual_only",
         "below_automatic_mitigation_threshold",
@@ -29011,7 +29728,9 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         "automatic_mitigation_threshold": automatic_threshold,
         "temporal_evidence": evidence,
         "warning_auto_explicitly_enabled": allow_warning_auto,
-        "temporal_evidence_required": vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+        "temporal_evidence_required": time_series_required,
+        "time_series_gate_bypassed_for_critical": time_series_bypassed_for_critical,
+        "time_series_reason": time_series_reason,
     }
 
 
@@ -33791,6 +34510,11 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
                 if reason:
                     key = reason.split(":", 1)[0]
                     skipped_reasons[key] = skipped_reasons.get(key, 0) + 1
+                # evaluate_detection_template_rule runs ClickHouse queries and
+                # writes anomalies on this same connection; commit each rule so
+                # the WAL write lock is never held across the next rule's slow
+                # ClickHouse round-trip (database is locked starvation).
+                conn.commit()
             conn.commit()
         update_detection_scheduler_status(
             last_run_at=started_at,
@@ -33873,6 +34597,9 @@ def detect_anomalies_once() -> dict[str, Any]:
                         vector.get("decoder"),
                         action,
                     )
+        # Each vector runs its own ClickHouse query; commit before the next
+        # vector so the WAL write lock is never held across slow flow queries.
+        conn.commit()
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
     mitigation = {
@@ -41410,9 +42137,9 @@ def calibration_diagnostics(sensor_id: int, if_index: int, window_minutes: int =
             FROM interface_snmp_samples
             WHERE sensor_id = ? AND if_index = ?
             ORDER BY sample_time DESC
-            LIMIT 2
+            LIMIT ?
             """,
-            (sensor_id, if_index),
+            (sensor_id, if_index, SNMP_PAIR_SCAN_LIMIT),
         ).fetchall()
 
     exporter_ip = clean_text(sensor.get("exporter_ip"))
@@ -41436,29 +42163,22 @@ def calibration_diagnostics(sensor_id: int, if_index: int, window_minutes: int =
         "out_bps": 0.0,
         "error": "",
     }
-    if len(sample_rows) < 2:
-        snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
+    pair = select_snmp_sample_pair(sample_rows)
+    snmp.update(
+        {
+            "in_octets_1": int(pair.get("in_octets_1") or 0),
+            "out_octets_1": int(pair.get("out_octets_1") or 0),
+            "in_octets_2": int(pair.get("in_octets_2") or 0),
+            "out_octets_2": int(pair.get("out_octets_2") or 0),
+            "interval_seconds": round(float(pair.get("interval_seconds") or 0), 3),
+            "in_bps": round(float(pair.get("in_bps") or 0), 2),
+            "out_bps": round(float(pair.get("out_bps") or 0), 2),
+        }
+    )
+    if pair.get("ok"):
+        snmp["ok"] = True
     else:
-        current = sample_rows[0]
-        previous = sample_rows[1]
-        current_time = parse_datetime_text(current["sample_time"])
-        previous_time = parse_datetime_text(previous["sample_time"])
-        interval = (current_time - previous_time).total_seconds() if current_time and previous_time else 0
-        snmp.update(
-            {
-                "in_octets_1": int(previous["in_octets"] or 0),
-                "out_octets_1": int(previous["out_octets"] or 0),
-                "in_octets_2": int(current["in_octets"] or 0),
-                "out_octets_2": int(current["out_octets"] or 0),
-                "interval_seconds": round(interval, 3),
-                "in_bps": round(float(current["in_bps"] or 0), 2),
-                "out_bps": round(float(current["out_bps"] or 0), 2),
-            }
-        )
-        if interval <= 0 or (float(current["in_bps"] or 0) <= 0 and float(current["out_bps"] or 0) <= 0):
-            snmp_error = "SNMP sem ifHCInOctets/ifHCOutOctets"
-        else:
-            snmp["ok"] = True
+        snmp_error = clean_text(pair.get("error")) or "SNMP sem ifHCInOctets/ifHCOutOctets"
     snmp["error"] = snmp_error
 
     params = {
@@ -41553,7 +42273,7 @@ def calibrate_interface_sample_rate(
 
         rows = conn.execute(
             """
-            SELECT sample_time, in_bps, out_bps
+            SELECT sample_time, in_octets, out_octets, in_bps, out_bps
             FROM interface_snmp_samples
             WHERE sensor_id = ? AND if_index = ? AND sample_time >= ?
             ORDER BY sample_time ASC
@@ -41567,21 +42287,34 @@ def calibrate_interface_sample_rate(
     snmp_out_values: list[float] = []
     flow_in_values: list[float] = []
     flow_out_values: list[float] = []
-    previous_time: datetime | None = None
+    previous_row: sqlite3.Row | None = None
 
     for row in rows:
         sample_time = parse_datetime_text(row["sample_time"])
         if sample_time is None:
             continue
-        if previous_time is None:
-            previous_time = sample_time
+        if previous_row is None:
+            previous_row = row
             continue
         if sample_time < now - timedelta(minutes=window_minutes):
-            previous_time = sample_time
+            previous_row = row
             continue
-
-        snmp_in = float(row["in_bps"] or 0)
-        snmp_out = float(row["out_bps"] or 0)
+        previous_time = parse_datetime_text(previous_row["sample_time"])
+        if previous_time is None:
+            previous_row = row
+            continue
+        interval = (sample_time - previous_time).total_seconds()
+        if interval <= 0:
+            continue
+        # Recalcula bps a partir dos octetos (delta real), nunca do
+        # in_bps/out_bps pré-calculado da linha. Polls duplicados gravam
+        # amostras com os mesmos contadores: delta zero nas duas direções é
+        # ignorado SEM avançar previous_row, para o par seguinte cobrir o
+        # intervalo real e a amostra zero não entrar no robust_ratio.
+        snmp_in = counter_bps(int(row["in_octets"] or 0), int(previous_row["in_octets"] or 0), interval)
+        snmp_out = counter_bps(int(row["out_octets"] or 0), int(previous_row["out_octets"] or 0), interval)
+        if snmp_in <= 0 and snmp_out <= 0:
+            continue
         flow_in = flow_interface_direction_bps(exporter_ip, if_index, "in", previous_time, sample_time)
         flow_out = flow_interface_direction_bps(exporter_ip, if_index, "out", previous_time, sample_time)
 
@@ -41594,7 +42327,7 @@ def calibrate_interface_sample_rate(
             snmp_out_values.append(snmp_out)
             flow_out_values.append(flow_out)
 
-        previous_time = sample_time
+        previous_row = row
 
     estimated_in, confidence_in, samples_in = robust_ratio_estimate(ratios_in)
     estimated_out, confidence_out, samples_out = robust_ratio_estimate(ratios_out)
@@ -42204,12 +42937,13 @@ def dashboard_hybrid_source_cte(
     params: dict[str, Any],
     dimensions: list[str],
     include_time_bounds: bool = False,
+    aggregate_dimensions: list[str] | None = None,
 ) -> str:
     interior_start, interior_end = aggregate_boundaries(start_dt, end_dt)
     params["aggregate_start"] = interior_start
     params["aggregate_end"] = interior_end
     raw_dimensions = ", ".join(dimensions)
-    aggregate_dimensions = ", ".join(dimensions)
+    aggregate_dimensions = ", ".join(aggregate_dimensions if aggregate_dimensions is not None else dimensions)
     if raw_dimensions:
         raw_dimensions = f", {raw_dimensions}"
         aggregate_dimensions = f", {aggregate_dimensions}"
@@ -44759,6 +45493,9 @@ def top_asn_dimension(
         "src_as_name" if physical_dimension == "src" else "dst_as_name"
     )
     ip_col = "src_ip" if physical_dimension == "src" else "dst_ip"
+    ip_select_expr = f"if(asn > 0, '', toString({ip_col}))"
+    asn_aggregate_dims = [asn_col, as_name_col, ip_col]
+    asn_aggregate_agg_dims: list[str] | None = None
     rate_direction = "auto"
     if zone_id is not None:
         requested_zone_direction = normalize_zone_direction(zone_direction)
@@ -44857,6 +45594,12 @@ def top_asn_dimension(
             else "asn_dst"
         )
         aggregate_table = DASHBOARD_AGGREGATE_TABLES[aggregate_key]
+        use_asn_v2 = (
+            aggregate_key in {"asn_src", "asn_dst"}
+            and asn_aggregate_version() == "v2"
+        )
+        if use_asn_v2:
+            aggregate_table = ASN_AGGREGATE_TABLES[aggregate_key]["v2"]
         if dashboard_aggregate_range_covered(
             aggregate_table,
             start_dt,
@@ -44864,6 +45607,21 @@ def top_asn_dimension(
             sensor_id,
             sensor,
         ):
+            if use_asn_v2:
+                asn_col = "asn"
+                as_name_col = "as_name"
+                ip_select_expr = "''"
+                asn_aggregate_agg_dims = ["asn", "as_name"]
+                if physical_dimension == "src":
+                    asn_aggregate_dims = [
+                        "if(src_asn > 0, src_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', src_ip, 0)) AS asn",
+                        "if(src_asn > 0, src_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', src_ip, '')) AS as_name",
+                    ]
+                else:
+                    asn_aggregate_dims = [
+                        "if(dst_asn > 0, dst_asn, dictGetOrDefault('flowdb.asn_prefix_dict', 'asn', dst_ip, 0)) AS asn",
+                        "if(dst_asn > 0, dst_as_name, dictGetOrDefault('flowdb.asn_prefix_dict', 'as_name', dst_ip, '')) AS as_name",
+                    ]
             query_prefix = dashboard_hybrid_source_cte(
                 aggregate_table,
                 where,
@@ -44881,8 +45639,9 @@ def top_asn_dimension(
                         "proto",
                     ]
                     if prefix_filter_active(prefix_filter)
-                    else [asn_col, as_name_col, ip_col]
+                    else asn_aggregate_dims
                 ),
+                aggregate_dimensions=asn_aggregate_agg_dims,
             )
             source_table = "rated_source"
             query_source = dashboard_aggregate_query_source(start_dt, end_dt)
@@ -44907,7 +45666,7 @@ def top_asn_dimension(
             aggregation_base AS (
                 SELECT
                     toUInt32({asn_col}) AS asn,
-                    if(asn > 0, '', toString({ip_col})) AS ip,
+                    {ip_select_expr} AS ip,
                     any({as_name_col}) AS as_name,
                     sum(weighted_bytes_value) AS weighted_bytes_total,
                     sum(weighted_packets_value) AS weighted_packets_total,

@@ -389,6 +389,114 @@
     select.value = selected;
   }
 
+  const IOC_PROVIDER_OPTIONS = ['CEREAL2', 'FEODO', 'TEAM_CYMRU', 'GREYNOISE', 'BLOCKLIST_DE'];
+
+  function iocPriorityBadge(priority) {
+    const p = Number(priority || 5);
+    return `<span class="threat-ioc-priority threat-ioc-p${p}">P${p}</span>`;
+  }
+
+  function iocCategoryChip(category, priority) {
+    const isC2 = Number(priority) === 1;
+    return `<span class="threat-intel-chip${isC2 ? ' threat-intel-chip--hot' : ''}">${esc(category || 'unknown')}</span>`;
+  }
+
+  function iocFreshnessLabel(freshness) {
+    return ({ excellent: '≤1h', good: '≤24h', acceptable: '≤7d', poor: 'ruim' })[freshness] || freshness || '-';
+  }
+
+  function renderIocs(payload) {
+    const items = payload.items || [];
+    const rows = document.getElementById('threatIocRows');
+    if (!rows) return;
+    rows.innerHTML = items.map(item => {
+      const isC2 = Number(item.priority) === 1;
+      return `<tr class="${isC2 ? 'threat-ioc-c2' : ''}" tabindex="0" data-ioc-ip="${esc(item.ip)}" title="Abrir IOC consolidado">
+        <td><code>${esc(item.ip)}</code></td>
+        <td>${iocPriorityBadge(item.priority)}</td>
+        <td>${iocCategoryChip(item.category, item.priority)}</td>
+        <td>${esc(item.primary_source || '-')}</td>
+        <td>${number(item.independent_sources)}</td>
+        <td>${item.confidence ? number(item.confidence) : '-'}</td>
+        <td>${dateTime(item.last_seen)}</td>
+        <td>${esc(iocFreshnessLabel(item.freshness))}</td>
+        <td>${number(item.evidence_count)}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="9" class="text-muted">Nenhum IOC consolidado.</td></tr>';
+    document.getElementById('threatIocsStatus').textContent = `${number(payload.total)} IOC(s) consolidado(s) · atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`;
+  }
+
+  async function loadIocs() {
+    const query = new URLSearchParams();
+    const tier = document.getElementById('iocTierFilter')?.value;
+    const category = document.getElementById('iocCategoryFilter')?.value;
+    const provider = document.getElementById('iocProviderFilter')?.value;
+    const freshness = document.getElementById('iocFreshnessFilter')?.value;
+    const search = (document.getElementById('iocSearchFilter')?.value || '').trim();
+    if (tier) query.set('tier', tier);
+    if (category) query.set('category', category);
+    if (provider) query.set('provider', provider);
+    if (freshness) query.set('freshness', freshness);
+    if (search) query.set('search', search);
+    query.set('limit', '200');
+    try {
+      const payload = await apiRequest(`/api/threat-intelligence/iocs?${query}`);
+      renderIocs(payload);
+      return payload;
+    } catch (error) {
+      const status = document.getElementById('threatIocsStatus');
+      if (status) status.textContent = `Erro ao carregar IOCs: ${error.message}`;
+      throw error;
+    }
+  }
+
+  function renderIocDetail(payload) {
+    const summary = payload.summary || {};
+    const evidence = Array.isArray(payload.evidence) ? payload.evidence : [];
+    document.getElementById('iocDrawerTitle').textContent = summary.ip || 'IOC';
+    const bogon = (summary.bogon || []).map(b => `<span class="threat-intel-chip">BOGON ${esc(b.prefix)} (${esc(b.kind)})</span>`).join('');
+    const summaryHtml = `<div class="security-event-detail-grid">
+      <div><dt>Prioridade</dt><dd>${iocPriorityBadge(summary.priority)}</dd></div>
+      <div><dt>Categoria principal</dt><dd>${iocCategoryChip(summary.category, summary.priority)}</dd></div>
+      <div><dt>Fonte principal</dt><dd>${esc(summary.primary_source || '-')}</dd></div>
+      <div><dt>Fontes independentes</dt><dd>${number(summary.independent_sources)}</dd></div>
+      <div><dt>Confidence</dt><dd>${summary.confidence != null ? number(summary.confidence) : '-'}</dd></div>
+      <div><dt>Last seen</dt><dd>${dateTime(summary.last_seen)}</dd></div>
+      <div><dt>Freshness</dt><dd>${esc(iocFreshnessLabel(summary.freshness))}</dd></div>
+      <div><dt>Evidências</dt><dd>${number(summary.evidence_count)}</dd></div>
+    </div>${bogon ? `<div class="mt-2">${bogon}</div>` : ''}`;
+    const evidenceHtml = evidence.map(e => `<div class="threat-evidence-lane threat-evidence-source">
+      <strong>${esc(e.provider)}</strong>
+      <div>${esc(e.classification)}${e.category ? ` · ${esc(e.category)}` : ''}${e.confidence != null ? ` · confidence ${number(e.confidence)}` : ''}</div>
+      <div class="subtle">${e.malware ? `Malware: ${esc(e.malware)}` : ''}${(e.ports || []).length ? ` · portas: ${esc((e.ports || []).join(','))}` : ''}</div>
+      <div class="subtle">first_seen ${dateTime(e.first_seen)} · last_seen ${dateTime(e.last_seen)}</div>
+      <div class="subtle">origem primária: ${esc(e.primary_source)}${e.service ? ` · serviço: ${esc(e.service)}` : ''}${e.source_record_id ? ` · id: ${esc(e.source_record_id)}` : ''}</div>
+    </div>`).join('') || '<div class="subtle">Sem evidências registradas.</div>';
+    document.getElementById('iocDrawerBody').innerHTML = summaryHtml + '<hr>' + evidenceHtml;
+    document.getElementById('iocDrawerStatus').textContent = `${number(summary.evidence_count)} evidência(s) · ${number(summary.independent_sources)} fonte(s) independente(s)`;
+    root.lucide?.createIcons();
+  }
+
+  async function openIoc(ip) {
+    const drawer = document.getElementById('iocDrawer');
+    if (!drawer) return;
+    drawer.hidden = false;
+    document.body.classList.add('security-event-drawer-open');
+    document.getElementById('iocDrawerStatus').textContent = 'Carregando...';
+    try {
+      const payload = await apiRequest(`/api/threat-intelligence/iocs/${encodeURIComponent(ip)}`);
+      renderIocDetail(payload);
+    } catch (error) {
+      document.getElementById('iocDrawerStatus').textContent = `Erro: ${error.message}`;
+    }
+  }
+
+  function closeIoc() {
+    const drawer = document.getElementById('iocDrawer');
+    if (drawer) drawer.hidden = true;
+    document.body.classList.remove('security-event-drawer-open');
+  }
+
   function renderVectors(payload) {
     const items = payload.items || [];
     document.getElementById('threatSummaryVectors').textContent = number(payload.total ?? items.length);
@@ -472,6 +580,32 @@
       ${sourceRows.length ? `<div class="table-wrap"><table class="table table-sm"><thead><tr><th>IP</th><th>Provider</th><th>Classificação</th><th>Tags</th></tr></thead><tbody>${sourceRows.join('')}</tbody></table></div>` : '<div class="subtle">Nenhum match externo.</div>'}`;
   }
 
+  function renderNetworkContextSection(event) {
+    const ctx = (event.investigation && event.investigation.network_context) || {};
+    const hasClassification = Boolean(ctx.traffic_classification);
+    const roleDist = Object.entries(ctx.target_role_distribution || {});
+    const hasRoleDist = roleDist.length > 0;
+    if (!hasClassification && !hasRoleDist) return '';
+    const percent = value => (value == null ? '-' : `${Math.round(Number(value) * 100)}%`);
+    return `<section><h3>Contexto da rede</h3>
+      ${hasClassification ? detailGrid([
+        ['Classificação', ctx.traffic_classification],
+        ['Network context score', ctx.network_context_score == null ? '-' : String(ctx.network_context_score)],
+        ['Reason codes', (ctx.reason_codes || []).join(', ') || '-']
+      ]) : ''}
+      ${hasRoleDist ? detailGrid([['Composição dos destinos', roleDist.map(([role, share]) => `${role} ${Math.round(Number(share) * 100)}%`).join(' · ')]]) : ''}
+      ${detailGrid([
+        ['Web return share', percent(ctx.web_return_share)],
+        ['UDP QUIC share', percent(ctx.udp_quic_share)],
+        ['TCP ACK ratio', percent(ctx.tcp_ack_ratio)],
+        ['TCP SYN ratio', percent(ctx.tcp_syn_ratio)],
+        ['Diversidade de portas destino', ctx.dst_port_entropy == null ? '-' : (Number(ctx.dst_port_entropy) > 0.5 ? 'alta' : 'baixa')]
+      ])}
+      ${(ctx.evidence_categories_passed || []).length ? detailGrid([['Evidências aprovadas', ctx.evidence_categories_passed.join(' + ')]]) : ''}
+      ${(ctx.evidence_categories_failed || []).length ? detailGrid([['Evidências ausentes', ctx.evidence_categories_failed.join(', ') || '-']]) : ''}
+    </section>`;
+  }
+
   function renderSecurityEventDetail(event, related = []) {
     const evidence = event.evidence || {};
     const network = event.network_context || {};
@@ -498,6 +632,7 @@
         ['Portas src / dst', `${number(event.unique_src_ports)} / ${number(event.unique_dst_ports)}`],
         ['ASNs de origem', number(event.unique_source_asns)], ['Baseline', `${number(event.baseline_deviation, 2)}x`]
       ])}</section>
+      ${renderNetworkContextSection(event)}
       <section><h3>Evidências do detector</h3>${evidenceList(evidence.facts)}
         <h4>Composição do score</h4>${detailGrid(Object.entries(components))}</section>
       <section><h3>Threat Intelligence</h3>${renderThreatIntelDetail(event)}</section>
@@ -1608,6 +1743,7 @@
       } catch (error) {
         document.getElementById('secOverviewStatus').textContent = `Falha ao carregar resumo: ${error.message}`;
       }
+      loadIocs().catch(() => { /* status já tratado em loadIocs */ });
       document.getElementById('threatWorkspaceStatus').textContent = failures.length
         ? `Atualização parcial: ${failures.join(', ')} indisponível(is). Os demais painéis permanecem atualizados.`
         : `Atualizado em ${new Date().toLocaleTimeString('pt-BR')}.`;
@@ -1686,14 +1822,30 @@
     }
     const action = event.target.closest('[data-threat-action]');
     if (action) providerAction(action).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
+    const iocRow = event.target.closest('[data-ioc-ip]');
+    if (iocRow) {
+      openIoc(iocRow.dataset.iocIp).catch(error => { document.getElementById('threatWorkspaceStatus').textContent = error.message; });
+      return;
+    }
+    const iocAction = event.target.closest('[data-ioc-action]');
+    if (iocAction) { closeIoc(); return; }
   });
   document.addEventListener('DOMContentLoaded', () => {
-    document.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.getElementById('securityEventDrawer')?.hidden) closeSecurityEvent(); });
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'Escape') return;
+      if (!document.getElementById('iocDrawer')?.hidden) closeIoc();
+      else if (!document.getElementById('securityEventDrawer')?.hidden) closeSecurityEvent();
+    });
     document.getElementById('refreshThreatWorkspaceButton')?.addEventListener('click', () => loadWorkspace().catch(console.error));
     document.getElementById('applyThreatFiltersButton')?.addEventListener('click', () => loadMap().catch(error => {
       setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
       ensureMap()?.setError('Não foi possível carregar o mapa de Threat Intelligence.');
     }));
+    document.getElementById('applyIocFiltersButton')?.addEventListener('click', () => loadIocs().catch(() => {}));
+    const iocProviderSelect = document.getElementById('iocProviderFilter');
+    if (iocProviderSelect) {
+      iocProviderSelect.innerHTML = '<option value="">Todos</option>' + IOC_PROVIDER_OPTIONS.map(p => `<option value="${p}">${p}</option>`).join('');
+    }
     document.getElementById('applySecMapFiltersButton')?.addEventListener('click', () => loadSecurityMap().catch(error => {
       setPanelStatus('threatMapStatus', `Erro ao carregar mapa: ${error.message}`, true);
       ensureMap()?.setError('Não foi possível carregar o mapa de situação de segurança.');

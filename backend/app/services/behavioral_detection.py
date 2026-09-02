@@ -24,6 +24,7 @@ from app.services.threat_intelligence import (
     utc_now,
     utc_now_iso,
 )
+from app.services.behavior_flow_table import behavior_flow_table
 from app.services.network_context import NetworkContextEngine
 from app.services.security_events import (
     canonical_event_key,
@@ -40,6 +41,8 @@ from app.services.behavior_baseline import (
     BOOTSTRAP,
     DEFAULT_BOOTSTRAP_MIN_CLEAN_WINDOWS,
     DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS,
+    DEFAULT_MAD_ABSOLUTE_FLOOR_PPS,
+    DEFAULT_MAD_RELATIVE_FLOOR_RATIO,
     DEFAULT_MIN_QUARANTINE_SAMPLES,
     DEFAULT_MIN_ROBUST_SAMPLES,
     DEFAULT_QUARANTINE_MINUTES,
@@ -48,11 +51,24 @@ from app.services.behavior_baseline import (
     QUARANTINED,
     REJECTED,
     TRUSTED,
+    effective_mad,
     robust_z_score,
     safe_learning_decision,
     safe_reason_bucket,
 )
 from app.services.config_effective import behavior_safe_learning_enabled
+from app.services.network_sweep_policy import _is_protected_subject
+from app.services.network_assets import (
+    CGNAT_POOL,
+    CDN_CACHE,
+    DNS_RESOLVER,
+    DOWNSTREAM_ISP,
+    NetworkAssetResolver,
+    ensure_network_assets_schema,
+    resolve_network_context as resolve_network_asset_context,
+    shannon_entropy,
+    target_role_distribution,
+)
 from app.services.threat_contracts import (
     FLOOD_ATTACK_TYPES,
     SCAN_ATTACK_TYPES,
@@ -86,6 +102,11 @@ CARPET_BOMBING = "CARPET_BOMBING"
 MULTI_VECTOR_DDOS = "MULTI_VECTOR_DDOS"
 UNKNOWN_ANOMALY = "UNKNOWN_ANOMALY"
 COMPROMISED_CUSTOMER = "COMPROMISED_CUSTOMER"
+
+# Traffic classifications used by the carpet-bombing detector when the observed
+# distribution is compatible with legitimate (usually web-return) traffic.
+EXPECTED_DISTRIBUTED_TRAFFIC = "EXPECTED_DISTRIBUTED_TRAFFIC"
+SUSPICIOUS_DISTRIBUTED_TRAFFIC = "SUSPICIOUS_DISTRIBUTED_TRAFFIC"
 
 CLASSIFICATIONS = {
     NORMAL,
@@ -321,6 +342,11 @@ class DetectorThresholds:
     carpet_host_pps: float = 100.0
     carpet_min_packets: int = 3000
     carpet_min_bps: float = 1_000_000.0
+    carpet_min_absolute_pps: float = 5000.0
+    carpet_min_absolute_bps: float = 50_000_000.0
+    carpet_web_return_share: float = 0.6
+    carpet_web_return_ack_ratio: float = 0.5
+    carpet_dst_port_diversity: int = 100
     udp_min_packets: int = 3000
     udp_min_pps: float = 100.0
     udp_min_bps: float = 1_000_000.0
@@ -341,6 +367,11 @@ class DetectorThresholds:
             carpet_host_pps=float(os.getenv("GMJFLOW_CARPET_MAX_HOST_PPS", "100")),
             carpet_min_packets=int(os.getenv("GMJFLOW_CARPET_MIN_PACKETS", "3000")),
             carpet_min_bps=float(os.getenv("GMJFLOW_CARPET_MIN_BPS", "1000000")),
+            carpet_min_absolute_pps=float(os.getenv("GMJFLOW_CARPET_MIN_ABSOLUTE_PPS", "5000")),
+            carpet_min_absolute_bps=float(os.getenv("GMJFLOW_CARPET_MIN_ABSOLUTE_BPS", "50000000")),
+            carpet_web_return_share=float(os.getenv("GMJFLOW_CARPET_WEB_RETURN_SHARE", "0.6")),
+            carpet_web_return_ack_ratio=float(os.getenv("GMJFLOW_CARPET_WEB_RETURN_ACK_RATIO", "0.5")),
+            carpet_dst_port_diversity=int(os.getenv("GMJFLOW_CARPET_DST_PORT_DIVERSITY", "100")),
             udp_min_packets=int(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PACKETS", "3000")),
             udp_min_pps=float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_PPS", "100")),
             udp_min_bps=float(os.getenv("GMJFLOW_UDP_FLOOD_MIN_BPS", "1000000")),
@@ -712,6 +743,92 @@ def target_prefixes(ip_text: str) -> Iterable[str]:
             yield str(ip_network(f"{parsed}/{length}", strict=False))
     else:
         yield str(ip_network(f"{parsed}/128", strict=False))
+
+
+def _overlaps_any_network(prefix: str, networks: Sequence[Any]) -> bool:
+    """True if the prefix overlaps any network in the sequence (lazy parse)."""
+    if not networks:
+        return False
+    try:
+        net = ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    for other in networks:
+        if isinstance(other, str):
+            try:
+                other = ip_network(other, strict=False)
+            except ValueError:
+                continue
+        if net.overlaps(other):
+            return True
+    return False
+
+
+def _record_safe_learning_audit_v2(
+    conn: sqlite3.Connection,
+    *,
+    now_iso: str,
+    prefix: str,
+    protocol: str,
+    classification: str,
+    reason: str,
+    safe_would_update: bool,
+    confirmed_attack: bool,
+    strong_signal: bool,
+    protected_or_internal: bool,
+    campaign_blocked: bool,
+    audit_z: float | None,
+    baseline_state: str,
+) -> None:
+    """Aggregated (per-hour, per classification/reason) Safe Learning shadow audit.
+
+    The key is (hour_bucket, protocol, classification, reason) — NOT target_prefix.
+    The detector fans each destination across 9 prefix lengths (IPv4 /22../32 +
+    IPv6 /128), so a per-prefix key retained ~30% of rows. The meta-only key
+    yields ~15-20 rows/hour (99.99% reduction); the last-seen prefix is kept in
+    sample_prefix for traceability, and per-prefix detail remains available in
+    behavior_safe_learning_shadow_audit (72h retention).
+    """
+    hour_bucket = clean_text(now_iso)[:13] + ":00:00Z"
+    conn.execute(
+        """
+        INSERT INTO behavior_safe_learning_shadow_audit_v2(
+            hour_bucket, protocol, classification, reason, policy_version,
+            evaluation_count, would_learn_count, rejected_count, quarantined_count,
+            confirmed_attack_count, strong_detector_signal_count,
+            protected_or_internal_count, campaign_blocked_count,
+            robust_z_min, robust_z_max, robust_z_sum, robust_z_count,
+            baseline_state, sample_prefix, first_seen, last_seen
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(hour_bucket, protocol, classification, reason) DO UPDATE SET
+            evaluation_count = evaluation_count + 1,
+            would_learn_count = would_learn_count + excluded.would_learn_count,
+            rejected_count = rejected_count + excluded.rejected_count,
+            quarantined_count = quarantined_count + excluded.quarantined_count,
+            confirmed_attack_count = confirmed_attack_count + excluded.confirmed_attack_count,
+            strong_detector_signal_count = strong_detector_signal_count + excluded.strong_detector_signal_count,
+            protected_or_internal_count = protected_or_internal_count + excluded.protected_or_internal_count,
+            campaign_blocked_count = campaign_blocked_count + excluded.campaign_blocked_count,
+            robust_z_min = CASE WHEN robust_z_min IS NULL THEN excluded.robust_z_min
+                                WHEN excluded.robust_z_min IS NULL THEN robust_z_min
+                                ELSE MIN(robust_z_min, excluded.robust_z_min) END,
+            robust_z_max = CASE WHEN robust_z_max IS NULL THEN excluded.robust_z_max
+                                WHEN excluded.robust_z_max IS NULL THEN robust_z_max
+                                ELSE MAX(robust_z_max, excluded.robust_z_max) END,
+            robust_z_sum = COALESCE(robust_z_sum, 0) + COALESCE(excluded.robust_z_sum, 0),
+            robust_z_count = robust_z_count + excluded.robust_z_count,
+            baseline_state = excluded.baseline_state,
+            sample_prefix = excluded.sample_prefix,
+            last_seen = excluded.last_seen
+        """,
+        (
+            hour_bucket, protocol, classification, reason, "safe_learning_shadow_v2",
+            1, int(safe_would_update), int(classification == REJECTED), int(classification == QUARANTINED),
+            int(confirmed_attack), int(strong_signal), int(protected_or_internal), int(campaign_blocked),
+            audit_z, audit_z, audit_z, 1 if audit_z is not None else 0,
+            baseline_state, prefix, now_iso, now_iso,
+        ),
+    )
 
 
 def _attack_signal(prefix: str, attack_networks: Sequence[Any], confirmed_networks: Sequence[Any]) -> tuple[bool, bool]:
@@ -1180,12 +1297,123 @@ def suppress_contained_vectors(vectors: list[AttackVector]) -> list[AttackVector
     return result
 
 
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int(math.ceil(percentile * len(ordered))) - 1))
+    return ordered[index]
+
+
+def carpet_bombing_features(
+    rows: Sequence[FlowObservation],
+    window_seconds: int,
+    resolver: Callable[[Any], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    packet_count = max(1, sum(row.packets for row in rows))
+    flow_count = max(1, sum(row.flow_count for row in rows))
+    byte_count = sum(row.bytes for row in rows)
+    src_port_packets: Counter[int] = Counter()
+    dst_port_packets: Counter[int] = Counter()
+    per_host_packets: Counter[str] = Counter()
+    tcp_packets = 0
+    tcp_syn_packets = 0
+    tcp_ack_packets = 0
+    tcp_psh_ack_packets = 0
+    udp_packets = 0
+    udp_quic_packets = 0
+    web_return_packets = 0
+    for row in rows:
+        src_port_packets[row.src_port] += row.packets
+        dst_port_packets[row.dst_port] += row.packets
+        per_host_packets[row.dst_ip] += row.packets
+        if row.protocol == 6:
+            tcp_packets += row.packets
+            if row.tcp_flags & 0x02:
+                tcp_syn_packets += row.packets
+            if row.tcp_flags & 0x10:
+                tcp_ack_packets += row.packets
+                if row.tcp_flags & 0x08:
+                    tcp_psh_ack_packets += row.packets
+            if row.src_port in (80, 443) and (row.tcp_flags & 0x10):
+                web_return_packets += row.packets
+        elif row.protocol == 17:
+            udp_packets += row.packets
+            if row.src_port == 443:
+                udp_quic_packets += row.packets
+                web_return_packets += row.packets
+    top_src_port, top_src_port_count = src_port_packets.most_common(1)[0] if src_port_packets else (0, 0)
+    top_dst_port, top_dst_port_count = dst_port_packets.most_common(1)[0] if dst_port_packets else (0, 0)
+    host_pps = [ratio(packets, window_seconds) for packets in per_host_packets.values()]
+    role_distribution: dict[str, float] = {}
+    if resolver is not None:
+        role_distribution = target_role_distribution(
+            per_host_packets.keys(),
+            resolver,
+            weights=dict(per_host_packets),
+        )
+    return {
+        "aggregate_pps": round(ratio(packet_count, window_seconds), 3),
+        "aggregate_bps": round(ratio(byte_count * 8, window_seconds), 3),
+        "unique_src_ports": len({row.src_port for row in rows}),
+        "unique_dst_ports": len({row.dst_port for row in rows}),
+        "max_host_pps": round(max(host_pps, default=0.0), 3),
+        "p95_host_pps": round(_percentile(host_pps, 0.95), 3),
+        "avg_pps_per_host": round(ratio(packet_count, len(per_host_packets)) / window_seconds, 3),
+        "top_src_port": int(top_src_port),
+        "top_src_port_share": round(ratio(top_src_port_count, packet_count), 4),
+        "top_dst_port": int(top_dst_port),
+        "top_dst_port_share": round(ratio(top_dst_port_count, packet_count), 4),
+        "dst_port_entropy": shannon_entropy(dst_port_packets),
+        "tcp_syn_ratio": round(ratio(tcp_syn_packets, tcp_packets), 4),
+        "tcp_ack_ratio": round(ratio(tcp_ack_packets, tcp_packets), 4),
+        "tcp_psh_ack_ratio": round(ratio(tcp_psh_ack_packets, tcp_packets), 4),
+        "udp_quic_share": round(ratio(udp_quic_packets, packet_count), 4),
+        "web_return_share": round(ratio(web_return_packets, packet_count), 4),
+        "flows_s": round(ratio(flow_count, window_seconds), 4),
+        "packets_per_flow": round(ratio(packet_count, flow_count), 4),
+        "target_role_distribution": role_distribution,
+        "target_cgnat_share": float(role_distribution.get(CGNAT_POOL, 0.0)),
+        "target_downstream_isp_share": float(role_distribution.get(DOWNSTREAM_ISP, 0.0)),
+        "target_customer_public_share": float(role_distribution.get("CUSTOMER_PUBLIC", 0.0)),
+        "known_infra_source_share": float(
+            sum(
+                share
+                for role, share in role_distribution.items()
+                if role in {CDN_CACHE, DNS_RESOLVER, "SERVER_INFRA", "NETWORK_INFRA", "PEERING_INFRA"}
+            )
+        ),
+    }
+
+
+def _carpet_web_return_likely(cf: Mapping[str, Any], thresholds: DetectorThresholds) -> bool:
+    web_return_share = float(cf.get("web_return_share") or 0.0)
+    tcp_ack_ratio = float(cf.get("tcp_ack_ratio") or 0.0)
+    tcp_syn_ratio = float(cf.get("tcp_syn_ratio") or 0.0)
+    udp_quic_share = float(cf.get("udp_quic_share") or 0.0)
+    dst_entropy = float(cf.get("dst_port_entropy") or 0.0)
+    unique_dst_ports = int(cf.get("unique_dst_ports") or 0)
+    established_tcp_return = tcp_ack_ratio >= thresholds.carpet_web_return_ack_ratio and tcp_syn_ratio < 0.2
+    diverse_destinations = dst_entropy >= 0.4 or unique_dst_ports >= thresholds.carpet_dst_port_diversity
+    return bool(
+        web_return_share >= thresholds.carpet_web_return_share
+        and (established_tcp_return or udp_quic_share >= 0.1)
+        and diverse_destinations
+    )
+
+
 class CarpetBombingDetector:
     name = "prefix_carpet_bombing"
 
-    def __init__(self, thresholds: DetectorThresholds | None = None, max_groups: int = 50000) -> None:
+    def __init__(
+        self,
+        thresholds: DetectorThresholds | None = None,
+        max_groups: int = 50000,
+        resolver: Callable[[Any], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.thresholds = thresholds or DetectorThresholds()
         self.max_groups = max(1000, max_groups)
+        self.resolver = resolver
 
     def detect(
         self,
@@ -1209,8 +1437,10 @@ class CarpetBombingDetector:
         vectors = []
         for prefix, rows in groups.items():
             features = flow_features(rows, window_seconds)
+            cf = carpet_bombing_features(rows, window_seconds, self.resolver)
             unique_hosts = features["unique_dst_ips"]
             aggregate_pps = features["packets_per_second"]
+            bits_per_second = features["bits_per_second"]
             per_host = Counter()
             for row in rows:
                 per_host[row.dst_ip] += row.packets
@@ -1219,32 +1449,137 @@ class CarpetBombingDetector:
             deviation = ratio(aggregate_pps, historical) if historical else 0.0
             if unique_hosts < self.thresholds.carpet_unique_hosts:
                 continue
-            # Baseline is complementary evidence; an absolute traffic floor is mandatory.
             if features["packet_count"] < self.thresholds.carpet_min_packets:
                 continue
-            if aggregate_pps < self.thresholds.carpet_prefix_pps and features["bits_per_second"] < self.thresholds.carpet_min_bps:
+            if aggregate_pps < self.thresholds.carpet_prefix_pps and bits_per_second < self.thresholds.carpet_min_bps:
                 continue
             if max_host_pps >= self.thresholds.carpet_host_pps:
                 continue
+            below_absolute_floor = bool(
+                aggregate_pps < self.thresholds.carpet_min_absolute_pps
+                and bits_per_second < self.thresholds.carpet_min_absolute_bps
+            )
+            web_return_likely = _carpet_web_return_likely(cf, self.thresholds)
+            cgnat_or_isp_share = cf["target_cgnat_share"] + cf["target_downstream_isp_share"]
+            persistence = safe_int(features.get("persistent_windows"))
+            reflection = bool(
+                cf["top_src_port"] in AMPLIFICATION_PORTS and cf["top_src_port_share"] >= 0.5
+            )
+            categories_passed: set[str] = set()
+            categories_failed: set[str] = set()
+            if not below_absolute_floor:
+                categories_passed.add("VOLUME")
+            else:
+                categories_failed.add("VOLUME")
+            if unique_hosts >= self.thresholds.carpet_unique_hosts and features["unique_src_ips"] >= 20:
+                categories_passed.add("DISTRIBUTION")
+            else:
+                categories_failed.add("DISTRIBUTION")
+            if max_host_pps < self.thresholds.carpet_host_pps and persistence >= 2:
+                categories_passed.add("ATTACK_PATTERN")
+            else:
+                categories_failed.add("ATTACK_PATTERN")
+            if reflection:
+                categories_passed.add("ANOMALOUS_SERVICE")
+            else:
+                categories_failed.add("ANOMALOUS_SERVICE")
+            network_context_points = 0
+            if below_absolute_floor:
+                network_context_points -= 15
+            if web_return_likely:
+                network_context_points -= 25
+            elif cgnat_or_isp_share >= 0.5:
+                network_context_points -= 12
+            if cgnat_or_isp_share >= 0.7 and not reflection:
+                network_context_points -= 8
+            if reflection:
+                network_context_points += 15
+            if cf["known_infra_source_share"] >= 0.5 and not web_return_likely:
+                network_context_points -= 10
+            network_context_points = int(clamp(network_context_points, -45, 20))
             score_components = {
                 "volume": min(30, int(math.log10(max(10, features["packet_count"])) * 7)),
                 "host_distribution": min(20, int(unique_hosts / 2)),
                 "low_per_host_rate": 12,
-                "persistence": min(20, safe_int(features.get("persistent_windows")) * 4),
+                "persistence": min(20, persistence * 4),
                 "baseline": min(10, int(deviation * 2)) if deviation else 0,
                 "threat_intel": 0,
-                "network_context": 0,
+                "network_context": network_context_points,
             }
             score = int(clamp(20 + sum(score_components.values())))
-            features.update({
-                "protocol": "mixed",
-                "target_prefix": prefix,
-                "target_hosts": unique_hosts,
-                "max_host_pps": round(max_host_pps, 3),
-                "aggregate_pps": aggregate_pps,
-            })
-            vectors.append(
-                finalize_vector(AttackVector(
+            reason_codes: list[str] = []
+            traffic_classification = "CONFIRMED_ATTACK"
+            if web_return_likely and below_absolute_floor:
+                traffic_classification = EXPECTED_DISTRIBUTED_TRAFFIC
+                reason_codes.extend(["LIKELY_WEB_RETURN_TRAFFIC", "ABSOLUTE_VOLUME_TOO_LOW"])
+                score = min(score, 54)
+            elif web_return_likely:
+                traffic_classification = EXPECTED_DISTRIBUTED_TRAFFIC
+                reason_codes.append("LIKELY_WEB_RETURN_TRAFFIC")
+                score = min(score, 54)
+            elif below_absolute_floor:
+                traffic_classification = SUSPICIOUS_DISTRIBUTED_TRAFFIC
+                reason_codes.append("ABSOLUTE_VOLUME_TOO_LOW")
+                score = min(score, 54)
+            elif cgnat_or_isp_share >= 0.7 and not reflection:
+                traffic_classification = SUSPICIOUS_DISTRIBUTED_TRAFFIC
+                reason_codes.append(
+                    "CGNAT_DISTRIBUTION_EXPECTED"
+                    if cf["target_cgnat_share"] >= cf["target_downstream_isp_share"]
+                    else "DOWNSTREAM_ISP_DISTRIBUTION_EXPECTED"
+                )
+                score = min(score, 74)
+            elif not (
+                "VOLUME" in categories_passed
+                and "DISTRIBUTION" in categories_passed
+                and ("ATTACK_PATTERN" in categories_passed or "ANOMALOUS_SERVICE" in categories_passed)
+            ):
+                traffic_classification = SUSPICIOUS_DISTRIBUTED_TRAFFIC
+                reason_codes.append("INSUFFICIENT_ATTACK_EVIDENCE")
+                score = min(score, 74)
+            if not reason_codes:
+                reason_codes.append("CONFIRMED_CARPET_BOMBING")
+            features.update(
+                {
+                    "protocol": "mixed",
+                    "target_prefix": prefix,
+                    "target_hosts": unique_hosts,
+                    "max_host_pps": round(max_host_pps, 3),
+                    "aggregate_pps": aggregate_pps,
+                    "aggregate_bps": round(bits_per_second, 3),
+                    "p95_host_pps": cf["p95_host_pps"],
+                    "avg_pps_per_host": cf["avg_pps_per_host"],
+                    "unique_src_ports": cf["unique_src_ports"],
+                    "unique_dst_ports": cf["unique_dst_ports"],
+                    "top_src_port": cf["top_src_port"],
+                    "top_src_port_share": cf["top_src_port_share"],
+                    "top_dst_port": cf["top_dst_port"],
+                    "top_dst_port_share": cf["top_dst_port_share"],
+                    "dst_port_entropy": cf["dst_port_entropy"],
+                    "tcp_syn_ratio": cf["tcp_syn_ratio"],
+                    "tcp_ack_ratio": cf["tcp_ack_ratio"],
+                    "tcp_psh_ack_ratio": cf["tcp_psh_ack_ratio"],
+                    "udp_quic_share": cf["udp_quic_share"],
+                    "web_return_share": cf["web_return_share"],
+                    "flows_s": cf["flows_s"],
+                    "packets_per_flow": cf["packets_per_flow"],
+                    "target_role_distribution": cf["target_role_distribution"],
+                    "target_cgnat_share": cf["target_cgnat_share"],
+                    "target_downstream_isp_share": cf["target_downstream_isp_share"],
+                    "target_customer_public_share": cf["target_customer_public_share"],
+                    "known_infra_source_share": cf["known_infra_source_share"],
+                    "below_absolute_floor": below_absolute_floor,
+                    "web_return_likely": web_return_likely,
+                    "network_context_score": network_context_points,
+                    "traffic_classification": traffic_classification,
+                    "reason_codes": reason_codes,
+                    "evidence_categories_passed": sorted(categories_passed),
+                    "evidence_categories_failed": sorted(categories_failed),
+                    "behavioral_score": score,
+                }
+            )
+            vector = finalize_vector(
+                AttackVector(
                     attack_type=CARPET_BOMBING,
                     detector=self.name,
                     detector_score=score,
@@ -1260,11 +1595,18 @@ class CarpetBombingDetector:
                         f"{features['packet_count']} pacotes para {unique_hosts} hosts em {window_seconds} segundos",
                         f"taxa agregada {aggregate_pps:.1f} pps; máximo por host {max_host_pps:.1f} pps",
                         f"{features['unique_src_ips']} fontes e {features['unique_source_asns']} ASNs",
+                        f"web return share {cf['web_return_share'] * 100:.1f}%" if cf["web_return_share"] else "",
                         f"baseline {deviation:.2f}x" if deviation else "baseline ainda indisponível",
                     ],
                     score_components=score_components,
-                ))
+                )
             )
+            if traffic_classification != "CONFIRMED_ATTACK":
+                vector.verdict = "SUSPICIOUS" if traffic_classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC else "INFO"
+                vector.severity = "MEDIUM" if traffic_classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC else "LOW"
+                vector.features["verdict"] = vector.verdict
+                vector.features["severity"] = vector.severity
+            vectors.append(vector)
         return sorted(vectors, key=lambda item: (item.detector_score, ip_network(item.target_prefix).prefixlen), reverse=True)[:100]
 
 
@@ -1540,6 +1882,15 @@ def compromised_host_score(vectors: Sequence[AttackVector], c2_match: bool, recu
 
 
 def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
+    # One-time migration: the first v2 draft keyed on target_prefix. Because the
+    # detector fans each destination out across 9 prefix lengths (IPv4 /22../32
+    # + IPv6 /128), a per-prefix key still retained ~30% of rows. Rebuild the
+    # (empty, shadow-only) table with the meta-only key defined below.
+    _v2_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='behavior_safe_learning_shadow_audit_v2'"
+    ).fetchone()
+    if _v2_sql and "target_prefix" in (_v2_sql[0] or ""):
+        conn.execute("DROP TABLE behavior_safe_learning_shadow_audit_v2")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS behavioral_attack_vectors (
@@ -1679,6 +2030,33 @@ def ensure_behavioral_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_audit_time
             ON behavior_safe_learning_shadow_audit(observed_at);
+        CREATE TABLE IF NOT EXISTS behavior_safe_learning_shadow_audit_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hour_bucket TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            policy_version TEXT NOT NULL DEFAULT 'safe_learning_shadow_v2',
+            evaluation_count INTEGER NOT NULL DEFAULT 0,
+            would_learn_count INTEGER NOT NULL DEFAULT 0,
+            rejected_count INTEGER NOT NULL DEFAULT 0,
+            quarantined_count INTEGER NOT NULL DEFAULT 0,
+            confirmed_attack_count INTEGER NOT NULL DEFAULT 0,
+            strong_detector_signal_count INTEGER NOT NULL DEFAULT 0,
+            protected_or_internal_count INTEGER NOT NULL DEFAULT 0,
+            campaign_blocked_count INTEGER NOT NULL DEFAULT 0,
+            robust_z_min REAL,
+            robust_z_max REAL,
+            robust_z_sum REAL,
+            robust_z_count INTEGER NOT NULL DEFAULT 0,
+            baseline_state TEXT NOT NULL DEFAULT '',
+            sample_prefix TEXT NOT NULL DEFAULT '',
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            UNIQUE(hour_bucket, protocol, classification, reason)
+        );
+        CREATE INDEX IF NOT EXISTS idx_safe_learning_shadow_v2_time
+            ON behavior_safe_learning_shadow_audit_v2(hour_bucket);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_status_time
             ON behavioral_attack_vectors(status, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_behavior_vectors_campaign
@@ -1769,9 +2147,11 @@ class BehavioralDetectionEngine:
         self.ssh_brute_force = SshBruteForceDetector(self.thresholds)
         self.syn_flood = SynFloodDetector(self.thresholds)
         self.udp_flood = UdpFloodDetector(self.thresholds)
+        self.asset_resolver = NetworkAssetResolver(connection_factory)
         self.carpet = CarpetBombingDetector(
             self.thresholds,
             max_groups=int(os.getenv("GMJFLOW_BEHAVIOR_MAX_PREFIX_GROUPS", "50000")),
+            resolver=self.asset_resolver.resolve,
         )
         self.campaigns = CampaignEngine()
         self.network_context = NetworkContextEngine(connection_factory)
@@ -1782,6 +2162,7 @@ class BehavioralDetectionEngine:
         with self.connection_factory() as conn:
             ensure_behavioral_schema(conn)
             ensure_security_event_schema(conn)
+            ensure_network_assets_schema(conn)
             migrate_legacy_security_events(conn)
             conn.commit()
 
@@ -1824,6 +2205,27 @@ class BehavioralDetectionEngine:
         now = utc_now_iso()
         alpha = clamp(float(os.getenv("GMJFLOW_BEHAVIOR_BASELINE_ALPHA", "0.1")), 0.01, 0.5)
         safe_enabled = behavior_safe_learning_enabled(conn)
+        mad_absolute_floor = max(0.0, float(os.getenv("GMJFLOW_SAFE_MAD_ABSOLUTE_FLOOR_PPS", str(DEFAULT_MAD_ABSOLUTE_FLOOR_PPS))))
+        mad_relative_floor_ratio = max(0.0, float(os.getenv("GMJFLOW_SAFE_MAD_RELATIVE_FLOOR_RATIO", str(DEFAULT_MAD_RELATIVE_FLOOR_RATIO))))
+
+        # Guardrail inputs (deterministic, reused system owners).
+        customer_networks: list[Any] = []
+        try:
+            rows = conn.execute(
+                "SELECT p.cidr FROM ip_zone_prefixes p "
+                "JOIN ip_zones z ON z.id = p.zone_id "
+                "WHERE p.active = 1 AND z.active = 1"
+            ).fetchall()
+            for row in rows:
+                cidr = clean_text(row[0])
+                if not cidr:
+                    continue
+                try:
+                    customer_networks.append(ip_network(cidr, strict=False))
+                except ValueError:
+                    continue
+        except sqlite3.OperationalError:
+            customer_networks = []
 
         # Exclude future clock-skewed observations (documented NE8000 exporter
         # bug): a far-future timestamp would otherwise become max(observed_at)
@@ -1856,6 +2258,7 @@ class BehavioralDetectionEngine:
 
         attack_networks: list[Any] = []
         confirmed_networks: list[Any] = []
+        campaign_networks: list[Any] = []
         for vector in vectors:
             target = vector.target_prefix or (f"{vector.target_ip}/32" if vector.target_ip else "")
             if not target:
@@ -1867,6 +2270,8 @@ class BehavioralDetectionEngine:
             attack_networks.append(network)
             if vector.verdict == "CONFIRMED_ATTACK" or clean_text(vector.severity).upper() == "CRITICAL":
                 confirmed_networks.append(network)
+            if clean_text(getattr(vector, "campaign_id", "") or ""):
+                campaign_networks.append(network)
 
         counters: dict[str, int] = defaultdict(int)
         if skewed_observations:
@@ -1904,6 +2309,8 @@ class BehavioralDetectionEngine:
 
             state, clean_count = self._safe_state(current, samples)
             strong_signal, confirmed_attack = _attack_signal(prefix, attack_networks, confirmed_networks)
+            protected_or_internal = _is_protected_subject(conn, prefix) or _overlaps_any_network(prefix, customer_networks)
+            campaign_blocked = _overlaps_any_network(prefix, campaign_networks)
             robust_stats_ready = old_mad > 0 and old_mad_sample_count >= DEFAULT_MIN_ROBUST_SAMPLES
             decision = safe_learning_decision(
                 baseline_state=state,
@@ -1917,6 +2324,10 @@ class BehavioralDetectionEngine:
                 quarantined_until=clean_text(current[6]) if current is not None else "",
                 now_iso=now,
                 robust_stats_ready=robust_stats_ready,
+                protected_or_internal=protected_or_internal,
+                campaign_blocked=campaign_blocked,
+                mad_absolute_floor=mad_absolute_floor,
+                mad_relative_floor_ratio=mad_relative_floor_ratio,
             )
             classification = decision["classification"]
             final_state = decision["next_state"]
@@ -2012,34 +2423,38 @@ class BehavioralDetectionEngine:
             else:
                 counters["baseline_updates_blocked"] += 1
 
-            # Low-cardinality shadow audit: only divergences, blocked windows and
-            # promotions (plus an optional, off-by-default ELIGIBLE sample).
+            # Compact shadow audit v2: aggregate by (hour, prefix, protocol,
+            # classification, reason) instead of one row per evaluation. This
+            # collapses the repetitive quarantine_frozen / quarantine_extended /
+            # robust_z re-evaluations into a few counter rows per hour.
             audit_z: float | None = None
-            if old_mad > 0 and old_pps > 0:
-                audit_z = round(robust_z_score(pps, old_pps, old_mad), 4)
+            if old_pps > 0:
+                audit_z = round(robust_z_score(
+                    pps, old_pps,
+                    effective_mad(old_pps, old_mad,
+                                  absolute_floor=mad_absolute_floor,
+                                  relative_floor_ratio=mad_relative_floor_ratio),
+                ), 4)
             if classification == ELIGIBLE:
                 eligible_seen += 1
                 sample_hit = eligible_sample_rate > 0 and eligible_seen % eligible_sample_rate == 0
             else:
                 sample_hit = False
             if divergence or classification in (REJECTED, QUARANTINED) or decision["promoted"] or sample_hit:
-                conn.execute(
-                    """
-                    INSERT INTO behavior_safe_learning_shadow_audit(
-                        observed_at, sensor, target_prefix, protocol,
-                        v1_would_update, safe_would_update, baseline_state, classification, reason,
-                        observed_pps, observed_bps, baseline_pps, baseline_bps, mad_pps, robust_z,
-                        sample_count, bootstrap_clean_count, confirmed_attack, strong_detector_signal,
-                        quarantined_until
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        now, sensor, prefix, protocol,
-                        int(v1_would_update), int(safe_would_update), state, classification, decision["reason"],
-                        round(pps, 4), round(bps, 4), round(old_pps, 4), round(old_bps, 4), round(old_mad, 4), audit_z,
-                        samples, final_clean, int(confirmed_attack), int(strong_signal),
-                        next_quarantine,
-                    ),
+                _record_safe_learning_audit_v2(
+                    conn,
+                    now_iso=now,
+                    prefix=prefix,
+                    protocol=protocol,
+                    classification=classification,
+                    reason=decision["reason"],
+                    safe_would_update=bool(safe_would_update),
+                    confirmed_attack=bool(confirmed_attack),
+                    strong_signal=bool(strong_signal),
+                    protected_or_internal=bool(protected_or_internal),
+                    campaign_blocked=bool(campaign_blocked),
+                    audit_z=audit_z,
+                    baseline_state=final_state,
                 )
 
         self._record_safe_learning_counters(conn, counters, now)
@@ -2087,6 +2502,10 @@ class BehavioralDetectionEngine:
         cutoff_iso = (now_dt - timedelta(hours=72)).isoformat().replace("+00:00", "Z")
         conn.execute(
             "DELETE FROM behavior_safe_learning_shadow_audit WHERE observed_at < ?",
+            (cutoff_iso,),
+        )
+        conn.execute(
+            "DELETE FROM behavior_safe_learning_shadow_audit_v2 WHERE hour_bucket < ?",
             (cutoff_iso,),
         )
 
@@ -2402,7 +2821,7 @@ def fetch_recent_observations(lookback_seconds: int = 300, limit: int = 100000) 
     """Fetch bounded 10-second flow dimensions; ClickHouse performs the heavy aggregation."""
     from app.services.clickhouse import query_clickhouse
 
-    return query_clickhouse(
+    sql = (
         """
         SELECT
             max(bucket) AS observed_at,
@@ -2429,7 +2848,10 @@ def fetch_recent_observations(lookback_seconds: int = 300, limit: int = 100000) 
             tcp_flags, input_if, output_if, src_asn, dst_asn
         ORDER BY observed_at DESC
         LIMIT {row_limit:UInt32}
-        """,
+        """
+    ).replace("behavior_flow_10s", behavior_flow_table())
+    return query_clickhouse(
+        sql,
         {
             "lookback_seconds": max(10, min(int(lookback_seconds), 3600)),
             "row_limit": max(1000, min(int(limit), 250000)),
@@ -2451,6 +2873,10 @@ class BehavioralThreatRuntime:
         self.policy_engine: Any = None
         self.observation_loader = observation_loader
         self.mitigation_handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None = None
+        # Threat Intelligence -> RTBH candidate generation (RECOMMEND_ONLY).
+        # The handler is invoked after every policy evaluation regardless of
+        # the FlowSpec decision; it never announces anything.
+        self.rtbh_candidate_handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._run_lock = threading.Lock()
@@ -2463,6 +2889,7 @@ class BehavioralThreatRuntime:
             "policy_decisions": 0,
             "automatic_authorizations": 0,
             "mitigations_submitted": 0,
+            "rtbh_candidates": 0,
             "mode": "shadow",
         }
 
@@ -2471,6 +2898,12 @@ class BehavioralThreatRuntime:
         handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None,
     ) -> None:
         self.mitigation_handler = handler
+
+    def set_rtbh_candidate_handler(
+        self,
+        handler: Callable[[AttackVector | CampaignVector, Any], dict[str, Any]] | None,
+    ) -> None:
+        self.rtbh_candidate_handler = handler
 
     def get_policy_engine(self) -> Any:
         if self.policy_engine is None:
@@ -2557,6 +2990,17 @@ class BehavioralThreatRuntime:
                     conn.commit()
             except Exception:
                 LOGGER.exception("network_sweep_shadow_evaluator_failed")
+            # NETWORK_SWEEP NO-OP adapter — simulates the full execution path
+            # (policy -> proposal -> adapter -> audit) with executed=false.
+            # Never writes BGP/FlowSpec/exabgp/FIFO.
+            try:
+                from app.services.network_sweep_noop_adapter import run_noop_adapter
+
+                with self.connection_factory() as conn:
+                    run_noop_adapter(conn)
+                    conn.commit()
+            except Exception:
+                LOGGER.exception("network_sweep_noop_adapter_failed")
             if candidate_v2 or candidate_v2_error:
                 v1_counts = Counter(item.detector for item in vectors)
                 comparison = {
@@ -2603,6 +3047,16 @@ class BehavioralThreatRuntime:
             for candidate in candidates[:maximum_evaluations]:
                 decision = self.get_policy_engine().evaluate(candidate)
                 decisions += 1
+                # Threat Intelligence -> RTBH candidates: generated after every
+                # evaluation, independent of the FlowSpec decision. RECOMMEND_ONLY.
+                if self.rtbh_candidate_handler is not None:
+                    try:
+                        rtbh_result = self.rtbh_candidate_handler(candidate, decision)
+                        created = safe_int(rtbh_result.get("candidates")) if isinstance(rtbh_result, Mapping) else 0
+                        if created:
+                            self.state["rtbh_candidates"] = safe_int(self.state.get("rtbh_candidates")) + created
+                    except Exception as exc:
+                        mitigation_errors.append("rtbh_candidates:" + (clean_text(exc) or exc.__class__.__name__))
                 if not decision.allowed:
                     if decision.gates.get("shadow_policy_verdict") == "WOULD_BLOCK":
                         self.mark_mitigation_status(candidate, "shadow", decision.decision_source)
