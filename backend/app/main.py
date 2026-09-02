@@ -85,6 +85,21 @@ from app.services.cgnat_mapping import (
     store_cgnat_preview,
     update_cgnat_pool,
 )
+from app.services.network_assets import (
+    ADDRESSING_MODES,
+    CGNAT_POOL,
+    NETWORK_ROLES,
+    SERVICE_DIRECTIONS,
+    SOURCE_TYPES,
+    delete_network_asset,
+    ensure_network_assets_schema,
+    fetch_network_asset,
+    list_network_asset_services,
+    list_network_assets,
+    replace_network_asset_services,
+    resolve_network_context as resolve_network_asset_context,
+    upsert_network_asset,
+)
 from app.services.ai_integration import (
     AI_FUNCTIONS,
     AI_PROVIDER_TYPES,
@@ -254,7 +269,14 @@ from app.services.behavioral_detection import (
     ensure_behavioral_schema,
     event_key,
 )
-from app.services.security_events import update_security_event_mitigation_status_by_reference
+from app.services.security_events import (
+    security_event_row,
+    update_security_event_mitigation_status_by_reference,
+)
+from app.services.carpet_replay import (
+    replay_carpet_event,
+    summarize_replay,
+)
 from app.services.transit_rtbh import (
     audit_candidate_event as rtbh_audit_candidate_event,
     build_incident_from_vector,
@@ -952,6 +974,26 @@ DETECTION_GROUP_BY_OPTIONS = {
     "interface",
 }
 DETECTION_MITIGATION_MODES = {"detection_only", "manual_review", "response_profile", "manual", "semi_auto", "auto"}
+
+# Specificity/precedence for detection_template_rules. When several rules match
+# the same traffic/target/window the most specific rule wins and the generic ones
+# are suppressed for that event. The weights implement the documented precedence
+# tiers (protocol + port + direction + domain + target down to ALL/generic).
+DETECTION_TRANSPORT_PROTOCOLS = {
+    "IP", "TCP", "UDP", "ICMP", "GRE", "ESP", "FRAGMENT", "FRAGMENTS",
+    "OTHER", "CUSTOM", "INVALID", "FLOWS",
+}
+DETECTION_SPECIFICITY_WEIGHTS = {
+    "fixed_port": 100,
+    "specific_protocol": 60,
+    "transport_protocol": 40,
+    "direction": 40,
+    "domain": 30,
+    "cidr": 20,
+    "group_by": 20,
+    "interface": 10,
+}
+DETECTION_PROTOCOL_FAMILY = {item["id"]: item["protocol"] for item in DECODER_REGISTRY}
 
 BGP_CONNECTOR_BACKENDS = {"dry_run", "exabgp", "gobgp", "frr", "manual_export"}
 GMJFLOW_HOST_AGENT_URL = os.getenv("GMJFLOW_HOST_AGENT_URL", "").strip().rstrip("/")
@@ -3601,7 +3643,9 @@ def seed_default_detection_template(conn: sqlite3.Connection) -> None:
         ("PREFIX_SUBNET_HIGH_PPS", "subnet", "transmits", "ALL", "packets_s", 1_000_000, 3_000_000),
         ("DNS_INTERNAL_IP_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 10_000, 30_000),
         ("DNS_INTERNAL_IP_HIGH_BITS", "internal_ip", "transmits", "DNS", "bits_s", 20_000_000, 50_000_000),
-        ("DNS_INTERNAL_IP_TO_DST_HIGH_PPS", "internal_ip", "transmits", "DNS", "packets_s", 5_000, 15_000),
+        # DNS_INTERNAL_IP_TO_DST_HIGH_PPS é criada exclusivamente por
+        # ensure_official_dns_detection_rules (com response profile e parâmetros
+        # operacionais oficiais). Não duplicar aqui: manter uma única fonte.
     ]
     for vector, domain, direction, protocol, metric, warning, critical in defaults:
         conn.execute(
@@ -3915,7 +3959,7 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
             "description": "Mitigacao automatica segura para DNS outbound: destination /32, udp, destination-port 53.",
             "response_type": "flowspec",
             "approval_mode": "auto",
-            "mitigation_target_mode": "fixed_connector",
+            "mitigation_target_mode": "sensor_origin",
             "action": "discard",
             "target_selector": "dst_ip",
             "protocol_selector": "udp",
@@ -4065,6 +4109,80 @@ def seed_default_bgp_response_profiles(conn: sqlite3.Connection) -> None:
                 now,
                 now,
             ),
+        )
+
+
+def migrate_dns_auto_block_profile(conn: sqlite3.Connection) -> None:
+    """Correção idempotente do profile DNS automático.
+
+    Profiles legados que ficaram ``fixed_connector`` SEM ``connector_id`` são
+    semanticamente inválidos (o modo exige um conector fixo) e causam
+    validação/UI incorreta. Passam a ``sensor_origin`` com o TTL operacional
+    de 1 hora. Profiles com ``connector_id`` explicitamente configurado (ex.:
+    VNT) NÃO são alterados automaticamente.
+    """
+    conn.execute(
+        """
+        UPDATE bgp_response_profiles
+        SET mitigation_target_mode = 'sensor_origin',
+            default_duration_seconds = 3600,
+            max_duration_seconds = 3600,
+            initial_lease_seconds = 3600,
+            recurrence_lease_seconds = 86400,
+            recurrence_renewal_enabled = 1,
+            updated_at = updated_at
+        WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
+          AND mitigation_target_mode = 'fixed_connector'
+          AND connector_id IS NULL
+        """
+    )
+
+
+def deduplicate_dns_internal_ip_to_dst_rules(conn: sqlite3.Connection) -> None:
+    """Idempotente: garante uma única regra ativa DNS_INTERNAL_IP_TO_DST_HIGH_PPS.
+
+    A regra canônica é a oficial (mitigation_mode='response_profile' e/ou com
+    response profile anexado). Duplicatas incompletas criadas pelo seed default
+    antigo (detection_only sem profile) são DESABILITADAS (nunca deletadas) e
+    anotadas com ``superseded_by_rule_id=<id canônico>``, preservando histórico
+    e referências antigas.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, enabled, mitigation_mode, critical_response_profile_id, notes
+        FROM detection_template_rules
+        WHERE lower(vector) = 'dns_internal_ip_to_dst_high_pps'
+        ORDER BY (critical_response_profile_id IS NOT NULL) DESC, id
+        """
+    ).fetchall()
+    if len(rows) <= 1:
+        return
+    canonical = next(
+        (row for row in rows if row["critical_response_profile_id"] is not None),
+        rows[0],
+    )
+    canonical_id = int(canonical["id"])
+    now = utc_now_iso()
+    for row in rows:
+        if int(row["id"]) == canonical_id:
+            if not sqlite_bool(row["enabled"]):
+                conn.execute(
+                    "UPDATE detection_template_rules SET enabled = 1, updated_at = ? WHERE id = ?",
+                    (now, canonical_id),
+                )
+            continue
+        notes = clean_text(row["notes"])
+        if notes.startswith("superseded_by_rule_id="):
+            continue
+        conn.execute(
+            """
+            UPDATE detection_template_rules
+            SET enabled = 0,
+                notes = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (f"superseded_by_rule_id={canonical_id}", now, int(row["id"])),
         )
 
 
@@ -4453,12 +4571,13 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_announcement_events_announcement ON bgp_announcement_events(announcement_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bgp_port_policies_lookup ON bgp_mitigation_port_policies(is_active, protocol, port_kind, port_value)")
     seed_default_bgp_response_profiles(conn)
+    migrate_dns_auto_block_profile(conn)
     conn.execute(
         """
         UPDATE bgp_response_profiles
         SET enable_multi_target_dns = 1,
             approval_mode = 'auto',
-            mitigation_target_mode = 'fixed_connector',
+            mitigation_target_mode = 'sensor_origin',
             target_selector = 'dst_ip',
             protocol_selector = 'udp',
             dst_port_selector = 'fixed',
@@ -4470,10 +4589,12 @@ def ensure_bgp_db(conn: sqlite3.Connection) -> None:
             recurrence_lease_seconds = COALESCE(recurrence_lease_seconds, 86400),
             recurrence_renewal_enabled = 1
         WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'
+          AND connector_id IS NULL
         """
     )
     if sqlite_table_exists(conn, "detection_template_rules"):
         ensure_official_dns_detection_rules(conn)
+        deduplicate_dns_internal_ip_to_dst_rules(conn)
     seed_default_bgp_port_policies(conn)
 
 
@@ -4636,6 +4757,7 @@ def ensure_sensor_db() -> None:
         ensure_transit_rtbh_schema(conn)
         ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
+        ensure_network_assets_schema(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
@@ -13241,6 +13363,9 @@ def bgp_readiness_reason_message(reason: str) -> str:
         "backend_exabgp_pipe_not_fifo": "Caminho ExaBGP do backend nao e um FIFO; anuncio nao enviado.",
         "backend_exabgp_pipe_not_writable": "Pipe ExaBGP sem permissao de escrita no backend; anuncio nao enviado.",
         "backend_exabgp_pipe_out_unavailable": "Pipe de saida ExaBGP indisponivel no backend; anuncio nao enviado.",
+        "host_agent_delivery_unavailable": "Host Agent nao confirma leitor ativo no FIFO; anuncio nao enviado.",
+        "delivery_path_unverified": "Caminho de entrega FlowSpec nao comprovado; anuncio nao enviado.",
+        "delivery_reader_unverified": "Leitor/consumer do FIFO nao comprovado; anuncio nao enviado.",
         "close_wait_above_threshold": "CLOSE_WAIT acima do limite operacional; anuncio nao enviado.",
     }.get(clean_text(reason), clean_text(reason))
 
@@ -13289,16 +13414,77 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     pipe_ok = bool(
         bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
     )
-    requires_backend_delivery = bool(clean_text(pipes.get("input_path")))
+    reader_active = bool(pipes.get("reader_active"))
+    input_path = clean_text(pipes.get("input_path"))
+
+    # Direct path evidence: the backend container itself can see and write the
+    # FIFO (filesystem/permission checks only — never opens the FIFO).
     backend_pipes = status.get("backend_pipes")
     if not isinstance(backend_pipes, dict):
         backend_pipes = exabgp_backend_delivery_path_status(
-            clean_text(pipes.get("input_path")),
+            input_path,
             clean_text(pipes.get("output_path")),
         )
-    delivery_path_ready = bool(
-        backend_pipes.get("delivery_path_ready") if requires_backend_delivery else True
+    direct_pipe_visible = bool(
+        backend_pipes.get("backend_pipe_in_visible")
+        or backend_pipes.get("backend_mount_visible")
     )
+
+    # Host-agent path evidence: when the host-agent is the component
+    # responsible for delivery, its own reader evidence is sufficient and the
+    # backend container is NOT required to see the FIFO directly.
+    host_agent = status.get("host_agent")
+    if not isinstance(host_agent, dict):
+        host_agent = {}
+    host_agent_reachable = bool(
+        host_agent.get("enabled") and host_agent.get("available")
+    )
+    host_agent_pipes = normalize_bgp_pipe_payload(host_agent)
+    host_agent_reader_active = bool(host_agent_pipes.get("reader_active"))
+    if not host_agent_reader_active and clean_text(pipes.get("source")) == "host_agent":
+        host_agent_reader_active = reader_active
+    host_agent_delivery_ready = bool(
+        host_agent_reachable and host_agent_reader_active
+    )
+
+    pipe_is_direct = clean_text(pipes.get("source")) != "host_agent"
+    # Direct pipe with a PROVEN reader/consumer: the payload explicitly asserts
+    # both a FIFO and an active reader. A writable-only pipe (or the backend's
+    # own exabgp_pipe_status / exabgp_backend_delivery_path_status view, which
+    # never inspect the reader) is NOT sufficient on its own.
+    direct_pipe_ready = bool(
+        pipe_ok
+        and pipe_is_direct
+        and bool(pipes.get("is_fifo"))
+        and reader_active
+    )
+    # Operational evidence: pipe exists/writable but the reader is unverified.
+    # Persisted for diagnosis only — it must never gate delivery on its own.
+    operational_delivery_ready = bool(
+        pipe_ok and pipe_is_direct and not direct_pipe_ready
+    )
+
+    if direct_pipe_ready:
+        delivery_path_ready = True
+        delivery_path_source = "direct_pipe"
+        delivery_path_reason = "direct_pipe_reader_verified"
+    elif host_agent_delivery_ready:
+        delivery_path_ready = True
+        delivery_path_source = "host_agent"
+        delivery_path_reason = "delivery_verified_via_host_agent"
+    elif operational_delivery_ready:
+        delivery_path_ready = False
+        delivery_path_source = "operational_evidence"
+        delivery_path_reason = "delivery_reader_unverified"
+    else:
+        delivery_path_ready = False
+        delivery_path_source = "unavailable"
+        delivery_path_reason = (
+            "host_agent_delivery_unavailable"
+            if host_agent_reachable and not host_agent_reader_active
+            else clean_text(backend_pipes.get("reason"))
+            or "delivery_path_unverified"
+        )
     close_wait_count = int(session.get("close_wait_count") or 0)
     close_wait_threshold = int(session.get("close_wait_alert_threshold") or 0)
     if isinstance(session.get("close_wait_alert"), bool):
@@ -13318,11 +13504,18 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         else status.get("passive_listen_enabled")
     )
     transport_ready = bool(listener_ok or bgp_ok)
+    # Operational evidence that ExaBGP is actually serving traffic even when the
+    # systemd service cannot be checked from inside the backend container.
+    service_proven_operational = bool(bgp_ok or flowspec_ok)
+    service_gate_ok = bool(
+        service_active or (not service_checked and service_proven_operational)
+    )
     failed_reasons: list[str] = []
     if not service_active:
-        failed_reasons.append(
-            "exabgp_service_inactive" if service_checked else "exabgp_service_unverified"
-        )
+        if service_checked:
+            failed_reasons.append("exabgp_service_inactive")
+        elif not service_proven_operational:
+            failed_reasons.append("exabgp_service_unverified")
     if not bgp_ok:
         failed_reasons.append(
             "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
@@ -13338,9 +13531,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     if not pipe_ok:
         failed_reasons.append("exabgp_pipe_unavailable")
     if not delivery_path_ready:
-        failed_reasons.append(
-            clean_text(backend_pipes.get("reason")) or "backend_exabgp_pipe_unavailable"
-        )
+        failed_reasons.append(delivery_path_reason)
     if not close_wait_ok:
         failed_reasons.append("close_wait_above_threshold")
     reason = failed_reasons[0] if failed_reasons else ""
@@ -13366,7 +13557,8 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         else "peer_not_verified"
     )
     checks = {
-        "service_ok": service_active,
+        "service_ok": service_gate_ok,
+        "service_active": service_active,
         "listener_ok": listener_ok,
         "bgp_ok": bgp_ok,
         "flowspec_ok": flowspec_ok,
@@ -13376,7 +13568,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "delivery_path_ready": delivery_path_ready,
     }
     required_checks = {
-        "service_ok": service_active,
+        "service_ok": service_gate_ok,
         "bgp_ok": bgp_ok,
         "flowspec_ok": flowspec_ok,
         "pipe_ok": pipe_ok,
@@ -13396,6 +13588,13 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     details["listener_informational"] = not listener_required
     details["listener_required"] = listener_required
     details["transport_ready"] = transport_ready
+    details["delivery_path_source"] = delivery_path_source
+    details["delivery_path_reason"] = delivery_path_reason
+    details["reader_active"] = reader_active
+    details["host_agent_reachable"] = host_agent_reachable
+    details["direct_pipe_visible"] = direct_pipe_visible
+    details["host_agent_delivery_ready"] = host_agent_delivery_ready
+    details["direct_pipe_ready"] = direct_pipe_ready
     return {
         "ready": ready,
         "peer_state": peer_state,
@@ -13409,6 +13608,11 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "confirmation_level": confirmation_level,
         "backend_pipes": backend_pipes,
         "delivery_path_ready": delivery_path_ready,
+        "delivery_path_source": delivery_path_source,
+        "delivery_path_reason": delivery_path_reason,
+        "reader_active": reader_active,
+        "host_agent_reachable": host_agent_reachable,
+        "direct_pipe_visible": direct_pipe_visible,
         "details": details,
     }
 
@@ -18249,6 +18453,97 @@ def equivalent_mitigation_announcement(
     return bgp_announcement_row_to_dict(row) if row is not None else None
 
 
+def automatic_mitigation_blockers(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Decompose the automatic-mitigation gate into one entry per guardrail so the
+    UI can show each blocker separately (ExaBGP readiness / time series /
+    connector / whitelist / policy / validation / cooldown) instead of a single
+    generic message."""
+    gate = state.get("automatic_gate") if isinstance(state.get("automatic_gate"), dict) else {}
+    policy = state.get("policy") if isinstance(state.get("policy"), dict) else {}
+    readiness = state.get("readiness") if isinstance(state.get("readiness"), dict) else {}
+    validation = state.get("validation") if isinstance(state.get("validation"), dict) else {}
+    preview_connector = state.get("preview_connector")
+    requires_connector_selection = bool(state.get("requires_connector_selection"))
+    resolution_reason = clean_text(
+        state.get("resolution_reason")
+        or state.get("connector_resolution_reason")
+        or state.get("resolution_error")
+    )
+    gate_reasons = normalize_string_list(gate.get("reasons"))
+    policy_reasons = normalize_string_list(policy.get("reasons"))
+    policy_warnings = normalize_string_list(policy.get("warnings"))
+    policy_decision = clean_text(policy.get("decision"))
+    whitelist_hits = state.get("whitelist_hits") or []
+
+    ts_blocked = "insufficient_time_series_evidence" in gate_reasons
+    ts_reason = clean_text(gate.get("time_series_reason")) or (
+        "insufficient_time_series_evidence" if ts_blocked else "sufficient_time_series_evidence"
+    )
+
+    if preview_connector is not None and not requires_connector_selection:
+        connector_status = "PASSED"
+        connector_reason = clean_text(state.get("resolution_reason")) or "connector_resolved"
+    else:
+        connector_status = "FAILED"
+        connector_reason = resolution_reason or (
+            "ambiguous_connector_resolution" if requires_connector_selection else "connector_unresolved"
+        )
+
+    whitelist_blocked = "whitelist_match" in policy_warnings or bool(whitelist_hits)
+    whitelist_status = "FAILED" if whitelist_blocked else "PASSED"
+    whitelist_reason = "whitelist_match" if whitelist_blocked else "no_whitelist_match"
+
+    policy_auto_allowed = policy_decision == "allow_auto" and any(
+        "AUTO_ALLOWED" in reason.upper() for reason in policy_reasons
+    )
+    policy_status = "PASSED" if policy_auto_allowed else "FAILED"
+    policy_reason = (
+        "policy_auto_allowed"
+        if policy_auto_allowed
+        else (policy_reasons[0] if policy_reasons else policy_decision or "policy_not_auto_allowed")
+    )
+
+    if not isinstance(readiness, dict) or "ready" not in readiness:
+        readiness_status = "SKIPPED"
+        readiness_reason = "readiness_not_checked"
+    elif readiness.get("ready") is True:
+        readiness_status = "PASSED"
+        readiness_reason = "exabgp_ready"
+    else:
+        readiness_status = "FAILED"
+        readiness_reason = clean_text(readiness.get("reason")) or "exabgp_not_ready"
+
+    blockers = [
+        {"key": "exabgp_readiness", "label": "ExaBGP readiness", "status": readiness_status, "reason": readiness_reason},
+        {"key": "time_series", "label": "time series", "status": "PASSED" if not ts_blocked else "FAILED", "reason": ts_reason},
+        {"key": "connector", "label": "connector", "status": connector_status, "reason": connector_reason},
+        {"key": "whitelist", "label": "whitelist", "status": whitelist_status, "reason": whitelist_reason},
+        {"key": "policy", "label": "policy", "status": policy_status, "reason": policy_reason},
+    ]
+
+    validation_errors = normalize_string_list(validation.get("errors"))
+    validation_blocked = bool(validation_errors)
+    blockers.append(
+        {
+            "key": "validation",
+            "label": "validation",
+            "status": "FAILED" if validation_blocked else "PASSED",
+            "reason": validation_errors[0] if validation_errors else "flowspec_valid",
+        }
+    )
+
+    cooldown_allowed = bool(state.get("cooldown_allowed", True))
+    blockers.append(
+        {
+            "key": "cooldown",
+            "label": "cooldown",
+            "status": "PASSED" if cooldown_allowed else "FAILED",
+            "reason": "cooldown_allows" if cooldown_allowed else "cooldown_active",
+        }
+    )
+    return blockers
+
+
 def evaluated_mitigation_candidates(
     anomaly_id: int,
     operator_connector_id: int | None = None,
@@ -18330,6 +18625,11 @@ def evaluated_mitigation_candidates(
             policy["decision"] = "deny"
             policy["severity"] = "danger"
             policy["reasons"] = sorted(set([*(policy.get("reasons") or []), connector_resolution_reason]))
+        elif not preview_connector:
+            connector_resolution_reason = "connector_unresolved"
+            policy["decision"] = "deny"
+            policy["severity"] = "danger"
+            policy["reasons"] = sorted(set([*(policy.get("reasons") or []), connector_resolution_reason]))
         with sqlite_connection() as conn:
             validation_profile = preview_profile or {}
             validation = validate_mitigation_candidate(candidate, preview_connector, validation_profile)
@@ -18383,6 +18683,7 @@ def evaluated_mitigation_candidates(
         auto_allowed = bool(
             policy_allows_auto
             and automatic_gate.get("allowed", True)
+            and preview_connector is not None
             and any("AUTO_ALLOWED" in clean_text(reason).upper() for reason in policy.get("reasons") or [])
         )
         analysis_only = bool(candidate.get("never_announce") or clean_text(candidate.get("mitigation_mode")) == "analysis_only")
@@ -18410,6 +18711,38 @@ def evaluated_mitigation_candidates(
             else "candidate_generated"
         )
         informational_candidate = candidate_state == "informational_candidate"
+        resolution_method = clean_text(candidate.get("connector_resolution_method") or candidate.get("resolution_source"))
+        connector_resolution_mode = "sensor_origin" if resolution_method == "sensor" else resolution_method
+        if preview_connector:
+            if resolution_method == "sensor":
+                resolution_reason = "anomaly_sensor_connector"
+            elif resolution_method == "zone_id":
+                resolution_reason = "zone_connector"
+            elif resolution_method == "zone_prefix":
+                resolution_reason = "zone_prefix_connector"
+            elif resolution_method == "profile_connector_id":
+                resolution_reason = "profile_fixed_connector"
+            elif resolution_method == "selected_connector_ids":
+                resolution_reason = "selected_connectors"
+            elif resolution_method == "operator_connector_id":
+                resolution_reason = "operator_connector"
+            else:
+                resolution_reason = "resolved_connector"
+        else:
+            resolution_reason = connector_resolution_reason or "connector_unresolved"
+        automatic_blockers = automatic_mitigation_blockers(
+            {
+                "automatic_gate": automatic_gate,
+                "policy": policy,
+                "readiness": readiness,
+                "validation": validation,
+                "preview_connector": preview_connector,
+                "requires_connector_selection": requires_connector_selection,
+                "resolution_reason": resolution_reason,
+                "cooldown_allowed": cooldown_allowed,
+                "whitelist_hits": candidate.get("dns_whitelist_hits") or [],
+            }
+        )
         evaluated.append(
             {
                 **candidate,
@@ -18425,6 +18758,10 @@ def evaluated_mitigation_candidates(
                 "pipe_path": preview_connector.get("exabgp_pipe_in") if preview_connector else candidate.get("pipe_path") or "",
                 "mitigation_target_mode": (preview_profile or {}).get("mitigation_target_mode") or candidate.get("mitigation_target_mode") or "",
                 "resolution_source": candidate.get("resolution_source") or candidate.get("connector_resolution_method") or "",
+                "connector_resolution_mode": connector_resolution_mode,
+                "resolved_connector_id": int(preview_connector["id"]) if preview_connector else None,
+                "resolved_connector_name": preview_connector.get("name") if preview_connector else "",
+                "resolution_reason": resolution_reason,
                 "resolution_error": (
                     "connector_ambiguous"
                     if requires_connector_selection
@@ -18437,6 +18774,10 @@ def evaluated_mitigation_candidates(
                 "candidate_version": candidate_version,
                 "automatic_not_applied_reason": automatic_gate.get("reason") or connector_resolution_reason,
                 "automatic_gate": automatic_gate,
+                "automatic_blockers": automatic_blockers,
+                "automatic_blocked": any(
+                    blocker.get("status") == "FAILED" for blocker in automatic_blockers
+                ),
                 "deterministic_gate_reasons": automatic_gate.get("reasons") or [],
                 "analysis_mode": automatic_gate.get("analysis_mode") or "automatic_authorization",
                 "mitigation_state": candidate_state,
@@ -27772,6 +28113,101 @@ def purge_ip_zone_prefix(zone_id: int, prefix_id: int):
         return {"status": "purged", "id": prefix_id, "cidr": prefix["cidr"], "zone_id": zone_id}
 
 
+@app.get("/api/network-assets")
+def network_assets_list(include_cgnat: bool = True):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_network_assets(conn, include_cgnat=include_cgnat)}
+
+
+@app.post("/api/network-assets", status_code=201)
+def network_assets_create(payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        asset = upsert_network_asset(conn, payload)
+        conn.commit()
+        return asset
+
+
+@app.put("/api/network-assets/{asset_id}")
+def network_assets_update(asset_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if fetch_network_asset(conn, asset_id) is None:
+            raise HTTPException(status_code=404, detail="network_asset_not_found")
+        asset = upsert_network_asset(conn, payload, asset_id=asset_id)
+        conn.commit()
+        return asset
+
+
+@app.delete("/api/network-assets/{asset_id}")
+def network_assets_delete(asset_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        changed = delete_network_asset(conn, asset_id)
+        conn.commit()
+        return {"status": "deleted" if changed else "not_found", "id": asset_id}
+
+
+@app.get("/api/network-assets/{asset_id}/services")
+def network_asset_services_list(asset_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_network_asset_services(conn, asset_id)}
+
+
+@app.put("/api/network-assets/{asset_id}/services")
+def network_asset_services_replace(asset_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if fetch_network_asset(conn, asset_id) is None:
+            raise HTTPException(status_code=404, detail="network_asset_not_found")
+        services = payload.get("services") if isinstance(payload.get("services"), list) else payload.get("items") or []
+        result = replace_network_asset_services(conn, asset_id, services)
+        conn.commit()
+        return {"items": result}
+
+
+@app.get("/api/network-context/resolve")
+def network_context_resolve_api(ip: str):
+    ensure_sensor_db()
+    return resolve_network_asset_context(ip)
+
+
+@app.post("/api/carpet-replay")
+def carpet_replay_api(payload: dict[str, Any]):
+    """Read-only shadow replay of historical CARPET_BOMBING events through the
+    current detector decision rules. Never writes events, never touches BGP."""
+    ensure_sensor_db()
+    event_id = int_or_none(payload.get("event_id"))
+    last_n = int(payload.get("last_n") or 0)
+    start = clean_text(payload.get("start"))
+    end = clean_text(payload.get("end"))
+    with sqlite_connection() as conn:
+        clauses = ["attack_type = 'CARPET_BOMBING'"]
+        values: list[Any] = []
+        if event_id is not None:
+            clauses.append("id = ?")
+            values.append(event_id)
+        elif start:
+            clauses.append("first_seen >= ?")
+            values.append(start)
+            if end:
+                clauses.append("first_seen <= ?")
+                values.append(end)
+        order = " ORDER BY first_seen DESC"
+        limit = ""
+        if event_id is None and last_n and last_n > 0:
+            limit = f" LIMIT {int(last_n)}"
+        rows = conn.execute(
+            f"SELECT * FROM security_events WHERE {' AND '.join(clauses)}{order}{limit}",
+            values,
+        ).fetchall()
+        events = [security_event_row(row) for row in rows]
+    results = [replay_carpet_event(event) for event in events]
+    return {"items": results, "summary": summarize_replay(results)}
+
+
 @app.get("/api/ip-zones/{zone_id}/flow-coverage")
 def ip_zone_flow_coverage(
     zone_id: int,
@@ -29154,6 +29590,14 @@ def detection_additional_conditions(candidate: dict[str, Any]) -> list[dict[str,
     return conditions
 
 
+def detection_rule_is_automatic(rule_config: dict[str, Any] | None) -> bool:
+    """True quando a regra de detecção está configurada para mitigação automática."""
+    rule_config = rule_config if isinstance(rule_config, dict) else {}
+    mode = clean_text(rule_config.get("mitigation_mode")).lower()
+    response = clean_text(rule_config.get("response")).upper()
+    return mode in {"response_profile", "auto", "automatic"} or response == "RESPONSE_PROFILE"
+
+
 def build_detection_threshold_state(
     candidate: dict[str, Any],
     previous_source_details: dict[str, Any] | None = None,
@@ -29241,11 +29685,29 @@ def build_detection_threshold_state(
     first_time = parse_datetime_text(immutable_trigger.get("triggered_at"))
     last_time = parse_datetime_text(last_seen)
     duration_seconds = max(0, int((last_time - first_time).total_seconds())) if first_time and last_time else 0
-    required_points = max(2, int(rule_config.get("consecutive_windows") or 1))
+    consecutive_windows = int(rule_config.get("consecutive_windows") or 1)
+    time_series_bypassed_for_critical = bool(
+        triggered_severity == "critical"
+        and detection_rule_is_automatic(rule_config)
+        and consecutive_windows <= 1
+    )
     instant_critical_allowed = sqlite_bool(
         rule_config.get("allow_instant_critical_auto")
         or rule_config.get("instant_critical_auto")
+        or time_series_bypassed_for_critical
     )
+    if time_series_bypassed_for_critical:
+        required_points = 1
+    else:
+        required_points = max(2, consecutive_windows)
+    if points_count >= required_points:
+        time_series_reason = (
+            "bypassed_critical_auto_single_window"
+            if time_series_bypassed_for_critical
+            else "sufficient_time_series_evidence"
+        )
+    else:
+        time_series_reason = "insufficient_time_series_evidence"
     temporal_evidence = {
         "points_count": points_count,
         "duration_seconds": duration_seconds,
@@ -29256,6 +29718,10 @@ def build_detection_threshold_state(
             points_count >= required_points
             or (triggered_severity == "critical" and instant_critical_allowed)
         ),
+        "time_series_required_windows": required_points,
+        "time_series_observed_windows": points_count,
+        "time_series_gate_bypassed_for_critical": time_series_bypassed_for_critical,
+        "time_series_reason": time_series_reason,
     }
     previous_peak = detection_number(previous_current.get("peak_value")) or detection_number(immutable_trigger.get("trigger_value")) or 0.0
     current = {
@@ -29417,12 +29883,30 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         comparison,
     ):
         reasons.append("below_automatic_mitigation_threshold")
-    if (
+    time_series_bypassed_for_critical = bool(
+        sqlite_bool(evidence.get("time_series_gate_bypassed_for_critical"))
+    )
+    time_series_required = bool(
         evidence
         and vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR
+    )
+    if (
+        time_series_required
         and not sqlite_bool(evidence.get("sufficient_for_automatic"))
     ):
         reasons.append("insufficient_time_series_evidence")
+    if evidence and sqlite_bool(evidence.get("sufficient_for_automatic")):
+        time_series_reason = (
+            "bypassed_critical_auto_single_window"
+            if time_series_bypassed_for_critical
+            else "sufficient_time_series_evidence"
+        )
+    elif not evidence:
+        time_series_reason = "no_temporal_evidence"
+    elif time_series_required:
+        time_series_reason = "insufficient_time_series_evidence"
+    else:
+        time_series_reason = "time_series_not_required"
     priority = (
         "warning_manual_only",
         "below_automatic_mitigation_threshold",
@@ -29448,7 +29932,9 @@ def detection_automatic_policy_gate(candidate_or_event: dict[str, Any]) -> dict[
         "automatic_mitigation_threshold": automatic_threshold,
         "temporal_evidence": evidence,
         "warning_auto_explicitly_enabled": allow_warning_auto,
-        "temporal_evidence_required": vector != DNS_SINGLE_FLOW_OUTBOUND_VECTOR,
+        "temporal_evidence_required": time_series_required,
+        "time_series_gate_bypassed_for_critical": time_series_bypassed_for_critical,
+        "time_series_reason": time_series_reason,
     }
 
 
@@ -29788,7 +30274,8 @@ def query_detection_rule_candidates(
             "top_src_ip": src_ip if outbound_dst_port or dns_outbound_rule else "",
             "top_dst_ip": dst_ip if outbound_dst_port or dns_outbound_rule else "",
             "top_src_port": top_src_port if outbound_dst_port or dns_outbound_rule else None,
-            "top_dst_port": top_dst_port if outbound_dst_port or dns_outbound_rule else None,
+            "dst_port": dst_port,
+            "top_dst_port": top_dst_port,
             "top_packets": int(float(row.get("packets") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
             "top_bytes": int(float(row.get("bytes") or 0)) if outbound_dst_port or dns_outbound_rule else 0,
             "mitigation_basis": "dns_outbound_conversation" if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR else "dns_outbound_destination" if dns_outbound_rule else "dst_ip,dst_port,protocol" if outbound_dst_port else "",
@@ -29979,6 +30466,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "target_port": candidate.get("target_port") or candidate.get("top_dst_port") or None,
         "mitigation_basis": candidate.get("mitigation_basis") or "",
         "mitigation_reason": candidate.get("mitigation_reason") or "",
+        "selection": candidate.get("selection") or {},
         "detection": detection_state,
     }
     source_details.update(detection_fields_from_source_details(source_details))
@@ -33893,6 +34381,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "automatic_mitigation_threshold": candidate.get("automatic_mitigation_threshold"),
         "observed_metric": candidate.get("metric_value"),
         "metric": candidate.get("metric"),
+        "selection": candidate.get("selection") or {},
         "detection": detection_state,
     }
     source_details.update(detection_fields_from_source_details(source_details))
@@ -34076,6 +34565,418 @@ def record_detection_rule_runtime(
     )
 
 
+def detection_protocol_specificity(protocol: Any) -> tuple[int, str]:
+    normalized = normalize_detection_protocol(protocol, allow_empty=True)
+    if not normalized or normalized == "ALL":
+        return 0, "generic_all"
+    if normalized in DETECTION_TRANSPORT_PROTOCOLS:
+        return DETECTION_SPECIFICITY_WEIGHTS["transport_protocol"], "transport"
+    return DETECTION_SPECIFICITY_WEIGHTS["specific_protocol"], "application"
+
+
+def detection_rule_fixed_port(rule: dict[str, Any]) -> bool:
+    for key in ("dst_port", "src_port"):
+        value = rule.get(key)
+        if value in (None, "", "any", "all", "*"):
+            continue
+        try:
+            normalized = normalize_detection_port_text(value, key)
+        except HTTPException:
+            continue
+        if normalized and normalized != "any" and not normalized.startswith("!"):
+            return True
+    return False
+
+
+def detection_rule_specificity(rule: dict[str, Any]) -> dict[str, Any]:
+    components: dict[str, Any] = {}
+    score = 0
+    protocol = normalize_detection_protocol(rule.get("protocol") or "ALL", allow_empty=True)
+    proto_score, proto_kind = detection_protocol_specificity(protocol)
+    if proto_score:
+        score += proto_score
+        components["protocol"] = {"value": protocol, "score": proto_score, "kind": proto_kind}
+    if detection_rule_fixed_port(rule):
+        score += DETECTION_SPECIFICITY_WEIGHTS["fixed_port"]
+        components["fixed_port"] = {
+            "score": DETECTION_SPECIFICITY_WEIGHTS["fixed_port"],
+            "dst_port": rule.get("dst_port"),
+            "src_port": rule.get("src_port"),
+        }
+    direction = clean_text(rule.get("direction")).lower()
+    if direction and direction != "both":
+        score += DETECTION_SPECIFICITY_WEIGHTS["direction"]
+        components["direction"] = {"value": direction, "score": DETECTION_SPECIFICITY_WEIGHTS["direction"]}
+    domain = clean_text(rule.get("domain"))
+    if domain:
+        score += DETECTION_SPECIFICITY_WEIGHTS["domain"]
+        components["domain"] = {"value": domain, "score": DETECTION_SPECIFICITY_WEIGHTS["domain"]}
+    if clean_text(rule.get("src_cidr")) or clean_text(rule.get("dst_cidr")):
+        score += DETECTION_SPECIFICITY_WEIGHTS["cidr"]
+        components["cidr"] = {
+            "score": DETECTION_SPECIFICITY_WEIGHTS["cidr"],
+            "src_cidr": rule.get("src_cidr"),
+            "dst_cidr": rule.get("dst_cidr"),
+        }
+    group_by = clean_text(rule.get("group_by") or rule.get("detection_key"))
+    if group_by:
+        score += DETECTION_SPECIFICITY_WEIGHTS["group_by"]
+        components["group_by"] = {"value": group_by, "score": DETECTION_SPECIFICITY_WEIGHTS["group_by"]}
+    if clean_text(rule.get("input_if")) or clean_text(rule.get("output_if")):
+        score += DETECTION_SPECIFICITY_WEIGHTS["interface"]
+        components["interface"] = {
+            "score": DETECTION_SPECIFICITY_WEIGHTS["interface"],
+            "input_if": rule.get("input_if"),
+            "output_if": rule.get("output_if"),
+        }
+    return {"score": score, "components": components}
+
+
+def detection_protocol_specializes(specific: Any, generic: Any) -> bool:
+    specific = normalize_detection_protocol(specific, allow_empty=True)
+    generic = normalize_detection_protocol(generic, allow_empty=True)
+    if not specific or specific == "ALL":
+        return False
+    if not generic or generic == "ALL":
+        return True
+    if specific == generic:
+        return True
+    specific_family = DETECTION_PROTOCOL_FAMILY.get(specific)
+    generic_family = DETECTION_PROTOCOL_FAMILY.get(generic)
+    if specific_family and generic_family and specific_family == generic_family:
+        return specific not in DETECTION_TRANSPORT_PROTOCOLS and generic in DETECTION_TRANSPORT_PROTOCOLS
+    return False
+
+
+def detection_candidate_protocol_family(candidate: dict[str, Any]) -> str:
+    protocol = clean_text(candidate.get("protocol")).upper()
+    family = DETECTION_PROTOCOL_FAMILY.get(protocol)
+    if family:
+        return family
+    mapping = {"UDP": "udp", "TCP": "tcp", "ICMP": "icmp", "GRE": "gre", "ESP": "esp"}
+    return mapping.get(protocol, protocol.lower())
+
+
+def detection_candidate_effective_dst_port(candidate: dict[str, Any]) -> int:
+    try:
+        return int(candidate.get("top_dst_port") or candidate.get("target_port") or candidate.get("dst_port") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def detection_candidate_time_bucket(candidate: dict[str, Any]) -> str:
+    window_seconds = max(1, int((candidate.get("rule_config") or {}).get("window_seconds") or 60))
+    dt = parse_datetime_text(candidate.get("first_seen") or candidate.get("last_seen"))
+    if dt is None:
+        return clean_text(candidate.get("first_seen") or candidate.get("last_seen"))
+    return str(int(dt.timestamp()) // max(1, window_seconds))
+
+
+def detection_candidate_event_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        candidate.get("zone_id"),
+        candidate.get("template_id"),
+        candidate.get("prefix_id") or clean_text(candidate.get("prefix_cidr")),
+        clean_ip(candidate.get("src_ip") or candidate.get("internal_ip") or candidate.get("target_ip")),
+        clean_ip(candidate.get("dst_ip") or candidate.get("top_dst_ip")),
+        detection_candidate_effective_dst_port(candidate),
+        detection_candidate_protocol_family(candidate),
+        detection_candidate_time_bucket(candidate),
+    )
+
+
+def detection_candidate_threshold(candidate: dict[str, Any]) -> float | None:
+    severity = clean_text(candidate.get("severity")).lower()
+    if severity == "critical":
+        critical = candidate.get("threshold_critical")
+        if critical is not None:
+            return detection_number(critical)
+    return detection_number(candidate.get("threshold_warning"))
+
+
+def detection_candidate_rule_fingerprint(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rule_id": candidate.get("rule_id"),
+        "rule_name": candidate.get("rule_name") or candidate.get("vector"),
+        "vector": candidate.get("vector") or candidate.get("rule_name"),
+        "display_name": candidate.get("display_name") or "",
+        "specificity_score": candidate.get("specificity_score"),
+        "specificity_components": candidate.get("specificity_components") or {},
+    }
+
+
+def select_most_specific_detection_candidate(items: list[dict[str, Any]]) -> dict[str, Any]:
+    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        threshold = detection_candidate_threshold(item)
+        if threshold is None:
+            threshold = float("inf")
+        return (
+            -int(item.get("specificity_score") or 0),
+            threshold,
+            int(item.get("rule_id") or 0),
+        )
+
+    ordered = sorted(items, key=sort_key)
+    winner = ordered[0]
+    suppressed = ordered[1:]
+    reason = (
+        f"highest_specificity_score_suppressed_{len(suppressed)}_generic_rules"
+        if suppressed
+        else "only_matching_rule"
+    )
+    return {
+        "selected": winner,
+        "suppressed": suppressed,
+        "matched_rules": [detection_candidate_rule_fingerprint(item) for item in ordered],
+        "selected_rule": detection_candidate_rule_fingerprint(winner),
+        "suppressed_rules": [detection_candidate_rule_fingerprint(item) for item in suppressed],
+        "selection_reason": reason,
+        "specificity_score": winner.get("specificity_score"),
+        "winner_name": winner.get("rule_name") or winner.get("vector") or "",
+    }
+
+
+def promote_superseded_generic_anomalies(
+    conn: sqlite3.Connection,
+    winner: dict[str, Any],
+    suppressed: list[dict[str, Any]],
+) -> list[int]:
+    promoted: list[int] = []
+    if not suppressed:
+        return promoted
+    now = utc_now_iso()
+    winner_fingerprint = detection_candidate_rule_fingerprint(winner)
+    for item in suppressed:
+        dedupe = security_anomaly_dedupe_key(item)
+        row = conn.execute(
+            """
+            SELECT *
+            FROM security_anomalies
+            WHERE dedupe_key = ?
+              AND status = 'active'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (dedupe,),
+        ).fetchone()
+        if row is None:
+            continue
+        previous = bgp_json_loads(row["source_details_json"], {})
+        history = [entry for entry in previous.get("reclassification_history") or [] if isinstance(entry, dict)]
+        history.append(
+            {
+                "from_rule_id": item.get("rule_id"),
+                "from_rule_name": item.get("rule_name") or item.get("vector"),
+                "from_vector": item.get("vector") or item.get("rule_name"),
+                "to_rule_id": winner.get("rule_id"),
+                "to_rule_name": winner.get("rule_name") or winner.get("vector"),
+                "to_vector": winner.get("vector") or winner.get("rule_name"),
+                "specificity_score": winner.get("specificity_score"),
+                "reason": "promoted_to_more_specific_rule",
+                "at": now,
+            }
+        )
+        source_details = {
+            **previous,
+            "reclassified_to": winner_fingerprint,
+            "reclassification_reason": "promoted_to_more_specific_rule",
+            "reclassification_history": history[-20:],
+        }
+        conn.execute(
+            """
+            UPDATE security_anomalies
+            SET status = 'ended',
+                ended_at = ?,
+                updated_at = ?,
+                source_details_json = ?
+            WHERE id = ?
+            """,
+            (now, now, json.dumps(source_details, sort_keys=True, default=str), int(row["id"])),
+        )
+        promoted.append(int(row["id"]))
+    return promoted
+
+
+def collect_detection_template_rule_matches(
+    conn: sqlite3.Connection,
+    raw_rule: dict[str, Any],
+    end_dt: datetime,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    rule = detection_rule_row_to_dict(raw_rule)
+    template = {
+        "id": int(raw_rule["template_id"]),
+        "name": raw_rule.get("template_name") or "",
+        "active": sqlite_bool(raw_rule.get("template_active")),
+    }
+    window_seconds = max(1, int(rule.get("window_seconds") or 60))
+    start_dt = end_dt - timedelta(seconds=window_seconds)
+    result: dict[str, Any] = {
+        "template_id": template["id"],
+        "template_name": template["name"],
+        "rule_id": rule["id"],
+        "rule_name": rule["vector"],
+        "enabled": bool(rule.get("enabled")) and bool(template.get("active")),
+        "query_range": {"start": iso(start_dt), "end": iso(end_dt), "window_seconds": window_seconds},
+        "rows": 0,
+        "max_metric": 0,
+        "threshold_warning": rule.get("warning_value"),
+        "threshold_critical": rule.get("critical_value"),
+        "matched": False,
+        "anomaly_created": False,
+        "anomaly_id": None,
+        "anomalies_created": 0,
+        "skipped_reason": "",
+        "specificity_score": None,
+    }
+    if not template["active"] or not rule["enabled"]:
+        result["skipped_reason"] = "disabled"
+        logger.info("rule skipped: disabled")
+        return result, [], ["disabled"]
+
+    logger.info("evaluating template rule id=%s name=%s", rule["id"], rule["vector"])
+    specificity = detection_rule_specificity(rule)
+    result["specificity_score"] = specificity["score"]
+    pairs = detection_rule_zone_prefixes(conn, template["id"])
+    if not pairs:
+        result["skipped_reason"] = "no_zone_prefix_match"
+        logger.info("rule skipped: no zone/prefix match")
+        return result, [], ["no_zone_prefix_match"]
+
+    skip_reasons: list[str] = []
+    matched_candidates: list[dict[str, Any]] = []
+    for zone, prefix in pairs:
+        zone["detection_template_name"] = template["name"]
+        prefix["detection_template_name"] = template["name"]
+        whitelist = [] if rule.get("bypass_whitelist") or not rule.get("use_global_whitelist") else active_detection_whitelist(conn, int(zone["id"]))
+        try:
+            observations = query_detection_rule_candidates(
+                zone,
+                template,
+                rule,
+                prefix,
+                start_dt,
+                end_dt,
+                rule.get("sensor_id"),
+                include_unmatched=True,
+            )
+        except Exception as exc:
+            reason = f"query_error:{clean_text(exc)}"
+            skip_reasons.append(reason)
+            logger.warning("Falha ao avaliar detection_template_rule id=%s prefix=%s: %s", rule["id"], prefix["cidr"], exc)
+            continue
+        result["rows"] += len(observations)
+        if observations:
+            result["max_metric"] = max(float(result["max_metric"] or 0), max(float(item.get("metric_value") or 0) for item in observations))
+        matched_items = [item for item in observations if item.get("matched")]
+        if matched_items:
+            result["matched"] = True
+            logger.info("rule matched")
+        for item in matched_items:
+            whitelist_hit = detection_whitelist_hit(item, whitelist)
+            if whitelist_hit:
+                reason = detection_whitelist_skip_reason(item, whitelist_hit)
+                skip_reasons.append(reason)
+                logger.info("rule skipped: global_whitelist %s", reason)
+                continue
+            item["whitelist_status"] = "no_match"
+            if security_anomaly_in_cooldown(conn, item, int(rule.get("cooldown_seconds") or 0), end_dt):
+                skip_reasons.append("cooldown")
+                logger.info("rule skipped: cooldown")
+                continue
+            item["specificity_score"] = specificity["score"]
+            item["specificity_components"] = specificity["components"]
+            matched_candidates.append(item)
+    return result, matched_candidates, skip_reasons
+
+
+def run_detection_template_rules_with_specificity(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    end_dt: datetime,
+    *,
+    create_anomalies: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    checked_at = iso(end_dt)
+    results: list[dict[str, Any]] = []
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    rule_state: dict[int, dict[str, Any]] = {}
+    for raw_rule in rows:
+        result, candidates, skip_reasons = collect_detection_template_rule_matches(conn, raw_rule, end_dt)
+        rule_id = int(raw_rule["id"])
+        rule_state[rule_id] = {
+            "result": result,
+            "candidates": candidates,
+            "skip_reasons": skip_reasons,
+            "checked_at": checked_at,
+            "selected": False,
+            "anomaly_created": False,
+            "suppressed_by": set(),
+        }
+        results.append(result)
+        for item in candidates:
+            grouped.setdefault(detection_candidate_event_key(item), []).append(item)
+
+    anomalies_created = 0
+    for items in grouped.values():
+        selection = select_most_specific_detection_candidate(items)
+        winner = dict(selection["selected"])
+        suppressed = selection["suppressed"]
+        winner["selection"] = {
+            "matched_rules": selection["matched_rules"],
+            "selected_rule": selection["selected_rule"],
+            "suppressed_rules": selection["suppressed_rules"],
+            "selection_reason": selection["selection_reason"],
+            "specificity_score": selection["specificity_score"],
+        }
+        if create_anomalies:
+            promote_superseded_generic_anomalies(conn, winner, suppressed)
+            if is_dns_outbound_template_vector(winner.get("vector") or winner.get("rule_name")):
+                action = upsert_detection_template_dns_anomaly_event(conn, winner)
+            else:
+                action = upsert_security_anomaly(conn, winner)
+            winner_state = rule_state.get(int(winner.get("rule_id") or 0))
+            if winner_state is not None:
+                winner_state["selected"] = True
+                if action == "created":
+                    winner_state["anomaly_created"] = True
+                    anomalies_created += 1
+        for item in suppressed:
+            state = rule_state.get(int(item.get("rule_id") or 0))
+            if state is not None:
+                state["suppressed_by"].add(selection["winner_name"])
+
+    for raw_rule in rows:
+        rule_id = int(raw_rule["id"])
+        state = rule_state.get(rule_id)
+        if state is None:
+            continue
+        result = state["result"]
+        skip_reasons = state["skip_reasons"]
+        pre_reason = clean_text(result.get("skipped_reason"))
+        if pre_reason not in {"disabled", "no_zone_prefix_match"}:
+            if result["rows"] == 0 and not result["matched"]:
+                result["skipped_reason"] = "no_flow_rows"
+            elif not result["matched"]:
+                result["skipped_reason"] = "threshold_not_met"
+            elif state["selected"]:
+                result["skipped_reason"] = "" if state["anomaly_created"] else ("existing_anomaly_updated" if create_anomalies else "")
+            elif state["candidates"] and state["suppressed_by"]:
+                result["skipped_reason"] = "suppressed_by_specific_rule:" + ",".join(sorted(state["suppressed_by"]))
+            elif skip_reasons:
+                result["skipped_reason"] = skip_reasons[0]
+            else:
+                result["skipped_reason"] = ""
+        record_detection_rule_runtime(
+            conn,
+            rule_id,
+            state["checked_at"],
+            matched=bool(result["matched"]),
+            anomaly_created=bool(state["anomaly_created"]),
+            skipped_reason=clean_text(result["skipped_reason"]),
+        )
+    return results, anomalies_created
+
+
 def evaluate_detection_template_rule(
     conn: sqlite3.Connection,
     raw_rule: dict[str, Any],
@@ -34220,19 +35121,20 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
         with sqlite_connection() as conn:
             rows = detection_template_rule_rows(conn)
             enabled_count = sum(1 for row in rows if sqlite_bool(row.get("enabled")) and sqlite_bool(row.get("template_active")))
-            for row in rows:
-                result = evaluate_detection_template_rule(conn, row, end_dt, create_anomalies=create_anomalies)
-                results.append(result)
-                anomalies_created += int(result.get("anomalies_created") or 0)
+            # evaluate_detection_template_rule runs ClickHouse queries and
+            # writes anomalies on this same connection; the specificity-aware
+            # evaluator below keeps the same single-connection contract and
+            # commits once after all rules so the WAL write lock is never held
+            # across the next rule's slow ClickHouse round-trip (database is
+            # locked starvation).
+            results, anomalies_created = run_detection_template_rules_with_specificity(
+                conn, rows, end_dt, create_anomalies=create_anomalies
+            )
+            for result in results:
                 reason = clean_text(result.get("skipped_reason"))
                 if reason:
                     key = reason.split(":", 1)[0]
                     skipped_reasons[key] = skipped_reasons.get(key, 0) + 1
-                # evaluate_detection_template_rule runs ClickHouse queries and
-                # writes anomalies on this same connection; commit each rule so
-                # the WAL write lock is never held across the next rule's slow
-                # ClickHouse round-trip (database is locked starvation).
-                conn.commit()
             conn.commit()
         update_detection_scheduler_status(
             last_run_at=started_at,

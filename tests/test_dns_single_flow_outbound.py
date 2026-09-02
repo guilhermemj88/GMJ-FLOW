@@ -424,7 +424,7 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     profile = conn.execute(
                         "SELECT * FROM bgp_response_profiles WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'"
                     ).fetchone()
-                    self.assertEqual(profile["default_duration_seconds"], 900)
+                    self.assertEqual(profile["default_duration_seconds"], 3600)
                     event = {
                         "id": 2446,
                         "anomaly_source": "detection_template_rule",
@@ -515,7 +515,7 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertNotIn("source ", command)
                     self.assertNotIn("source-port", command)
                     self.assertEqual(automatic["mitigation_scope"], "destination_dns_udp53")
-                    self.assertEqual(automatic["duration_seconds"], 900)
+                    self.assertEqual(automatic["duration_seconds"], 3600)
                     self.assertEqual(automatic["mitigation_mode"], "automatic")
                     self.assertNotEqual(
                         automatic.get("cgnat_auto_block_reason"),
@@ -560,7 +560,7 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     self.assertEqual(details["whitelist_result"], "no_match")
                     self.assertEqual(details["mitigation_scope"], "destination_dns_udp53")
                     self.assertEqual(details["blocked_destination_ip"], "83.29.96.194")
-                    self.assertEqual(details["ttl_seconds"], 900)
+                    self.assertEqual(details["ttl_seconds"], 3600)
                     self.assertEqual(details["public_ip"], "45.5.248.196")
                     self.assertEqual(details["public_port"], 2258)
                     self.assertEqual(details["private_ip"], "100.64.0.4")
@@ -659,7 +659,14 @@ class DnsSingleFlowOutboundTest(unittest.TestCase):
                     configured = backend_main.build_mitigation_candidates_from_anomaly(
                         {"event": event, "flows": flows}
                     )[0]
-                    self.assertEqual(configured["duration_seconds"], 1200)
+                    # Single-owner TTL: initial_lease_seconds do perfil (3600) vence o
+                    # duration_seconds legado da regra (1200 preservado, mas ignorado).
+                    self.assertEqual(configured["duration_seconds"], 3600)
+                    preserved = conn.execute(
+                        "SELECT duration_seconds FROM detection_template_rules WHERE id = ?",
+                        (int(rule["id"]),),
+                    ).fetchone()["duration_seconds"]
+                    self.assertEqual(preserved, 1200)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -580,6 +580,32 @@
       ${sourceRows.length ? `<div class="table-wrap"><table class="table table-sm"><thead><tr><th>IP</th><th>Provider</th><th>Classificação</th><th>Tags</th></tr></thead><tbody>${sourceRows.join('')}</tbody></table></div>` : '<div class="subtle">Nenhum match externo.</div>'}`;
   }
 
+  function renderNetworkContextSection(event) {
+    const ctx = (event.investigation && event.investigation.network_context) || {};
+    const hasClassification = Boolean(ctx.traffic_classification);
+    const roleDist = Object.entries(ctx.target_role_distribution || {});
+    const hasRoleDist = roleDist.length > 0;
+    if (!hasClassification && !hasRoleDist) return '';
+    const percent = value => (value == null ? '-' : `${Math.round(Number(value) * 100)}%`);
+    return `<section><h3>Contexto da rede</h3>
+      ${hasClassification ? detailGrid([
+        ['Classificação', ctx.traffic_classification],
+        ['Network context score', ctx.network_context_score == null ? '-' : String(ctx.network_context_score)],
+        ['Reason codes', (ctx.reason_codes || []).join(', ') || '-']
+      ]) : ''}
+      ${hasRoleDist ? detailGrid([['Composição dos destinos', roleDist.map(([role, share]) => `${role} ${Math.round(Number(share) * 100)}%`).join(' · ')]]) : ''}
+      ${detailGrid([
+        ['Web return share', percent(ctx.web_return_share)],
+        ['UDP QUIC share', percent(ctx.udp_quic_share)],
+        ['TCP ACK ratio', percent(ctx.tcp_ack_ratio)],
+        ['TCP SYN ratio', percent(ctx.tcp_syn_ratio)],
+        ['Diversidade de portas destino', ctx.dst_port_entropy == null ? '-' : (Number(ctx.dst_port_entropy) > 0.5 ? 'alta' : 'baixa')]
+      ])}
+      ${(ctx.evidence_categories_passed || []).length ? detailGrid([['Evidências aprovadas', ctx.evidence_categories_passed.join(' + ')]]) : ''}
+      ${(ctx.evidence_categories_failed || []).length ? detailGrid([['Evidências ausentes', ctx.evidence_categories_failed.join(', ') || '-']]) : ''}
+    </section>`;
+  }
+
   function renderSecurityEventDetail(event, related = []) {
     const evidence = event.evidence || {};
     const network = event.network_context || {};
@@ -606,6 +632,7 @@
         ['Portas src / dst', `${number(event.unique_src_ports)} / ${number(event.unique_dst_ports)}`],
         ['ASNs de origem', number(event.unique_source_asns)], ['Baseline', `${number(event.baseline_deviation, 2)}x`]
       ])}</section>
+      ${renderNetworkContextSection(event)}
       <section><h3>Evidências do detector</h3>${evidenceList(evidence.facts)}
         <h4>Composição do score</h4>${detailGrid(Object.entries(components))}</section>
       <section><h3>Threat Intelligence</h3>${renderThreatIntelDetail(event)}</section>

@@ -5087,6 +5087,99 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </div>
 
+          <section class="panel p-3 mt-3">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Contexto semântico da rede (roles / hierarquia)</div>
+                <div id="networkAssetStatus" class="metric-readout">Função e endereçamento por prefixo/host; CGNAT pools aparecem automaticamente.</div>
+              </div>
+              <div class="toolbar">
+                <button id="refreshNetworkAssetsButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+                </button>
+                <button id="newNetworkAssetButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="plus"></i><span>Novo prefixo/subrede</span>
+                </button>
+                <button id="newNetworkHostButton" type="button" class="btn btn-sm btn-outline-secondary">
+                  <i data-lucide="plus-square"></i><span>Novo host</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="ip-zone-form-grid mb-3" id="networkAssetForm" hidden>
+              <div class="field">
+                <label for="networkAssetPrefix">Prefixo / host (CIDR)</label>
+                <input id="networkAssetPrefix" class="form-control form-control-sm" placeholder="45.163.144.32/27">
+              </div>
+              <div class="field">
+                <label for="networkAssetName">Nome</label>
+                <input id="networkAssetName" class="form-control form-control-sm" placeholder="Google GGC">
+              </div>
+              <div class="field">
+                <label for="networkAssetRole">Role</label>
+                <select id="networkAssetRole" class="form-select form-select-sm"></select>
+              </div>
+              <div class="field">
+                <label for="networkAssetAddressingMode">Endereçamento</label>
+                <select id="networkAssetAddressingMode" class="form-select form-select-sm"></select>
+              </div>
+              <div class="field">
+                <label for="networkAssetProvider">Provider</label>
+                <input id="networkAssetProvider" class="form-control form-control-sm" placeholder="GOOGLE">
+              </div>
+              <div class="field">
+                <label for="networkAssetZone">Zona</label>
+                <select id="networkAssetZone" class="form-select form-select-sm"></select>
+              </div>
+              <div class="field grid-span-3">
+                <label for="networkAssetNotes">Notas</label>
+                <input id="networkAssetNotes" class="form-control form-control-sm" placeholder="Observações">
+              </div>
+              <div class="field grid-span-3 toolbar">
+                <button id="saveNetworkAssetButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
+                <button id="cancelNetworkAssetButton" type="button" class="btn btn-sm btn-outline-secondary"><span>Cancelar</span></button>
+                <span id="networkAssetFormHint" class="subtle"></span>
+              </div>
+            </div>
+
+            <div class="d-flex gap-2 mb-2 align-items-center">
+              <input id="networkContextResolveIp" class="form-control form-control-sm" placeholder="Resolver IP (ex.: 45.163.144.44)" style="max-width: 260px;">
+              <button id="networkContextResolveButton" type="button" class="btn btn-sm btn-outline-primary">
+                <i data-lucide="search"></i><span>Resolver</span>
+              </button>
+            </div>
+            <div id="networkContextResolveResult" class="panel p-2 mb-2" hidden></div>
+
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 ip-zone-data-table">
+                <thead><tr><th>Prefixo</th><th>Nome</th><th>Role</th><th>Endereçamento</th><th>Provider</th><th>Origem</th><th>Status</th><th class="text-end">Ações</th></tr></thead>
+                <tbody id="networkAssetTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <div id="networkAssetServicesModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="networkAssetServicesTitle">
+            <div class="gmj-dialog">
+              <div class="gmj-dialog-header">
+                <h2 id="networkAssetServicesTitle" class="view-title">Serviços esperados</h2>
+                <button type="button" class="icon-button" data-close-modal="networkAssetServicesModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </div>
+              <div class="gmj-dialog-body">
+                <div id="networkAssetServicesStatus" class="metric-readout mb-2">Tráfego compatível com role + serviço recebe contexto de comportamento legítimo; não é whitelist.</div>
+                <div class="table-wrap">
+                  <table class="table table-sm align-middle mb-2">
+                    <thead><tr><th>Protocolo</th><th>Porta origem</th><th>Porta destino</th><th>Direção</th><th>Descrição</th><th>Ativo</th><th></th></tr></thead>
+                    <tbody id="networkAssetServicesTable"></tbody>
+                  </table>
+                </div>
+                <button id="addNetworkAssetServiceButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="plus"></i><span>Adicionar serviço</span></button>
+                <div class="toolbar mt-2">
+                  <button id="saveNetworkAssetServicesButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar serviços</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <section id="detectionTemplateSection" class="panel p-3 mt-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
@@ -12045,12 +12138,310 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       else fillIpZoneForm(null);
     }
 
+    let networkAssets = [];
+    let editingNetworkAssetId = null;
+    let editingNetworkAssetServicesAssetId = null;
+    let networkAssetServicesDraft = [];
+
+    const NETWORK_ROLE_OPTIONS = [
+      ['CUSTOMER_PUBLIC', 'CUSTOMER_PUBLIC'],
+      ['CGNAT_POOL', 'CGNAT_POOL'],
+      ['CDN_CACHE', 'CDN_CACHE'],
+      ['DNS_RESOLVER', 'DNS_RESOLVER'],
+      ['DOWNSTREAM_ISP', 'DOWNSTREAM_ISP'],
+      ['SERVER_INFRA', 'SERVER_INFRA'],
+      ['NETWORK_INFRA', 'NETWORK_INFRA'],
+      ['PEERING_INFRA', 'PEERING_INFRA'],
+      ['OTHER', 'OTHER'],
+    ];
+    const NETWORK_ADDRESSING_OPTIONS = [
+      ['NONE', 'NONE'],
+      ['DIRECT_PUBLIC', 'DIRECT_PUBLIC'],
+      ['CGNAT_DETERMINISTIC', 'CGNAT_DETERMINISTIC'],
+      ['CGNAT_NON_DETERMINISTIC', 'CGNAT_NON_DETERMINISTIC'],
+      ['NAT', 'NAT'],
+      ['MIXED', 'MIXED'],
+    ];
+
+    function fillNetworkAssetSelectOptions() {
+      const roleSelect = document.getElementById('networkAssetRole');
+      const addressingSelect = document.getElementById('networkAssetAddressingMode');
+      if (roleSelect && !roleSelect.options.length) {
+        roleSelect.innerHTML = NETWORK_ROLE_OPTIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+      }
+      if (addressingSelect && !addressingSelect.options.length) {
+        addressingSelect.innerHTML = NETWORK_ADDRESSING_OPTIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+      }
+      const zoneSelect = document.getElementById('networkAssetZone');
+      if (zoneSelect) {
+        zoneSelect.innerHTML = '<option value="">Sem zona</option>' + (ipZones || []).map(zone => `<option value="${Number(zone.id)}">${escapeHtml(zone.name)}</option>`).join('');
+      }
+    }
+
+    async function loadNetworkAssets() {
+      try {
+        const payload = await apiRequest('/api/network-assets');
+        networkAssets = Array.isArray(payload.items) ? payload.items : [];
+      } catch (error) {
+        networkAssets = [];
+        console.error('Falha ao carregar ativos de rede', error);
+      }
+      renderNetworkAssets();
+    }
+
+    function networkRoleBadgeClass(role) {
+      const map = {
+        CGNAT_POOL: 'state-informational',
+        CDN_CACHE: 'status-active',
+        DNS_RESOLVER: 'status-active',
+        DOWNSTREAM_ISP: 'state-pending',
+        CUSTOMER_PUBLIC: 'off',
+        SERVER_INFRA: 'state-informational',
+        NETWORK_INFRA: 'state-informational',
+        PEERING_INFRA: 'state-informational',
+      };
+      return map[role] || 'off';
+    }
+
+    function networkRoleShortBadge(role) {
+      const map = {
+        CDN_CACHE: 'CDN',
+        DNS_RESOLVER: 'DNS',
+        CGNAT_POOL: 'CGNAT',
+        DOWNSTREAM_ISP: 'ISP',
+        SERVER_INFRA: 'SERVER',
+        NETWORK_INFRA: 'NETWORK',
+        PEERING_INFRA: 'PEERING',
+        CUSTOMER_PUBLIC: 'CUSTOMER',
+      };
+      return map[role] || 'OTHER';
+    }
+
+    function renderNetworkAssets() {
+      const tbody = document.getElementById('networkAssetTable');
+      if (!tbody) return;
+      const sorted = [...networkAssets].sort((a, b) => String(a.prefix).localeCompare(String(b.prefix)));
+      tbody.innerHTML = sorted.map(asset => {
+        const prefixLength = Number(String(asset.prefix).split('/')[1] || 0);
+        const indent = Math.max(0, Math.min(18, prefixLength - 8));
+        const pad = '&nbsp;&nbsp;&nbsp;&nbsp;'.repeat(indent);
+        const isCgnat = asset.source_type === 'cgnat_pool';
+        const sourceLabel = isCgnat ? '<span class="badge-soft state-informational">CGNAT</span>' : escapeHtml(asset.source_type || 'manual');
+        const actions = isCgnat
+          ? `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="showView('cgnat')" title="Gerenciar no CGNAT"><i data-lucide="external-link"></i></button>`
+          : `<button type="button" class="btn btn-sm btn-outline-secondary network-asset-edit" data-id="${Number(asset.id)}" title="Editar"><i data-lucide="pencil"></i></button>
+             <button type="button" class="btn btn-sm btn-outline-secondary network-asset-services" data-id="${Number(asset.id)}" title="Serviços esperados"><i data-lucide="settings-2"></i></button>
+             ${asset.active
+               ? `<button type="button" class="btn btn-sm btn-outline-danger network-asset-toggle" data-id="${Number(asset.id)}" data-active="0" title="Desativar"><i data-lucide="ban"></i></button>`
+               : `<button type="button" class="btn btn-sm btn-outline-success network-asset-toggle" data-id="${Number(asset.id)}" data-active="1" title="Ativar"><i data-lucide="rotate-ccw"></i></button>`}
+             <button type="button" class="btn btn-sm btn-outline-danger network-asset-delete" data-id="${Number(asset.id)}" title="Excluir"><i data-lucide="trash-2"></i></button>`;
+        return `<tr>
+          <td>${pad}${escapeHtml(asset.prefix)}</td>
+          <td>${escapeHtml(asset.name)}</td>
+          <td><span class="badge-soft ${networkRoleBadgeClass(asset.role)}">${escapeHtml(asset.role)}</span></td>
+          <td>${escapeHtml(asset.addressing_mode)}</td>
+          <td>${escapeHtml(asset.provider)}</td>
+          <td>${sourceLabel}</td>
+          <td>${asset.active ? 'Ativo' : 'Inativo'}</td>
+          <td class="text-end">${actions}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="subtle">Nenhum ativo semântico cadastrado.</td></tr>';
+      createIcons();
+    }
+
+    function resetNetworkAssetForm() {
+      editingNetworkAssetId = null;
+      document.getElementById('networkAssetForm').hidden = false;
+      document.getElementById('networkAssetPrefix').value = '';
+      document.getElementById('networkAssetName').value = '';
+      document.getElementById('networkAssetProvider').value = '';
+      document.getElementById('networkAssetNotes').value = '';
+      document.getElementById('networkAssetRole').value = 'OTHER';
+      document.getElementById('networkAssetAddressingMode').value = 'NONE';
+      document.getElementById('networkAssetZone').value = '';
+      document.getElementById('networkAssetFormHint').textContent = '';
+    }
+
+    function openNetworkAssetForm(asset, hostMode = false) {
+      fillNetworkAssetSelectOptions();
+      resetNetworkAssetForm();
+      if (asset) {
+        editingNetworkAssetId = Number(asset.id);
+        document.getElementById('networkAssetPrefix').value = asset.prefix || '';
+        document.getElementById('networkAssetName').value = asset.name || '';
+        document.getElementById('networkAssetProvider').value = asset.provider || '';
+        document.getElementById('networkAssetNotes').value = asset.notes || '';
+        document.getElementById('networkAssetRole').value = asset.role || 'OTHER';
+        document.getElementById('networkAssetAddressingMode').value = asset.addressing_mode || 'NONE';
+        document.getElementById('networkAssetZone').value = asset.zone_id ? String(asset.zone_id) : '';
+      } else if (hostMode) {
+        document.getElementById('networkAssetPrefix').placeholder = '45.163.144.18/32';
+        document.getElementById('networkAssetFormHint').textContent = 'Host /32 (ou /128 IPv6).';
+      }
+      document.getElementById('networkAssetPrefix').focus();
+    }
+
+    async function saveNetworkAsset() {
+      const payload = {
+        prefix: document.getElementById('networkAssetPrefix').value.trim(),
+        name: document.getElementById('networkAssetName').value.trim(),
+        role: document.getElementById('networkAssetRole').value,
+        addressing_mode: document.getElementById('networkAssetAddressingMode').value,
+        provider: document.getElementById('networkAssetProvider').value.trim(),
+        zone_id: document.getElementById('networkAssetZone').value ? Number(document.getElementById('networkAssetZone').value) : null,
+        notes: document.getElementById('networkAssetNotes').value.trim(),
+      };
+      if (!payload.prefix) {
+        document.getElementById('networkAssetFormHint').textContent = 'Prefixo obrigatório.';
+        return;
+      }
+      const path = editingNetworkAssetId ? `/api/network-assets/${editingNetworkAssetId}` : '/api/network-assets';
+      const method = editingNetworkAssetId ? 'PUT' : 'POST';
+      try {
+        await apiRequest(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        document.getElementById('networkAssetForm').hidden = true;
+        await loadNetworkAssets();
+      } catch (error) {
+        document.getElementById('networkAssetFormHint').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function toggleNetworkAsset(id, active) {
+      const asset = networkAssets.find(item => Number(item.id) === Number(id));
+      if (!asset) return;
+      try {
+        await apiRequest(`/api/network-assets/${Number(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prefix: asset.prefix, active: Number(active) })
+        });
+        await loadNetworkAssets();
+      } catch (error) {
+        console.error('Falha ao alternar ativo', error);
+      }
+    }
+
+    async function deleteNetworkAsset(id) {
+      if (!confirm('Excluir este ativo semântico? Prefixos CGNAT projetados não podem ser excluídos aqui.')) return;
+      try {
+        await apiRequest(`/api/network-assets/${Number(id)}`, { method: 'DELETE' });
+        await loadNetworkAssets();
+      } catch (error) {
+        console.error('Falha ao excluir ativo', error);
+      }
+    }
+
+    function networkServiceRow(service, index) {
+      const protocol = service?.protocol || '';
+      const srcPort = service?.source_port ?? '';
+      const dstPort = service?.destination_port ?? '';
+      const direction = service?.direction || 'ANY';
+      const description = service?.description || '';
+      const enabled = service?.enabled !== 0;
+      const directionOptions = ['ANY', 'TO_CUSTOMERS', 'FROM_CUSTOMERS', 'INBOUND', 'OUTBOUND']
+        .map(dir => `<option value="${dir}" ${direction === dir ? 'selected' : ''}>${dir}</option>`).join('');
+      return `<tr>
+        <td><input class="form-control form-control-sm network-service-protocol" value="${escapeHtml(protocol)}" placeholder="tcp"></td>
+        <td><input class="form-control form-control-sm network-service-srcport" type="number" value="${escapeHtml(String(srcPort))}" placeholder="443"></td>
+        <td><input class="form-control form-control-sm network-service-dstport" type="number" value="${escapeHtml(String(dstPort))}" placeholder="any"></td>
+        <td><select class="form-select form-select-sm network-service-direction">${directionOptions}</select></td>
+        <td><input class="form-control form-control-sm network-service-description" value="${escapeHtml(description)}" placeholder="QUIC"></td>
+        <td><input type="checkbox" class="network-service-enabled" ${enabled ? 'checked' : ''}></td>
+        <td><button type="button" class="btn btn-sm btn-outline-danger network-service-remove" data-index="${index}"><i data-lucide="x"></i></button></td>
+      </tr>`;
+    }
+
+    function renderNetworkAssetServices() {
+      const tbody = document.getElementById('networkAssetServicesTable');
+      if (!tbody) return;
+      tbody.innerHTML = networkAssetServicesDraft.map((service, index) => networkServiceRow(service, index)).join('')
+        || '<tr><td colspan="7" class="subtle">Nenhum serviço esperado.</td></tr>';
+      createIcons();
+    }
+
+    function collectNetworkAssetServices() {
+      const rows = document.querySelectorAll('#networkAssetServicesTable tr');
+      const services = [];
+      rows.forEach(row => {
+        const protocol = row.querySelector('.network-service-protocol')?.value?.trim();
+        if (!protocol && !row.querySelector('.network-service-srcport')?.value && !row.querySelector('.network-service-dstport')?.value) return;
+        services.push({
+          protocol,
+          source_port: row.querySelector('.network-service-srcport')?.value ? Number(row.querySelector('.network-service-srcport').value) : null,
+          destination_port: row.querySelector('.network-service-dstport')?.value ? Number(row.querySelector('.network-service-dstport').value) : null,
+          direction: row.querySelector('.network-service-direction')?.value || 'ANY',
+          description: row.querySelector('.network-service-description')?.value?.trim() || '',
+          enabled: row.querySelector('.network-service-enabled')?.checked ? 1 : 0,
+        });
+      });
+      return services;
+    }
+
+    async function openNetworkAssetServices(id) {
+      editingNetworkAssetServicesAssetId = Number(id);
+      const asset = networkAssets.find(item => Number(item.id) === Number(id));
+      document.getElementById('networkAssetServicesTitle').textContent = `Serviços esperados — ${asset ? asset.prefix : ''}`;
+      try {
+        const payload = await apiRequest(`/api/network-assets/${Number(id)}/services`);
+        networkAssetServicesDraft = Array.isArray(payload.items) ? payload.items.map(item => ({ ...item })) : [];
+      } catch (error) {
+        networkAssetServicesDraft = [];
+      }
+      renderNetworkAssetServices();
+      openModal('networkAssetServicesModal');
+    }
+
+    async function saveNetworkAssetServices() {
+      const services = collectNetworkAssetServices();
+      try {
+        await apiRequest(`/api/network-assets/${editingNetworkAssetServicesAssetId}/services`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ services })
+        });
+        closeModal('networkAssetServicesModal');
+        await loadNetworkAssets();
+      } catch (error) {
+        document.getElementById('networkAssetServicesStatus').textContent = `Falha: ${error.message}`;
+      }
+    }
+
+    async function resolveNetworkContextPreview() {
+      const box = document.getElementById('networkContextResolveResult');
+      const ip = (document.getElementById('networkContextResolveIp').value || '').trim();
+      if (!ip) { box.hidden = true; return; }
+      try {
+        const ctx = await apiRequest(`/api/network-context/resolve?ip=${encodeURIComponent(ip)}`);
+        if (!ctx.matched) {
+          box.hidden = false;
+          box.innerHTML = `<div class="metric-readout">${escapeHtml(ip)}</div><div class="subtle">Sem contexto (OTHER).</div>`;
+          return;
+        }
+        const services = (ctx.expected_services || []).map(s =>
+          `${String(s.protocol || 'any').toUpperCase()}/${s.source_port ?? 'any'}${s.destination_port != null ? '→' + s.destination_port : ''} ${s.direction || ''}${s.description ? ' ' + s.description : ''}`
+        ).join(' · ');
+        const rows = [
+          ['Matched', `${ctx.prefix}${ctx.name ? ' · ' + ctx.name : ''}`],
+          ['Parent', ctx.parent ? `${ctx.parent.prefix}${ctx.parent.name ? ' · ' + ctx.parent.name : ''}` : '-'],
+          ['Role', ctx.role],
+          ['Addressing', ctx.addressing_mode],
+          ['Provider', ctx.provider || '-'],
+          ['Fontes de contexto', (ctx.context_sources || []).join(' + ') || '-'],
+          ['Serviços esperados', services || '-'],
+        ].map(([label, value]) => `<div class="metric-readout"><span class="subtle">${label}:</span> ${escapeHtml(value)}</div>`).join('');
+        box.hidden = false;
+        box.innerHTML = `<div class="metric-readout mb-1">${escapeHtml(ctx.ip)}</div>${rows}`;
+      } catch (error) {
+        box.hidden = false;
+        box.innerHTML = '<div class="text-danger">falha ao resolver</div>';
+      }
+    }
+
     function newIpZone() {
       currentIpZoneId = null;
       fillIpZoneForm(null);
       setIpZoneStatus('Nova IP Zone');
     }
-
     async function saveIpZone() {
       const payload = collectIpZoneForm();
       if (!payload.name) {
@@ -13355,7 +13746,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         loadDetectionTemplates(),
         loadIpZoneConnectors(),
         loadIpZones(),
-        loadDetectionWhitelist()
+        loadDetectionWhitelist(),
+        loadNetworkAssets()
       ]);
       renderDashboardZoneSelects();
       renderDetectionTemplateSelect();
@@ -16328,7 +16720,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         return '<div class="text-danger mb-2">Não elegível para mitigação: nenhum conector elegível foi encontrado.</div>';
       }
       if (eligible.length === 1 && !candidate.requires_connector_selection) {
-        return `<div class="metric-readout mb-2">Conector escolhido: ${escapeHtml(mitigationConnectorLabel(eligible[0]))}</div>`;
+        const autoResolved = candidate.connector_resolution_mode === 'sensor_origin'
+          ? '<div class="text-success fw-semibold mb-1">Resolvido automaticamente por sensor_origin</div>'
+          : '';
+        return `${autoResolved}<div class="metric-readout mb-2">Conector escolhido: ${escapeHtml(mitigationConnectorLabel(eligible[0]))}</div>`;
       }
       return `
         <div class="field mb-2">
@@ -16510,6 +16905,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const selectionMessage = selectionPending
           ? '<div class="text-warning fw-semibold mb-2">Selecione um conector para recalcular a proposta.</div>'
           : '';
+        const automaticBlockers = Array.isArray(candidate.automatic_blockers) ? candidate.automatic_blockers : [];
+        const hasFailedBlocker = automaticBlockers.some(blocker => blocker && blocker.status === 'FAILED');
+        const autoBlockedPanel = hasFailedBlocker ? `
+          <div class="panel p-2 mb-2 border-start border-danger border-3">
+            <div class="panel-title mb-1 text-danger">AUTO BLOCKED</div>
+            ${automaticBlockers.map(blocker => {
+              const statusClass = blocker.status === 'FAILED' ? 'text-danger' : blocker.status === 'PASSED' ? 'text-success' : 'subtle';
+              return `<div class="${statusClass}">- ${escapeHtml(blocker.label)}: ${escapeHtml(blocker.status)}${blocker.reason ? ` (${escapeHtml(blocker.reason)})` : ''}</div>`;
+            }).join('')}
+          </div>` : '';
         return `
           <div class="panel p-2">
             <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
@@ -16536,6 +16941,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             ${readiness && Object.prototype.hasOwnProperty.call(readiness, 'ready') ? `<div class="subtle mb-2">Prontidão atual: ${readiness.ready === true ? 'ready' : readiness.ready === false ? `não pronto${readiness.reason ? ` (${escapeHtml(readiness.reason)})` : ''}` : 'ainda não verificada'}</div>` : ''}
             ${selectedConnectorId ? `<div class="subtle mb-2">connector_id selecionado: #${escapeHtml(selectedConnectorId)}</div>` : ''}
             ${connectorResolutionReason && !selectionPending ? `<div class="text-danger mb-2">Mitigacao automatica nao aplicada: ${escapeHtml(connectorResolutionReason)}</div>` : ''}
+            ${autoBlockedPanel}
             ${informationalMessage}
             ${ineligibleMessage}
             ${selectionMessage}
@@ -27883,6 +28289,43 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('editAssociatedTemplateButton').addEventListener('click', editAssociatedDetectionTemplate);
     document.getElementById('ipZoneTemplate').addEventListener('change', renderIpZoneTemplateSummary);
     document.getElementById('showInactiveZones').addEventListener('change', () => loadIpZones().catch(console.error));
+    document.getElementById('refreshNetworkAssetsButton').addEventListener('click', () => loadNetworkAssets().catch(console.error));
+    document.getElementById('networkContextResolveButton').addEventListener('click', () => resolveNetworkContextPreview().catch(console.error));
+    document.getElementById('networkContextResolveIp').addEventListener('keydown', event => {
+      if (event.key === 'Enter') resolveNetworkContextPreview().catch(console.error);
+    });
+    document.getElementById('newNetworkAssetButton').addEventListener('click', () => openNetworkAssetForm(null));
+    document.getElementById('newNetworkHostButton').addEventListener('click', () => openNetworkAssetForm(null, true));
+    document.getElementById('saveNetworkAssetButton').addEventListener('click', () => saveNetworkAsset().catch(console.error));
+    document.getElementById('cancelNetworkAssetButton').addEventListener('click', () => { document.getElementById('networkAssetForm').hidden = true; });
+    document.getElementById('addNetworkAssetServiceButton').addEventListener('click', () => {
+      networkAssetServicesDraft.push({ protocol: '', source_port: null, destination_port: null, direction: 'ANY', description: '', enabled: 1 });
+      renderNetworkAssetServices();
+    });
+    document.getElementById('saveNetworkAssetServicesButton').addEventListener('click', () => saveNetworkAssetServices().catch(console.error));
+    document.getElementById('networkAssetTable').addEventListener('click', event => {
+      const edit = event.target.closest('.network-asset-edit');
+      const services = event.target.closest('.network-asset-services');
+      const toggle = event.target.closest('.network-asset-toggle');
+      const del = event.target.closest('.network-asset-delete');
+      if (edit) {
+        const asset = networkAssets.find(item => Number(item.id) === Number(edit.dataset.id));
+        openNetworkAssetForm(asset);
+      } else if (services) {
+        openNetworkAssetServices(Number(services.dataset.id)).catch(console.error);
+      } else if (toggle) {
+        toggleNetworkAsset(Number(toggle.dataset.id), Number(toggle.dataset.active)).catch(console.error);
+      } else if (del) {
+        deleteNetworkAsset(Number(del.dataset.id)).catch(console.error);
+      }
+    });
+    document.getElementById('networkAssetServicesTable').addEventListener('click', event => {
+      const remove = event.target.closest('.network-service-remove');
+      if (remove) {
+        networkAssetServicesDraft.splice(Number(remove.dataset.index), 1);
+        renderNetworkAssetServices();
+      }
+    });
     document.getElementById('newIpZonePrefixButton').addEventListener('click', () => resetIpZonePrefixForm());
     document.getElementById('saveIpZonePrefixButton').addEventListener('click', () => saveIpZonePrefix().catch(console.error));
     document.getElementById('showInactivePrefixes').addEventListener('change', () => renderIpZonePrefixTable(selectedIpZone()?.prefixes || []));

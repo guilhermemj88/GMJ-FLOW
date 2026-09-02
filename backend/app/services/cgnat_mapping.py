@@ -2543,6 +2543,8 @@ def create_cgnat_pool(conn: sqlite3.Connection, values: dict[str, Any]) -> dict[
     )
     conn.commit()
     row = conn.execute("SELECT * FROM cgnat_pools WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+    from app.services.network_assets import invalidate_network_asset_cache
+    invalidate_network_asset_cache()
     return pool_to_dict(row)
 
 
@@ -2578,6 +2580,8 @@ def update_cgnat_pool(conn: sqlite3.Connection, pool_id: int, values: dict[str, 
     )
     conn.commit()
     updated = conn.execute("SELECT * FROM cgnat_pools WHERE id = ?", (int(pool_id),)).fetchone()
+    from app.services.network_assets import invalidate_network_asset_cache
+    invalidate_network_asset_cache()
     return pool_to_dict(updated)
 
 
@@ -2585,6 +2589,8 @@ def delete_cgnat_pool(conn: sqlite3.Connection, pool_id: int) -> bool:
     ensure_cgnat_schema(conn)
     cursor = conn.execute("DELETE FROM cgnat_pools WHERE id = ?", (int(pool_id),))
     conn.commit()
+    from app.services.network_assets import invalidate_network_asset_cache
+    invalidate_network_asset_cache()
     return bool(cursor.rowcount)
 
 

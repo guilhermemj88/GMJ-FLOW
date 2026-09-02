@@ -364,6 +364,22 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
             "window_seconds": int(getattr(vector, "window_seconds", 60) or 60),
             "samples": int(features.get("observation_samples") or 0),
         },
+        "network_context": {
+            "traffic_classification": clean_text(features.get("traffic_classification")),
+            "reason_codes": list(features.get("reason_codes") or []),
+            "target_role_distribution": dict(features.get("target_role_distribution") or {}),
+            "target_cgnat_share": float(features.get("target_cgnat_share") or 0),
+            "target_downstream_isp_share": float(features.get("target_downstream_isp_share") or 0),
+            "target_customer_public_share": float(features.get("target_customer_public_share") or 0),
+            "web_return_share": float(features.get("web_return_share") or 0),
+            "udp_quic_share": float(features.get("udp_quic_share") or 0),
+            "tcp_ack_ratio": float(features.get("tcp_ack_ratio") or 0),
+            "tcp_syn_ratio": float(features.get("tcp_syn_ratio") or 0),
+            "dst_port_entropy": float(features.get("dst_port_entropy") or 0),
+            "network_context_score": int(features.get("network_context_score") or 0),
+            "evidence_categories_passed": list(features.get("evidence_categories_passed") or []),
+            "evidence_categories_failed": list(features.get("evidence_categories_failed") or []),
+        },
     }
     return {
         "public_id": public_event_id(event_key, first_seen),

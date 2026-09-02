@@ -300,7 +300,66 @@ class BgpMitigationTest(unittest.TestCase):
             ).fetchall()
         ]
 
-    def _dns_multi_target_context(self, max_active_rules=50, min_packets_s=1000, add_whitelist=True):
+    def _insert_cgnat_mapping(
+        self,
+        conn,
+        public_ip="45.5.248.205",
+        private_ip="100.64.0.10",
+        connector_id=None,
+        protocol="udp",
+        port_start=1,
+        port_end=65535,
+        batch_id=None,
+    ):
+        main.ensure_cgnat_schema(conn)
+        existing = conn.execute(
+            """
+            SELECT id FROM cgnat_port_mappings
+            WHERE public_ip = ? AND protocol = ? AND port_start = ? AND port_end = ?
+              AND private_ip = ? AND active = 1
+            LIMIT 1
+            """,
+            (public_ip, protocol, port_start, port_end, private_ip),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        now = main.utc_now_iso()
+        if batch_id is None:
+            batch_id = conn.execute(
+                """
+                INSERT INTO cgnat_import_batches (
+                    filename, original_filename, file_size, source_type_detected,
+                    source_type_confirmed, device_name, pool_name, connector_id, status,
+                    file_hash, total_rows, valid_rows, created_at, activated_at, created_by
+                )
+                VALUES ('fixture-map.txt', 'fixture-map.txt', 0, 'manual',
+                        'manual', 'NE8000-FIXTURE', 'fixture-pool', ?, 'active',
+                        'fixture-hash', 1, 1, ?, ?, 'fixture')
+                """,
+                (connector_id, now, now),
+            ).lastrowid
+        mapping_id = conn.execute(
+            """
+            INSERT INTO cgnat_port_mappings (
+                batch_id, source_type, source_filename, device_name, pool_name,
+                connector_id, public_ip, private_ip, protocol, port_start, port_end,
+                subscriber_id, subscriber_name, active, confidence, created_at, updated_at
+            )
+            VALUES (?, 'manual', 'fixture-map.txt', 'NE8000-FIXTURE', 'fixture-pool',
+                    ?, ?, ?, ?, ?, ?, 'SUB-100', 'Subscriber 100', 1, 1.0, ?, ?)
+            """,
+            (batch_id, connector_id, public_ip, private_ip, protocol, port_start, port_end, now, now),
+        ).lastrowid
+        conn.commit()
+        return int(mapping_id)
+
+    def _dns_multi_target_context(
+        self,
+        max_active_rules=50,
+        min_packets_s=1000,
+        add_whitelist=True,
+        add_cgnat_mapping=True,
+    ):
         conn = main.sqlite_connection()
         now = main.utc_now_iso()
         connector_id = conn.execute(
@@ -403,6 +462,8 @@ class BgpMitigationTest(unittest.TestCase):
                 """,
                 (now, now),
             )
+        if add_cgnat_mapping:
+            self._insert_cgnat_mapping(conn, public_ip="45.5.248.205", connector_id=connector_id)
         conn.commit()
         profile = main.fetch_bgp_profile(conn, int(profile["id"]))
         connector = main.fetch_bgp_connector(conn, int(connector_id))
@@ -450,7 +511,14 @@ class BgpMitigationTest(unittest.TestCase):
         })
         return event, flows
 
-    def _insert_dns_query_anomaly_event(self, conn, event_id=140, src_ip="45.5.248.205", dst_ip="103.100.169.200"):
+    def _insert_dns_query_anomaly_event(
+        self,
+        conn,
+        event_id=140,
+        src_ip="45.5.248.205",
+        dst_ip="103.100.169.200",
+        add_cgnat_mapping=True,
+    ):
         now = main.utc_now_iso()
         conn.execute(
             """
@@ -479,6 +547,8 @@ class BgpMitigationTest(unittest.TestCase):
             """,
             (event_id, now, src_ip, dst_ip),
         )
+        if add_cgnat_mapping:
+            self._insert_cgnat_mapping(conn, public_ip=src_ip)
         conn.commit()
         return event_id
 
@@ -714,6 +784,15 @@ class BgpMitigationTest(unittest.TestCase):
     def test_manual_announce_blocks_duration_above_max_before_pipe(self):
         with temporary_main_db():
             conn, connector, profile = self._connector_and_profile(max_duration=300)
+            # Modelo lease vs hard-cap: a duracao por lease so e limitada por um
+            # max_lifetime_seconds explicito; o max_duration_seconds legado nao
+            # impoe mais um teto global.
+            conn.execute(
+                "UPDATE bgp_response_profiles SET max_lifetime_seconds = 300 WHERE id = ?",
+                (profile["id"],),
+            )
+            conn.commit()
+            profile = main.fetch_bgp_profile(conn, profile["id"])
             candidate = {
                 "response_profile_id": profile["id"],
                 "connector_id": connector["id"],
@@ -736,7 +815,7 @@ class BgpMitigationTest(unittest.TestCase):
             finally:
                 main.exabgp_write_pipe = original
             self.assertEqual(calls, [])
-            self.assertIn("Nenhum anuncio foi enviado", str(ctx.exception.detail))
+            self.assertIn("Duracao excede a vida maxima permitida", str(ctx.exception.detail))
 
     def test_scheduler_expires_advertised_announcement_with_saved_withdraw(self):
         with temporary_main_db():
@@ -1724,7 +1803,7 @@ class BgpMitigationTest(unittest.TestCase):
         source = Path(ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Detector legacy: mitigação automática desativada. Use templates de detecção.", source)
         self.assertIn("function isLegacyDnsAnomaly", source)
-        self.assertIn("${legacyDns ? '' : `<button", source)
+        self.assertIn("${legacyDns || !hasPermission('mitigations.view') ? '' : `<button", source)
 
     def test_official_dns_template_event_persists_top_flow_and_auto_applies(self):
         with temporary_main_db():
@@ -1782,7 +1861,7 @@ class BgpMitigationTest(unittest.TestCase):
                 "rule_id": int(row["id"]),
                 "rule_name": "DNS_QUERY_OUTBOUND_CLIENT",
                 "display_name": "DNS outbound por cliente",
-                "rule_config": {"dst_port": "53", "group_by": "src_ip,dst_ip,dst_port,proto"},
+                "rule_config": {"dst_port": "53", "group_by": "src_ip,dst_ip,dst_port,proto", "allow_instant_critical_auto": True},
                 "prefix_id": int(prefix_id),
                 "prefix_cidr": "45.5.248.0/24",
                 "domain": "internal_ip",
@@ -1802,12 +1881,12 @@ class BgpMitigationTest(unittest.TestCase):
                 "top_dst_ip": "103.100.169.200",
                 "top_src_port": 62129,
                 "top_dst_port": 53,
-                "top_packets": 13000,
-                "top_bytes": 1000000,
-                "packets": 13000,
-                "bytes": 1000000,
-                "packets_s": 13000,
-                "bits_s": 8000000,
+                "top_packets": 20000,
+                "top_bytes": 2000000,
+                "packets": 20000,
+                "bytes": 2000000,
+                "packets_s": 20000,
+                "bits_s": 16000000,
                 "flows": 1,
                 "unique_dst_ips": 1,
                 "unique_dst_ports": 1,
@@ -1816,7 +1895,7 @@ class BgpMitigationTest(unittest.TestCase):
                 "threshold_warning": 5000,
                 "threshold_critical": 15000,
                 "metric": "packets_s",
-                "metric_value": 13000,
+                "metric_value": 20000,
                 "warning_response_profile_id": profile["id"],
                 "critical_response_profile_id": profile["id"],
                 "fallback_response_profile_id": profile["id"],
@@ -1846,8 +1925,8 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertEqual(event["top_dst_ip"], "103.100.169.200")
             self.assertEqual(event["top_src_port"], 62129)
             self.assertEqual(event["top_dst_port"], 53)
-            self.assertEqual(event["top_packets"], 13000)
-            self.assertEqual(event["top_bytes"], 1000000)
+            self.assertEqual(event["top_packets"], 20000)
+            self.assertEqual(event["top_bytes"], 2000000)
             self.assertEqual(event["protocol"], "udp")
             self.assertEqual(event["target_port"], 53)
             self.assertEqual(event["mitigation_basis"], "dns_outbound_destination")
@@ -3220,6 +3299,80 @@ class BgpMitigationTest(unittest.TestCase):
             self.assertIsNone(item["advertised_at"])
             self.assertEqual(summary["active_bgp_announcements"], 0)
 
+    def test_cgnat_gate_blocks_dns_outbound_without_port_mapping(self):
+        with temporary_main_db():
+            conn, _connector, _profile = self._dns_multi_target_context(add_whitelist=False, add_cgnat_mapping=False)
+            event_id = self._insert_dns_query_anomaly_event(conn, add_cgnat_mapping=False)
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["advertised"], 0)
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+            self.assertEqual(outcome["auto_mitigation_reason"], "cgnat_subscriber_not_resolved")
+
+    def test_cgnat_gate_allows_dns_outbound_with_valid_port_mapping(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.commit()
+            conn.close()
+            calls = []
+            with patch.object(main, "exabgp_write_pipe", side_effect=lambda item, command: calls.append(item["id"])):
+                stats = main.process_anomaly_mitigation()
+            self.assertEqual(calls, [connector["id"]])
+            self.assertEqual(stats["advertised"], 1)
+
+    def test_cgnat_gate_fails_closed_on_ambiguous_port_mapping(self):
+        with temporary_main_db():
+            conn, connector, _profile = self._dns_multi_target_context(add_whitelist=False)
+            # Segunda identidade para o mesmo public_ip/porta, no mesmo batch e
+            # com o mesmo conector, para empatar na prioridade e gerar ambiguidade.
+            first_batch = conn.execute(
+                """
+                SELECT batch_id FROM cgnat_port_mappings
+                WHERE public_ip = '45.5.248.205' AND private_ip = '100.64.0.10' AND active = 1
+                ORDER BY id LIMIT 1
+                """
+            ).fetchone()
+            self._insert_cgnat_mapping(
+                conn,
+                public_ip="45.5.248.205",
+                private_ip="100.64.0.20",
+                connector_id=connector["id"],
+                batch_id=int(first_batch["batch_id"]),
+            )
+            event_id = self._insert_dns_query_anomaly_event(conn)
+            conn.commit()
+            conn.close()
+            calls = []
+            original = main.exabgp_write_pipe
+            main.exabgp_write_pipe = lambda _connector, command: calls.append(command)
+            try:
+                stats = main.process_anomaly_mitigation()
+            finally:
+                main.exabgp_write_pipe = original
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["advertised"], 0)
+            with main.sqlite_connection() as check:
+                outcome = check.execute(
+                    "SELECT auto_mitigation_status, auto_mitigation_reason FROM anomaly_events WHERE id = ?",
+                    (event_id,),
+                ).fetchone()
+            self.assertEqual(outcome["auto_mitigation_status"], "not_applied")
+            self.assertEqual(outcome["auto_mitigation_reason"], "cgnat_mapping_ambiguous")
+
     def test_bgp_summary_counts_only_current_advertised_and_marks_legacy_unconfirmed(self):
         with temporary_main_db():
             conn, connector, profile = self._dns_multi_target_context(add_whitelist=False)
@@ -3916,7 +4069,8 @@ class BgpMitigationTest(unittest.TestCase):
                 conn.close()
                 with patch.object(main, "router_ssh_command") as ssh_command, \
                      patch.object(main, "exabgp_peer_from_pipe", return_value={"state": "unknown"}), \
-                     patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}):
+                     patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}), \
+                     patch.object(main, "host_agent_status", return_value={"enabled": False}):
                     status = main.check_and_persist_bgp_connector_status(connector["id"])
             self.assertEqual(status["pipe_state"], "ok")
             self.assertEqual(status["bgp_state"], "not_verified")
@@ -4920,6 +5074,8 @@ class BgpMitigationTest(unittest.TestCase):
             "pipe_ok": True,
             "bgp_state": "established",
             "flowspec_state": "established",
+            # delivery path requires its own evidence: fifo + active reader.
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
         }
         readiness = main.evaluate_bgp_connector_readiness(host_agent_payload)
         self.assertTrue(readiness["ready"])
@@ -4987,6 +5143,7 @@ class BgpMitigationTest(unittest.TestCase):
             "pipe_ok": True,
             "bgp_state": "established",
             "flowspec_state": "established",
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
             "session": {
                 "close_wait_count": 6,
                 "close_wait_alert_threshold": 5,
@@ -5134,7 +5291,8 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(status["bgp_state"], "established")
         self.assertEqual(status["flowspec_state"], "established")
         self.assertTrue(status["pipes"]["ok"])
-        self.assertFalse(status["listener_ok"])
+        self.assertTrue(status["listener_ok"])
+        self.assertEqual(status["listener"]["status"], "not_required")
         self.assertTrue(main.evaluate_bgp_connector_readiness(status)["ready"])
 
     def test_shared_service_fallback_makes_two_established_connectors_ready(self):
@@ -5230,7 +5388,7 @@ class BgpMitigationTest(unittest.TestCase):
                     "exabgp-gmj-flow.service",
                 )
                 self.assertTrue(status["service_ok"])
-                self.assertFalse(status["listener_ok"])
+                self.assertTrue(status["listener_ok"])
                 self.assertTrue(status["bgp_ok"])
                 self.assertTrue(status["flowspec_ok"])
                 self.assertTrue(status["pipe_ok"])
@@ -5353,6 +5511,212 @@ class BgpMitigationTest(unittest.TestCase):
                     "fifo_written"
                 ]
             )
+
+
+class DeliveryPathReadinessTest(unittest.TestCase):
+    """delivery_path_ready = direct_pipe_ready OR host_agent_delivery_ready.
+
+    The gate must stay a safety gate, but it accepts multiple valid proofs of
+    the FlowSpec delivery path: a directly-visible backend FIFO, a verified
+    direct pipe payload (fifo + active reader), or a reachable host-agent with
+    an active FIFO reader. BGP established alone is never delivery evidence.
+    """
+
+    @staticmethod
+    def _healthy_status(**overrides) -> dict:
+        status = {
+            "service": {"active": True, "check_possible": True},
+            "listener": {"listening": False, "required": False},
+            "session": {"tcp_established": True},
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "passive_listen_enabled": False,
+            "checks": {
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": True,
+                "close_wait_ok": True,
+            },
+        }
+        status.update(overrides)
+        return status
+
+    def _backend_unavailable(self) -> dict:
+        return {
+            "delivery_path_ready": False,
+            "backend_pipe_in_visible": False,
+            "backend_mount_visible": False,
+            "reason": "backend_exabgp_pipe_unavailable",
+        }
+
+    def test_direct_pipe_ready_sets_direct_pipe_source(self):
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "exists": True,
+                "is_fifo": True,
+                "reader_active": True,
+                "ok": True,
+            }
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value={"delivery_path_ready": True, "backend_pipe_in_visible": True, "reason": ""},
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "direct_pipe")
+        self.assertEqual(readiness["delivery_path_reason"], "direct_pipe_reader_verified")
+
+    def test_host_agent_delivery_ready_when_direct_pipe_invisible(self):
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": True,
+                "ok": True,
+                "source": "host_agent",
+            },
+            host_agent={
+                "enabled": True,
+                "available": True,
+                "pipes": {"is_fifo": True, "reader_active": True},
+            },
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "host_agent")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_verified_via_host_agent")
+        self.assertTrue(readiness["host_agent_reachable"])
+
+    def test_host_agent_reachable_without_reader_is_not_delivery_ready(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            },
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": False,
+                "ok": False,
+                "source": "host_agent",
+            },
+            host_agent={
+                "enabled": True,
+                "available": True,
+                "pipes": {"is_fifo": True, "reader_active": False},
+            },
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+        self.assertEqual(readiness["delivery_path_reason"], "host_agent_delivery_unavailable")
+
+    def test_direct_pipe_unavailable_and_host_agent_unavailable_is_not_ready(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            },
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": False,
+                "ok": False,
+            },
+            host_agent={"enabled": True, "available": False},
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+
+    def test_bgp_established_alone_does_not_prove_delivery_path(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            }
+        )
+        status.pop("pipes", None)
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+        self.assertNotEqual(readiness["delivery_path_source"], "operational_evidence")
+
+    def test_writable_pipe_without_verified_reader_is_not_delivery_ready(self):
+        # pipe exists + writable + pipe_ok=true, but the reader is UNKNOWN.
+        # A writable-only pipe must never prove the delivery path on its own.
+        status = self._healthy_status(
+            pipes={"path": "/run/exabgp/exabgp.in", "ok": True, "is_fifo": True}
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "operational_evidence")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_reader_unverified")
+
+    def test_bgp_established_with_writable_pipe_no_reader_is_not_delivery_ready(self):
+        # BGP established does NOT prove a FIFO reader; writable + no reader
+        # stays delivery-not-ready (operational evidence only).
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "ok": True,
+                "is_fifo": True,
+                "reader_active": False,
+            }
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "operational_evidence")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_reader_unverified")
 
 
 if __name__ == "__main__":
