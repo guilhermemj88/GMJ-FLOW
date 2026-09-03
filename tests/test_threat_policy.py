@@ -14,7 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.services.behavioral_detection import (  # noqa: E402
+    CARPET_BOMBING,
+    EXPECTED_DISTRIBUTED_TRAFFIC,
     PORT_SCAN_VERTICAL,
+    SUSPICIOUS_DISTRIBUTED_TRAFFIC,
+    SYN_FLOOD,
+    TI_INFLUENCE_ADVISORY_ONLY,
+    TI_INFLUENCE_NORMAL,
+    TI_INFLUENCE_REDUCED,
     UDP_FLOOD,
     AttackVector,
 )
@@ -224,6 +231,124 @@ class ThreatPolicyTest(unittest.TestCase):
         strong_proposal, _ = engine.proposal_for(strong)
         self.assertEqual(weak_proposal.dst_port, "")
         self.assertEqual(strong_proposal.dst_port, "53")
+
+    # ------------------------------------------------------------------
+    # TI influence na policy: ADVISORY_ONLY não pode alterar a decisão.
+    # ------------------------------------------------------------------
+    def _carpet_vector(self, *, with_intel: bool) -> AttackVector:
+        base = dict(
+            attack_type=CARPET_BOMBING,
+            detector="prefix_carpet_bombing",
+            detector_score=99,
+            confidence=0.99,
+            first_seen="2026-08-11T10:00:00Z",
+            last_seen="2026-08-11T10:01:00Z",
+            target_prefix="203.0.113.0/24",
+            direction="RECEIVES",
+            baseline_deviation=5.0,
+            features={
+                "traffic_classification": EXPECTED_DISTRIBUTED_TRAFFIC,
+                "reason_codes": ["LIKELY_WEB_RETURN_TRAFFIC"],
+                "recurrence_count": 3,
+                "persistent_windows": 3,
+            },
+            intel_sources=[],
+            external_correlation=False,
+            threat_intel={},
+        )
+        if with_intel:
+            base["intel_sources"] = ["GREYNOISE", "CEREAL2"]
+            base["external_correlation"] = True
+            base["threat_intel"] = {
+                "source_intel": {
+                    "matched_source_count": 1,
+                    "match_count": 1,
+                    "indicator_types": ["IP"],
+                    "classifications": ["malicious"],
+                    "tags": ["scanner"],
+                    "intel_sources": ["GREYNOISE"],
+                },
+                "target_campaign_intel": {
+                    "matches": 1,
+                    "observations": [{"provider": "CEREAL2", "method": "coordinated"}],
+                    "intel_sources": ["CEREAL2"],
+                },
+            }
+        return AttackVector(**base)
+
+    def test_advisory_only_intel_keeps_policy_decision_identical(self) -> None:
+        engine = ThreatPolicyEngine(self.db.connect)
+        self.enable_auto_policy()
+        no_intel = self._carpet_vector(with_intel=False)
+        advisory = self._carpet_vector(with_intel=True)
+        with patch.dict(
+            os.environ,
+            {
+                "GMJFLOW_THREAT_POLICY_REQUIRE_RELEVANT_INTEL": "true",
+                "GMJFLOW_THREAT_POLICY_REQUIRE_GROQ": "true",
+            },
+            clear=False,
+        ):
+            decision_a = engine.evaluate(no_intel, self.ai(CARPET_BOMBING))
+            decision_b = engine.evaluate(advisory, self.ai(CARPET_BOMBING))
+
+        # Invariante: mesma evidência, mesmo score, mesma decisão.
+        self.assertEqual(no_intel.detector_score, advisory.detector_score)
+        self.assertEqual(no_intel.confidence, advisory.confidence)
+        self.assertEqual(decision_a.policy_score, decision_b.policy_score)
+        self.assertEqual(decision_a.allowed, decision_b.allowed)
+        self.assertEqual(
+            decision_a.gates["shadow_policy_verdict"],
+            decision_b.gates["shadow_policy_verdict"],
+        )
+        self.assertEqual(
+            set(decision_a.non_mitigation_reason.split(", ")),
+            set(decision_b.non_mitigation_reason.split(", ")),
+        )
+        # O IOC permanece, mas a influência é advisory e o bônus aplicado é zero.
+        self.assertEqual(TI_INFLUENCE_ADVISORY_ONLY, decision_b.gates["ti_influence"])
+        self.assertEqual(0, decision_b.gates["ti_bonus_applied"])
+        self.assertGreater(decision_b.gates["ti_bonus_raw"], 0)
+        # Sem IOC o gate relevant_threat_intel falha; com IOC ADVISORY_ONLY
+        # também deve falhar (não pode satisfazer o gate).
+        self.assertFalse(decision_a.gates["relevant_threat_intel"])
+        self.assertFalse(decision_b.gates["relevant_threat_intel"])
+
+    def test_reduced_intel_is_capped_in_policy(self) -> None:
+        engine = ThreatPolicyEngine(self.db.connect)
+        item = vector(
+            attack_type=CARPET_BOMBING,
+            features={
+                "traffic_classification": SUSPICIOUS_DISTRIBUTED_TRAFFIC,
+                "recurrence_count": 3,
+            },
+            intel_sources=["GREYNOISE", "CEREAL2"],
+            external_correlation=True,
+            threat_intel={
+                "source_intel": {"matched_source_count": 1, "intel_sources": ["GREYNOISE"]},
+                "target_campaign_intel": {"matches": 1},
+            },
+        )
+        decision = engine.evaluate(item, self.ai(CARPET_BOMBING))
+        self.assertEqual(TI_INFLUENCE_REDUCED, decision.gates["ti_influence"])
+        self.assertGreater(decision.gates["ti_bonus_raw"], 2)
+        self.assertLessEqual(decision.gates["ti_bonus_applied"], 2)
+
+    def test_normal_intel_applied_equals_raw(self) -> None:
+        engine = ThreatPolicyEngine(self.db.connect)
+        item = vector(
+            attack_type=SYN_FLOOD,
+            intel_sources=["GREYNOISE"],
+            external_correlation=True,
+            threat_intel={
+                "source_intel": {"matched_source_count": 1, "c2_sources": 1, "intel_sources": ["GREYNOISE"]},
+                "target_campaign_intel": {"matches": 1},
+            },
+        )
+        decision = engine.evaluate(item, self.ai(SYN_FLOOD))
+        self.assertEqual(TI_INFLUENCE_NORMAL, decision.gates["ti_influence"])
+        self.assertEqual(decision.gates["ti_bonus_raw"], decision.gates["ti_bonus_applied"])
+        self.assertGreater(decision.gates["ti_bonus_applied"], 0)
 
 
 if __name__ == "__main__":

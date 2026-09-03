@@ -576,6 +576,16 @@ def shannon_entropy(counts: Mapping[Any, float]) -> float:
     return round(entropy / maximum, 4) if maximum else 0.0
 
 
+def _service_port_wildcard(value: Any) -> bool:
+    """None and non-positive ports (e.g. 0) mean ANY (wildcard)."""
+    if value is None:
+        return True
+    try:
+        return int(value) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
 def expected_services_match(
     context: Mapping[str, Any],
     protocol: str,
@@ -585,6 +595,9 @@ def expected_services_match(
 ) -> bool:
     """True when the observed tuple is compatible with an expected service of
     the asset. This is context only — it never suppresses detection by itself.
+
+    Port semantics: ``None`` and ``0`` (or any non-positive value) on a service
+    mean ANY (wildcard) for that side; positive values require an exact match.
     """
     services = context.get("expected_services") or []
     if not services:
@@ -596,9 +609,9 @@ def expected_services_match(
         svc_proto = clean_text(service.get("protocol")).lower()
         if svc_proto and svc_proto not in {"any", "all", proto}:
             continue
-        if service.get("source_port") is not None and safe_int(service.get("source_port")) != safe_int(source_port):
+        if not _service_port_wildcard(service.get("source_port")) and safe_int(service.get("source_port")) != safe_int(source_port):
             continue
-        if service.get("destination_port") is not None and safe_int(service.get("destination_port")) != safe_int(destination_port):
+        if not _service_port_wildcard(service.get("destination_port")) and safe_int(service.get("destination_port")) != safe_int(destination_port):
             continue
         svc_direction = clean_text(service.get("direction")).upper() or "ANY"
         if svc_direction not in {"ANY", clean_text(direction).upper()}:

@@ -20,13 +20,17 @@ from app.services.behavioral_detection import (
     PORT_SCAN_VERTICAL,
     SPOOFED_SYN_FLOOD,
     SYN_FLOOD,
+    TI_INFLUENCE_NORMAL,
+    TI_INFLUENCE_REDUCED,
     UDP_FLOOD,
     UDP_REFLECTION_SUSPECTED,
     AttackVector,
     CampaignVector,
+    apply_ti_influence,
     clamp,
     ensure_behavioral_schema,
     safe_int,
+    threat_intel_influence,
 )
 from app.services.config_effective import threat_policy_auto_enabled
 from app.services.threat_intelligence import clean_text, json_dump, safe_json, utc_now_iso
@@ -102,6 +106,8 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
         "persistent_windows", "elapsed_seconds", "threat_intel_relevance",
         "src_role", "dst_role", "src_is_cgnat", "dst_is_cgnat",
         "ephemeral_destination_ratio", "pps_per_destination", "target_concentration",
+        "ti_influence", "ti_influence_reason", "ti_bonus_raw", "ti_bonus_applied",
+        "traffic_classification", "reason_codes",
     }
     return {
         "vector_type": "ATTACK_VECTOR",
@@ -125,6 +131,10 @@ def compact_attack_vector(vector: AttackVector) -> dict[str, Any]:
         "features": {key: value for key, value in features.items() if key in allowed_features},
         "threat_intel": {
             "intel_sources": list(vector.intel_sources),
+            "ti_influence": clean_text(vector.threat_intel.get("ti_influence") or ""),
+            "ti_influence_reason": clean_text(vector.threat_intel.get("ti_influence_reason") or ""),
+            "ti_bonus_raw": safe_int(vector.threat_intel.get("ti_bonus_raw")),
+            "ti_bonus_applied": safe_int(vector.threat_intel.get("ti_bonus_applied")),
             "source_intel": {
                 "matched_source_count": safe_int(source_intel.get("matched_source_count") or source_intel.get("matches")),
                 "match_count": safe_int(source_intel.get("match_count")),
@@ -437,6 +447,10 @@ class ThreatPolicyEngine:
         relevance = clean_text((vector.features or {}).get("threat_intel_relevance")) if not is_campaign else "campaign_correlation"
         source_bonus = 1 if source_intel_present and relevance == "historical_reputation_only" else 4 if source_intel_present else 0
         external_bonus = min(8, source_bonus + (3 if target_intel_present else 0) + (1 if source_intel_present and target_intel_present else 0))
+        traffic_classification = clean_text((vector.features or {}).get("traffic_classification")) if not is_campaign else ""
+        ti_influence, ti_influence_reason = threat_intel_influence(classification, traffic_classification)
+        ti_bonus_raw = int(external_bonus)
+        ti_bonus_applied = int(apply_ti_influence(ti_bonus_raw, ti_influence))
         recurrence = safe_int((vector.features or {}).get("historical_recurrence") or (vector.features or {}).get("recurrence_count"))
         persistence = (
             safe_int((vector.features or {}).get("persistent_windows")) >= 3
@@ -466,7 +480,7 @@ class ThreatPolicyEngine:
         score = (
             evidence_score * 0.75
             + min(10, baseline_deviation * 2)
-            + external_bonus
+            + ti_bonus_applied
             + min(10, recurrence * 2)
             + (ai_confidence * 5 if ai_agrees else 0)
         )
@@ -482,6 +496,10 @@ class ThreatPolicyEngine:
             "proposal_available": proposal is not None,
             "ttl_present": bool(proposal and proposal.ttl_seconds > 0),
             "external_intel_is_not_solo_authority": detector_score > 0 or coordination_score > 0,
+            "ti_influence": ti_influence,
+            "ti_influence_reason": ti_influence_reason,
+            "ti_bonus_raw": ti_bonus_raw,
+            "ti_bonus_applied": ti_bonus_applied,
             "ai_valid": bool(ai.get("ok")),
             "ai_is_groq": ai_is_groq,
             "ai_agrees": ai_agrees,
@@ -495,10 +513,21 @@ class ThreatPolicyEngine:
             or clean_text(context.get("dst_role")).upper() in {"INFRASTRUCTURE", "MANAGEMENT"}
         )
         require_relevant_intel = os.getenv("GMJFLOW_THREAT_POLICY_REQUIRE_RELEVANT_INTEL", "false").strip().lower() in {"1", "true", "yes", "on"}
+        # Advisory-only (or disabled) intelligence is displayed and investigated,
+        # but it must never satisfy the relevant-intel gate: the gate may only be
+        # satisfied by intelligence that effectively influences the score (NORMAL
+        # or REDUCED). This keeps a no-IOC vector and the same vector with an
+        # ADVISORY_ONLY IOC decision-identical.
+        ti_effectively_influential = ti_influence in {TI_INFLUENCE_NORMAL, TI_INFLUENCE_REDUCED}
         gates["relevant_threat_intel"] = (
             not require_relevant_intel
-            or target_intel_present
-            or (source_intel_present and relevance not in {"", "no_match", "historical_reputation_only"})
+            or (
+                ti_effectively_influential
+                and (
+                    target_intel_present
+                    or (source_intel_present and relevance not in {"", "no_match", "historical_reputation_only"})
+                )
+            )
         )
         require_ai = os.getenv("GMJFLOW_THREAT_POLICY_REQUIRE_GROQ", "true").strip().lower() in {"1", "true", "yes", "on"}
         gates["ai_required"] = require_ai
