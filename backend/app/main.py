@@ -29,7 +29,7 @@ from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
-from typing import Any, Union
+from typing import Any, Mapping, Union
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - production image uses Python 3.12.
@@ -99,6 +99,18 @@ from app.services.network_assets import (
     replace_network_asset_services,
     resolve_network_context as resolve_network_asset_context,
     upsert_network_asset,
+)
+from app.services.flow_codecs import (
+    classify_flow_codecs,
+    create_flow_codec,
+    delete_flow_codec,
+    duplicate_flow_codec,
+    ensure_flow_codecs_schema,
+    flow_codec_options,
+    get_flow_codec,
+    list_flow_codecs,
+    seed_builtin_flow_codecs,
+    update_flow_codec,
 )
 from app.services.ai_integration import (
     AI_FUNCTIONS,
@@ -4758,6 +4770,8 @@ def ensure_sensor_db() -> None:
         ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
         ensure_network_assets_schema(conn)
+        ensure_flow_codecs_schema(conn)
+        seed_builtin_flow_codecs(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
@@ -5654,6 +5668,8 @@ def permission_for_protected_api_route(request: Request) -> str:
         return "settings.view" if method == "GET" else "settings.manage"
     if path.startswith(("/api/threat-intelligence", "/api/threat-engine")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith("/api/flow-codecs"):
+        return "settings.view" if method == "GET" else "settings.manage"
     return ""
 
 
@@ -28172,6 +28188,95 @@ def network_asset_services_replace(asset_id: int, payload: dict[str, Any]):
 def network_context_resolve_api(ip: str):
     ensure_sensor_db()
     return resolve_network_asset_context(ip)
+
+
+@app.get("/api/flow-codecs")
+def flow_codecs_list(active_only: bool = False):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_flow_codecs(conn, active_only=active_only)}
+
+
+@app.get("/api/flow-codecs/options")
+def flow_codecs_options():
+    return flow_codec_options()
+
+
+@app.post("/api/flow-codecs/test")
+def flow_codecs_test(payload: dict[str, Any]):
+    """Classify a synthetic flow against all active codecs (read-only)."""
+    ensure_sensor_db()
+    flow = payload.get("flow") if isinstance(payload.get("flow"), Mapping) else {}
+    source_context = payload.get("source_context") if isinstance(payload.get("source_context"), Mapping) else None
+    destination_context = payload.get("destination_context") if isinstance(payload.get("destination_context"), Mapping) else None
+    with sqlite_connection() as conn:
+        codecs = list_flow_codecs(conn, active_only=True)
+    matches = classify_flow_codecs(flow, codecs, source_context, destination_context)
+    return {
+        "matches": matches,
+        "names": [item["name"] for item in matches],
+    }
+
+
+@app.get("/api/flow-codecs/{codec_id}")
+def flow_codec_get(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        codec = get_flow_codec(conn, codec_id)
+        if codec is None:
+            raise HTTPException(status_code=404, detail="flow_codec_not_found")
+        return codec
+
+
+@app.post("/api/flow-codecs", status_code=201)
+def flow_codec_create(payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        try:
+            codec = create_flow_codec(conn, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        conn.commit()
+        return codec
+
+
+@app.put("/api/flow-codecs/{codec_id}")
+def flow_codec_update(codec_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if get_flow_codec(conn, codec_id) is None:
+            raise HTTPException(status_code=404, detail="flow_codec_not_found")
+        try:
+            codec = update_flow_codec(conn, codec_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn.commit()
+        return codec
+
+
+@app.delete("/api/flow-codecs/{codec_id}")
+def flow_codec_delete(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        changed, status = delete_flow_codec(conn, codec_id)
+        conn.commit()
+        if status == "builtin_protected":
+            raise HTTPException(status_code=409, detail="builtin_codec_protected")
+        return {"status": status, "id": codec_id}
+
+
+@app.post("/api/flow-codecs/{codec_id}/duplicate")
+def flow_codec_duplicate(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        try:
+            codec = duplicate_flow_codec(conn, codec_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn.commit()
+        return codec
 
 
 @app.post("/api/carpet-replay")
