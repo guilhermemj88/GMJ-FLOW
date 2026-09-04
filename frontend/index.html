@@ -736,6 +736,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .brand-block {
+      flex: 0 0 auto;
       padding: 18px 18px 16px;
       border-bottom: 1px solid rgba(255, 255, 255, .08);
     }
@@ -760,6 +761,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: grid;
       gap: .25rem;
       padding: 12px;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, .28) transparent;
+    }
+
+    .side-nav::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .side-nav::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .side-nav::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, .22);
+      border-radius: 999px;
+    }
+
+    .side-nav::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, .36);
     }
 
     .side-nav button {
@@ -27780,6 +27805,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return canonicalNavigationView(window.location.hash);
     }
 
+    function scrollActiveNavIntoView() {
+      const nav = document.querySelector('.side-nav');
+      const active = nav ? nav.querySelector('button.active') : null;
+      if (nav && active) {
+        active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      }
+    }
+
     function showView(view, placeholderTitle = '') {
       view = canonicalNavigationView(view);
       const requiredPermission = requiredPermissionForView(view);
@@ -27918,6 +27951,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const button = Array.from(document.querySelectorAll('.side-nav button')).find(item => item.dataset.placeholderTitle === placeholderTitle);
         if (button) button.classList.add('active');
       }
+      scrollActiveNavIntoView();
       scheduleDashboardRefresh();
     }
 

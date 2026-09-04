@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>GMJ-FLOW sidebar navigation harness</title>
+</head>
+<body>
+  <div id="result" data-status="running">Executando</div>
+  <script>
+    (async function runSidebarNavigationHarness() {
+      const failures = [];
+      const assert = (condition, label) => {
+        if (!condition) failures.push(label);
+      };
+
+      const frontendResponse = await fetch('../frontend/index.html');
+      const frontendSource = await frontendResponse.text();
+      const parsedFrontend = new DOMParser().parseFromString(
+        frontendSource,
+        'text/html'
+      );
+      parsedFrontend.querySelectorAll('style').forEach(style => {
+        document.head.appendChild(style.cloneNode(true));
+      });
+
+      // Contratos estáticos do CSS/JS (não dependem de layout).
+      assert(frontendSource.includes('flex: 1 1 auto'), 'side-nav usa flex: 1 1 auto');
+      assert(frontendSource.includes('min-height: 0'), 'side-nav usa min-height: 0');
+      assert(frontendSource.includes('overflow-y: auto'), 'side-nav usa overflow-y: auto');
+      assert(frontendSource.includes('overflow-x: hidden'), 'side-nav usa overflow-x: hidden');
+      assert(frontendSource.includes('overscroll-behavior: contain'), 'side-nav não propaga scroll para a página');
+      assert(frontendSource.includes('scrollbar-width: thin'), 'scrollbar fina (Firefox)');
+      assert(frontendSource.includes('.side-nav::-webkit-scrollbar'), 'scrollbar Chromium presente');
+      assert(frontendSource.includes('scrollActiveNavIntoView'), 'helper scrollIntoView presente');
+      assert(frontendSource.includes('block: \'nearest\''), 'scrollIntoView usa block nearest');
+
+      // Estrutura da sidebar no HTML real.
+      const sidebar = parsedFrontend.querySelector('.sidebar');
+      const nav = sidebar ? sidebar.querySelector('.side-nav') : null;
+      const brand = sidebar ? sidebar.querySelector('.brand-block') : null;
+      assert(Boolean(sidebar), 'sidebar existe');
+      assert(Boolean(nav), 'side-nav existe');
+      assert(Boolean(brand), 'brand-block (header/status) existe');
+      assert(brand && nav && brand.parentElement === sidebar, 'header é irmão do nav (fora da área rolável)');
+      assert(brand && nav && !nav.contains(brand), 'header não pertence ao container rolável');
+      const threatButton = nav ? nav.querySelector('[data-nav-view="threat-intelligence"]') : null;
+      assert(Boolean(threatButton), 'Threat Intelligence permanece dentro da lista rolável');
+
+      // Fixture com altura reduzida para forçar overflow.
+      const fixture = document.createElement('div');
+      fixture.style.cssText = 'width:238px;height:600px;';
+      const clonedSidebar = sidebar.cloneNode(true);
+      clonedSidebar.style.cssText = 'position:static;width:100%;height:100%;flex:0 0 auto;';
+      fixture.appendChild(clonedSidebar);
+      document.body.appendChild(fixture);
+
+      const clonedNav = clonedSidebar.querySelector('.side-nav');
+      const clonedBrand = clonedSidebar.querySelector('.brand-block');
+      const clonedThreat = clonedNav.querySelector('[data-nav-view="threat-intelligence"]');
+
+      const csSidebar = getComputedStyle(clonedSidebar);
+      const csNav = getComputedStyle(clonedNav);
+      const csBrand = getComputedStyle(clonedBrand);
+
+      assert(csSidebar.display === 'flex', 'sidebar usa display flex');
+      assert(csSidebar.flexDirection === 'column', 'sidebar usa flex-direction column');
+      assert(csBrand.flexGrow === '0' && csBrand.flexShrink === '0', 'header usa flex: 0 0 auto');
+      assert(csNav.flexGrow === '1', 'nav usa flex-grow 1');
+      assert(csNav.minHeight === '0px', 'nav tem min-height: 0 computado');
+      assert(csNav.overflowY === 'auto', 'nav tem overflow-y: auto computado');
+      assert(csNav.overflowX === 'hidden', 'nav tem overflow-x: hidden computado');
+      assert(
+        csSidebar.overflowY !== 'auto' && csSidebar.overflowY !== 'scroll',
+        'apenas o nav rola (sem scrollbar dupla na sidebar)'
+      );
+
+      // Em 600px de altura a lista deve transbordar e gerar scroll.
+      assert(clonedNav.scrollHeight > clonedNav.clientHeight, 'lista de navegação fica rolável em tela baixa');
+
+      // O item ativo/Threat Intelligence deve continuar acessível via scroll.
+      clonedThreat.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      const navRect = clonedNav.getBoundingClientRect();
+      const threatRect = clonedThreat.getBoundingClientRect();
+      assert(
+        threatRect.bottom <= navRect.bottom + 1 && threatRect.top >= navRect.top - 1,
+        'Threat Intelligence fica visível após scrollIntoView'
+      );
+
+      const result = document.getElementById('result');
+      if (failures.length === 0) {
+        result.setAttribute('data-status', 'passed');
+        result.textContent = 'SIDEBAR_NAVIGATION_TESTS_OK';
+        console.log('SIDEBAR_NAVIGATION_TESTS_OK');
+      } else {
+        result.setAttribute('data-status', 'failed');
+        result.textContent = 'FALHAS: ' + failures.join(' | ');
+        console.error('SIDEBAR_NAVIGATION_TESTS_FAILED: ' + failures.join(' | '));
+      }
+    })().catch(error => {
+      const result = document.getElementById('result');
+      result.setAttribute('data-status', 'failed');
+      result.textContent = 'ERRO: ' + error.message;
+      console.error(error);
+    });
+  </script>
+</body>
+</html>
