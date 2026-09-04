@@ -3216,6 +3216,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         <button id="databaseNavButton" type="button" data-nav-view="database" data-required-permission="settings.view">
           <i data-lucide="database"></i><span>Banco de Dados</span>
         </button>
+        <button id="codecsNavButton" type="button" data-nav-view="codecs" data-required-permission="settings.view">
+          <i data-lucide="tags"></i><span>Codecs</span>
+        </button>
         <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors" data-required-permission="anomalies.view">
           <i data-lucide="shield-alert"></i><span>Vetores de Ataque</span>
         </button>
@@ -6863,6 +6866,129 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="panel p-3 mb-3"><div class="panel-title mb-2">Chamadas de IA</div><div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>ID</th><th>Data/hora</th><th>Função</th><th>Provider</th><th>Modelo</th><th>Duração</th><th>Status</th><th>Tentativas</th><th>Fallback</th><th>Tokens</th><th>Custo</th><th>Erro</th></tr></thead><tbody id="aiHistoryTable"></tbody></table></div></div>
             <div class="panel p-3"><div class="panel-title mb-2">Auditoria de configuração</div><div class="table-wrap"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data/hora</th><th>Usuário</th><th>Ação</th><th>Entidade</th><th>Detalhes</th></tr></thead><tbody id="aiAuditTable"></tbody></table></div></div>
           </section>
+        </section>
+
+        <section id="view-codecs" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Codecs</h1>
+              <div class="subtle">Classificação de tráfego por protocolo/porta/contexto. Codec NÃO é whitelist, NÃO é autorização e NÃO reduz score sozinho.</div>
+            </div>
+            <div class="toolbar">
+              <button id="codecTesterButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="flask-conical"></i><span>Testar codec</span></button>
+              <button id="newCodecButton" type="button" class="btn btn-sm btn-success"><i data-lucide="plus"></i><span>Novo codec</span></button>
+              <button id="refreshCodecsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+            </div>
+          </div>
+          <div id="codecsStatus" class="subtle mb-3">Carregando codecs...</div>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+              <div>
+                <div class="panel-title">Registro de codecs</div>
+                <div class="subtle">BUILTIN = fornecido pelo sistema (identidade protegida). CUSTOM = criado/duplicado pelo operador. 0 ou vazio em Source/Destination Port = ANY.</div>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>Nome</th><th>Origem</th><th>Protocolo</th><th>Src Port</th><th>Dst Port</th><th>Direção</th><th>Prioridade</th><th>Grupo</th><th>Ativo</th><th>Ações</th></tr></thead>
+                <tbody id="codecsTable"><tr><td colspan="10" class="text-muted">Nenhum codec.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="panel-title mb-2">Semântica da porta 443 e codecs</div>
+            <div class="metric-readout mb-2">Codec match ≠ whitelist · Codec match ≠ tráfego legítimo · Codec match ≠ autorização. Codec é apenas classificação de tráfego.</div>
+            <ul class="mb-0">
+              <li><strong>HTTPS_CLIENT</strong> (TCP dst 443): apenas tráfego indo para serviço HTTPS. Não reduz score por si só.</li>
+              <li><strong>HTTPS_RETURN</strong> (TCP src 443): identifica retorno TCP de serviço HTTPS. ACK/PSH+ACK e direção são usados em contexto comportamental.</li>
+              <li><strong>QUIC_CLIENT</strong> (UDP dst 443) e <strong>QUIC_RETURN</strong> (UDP src 443): identificam tráfego compatível com QUIC por porta. Não implicam legitimidade sem contexto de Network Asset / Expected Service.</li>
+              <li>Porta 443 sozinha é evidência fraca (hint). TCP dst 443 + SYN flood continua sendo ataque. O contexto decide.</li>
+            </ul>
+          </section>
+
+          <aside id="codecEditorDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="codecEditorDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-codec-action="closeEditor" aria-label="Fechar editor"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div id="codecEditorDrawerContext" class="subtle">Codec</div><h2 id="codecEditorDrawerTitle">Novo codec</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeEditor" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="codecEditorStatus" class="subtle"></div>
+              <div class="security-event-drawer__body">
+                <input id="codecEditorId" type="hidden">
+                <section>
+                  <h3>Identificação</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorName">Nome</label><input id="codecEditorName" class="form-control form-control-sm" placeholder="MEU_CODEC"></div>
+                    <div class="field"><label for="codecEditorDisplayName">Display name</label><input id="codecEditorDisplayName" class="form-control form-control-sm" placeholder="Meu codec"></div>
+                    <div class="field"><label for="codecEditorProtocol">Protocolo</label><select id="codecEditorProtocol" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorDirection">Direção</label><select id="codecEditorDirection" class="form-select form-select-sm"></select></div>
+                    <div class="field grid-span-3"><label for="codecEditorDescription">Descrição</label><input id="codecEditorDescription" class="form-control form-control-sm" placeholder="Classificação de tráfego (não whitelist, não veredito)"></div>
+                  </div>
+                </section>
+                <section>
+                  <h3>Correspondência</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorSourcePort">Source Port</label><input id="codecEditorSourcePort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorDestinationPort">Destination Port</label><input id="codecEditorDestinationPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorTcpFlags">TCP Flags</label><input id="codecEditorTcpFlags" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorIcmpType">ICMP Type</label><input id="codecEditorIcmpType" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecEditorIcmpCode">ICMP Code</label><input id="codecEditorIcmpCode" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecEditorSourceRole">Source Role</label><select id="codecEditorSourceRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorDestinationRole">Destination Role</label><select id="codecEditorDestinationRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorProvider">Provider</label><input id="codecEditorProvider" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                  </div>
+                </section>
+                <section>
+                  <h3>Classificação e consumo</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorPriority">Specificity Priority</label><input id="codecEditorPriority" type="number" min="0" class="form-control form-control-sm" value="0"></div>
+                    <div class="field"><label for="codecEditorExclusiveGroup">Exclusive Group</label><input id="codecEditorExclusiveGroup" class="form-control form-control-sm" placeholder="ex.: UDP_SERVICE"></div>
+                    <div class="field"><label for="codecEditorConsumeTraffic">Consume Traffic</label><select id="codecEditorConsumeTraffic" class="form-select form-select-sm"><option value="false">Não</option><option value="true">Sim</option></select></div>
+                    <div class="field"><label for="codecEditorActive">Ativo</label><select id="codecEditorActive" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+                  </div>
+                </section>
+              </div>
+              <div class="toolbar mt-3">
+                <button id="saveCodecButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeEditor"><i data-lucide="x"></i><span>Cancelar</span></button>
+              </div>
+            </section>
+          </aside>
+
+          <aside id="codecTesterDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="codecTesterDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-codec-action="closeTester" aria-label="Fechar testador"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div class="subtle">Classificação de um flow sintético (somente leitura)</div><h2 id="codecTesterDrawerTitle">Testar codec</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeTester" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="codecTesterStatus" class="subtle"></div>
+              <div class="security-event-drawer__body">
+                <section>
+                  <h3>Flow</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecTestProtocol">Protocolo</label><select id="codecTestProtocol" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestSrcPort">Src Port</label><input id="codecTestSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestDstPort">Dst Port</label><input id="codecTestDstPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestDirection">Direção</label><select id="codecTestDirection" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestTcpFlags">TCP Flags</label><input id="codecTestTcpFlags" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestIcmpType">ICMP Type</label><input id="codecTestIcmpType" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecTestIcmpCode">ICMP Code</label><input id="codecTestIcmpCode" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecTestSourceRole">Source Role</label><select id="codecTestSourceRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestDestinationRole">Destination Role</label><select id="codecTestDestinationRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestProvider">Provider</label><input id="codecTestProvider" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                  </div>
+                </section>
+              </div>
+              <div class="toolbar mt-3">
+                <button id="runCodecTestButton" type="button" class="btn btn-sm btn-success"><i data-lucide="flask-conical"></i><span>Executar</span></button>
+              </div>
+              <div id="codecTestResults" class="mt-3"></div>
+            </section>
+          </aside>
         </section>
 
         <section id="view-system" class="app-view">
@@ -27416,6 +27542,276 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
+    let codecsStateItems = [];
+    let codecOptionsState = { protocols: [], directions: [], roles: [], exclusive_groups: [] };
+
+    function codecPortLabel(value) {
+      const num = Number(value);
+      if (value === null || value === undefined || value === '' || !Number.isFinite(num) || num <= 0) return 'ANY';
+      return String(num);
+    }
+
+    function codecPortPayload(value) {
+      const text = String(value ?? '').trim();
+      if (!text) return null;
+      const num = Number(text);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function codecOptionalIntPayload(value) {
+      const text = String(value ?? '').trim();
+      if (!text) return null;
+      const num = Number(text);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function codecSelectOptions(list, includeAny = false) {
+      const anyOption = includeAny ? '<option value="">ANY</option>' : '';
+      return anyOption + (list || []).map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
+    }
+
+    function populateCodecOptions() {
+      const protocols = codecOptionsState.protocols?.length ? codecOptionsState.protocols : ['ANY', 'TCP', 'UDP', 'ICMP', 'ICMPV6', 'GRE', 'ESP', 'AH'];
+      const directions = codecOptionsState.directions?.length ? codecOptionsState.directions : ['ANY', 'TO_CUSTOMERS', 'FROM_CUSTOMERS', 'INBOUND', 'OUTBOUND'];
+      const roles = codecOptionsState.roles || [];
+      const protocolHtml = codecSelectOptions(protocols);
+      const directionHtml = codecSelectOptions(directions);
+      const roleHtml = codecSelectOptions(roles, true);
+      ['codecEditorProtocol', 'codecTestProtocol'].forEach(id => { document.getElementById(id).innerHTML = protocolHtml; });
+      ['codecEditorDirection', 'codecTestDirection'].forEach(id => { document.getElementById(id).innerHTML = directionHtml; });
+      ['codecEditorSourceRole', 'codecEditorDestinationRole', 'codecTestSourceRole', 'codecTestDestinationRole'].forEach(id => { document.getElementById(id).innerHTML = roleHtml; });
+    }
+
+    function renderCodecsTable(items) {
+      codecsStateItems = items || [];
+      document.getElementById('codecsTable').innerHTML = codecsStateItems.map(item => {
+        const builtin = Number(item.builtin) === 1;
+        const active = Number(item.active) === 1;
+        const actions = [
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="edit" data-id="${item.id}">Editar</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="duplicate" data-id="${item.id}">Duplicar</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-${active ? 'warning' : 'success'}" data-codec-action="toggle" data-id="${item.id}">${active ? 'Desativar' : 'Ativar'}</button>`,
+          builtin ? '' : `<button type="button" class="btn btn-sm btn-outline-danger" data-codec-action="delete" data-id="${item.id}">Excluir</button>`
+        ].filter(Boolean).join('');
+        return `
+          <tr>
+            <td><strong>${escapeHtml(item.name)}</strong>${item.description ? `<div class="small text-muted">${escapeHtml(item.description)}</div>` : ''}</td>
+            <td>${builtin ? '<span class="badge-soft ok">BUILTIN</span>' : '<span class="badge-soft warn">CUSTOM</span>'}</td>
+            <td>${escapeHtml(item.protocol || 'ANY')}</td>
+            <td>${escapeHtml(codecPortLabel(item.source_port))}</td>
+            <td>${escapeHtml(codecPortLabel(item.destination_port))}</td>
+            <td>${escapeHtml(item.direction || 'ANY')}</td>
+            <td>${formatNumber(item.specificity_priority || 0)}</td>
+            <td>${escapeHtml(item.exclusive_group || '-')}</td>
+            <td><span class="badge-soft ${active ? 'ok' : 'off'}">${active ? 'Ativo' : 'Desativado'}</span></td>
+            <td><div class="toolbar">${actions}</div></td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="10" class="text-muted">Nenhum codec cadastrado.</td></tr>';
+      createIcons();
+    }
+
+    async function loadCodecsWorkspace() {
+      setText('codecsStatus', 'Carregando codecs e opções...');
+      const [result, options] = await Promise.all([
+        apiRequest('/api/flow-codecs'),
+        apiRequest('/api/flow-codecs/options').catch(() => ({ protocols: [], directions: [], roles: [], exclusive_groups: [] }))
+      ]);
+      codecOptionsState = options || {};
+      populateCodecOptions();
+      renderCodecsTable(result.items || []);
+      const total = (result.items || []).length;
+      const builtin = (result.items || []).filter(item => Number(item.builtin) === 1).length;
+      setText('codecsStatus', `${formatNumber(total)} codec(s) — ${builtin} builtin, ${formatNumber(total - builtin)} custom.`);
+    }
+
+    function clearCodecEditor() {
+      setValue('codecEditorId', '');
+      setValue('codecEditorName', '');
+      setValue('codecEditorDisplayName', '');
+      setValue('codecEditorDescription', '');
+      setValue('codecEditorProtocol', 'ANY');
+      setValue('codecEditorDirection', 'ANY');
+      setValue('codecEditorSourcePort', '');
+      setValue('codecEditorDestinationPort', '');
+      setValue('codecEditorTcpFlags', '');
+      setValue('codecEditorIcmpType', '');
+      setValue('codecEditorIcmpCode', '');
+      setValue('codecEditorSourceRole', '');
+      setValue('codecEditorDestinationRole', '');
+      setValue('codecEditorProvider', '');
+      setValue('codecEditorPriority', '0');
+      setValue('codecEditorExclusiveGroup', '');
+      setBoolSelect('codecEditorConsumeTraffic', false);
+      setBoolSelect('codecEditorActive', true);
+      setText('codecEditorDrawerTitle', 'Novo codec');
+      setText('codecEditorDrawerContext', 'Codec');
+      setText('codecEditorStatus', '');
+    }
+
+    function openCodecEditor(codec) {
+      clearCodecEditor();
+      if (codec) {
+        setValue('codecEditorId', codec.id);
+        setValue('codecEditorName', codec.name || '');
+        setValue('codecEditorDisplayName', codec.display_name || '');
+        setValue('codecEditorDescription', codec.description || '');
+        setValue('codecEditorProtocol', codec.protocol || 'ANY');
+        setValue('codecEditorDirection', codec.direction || 'ANY');
+        setValue('codecEditorSourcePort', codec.source_port === null || codec.source_port === undefined ? '' : codec.source_port);
+        setValue('codecEditorDestinationPort', codec.destination_port === null || codec.destination_port === undefined ? '' : codec.destination_port);
+        setValue('codecEditorTcpFlags', codec.tcp_flags === null || codec.tcp_flags === undefined ? '' : codec.tcp_flags);
+        setValue('codecEditorIcmpType', codec.icmp_type === null || codec.icmp_type === undefined ? '' : codec.icmp_type);
+        setValue('codecEditorIcmpCode', codec.icmp_code === null || codec.icmp_code === undefined ? '' : codec.icmp_code);
+        setValue('codecEditorSourceRole', codec.source_role || '');
+        setValue('codecEditorDestinationRole', codec.destination_role || '');
+        setValue('codecEditorProvider', codec.provider || '');
+        setValue('codecEditorPriority', codec.specificity_priority ?? 0);
+        setValue('codecEditorExclusiveGroup', codec.exclusive_group || '');
+        setBoolSelect('codecEditorConsumeTraffic', Number(codec.consume_traffic) === 1);
+        setBoolSelect('codecEditorActive', Number(codec.active) === 1);
+        const builtin = Number(codec.builtin) === 1;
+        setText('codecEditorDrawerTitle', builtin ? `Codec builtin: ${codec.name}` : `Editar codec: ${codec.name}`);
+        setText('codecEditorDrawerContext', builtin ? 'BUILTIN — identidade protegida; edite apenas metadados/ativo' : 'CUSTOM');
+      }
+      document.getElementById('codecEditorDrawer').hidden = false;
+      createIcons();
+    }
+
+    function closeCodecEditor() {
+      document.getElementById('codecEditorDrawer').hidden = true;
+    }
+
+    function codecEditorPayload() {
+      return {
+        name: selectValue('codecEditorName').trim(),
+        display_name: selectValue('codecEditorDisplayName').trim(),
+        description: selectValue('codecEditorDescription').trim(),
+        protocol: selectValue('codecEditorProtocol') || 'ANY',
+        source_port: codecPortPayload(selectValue('codecEditorSourcePort')),
+        destination_port: codecPortPayload(selectValue('codecEditorDestinationPort')),
+        direction: selectValue('codecEditorDirection') || 'ANY',
+        tcp_flags: codecOptionalIntPayload(selectValue('codecEditorTcpFlags')),
+        icmp_type: codecOptionalIntPayload(selectValue('codecEditorIcmpType')),
+        icmp_code: codecOptionalIntPayload(selectValue('codecEditorIcmpCode')),
+        source_role: selectValue('codecEditorSourceRole').trim().toUpperCase(),
+        destination_role: selectValue('codecEditorDestinationRole').trim().toUpperCase(),
+        provider: selectValue('codecEditorProvider').trim().toUpperCase(),
+        specificity_priority: numberValue('codecEditorPriority', 0),
+        exclusive_group: selectValue('codecEditorExclusiveGroup').trim(),
+        consume_traffic: boolSelectValue('codecEditorConsumeTraffic'),
+        active: boolSelectValue('codecEditorActive')
+      };
+    }
+
+    async function saveCodec() {
+      const id = selectValue('codecEditorId');
+      const payload = codecEditorPayload();
+      if (!payload.name) throw new Error('Informe o nome do codec.');
+      await apiRequest(id ? `/api/flow-codecs/${id}` : '/api/flow-codecs', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      closeCodecEditor();
+      await loadCodecsWorkspace();
+    }
+
+    async function handleCodecAction(button) {
+      const codecId = Number(button.dataset.id);
+      const action = button.dataset.action;
+      const item = codecsStateItems.find(codec => Number(codec.id) === codecId);
+      if (action === 'edit') {
+        if (!item) return;
+        openCodecEditor(item);
+        return;
+      }
+      if (action === 'duplicate') {
+        await apiRequest(`/api/flow-codecs/${codecId}/duplicate`, { method: 'POST' });
+        await loadCodecsWorkspace();
+        return;
+      }
+      if (action === 'toggle') {
+        if (!item) return;
+        await apiRequest(`/api/flow-codecs/${codecId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: Number(item.active) !== 1 })
+        });
+        await loadCodecsWorkspace();
+        return;
+      }
+      if (action === 'delete') {
+        if (!item) return;
+        if (Number(item.builtin) === 1) {
+          setText('codecsStatus', 'Codecs builtin não podem ser excluídos.');
+          return;
+        }
+        if (!confirm(`Excluir o codec ${item.name}?`)) return;
+        await apiRequest(`/api/flow-codecs/${codecId}`, { method: 'DELETE' });
+        await loadCodecsWorkspace();
+      }
+    }
+
+    function openCodecTester() {
+      document.getElementById('codecTesterDrawer').hidden = false;
+      setText('codecTesterStatus', 'Informe os campos e clique em Executar.');
+      document.getElementById('codecTestResults').innerHTML = '';
+      createIcons();
+    }
+
+    function closeCodecTester() {
+      document.getElementById('codecTesterDrawer').hidden = true;
+    }
+
+    function renderCodecTestResults(result) {
+      const matches = result.matches || [];
+      document.getElementById('codecTestResults').innerHTML = matches.length
+        ? `<div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>#</th><th>Codec</th><th>Display</th><th>Protocolo</th><th>Src Port</th><th>Dst Port</th><th>Direção</th><th>Prioridade</th><th>Grupo</th></tr></thead><tbody>${matches.map((item, index) => `
+          <tr>
+            <td>${index + 1}</td>
+            <td><strong>${escapeHtml(item.name)}</strong></td>
+            <td>${escapeHtml(item.display_name || '-')}</td>
+            <td>${escapeHtml(item.protocol || 'ANY')}</td>
+            <td>${escapeHtml(codecPortLabel(item.source_port))}</td>
+            <td>${escapeHtml(codecPortLabel(item.destination_port))}</td>
+            <td>${escapeHtml(item.direction || 'ANY')}</td>
+            <td>${formatNumber(item.specificity_priority || 0)}</td>
+            <td>${escapeHtml(item.exclusive_group || '-')}</td>
+          </tr>`).join('')}</tbody></table></div>`
+        : '<div class="metric-readout">Nenhum codec ativo corresponde ao flow informado.</div>';
+    }
+
+    async function runCodecTest() {
+      setText('codecTesterStatus', 'Classificando flow sintético...');
+      const payload = { flow: {
+        protocol: selectValue('codecTestProtocol') || 'ANY',
+        source_port: codecPortPayload(selectValue('codecTestSrcPort')),
+        destination_port: codecPortPayload(selectValue('codecTestDstPort')),
+        direction: selectValue('codecTestDirection') || 'ANY',
+        tcp_flags: codecOptionalIntPayload(selectValue('codecTestTcpFlags')),
+        icmp_type: codecOptionalIntPayload(selectValue('codecTestIcmpType')),
+        icmp_code: codecOptionalIntPayload(selectValue('codecTestIcmpCode'))
+      } };
+      const sourceRole = selectValue('codecTestSourceRole').trim();
+      const destinationRole = selectValue('codecTestDestinationRole').trim();
+      const provider = selectValue('codecTestProvider').trim();
+      const sourceContext = {};
+      if (sourceRole) sourceContext.role = sourceRole;
+      if (provider) sourceContext.provider = provider;
+      if (Object.keys(sourceContext).length) payload.source_context = sourceContext;
+      const destinationContext = {};
+      if (destinationRole) destinationContext.role = destinationRole;
+      if (Object.keys(destinationContext).length) payload.destination_context = destinationContext;
+      const result = await apiRequest('/api/flow-codecs/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      renderCodecTestResults(result);
+      setText('codecTesterStatus', `${formatNumber((result.matches || []).length)} codec(s) correspondente(s), em ordem de prioridade.`);
+    }
+
     async function processCgnatFile() {
       if (!selectedCgnatFile) throw new Error('Selecione um arquivo CGNAT.');
       const maxBytes = Number(cgnatConfigState?.limits?.max_file_bytes || 0);
@@ -27796,7 +28192,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         sensors: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
         'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'threat-intelligence': 'anomalies.view', 'peak-hunter': 'anomalies.view',
         mitigation: 'mitigations.view', 'bgp-connectors': 'bgp.view', ai: 'settings.view',
-        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view'
+        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view', codecs: 'settings.view'
       };
       return requirements[canonicalNavigationView(view)] || '';
     }
@@ -27887,6 +28283,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-database').classList.add('active');
         document.querySelector('[data-nav-view="database"]').classList.add('active');
         loadDatabaseStatus().catch(console.error);
+      } else if (view === 'codecs') {
+        document.getElementById('view-codecs').classList.add('active');
+        document.querySelector('[data-nav-view="codecs"]').classList.add('active');
+        loadCodecsWorkspace().catch(error => setText('codecsStatus', `Falha: ${error.message}`));
       } else if (view === 'ip-zones') {
         document.getElementById('view-ip-zones').classList.add('active');
         document.querySelector('[data-nav-view="ip-zones"]').classList.add('active');
@@ -28506,6 +28906,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('cgnatPoolsTable').addEventListener('click', event => {
       const button = event.target.closest('[data-cgnat-pool-action]');
       if (button) handleCgnatPoolAction(button).catch(error => setText('cgnatStatus', `Falha no pool: ${error.message}`));
+    });
+    document.getElementById('codecsTable').addEventListener('click', event => {
+      const button = event.target.closest('[data-codec-action]');
+      if (button) handleCodecAction(button).catch(error => setText('codecsStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('newCodecButton').addEventListener('click', () => openCodecEditor(null));
+    document.getElementById('refreshCodecsButton').addEventListener('click', () => loadCodecsWorkspace().catch(error => setText('codecsStatus', `Falha: ${error.message}`)));
+    document.getElementById('saveCodecButton').addEventListener('click', () => saveCodec().catch(error => setText('codecEditorStatus', `Falha: ${error.message}`)));
+    document.getElementById('codecTesterButton').addEventListener('click', openCodecTester);
+    document.getElementById('runCodecTestButton').addEventListener('click', () => runCodecTest().catch(error => setText('codecTesterStatus', `Falha: ${error.message}`)));
+    document.addEventListener('click', event => {
+      if (event.target.closest('[data-codec-action="closeEditor"]')) closeCodecEditor();
+      if (event.target.closest('[data-codec-action="closeTester"]')) closeCodecTester();
     });
     document.getElementById('appearanceTheme').addEventListener('change', event => {
       setAppearanceTheme(event.target.value);

@@ -129,41 +129,78 @@ def flow_codec_row_to_dict(row: Mapping[str, Any] | sqlite3.Row) -> dict[str, An
 
 
 # (name, display_name, protocol, source_port, destination_port, direction,
-#  specificity_priority, exclusive_group, consume_traffic)
-BUILTIN_CODECS: tuple[tuple[str, str, str, int | None, int | None, str, int, str, int], ...] = (
-    ("DNS_QUERY_UDP", "DNS query (UDP)", "UDP", None, 53, "ANY", 100, "UDP_SERVICE", 1),
-    ("DNS_RESPONSE_UDP", "DNS response (UDP)", "UDP", 53, None, "ANY", 100, "UDP_SERVICE", 1),
-    ("DNS_QUERY_TCP", "DNS query (TCP)", "TCP", None, 53, "ANY", 100, "TCP_SERVICE", 1),
-    ("DNS_RESPONSE_TCP", "DNS response (TCP)", "TCP", 53, None, "ANY", 100, "TCP_SERVICE", 1),
-    ("NTP_QUERY", "NTP query", "UDP", None, 123, "ANY", 90, "UDP_SERVICE", 1),
-    ("NTP_RESPONSE", "NTP response", "UDP", 123, None, "ANY", 90, "UDP_SERVICE", 1),
-    ("SSDP_QUERY", "SSDP query", "UDP", None, 1900, "ANY", 80, "UDP_SERVICE", 1),
-    ("SSDP_RESPONSE", "SSDP response", "UDP", 1900, None, "ANY", 80, "UDP_SERVICE", 1),
-    ("CLDAP_QUERY", "CLDAP query", "UDP", None, 389, "ANY", 80, "UDP_SERVICE", 1),
-    ("CLDAP_RESPONSE", "CLDAP response", "UDP", 389, None, "ANY", 80, "UDP_SERVICE", 1),
-    ("CHARGEN_QUERY", "CHARGEN query", "UDP", None, 19, "ANY", 70, "UDP_SERVICE", 1),
-    ("CHARGEN_RESPONSE", "CHARGEN response", "UDP", 19, None, "ANY", 70, "UDP_SERVICE", 1),
-    ("SNMP_QUERY", "SNMP query", "UDP", None, 161, "ANY", 70, "UDP_SERVICE", 1),
-    ("SNMP_RESPONSE", "SNMP response", "UDP", 161, None, "ANY", 70, "UDP_SERVICE", 1),
-    ("MEMCACHED_QUERY", "Memcached query", "UDP", None, 11211, "ANY", 70, "UDP_SERVICE", 1),
-    ("MEMCACHED_RESPONSE", "Memcached response", "UDP", 11211, None, "ANY", 70, "UDP_SERVICE", 1),
-    ("QUIC_CLIENT", "QUIC client", "UDP", None, 443, "ANY", 90, "UDP_SERVICE", 1),
-    ("QUIC_RETURN", "QUIC return", "UDP", 443, None, "ANY", 90, "UDP_SERVICE", 1),
-    ("HTTP_CLIENT", "HTTP client", "TCP", None, 80, "ANY", 90, "TCP_SERVICE", 1),
-    ("HTTP_RETURN", "HTTP return", "TCP", 80, None, "ANY", 90, "TCP_SERVICE", 1),
-    ("HTTPS_CLIENT", "HTTPS client", "TCP", None, 443, "ANY", 90, "TCP_SERVICE", 1),
-    ("HTTPS_RETURN", "HTTPS return", "TCP", 443, None, "ANY", 90, "TCP_SERVICE", 1),
+#  specificity_priority, exclusive_group, consume_traffic, description)
+#
+# Description is classification guidance only: a codec match is never a
+# whitelist, never a verdict and never an authorization. The port-443 codecs
+# explicitly state that context (not the port alone) decides the signal.
+BUILTIN_CODECS: tuple[tuple[str, str, str, int | None, int | None, str, int, str, int, str], ...] = (
+    ("DNS_QUERY_UDP", "DNS query (UDP)", "UDP", None, 53, "ANY", 100, "UDP_SERVICE", 1,
+     "Identifica consulta DNS via UDP (destino 53). Classificação de tráfego, não whitelist nem veredito."),
+    ("DNS_RESPONSE_UDP", "DNS response (UDP)", "UDP", 53, None, "ANY", 100, "UDP_SERVICE", 1,
+     "Identifica resposta DNS via UDP (origem 53)."),
+    ("DNS_QUERY_TCP", "DNS query (TCP)", "TCP", None, 53, "ANY", 100, "TCP_SERVICE", 1,
+     "Identifica consulta DNS via TCP (destino 53)."),
+    ("DNS_RESPONSE_TCP", "DNS response (TCP)", "TCP", 53, None, "ANY", 100, "TCP_SERVICE", 1,
+     "Identifica resposta DNS via TCP (origem 53)."),
+    ("NTP_QUERY", "NTP query", "UDP", None, 123, "ANY", 90, "UDP_SERVICE", 1,
+     "Identifica consulta NTP via UDP (destino 123)."),
+    ("NTP_RESPONSE", "NTP response", "UDP", 123, None, "ANY", 90, "UDP_SERVICE", 1,
+     "Identifica resposta NTP via UDP (origem 123)."),
+    ("SSDP_QUERY", "SSDP query", "UDP", None, 1900, "ANY", 80, "UDP_SERVICE", 1,
+     "Identifica consulta SSDP via UDP (destino 1900)."),
+    ("SSDP_RESPONSE", "SSDP response", "UDP", 1900, None, "ANY", 80, "UDP_SERVICE", 1,
+     "Identifica resposta SSDP via UDP (origem 1900)."),
+    ("CLDAP_QUERY", "CLDAP query", "UDP", None, 389, "ANY", 80, "UDP_SERVICE", 1,
+     "Identifica consulta CLDAP via UDP (destino 389)."),
+    ("CLDAP_RESPONSE", "CLDAP response", "UDP", 389, None, "ANY", 80, "UDP_SERVICE", 1,
+     "Identifica resposta CLDAP via UDP (origem 389)."),
+    ("CHARGEN_QUERY", "CHARGEN query", "UDP", None, 19, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica consulta CHARGEN via UDP (destino 19)."),
+    ("CHARGEN_RESPONSE", "CHARGEN response", "UDP", 19, None, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica resposta CHARGEN via UDP (origem 19)."),
+    ("SNMP_QUERY", "SNMP query", "UDP", None, 161, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica consulta SNMP via UDP (destino 161)."),
+    ("SNMP_RESPONSE", "SNMP response", "UDP", 161, None, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica resposta SNMP via UDP (origem 161)."),
+    ("MEMCACHED_QUERY", "Memcached query", "UDP", None, 11211, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica consulta Memcached via UDP (destino 11211)."),
+    ("MEMCACHED_RESPONSE", "Memcached response", "UDP", 11211, None, "ANY", 70, "UDP_SERVICE", 1,
+     "Identifica resposta Memcached via UDP (origem 11211)."),
+    ("QUIC_CLIENT", "QUIC client", "UDP", None, 443, "ANY", 90, "UDP_SERVICE", 1,
+     "Identifica tráfego UDP com destino 443 (cliente QUIC). Apenas classificação por porta; não implica legitimidade."),
+    ("QUIC_RETURN", "QUIC return", "UDP", 443, None, "ANY", 90, "UDP_SERVICE", 1,
+     "Identifica tráfego compatível com retorno QUIC por porta (UDP origem 443). Não implica legitimidade sem contexto de Network Asset / Expected Service."),
+    ("HTTP_CLIENT", "HTTP client", "TCP", None, 80, "ANY", 90, "TCP_SERVICE", 1,
+     "Identifica tráfego TCP com destino 80 (cliente HTTP)."),
+    ("HTTP_RETURN", "HTTP return", "TCP", 80, None, "ANY", 90, "TCP_SERVICE", 1,
+     "Identifica retorno TCP de serviço HTTP (origem 80). ACK/PSH+ACK e direção são usados em contexto comportamental."),
+    ("HTTPS_CLIENT", "HTTPS client", "TCP", None, 443, "ANY", 90, "TCP_SERVICE", 1,
+     "Identifica tráfego TCP com destino 443 (cliente HTTPS). Não reduz score por si só."),
+    ("HTTPS_RETURN", "HTTPS return", "TCP", 443, None, "ANY", 90, "TCP_SERVICE", 1,
+     "Identifica retorno TCP de serviço HTTPS (origem 443). ACK/PSH+ACK e direção são usados em contexto comportamental."),
 )
 
 
 def seed_builtin_flow_codecs(conn: sqlite3.Connection) -> int:
-    """Idempotent seed of builtin codecs. Returns number of rows inserted."""
+    """Idempotent seed of builtin codecs. Returns number of rows inserted.
+
+    Existing builtin rows get their description backfilled only when empty, so
+    operator-edited metadata (display_name/description/active) is preserved.
+    """
     ensure_flow_codecs_schema(conn)
     inserted = 0
     now = utc_now_iso()
-    for name, display_name, protocol, src, dst, direction, priority, group, consume in BUILTIN_CODECS:
+    for name, display_name, protocol, src, dst, direction, priority, group, consume, description in BUILTIN_CODECS:
         exists = conn.execute("SELECT id FROM flow_codecs WHERE name = ?", (name,)).fetchone()
         if exists is not None:
+            conn.execute(
+                """
+                UPDATE flow_codecs SET description = ?
+                WHERE name = ? AND builtin = 1 AND (description IS NULL OR description = '')
+                """,
+                (description, name),
+            )
             continue
         conn.execute(
             """
@@ -172,9 +209,9 @@ def seed_builtin_flow_codecs(conn: sqlite3.Connection) -> int:
                 direction, tcp_flags, icmp_type, icmp_code, source_role, destination_role,
                 provider, specificity_priority, exclusive_group, consume_traffic, builtin,
                 active, created_at, updated_at
-            ) VALUES (?, ?, '', ?, ?, ?, ?, NULL, NULL, NULL, '', '', '', ?, ?, ?, 1, 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '', '', '', ?, ?, ?, 1, 1, ?, ?)
             """,
-            (name, display_name, protocol, src, dst, direction, priority, group, consume, now, now),
+            (name, display_name, description, protocol, src, dst, direction, priority, group, consume, now, now),
         )
         inserted += 1
     return inserted

@@ -234,6 +234,43 @@ class FlowCodecTestCase(unittest.TestCase):
         self.assertEqual("DNS query editado", updated["display_name"])
         self.assertEqual(53, updated["destination_port"])
 
+    # ---- Descrições / semântica da porta 443 ------------------------------
+    def test_builtin_codecs_have_descriptions(self):
+        builtin = [c for c in self._codecs() if c["builtin"]]
+        self.assertGreaterEqual(len(builtin), 20)
+        for codec in builtin:
+            self.assertTrue(codec["description"], f"codec {codec['name']} sem descrição")
+
+    def test_https_and_quic_client_return_distinct(self):
+        by_name = {c["name"]: c for c in self._codecs()}
+        self.assertEqual("TCP", by_name["HTTPS_CLIENT"]["protocol"])
+        self.assertIsNone(by_name["HTTPS_CLIENT"]["source_port"])
+        self.assertEqual(443, by_name["HTTPS_CLIENT"]["destination_port"])
+        self.assertEqual("TCP", by_name["HTTPS_RETURN"]["protocol"])
+        self.assertEqual(443, by_name["HTTPS_RETURN"]["source_port"])
+        self.assertIsNone(by_name["HTTPS_RETURN"]["destination_port"])
+        self.assertEqual("UDP", by_name["QUIC_CLIENT"]["protocol"])
+        self.assertIsNone(by_name["QUIC_CLIENT"]["source_port"])
+        self.assertEqual(443, by_name["QUIC_CLIENT"]["destination_port"])
+        self.assertEqual("UDP", by_name["QUIC_RETURN"]["protocol"])
+        self.assertEqual(443, by_name["QUIC_RETURN"]["source_port"])
+        self.assertIsNone(by_name["QUIC_RETURN"]["destination_port"])
+
+    def test_port_443_descriptions_do_not_imply_whitelist(self):
+        by_name = {c["name"]: c for c in self._codecs()}
+        self.assertIn("Não reduz score", by_name["HTTPS_CLIENT"]["description"])
+        self.assertIn("contexto comportamental", by_name["HTTPS_RETURN"]["description"])
+        self.assertIn("Não implica legitimidade", by_name["QUIC_RETURN"]["description"])
+
+    def test_seed_backfills_empty_builtin_description(self):
+        codec_id = next(c["id"] for c in self._codecs() if c["name"] == "NTP_QUERY")
+        self.conn.execute("UPDATE flow_codecs SET description = '' WHERE id = ?", (codec_id,))
+        self.conn.commit()
+        self.assertEqual("", get_flow_codec(self.conn, codec_id)["description"])
+        seed_builtin_flow_codecs(self.conn)
+        self.conn.commit()
+        self.assertTrue(get_flow_codec(self.conn, codec_id)["description"])
+
     # ---- Matcher com FlowObservation (integração futura) ------------------
     def test_match_flow_observation(self):
         codecs = self._codecs()
