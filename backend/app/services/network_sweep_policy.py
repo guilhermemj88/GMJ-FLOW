@@ -21,6 +21,7 @@ import os
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import timedelta
 from ipaddress import ip_address, ip_network
 from typing import Any, Mapping
@@ -293,61 +294,124 @@ def _overlaps_subject(subject: str, network: str) -> bool:
         return False
 
 
-def _is_protected_subject(conn: sqlite3.Connection, subject: str) -> bool:
+_EXACT_HOST_TABLES = {
+    "bgp_connectors": ("peer_ip", "local_address", "router_mgmt_ip"),
+    "sensors": ("exporter_ip", "listener_ip", "snmp_ip"),
+}
+
+
+@dataclass
+class ProtectedSubjectContext:
+    """Per-execution snapshot of the data ``_is_protected_subject`` reads from
+    SQLite on every call. Built once (before the first write) and reused for
+    pure in-memory lookups. It never outlives the current run and is never a
+    global cache."""
+
+    tables: set[str] = field(default_factory=set)
+    whitelist_pairs: list[tuple[str, str]] = field(default_factory=list)
+    bgp_protected_prefixes: list[str] = field(default_factory=list)
+    network_context_ranges: list[str] = field(default_factory=list)
+    exact_hosts: list[Any] = field(default_factory=list)
+    env_protected_ranges: list[str] = field(default_factory=list)
+
+
+def load_protected_subject_context(conn: sqlite3.Connection) -> ProtectedSubjectContext:
+    """Read all protection data once. Tolerant to missing tables/columns in the
+    exact same way as the original ``_is_protected_subject`` loop."""
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    whitelist_pairs: list[tuple[str, str]] = []
+    if "detection_whitelist" in tables:
+        try:
+            whitelist_pairs = [
+                (clean_text(row[0]), clean_text(row[1]))
+                for row in conn.execute("SELECT src_cidr, dst_cidr FROM detection_whitelist WHERE active=1").fetchall()
+            ]
+        except sqlite3.OperationalError:
+            whitelist_pairs = []
+
+    bgp_protected_prefixes: list[str] = []
+    if "bgp_protected_prefixes" in tables:
+        try:
+            bgp_protected_prefixes = [
+                clean_text(row[0])
+                for row in conn.execute("SELECT cidr FROM bgp_protected_prefixes WHERE enabled=1").fetchall()
+            ]
+        except sqlite3.OperationalError:
+            bgp_protected_prefixes = []
+
+    network_context_ranges: list[str] = []
+    if "threat_network_contexts" in tables:
+        try:
+            parsed: list[str] = []
+            for row in conn.execute("SELECT protected_ranges_json FROM threat_network_contexts WHERE enabled=1").fetchall():
+                parsed.extend(json.loads(row[0] or "[]"))
+            network_context_ranges = [clean_text(network) for network in parsed]
+        except (sqlite3.OperationalError, ValueError):
+            network_context_ranges = []
+
+    exact_hosts: list[Any] = []
+    for table, cols in _EXACT_HOST_TABLES.items():
+        if table not in tables:
+            continue
+        where = "enabled=1" if table == "bgp_connectors" else "active=1"
+        try:
+            for row in conn.execute(f"SELECT {', '.join(cols)} FROM {table} WHERE {where}").fetchall():
+                for value in row:
+                    candidate = _normalize_subject(clean_text(value))
+                    if candidate is not None:
+                        exact_hosts.append(candidate)
+        except sqlite3.OperationalError:
+            continue
+
+    env_protected_ranges = [
+        value.strip() for value in os.getenv("GMJFLOW_THREAT_PROTECTED_RANGES", "").split(",") if value.strip()
+    ]
+
+    return ProtectedSubjectContext(
+        tables=set(tables),
+        whitelist_pairs=whitelist_pairs,
+        bgp_protected_prefixes=bgp_protected_prefixes,
+        network_context_ranges=network_context_ranges,
+        exact_hosts=exact_hosts,
+        env_protected_ranges=env_protected_ranges,
+    )
+
+
+def is_protected_subject_cached(subject: str, context: ProtectedSubjectContext) -> bool:
+    """Pure in-memory equivalent of ``_is_protected_subject`` using a pre-loaded
+    context. Returns the exact same result as the DB-backed version."""
     if not clean_text(subject):
         return False
     for network in _RFC1918_AND_INFRA:
         if _overlaps_subject(subject, network):
             return True
-    for network in [v.strip() for v in os.getenv("GMJFLOW_THREAT_PROTECTED_RANGES", "").split(",") if v.strip()]:
+    for network in context.env_protected_ranges:
         if _overlaps_subject(subject, network):
             return True
-    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    if "detection_whitelist" in tables:
-        try:
-            for row in conn.execute("SELECT src_cidr, dst_cidr FROM detection_whitelist WHERE active=1").fetchall():
-                if _overlaps_subject(subject, clean_text(row[0])) or _overlaps_subject(subject, clean_text(row[1])):
-                    return True
-        except sqlite3.OperationalError:
-            pass
-    if "bgp_protected_prefixes" in tables:
-        try:
-            for row in conn.execute("SELECT cidr FROM bgp_protected_prefixes WHERE enabled=1").fetchall():
-                if _overlaps_subject(subject, clean_text(row[0])):
-                    return True
-        except sqlite3.OperationalError:
-            pass
-    if "threat_network_contexts" in tables:
-        try:
-            for row in conn.execute("SELECT protected_ranges_json FROM threat_network_contexts WHERE enabled=1").fetchall():
-                for network in json.loads(row[0] or "[]"):
-                    if _overlaps_subject(subject, clean_text(network)):
-                        return True
-        except (sqlite3.OperationalError, ValueError):
-            pass
-    exact_tables = {"bgp_connectors": ("peer_ip", "local_address", "router_mgmt_ip"), "sensors": ("exporter_ip", "listener_ip", "snmp_ip")}
+    for src_cidr, dst_cidr in context.whitelist_pairs:
+        if _overlaps_subject(subject, src_cidr) or _overlaps_subject(subject, dst_cidr):
+            return True
+    for cidr in context.bgp_protected_prefixes:
+        if _overlaps_subject(subject, cidr):
+            return True
+    for network in context.network_context_ranges:
+        if _overlaps_subject(subject, network):
+            return True
     host = _normalize_subject(subject)
     if host is None:
         return False
-    for table, cols in exact_tables.items():
-        if table not in tables:
-            continue
-        where = "enabled=1" if table == "bgp_connectors" else "active=1"
+    for candidate in context.exact_hosts:
         try:
-            rows = conn.execute(f"SELECT {', '.join(cols)} FROM {table} WHERE {where}").fetchall()
-        except sqlite3.OperationalError:
+            if getattr(host, "version", None) == getattr(candidate, "version", None) and str(host) == str(candidate):
+                return True
+        except ValueError:
             continue
-        for row in rows:
-            for value in row:
-                candidate = _normalize_subject(clean_text(value))
-                if candidate is None:
-                    continue
-                try:
-                    if getattr(host, "version", None) == getattr(candidate, "version", None) and str(host) == str(candidate):
-                        return True
-                except ValueError:
-                    continue
     return False
+
+
+def _is_protected_subject(conn: sqlite3.Connection, subject: str) -> bool:
+    return is_protected_subject_cached(subject, load_protected_subject_context(conn))
 
 
 def _existing_mitigation(conn: sqlite3.Connection, source_ip: str) -> bool:

@@ -19,6 +19,9 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterable, Mapping
 
 
+from app.services.sqlite_managed import open_managed
+
+
 LOGGER = logging.getLogger("gmj-flow")
 
 ACTIVE = "ACTIVE"
@@ -41,14 +44,66 @@ GREYNOISE = "GREYNOISE"
 CEREAL2 = "CEREAL2"
 TEAM_CYMRU = "TEAM_CYMRU"
 FEODO = "FEODO"
-INTEL_SOURCES = {GREYNOISE, CEREAL2, TEAM_CYMRU, FEODO}
+BLOCKLIST_DE = "BLOCKLIST_DE"
+INTEL_SOURCES = {GREYNOISE, CEREAL2, TEAM_CYMRU, FEODO, BLOCKLIST_DE}
 
 DEFAULT_INTERVALS = {
     GREYNOISE: 8 * 60 * 60,
     CEREAL2: 15 * 60,
     TEAM_CYMRU: 4 * 60 * 60,
     FEODO: 15 * 60,
+    BLOCKLIST_DE: 15 * 60,
 }
+
+# Semantic priority profile: classification (lowercased) -> (tier, category).
+# Tier 1 (P1) = C2, P2 = botnet/DDoS, P3 = malware/compromised, P4 = abuse, P5 = low signal.
+# GreyNoise "malicious" gets its own category "reputation_malicious" so it never mixes
+# with reported_attack_source / scanner / brute_force / abuse.
+SEMANTIC_PROFILE: dict[str, tuple[int, str]] = {
+    "c2": (1, "c2"),
+    "botnet_cc": (1, "c2"),
+    "command_and_control": (1, "c2"),
+    "c2_confirmed": (1, "c2"),
+    "active_botnet": (2, "botnet"),
+    "ddos_source": (2, "ddos"),
+    "ddos": (2, "ddos"),
+    "payload_delivery": (3, "malware"),
+    "malware_distribution": (3, "malware"),
+    "compromised_host": (3, "compromised"),
+    "compromised": (3, "compromised"),
+    "scanner": (4, "scanner"),
+    "brute_force": (4, "brute_force"),
+    "bruteforce": (4, "brute_force"),
+    "reported_attack_source": (4, "abuse"),
+    "abuse": (4, "abuse"),
+    "malicious": (4, "reputation_malicious"),
+    "reputation_malicious": (4, "reputation_malicious"),
+    "suspicious": (5, "unknown"),
+    "unknown": (5, "unknown"),
+    "noise": (5, "unknown"),
+    "benign": (5, "benign"),
+}
+SEMANTIC_DEFAULT: tuple[int, str] = (5, "unknown")
+
+
+def semantic_tier(classification: Any) -> int:
+    return SEMANTIC_PROFILE.get(clean_text(classification).lower(), SEMANTIC_DEFAULT)[0]
+
+
+def semantic_category(classification: Any) -> str:
+    return SEMANTIC_PROFILE.get(clean_text(classification).lower(), SEMANTIC_DEFAULT)[1]
+
+
+def semantic_case(column_expr: str, value_index: int) -> str:
+    branches = []
+    for key, value in SEMANTIC_PROFILE.items():
+        escaped = key.replace("'", "''")
+        literal = value[value_index]
+        literal_sql = f"'{literal.replace(chr(39), chr(39) + chr(39))}'" if isinstance(literal, str) else str(literal)
+        branches.append(f"WHEN {column_expr} = '{escaped}' THEN {literal_sql}")
+    default = SEMANTIC_DEFAULT[value_index]
+    default_sql = f"'{default.replace(chr(39), chr(39) + chr(39))}'" if isinstance(default, str) else str(default)
+    return f"CASE {' '.join(branches)} ELSE {default_sql} END"
 
 GREYNOISE_QUERIES = (
     'last_seen:1d classification:"malicious"',
@@ -88,7 +143,7 @@ def json_dump(value: Any) -> str:
 def sqlite_connection() -> sqlite3.Connection:
     path = Path(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    conn = open_managed(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
@@ -250,6 +305,7 @@ def ensure_threat_intel_schema(conn: sqlite3.Connection) -> None:
         (CEREAL2, "Cereal2", 1),
         (TEAM_CYMRU, "Team Cymru", 1),
         (FEODO, "Feodo Tracker", 1),
+        (BLOCKLIST_DE, "Blocklist.de", 1),
     )
     for provider, display_name, public_default in defaults:
         env_enabled = os.getenv(f"GMJFLOW_THREAT_INTEL_{provider}_ENABLED")
@@ -399,10 +455,38 @@ class ThreatIntelProvider(ABC):
         except json.JSONDecodeError as exc:
             raise ThreatIntelError(f"JSON invalido: {exc.msg}") from None
 
+    def _request_raw(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: int | None = None,
+    ) -> tuple[int, bytes, Mapping[str, str]]:
+        request_headers = {"Accept": "application/json", "User-Agent": "GMJ-FLOW/1.0"}
+        request_headers.update(dict(headers or {}))
+        request = urllib.request.Request(url, headers=request_headers, method="GET")
+        try:
+            with self.opener(request, timeout=timeout or self.timeout_seconds()) as response:
+                response_headers = dict(getattr(response, "headers", {}) or {})
+                status = int(getattr(response, "status", 200) or 200)
+                return status, response.read(), response_headers
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return 304, b"", {}
+            if exc.code in {401, 403}:
+                raise ThreatIntelAuthError(f"HTTP {exc.code}: credencial rejeitada") from None
+            if exc.code == 429:
+                raise ThreatIntelRateLimitError("HTTP 429: limite do provider atingido") from None
+            if 500 <= exc.code < 600:
+                raise ThreatIntelOfflineError(f"HTTP {exc.code}: provider indisponivel") from None
+            raise ThreatIntelError(f"HTTP {exc.code}: requisicao rejeitada") from None
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            raise ThreatIntelOfflineError(clean_text(getattr(exc, "reason", exc)) or "provider indisponivel") from None
+
     def timeout_seconds(self) -> int:
         return max(2, min(int(os.getenv("GMJFLOW_THREAT_INTEL_HTTP_TIMEOUT_SECONDS", "30")), 120))
 
-    def _upsert_indicators(self, items: Iterable[dict[str, Any]], sync_token: str) -> int:
+    def _indicator_rows(self, items: Iterable[dict[str, Any]], sync_token: str) -> list[tuple[Any, ...]]:
         rows = []
         now = utc_now_iso()
         for item in items:
@@ -436,30 +520,33 @@ class ThreatIntelProvider(ABC):
                     now,
                 )
             )
+        return rows
+
+    _INDICATOR_UPSERT_SQL = """
+        INSERT INTO threat_intel_indicators (
+            provider, indicator_type, ip, network, classification, actor, asn,
+            organization, country, country_code, city, spoofable, vpn, tor,
+            first_seen, last_seen, botnet_family, recency_seconds, tags_json,
+            metadata_json, sync_token, active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(provider, indicator_type, ip, network) DO UPDATE SET
+            classification=excluded.classification, actor=excluded.actor, asn=excluded.asn,
+            organization=excluded.organization, country=excluded.country,
+            country_code=excluded.country_code, city=excluded.city,
+            spoofable=excluded.spoofable, vpn=excluded.vpn, tor=excluded.tor,
+            first_seen=COALESCE(excluded.first_seen, threat_intel_indicators.first_seen),
+            last_seen=excluded.last_seen, botnet_family=excluded.botnet_family,
+            recency_seconds=excluded.recency_seconds, tags_json=excluded.tags_json,
+            metadata_json=excluded.metadata_json, sync_token=excluded.sync_token,
+            active=1, updated_at=excluded.updated_at
+    """
+
+    def _upsert_indicators(self, items: Iterable[dict[str, Any]], sync_token: str) -> int:
+        rows = self._indicator_rows(items, sync_token)
         if not rows:
             return 0
         with self.connection_factory() as conn:
-            conn.executemany(
-                """
-                INSERT INTO threat_intel_indicators (
-                    provider, indicator_type, ip, network, classification, actor, asn,
-                    organization, country, country_code, city, spoofable, vpn, tor,
-                    first_seen, last_seen, botnet_family, recency_seconds, tags_json,
-                    metadata_json, sync_token, active, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                ON CONFLICT(provider, indicator_type, ip, network) DO UPDATE SET
-                    classification=excluded.classification, actor=excluded.actor, asn=excluded.asn,
-                    organization=excluded.organization, country=excluded.country,
-                    country_code=excluded.country_code, city=excluded.city,
-                    spoofable=excluded.spoofable, vpn=excluded.vpn, tor=excluded.tor,
-                    first_seen=COALESCE(excluded.first_seen, threat_intel_indicators.first_seen),
-                    last_seen=excluded.last_seen, botnet_family=excluded.botnet_family,
-                    recency_seconds=excluded.recency_seconds, tags_json=excluded.tags_json,
-                    metadata_json=excluded.metadata_json, sync_token=excluded.sync_token,
-                    active=1, updated_at=excluded.updated_at
-                """,
-                rows,
-            )
+            conn.executemany(self._INDICATOR_UPSERT_SQL, rows)
             conn.commit()
         return len(rows)
 
@@ -525,7 +612,7 @@ def greynoise_tag(raw: Any) -> dict[str, Any] | None:
 class GreyNoiseProvider(ThreatIntelProvider):
     provider = GREYNOISE
     display_name = "GreyNoise"
-    requires_credential = False
+    requires_credential = True
 
     def api_key(self) -> str:
         return os.getenv("GREYNOISE_API_KEY", "").strip()
@@ -561,16 +648,15 @@ class GreyNoiseProvider(ThreatIntelProvider):
         }
 
     def _query_page(self, query: str, scroll: str = "") -> Mapping[str, Any]:
+        if not self.api_key():
+            raise ThreatIntelAuthError("GREYNOISE_API_KEY nao configurada")
         params = {"query": query, "size": "1000", "exclude_raw": "true"}
         if scroll:
             params["scroll"] = scroll
         base = os.getenv("GREYNOISE_GNQL_URL", "https://api.greynoise.io/v3/gnql").strip()
-        headers: dict[str, str] = {}
-        if self.api_key():
-            headers["key"] = self.api_key()
         result = self._request_json(
             f"{base}?{urllib.parse.urlencode(params)}",
-            headers=headers,
+            headers={"key": self.api_key()},
         )
         if not isinstance(result, Mapping):
             raise ThreatIntelError("Resposta GNQL nao e um objeto")
@@ -1062,6 +1148,171 @@ class TeamCymruProvider(ThreatIntelProvider):
         ]
 
 
+class BlocklistDeProvider(ThreatIntelProvider):
+    provider = BLOCKLIST_DE
+    display_name = "Blocklist.de"
+
+    @property
+    def feed_url(self) -> str:
+        return os.getenv("BLOCKLIST_DE_FEED_URL", "https://lists.blocklist.de/lists/all.txt").strip()
+
+    def normalize(self, raw: Mapping[str, Any]) -> dict[str, Any] | None:
+        ip_text = clean_text(raw.get("ip"))
+        try:
+            ip_text = str(ip_address(ip_text))
+        except ValueError:
+            return None
+        return {
+            "indicator_type": "IP",
+            "ip": ip_text,
+            "classification": "reported_attack_source",
+            "first_seen": None,
+            "last_seen": None,
+            "botnet_family": "",
+            "tags": [],
+            "metadata": self._metadata(),
+        }
+
+    def _metadata(self) -> dict[str, Any]:
+        return {
+            "primary_source": BLOCKLIST_DE,
+            "aggregator_source": None,
+            "source_mode": "list_txt",
+            "category": "abuse",
+            "classification_original": "reported_attack_source",
+            "confidence_original": None,
+            "source_url": self.feed_url,
+            "source_record_id": None,
+            "service": None,
+            "expires_at": None,
+            "retrieved_at": None,
+        }
+
+    def _active_count(self) -> int:
+        with self.connection_factory() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM threat_intel_indicators WHERE provider=? AND active=1",
+                (self.provider,),
+            ).fetchone()[0])
+
+    def _load_config(self) -> dict[str, Any]:
+        with self.connection_factory() as conn:
+            row = conn.execute(
+                "SELECT config_json FROM threat_intel_providers WHERE provider=?", (self.provider,)
+            ).fetchone()
+        return safe_json(row["config_json"] if row else "{}", {})
+
+    def _save_config(self, config: Mapping[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.connection_factory() as conn:
+            ensure_threat_intel_schema(conn)
+            conn.execute(
+                "UPDATE threat_intel_providers SET config_json=?, updated_at=? WHERE provider=?",
+                (json_dump(config), now, self.provider),
+            )
+            conn.commit()
+
+    def _replace_indicators_atomic(self, items: list[dict[str, Any]], sync_token: str) -> tuple[int, int]:
+        rows = self._indicator_rows(items, sync_token)
+        if not rows:
+            return 0, 0
+        started = time.monotonic()
+        for attempt in range(3):
+            try:
+                with self.connection_factory() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        for start in range(0, len(rows), 2000):
+                            conn.executemany(self._INDICATOR_UPSERT_SQL, rows[start:start + 2000])
+                        conn.execute(
+                            "UPDATE threat_intel_indicators SET active=0 WHERE provider=? AND sync_token<>?",
+                            (self.provider, sync_token),
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    raise
+                LOGGER.warning("THREAT_INTEL_WRITE_LOCKED provider=%s attempt=%d", self.provider, attempt + 1)
+                time.sleep(0.5 * (attempt + 1))
+        write_ms = max(0, int((time.monotonic() - started) * 1000))
+        LOGGER.info("THREAT_INTEL_WRITE provider=%s rows=%d write_duration_ms=%d", self.provider, len(rows), write_ms)
+        return len(rows), write_ms
+
+    def _min_records(self) -> int:
+        return max(1, int(os.getenv("GMJFLOW_BLOCKLIST_DE_MIN_RECORDS", "5000")))
+
+    def health_check(self) -> dict[str, Any]:
+        started = time.monotonic()
+        status, body, _ = self._request_raw(self.feed_url)
+        ok = status == 304 or (bool(body) and not body.lstrip()[:1].startswith(b"<"))
+        return {
+            "ok": ok,
+            "status": ACTIVE if ok else DEGRADED,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+
+    def sync(self) -> SyncResult:
+        started = time.monotonic()
+        now = utc_now_iso()
+        token = uuid.uuid4().hex
+        config = self._load_config()
+        request_headers: dict[str, str] = {}
+        if clean_text(config.get("etag")):
+            request_headers["If-None-Match"] = clean_text(config["etag"])
+        if clean_text(config.get("last_modified")):
+            request_headers["If-Modified-Since"] = clean_text(config["last_modified"])
+
+        status, body, response_headers = self._request_raw(self.feed_url, headers=request_headers)
+        if status == 304:
+            config["last_not_modified_at"] = now
+            self._save_config(config)
+            return SyncResult(self.provider, ACTIVE, 0, 0, self._active_count(), int((time.monotonic() - started) * 1000))
+
+        config["etag"] = clean_text(response_headers.get("ETag") or response_headers.get("etag"))
+        config["last_modified"] = clean_text(response_headers.get("Last-Modified") or response_headers.get("last-modified"))
+
+        text = body.decode("utf-8", errors="replace")
+        if text.lstrip()[:1] == "<":
+            raise ThreatIntelError("BLOCKLIST_DE resposta inesperada (HTML/WAF)")
+
+        parsed: list[dict[str, Any]] = []
+        invalid = 0
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            item = self.normalize({"ip": line})
+            if item is not None:
+                parsed.append(item)
+            else:
+                invalid += 1
+
+        total = len(parsed)
+        minimum = self._min_records()
+        previous = self.item_count
+        if total < minimum:
+            raise ThreatIntelError(f"BLOCKLIST_DE volume anormal ({total} IPs < minimo {minimum})")
+        if previous and total < previous * 0.5:
+            raise ThreatIntelError(f"BLOCKLIST_DE reducao abrupta ({previous} -> {total})")
+        if invalid > max(1, total * 0.01):
+            raise ThreatIntelError("BLOCKLIST_DE linhas invalidas demais")
+
+        expires_at = (utc_now() + timedelta(hours=48)).isoformat().replace("+00:00", "Z")
+        for item in parsed:
+            item["metadata"]["retrieved_at"] = now
+            item["metadata"]["expires_at"] = expires_at
+
+        processed, write_ms = self._replace_indicators_atomic(parsed, token)
+        config["last_write_duration_ms"] = write_ms
+        config["last_success_at"] = now
+        self._save_config(config)
+        return SyncResult(self.provider, ACTIVE, 1, processed, self._active_count(), int((time.monotonic() - started) * 1000))
+
+
 def indicator_row(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["spoofable"] = bool(item.get("spoofable"))
@@ -1083,6 +1334,7 @@ class ThreatIntelManager:
             CEREAL2: Cereal2Provider(connection_factory, opener),
             TEAM_CYMRU: TeamCymruProvider(connection_factory, opener),
             FEODO: FeodoProvider(connection_factory, opener),
+            BLOCKLIST_DE: BlocklistDeProvider(connection_factory, opener),
         }
         self._sync_locks = {name: Lock() for name in self.providers}
         self._stop = Event()
@@ -1507,6 +1759,218 @@ class ThreatIntelManager:
                 }
             )
         return items
+
+    def consolidated_iocs(
+        self,
+        *,
+        tier: str = "",
+        category: str = "",
+        provider: str = "",
+        freshness: str = "",
+        search: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        tier_case = semantic_case("i.classification", 0)
+        category_case = semantic_case("i.classification", 1)
+        where = ["i.active = 1", "i.ip <> ''"]
+        inner_params: list[Any] = []
+        if clean_text(provider):
+            where.append("i.provider = ?")
+            inner_params.append(clean_text(provider).upper())
+        if clean_text(search):
+            where.append("i.ip LIKE ?")
+            inner_params.append(f"%{clean_text(search)}%")
+        where_clause = " AND ".join(where)
+
+        inner = f"""
+            SELECT i.ip AS ip,
+                   COALESCE(json_extract(i.metadata_json, '$.primary_source'), i.provider) AS primary_source,
+                   i.classification AS classification,
+                   {tier_case} AS tier,
+                   {category_case} AS category,
+                   COALESCE(CAST(json_extract(i.metadata_json, '$.confidence_original') AS INTEGER), 0) AS confidence,
+                   i.last_seen AS last_seen,
+                   i.first_seen AS first_seen,
+                   i.botnet_family AS botnet_family,
+                   COALESCE(i.last_seen, i.updated_at) AS fresh_ts
+            FROM threat_intel_indicators i
+            WHERE {where_clause}
+        """
+        ranked = f"""
+            SELECT inner_q.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY inner_q.ip
+                       ORDER BY inner_q.tier ASC, inner_q.confidence DESC,
+                                inner_q.last_seen DESC, inner_q.primary_source ASC
+                   ) AS rn
+            FROM ({inner}) AS inner_q
+        """
+        grouped = f"""
+            SELECT r.ip AS ip,
+                   MAX(CASE WHEN r.rn = 1 THEN r.tier END) AS priority,
+                   MAX(CASE WHEN r.rn = 1 THEN r.category END) AS category,
+                   MAX(CASE WHEN r.rn = 1 THEN r.primary_source END) AS primary_source,
+                   MAX(CASE WHEN r.rn = 1 THEN r.confidence END) AS confidence,
+                   MAX(CASE WHEN r.rn = 1 THEN r.last_seen END) AS last_seen,
+                   MAX(CASE WHEN r.rn = 1 THEN r.first_seen END) AS first_seen,
+                   MAX(CASE WHEN r.rn = 1 THEN r.botnet_family END) AS botnet_family,
+                   MAX(CASE WHEN r.rn = 1 THEN r.fresh_ts END) AS fresh_ts,
+                   COUNT(DISTINCT r.primary_source) AS independent_sources,
+                   COUNT(*) AS evidence_count
+            FROM ({ranked}) AS r
+            GROUP BY r.ip
+        """
+
+        outer_where: list[str] = []
+        outer_params: list[Any] = []
+        if clean_text(tier) and clean_text(tier).isdigit():
+            outer_where.append("g.priority = ?")
+            outer_params.append(int(clean_text(tier)))
+        if clean_text(category):
+            outer_where.append("g.category = ?")
+            outer_params.append(clean_text(category).lower())
+        if clean_text(freshness):
+            cutoff = self._freshness_cutoff(freshness)
+            if cutoff:
+                outer_where.append("g.fresh_ts >= ?")
+                outer_params.append(cutoff)
+        outer_clause = ("WHERE " + " AND ".join(outer_where)) if outer_where else ""
+
+        with self.connection_factory() as conn:
+            count_sql = f"SELECT COUNT(*) FROM ({grouped}) AS g {outer_clause}"
+            total = int(conn.execute(count_sql, inner_params + outer_params).fetchone()[0])
+            page_sql = f"""
+                SELECT * FROM ({grouped}) AS g {outer_clause}
+                ORDER BY g.priority ASC, g.independent_sources DESC, g.fresh_ts DESC, g.ip ASC
+                LIMIT ? OFFSET ?
+            """
+            rows = conn.execute(page_sql, inner_params + outer_params + [max(1, min(int(limit), 500)), max(0, int(offset))]).fetchall()
+
+        now = utc_now()
+        items = []
+        for row in rows:
+            fresh_ts = clean_text(row["fresh_ts"])
+            items.append(
+                {
+                    "ip": row["ip"],
+                    "priority": int(row["priority"] or SEMANTIC_DEFAULT[0]),
+                    "category": clean_text(row["category"]) or SEMANTIC_DEFAULT[1],
+                    "primary_source": clean_text(row["primary_source"]),
+                    "confidence": int(row["confidence"] or 0),
+                    "last_seen": fresh_ts or None,
+                    "first_seen": clean_text(row["first_seen"]) or None,
+                    "botnet_family": clean_text(row["botnet_family"]),
+                    "independent_sources": int(row["independent_sources"] or 0),
+                    "evidence_count": int(row["evidence_count"] or 0),
+                    "freshness": self._freshness_label(fresh_ts, now),
+                }
+            )
+        return {"items": items, "total": total, "limit": max(1, min(int(limit), 500)), "offset": max(0, int(offset))}
+
+    def consolidated_ioc(self, ip: str) -> dict[str, Any]:
+        try:
+            parsed = ip_address(ip)
+            normalized = str(parsed)
+        except ValueError:
+            return {"summary": {"ip": clean_text(ip), "found": False}, "evidence": []}
+        with self.connection_factory() as conn:
+            rows = conn.execute(
+                "SELECT * FROM threat_intel_indicators WHERE ip=? AND active=1 ORDER BY provider",
+                (normalized,),
+            ).fetchall()
+            packed = parsed.packed
+            bogon_rows = conn.execute(
+                """
+                SELECT kind, prefix FROM threat_intel_bogons
+                WHERE active=1 AND ip_version=? AND start_bin <= ? AND end_bin >= ?
+                ORDER BY CASE kind WHEN 'BOGON' THEN 0 ELSE 1 END, prefix_length DESC
+                """,
+                (parsed.version, packed, packed),
+            ).fetchall()
+
+        evidences: list[dict[str, Any]] = []
+        for row in rows:
+            item = indicator_row(row)
+            metadata = item.get("metadata") or {}
+            classification = clean_text(item.get("classification"))
+            ports = metadata.get("ports")
+            evidences.append(
+                {
+                    "provider": item["provider"],
+                    "classification": classification,
+                    "category": semantic_category(classification),
+                    "tier": semantic_tier(classification),
+                    "confidence": metadata.get("confidence_original"),
+                    "malware": clean_text(item.get("botnet_family")),
+                    "ports": ports if isinstance(ports, list) else [],
+                    "first_seen": item.get("first_seen"),
+                    "last_seen": item.get("last_seen"),
+                    "updated_at": item.get("updated_at"),
+                    "tags": item.get("tags") or [],
+                    "primary_source": clean_text(metadata.get("primary_source")) or item["provider"],
+                    "aggregator_source": metadata.get("aggregator_source"),
+                    "source_record_id": metadata.get("source_record_id"),
+                    "source_url": clean_text(metadata.get("source_url")),
+                    "service": metadata.get("service"),
+                }
+            )
+
+        ordered = sorted(
+            evidences,
+            key=lambda evidence: (
+                evidence["tier"],
+                -(evidence["confidence"] or 0),
+                -(len(clean_text(evidence["last_seen"] or ""))),
+                evidence["primary_source"],
+            ),
+        )
+        primary = ordered[0] if ordered else None
+        independent = len({evidence["primary_source"] for evidence in evidences})
+        now = utc_now()
+        summary = {
+            "ip": normalized,
+            "found": bool(evidences),
+            "priority": primary["tier"] if primary else None,
+            "category": primary["category"] if primary else None,
+            "primary_source": primary["primary_source"] if primary else None,
+            "confidence": primary["confidence"] if primary else None,
+            "last_seen": (primary["last_seen"] or primary["updated_at"]) if primary else None,
+            "independent_sources": independent,
+            "evidence_count": len(evidences),
+            "freshness": self._freshness_label((primary["last_seen"] or primary["updated_at"]) if primary else "", now),
+            "bogon": [{"kind": row["kind"], "prefix": row["prefix"]} for row in bogon_rows],
+        }
+        return {"summary": summary, "evidence": evidences}
+
+    @staticmethod
+    def _freshness_cutoff(freshness: str) -> str:
+        key = clean_text(freshness).lower()
+        delta = {
+            "excellent": timedelta(hours=1),
+            "good": timedelta(days=1),
+            "acceptable": timedelta(days=7),
+        }.get(key)
+        if delta is None:
+            return ""
+        return (utc_now() - delta).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _freshness_label(timestamp: str, now: datetime) -> str:
+        if not clean_text(timestamp):
+            return "poor"
+        try:
+            parsed = datetime.fromisoformat(clean_text(timestamp).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            return "poor"
+        age = now - parsed
+        if age <= timedelta(hours=1):
+            return "excellent"
+        if age <= timedelta(days=1):
+            return "good"
+        if age <= timedelta(days=7):
+            return "acceptable"
+        return "poor"
 
     def audit(self, provider: str = "", limit: int = 100) -> list[dict[str, Any]]:
         with self.connection_factory() as conn:

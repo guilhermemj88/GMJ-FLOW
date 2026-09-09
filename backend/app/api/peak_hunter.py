@@ -40,6 +40,7 @@ from app.services.peak_hunter_runner import (
     run_peak_hunter_job_now,
     update_peak_hunter_job,
 )
+from app.services.sqlite_managed import open_managed
 
 
 router = APIRouter(prefix="/api/peak-hunter", tags=["peak-hunter"])
@@ -470,7 +471,7 @@ def _request_window(
 
 
 def _sqlite_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"), timeout=30, check_same_thread=False)
+    conn = open_managed(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:

@@ -15,6 +15,7 @@ from app.services.peak_hunter import (
     metric_value_text,
     save_peak_analysis,
 )
+from app.services.sqlite_managed import open_managed
 
 
 RUNNER_VERSION = "peak-hunter-runner-v1"
@@ -34,7 +35,7 @@ InterfaceFetcher = Callable[..., Any]
 
 
 def sqlite_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"), timeout=30, check_same_thread=False)
+    conn = open_managed(os.getenv("GMJFLOW_DB_PATH", "/app/data/gmjflow.db"))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=30000")
     try:

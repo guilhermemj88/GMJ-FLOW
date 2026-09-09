@@ -29,7 +29,7 @@ from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
-from typing import Any, Union
+from typing import Any, Mapping, Union
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - production image uses Python 3.12.
@@ -93,12 +93,36 @@ from app.services.network_assets import (
     SOURCE_TYPES,
     delete_network_asset,
     ensure_network_assets_schema,
+    expected_services_match,
     fetch_network_asset,
     list_network_asset_services,
     list_network_assets,
     replace_network_asset_services,
     resolve_network_context as resolve_network_asset_context,
     upsert_network_asset,
+)
+from app.services.flow_codecs import (
+    classify_flow_codecs,
+    create_flow_codec,
+    delete_flow_codec,
+    duplicate_flow_codec,
+    ensure_flow_codecs_schema,
+    flow_codec_options,
+    get_flow_codec,
+    list_flow_codecs,
+    seed_builtin_flow_codecs,
+    update_flow_codec,
+)
+from app.services.vector_specificity import (
+    SPECIFIC_CODEC,
+    SPECIFIC_SERVICE_DIRECTION,
+    SPECIFIC_SERVICE_PROTOCOL,
+    SPECIFIC_SERVICE_SOURCE_PORT,
+    build_traffic_accounting,
+    effective_specific_packets_s,
+    is_udp_internal_transmits_candidate,
+    residual_packets_s as compute_residual_packets_s,
+    specific_udp_return_satisfied,
 )
 from app.services.ai_integration import (
     AI_FUNCTIONS,
@@ -966,6 +990,7 @@ DETECTION_GROUP_BY_OPTIONS = {
     "dst_ip",
     "src_ip,dst_ip",
     "dst_ip,dst_port,protocol",
+    "dst_ip,src_port,protocol",
     "src_ip,dst_ip,dst_port,protocol",
     "src_ip,src_port,dst_ip,dst_port,protocol",
     "src_subnet",
@@ -4659,6 +4684,8 @@ def ensure_sensor_db() -> None:
         ensure_automatic_mitigation_schema(conn)
         ensure_cgnat_schema(conn)
         ensure_network_assets_schema(conn)
+        ensure_flow_codecs_schema(conn)
+        seed_builtin_flow_codecs(conn)
         ensure_peak_analysis_db(conn)
         ensure_peak_hunter_automation_db(conn)
         ensure_system_settings_table(conn)
@@ -4786,7 +4813,7 @@ def start_dashboard_cache_prewarm() -> None:
 
 
 def peak_hunter_runner_enabled() -> bool:
-    return os.getenv("GMJFLOW_PEAK_HUNTER_RUNNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("GMJFLOW_PEAK_HUNTER_RUNNER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def peak_hunter_runner_loop() -> None:
@@ -5555,6 +5582,8 @@ def permission_for_protected_api_route(request: Request) -> str:
         return "settings.view" if method == "GET" else "settings.manage"
     if path.startswith(("/api/threat-intelligence", "/api/threat-engine")):
         return "anomalies.view" if method == "GET" else "anomalies.manage"
+    if path.startswith("/api/flow-codecs"):
+        return "settings.view" if method == "GET" else "settings.manage"
     return ""
 
 
@@ -13264,6 +13293,9 @@ def bgp_readiness_reason_message(reason: str) -> str:
         "backend_exabgp_pipe_not_fifo": "Caminho ExaBGP do backend nao e um FIFO; anuncio nao enviado.",
         "backend_exabgp_pipe_not_writable": "Pipe ExaBGP sem permissao de escrita no backend; anuncio nao enviado.",
         "backend_exabgp_pipe_out_unavailable": "Pipe de saida ExaBGP indisponivel no backend; anuncio nao enviado.",
+        "host_agent_delivery_unavailable": "Host Agent nao confirma leitor ativo no FIFO; anuncio nao enviado.",
+        "delivery_path_unverified": "Caminho de entrega FlowSpec nao comprovado; anuncio nao enviado.",
+        "delivery_reader_unverified": "Leitor/consumer do FIFO nao comprovado; anuncio nao enviado.",
         "close_wait_above_threshold": "CLOSE_WAIT acima do limite operacional; anuncio nao enviado.",
     }.get(clean_text(reason), clean_text(reason))
 
@@ -13312,16 +13344,77 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     pipe_ok = bool(
         bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
     )
-    requires_backend_delivery = bool(clean_text(pipes.get("input_path")))
+    reader_active = bool(pipes.get("reader_active"))
+    input_path = clean_text(pipes.get("input_path"))
+
+    # Direct path evidence: the backend container itself can see and write the
+    # FIFO (filesystem/permission checks only — never opens the FIFO).
     backend_pipes = status.get("backend_pipes")
     if not isinstance(backend_pipes, dict):
         backend_pipes = exabgp_backend_delivery_path_status(
-            clean_text(pipes.get("input_path")),
+            input_path,
             clean_text(pipes.get("output_path")),
         )
-    delivery_path_ready = bool(
-        backend_pipes.get("delivery_path_ready") if requires_backend_delivery else True
+    direct_pipe_visible = bool(
+        backend_pipes.get("backend_pipe_in_visible")
+        or backend_pipes.get("backend_mount_visible")
     )
+
+    # Host-agent path evidence: when the host-agent is the component
+    # responsible for delivery, its own reader evidence is sufficient and the
+    # backend container is NOT required to see the FIFO directly.
+    host_agent = status.get("host_agent")
+    if not isinstance(host_agent, dict):
+        host_agent = {}
+    host_agent_reachable = bool(
+        host_agent.get("enabled") and host_agent.get("available")
+    )
+    host_agent_pipes = normalize_bgp_pipe_payload(host_agent)
+    host_agent_reader_active = bool(host_agent_pipes.get("reader_active"))
+    if not host_agent_reader_active and clean_text(pipes.get("source")) == "host_agent":
+        host_agent_reader_active = reader_active
+    host_agent_delivery_ready = bool(
+        host_agent_reachable and host_agent_reader_active
+    )
+
+    pipe_is_direct = clean_text(pipes.get("source")) != "host_agent"
+    # Direct pipe with a PROVEN reader/consumer: the payload explicitly asserts
+    # both a FIFO and an active reader. A writable-only pipe (or the backend's
+    # own exabgp_pipe_status / exabgp_backend_delivery_path_status view, which
+    # never inspect the reader) is NOT sufficient on its own.
+    direct_pipe_ready = bool(
+        pipe_ok
+        and pipe_is_direct
+        and bool(pipes.get("is_fifo"))
+        and reader_active
+    )
+    # Operational evidence: pipe exists/writable but the reader is unverified.
+    # Persisted for diagnosis only — it must never gate delivery on its own.
+    operational_delivery_ready = bool(
+        pipe_ok and pipe_is_direct and not direct_pipe_ready
+    )
+
+    if direct_pipe_ready:
+        delivery_path_ready = True
+        delivery_path_source = "direct_pipe"
+        delivery_path_reason = "direct_pipe_reader_verified"
+    elif host_agent_delivery_ready:
+        delivery_path_ready = True
+        delivery_path_source = "host_agent"
+        delivery_path_reason = "delivery_verified_via_host_agent"
+    elif operational_delivery_ready:
+        delivery_path_ready = False
+        delivery_path_source = "operational_evidence"
+        delivery_path_reason = "delivery_reader_unverified"
+    else:
+        delivery_path_ready = False
+        delivery_path_source = "unavailable"
+        delivery_path_reason = (
+            "host_agent_delivery_unavailable"
+            if host_agent_reachable and not host_agent_reader_active
+            else clean_text(backend_pipes.get("reason"))
+            or "delivery_path_unverified"
+        )
     close_wait_count = int(session.get("close_wait_count") or 0)
     close_wait_threshold = int(session.get("close_wait_alert_threshold") or 0)
     if isinstance(session.get("close_wait_alert"), bool):
@@ -13341,6 +13434,8 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         else status.get("passive_listen_enabled")
     )
     transport_ready = bool(listener_ok or bgp_ok)
+    # Operational evidence that ExaBGP is actually serving traffic even when the
+    # systemd service cannot be checked from inside the backend container.
     service_proven_operational = bool(bgp_ok or flowspec_ok)
     service_gate_ok = bool(
         service_active or (not service_checked and service_proven_operational)
@@ -13366,9 +13461,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     if not pipe_ok:
         failed_reasons.append("exabgp_pipe_unavailable")
     if not delivery_path_ready:
-        failed_reasons.append(
-            clean_text(backend_pipes.get("reason")) or "backend_exabgp_pipe_unavailable"
-        )
+        failed_reasons.append(delivery_path_reason)
     if not close_wait_ok:
         failed_reasons.append("close_wait_above_threshold")
     reason = failed_reasons[0] if failed_reasons else ""
@@ -13425,6 +13518,13 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     details["listener_informational"] = not listener_required
     details["listener_required"] = listener_required
     details["transport_ready"] = transport_ready
+    details["delivery_path_source"] = delivery_path_source
+    details["delivery_path_reason"] = delivery_path_reason
+    details["reader_active"] = reader_active
+    details["host_agent_reachable"] = host_agent_reachable
+    details["direct_pipe_visible"] = direct_pipe_visible
+    details["host_agent_delivery_ready"] = host_agent_delivery_ready
+    details["direct_pipe_ready"] = direct_pipe_ready
     return {
         "ready": ready,
         "peer_state": peer_state,
@@ -13438,6 +13538,11 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "confirmation_level": confirmation_level,
         "backend_pipes": backend_pipes,
         "delivery_path_ready": delivery_path_ready,
+        "delivery_path_source": delivery_path_source,
+        "delivery_path_reason": delivery_path_reason,
+        "reader_active": reader_active,
+        "host_agent_reachable": host_agent_reachable,
+        "direct_pipe_visible": direct_pipe_visible,
         "details": details,
     }
 
@@ -27970,6 +28075,96 @@ def network_context_resolve_api(ip: str):
     return resolve_network_asset_context(ip)
 
 
+
+
+@app.get("/api/flow-codecs")
+def flow_codecs_list(active_only: bool = False):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        return {"items": list_flow_codecs(conn, active_only=active_only)}
+
+
+@app.get("/api/flow-codecs/options")
+def flow_codecs_options():
+    return flow_codec_options()
+
+
+@app.post("/api/flow-codecs/test")
+def flow_codecs_test(payload: dict[str, Any]):
+    """Classify a synthetic flow against all active codecs (read-only)."""
+    ensure_sensor_db()
+    flow = payload.get("flow") if isinstance(payload.get("flow"), Mapping) else {}
+    source_context = payload.get("source_context") if isinstance(payload.get("source_context"), Mapping) else None
+    destination_context = payload.get("destination_context") if isinstance(payload.get("destination_context"), Mapping) else None
+    with sqlite_connection() as conn:
+        codecs = list_flow_codecs(conn, active_only=True)
+    matches = classify_flow_codecs(flow, codecs, source_context, destination_context)
+    return {
+        "matches": matches,
+        "names": [item["name"] for item in matches],
+    }
+
+
+@app.get("/api/flow-codecs/{codec_id}")
+def flow_codec_get(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        codec = get_flow_codec(conn, codec_id)
+        if codec is None:
+            raise HTTPException(status_code=404, detail="flow_codec_not_found")
+        return codec
+
+
+@app.post("/api/flow-codecs", status_code=201)
+def flow_codec_create(payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        try:
+            codec = create_flow_codec(conn, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        conn.commit()
+        return codec
+
+
+@app.put("/api/flow-codecs/{codec_id}")
+def flow_codec_update(codec_id: int, payload: dict[str, Any]):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        if get_flow_codec(conn, codec_id) is None:
+            raise HTTPException(status_code=404, detail="flow_codec_not_found")
+        try:
+            codec = update_flow_codec(conn, codec_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn.commit()
+        return codec
+
+
+@app.delete("/api/flow-codecs/{codec_id}")
+def flow_codec_delete(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        changed, status = delete_flow_codec(conn, codec_id)
+        conn.commit()
+        if status == "builtin_protected":
+            raise HTTPException(status_code=409, detail="builtin_codec_protected")
+        return {"status": status, "id": codec_id}
+
+
+@app.post("/api/flow-codecs/{codec_id}/duplicate")
+def flow_codec_duplicate(codec_id: int):
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        try:
+            codec = duplicate_flow_codec(conn, codec_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn.commit()
+        return codec
+
 @app.post("/api/carpet-replay")
 def carpet_replay_api(payload: dict[str, Any]):
     """Read-only shadow replay of historical CARPET_BOMBING events through the
@@ -29823,6 +30018,7 @@ def query_detection_rule_candidates(
     sensor_id: int | None,
     limit: int = 1000,
     include_unmatched: bool = False,
+    active_codecs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     warning = rule.get("warning_value")
     critical = rule.get("critical_value")
@@ -29945,6 +30141,7 @@ def query_detection_rule_candidates(
                 {grouped_top_src_port_expr},
                 sum(byte_value * multiplier) AS bytes,
                 sum(packet_value * multiplier) AS packets,
+                sumIf(packet_value * multiplier, src_port = 443) AS specific_packets,
                 sum(flow_value) AS flows,
                 uniqExact(unique_dst_ip_value) AS unique_dst_ips,
                 uniqExact(unique_dst_port_value) AS unique_dst_ports,
@@ -29968,6 +30165,7 @@ def query_detection_rule_candidates(
             flows,
             bytes * 8 / {float(window_seconds)} AS bits_s,
             packets / {float(window_seconds)} AS packets_s,
+            specific_packets / {float(window_seconds)} AS specific_packets_s,
             flows / {float(window_seconds)} AS flows_s,
             unique_dst_ips,
             unique_dst_ports,
@@ -30017,6 +30215,49 @@ def query_detection_rule_candidates(
             }
         else:
             scope = internal_ip_scope_fields(rule["domain"], rule["direction"], internal_ip)
+        traffic_accounting: dict[str, Any] | None = None
+        if is_udp_internal_transmits_candidate(rule.get("protocol"), rule.get("domain"), rule.get("direction")):
+            raw_pps = float(row.get("packets_s") or 0)
+            port_specific_pps = float(row.get("specific_packets_s") or 0)
+            specific_pps = 0.0
+            specific_codec = None
+            expected_service = False
+            asset_role = None
+            provider = None
+            if active_codecs is not None and internal_ip:
+                asset_context = resolve_network_asset_context(internal_ip)
+                asset_role = (asset_context or {}).get("role")
+                provider = (asset_context or {}).get("provider")
+                expected_service = expected_services_match(
+                    asset_context,
+                    SPECIFIC_SERVICE_PROTOCOL,
+                    SPECIFIC_SERVICE_SOURCE_PORT,
+                    0,
+                    SPECIFIC_SERVICE_DIRECTION,
+                )
+                codec_names = {
+                    codec.get("name")
+                    for codec in classify_flow_codecs(
+                        {"protocol": 17, "source_port": SPECIFIC_SERVICE_SOURCE_PORT, "destination_port": 0},
+                        active_codecs,
+                        source_context=asset_context,
+                        destination_context=None,
+                    )
+                }
+                qualified = specific_udp_return_satisfied(asset_context, codec_names, expected_service)
+                specific_pps = effective_specific_packets_s(port_specific_pps, qualified)
+                specific_codec = SPECIFIC_CODEC if qualified else None
+            traffic_accounting = build_traffic_accounting(
+                raw_packets_s=raw_pps,
+                specific_packets_s=specific_pps,
+                residual=compute_residual_packets_s(raw_pps, specific_pps),
+                specific_codec=specific_codec,
+                expected_service=bool(expected_service),
+                asset_role=asset_role,
+                provider=provider,
+                direction=SPECIFIC_SERVICE_DIRECTION,
+                threshold_basis="raw",
+            )
         item = {
             "zone_id": int(zone["id"]),
             "zone_name": zone["name"],
@@ -30100,6 +30341,7 @@ def query_detection_rule_candidates(
             "comparison": rule.get("comparison") or "over",
             "metric_value": round(metric_value, 2),
             "matched": matched,
+            "traffic_accounting": traffic_accounting,
             "response": rule_response,
         }
         items.append(item)
@@ -30261,6 +30503,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "target_port": candidate.get("target_port") or candidate.get("top_dst_port") or None,
         "mitigation_basis": candidate.get("mitigation_basis") or "",
         "mitigation_reason": candidate.get("mitigation_reason") or "",
+        "traffic_accounting": candidate.get("traffic_accounting") or {},
         "detection": detection_state,
     }
     source_details.update(detection_fields_from_source_details(source_details))
@@ -30829,12 +31072,13 @@ def detection_candidates_payload(
         if vector_filter:
             rules = [rule for rule in rules if rule["vector"].lower() in vector_filter]
         whitelist = active_detection_whitelist(conn, zone_id)
+        active_codecs = list_flow_codecs(conn, active_only=True)
 
     items: list[dict[str, Any]] = []
     for prefix in prefixes:
         for rule in rules:
             try:
-                items.extend(query_detection_rule_candidates(zone, template, rule, prefix, start_dt, end_dt, sensor_id))
+                items.extend(query_detection_rule_candidates(zone, template, rule, prefix, start_dt, end_dt, sensor_id, active_codecs=active_codecs))
             except Exception as exc:
                 warning = f"Falha ao executar {rule['vector']} em {prefix['cidr']}: {clean_text(exc)}"
                 logger.warning(warning)
@@ -34364,6 +34608,7 @@ def evaluate_detection_template_rule(
     end_dt: datetime,
     *,
     create_anomalies: bool = True,
+    active_codecs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rule = detection_rule_row_to_dict(raw_rule)
     template = {
@@ -34420,6 +34665,7 @@ def evaluate_detection_template_rule(
                 end_dt,
                 rule.get("sensor_id"),
                 include_unmatched=True,
+                active_codecs=active_codecs,
             )
         except Exception as exc:
             reason = f"query_error:{clean_text(exc)}"
@@ -34501,9 +34747,10 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
     try:
         with sqlite_connection() as conn:
             rows = detection_template_rule_rows(conn)
+            active_codecs = list_flow_codecs(conn, active_only=True)
             enabled_count = sum(1 for row in rows if sqlite_bool(row.get("enabled")) and sqlite_bool(row.get("template_active")))
             for row in rows:
-                result = evaluate_detection_template_rule(conn, row, end_dt, create_anomalies=create_anomalies)
+                result = evaluate_detection_template_rule(conn, row, end_dt, create_anomalies=create_anomalies, active_codecs=active_codecs)
                 results.append(result)
                 anomalies_created += int(result.get("anomalies_created") or 0)
                 reason = clean_text(result.get("skipped_reason"))
