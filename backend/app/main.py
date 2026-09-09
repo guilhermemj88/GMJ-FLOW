@@ -93,6 +93,7 @@ from app.services.network_assets import (
     SOURCE_TYPES,
     delete_network_asset,
     ensure_network_assets_schema,
+    expected_services_match,
     fetch_network_asset,
     list_network_asset_services,
     list_network_assets,
@@ -111,6 +112,17 @@ from app.services.flow_codecs import (
     list_flow_codecs,
     seed_builtin_flow_codecs,
     update_flow_codec,
+)
+from app.services.vector_specificity import (
+    SPECIFIC_CODEC,
+    SPECIFIC_SERVICE_DIRECTION,
+    SPECIFIC_SERVICE_PROTOCOL,
+    SPECIFIC_SERVICE_SOURCE_PORT,
+    build_traffic_accounting,
+    effective_specific_packets_s,
+    is_udp_internal_transmits_candidate,
+    residual_packets_s as compute_residual_packets_s,
+    specific_udp_return_satisfied,
 )
 from app.services.ai_integration import (
     AI_FUNCTIONS,
@@ -30132,6 +30144,7 @@ def query_detection_rule_candidates(
     sensor_id: int | None,
     limit: int = 1000,
     include_unmatched: bool = False,
+    active_codecs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     warning = rule.get("warning_value")
     critical = rule.get("critical_value")
@@ -30254,6 +30267,7 @@ def query_detection_rule_candidates(
                 {grouped_top_src_port_expr},
                 sum(byte_value * multiplier) AS bytes,
                 sum(packet_value * multiplier) AS packets,
+                sumIf(packet_value * multiplier, src_port = 443) AS specific_packets,
                 sum(flow_value) AS flows,
                 uniqExact(unique_dst_ip_value) AS unique_dst_ips,
                 uniqExact(unique_dst_port_value) AS unique_dst_ports,
@@ -30277,6 +30291,7 @@ def query_detection_rule_candidates(
             flows,
             bytes * 8 / {float(window_seconds)} AS bits_s,
             packets / {float(window_seconds)} AS packets_s,
+            specific_packets / {float(window_seconds)} AS specific_packets_s,
             flows / {float(window_seconds)} AS flows_s,
             unique_dst_ips,
             unique_dst_ports,
@@ -30326,6 +30341,49 @@ def query_detection_rule_candidates(
             }
         else:
             scope = internal_ip_scope_fields(rule["domain"], rule["direction"], internal_ip)
+        traffic_accounting: dict[str, Any] | None = None
+        if is_udp_internal_transmits_candidate(rule.get("protocol"), rule.get("domain"), rule.get("direction")):
+            raw_pps = float(row.get("packets_s") or 0)
+            port_specific_pps = float(row.get("specific_packets_s") or 0)
+            specific_pps = 0.0
+            specific_codec = None
+            expected_service = False
+            asset_role = None
+            provider = None
+            if active_codecs is not None and internal_ip:
+                asset_context = resolve_network_asset_context(internal_ip)
+                asset_role = (asset_context or {}).get("role")
+                provider = (asset_context or {}).get("provider")
+                expected_service = expected_services_match(
+                    asset_context,
+                    SPECIFIC_SERVICE_PROTOCOL,
+                    SPECIFIC_SERVICE_SOURCE_PORT,
+                    0,
+                    SPECIFIC_SERVICE_DIRECTION,
+                )
+                codec_names = {
+                    codec.get("name")
+                    for codec in classify_flow_codecs(
+                        {"protocol": 17, "source_port": SPECIFIC_SERVICE_SOURCE_PORT, "destination_port": 0},
+                        active_codecs,
+                        source_context=asset_context,
+                        destination_context=None,
+                    )
+                }
+                qualified = specific_udp_return_satisfied(asset_context, codec_names, expected_service)
+                specific_pps = effective_specific_packets_s(port_specific_pps, qualified)
+                specific_codec = SPECIFIC_CODEC if qualified else None
+            traffic_accounting = build_traffic_accounting(
+                raw_packets_s=raw_pps,
+                specific_packets_s=specific_pps,
+                residual=compute_residual_packets_s(raw_pps, specific_pps),
+                specific_codec=specific_codec,
+                expected_service=bool(expected_service),
+                asset_role=asset_role,
+                provider=provider,
+                direction=SPECIFIC_SERVICE_DIRECTION,
+                threshold_basis="raw",
+            )
         item = {
             "zone_id": int(zone["id"]),
             "zone_name": zone["name"],
@@ -30410,6 +30468,7 @@ def query_detection_rule_candidates(
             "comparison": rule.get("comparison") or "over",
             "metric_value": round(metric_value, 2),
             "matched": matched,
+            "traffic_accounting": traffic_accounting,
             "response": rule_response,
         }
         items.append(item)
@@ -30572,6 +30631,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "mitigation_basis": candidate.get("mitigation_basis") or "",
         "mitigation_reason": candidate.get("mitigation_reason") or "",
         "selection": candidate.get("selection") or {},
+        "traffic_accounting": candidate.get("traffic_accounting") or {},
         "detection": detection_state,
     }
     source_details.update(detection_fields_from_source_details(source_details))
@@ -31140,12 +31200,13 @@ def detection_candidates_payload(
         if vector_filter:
             rules = [rule for rule in rules if rule["vector"].lower() in vector_filter]
         whitelist = active_detection_whitelist(conn, zone_id)
+        active_codecs = list_flow_codecs(conn, active_only=True)
 
     items: list[dict[str, Any]] = []
     for prefix in prefixes:
         for rule in rules:
             try:
-                items.extend(query_detection_rule_candidates(zone, template, rule, prefix, start_dt, end_dt, sensor_id))
+                items.extend(query_detection_rule_candidates(zone, template, rule, prefix, start_dt, end_dt, sensor_id, active_codecs=active_codecs))
             except Exception as exc:
                 warning = f"Falha ao executar {rule['vector']} em {prefix['cidr']}: {clean_text(exc)}"
                 logger.warning(warning)
@@ -34906,6 +34967,7 @@ def collect_detection_template_rule_matches(
     conn: sqlite3.Connection,
     raw_rule: dict[str, Any],
     end_dt: datetime,
+    active_codecs: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     rule = detection_rule_row_to_dict(raw_rule)
     template = {
@@ -34963,6 +35025,7 @@ def collect_detection_template_rule_matches(
                 end_dt,
                 rule.get("sensor_id"),
                 include_unmatched=True,
+                active_codecs=active_codecs,
             )
         except Exception as exc:
             reason = f"query_error:{clean_text(exc)}"
@@ -35005,8 +35068,9 @@ def run_detection_template_rules_with_specificity(
     results: list[dict[str, Any]] = []
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     rule_state: dict[int, dict[str, Any]] = {}
+    active_codecs = list_flow_codecs(conn, active_only=True)
     for raw_rule in rows:
-        result, candidates, skip_reasons = collect_detection_template_rule_matches(conn, raw_rule, end_dt)
+        result, candidates, skip_reasons = collect_detection_template_rule_matches(conn, raw_rule, end_dt, active_codecs=active_codecs)
         rule_id = int(raw_rule["id"])
         rule_state[rule_id] = {
             "result": result,

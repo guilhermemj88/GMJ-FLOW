@@ -61,7 +61,7 @@ class DetectionAndCalibrationStaticTest(unittest.TestCase):
             if line.strip()
         ]
         group_keys = {item.strip() for item in match.group("group_by").split(",") if item.strip()}
-        aggregate_prefixes = ("argMax(", "sum(", "uniqExact(", "min(", "max(")
+        aggregate_prefixes = ("argMax(", "sum(", "sumIf(", "uniqExact(", "min(", "max(")
         for expression in select_lines:
             if expression in group_keys:
                 continue

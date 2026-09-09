@@ -293,7 +293,7 @@ class DetectionSpecificityDbTest(unittest.TestCase):
             return [dict(row) for row in rows]
 
     def _run_with(self, template_id, end_dt, fake_candidates):
-        def fake_query(zone, template, rule, prefix, start_dt, end_dt, sensor_id, limit=1000, include_unmatched=False):
+        def fake_query(zone, template, rule, prefix, start_dt, end_dt, sensor_id, limit=1000, include_unmatched=False, active_codecs=None):
             return fake_candidates(rule)
 
         rows = self._rule_rows(template_id)
