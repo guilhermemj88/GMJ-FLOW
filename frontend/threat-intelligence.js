@@ -497,6 +497,61 @@
     document.body.classList.remove('security-event-drawer-open');
   }
 
+const TRANSPORT_SEMANTIC_LABELS = Object.freeze({
+  HTTPS_SERVER_RESPONSE: 'HTTPS Server Response',
+  HTTPS_CLIENT_INITIATION: 'HTTPS Client Initiation',
+  HTTPS_SOURCE_SYN: 'HTTPS Source SYN',
+  HTTPS_BIDIRECTIONAL_ESTABLISHED: 'HTTPS Established',
+  HTTPS_AMBIGUOUS: 'HTTPS / TCP 443',
+  QUIC_UDP_443: 'QUIC / UDP 443'
+});
+
+const TRANSPORT_CONFIDENCE_LABELS = Object.freeze({ HIGH: 'High', MEDIUM: 'Medium', LOW: 'Low' });
+
+const TRANSPORT_REASON_LABELS = Object.freeze({
+  SRC_443: 'Source port 443', DST_443: 'Destination port 443',
+  TCP_SYN_DOMINANT: 'SYN dominant', TCP_ACK_DOMINANT: 'ACK dominant',
+  TCP_PSH_ACK_RESPONSE: 'PSH+ACK response',
+  OUTBOUND_CLIENT_DIRECTION: 'Outbound client direction',
+  INBOUND_SERVER_DIRECTION: 'Inbound server direction',
+  IOC_C2_DESTINATION: 'C2 destination IOC', IOC_BOTNET_DESTINATION: 'Botnet destination IOC',
+  AMBIGUOUS_FLAGS: 'Ambiguous flags', NON_HTTPS_PORT: 'Non-HTTPS port',
+  UDP_443: 'UDP port 443', ESTABLISHED_BIDIRECTIONAL: 'Established bidirectional'
+});
+
+function humanizeTransportEnum(value) {
+  return String(value || '').split('_').filter(Boolean)
+    .map(word => word.charAt(0) + word.slice(1).toLowerCase()).join(' ');
+}
+
+function getTransportSemanticDisplay(investigation) {
+  const inv = investigation || {};
+  const role = inv.transport_semantic;
+  if (!role) return null;
+  const roleUpper = String(role).toUpperCase();
+  if (roleUpper === 'NON_HTTPS') return null;
+  const label = TRANSPORT_SEMANTIC_LABELS[roleUpper] || humanizeTransportEnum(role);
+  const confidence = inv.transport_confidence
+    ? (TRANSPORT_CONFIDENCE_LABELS[String(inv.transport_confidence).toUpperCase()] || String(inv.transport_confidence)) : '';
+  const side = String(inv.service_side || '').toUpperCase();
+  const sideLabel = side === 'DESTINATION' ? 'dst' : (side === 'SOURCE' ? 'src' : '');
+  const orientation = inv.service_port != null && sideLabel ? `${sideLabel} ${number(inv.service_port)}` : '';
+  const c2OverHttps = Boolean(inv.c2_over_https);
+  const reasonCodes = Array.isArray(inv.transport_reason_codes) ? inv.transport_reason_codes : [];
+  return { label, confidence, orientation, c2OverHttps, reasonCodes };
+}
+
+function renderTransportSemanticBadge(investigation) {
+  const d = getTransportSemanticDisplay(investigation);
+  if (!d) return '';
+  const reasonTooltip = d.reasonCodes.length
+    ? ` title="${esc(d.reasonCodes.map(c => TRANSPORT_REASON_LABELS[c] || humanizeTransportEnum(c)).join(' · '))}"` : '';
+  const confidenceHtml = d.confidence ? `<span class="transport-semantic-confidence">Transport confidence: ${esc(d.confidence)}</span>` : '';
+  const orientationHtml = d.orientation ? `<span class="transport-semantic-service">${esc(d.orientation)}</span>` : '';
+  const c2Html = d.c2OverHttps ? '<span class="transport-semantic-c2">C2 over HTTPS</span>' : '';
+  return `<div class="transport-semantic-badge"${reasonTooltip}><span class="transport-semantic-role">${esc(d.label)}</span>${orientationHtml ? ' ' + orientationHtml : ''}${confidenceHtml ? ' ' + confidenceHtml : ''}${c2Html ? ' ' + c2Html : ''}</div>`;
+}
+
   function renderVectors(payload) {
     const items = payload.items || [];
     document.getElementById('threatSummaryVectors').textContent = number(payload.total ?? items.length);
@@ -512,7 +567,7 @@
         item.recurrence_count ? `${number(item.recurrence_count)} ocorrências` : ''
       ].filter(Boolean).join(' · ') || '-';
       return `<tr class="security-event-row" tabindex="0" data-security-event-id="${item.id}" title="Abrir investigação">
-        <td><strong>${esc(item.attack_type)}</strong><br><code>${esc(item.event_id || `#${item.id}`)}</code><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
+        <td><strong>${esc(item.attack_type)}</strong>${renderTransportSemanticBadge(item.investigation)}<br><code>${esc(item.event_id || `#${item.id}`)}</code><br><span class="subtle">${esc(item.attack_family || '-')} · ${esc(item.severity || '-')}</span></td>
         <td>${esc(item.src_ip || 'distribuída')} → ${esc(scannerTargetLabel(item))}</td>
         <td><span class="threat-score ${scoreClass(item.detector_score)}">${number(item.detector_score)}</span><br><span class="subtle">${esc(item.verdict || 'INFO')} · conf. ${number(confidence <= 1 ? confidence * 100 : confidence, 1)}%</span></td>
         <td><span class="subtle">${esc(item.direction || 'UNKNOWN')} · ${esc(item.src_role || 'UNKNOWN')} → ${esc(item.dst_role || 'UNKNOWN')}</span><br>${esc(evidence)}</td>
@@ -1011,7 +1066,7 @@
         ['Flows / flows/s', `${number(event.flows)} / ${number(event.flows_per_second, 2)}`], ['Portas src / dst', `${number(event.unique_src_ports)} / ${number(event.unique_dst_ports)}`]
       ])}<h4>Timeline (janela limitada por segurança, não representa toda a duração acumulada)</h4>${renderSecurityTimeline(traffic)}</section>
       <section id="security-event-sources">${renderSecuritySources(sources.items || investigation.top_sources || [], Boolean(sources.distributed || event.unique_sources > 1))}</section>
-      <section id="security-event-ports"><h3>Portas e protocolos</h3>${renderSecurityDistribution(investigation.top_destination_ports, 'Top Destination Ports')}${renderSecurityDistribution(investigation.top_source_ports, 'Top Source Ports')}${renderSecurityDistribution(investigation.protocols, 'Distribuição por protocolo')}${renderSecurityDistribution(investigation.tcp_flags, 'TCP Flags (SYN / ACK / RST)')}
+      <section id="security-event-ports"><h3>Portas e protocolos</h3>${renderTransportSemanticBadge(investigation)}${renderSecurityDistribution(investigation.top_destination_ports, 'Top Destination Ports')}${renderSecurityDistribution(investigation.top_source_ports, 'Top Source Ports')}${renderSecurityDistribution(investigation.protocols, 'Distribuição por protocolo')}${renderSecurityDistribution(investigation.tcp_flags, 'TCP Flags (SYN / ACK / RST)')}
         ${!(investigation.top_destination_ports || []).length && !(investigation.top_source_ports || []).length ? '<div class="subtle">Evento legado sem distribuição persistida. Use “Ver evidências” para consultar agregados limitados.</div>' : ''}</section>
       <section id="security-event-intel"><h3>Threat Intelligence</h3>${renderExternalReputation(event)}${renderPersistedThreatIntel(event)}</section>
       <section id="security-event-evidence"><div class="security-section-heading"><h3>Evidências</h3><button type="button" class="btn btn-sm btn-outline-secondary" data-security-action="evidence" data-event-id="${event.id}">VER EVIDÊNCIAS</button></div>${renderDetectionEvidence(event)}<div id="securityEventEvidenceSamples"></div></section>
