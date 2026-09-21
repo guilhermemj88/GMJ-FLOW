@@ -104,9 +104,20 @@ NETFLOW_PORT=9995
 PMACCT_SENSOR=mikrotik-lab
 PMACCT_EXPORTER_IP=192.168.0.157
 PMACCT_SAMPLE_RATE=1
-PMACCT_PARSER_BATCH_SIZE=1000
+PMACCT_PARSER_BATCH_SIZE=20000
+PMACCT_PARSER_MAX_BYTES=4194304
 PMACCT_PARSER_FLUSH_SECONDS=5
+GMJFLOW_PMACCT_PARSE_WORKERS=1
+GMJFLOW_PMACCT_PARSE_WORKERS_AUTO_MAX=2
 ```
+
+O lote termina no primeiro limite atingido: linhas ou bytes. O valor
+`GMJFLOW_PMACCT_PARSE_WORKERS=1` mantém o modo sequencial como default.
+O valor `auto` usa no máximo `GMJFLOW_PMACCT_PARSE_WORKERS_AUTO_MAX` e
+reserva um orçamento conservador por sensor com base em CPU affinity,
+cpuset e quota de cgroup. Em instalações existentes, revise qualquer
+override antigo de `PMACCT_PARSER_BATCH_SIZE=1000` antes do rollout para
+preservar o lote efetivo histórico de 20.000 linhas.
 
 O allowlist inicial do `nfacctd` aceita somente `192.168.0.157` em `collector/pmacct/allow.lst`.
 
