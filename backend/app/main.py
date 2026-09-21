@@ -46408,6 +46408,419 @@ def top_asn_dst(
     return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
 
 
+# =====================================================================
+# Directional analytics (Overview operacional)
+# ---------------------------------------------------------------------
+# Um unico endpoint coeso que devolve, a partir do agregado minuto
+# `flow_dashboard_prefix_1m`, os analytics direcionais por prefixo
+# monitorado (fonte canonica: zonas ativas de `ip_zone_prefixes`):
+#   - serie temporal por protocolo (Total / Download / Upload)
+#   - top ASN externo (Download / Upload)
+#   - top IPs dos blocos monitorados (Download / Upload)
+#
+# Regra de direcao (mesma do NetworkContext/zone_edge_filters):
+#   DOWNLOAD = dst pertence aos prefixos monitorados E src nao pertence
+#   UPLOAD   = src pertence aos prefixos monitorados E dst nao pertence
+#   (nosso->nosso e externo->externo sao descartados)
+# =====================================================================
+
+_DIRECTIONAL_PROTOCOL_LABEL_EXPR = (
+    "multiIf("
+    "proto = 6, 'TCP', "
+    "proto = 17, 'UDP', "
+    "proto = 1, 'ICMP', "
+    "proto = 47, 'GRE', "
+    "proto = 50, 'ESP', "
+    "'OTHER')"
+)
+
+_DIRECTIONAL_PROTOCOL_ORDER = ("TCP", "UDP", "GRE", "ESP", "ICMP", "OTHER")
+
+
+def active_monitored_cidrs() -> list[str]:
+    """CIDRs ativos de todas as zonas monitoradas (fonte canonica)."""
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.cidr
+                FROM ip_zone_prefixes p
+                JOIN ip_zones z ON z.id = p.zone_id
+                WHERE p.active = 1 AND z.active = 1
+                ORDER BY p.id
+                """
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    cidrs: list[str] = []
+    for row in rows:
+        cidr = clean_text(
+            row["cidr"] if isinstance(row, sqlite3.Row) else row[0]
+        )
+        if cidr:
+            cidrs.append(cidr)
+    return cidrs
+
+
+def monitored_asn_numbers(cidrs: list[str]) -> set[int]:
+    """ASNs proprietarios dos blocos monitorados (nunca listados como externos)."""
+    numbers: set[int] = set()
+    for cidr in cidrs:
+        try:
+            network = ip_network(cidr, strict=False)
+            address = str(network.network_address)
+        except ValueError:
+            continue
+        asn = int(resolve_asn_for_ip(address).get("asn") or 0)
+        if asn > 0:
+            numbers.add(asn)
+    return numbers
+
+
+def _directional_protocol_series(rows: list[dict[str, Any]], direction_filter: str) -> list[dict[str, Any]]:
+    series_by_label: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        flow_direction = clean_text(row.get("flow_direction"))
+        if direction_filter != "total" and flow_direction != direction_filter:
+            continue
+        label = clean_text(row.get("label")) or "OTHER"
+        ts = row.get("ts")
+        if ts is None:
+            continue
+        group = series_by_label.setdefault(
+            label,
+            {
+                "name": label,
+                "group": label,
+                "label": label,
+                "direction": "download",
+                "color": dashboard_series_color(label, "protocol", 0),
+                "points_by_ts": {},
+            },
+        )
+        group["points_by_ts"][ts] = group["points_by_ts"].get(ts, 0.0) + float(row.get("bps") or 0)
+
+    ordered: list[dict[str, Any]] = []
+    for label in _DIRECTIONAL_PROTOCOL_ORDER:
+        if label in series_by_label:
+            ordered.append(series_by_label[label])
+    for label, group in series_by_label.items():
+        if label not in _DIRECTIONAL_PROTOCOL_ORDER:
+            ordered.append(group)
+
+    return [
+        {
+            "name": group["name"],
+            "group": group["group"],
+            "label": group["label"],
+            "direction": "download",
+            "color": group["color"],
+            "points": sorted(
+                (
+                    {"ts": ts, "value": round(value, 2)}
+                    for ts, value in group["points_by_ts"].items()
+                ),
+                key=lambda point: point["ts"],
+            ),
+        }
+        for group in ordered
+    ]
+
+
+def directional_analytics_payload(
+    range_minutes: int,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = None,
+    interface_id: int | None = None,
+    if_index: int | None = None,
+    limit: int = 5,
+    metric: str = "bits_s",
+) -> dict[str, Any]:
+    metric = clean_text(metric).lower() or "bits_s"
+    if metric not in {"bits_s", "packets_s"}:
+        raise HTTPException(status_code=400, detail="metric invalida")
+    limit = max(1, min(50, int(limit or 5)))
+
+    empty_payload = {
+        "start": None,
+        "end": None,
+        "range_minutes": range_minutes,
+        "metric": metric,
+        "monitored_prefixes": 0,
+        "monitored_asns": [],
+        "protocol_timeseries": {"total": [], "download": [], "upload": []},
+        "external_asn_download": {"items": []},
+        "external_asn_upload": {"items": []},
+        "local_ip_download": {"items": []},
+        "local_ip_upload": {"items": []},
+        "query_source": "none",
+    }
+
+    cidrs = active_monitored_cidrs()
+    if not cidrs:
+        empty_payload["monitored_prefixes"] = 0
+        return empty_payload
+
+    ensure_clickhouse_schema()
+
+    context = flow_query_context(
+        range_minutes,
+        start=start,
+        end=end,
+        start_time=start_time,
+        end_time=end_time,
+        sensor=sensor,
+        sensor_id=sensor_id,
+        interface_id=interface_id,
+        if_index=if_index,
+        direction="both",
+    )
+    start_dt = context["start"]
+    end_dt = context["end"]
+    effective_range_minutes = range_minutes_for_window(start_dt, end_dt)
+    bucket_seconds = bucket_seconds_for_window(
+        start_dt,
+        end_dt,
+        maximum_data_points=1000,
+        minimum_seconds=dashboard_bucket_seconds(effective_range_minutes),
+    )
+    cache_key = dashboard_cache_key(
+        "directional-analytics",
+        {
+            "range_minutes": range_minutes,
+            "start": start or start_time or "",
+            "end": end or end_time or "",
+            "sensor": sensor,
+            "sensor_id": sensor_id,
+            "interface_id": interface_id,
+            "if_index": if_index,
+            "limit": limit,
+            "metric": metric,
+        },
+    )
+    cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(effective_range_minutes))
+    if cached:
+        return cached
+
+    params = dict(context["params"])
+    params["limit"] = limit
+    params["seconds"] = range_seconds(start_dt, end_dt)
+    params["bucket_seconds"] = bucket_seconds
+
+    src_filter, dst_filter = cidr_membership_filters_for_clickhouse(cidrs, params, "dir")
+    upload_filter, download_filter, _both_filter = zone_edge_filters(src_filter, dst_filter)
+
+    value_field = "bytes" if metric == "bits_s" else "packets"
+    multiplier = "8" if metric == "bits_s" else "1"
+    where = context["where"]
+    rated_where = context["rated_where"]
+    dimensions = [
+        "src_ip", "dst_ip", "proto", "src_asn", "dst_asn", "src_as_name", "dst_as_name",
+    ]
+
+    query_prefix = dashboard_raw_rated_source_cte(where, dimensions)
+    source_table = "rated_source"
+    query_source = "raw"
+    aggregate_table = DASHBOARD_AGGREGATE_TABLES["prefix"]
+    if dashboard_aggregate_range_covered(aggregate_table, start_dt, end_dt, sensor_id, sensor):
+        query_prefix = dashboard_hybrid_source_cte(
+            aggregate_table,
+            where,
+            start_dt,
+            end_dt,
+            params,
+            dimensions,
+        )
+        source_table = "rated_source"
+        query_source = dashboard_aggregate_query_source(start_dt, end_dt)
+
+    download_factor = "dashboard_input_sample_rate"
+    upload_factor = "dashboard_output_sample_rate"
+
+    # --- 1) serie temporal por protocolo (download + upload) ---
+    series_query = query_prefix + f"""
+        ,
+        directional_weighted_series AS (
+            SELECT
+                toStartOfInterval(flow_time, INTERVAL {{bucket_seconds:UInt32}} SECOND) AS ts,
+                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS label,
+                'download' AS flow_direction,
+                sum({corrected_value_expr(value_field, download_factor)}) * {multiplier} / {{seconds:Float64}} AS bps
+            FROM {source_table}
+            WHERE {rated_where} AND {download_filter}
+            GROUP BY ts, label
+            UNION ALL
+            SELECT
+                toStartOfInterval(flow_time, INTERVAL {{bucket_seconds:UInt32}} SECOND) AS ts,
+                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS label,
+                'upload' AS flow_direction,
+                sum({corrected_value_expr(value_field, upload_factor)}) * {multiplier} / {{seconds:Float64}} AS bps
+            FROM {source_table}
+            WHERE {rated_where} AND {upload_filter}
+            GROUP BY ts, label
+        )
+        SELECT ts, label, flow_direction, bps
+        FROM directional_weighted_series
+        ORDER BY ts, label, flow_direction
+    """
+    series_rows = rows_as_dicts(query_clickhouse(series_query, params))
+    protocol_timeseries = {
+        "total": _directional_protocol_series(series_rows, "total"),
+        "download": _directional_protocol_series(series_rows, "download"),
+        "upload": _directional_protocol_series(series_rows, "upload"),
+    }
+
+    # --- 2) rankings direcionais (4 branches) ---
+    def asn_branch(kind: str, direction_filter: str, asn_col: str, as_name_col: str) -> str:
+        where_filter = download_filter if direction_filter == "download" else upload_filter
+        factor = download_factor if direction_filter == "download" else upload_factor
+        return f"""
+            SELECT
+                '{kind}' AS kind,
+                toUInt32({asn_col}) AS asn,
+                any({as_name_col}) AS as_name,
+                '' AS ip,
+                sum({corrected_value_expr(value_field, factor)}) * {multiplier} / {{seconds:Float64}} AS bps
+            FROM {source_table}
+            WHERE {rated_where} AND {where_filter} AND {asn_col} > 0
+            GROUP BY {asn_col}
+            ORDER BY bps DESC
+            LIMIT {{limit:UInt32}}
+        """
+
+    def ip_branch(kind: str, direction_filter: str, ip_col: str) -> str:
+        where_filter = download_filter if direction_filter == "download" else upload_filter
+        factor = download_factor if direction_filter == "download" else upload_factor
+        return f"""
+            SELECT
+                '{kind}' AS kind,
+                0 AS asn,
+                '' AS as_name,
+                toString({ip_col}) AS ip,
+                sum({corrected_value_expr(value_field, factor)}) * {multiplier} / {{seconds:Float64}} AS bps
+            FROM {source_table}
+            WHERE {rated_where} AND {where_filter}
+            GROUP BY {ip_col}
+            ORDER BY bps DESC
+            LIMIT {{limit:UInt32}}
+        """
+
+    rankings_query = query_prefix + "\n" + " UNION ALL ".join([
+        "SELECT * FROM (" + asn_branch("external_asn_download", "download", "src_asn", "src_as_name") + ")",
+        "SELECT * FROM (" + asn_branch("external_asn_upload", "upload", "dst_asn", "dst_as_name") + ")",
+        "SELECT * FROM (" + ip_branch("local_ip_download", "download", "dst_ip") + ")",
+        "SELECT * FROM (" + ip_branch("local_ip_upload", "upload", "src_ip") + ")",
+    ])
+    ranking_rows = rows_as_dicts(query_clickhouse(rankings_query, params))
+
+    monitored_asns = monitored_asn_numbers(cidrs)
+    asn_numbers = sorted({
+        int(row.get("asn") or 0)
+        for row in ranking_rows
+        if row.get("kind") in {"external_asn_download", "external_asn_upload"}
+        and int(row.get("asn") or 0) > 0
+    })
+    asn_information = lookup_asn_information_batch(asn_numbers)
+
+    def asn_item(row: dict[str, Any]) -> dict[str, Any]:
+        asn = int(row.get("asn") or 0)
+        info = asn_information.get(asn, {})
+        display = asn_display_name(
+            asn, info.get("as_name"), info.get("org_name"), row.get("as_name")
+        )
+        return {
+            "rank": 0,
+            "asn": asn_label(asn),
+            "asn_number": asn,
+            "display_name": display,
+            "org_name": clean_text(info.get("org_name")) or clean_text(info.get("as_name")) or display,
+            "bps": round(float(row.get("bps") or 0), 2),
+        }
+
+    def ip_item(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "rank": 0,
+            "ip": clean_ip(row.get("ip")),
+            "bps": round(float(row.get("bps") or 0), 2),
+        }
+
+    def finalize_ranking(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked = [item for item in items if float(item.get("bps") or 0) > 0]
+        ranked.sort(key=lambda item: float(item.get("bps") or 0), reverse=True)
+        ranked = ranked[:limit]
+        for index, item in enumerate(ranked, start=1):
+            item["rank"] = index
+        return ranked
+
+    external_download = [
+        item for item in (
+            asn_item(row) for row in ranking_rows if row.get("kind") == "external_asn_download"
+        )
+        if item["asn_number"] not in monitored_asns
+    ]
+    external_upload = [
+        item for item in (
+            asn_item(row) for row in ranking_rows if row.get("kind") == "external_asn_upload"
+        )
+        if item["asn_number"] not in monitored_asns
+    ]
+
+    payload = {
+        "start": iso(start_dt),
+        "end": iso(end_dt),
+        "range_minutes": effective_range_minutes,
+        "metric": metric,
+        "bucket_seconds": bucket_seconds,
+        "monitored_prefixes": len(cidrs),
+        "monitored_asns": sorted(monitored_asns),
+        "protocol_timeseries": protocol_timeseries,
+        "external_asn_download": {"items": finalize_ranking(external_download)},
+        "external_asn_upload": {"items": finalize_ranking(external_upload)},
+        "local_ip_download": {"items": finalize_ranking(
+            [ip_item(row) for row in ranking_rows if row.get("kind") == "local_ip_download"]
+        )},
+        "local_ip_upload": {"items": finalize_ranking(
+            [ip_item(row) for row in ranking_rows if row.get("kind") == "local_ip_upload"]
+        )},
+        "query_source": query_source,
+    }
+    return dashboard_cache_set(cache_key, payload)
+
+
+@app.get("/api/dashboard/directional-analytics")
+def dashboard_directional_analytics(
+    range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
+    start: datetime | None = None,
+    end: datetime | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    sensor: str | None = None,
+    sensor_id: int | None = Query(None, ge=1),
+    interface_id: int | None = Query(None, ge=1),
+    if_index: int | None = Query(None, ge=0),
+    limit: int = Query(5, ge=1, le=50),
+    metric: str = "bits_s",
+):
+    return directional_analytics_payload(
+        range_minutes,
+        start,
+        end,
+        start_time,
+        end_time,
+        sensor,
+        sensor_id,
+        interface_id,
+        if_index,
+        limit,
+        metric,
+    )
+
+
 def flow_query_context(
     range_minutes: int = Query(60, ge=1, le=MAX_RANGE_MINUTES),
     start: datetime | None = None,

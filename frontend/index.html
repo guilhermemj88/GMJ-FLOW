@@ -2544,7 +2544,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: none !important;
     }
 
-    #view-dashboard.dashboard-engine-active.dashboard-operational > section:not(#dashboardAlertSection):not(#dashboardOverviewChrome):not(#dashboardAggregateSection):not(#dashboardTopInterfacesSection):not(#dashboardSecondaryAnalyticsSection):not(#dashboardPrefixControls) {
+    #view-dashboard.dashboard-engine-active.dashboard-operational > section:not(#dashboardAlertSection):not(#dashboardOverviewChrome):not(#dashboardAggregateSection):not(#dashboardTopInterfacesSection):not(#dashboardSecondaryAnalyticsSection):not(#dashboardProtocolSection):not(#dashboardExternalAsnSection):not(#dashboardLocalIpSection):not(#dashboardPrefixControls) {
       display: none !important;
     }
 
@@ -4074,6 +4074,23 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
+          <section class="dashboard-overview-chrome" id="dashboardProtocolSection" aria-label="Tráfego por protocolo">
+            <div class="panel p-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="panel-title">Tráfego por Protocolo</div>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="btn-group btn-group-sm directional-protocol-toggle" role="group" aria-label="Direção do gráfico por protocolo">
+                    <button type="button" class="btn btn-outline-secondary active" data-protocol-direction="total">Total</button>
+                    <button type="button" class="btn btn-outline-secondary" data-protocol-direction="download">Download</button>
+                    <button type="button" class="btn btn-outline-secondary" data-protocol-direction="upload">Upload</button>
+                  </div>
+                  <div id="protocolSectionMeta" class="metric-readout">por protocolo</div>
+                </div>
+              </div>
+              <div id="protocolChart" class="chart" style="height:280px;"></div>
+            </div>
+          </section>
+
           <section class="dashboard-overview-chrome" id="dashboardTopInterfacesSection">
             <div class="panel p-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
@@ -4123,6 +4140,64 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="panel dashboard-flows-summary">
               <span id="secondaryFlowsSummary" class="secondary-flows-text">—</span>
               <button id="secondaryFlowsLink" type="button" class="btn btn-sm btn-outline-secondary" onclick="showView('flows')">Ver flows →</button>
+            </div>
+          </section>
+
+          <section class="dashboard-overview-chrome" id="dashboardExternalAsnSection" aria-label="Top ASN externo direcional">
+            <div class="dashboard-secondary-grid">
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top ASN Externo · Download</div>
+                  <div id="externalAsnDownloadMeta" class="metric-readout">externo → nossos blocos</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="externalAsnDownloadTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top ASN Externo · Upload</div>
+                  <div id="externalAsnUploadMeta" class="metric-readout">nossos blocos → externo</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="externalAsnUploadTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="dashboard-overview-chrome" id="dashboardLocalIpSection" aria-label="Top IPs direcional">
+            <div class="dashboard-secondary-grid">
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top IPs · Download</div>
+                  <div id="localIpDownloadMeta" class="metric-readout">IPs dos nossos blocos recebendo</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="localIpDownloadTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top IPs · Upload</div>
+                  <div id="localIpUploadMeta" class="metric-readout">IPs dos nossos blocos transmitindo</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="localIpUploadTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -10982,6 +11057,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const charts = {
       bps: echarts.init(document.getElementById('bpsChart')),
       pps: echarts.init(document.getElementById('ppsChart')),
+      protocol: echarts.init(document.getElementById('protocolChart')),
       srcIp: echarts.init(document.getElementById('srcIpChart')),
       dstIp: echarts.init(document.getElementById('dstIpChart')),
       ports: echarts.init(document.getElementById('portsChart')),
@@ -27316,6 +27392,148 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       el.textContent = `${flowsLabel} flows · ${formatPps(totalPps)}`;
     }
 
+    let directionalAnalyticsData = null;
+    let directionalProtocolMode = 'total';
+
+    function directionalRankingShare(items) {
+      return items.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
+    }
+
+    function renderDirectionalAsnTable(tableId, metaId, items, emptyLabel) {
+      const table = document.getElementById(tableId);
+      const meta = document.getElementById(metaId);
+      if (!table) return;
+      const rows = Array.isArray(items) ? items : [];
+      const total = directionalRankingShare(rows);
+      if (!rows.length || total <= 0) {
+        table.innerHTML = `<tr><td colspan="5" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`;
+        if (meta) meta.textContent = 'sem dados';
+        return;
+      }
+      table.innerHTML = rows.map((item, index) => {
+        const bps = Number(item.bps) || 0;
+        const share = bps / total * 100;
+        const code = item.asn || '—';
+        const org = item.org_name || item.display_name || '—';
+        return `<tr>
+          <td class="rank">${formatNumber(item.rank || index + 1)}</td>
+          <td class="mono">${escapeHtml(code)}</td>
+          <td class="secondary-asn-org" title="${escapeHtml(org)}">${escapeHtml(org)}</td>
+          <td class="text-end mono">${formatBps(bps)}</td>
+          <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
+        </tr>`;
+      }).join('');
+      if (meta) meta.textContent = `top ${rows.length} · externo`;
+    }
+
+    function renderDirectionalIpTable(tableId, metaId, items, emptyLabel) {
+      const table = document.getElementById(tableId);
+      const meta = document.getElementById(metaId);
+      if (!table) return;
+      const rows = Array.isArray(items) ? items : [];
+      const total = directionalRankingShare(rows);
+      if (!rows.length || total <= 0) {
+        table.innerHTML = `<tr><td colspan="4" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`;
+        if (meta) meta.textContent = 'sem dados';
+        return;
+      }
+      table.innerHTML = rows.map((item, index) => {
+        const bps = Number(item.bps) || 0;
+        const share = bps / total * 100;
+        return `<tr>
+          <td class="rank">${formatNumber(item.rank || index + 1)}</td>
+          <td class="mono">${escapeHtml(item.ip || '—')}</td>
+          <td class="text-end mono">${formatBps(bps)}</td>
+          <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
+        </tr>`;
+      }).join('');
+      if (meta) meta.textContent = `top ${rows.length} · nossos blocos`;
+    }
+
+    function directionalProtocolItems() {
+      const series = directionalAnalyticsData?.protocol_timeseries?.[directionalProtocolMode] || [];
+      return series.map(item => ({ ...item, direction: 'download' }));
+    }
+
+    function renderDirectionalProtocolChart() {
+      const items = directionalProtocolItems();
+      const meta = document.getElementById('protocolSectionMeta');
+      if (!charts.protocol) return;
+      if (!items.length || !items.some(item => (item.points || []).length)) {
+        GMJDashboardCharts.replaceChartOption(charts.protocol, emptyChartOption('Sem dados de protocolo no período'));
+        if (meta) meta.textContent = 'sem dados';
+        return;
+      }
+      GMJDashboardCharts.replaceChartOption(charts.protocol, directionalProtocolOption(items, 'bits_s'));
+      if (meta) meta.textContent = `por protocolo · ${directionalProtocolMode}`;
+    }
+
+    function renderDirectionalAnalytics(payload) {
+      directionalAnalyticsData = payload || {};
+      const prefixCount = Number(payload?.monitored_prefixes) || 0;
+      const emptyMessage = prefixCount ? 'Sem dados direcionais no período.' : 'Nenhum bloco monitorado configurado.';
+      renderDirectionalAsnTable('externalAsnDownloadTable', 'externalAsnDownloadMeta', payload?.external_asn_download?.items, emptyMessage);
+      renderDirectionalAsnTable('externalAsnUploadTable', 'externalAsnUploadMeta', payload?.external_asn_upload?.items, emptyMessage);
+      renderDirectionalIpTable('localIpDownloadTable', 'localIpDownloadMeta', payload?.local_ip_download?.items, emptyMessage);
+      renderDirectionalIpTable('localIpUploadTable', 'localIpUploadMeta', payload?.local_ip_upload?.items, emptyMessage);
+      renderDirectionalProtocolChart();
+    }
+
+    function directionalProtocolOption(items, apiMetric) {
+      const metric = metricFromApi(apiMetric);
+      const formatter = metricFormatter(metric);
+      const series = items.map(item => {
+        const color = item.color || protocolPalette[item.group] || palette[0];
+        const data = (item.points || []).map(point => [point.ts, Number(point.value) || 0]);
+        return {
+          name: item.name || item.label || item.group || 'Serie',
+          type: 'line',
+          smooth: true,
+          showSymbol: false,
+          connectNulls: false,
+          lineStyle: { width: 2, color },
+          itemStyle: { color },
+          areaStyle: { color: hexToRgba(color, 0.22) },
+          label: { show: false },
+          emphasis: { focus: 'series' },
+          data
+        };
+      });
+      if (!series.length) return emptyChartOption('Sem dados no período');
+      return {
+        animation: false,
+        grid: { left: 60, right: 30, top: 40, bottom: 70, containLabel: true },
+        legend: { bottom: 0, type: 'scroll', orient: 'horizontal', left: 0, right: 0, textStyle: { color: '#374151' } },
+        tooltip: {
+          trigger: 'axis',
+          formatter(params) {
+            const rows = Array.isArray(params) ? params : [params];
+            const first = rows[0];
+            const timeValue = Array.isArray(first?.value) ? first.value[0] : first?.axisValue;
+            const title = timeValue ? new Date(timeValue).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+            const bucketTotal = rows.reduce((sum, row) => sum + (Math.abs(Number(row.value?.[1]) || 0)), 0) || 1;
+            return [title, ...rows.map(row => {
+              const value = Math.abs(Number(row.value?.[1]) || 0);
+              return `${row.marker}${escapeHtml(row.seriesName)}: ${formatter(value)} (${(value / bucketTotal * 100).toFixed(1)}%)`;
+            })].filter(Boolean).join('<br>');
+          }
+        },
+        xAxis: {
+          type: 'time',
+          boundaryGap: false,
+          axisLabel: { color: '#6b7280', formatter: value => new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) },
+          axisLine: { lineStyle: { color: themeColor('border', '#d9dee5') } }
+        },
+        yAxis: {
+          type: 'value',
+          min: 0,
+          axisLabel: { color: '#6b7280', margin: 14, formatter: value => formatter(Math.abs(Number(value) || 0)) },
+          splitLine: { lineStyle: { color: themeColor('chart-grid', '#edf0f3') } }
+        },
+        series
+      };
+    }
+
     let alertsRows = [];
     let alertsLoadedAt = '';
 
@@ -27581,6 +27799,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         }
         return;
       }
+      if (name === 'directional') {
+        if (failed) {
+          const message = widgetErrorMessage(payload);
+          renderTableMessage('externalAsnDownloadTable', 5, message, true);
+          renderTableMessage('externalAsnUploadTable', 5, message, true);
+          renderTableMessage('localIpDownloadTable', 4, message, true);
+          renderTableMessage('localIpUploadTable', 4, message, true);
+          if (charts.protocol) GMJDashboardCharts.replaceChartOption(charts.protocol, emptyChartOption('Erro ao carregar widget', true));
+          setText('protocolSectionMeta', 'indisponível');
+        } else {
+          renderDirectionalAnalytics(payload || {});
+        }
+        return;
+      }
       const topWidgets = {
         srcIp: [charts.srcIp, 'srcIpTable', 'ip', 'flows', barOption],
         dstIp: [charts.dstIp, 'dstIpTable', 'ip', 'flows', barOption],
@@ -27681,6 +27913,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         setText('ppsReadout', 'Carregando...');
         setText('dashboardAnomaliesStatus', 'Carregando histórico...');
         renderTableMessage('dashboardAnomaliesTable', 10, 'Carregando...');
+        renderTableMessage('externalAsnDownloadTable', 5, 'Carregando…');
+        renderTableMessage('externalAsnUploadTable', 5, 'Carregando…');
+        renderTableMessage('localIpDownloadTable', 4, 'Carregando…');
+        renderTableMessage('localIpUploadTable', 4, 'Carregando…');
         checkHealth().catch(error => console.error('Falha no health do dashboard', error));
         const sensorId = selectedDashboardSensorId();
         const bpsSeriesQuery = dashboardSeriesParams('bits_s');
@@ -27696,7 +27932,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ['anomaliesSummary', fetchJSON('/api/dashboard/anomalies-summary', `${topQuery}&limit=20`, requestOptions)],
           ['asnSrc', fetchJSON('/api/tops/asn-src', topQuery, requestOptions)],
           ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)],
-          ['topInterfaces', loadAllInterfaces()]
+          ['topInterfaces', loadAllInterfaces()],
+          ['directional', fetchJSON('/api/dashboard/directional-analytics', topQuery, requestOptions)]
         ];
         if (isDashboardWidgetVisible('bps-chart')) {
           entries.unshift(['bps', fetchJSON('/api/dashboard/series', bpsSeriesQuery, requestOptions)]);
@@ -30172,6 +30409,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       scheduleDashboardRefresh();
     });
     document.getElementById('dashboardSeriesMode').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    document.querySelectorAll('.directional-protocol-toggle button').forEach(button => {
+      button.addEventListener('click', () => {
+        directionalProtocolMode = button.dataset.protocolDirection || 'total';
+        document.querySelectorAll('.directional-protocol-toggle button').forEach(btn => btn.classList.toggle('active', btn === button));
+        renderDirectionalProtocolChart();
+      });
+    });
     document.getElementById('dashboardSeriesLimit').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('dashboardZone').addEventListener('change', () => {
       updateDashboardZoneLabels();
