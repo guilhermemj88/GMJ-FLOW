@@ -4918,6 +4918,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                     <th class="text-end">Tamanho</th>
                     <th class="text-end">Offset</th>
                     <th class="text-end">Lag</th>
+                    <th class="text-end">Workers/CPU</th>
+                    <th class="text-end">Batch</th>
+                    <th class="text-end">Parse</th>
+                    <th class="text-end">Insert</th>
+                    <th class="text-end">Ciclo</th>
+                    <th class="text-end">rows/s</th>
                     <th>nfacctd.conf</th>
                     <th>pmacct</th>
                     <th>UDP</th>
@@ -26657,6 +26663,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td class="text-end">${Number(item.file_size_mb || 0).toFixed(1)} MB</td>
             <td class="text-end">${formatNumber(item.offset)}</td>
             <td class="text-end">${formatBytes(item.lag_bytes)}</td>
+            <td class="text-end">${formatNumber(item.parse_workers)} / ${formatNumber(item.effective_cpu_count)}</td>
+            <td class="text-end">${formatNumber(item.batch_rows)}</td>
+            <td class="text-end">${Number(item.parse_ms || 0).toFixed(1)} ms</td>
+            <td class="text-end">${Number(item.insert_ms || 0).toFixed(1)} ms</td>
+            <td class="text-end">${Number(item.cycle_ms || 0).toFixed(1)} ms</td>
+            <td class="text-end">${formatNumber(Math.round(item.rows_per_second || 0))}</td>
             <td>${diagnosticBadge(item.nfacctd_conf_exists, 'Existe', 'Falta')}</td>
             <td>${diagnosticBadge(item.pmacct_container_running, 'Rodando', 'Parado', 'Indisp')}</td>
             <td>${diagnosticBadge(item.udp_port_published, 'Publicada', 'Fechada', 'Indisp')}</td>
@@ -26667,9 +26679,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             <td>${formatDateTime(item.last_insert_at)}</td>
             <td title="${escapeHtml(ingestionDiagnosticTitle(item))}">${escapeHtml(item.status_issue || item.parser_status || '-')}</td>
           </tr>
-        `).join('') || '<tr><td colspan="14" class="text-muted">Sem status do parser</td></tr>';
+        `).join('') || '<tr><td colspan="20" class="text-muted">Sem status do parser</td></tr>';
       } catch (error) {
-        tbody.innerHTML = `<tr><td colspan="14" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="20" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
       }
     }
 
