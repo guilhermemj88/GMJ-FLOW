@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -26,6 +27,9 @@ from app.services.threat_intelligence import (
 )
 from app.services.behavior_flow_table import behavior_flow_table
 from app.services.network_context import NetworkContextEngine
+from app.services.outbound_ioc_detector import OutboundIocShadowDetector
+from app.services.outbound_ioc_aggregation import OutboundIocAggregator
+from app.services.outbound_ioc_persistence import OutboundIocPersistence
 from app.services.security_events import (
     canonical_event_key,
     cleanup_security_events,
@@ -57,7 +61,12 @@ from app.services.behavior_baseline import (
     safe_reason_bucket,
 )
 from app.services.config_effective import behavior_safe_learning_enabled
-from app.services.network_sweep_policy import _is_protected_subject
+from app.services.network_sweep_policy import (
+    clear_protected_subject_caches,
+    is_protected_subject_cached,
+    load_protected_subject_context,
+)
+from app.services.transport_semantics import transport_semantics_from_features
 from app.services.network_assets import (
     CGNAT_POOL,
     CDN_CACHE,
@@ -65,6 +74,7 @@ from app.services.network_assets import (
     DOWNSTREAM_ISP,
     NetworkAssetResolver,
     ensure_network_assets_schema,
+    expected_services_match,
     resolve_network_context as resolve_network_asset_context,
     shannon_entropy,
     target_role_distribution,
@@ -130,6 +140,152 @@ CLASSIFICATIONS = {
     MULTI_VECTOR_DDOS,
     UNKNOWN_ANOMALY,
 }
+
+# ---------------------------------------------------------------------------
+# Threat Intelligence influence levels.
+#
+# Threat Intelligence (IOC/reputation) is context, not a verdict. The influence
+# level decides how much a TI match may move detector_score / confidence /
+# policy score — the raw IOCs are ALWAYS preserved in threat_intel.
+# ---------------------------------------------------------------------------
+TI_INFLUENCE_NORMAL = "NORMAL"
+TI_INFLUENCE_REDUCED = "REDUCED"
+TI_INFLUENCE_ADVISORY_ONLY = "ADVISORY_ONLY"
+TI_INFLUENCE_DISABLED = "DISABLED"
+
+TI_INFLUENCE_LEVELS = {
+    TI_INFLUENCE_NORMAL,
+    TI_INFLUENCE_REDUCED,
+    TI_INFLUENCE_ADVISORY_ONLY,
+    TI_INFLUENCE_DISABLED,
+}
+
+# Strong volumetric/reflection vectors keep full TI influence (NORMAL).
+TI_STRONG_VECTORS = {
+    SYN_FLOOD,
+    DISTRIBUTED_SYN_FLOOD,
+    SPOOFED_SYN_FLOOD,
+    UDP_FLOOD,
+    DISTRIBUTED_UDP_FLOOD,
+    UDP_REFLECTION_SUSPECTED,
+    MULTI_VECTOR_DDOS,
+}
+
+# Scan/sweep vectors only get a small, capped TI boost (REDUCED).
+TI_REDUCED_VECTORS = {
+    PORT_SCAN_VERTICAL,
+    PORT_SCAN_HORIZONTAL,
+    NETWORK_SWEEP,
+    LOW_SLOW_SCAN,
+}
+
+
+def threat_intel_influence(attack_type: str, traffic_classification: str = "") -> tuple[str, str]:
+    """Return (influence, reason) for how Threat Intelligence may move the score.
+
+    This is a pure policy function: it never removes IOCs from evidence — it
+    only bounds how strongly a reputation match may affect score/confidence.
+    """
+    if attack_type in TI_STRONG_VECTORS:
+        return TI_INFLUENCE_NORMAL, "strong_volumetric_or_reflection_evidence"
+    if attack_type == CARPET_BOMBING:
+        classification = clean_text(traffic_classification).upper()
+        if classification == EXPECTED_DISTRIBUTED_TRAFFIC:
+            return TI_INFLUENCE_ADVISORY_ONLY, "expected_distributed_traffic"
+        if classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC:
+            return TI_INFLUENCE_REDUCED, "suspicious_distributed_traffic"
+        return TI_INFLUENCE_NORMAL, "confirmed_carpet_attack_evidence"
+    if attack_type in TI_REDUCED_VECTORS:
+        return TI_INFLUENCE_REDUCED, "scan_or_sweep_context"
+    return TI_INFLUENCE_NORMAL, "default"
+
+
+def apply_ti_influence(raw_bonus: int, influence: str) -> int:
+    """Map a raw TI bonus through the influence level.
+
+    NORMAL keeps the raw bonus; REDUCED caps it small; ADVISORY_ONLY and
+    DISABLED contribute zero to the score (IOCs remain in evidence).
+    """
+    bonus = max(0, int(raw_bonus))
+    if influence in {TI_INFLUENCE_ADVISORY_ONLY, TI_INFLUENCE_DISABLED}:
+        return 0
+    if influence == TI_INFLUENCE_REDUCED:
+        return min(2, bonus)
+    return bonus
+
+
+# ---------------------------------------------------------------------------
+# TCP flag semantics (NetFlow tcp_flags bitfield).
+#
+#   0x01 FIN   0x02 SYN   0x04 RST   0x08 PSH   0x10 ACK
+#
+# Detectors must reason about real TCP states instead of coarse rules such as
+# "tcpflags != 2", so that:
+#   - a dst_port=443 SYN flood is never mistaken for a web return,
+#   - a src_port=443 pure SYN is never classified as WEB_RETURN,
+#   - only ACK / PSH+ACK (established return) can support WEB_RETURN.
+# ---------------------------------------------------------------------------
+TCP_FIN = 0x01
+TCP_SYN = 0x02
+TCP_RST = 0x04
+TCP_PSH = 0x08
+TCP_ACK = 0x10
+
+TCP_SYN_ACK = TCP_SYN | TCP_ACK   # 0x12 — handshake reply, not established
+TCP_PSH_ACK = TCP_PSH | TCP_ACK   # 0x18 — established return
+TCP_FIN_ACK = TCP_FIN | TCP_ACK   # 0x11 — teardown, not established
+
+
+def is_tcp_syn_only(flags: int) -> bool:
+    """Pure SYN (connection attempt): SYN set and ACK clear.
+
+    SYN+ACK (0x12) is a handshake reply and is NOT a pure SYN."""
+    return bool(int(flags) & TCP_SYN) and not bool(int(flags) & TCP_ACK)
+
+
+def is_tcp_web_return_flags(flags: int) -> bool:
+    """Established return: ACK set and no SYN/RST/FIN.
+
+    Effectively flags 16 (ACK) or 24 (PSH+ACK), optionally with ECE/CWR.
+    This is the only TCP state that can support a WEB_RETURN hypothesis for
+    a src_port 80/443 flow."""
+    value = int(flags)
+    return (
+        bool(value & TCP_ACK)
+        and not bool(value & TCP_SYN)
+        and not bool(value & TCP_RST)
+        and not bool(value & TCP_FIN)
+    )
+
+
+def tcp_syn_share(rows: Iterable[Any], total_packets: int | None = None) -> float:
+    """Fraction of TCP packets that are pure SYN (connection attempts)."""
+    syn = 0
+    tcp = 0
+    for row in rows:
+        if getattr(row, "protocol", 6) != 6:
+            continue
+        packets = int(getattr(row, "packets", 0) or 0)
+        tcp += packets
+        if is_tcp_syn_only(int(getattr(row, "tcp_flags", 0) or 0)):
+            syn += packets
+    denominator = total_packets if total_packets is not None else tcp
+    return ratio(syn, max(1, denominator))
+
+
+def tcp_web_return_share(rows: Iterable[Any], total_packets: int | None = None) -> float:
+    """Fraction of TCP packets carrying established-return flags (ACK/PSH+ACK)."""
+    ret = 0
+    tcp = 0
+    for row in rows:
+        if getattr(row, "protocol", 6) != 6:
+            continue
+        packets = int(getattr(row, "packets", 0) or 0)
+        tcp += packets
+        if is_tcp_web_return_flags(int(getattr(row, "tcp_flags", 0) or 0)):
+            ret += packets
+    denominator = total_packets if total_packets is not None else tcp
+    return ratio(ret, max(1, denominator))
 
 
 def behavioral_clickhouse_schema_statements() -> tuple[str, ...]:
@@ -215,14 +371,19 @@ def safe_int(value: Any) -> int:
         return 0
 
 
-def normalized_ip(value: Any) -> str:
+@functools.lru_cache(maxsize=262144)
+def _normalized_ip_cached(value: str) -> str:
     try:
-        parsed = ip_address(clean_text(value))
+        parsed = ip_address(value)
     except ValueError:
         return ""
     if parsed.version == 6 and parsed.ipv4_mapped:
         return str(parsed.ipv4_mapped)
     return str(parsed)
+
+
+def normalized_ip(value: Any) -> str:
+    return _normalized_ip_cached(clean_text(value))
 
 
 @dataclass(frozen=True)
@@ -503,6 +664,26 @@ def flow_features(rows: Sequence[FlowObservation], window_seconds: int) -> dict[
     }
 
 
+def _carpet_semantic_verdict(vector: AttackVector) -> tuple[str, str] | None:
+    """Carpet-bombing semantic classification overrides the generic score verdict.
+
+    ``EXPECTED_DISTRIBUTED_TRAFFIC`` is benign evidence (INFO/LOW) and
+    ``SUSPICIOUS_DISTRIBUTED_TRAFFIC`` is a weak signal (SUSPICIOUS/MEDIUM),
+    regardless of ``detector_score`` / persistence. Returns None for
+    CONFIRMED_ATTACK (or any other type), so the generic score-based verdict
+    still applies. This keeps ``finalize_vector`` idempotent for Carpet vectors
+    even when the engine re-finalizes them after correlation.
+    """
+    if vector.attack_type != CARPET_BOMBING:
+        return None
+    classification = clean_text((vector.features or {}).get("traffic_classification")).upper()
+    if classification == EXPECTED_DISTRIBUTED_TRAFFIC:
+        return "INFO", "LOW"
+    if classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC:
+        return "SUSPICIOUS", "MEDIUM"
+    return None
+
+
 def finalize_vector(vector: AttackVector) -> AttackVector:
     vector.attack_family = attack_family(vector.attack_type)
     persistent = safe_int(vector.features.get("persistent_windows") or vector.features.get("consecutive_windows") or 1)
@@ -515,12 +696,40 @@ def finalize_vector(vector: AttackVector) -> AttackVector:
         vector.severity = "MEDIUM"
     else:
         vector.severity = "LOW"
+    semantic = _carpet_semantic_verdict(vector)
+    if semantic is not None:
+        vector.verdict, vector.severity = semantic
     vector.features["attack_family"] = vector.attack_family
     vector.features["verdict"] = vector.verdict
     vector.features["severity"] = vector.severity
     vector.features["score_components"] = dict(vector.score_components)
     vector.features["evidence"] = list(vector.evidence)
+    _attach_transport_semantics(vector)
     return vector
+
+
+def _attach_transport_semantics(vector: AttackVector) -> None:
+    """Attach P5.0 transport/port semantic classification to vector features.
+
+    Descriptive metadata only - never a verdict, never a score change and
+    never a whitelist. Threat Intelligence and behavioral signals stay
+    independent dimensions.
+    """
+    try:
+        semantic = transport_semantics_from_features(
+            vector.features,
+            direction=vector.direction,
+            threat_intel=vector.threat_intel,
+        )
+    except Exception as exc:  # semantic metadata must never break detection
+        LOGGER.warning("TRANSPORT_SEMANTICS_FAILED error=%s", exc)
+        return
+    vector.features["transport_semantic"] = semantic
+    vector.features["transport_confidence"] = semantic.get("transport_confidence")
+    vector.features["transport_reason_codes"] = semantic.get("transport_reason_codes")
+    vector.features["service_port"] = semantic.get("service_port")
+    vector.features["service_side"] = semantic.get("service_side")
+    vector.features["c2_over_https"] = bool(semantic.get("c2_over_https"))
 
 
 class PortScanDetector:
@@ -631,7 +840,10 @@ class PortScanDetector:
         for vector in vectors:
             intel = source_intel_stats(rows_by_source.get(vector.src_ip, []), intel_lookup, maximum_lookups=1)
             attach_source_intel(vector, intel)
-            boost = source_intel_score_boost(intel, maximum=10)
+            raw_boost = source_intel_score_boost(intel, maximum=10)
+            influence, reason = threat_intel_influence(vector.attack_type)
+            boost = apply_ti_influence(raw_boost, influence)
+            attach_ti_influence_metadata(vector, influence, reason, raw_boost, boost)
             if boost:
                 vector.detector_score = int(clamp(vector.detector_score + boost))
                 vector.confidence = round(clamp(vector.confidence + boost / 100.0, 0, 1), 3)
@@ -695,7 +907,9 @@ class SshBruteForceDetector:
             persistence = min(25, int(features["elapsed_seconds"] / 6))
             recurrence = min(15, safe_int(features.get("persistent_windows")) * 3)
             behavioral_score = int(clamp(35 + volume + persistence + recurrence))
-            intel_boost = source_intel_score_boost(intel, maximum=8)
+            raw_intel_boost = source_intel_score_boost(intel, maximum=8)
+            influence, reason = threat_intel_influence(SSH_BRUTE_FORCE)
+            intel_boost = apply_ti_influence(raw_intel_boost, influence)
             score = int(clamp(behavioral_score + intel_boost))
             features.update({
                 "protocol": "tcp",
@@ -704,6 +918,10 @@ class SshBruteForceDetector:
                 "unique_destinations": 1,
                 "behavioral_score": behavioral_score,
                 "source_intel_score_boost": intel_boost,
+                "ti_influence": influence,
+                "ti_influence_reason": reason,
+                "ti_bonus_raw": raw_intel_boost,
+                "ti_bonus_applied": intel_boost,
             })
             vector = AttackVector(
                 attack_type=SSH_BRUTE_FORCE,
@@ -732,17 +950,74 @@ class SshBruteForceDetector:
                 },
             )
             attach_source_intel(vector, intel)
+            attach_ti_influence_metadata(vector, influence, reason, raw_intel_boost, intel_boost)
             vectors.append(finalize_vector(vector))
         return vectors
 
 
-def target_prefixes(ip_text: str) -> Iterable[str]:
+_PREFIX_BASELINE_UPSERT_SQL = """
+        INSERT INTO prefix_behavior_baselines(
+            prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count,
+            baseline_state, bootstrap_clean_count, last_classification, quarantined_until,
+            mad_pps, rejected_count, quarantined_count, trusted_at, mad_sample_count, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(prefix, protocol) DO UPDATE SET
+            packets_per_second_ema=excluded.packets_per_second_ema,
+            bits_per_second_ema=excluded.bits_per_second_ema,
+            sample_count=excluded.sample_count,
+            baseline_state=excluded.baseline_state,
+            bootstrap_clean_count=excluded.bootstrap_clean_count,
+            last_classification=excluded.last_classification,
+            quarantined_until=excluded.quarantined_until,
+            mad_pps=excluded.mad_pps,
+            rejected_count=excluded.rejected_count,
+            quarantined_count=excluded.quarantined_count,
+            trusted_at=excluded.trusted_at,
+            mad_sample_count=excluded.mad_sample_count,
+            updated_at=excluded.updated_at
+    """
+
+
+def fetch_prefix_baseline_states(
+    conn: sqlite3.Connection,
+    keys: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[Any, ...]]:
+    """Batch-load current baseline rows for the given (prefix, protocol) keys.
+
+    Chunked row-value IN avoids per-prefix SELECT round-trips and keeps the
+    read phase O(number of active prefix groups) instead of O(historical rows).
+    Returned values are (ema, bps, samples, state, clean_count, mad_pps,
+    quarantined_until, rejected_count, quarantined_count, trusted_at,
+    mad_sample_count) — the same column order the caller used before.
+    """
+    result: dict[tuple[str, str], tuple[Any, ...]] = {}
+    ordered = sorted(keys)
+    for start in range(0, len(ordered), 500):
+        chunk = ordered[start:start + 500]
+        placeholders = ",".join("(?,?)" for _ in chunk)
+        flat: list[Any] = []
+        for prefix, protocol in chunk:
+            flat.extend((prefix, protocol))
+        rows = conn.execute(
+            f"SELECT prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count, "
+            f"baseline_state, bootstrap_clean_count, mad_pps, quarantined_until, rejected_count, "
+            f"quarantined_count, trusted_at, mad_sample_count "
+            f"FROM prefix_behavior_baselines WHERE (prefix, protocol) IN ({placeholders})",
+            flat,
+        ).fetchall()
+        for row in rows:
+            result[(clean_text(row[0]), clean_text(row[1]))] = tuple(row[2:])
+    return result
+
+@functools.lru_cache(maxsize=262144)
+def target_prefixes(ip_text: str) -> tuple[str, ...]:
     parsed = ip_address(ip_text)
     if parsed.version == 4:
-        for length in PREFIX_LENGTHS_V4:
-            yield str(ip_network(f"{parsed}/{length}", strict=False))
-    else:
-        yield str(ip_network(f"{parsed}/128", strict=False))
+        return tuple(
+            str(ip_network(f"{parsed}/{length}", strict=False))
+            for length in PREFIX_LENGTHS_V4
+        )
+    return (str(ip_network(f"{parsed}/128", strict=False)),)
 
 
 def _overlaps_any_network(prefix: str, networks: Sequence[Any]) -> bool:
@@ -1010,6 +1285,24 @@ def attach_source_intel(vector: AttackVector, intel: Mapping[str, Any]) -> None:
     vector.intel_sources = sorted(set(vector.intel_sources) | set(source.get("intel_sources") or []))
 
 
+def attach_ti_influence_metadata(
+    vector: AttackVector,
+    influence: str,
+    reason: str,
+    raw_bonus: int,
+    applied_bonus: int,
+) -> None:
+    """Expose TI influence on both threat_intel and features (persisted)."""
+    vector.threat_intel["ti_influence"] = influence
+    vector.threat_intel["ti_influence_reason"] = reason
+    vector.threat_intel["ti_bonus_raw"] = int(raw_bonus)
+    vector.threat_intel["ti_bonus_applied"] = int(applied_bonus)
+    vector.features["ti_influence"] = influence
+    vector.features["ti_influence_reason"] = reason
+    vector.features["ti_bonus_raw"] = int(raw_bonus)
+    vector.features["ti_bonus_applied"] = int(applied_bonus)
+
+
 def cached_intel_lookup(
     lookup: Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]],
 ) -> Callable[[str, Mapping[str, Any] | None], Mapping[str, Any]]:
@@ -1053,13 +1346,23 @@ class SynFloodDetector:
         vectors = []
         for prefix, rows in grouped.items():
             features = flow_features(rows, window_seconds)
-            syn_packets = sum(row.packets for row in rows if row.tcp_flags & 0x02 and not row.tcp_flags & 0x10)
-            ack_packets = sum(row.packets for row in rows if row.tcp_flags & 0x10)
-            rst_packets = sum(row.packets for row in rows if row.tcp_flags & 0x04)
-            syn_ratio = ratio(syn_packets, max(1, features["packet_count"]))
+            packet_count = max(1, features["packet_count"])
+            syn_packets = sum(row.packets for row in rows if is_tcp_syn_only(int(row.tcp_flags)))
+            syn_ack_packets = sum(row.packets for row in rows if (int(row.tcp_flags) & TCP_SYN) and (int(row.tcp_flags) & TCP_ACK))
+            ack_packets = sum(row.packets for row in rows if int(row.tcp_flags) & TCP_ACK)
+            psh_ack_packets = sum(row.packets for row in rows if is_tcp_web_return_flags(int(row.tcp_flags)) and (int(row.tcp_flags) & TCP_PSH))
+            web_return_packets = sum(row.packets for row in rows if is_tcp_web_return_flags(int(row.tcp_flags)))
+            rst_packets = sum(row.packets for row in rows if int(row.tcp_flags) & TCP_RST)
+            syn_ratio = ratio(syn_packets, packet_count)
             syn_ack_ratio = ratio(syn_packets, max(1, ack_packets))
             pps = ratio(syn_packets, window_seconds)
             bps = features["bits_per_second"]
+            per_dst: Counter[str] = Counter()
+            for row in rows:
+                per_dst[row.dst_ip] += row.packets
+            max_dst_pps = ratio(max(per_dst.values(), default=0), window_seconds)
+            unique_destinations = features["unique_dst_ips"]
+            unique_dst_ports = features["unique_dst_ports"]
             current_baseline = float((baseline or {}).get(prefix) or 0)
             deviation = ratio(pps, current_baseline) if current_baseline else 0.0
             volume_signals = sum((
@@ -1090,7 +1393,9 @@ class SynFloodDetector:
                 "network_context": 0,
             }
             behavioral_score = int(clamp(20 + sum(score_components.values())))
-            intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=8)
+            raw_intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=8)
+            influence, reason = threat_intel_influence(attack_type)
+            intel_boost = apply_ti_influence(raw_intel_boost, influence)
             score_components["threat_intel"] = intel_boost
             score = int(clamp(behavioral_score + intel_boost))
             features.update(
@@ -1100,14 +1405,31 @@ class SynFloodDetector:
                     "ack_count": ack_packets,
                     "rst_count": rst_packets,
                     "syn_ratio": round(syn_ratio, 4),
+                    "syn_share": round(syn_ratio, 4),
+                    "syn_pps": round(pps, 4),
+                    "syn_ack_share": round(ratio(syn_ack_packets, packet_count), 4),
+                    "psh_ack_share": round(ratio(psh_ack_packets, packet_count), 4),
+                    "rst_share": round(ratio(rst_packets, packet_count), 4),
+                    "web_return_share": round(ratio(web_return_packets, packet_count), 4),
                     "syn_ack_ratio": round(syn_ack_ratio, 4),
                     "unique_sources": unique_sources,
+                    "unique_destinations": unique_destinations,
+                    "unique_dst_ports": unique_dst_ports,
+                    "max_dst_pps": round(max_dst_pps, 4),
+                    "per_target_pps_distribution": {
+                        "max": round(max_dst_pps, 4),
+                        "targets": len(per_dst),
+                    },
                     "pps": round(features["packets_per_second"], 4),
                     "bps": round(features["bits_per_second"], 4),
                     "spoofing_likelihood": spoofing_likelihood,
                     "behavioral_score": behavioral_score,
                     "source_intel_score_boost": intel_boost,
                     "threat_intel_relevance": intel_relevance,
+                    "ti_influence": influence,
+                    "ti_influence_reason": reason,
+                    "ti_bonus_raw": raw_intel_boost,
+                    "ti_bonus_applied": intel_boost,
                     "volume_signals": volume_signals,
                 }
             )
@@ -1136,6 +1458,7 @@ class SynFloodDetector:
                 score_components=score_components,
             )
             attach_source_intel(vector, intel)
+            attach_ti_influence_metadata(vector, influence, reason, raw_intel_boost, intel_boost)
             vectors.append(finalize_vector(vector))
         return suppress_contained_vectors(vectors)
 
@@ -1226,7 +1549,9 @@ class UdpFloodDetector:
                 "network_context": 0,
             }
             behavioral_score = int(clamp(20 + sum(score_components.values())))
-            intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=6)
+            raw_intel_boost, intel_relevance = contextual_intel_score_boost(intel, attack_type, maximum=6)
+            influence, reason = threat_intel_influence(attack_type)
+            intel_boost = apply_ti_influence(raw_intel_boost, influence)
             score_components["threat_intel"] = intel_boost
             score = int(clamp(behavioral_score + intel_boost))
             features.update(
@@ -1251,6 +1576,10 @@ class UdpFloodDetector:
                     "behavioral_score": behavioral_score,
                     "source_intel_score_boost": intel_boost,
                     "threat_intel_relevance": intel_relevance,
+                    "ti_influence": influence,
+                    "ti_influence_reason": reason,
+                    "ti_bonus_raw": raw_intel_boost,
+                    "ti_bonus_applied": intel_boost,
                     "volume_signals": volume_signals,
                 }
             )
@@ -1278,6 +1607,7 @@ class UdpFloodDetector:
                 score_components=score_components,
             )
             attach_source_intel(vector, intel)
+            attach_ti_influence_metadata(vector, influence, reason, raw_intel_boost, intel_boost)
             vectors.append(finalize_vector(vector))
         return suppress_contained_vectors(vectors)
 
@@ -1310,6 +1640,10 @@ def carpet_bombing_features(
     window_seconds: int,
     resolver: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Carpet-bombing specific signals beyond the generic `flow_features`.
+
+    The resolver is expected to be an in-memory/cached resolver; lookups are
+    bounded to distinct destinations/sources (not one call per flow)."""
     packet_count = max(1, sum(row.packets for row in rows))
     flow_count = max(1, sum(row.flow_count for row in rows))
     byte_count = sum(row.bytes for row in rows)
@@ -1318,30 +1652,77 @@ def carpet_bombing_features(
     per_host_packets: Counter[str] = Counter()
     tcp_packets = 0
     tcp_syn_packets = 0
+    tcp_syn_ack_packets = 0
     tcp_ack_packets = 0
     tcp_psh_ack_packets = 0
+    tcp_fin_ack_packets = 0
+    tcp_rst_packets = 0
     udp_packets = 0
     udp_quic_packets = 0
     web_return_packets = 0
+    tcp_web_return_packets = 0
+    cdn_quic_packets = 0
+    expected_service_packets = 0
+    cdn_expected_service_packets = 0
+    expected_service_providers: list[str] = []
+    expected_service_sources: set[str] = set()
+
+    # Bounded per-source semantic resolution (cached in-memory).
+    source_contexts: dict[str, dict[str, Any]] = {}
+    max_source_lookups = 2000
+
+    def _source_context(ip: str) -> dict[str, Any]:
+        if ip not in source_contexts:
+            if resolver is None or len(source_contexts) >= max_source_lookups:
+                return {}
+            source_contexts[ip] = resolver(ip) or {}
+        return source_contexts.get(ip, {})
+
+    proto_name = {6: "tcp", 17: "udp", 1: "icmp"}
     for row in rows:
         src_port_packets[row.src_port] += row.packets
         dst_port_packets[row.dst_port] += row.packets
         per_host_packets[row.dst_ip] += row.packets
         if row.protocol == 6:
             tcp_packets += row.packets
-            if row.tcp_flags & 0x02:
+            flags = int(row.tcp_flags)
+            if is_tcp_syn_only(flags):
                 tcp_syn_packets += row.packets
-            if row.tcp_flags & 0x10:
+            elif flags & TCP_SYN and flags & TCP_ACK:
+                tcp_syn_ack_packets += row.packets
+            if flags & TCP_ACK:
                 tcp_ack_packets += row.packets
-                if row.tcp_flags & 0x08:
+                if flags & TCP_PSH and not flags & TCP_SYN:
                     tcp_psh_ack_packets += row.packets
-            if row.src_port in (80, 443) and (row.tcp_flags & 0x10):
+            if flags & TCP_FIN:
+                tcp_fin_ack_packets += row.packets
+            if flags & TCP_RST:
+                tcp_rst_packets += row.packets
+            if row.src_port in (80, 443) and is_tcp_web_return_flags(flags):
                 web_return_packets += row.packets
+                tcp_web_return_packets += row.packets
         elif row.protocol == 17:
             udp_packets += row.packets
             if row.src_port == 443:
                 udp_quic_packets += row.packets
                 web_return_packets += row.packets
+        # Expected CDN service context (context only — never a whitelist).
+        context = _source_context(row.src_ip)
+        if context.get("role") == CDN_CACHE and expected_services_match(
+            context,
+            proto_name.get(row.protocol, str(row.protocol)),
+            row.src_port,
+            row.dst_port,
+            direction="TO_CUSTOMERS",
+        ):
+            expected_service_packets += row.packets
+            cdn_expected_service_packets += row.packets
+            expected_service_sources.add(row.src_ip)
+            provider = clean_text(context.get("provider"))
+            if provider and provider not in expected_service_providers:
+                expected_service_providers.append(provider)
+            if row.protocol == 17 and row.src_port == 443:
+                cdn_quic_packets += row.packets
     top_src_port, top_src_port_count = src_port_packets.most_common(1)[0] if src_port_packets else (0, 0)
     top_dst_port, top_dst_port_count = dst_port_packets.most_common(1)[0] if dst_port_packets else (0, 0)
     host_pps = [ratio(packets, window_seconds) for packets in per_host_packets.values()]
@@ -1352,6 +1733,10 @@ def carpet_bombing_features(
             resolver,
             weights=dict(per_host_packets),
         )
+    expected_service_share = ratio(expected_service_packets, packet_count)
+    cdn_expected_service_share = ratio(cdn_expected_service_packets, packet_count)
+    cdn_quic_expected_share = ratio(cdn_quic_packets, packet_count)
+    udp_quic_share = ratio(udp_quic_packets, packet_count)
     return {
         "aggregate_pps": round(ratio(packet_count, window_seconds), 3),
         "aggregate_bps": round(ratio(byte_count * 8, window_seconds), 3),
@@ -1368,8 +1753,29 @@ def carpet_bombing_features(
         "tcp_syn_ratio": round(ratio(tcp_syn_packets, tcp_packets), 4),
         "tcp_ack_ratio": round(ratio(tcp_ack_packets, tcp_packets), 4),
         "tcp_psh_ack_ratio": round(ratio(tcp_psh_ack_packets, tcp_packets), 4),
-        "udp_quic_share": round(ratio(udp_quic_packets, packet_count), 4),
+        "tcp_syn_share": round(ratio(tcp_syn_packets, packet_count), 4),
+        "tcp_syn_ack_share": round(ratio(tcp_syn_ack_packets, packet_count), 4),
+        "tcp_fin_ack_share": round(ratio(tcp_fin_ack_packets, packet_count), 4),
+        "tcp_rst_share": round(ratio(tcp_rst_packets, packet_count), 4),
+        "udp_quic_share": round(udp_quic_share, 4),
+        "udp_quic_hint": bool(udp_quic_packets),
+        "cdn_quic_expected": bool(cdn_quic_packets),
+        "cdn_quic_expected_share": round(cdn_quic_expected_share, 4),
         "web_return_share": round(ratio(web_return_packets, packet_count), 4),
+        "tcp_web_return_packets": int(tcp_web_return_packets),
+        "tcp_web_return_share": round(ratio(tcp_web_return_packets, packet_count), 4),
+        "udp_quic_packets": int(udp_quic_packets),
+        "expected_service_packets": int(expected_service_packets),
+        "expected_service_share": round(expected_service_share, 4),
+        "cdn_expected_service_packets": int(cdn_expected_service_packets),
+        "cdn_expected_service_share": round(cdn_expected_service_share, 4),
+        "expected_service_matches": len(expected_service_sources),
+        "expected_service_providers": sorted(expected_service_providers),
+        "web_return_service_context": {
+            "matched": bool(expected_service_sources),
+            "cdn_expected_service_share": round(cdn_expected_service_share, 4),
+            "providers": sorted(expected_service_providers),
+        },
         "flows_s": round(ratio(flow_count, window_seconds), 4),
         "packets_per_flow": round(ratio(packet_count, flow_count), 4),
         "target_role_distribution": role_distribution,
@@ -1387,17 +1793,24 @@ def carpet_bombing_features(
 
 
 def _carpet_web_return_likely(cf: Mapping[str, Any], thresholds: DetectorThresholds) -> bool:
+    """TCP src-port 80/443 + ACK (established return), or UDP/443 QUIC from a
+    known CDN expected service, with highly diverse destination ports — the
+    fingerprint of normal web traffic returning to many subscribers.
+
+    Plain UDP/443 from an unknown source is only a hint (``udp_quic_hint``) and
+    is NOT enough by itself to classify the traffic as expected."""
     web_return_share = float(cf.get("web_return_share") or 0.0)
     tcp_ack_ratio = float(cf.get("tcp_ack_ratio") or 0.0)
     tcp_syn_ratio = float(cf.get("tcp_syn_ratio") or 0.0)
-    udp_quic_share = float(cf.get("udp_quic_share") or 0.0)
+    cdn_quic_expected_share = float(cf.get("cdn_quic_expected_share") or 0.0)
     dst_entropy = float(cf.get("dst_port_entropy") or 0.0)
     unique_dst_ports = int(cf.get("unique_dst_ports") or 0)
     established_tcp_return = tcp_ack_ratio >= thresholds.carpet_web_return_ack_ratio and tcp_syn_ratio < 0.2
     diverse_destinations = dst_entropy >= 0.4 or unique_dst_ports >= thresholds.carpet_dst_port_diversity
+    cdn_quic_return = cdn_quic_expected_share >= 0.1
     return bool(
         web_return_share >= thresholds.carpet_web_return_share
-        and (established_tcp_return or udp_quic_share >= 0.1)
+        and (established_tcp_return or cdn_quic_return)
         and diverse_destinations
     )
 
@@ -1449,12 +1862,16 @@ class CarpetBombingDetector:
             deviation = ratio(aggregate_pps, historical) if historical else 0.0
             if unique_hosts < self.thresholds.carpet_unique_hosts:
                 continue
+            # Baseline is complementary evidence; an absolute traffic floor is mandatory.
             if features["packet_count"] < self.thresholds.carpet_min_packets:
                 continue
             if aggregate_pps < self.thresholds.carpet_prefix_pps and bits_per_second < self.thresholds.carpet_min_bps:
                 continue
             if max_host_pps >= self.thresholds.carpet_host_pps:
                 continue
+
+            # Absolute floor: a high relative baseline can never turn tiny
+            # absolute traffic into a CONFIRMED_ATTACK.
             below_absolute_floor = bool(
                 aggregate_pps < self.thresholds.carpet_min_absolute_pps
                 and bits_per_second < self.thresholds.carpet_min_absolute_bps
@@ -1465,6 +1882,10 @@ class CarpetBombingDetector:
             reflection = bool(
                 cf["top_src_port"] in AMPLIFICATION_PORTS and cf["top_src_port_share"] >= 0.5
             )
+
+            # Independent evidence categories (section 13). CONFIRMED_ATTACK
+            # requires at least DISTRIBUTION + VOLUME + (ATTACK_PATTERN or
+            # ANOMALOUS_SERVICE).
             categories_passed: set[str] = set()
             categories_failed: set[str] = set()
             if not below_absolute_floor:
@@ -1483,6 +1904,8 @@ class CarpetBombingDetector:
                 categories_passed.add("ANOMALOUS_SERVICE")
             else:
                 categories_failed.add("ANOMALOUS_SERVICE")
+
+            # Bidirectional network-context signal (positive and negative).
             network_context_points = 0
             if below_absolute_floor:
                 network_context_points -= 15
@@ -1490,6 +1913,12 @@ class CarpetBombingDetector:
                 network_context_points -= 25
             elif cgnat_or_isp_share >= 0.5:
                 network_context_points -= 12
+            udp_quic_hint = bool(cf.get("udp_quic_hint"))
+            cdn_quic_expected = bool(cf.get("cdn_quic_expected"))
+            if udp_quic_hint and not cdn_quic_expected and not web_return_likely:
+                # QUIC-looking return is only a hint: it moderately reduces
+                # suspicion but never classifies traffic as expected on its own.
+                network_context_points -= 8
             if cgnat_or_isp_share >= 0.7 and not reflection:
                 network_context_points -= 8
             if reflection:
@@ -1497,6 +1926,7 @@ class CarpetBombingDetector:
             if cf["known_infra_source_share"] >= 0.5 and not web_return_likely:
                 network_context_points -= 10
             network_context_points = int(clamp(network_context_points, -45, 20))
+
             score_components = {
                 "volume": min(30, int(math.log10(max(10, features["packet_count"])) * 7)),
                 "host_distribution": min(20, int(unique_hosts / 2)),
@@ -1507,6 +1937,8 @@ class CarpetBombingDetector:
                 "network_context": network_context_points,
             }
             score = int(clamp(20 + sum(score_components.values())))
+
+            # Final traffic classification and reason codes.
             reason_codes: list[str] = []
             traffic_classification = "CONFIRMED_ATTACK"
             if web_return_likely and below_absolute_floor:
@@ -1539,6 +1971,7 @@ class CarpetBombingDetector:
                 score = min(score, 74)
             if not reason_codes:
                 reason_codes.append("CONFIRMED_CARPET_BOMBING")
+
             features.update(
                 {
                     "protocol": "mixed",
@@ -1559,8 +1992,21 @@ class CarpetBombingDetector:
                     "tcp_syn_ratio": cf["tcp_syn_ratio"],
                     "tcp_ack_ratio": cf["tcp_ack_ratio"],
                     "tcp_psh_ack_ratio": cf["tcp_psh_ack_ratio"],
+                    "tcp_syn_share": cf["tcp_syn_share"],
+                    "tcp_syn_ack_share": cf["tcp_syn_ack_share"],
+                    "tcp_fin_ack_share": cf["tcp_fin_ack_share"],
+                    "tcp_rst_share": cf["tcp_rst_share"],
                     "udp_quic_share": cf["udp_quic_share"],
                     "web_return_share": cf["web_return_share"],
+                    "udp_quic_hint": cf["udp_quic_hint"],
+                    "cdn_quic_expected": cf["cdn_quic_expected"],
+                    "cdn_quic_expected_share": cf["cdn_quic_expected_share"],
+                    "expected_service_packets": cf["expected_service_packets"],
+                    "expected_service_share": cf["expected_service_share"],
+                    "cdn_expected_service_share": cf["cdn_expected_service_share"],
+                    "expected_service_matches": cf["expected_service_matches"],
+                    "expected_service_providers": cf["expected_service_providers"],
+                    "web_return_service_context": cf["web_return_service_context"],
                     "flows_s": cf["flows_s"],
                     "packets_per_flow": cf["packets_per_flow"],
                     "target_role_distribution": cf["target_role_distribution"],
@@ -1601,11 +2047,6 @@ class CarpetBombingDetector:
                     score_components=score_components,
                 )
             )
-            if traffic_classification != "CONFIRMED_ATTACK":
-                vector.verdict = "SUSPICIOUS" if traffic_classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC else "INFO"
-                vector.severity = "MEDIUM" if traffic_classification == SUSPICIOUS_DISTRIBUTED_TRAFFIC else "LOW"
-                vector.features["verdict"] = vector.verdict
-                vector.features["severity"] = vector.severity
             vectors.append(vector)
         return sorted(vectors, key=lambda item: (item.detector_score, ip_network(item.target_prefix).prefixlen), reverse=True)[:100]
 
@@ -2166,15 +2607,29 @@ class BehavioralDetectionEngine:
             migrate_legacy_security_events(conn)
             conn.commit()
 
-    def prefix_baselines(self, protocol: str) -> dict[str, float]:
+    def prefix_baselines(self, protocol: str, prefixes: Iterable[str] | None = None) -> dict[str, float]:
         self.ensure_schema()
+        normalized = clean_text(protocol).lower()
         with self.connection_factory() as conn:
-            rows = conn.execute(
-                "SELECT prefix, packets_per_second_ema FROM prefix_behavior_baselines WHERE protocol = ?",
-                (clean_text(protocol).lower(),),
-            ).fetchall()
-        return {clean_text(row[0]): float(row[1] or 0) for row in rows}
-
+            if prefixes is None:
+                rows = conn.execute(
+                    "SELECT prefix, packets_per_second_ema FROM prefix_behavior_baselines WHERE protocol = ?",
+                    (normalized,),
+                ).fetchall()
+                return {clean_text(row[0]): float(row[1] or 0) for row in rows}
+            result: dict[str, float] = {}
+            ordered = sorted(set(prefixes))
+            for start in range(0, len(ordered), 500):
+                chunk = ordered[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT prefix, packets_per_second_ema FROM prefix_behavior_baselines "
+                    f"WHERE protocol = ? AND prefix IN ({placeholders})",
+                    (normalized, *chunk),
+                ).fetchall()
+                for row in rows:
+                    result[clean_text(row[0])] = float(row[1] or 0)
+            return result
     def enrich_internal_history(self, vectors: Sequence[AttackVector]) -> None:
         if not vectors:
             return
@@ -2199,6 +2654,7 @@ class BehavioralDetectionEngine:
         window_seconds: int = 60,
         vectors: Sequence[AttackVector] = (),
     ) -> None:
+        clear_protected_subject_caches()
         groups: dict[tuple[str, str], list[Any]] = defaultdict(lambda: [0, 0, ""])
         maximum = max(1000, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_PREFIX_GROUPS", "50000")))
         now_dt = utc_now()
@@ -2281,16 +2737,22 @@ class BehavioralDetectionEngine:
         eligible_sample_rate = max(0, int(os.getenv("GMJFLOW_SAFE_SHADOW_AUDIT_ELIGIBLE_SAMPLE_RATE", "0")))
         eligible_seen = 0
 
+        # Load the protection data ONCE, before the first baseline write, so the
+        # deferred transaction only starts at the executemany below. The
+        # per-prefix lookup then becomes pure in-memory.
+        protected_context = load_protected_subject_context(conn)
+
+        # Batch-load every current baseline state in one read phase, so the
+        # per-prefix loop below performs no SQLite round-trips and no write lock
+        # is acquired until the single executemany at the end.
+        old_states = fetch_prefix_baseline_states(conn, groups.keys())
+
+        new_rows: list[tuple[Any, ...]] = []
+        audit_calls: list[tuple[Any, ...]] = []
         for (prefix, protocol), (packets, byte_count, sensor) in groups.items():
             pps = ratio(packets, max(1, window_seconds))
             bps = ratio(byte_count * 8, max(1, window_seconds))
-            current = conn.execute(
-                "SELECT packets_per_second_ema, bits_per_second_ema, sample_count, baseline_state, "
-                "bootstrap_clean_count, mad_pps, quarantined_until, rejected_count, quarantined_count, "
-                "trusted_at, mad_sample_count "
-                "FROM prefix_behavior_baselines WHERE prefix=? AND protocol=?",
-                (prefix, protocol),
-            ).fetchone()
+            current = old_states.get((prefix, protocol))
 
             # V1 EMA update (unchanged math).
             if current is None:
@@ -2309,7 +2771,7 @@ class BehavioralDetectionEngine:
 
             state, clean_count = self._safe_state(current, samples)
             strong_signal, confirmed_attack = _attack_signal(prefix, attack_networks, confirmed_networks)
-            protected_or_internal = _is_protected_subject(conn, prefix) or _overlaps_any_network(prefix, customer_networks)
+            protected_or_internal = is_protected_subject_cached(prefix, protected_context) or _overlaps_any_network(prefix, customer_networks)
             campaign_blocked = _overlaps_any_network(prefix, campaign_networks)
             robust_stats_ready = old_mad > 0 and old_mad_sample_count >= DEFAULT_MIN_ROBUST_SAMPLES
             decision = safe_learning_decision(
@@ -2362,35 +2824,12 @@ class BehavioralDetectionEngine:
             applied_bps = next_bps if update_allowed else old_bps
             applied_samples = samples if update_allowed else (safe_int(current[2]) if current is not None else 0)
 
-            conn.execute(
-                """
-                INSERT INTO prefix_behavior_baselines(
-                    prefix, protocol, packets_per_second_ema, bits_per_second_ema, sample_count,
-                    baseline_state, bootstrap_clean_count, last_classification, quarantined_until,
-                    mad_pps, rejected_count, quarantined_count, trusted_at, mad_sample_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(prefix, protocol) DO UPDATE SET
-                    packets_per_second_ema=excluded.packets_per_second_ema,
-                    bits_per_second_ema=excluded.bits_per_second_ema,
-                    sample_count=excluded.sample_count,
-                    baseline_state=excluded.baseline_state,
-                    bootstrap_clean_count=excluded.bootstrap_clean_count,
-                    last_classification=excluded.last_classification,
-                    quarantined_until=excluded.quarantined_until,
-                    mad_pps=excluded.mad_pps,
-                    rejected_count=excluded.rejected_count,
-                    quarantined_count=excluded.quarantined_count,
-                    trusted_at=excluded.trusted_at,
-                    mad_sample_count=excluded.mad_sample_count,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    prefix, protocol, applied_pps, applied_bps, applied_samples,
-                    final_state, final_clean, classification, next_quarantine,
-                    next_mad, rejected_count, quarantined_count, trusted_at,
-                    next_mad_sample_count, now,
-                ),
-            )
+            new_rows.append((
+                prefix, protocol, applied_pps, applied_bps, applied_samples,
+                final_state, final_clean, classification, next_quarantine,
+                next_mad, rejected_count, quarantined_count, trusted_at,
+                next_mad_sample_count, now,
+            ))
 
             # Hourly observability counters (V1 x Safe, reasons, readiness).
             counters["v1_updates_allowed"] += 1
@@ -2441,26 +2880,33 @@ class BehavioralDetectionEngine:
             else:
                 sample_hit = False
             if divergence or classification in (REJECTED, QUARANTINED) or decision["promoted"] or sample_hit:
-                _record_safe_learning_audit_v2(
-                    conn,
-                    now_iso=now,
-                    prefix=prefix,
-                    protocol=protocol,
-                    classification=classification,
-                    reason=decision["reason"],
-                    safe_would_update=bool(safe_would_update),
-                    confirmed_attack=bool(confirmed_attack),
-                    strong_signal=bool(strong_signal),
-                    protected_or_internal=bool(protected_or_internal),
-                    campaign_blocked=bool(campaign_blocked),
-                    audit_z=audit_z,
-                    baseline_state=final_state,
-                )
+                audit_calls.append((
+                    prefix, protocol, classification, decision["reason"],
+                    bool(safe_would_update), bool(confirmed_attack),
+                    bool(strong_signal), bool(protected_or_internal),
+                    bool(campaign_blocked), audit_z, final_state,
+                ))
+
+        conn.executemany(_PREFIX_BASELINE_UPSERT_SQL, new_rows)
+        for audit in audit_calls:
+            _record_safe_learning_audit_v2(
+                conn,
+                now_iso=now,
+                prefix=audit[0],
+                protocol=audit[1],
+                classification=audit[2],
+                reason=audit[3],
+                safe_would_update=audit[4],
+                confirmed_attack=audit[5],
+                strong_signal=audit[6],
+                protected_or_internal=audit[7],
+                campaign_blocked=audit[8],
+                audit_z=audit[9],
+                baseline_state=audit[10],
+            )
 
         self._record_safe_learning_counters(conn, counters, now)
         self._cleanup_shadow_audit(conn, now_dt)
-
-
     @staticmethod
     def _safe_state(current: Any, samples: int) -> tuple[str, int]:
         if current is None:
@@ -2510,6 +2956,8 @@ class BehavioralDetectionEngine:
         )
 
     def detect(self, raw_observations: Iterable[Mapping[str, Any]], customer_networks: Sequence[str] = ()) -> tuple[list[AttackVector], list[CampaignVector]]:
+        target_prefixes.cache_clear()
+        _normalized_ip_cached.cache_clear()
         limit = max(1000, int(os.getenv("GMJFLOW_BEHAVIOR_MAX_OBSERVATIONS", "100000")))
         observations = []
         for raw in raw_observations:
@@ -2519,28 +2967,35 @@ class BehavioralDetectionEngine:
             if len(observations) >= limit:
                 break
         self._last_observations = observations
-        lookup = cached_intel_lookup(self.intel_manager.lookup_ip)
-        tcp_baseline = self.prefix_baselines("tcp")
-        udp_baseline = self.prefix_baselines("udp")
+        active_prefixes = {p for row in observations for p in target_prefixes(row.dst_ip)}
+        tcp_baseline = self.prefix_baselines("tcp", active_prefixes)
+        udp_baseline = self.prefix_baselines("udp", active_prefixes)
         carpet_baseline = {**tcp_baseline}
         for prefix, value in udp_baseline.items():
             carpet_baseline[prefix] = carpet_baseline.get(prefix, 0) + value
-        scan_vectors = self.port_scan.detect(observations, lookup)
-        ssh_vectors = self.ssh_brute_force.detect(observations, lookup)
-        for scan_vector in scan_vectors:
-            ssh_summary = self.ssh_brute_force.last_suppressed_multi_target.get(scan_vector.src_ip)
-            if not ssh_summary or scan_vector.attack_type not in {PORT_SCAN_HORIZONTAL, NETWORK_SWEEP}:
-                continue
-            scan_vector.features["ssh_multi_target_evidence"] = dict(ssh_summary)
-            scan_vector.evidence.append(
-                f"padrão TCP/22 multi-alvo: {ssh_summary['attempts']} tentativas persistentes "
-                f"em {ssh_summary['qualifying_targets']} de {ssh_summary['target_count']} hosts; "
-                "vetores SSH por host suprimidos"
-            )
-        vectors = [*scan_vectors, *ssh_vectors]
-        vectors += self.syn_flood.detect(observations, lookup, tcp_baseline)
-        vectors += self.udp_flood.detect(observations, lookup, udp_baseline)
-        vectors += self.carpet.detect(observations, carpet_baseline)
+        prepare_context = getattr(self.intel_manager, "prepare_lookup_context", None)
+        ti_context = prepare_context() if prepare_context is not None else None
+        try:
+            lookup = cached_intel_lookup(ti_context.lookup_ip if ti_context is not None else self.intel_manager.lookup_ip)
+            scan_vectors = self.port_scan.detect(observations, lookup)
+            ssh_vectors = self.ssh_brute_force.detect(observations, lookup)
+            for scan_vector in scan_vectors:
+                ssh_summary = self.ssh_brute_force.last_suppressed_multi_target.get(scan_vector.src_ip)
+                if not ssh_summary or scan_vector.attack_type not in {PORT_SCAN_HORIZONTAL, NETWORK_SWEEP}:
+                    continue
+                scan_vector.features["ssh_multi_target_evidence"] = dict(ssh_summary)
+                scan_vector.evidence.append(
+                    f"padrão TCP/22 multi-alvo: {ssh_summary['attempts']} tentativas persistentes "
+                    f"em {ssh_summary['qualifying_targets']} de {ssh_summary['target_count']} hosts; "
+                    "vetores SSH por host suprimidos"
+                )
+            vectors = [*scan_vectors, *ssh_vectors]
+            vectors += self.syn_flood.detect(observations, lookup, tcp_baseline)
+            vectors += self.udp_flood.detect(observations, lookup, udp_baseline)
+            vectors += self.carpet.detect(observations, carpet_baseline)
+        finally:
+            if ti_context is not None:
+                ti_context.close()
         by_source: dict[str, list[AttackVector]] = defaultdict(list)
         for vector in vectors:
             vector.threat_intel.setdefault("source_intel", {
@@ -2607,16 +3062,21 @@ class BehavioralDetectionEngine:
             if target:
                 correlations = self.intel_manager.external_attack_matches(target, "tcp" if "SYN" in vector.attack_type else "udp" if "UDP" in vector.attack_type else "", vector.last_seen)
                 if correlations:
+                    traffic_classification = clean_text((vector.features or {}).get("traffic_classification"))
+                    influence, reason = threat_intel_influence(vector.attack_type, traffic_classification)
+                    raw_bonus = 8
+                    applied_bonus = apply_ti_influence(raw_bonus, influence)
                     vector.external_correlation = True
-                    vector.detector_score = int(clamp(vector.detector_score + 8))
-                    vector.confidence = round(clamp(vector.confidence + 0.08, 0, 1), 3)
+                    vector.detector_score = int(clamp(vector.detector_score + applied_bonus))
+                    vector.confidence = round(clamp(vector.confidence + applied_bonus / 100.0, 0, 1), 3)
                     vector.threat_intel["target_campaign_intel"] = {
                         "matches": len(correlations),
                         "observations": correlations[:20],
                         "intel_sources": sorted({clean_text(item.get("provider")) for item in correlations} - {""}),
                     }
                     vector.intel_sources = sorted((set(vector.intel_sources) | {clean_text(item.get("provider")) for item in correlations}) - {""})
-                    vector.score_components["threat_intel"] = min(10, safe_int(vector.score_components.get("threat_intel")) + 8)
+                    vector.score_components["threat_intel"] = min(10, safe_int(vector.score_components.get("threat_intel")) + applied_bonus)
+                    attach_ti_influence_metadata(vector, influence, reason, raw_bonus, applied_bonus)
             finalize_vector(vector)
         self.enrich_internal_history(vectors)
         campaigns = self.campaigns.correlate(vectors)
@@ -2865,9 +3325,18 @@ class BehavioralThreatRuntime:
         connection_factory: Callable[[], sqlite3.Connection] = sqlite_connection,
         intel_manager: ThreatIntelManager = THREAT_INTEL_MANAGER,
         observation_loader: Callable[[int, int], list[dict[str, Any]]] = fetch_recent_observations,
+        outbound_ioc_detector: Any = None,
+        outbound_ioc_aggregator: Any = None,
+        outbound_ioc_persistence: Any = None,
     ) -> None:
         self.connection_factory = connection_factory
         self.engine = BehavioralDetectionEngine(connection_factory, intel_manager)
+        self.outbound_ioc_detector = outbound_ioc_detector or OutboundIocShadowDetector(connection_factory)
+        self.outbound_ioc_candidates: list[Any] = []
+        self.outbound_ioc_aggregator = outbound_ioc_aggregator or OutboundIocAggregator(connection_factory)
+        self.outbound_ioc_aggregation_snapshot: dict[str, Any] = {}
+        self.outbound_ioc_persistence = outbound_ioc_persistence or OutboundIocPersistence(connection_factory)
+        self.outbound_ioc_persistence_snapshot: dict[str, Any] = {}
         # Created on first policy evaluation so detector-only deployments do not
         # acquire the central AI provider's optional crypto dependency at import.
         self.policy_engine: Any = None
@@ -2891,6 +3360,9 @@ class BehavioralThreatRuntime:
             "mitigations_submitted": 0,
             "rtbh_candidates": 0,
             "mode": "shadow",
+            "outbound_ioc_shadow": self.outbound_ioc_detector.status(),
+            "outbound_ioc_aggregation": self.outbound_ioc_aggregator.status(),
+            "outbound_ioc_persistence": self.outbound_ioc_persistence.status(),
         }
 
     def set_mitigation_handler(
@@ -2979,6 +3451,40 @@ class BehavioralThreatRuntime:
                 except Exception as exc:
                     candidate_v2_error = clean_text(exc) or exc.__class__.__name__
             vectors, campaigns = self.engine.detect(rows, self.customer_networks())
+            try:
+                outbound_result = self.outbound_ioc_detector.detect(
+                    self.engine._last_observations
+                )
+                self.outbound_ioc_candidates = list(outbound_result.candidates)
+                outbound_status = self.outbound_ioc_detector.status()
+            except Exception as exc:
+                self.outbound_ioc_candidates = []
+                LOGGER.exception("outbound_ioc_shadow_cycle_failed")
+                outbound_status = self.outbound_ioc_detector.status()
+                outbound_status["candidate_errors"] = safe_int(outbound_status.get("candidate_errors")) + 1
+                outbound_status["last_error"] = clean_text(exc) or exc.__class__.__name__
+            try:
+                agg_cycle = self.outbound_ioc_aggregator.ingest(self.outbound_ioc_candidates)
+                self.outbound_ioc_aggregation_snapshot = {
+                    "active_relationships": len(agg_cycle.relationships),
+                    "active_clients": len(agg_cycle.client_summaries),
+                    "metrics": dict(agg_cycle.metrics),
+                }
+                agg_status = self.outbound_ioc_aggregator.status()
+            except Exception as exc:
+                LOGGER.exception("outbound_ioc_aggregation_cycle_failed")
+                agg_status = self.outbound_ioc_aggregator.status()
+                agg_status["cycle_errors"] = safe_int(agg_status.get("cycle_errors")) + 1
+                agg_status["last_error"] = clean_text(exc) or exc.__class__.__name__
+            try:
+                p4_metrics = self.outbound_ioc_persistence.persist(agg_cycle)
+                self.outbound_ioc_persistence_snapshot = dict(p4_metrics)
+                p4_status = self.outbound_ioc_persistence.status()
+            except Exception as exc:
+                LOGGER.exception("outbound_ioc_persistence_cycle_failed")
+                p4_status = self.outbound_ioc_persistence.status()
+                p4_status["cycle_errors"] = safe_int(p4_status.get("cycle_errors")) + 1
+                p4_status["last_error"] = clean_text(exc) or exc.__class__.__name__
             stats = self.engine.persist(vectors, campaigns)
             # NETWORK_SWEEP shadow policy evaluator (Phase 6B) — read-only
             # observer. Never returns ALLOW_AUTO, never calls mitigation.
@@ -3090,6 +3596,9 @@ class BehavioralThreatRuntime:
                     "candidate_engine": "v1_with_v2_shadow" if candidate_v2 or candidate_v2_error else "v1",
                     "candidate_v2": candidate_v2.get("counts", {}),
                     "candidate_v2_error": candidate_v2_error,
+                    "outbound_ioc_shadow": outbound_status,
+                    "outbound_ioc_aggregation": agg_status,
+                    "outbound_ioc_persistence": p4_status,
                     "mode": "shadow" if not automatic_policy_enabled() else "policy",
                 }
             )
@@ -3125,6 +3634,7 @@ class BehavioralThreatRuntime:
         self.engine.ensure_schema()
         if os.getenv("GMJFLOW_BEHAVIORAL_DETECTION_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
             return
+        self.outbound_ioc_detector.start()
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -3143,6 +3653,7 @@ class BehavioralThreatRuntime:
 
     def stop(self) -> None:
         self._stop.set()
+        self.outbound_ioc_detector.stop()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2)
 

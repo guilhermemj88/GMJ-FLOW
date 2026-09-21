@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
 from typing import Any, Callable, Iterable, Mapping
 
@@ -72,7 +72,20 @@ class NetworkContext:
     matched_context: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "src_role": self.src_role,
+            "dst_role": self.dst_role,
+            "src_is_cgnat": self.src_is_cgnat,
+            "dst_is_cgnat": self.dst_is_cgnat,
+            "src_prefix": self.src_prefix,
+            "dst_prefix": self.dst_prefix,
+            "traffic_direction": self.traffic_direction,
+            "input_if": self.input_if,
+            "output_if": self.output_if,
+            "sensor": self.sensor,
+            "exporter": self.exporter,
+            "matched_context": self.matched_context,
+        }
 
 
 def _safe_network(value: Any):
@@ -90,6 +103,82 @@ def _safe_ip(value: Any):
     if parsed.version == 6 and parsed.ipv4_mapped:
         return parsed.ipv4_mapped
     return parsed
+
+
+def _prefix_entry(network: Any, role: str, name: str) -> tuple[Any, str, str]:
+    return (network, role, name)
+
+
+class _TrieNode:
+    """One node of a binary LPM trie (one child per address bit)."""
+
+    __slots__ = ("zero", "one", "role", "name", "network")
+
+    def __init__(self) -> None:
+        self.zero: "_TrieNode | None" = None
+        self.one: "_TrieNode | None" = None
+        self.role: str | None = None
+        self.name: str | None = None
+        self.network: Any = None
+
+
+def _trie_insert(root: _TrieNode, network: Any, role: str, name: str) -> None:
+    node = root
+    addr = int(network.network_address)
+    bits = network.max_prefixlen
+    # Walk the MOST significant bits of the address (MSB -> LSB), one node per
+    # prefix bit, so the trie depth equals the prefix length.
+    for bit in range(bits - 1, bits - 1 - network.prefixlen, -1):
+        if (addr >> bit) & 1:
+            if node.one is None:
+                node.one = _TrieNode()
+            node = node.one
+        else:
+            if node.zero is None:
+                node.zero = _TrieNode()
+            node = node.zero
+    # First-wins on equal prefix length: preserves the original list tie-break
+    # (max(matches, key=prefixlen) returns the first max).
+    if node.role is None:
+        node.role = role
+        node.name = name
+        node.network = network
+
+
+def _build_trie(prefixes: Iterable[tuple[Any, str, str]]) -> tuple[_TrieNode, _TrieNode]:
+    v4 = _TrieNode()
+    v6 = _TrieNode()
+    for entry in prefixes:
+        network, role, name = entry[0], entry[1], entry[2]
+        root = v4 if network.version == 4 else v6
+        _trie_insert(root, network, role, name)
+    return v4, v6
+
+
+def _trie_match(v4_root: _TrieNode, v6_root: _TrieNode, ip_value: Any) -> tuple[str, str]:
+    """Longest-prefix match via the trie (O(32)/O(128) per address)."""
+    parsed = _safe_ip(ip_value)
+    if parsed is None:
+        return UNKNOWN, ""
+    version = parsed.version
+    root = v4_root if version == 4 else v6_root
+    key = int(parsed)
+    bits = 32 if version == 4 else 128
+    node = root
+    best_role = node.role
+    best_network = node.network
+    for bit in range(bits - 1, -1, -1):
+        node = node.one if (key >> bit) & 1 else node.zero
+        if node is None:
+            break
+        if node.role is not None:
+            best_role = node.role
+            best_network = node.network
+    if best_role is None:
+        # A syntactically valid address outside registered networks is external.
+        # This deliberately avoids the old and unsafe INTERNAL fallback.
+        return EXTERNAL, ""
+    return best_role, str(best_network)
 
 
 def _direction(src_role: str, dst_role: str, interface_role: str = "") -> str:
@@ -118,19 +207,6 @@ class NetworkContextEngine:
     def __init__(self, connection_factory: Callable[[], sqlite3.Connection] = sqlite_connection) -> None:
         self.connection_factory = connection_factory
 
-    @staticmethod
-    def _best_match(ip_value: Any, prefixes: Iterable[tuple[Any, str, str]]) -> tuple[str, str]:
-        parsed = _safe_ip(ip_value)
-        if parsed is None:
-            return UNKNOWN, ""
-        matches = [item for item in prefixes if item[0] is not None and item[0].version == parsed.version and parsed in item[0]]
-        if not matches:
-            # A syntactically valid address outside registered networks is external.
-            # This deliberately avoids the old and unsafe INTERNAL fallback.
-            return EXTERNAL, ""
-        network, role, _name = max(matches, key=lambda item: item[0].prefixlen)
-        return role, str(network)
-
     def _registered_prefixes(self, conn: sqlite3.Connection) -> list[tuple[Any, str, str]]:
         prefixes: list[tuple[Any, str, str]] = []
         try:
@@ -154,7 +230,7 @@ class NetworkContextEngine:
                 role = CGNAT_PUBLIC
             network = _safe_network(item.get("cidr"))
             if network is not None:
-                prefixes.append((network, role, clean_text(item.get("name"))))
+                prefixes.append(_prefix_entry(network, role, clean_text(item.get("name"))))
 
         try:
             rows = conn.execute(
@@ -169,7 +245,7 @@ class NetworkContextEngine:
                 parsed = _safe_ip(value)
                 if parsed is not None:
                     suffix = 32 if parsed.version == 4 else 128
-                    prefixes.append((ip_network(f"{parsed}/{suffix}"), role, "CGNAT mapping"))
+                    prefixes.append(_prefix_entry(ip_network(f"{parsed}/{suffix}"), role, "CGNAT mapping"))
         return prefixes
 
     @staticmethod
@@ -186,6 +262,79 @@ class NetworkContextEngine:
                 return False
         return True
 
+    def prepare_resolver(self) -> Callable[..., NetworkContext]:
+        """Load control-plane context once and return the canonical local resolver.
+
+        The returned callable performs no SQLite access.  It is intended for a
+        bounded runtime cycle that needs to classify many flow observations.
+        """
+        connection = self.connection_factory()
+        try:
+            prefixes = self._registered_prefixes(connection)
+            try:
+                rows = connection.execute(
+                    "SELECT * FROM threat_network_contexts WHERE enabled = 1 ORDER BY id"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+
+            contexts: list[tuple[Mapping[str, Any], str]] = []
+            for raw in rows:
+                row = dict(raw) if isinstance(raw, sqlite3.Row) else dict(raw)
+                role = CONTEXT_TYPE_ROLES.get(
+                    clean_text(row.get("context_type")).upper(), UNKNOWN
+                )
+                for value in safe_json(row.get("protected_ranges_json"), []):
+                    network = _safe_network(value)
+                    if network is not None:
+                        prefixes.append(
+                            _prefix_entry(network, role, clean_text(row.get("name")))
+                        )
+                contexts.append((row, role))
+        finally:
+            connection.close()
+
+        frozen_prefixes = tuple(prefixes)
+        frozen_contexts = tuple(contexts)
+        v4_trie, v6_trie = _build_trie(frozen_prefixes)
+
+        def resolve(
+            src_ip: Any,
+            dst_ip: Any,
+            input_if: Any = 0,
+            output_if: Any = 0,
+            *,
+            sensor: Any = "",
+            exporter: Any = "",
+        ) -> NetworkContext:
+            matched_context = ""
+            interface_role = ""
+            for row, role in frozen_contexts:
+                if self._context_matches(
+                    row, clean_text(sensor), clean_text(exporter),
+                    int(input_if or 0), int(output_if or 0),
+                ):
+                    matched_context = clean_text(row.get("name"))
+                    interface_role = role
+            src_role, src_prefix = _trie_match(v4_trie, v6_trie, src_ip)
+            dst_role, dst_prefix = _trie_match(v4_trie, v6_trie, dst_ip)
+            return NetworkContext(
+                src_role=src_role,
+                dst_role=dst_role,
+                src_is_cgnat=src_role == CGNAT_PUBLIC,
+                dst_is_cgnat=dst_role == CGNAT_PUBLIC,
+                src_prefix=src_prefix,
+                dst_prefix=dst_prefix,
+                traffic_direction=_direction(src_role, dst_role, interface_role),
+                input_if=int(input_if or 0),
+                output_if=int(output_if or 0),
+                sensor=clean_text(sensor),
+                exporter=clean_text(exporter),
+                matched_context=matched_context,
+            )
+
+        return resolve
+
     def resolve(
         self,
         src_ip: Any,
@@ -198,6 +347,7 @@ class NetworkContextEngine:
         conn: sqlite3.Connection | None = None,
     ) -> NetworkContext:
         connection = conn or self.connection_factory()
+        owns_connection = conn is None
         try:
             prefixes = self._registered_prefixes(connection)
             matched_context = ""
@@ -214,13 +364,14 @@ class NetworkContextEngine:
                 for value in safe_json(row.get("protected_ranges_json"), []):
                     network = _safe_network(value)
                     if network is not None:
-                        prefixes.append((network, role, clean_text(row.get("name"))))
+                        prefixes.append(_prefix_entry(network, role, clean_text(row.get("name"))))
                 if self._context_matches(row, clean_text(sensor), clean_text(exporter), int(input_if or 0), int(output_if or 0)):
                     matched_context = clean_text(row.get("name"))
                     interface_role = role
 
-            src_role, src_prefix = self._best_match(src_ip, prefixes)
-            dst_role, dst_prefix = self._best_match(dst_ip, prefixes)
+            v4_trie, v6_trie = _build_trie(prefixes)
+            src_role, src_prefix = _trie_match(v4_trie, v6_trie, src_ip)
+            dst_role, dst_prefix = _trie_match(v4_trie, v6_trie, dst_ip)
             return NetworkContext(
                 src_role=src_role,
                 dst_role=dst_role,
@@ -236,9 +387,8 @@ class NetworkContextEngine:
                 matched_context=matched_context,
             )
         finally:
-            # Connection lifetime belongs to the supplied factory, matching the
-            # repository's existing sqlite_connection usage pattern.
-            pass
+            if owns_connection and connection is not None:
+                connection.close()
 
 
 def resolve_network_context(

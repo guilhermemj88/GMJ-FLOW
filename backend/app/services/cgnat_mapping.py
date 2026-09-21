@@ -2269,8 +2269,11 @@ def resolve_cgnat_subscriber(
     protocol: Any,
     timestamp: Any = None,
     connector_id: int | None = None,
+    *,
+    ensure_schema: bool = True,
 ) -> dict[str, Any]:
-    ensure_cgnat_schema(conn)
+    if ensure_schema:
+        ensure_cgnat_schema(conn)
     public_ip_text = clean_text(public_ip)
     if not valid_ip_text(public_ip_text):
         return {"matched": False, "ambiguous": False, "error": "public_ip_invalid"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address, ip_address
 from typing import Any
@@ -24,6 +25,35 @@ DASHBOARD_AGGREGATE_TABLES = {
     "syn": "flow_dashboard_syn_1m",
     "conversations": "flow_dashboard_conversations_1m",
 }
+
+
+ASN_AGGREGATE_TABLES = {
+    "asn_src": {
+        "v1": "flow_dashboard_asn_src_1m",
+        "v2": "flow_dashboard_asn_src_1m_v2",
+    },
+    "asn_dst": {
+        "v1": "flow_dashboard_asn_dst_1m",
+        "v2": "flow_dashboard_asn_dst_1m_v2",
+    },
+}
+
+
+def asn_aggregate_version() -> str:
+    """Version of the ASN minute aggregate used by top-ASN dashboard queries.
+
+    - default (env absent/empty): ``v2`` (compact, dict-resolved, time-safe).
+    - allowlist: ``v1``, ``v2``.
+    - invalid value: safe fallback to ``v1``.
+    Rollback: set ``GMJFLOW_ASN_AGGREGATE_VERSION=v1`` and rebuild/restart.
+    """
+    raw = os.getenv("GMJFLOW_ASN_AGGREGATE_VERSION")
+    if raw is None or not raw.strip():
+        return "v2"
+    value = raw.strip().lower()
+    if value in {"v1", "v2"}:
+        return value
+    return "v1"
 
 
 def _summable_table(name: str, dimensions: list[tuple[str, str]]) -> str:
@@ -56,7 +86,7 @@ def _summable_table(name: str, dimensions: list[tuple[str, str]]) -> str:
     ENGINE = SummingMergeTree((bytes, packets, flows))
     PARTITION BY toYYYYMM(minute)
     ORDER BY ({", ".join(order)})
-    TTL toDateTime(minute) + INTERVAL 7 DAY DELETE
+    TTL toDateTime(minute) + INTERVAL 30 DAY DELETE
     """
 
 
@@ -246,7 +276,7 @@ def dashboard_aggregate_schema_statements() -> tuple[str, ...]:
                 src_ip, dst_ip, src_port, dst_port, proto,
                 src_asn, dst_asn, src_as_name, dst_as_name
             )
-            TTL toDateTime(minute) + INTERVAL 7 DAY DELETE
+            TTL toDateTime(minute) + INTERVAL 30 DAY DELETE
             """,
             f"""
             CREATE MATERIALIZED VIEW IF NOT EXISTS mv_{conversation_table}

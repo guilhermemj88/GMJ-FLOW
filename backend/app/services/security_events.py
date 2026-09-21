@@ -43,6 +43,8 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
             detector_score INTEGER NOT NULL DEFAULT 0,
             confidence REAL NOT NULL DEFAULT 0,
             verdict TEXT NOT NULL DEFAULT 'INFO',
+            current_detector_score INTEGER NOT NULL DEFAULT 0,
+            current_verdict TEXT NOT NULL DEFAULT 'INFO',
             src_ip TEXT NOT NULL DEFAULT '',
             src_prefix TEXT NOT NULL DEFAULT '',
             target_ip TEXT NOT NULL DEFAULT '',
@@ -157,6 +159,8 @@ def ensure_security_event_schema(conn: sqlite3.Connection) -> None:
         "bytes": "bytes INTEGER NOT NULL DEFAULT 0",
         "investigation_json": "investigation_json TEXT NOT NULL DEFAULT '{}'",
         "score_components_json": "score_components_json TEXT NOT NULL DEFAULT '{}'",
+        "current_detector_score": "current_detector_score INTEGER NOT NULL DEFAULT 0",
+        "current_verdict": "current_verdict TEXT NOT NULL DEFAULT 'INFO'",
         "ai_analysis_status": "ai_analysis_status TEXT NOT NULL DEFAULT 'not_analyzed'",
         "ai_analysis_stale_at": "ai_analysis_stale_at TEXT",
         "analyzed_at": "analyzed_at TEXT",
@@ -301,6 +305,19 @@ def resolve_event_target(
     return {"target_ip": "", "target_prefix": "", "target_scope": "none"}
 
 
+def _transport_semantic_role(features: Mapping[str, Any]) -> Any:
+    """P5.0: extract the transport role string from a feature group.
+
+    ``features["transport_semantic"]`` is the full TransportSemantic dict
+    whose nested ``transport_semantic`` key holds the role string (e.g.
+    QUIC_UDP_443). A plain string is accepted for forward-compatibility.
+    """
+    value = (features or {}).get("transport_semantic")
+    if isinstance(value, Mapping):
+        return value.get("transport_semantic")
+    return value
+
+
 def vector_security_payload(vector: Any) -> dict[str, Any]:
     features = dict(getattr(vector, "features", {}) or {})
     network = dict(getattr(vector, "network_context", {}) or features.get("network_context") or {})
@@ -380,6 +397,12 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
             "evidence_categories_passed": list(features.get("evidence_categories_passed") or []),
             "evidence_categories_failed": list(features.get("evidence_categories_failed") or []),
         },
+        "transport_semantic": _transport_semantic_role(features),
+        "transport_confidence": features.get("transport_confidence"),
+        "transport_reason_codes": list(features.get("transport_reason_codes") or []),
+        "service_port": features.get("service_port"),
+        "service_side": features.get("service_side"),
+        "c2_over_https": features.get("c2_over_https"),
     }
     return {
         "public_id": public_event_id(event_key, first_seen),
@@ -391,6 +414,8 @@ def vector_security_payload(vector: Any) -> dict[str, Any]:
         "detector_score": score,
         "confidence": _confidence_percent(getattr(vector, "confidence", 0)),
         "verdict": verdict,
+        "current_detector_score": score,
+        "current_verdict": verdict,
         "src_ip": src_ip,
         "src_prefix": src_prefix,
         "target_ip": target_ip,
@@ -453,8 +478,14 @@ def _material_event_changes(existing: Mapping[str, Any] | None, item: Mapping[st
     return reasons
 
 
-def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
-    ensure_security_event_schema(conn)
+def upsert_security_event(
+    conn: sqlite3.Connection,
+    vector: Any,
+    *,
+    ensure_schema: bool = True,
+) -> int:
+    if ensure_schema:
+        ensure_security_event_schema(conn)
     item = vector_security_payload(vector)
     now = utc_now_iso()
     existing_row = conn.execute(
@@ -478,6 +509,8 @@ def upsert_security_event(conn: sqlite3.Connection, vector: Any) -> int:
             verdict=CASE
                 WHEN excluded.detector_score >= security_events.detector_score THEN excluded.verdict
                 ELSE security_events.verdict END,
+            current_detector_score=excluded.current_detector_score,
+            current_verdict=excluded.current_verdict,
             first_seen=MIN(security_events.first_seen, excluded.first_seen),
             last_seen=MAX(security_events.last_seen, excluded.last_seen),
             recurrence_count=security_events.recurrence_count+1,

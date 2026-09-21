@@ -156,6 +156,39 @@ def robust_z_score(current: Any, center: Any, deviation: Any, *, max_z: float = 
     return max(-max_z, min(max_z, score))
 
 
+def effective_mad(
+    center: Any,
+    deviation: Any,
+    *,
+    absolute_floor: float = 0.0,
+    relative_floor_ratio: float = 0.0,
+) -> float:
+    """Deterministic MAD floor for the robust z-score denominator.
+
+    A near-zero MAD saturates the z-score for trivially small deviations
+    (e.g. ~1 pps on a quiet prefix => |z| ~= MAX_ROBUST_Z), causing spurious
+    quarantines. This returns the denominator deviation to use in
+    robust_z_score, floored by:
+
+      - absolute_floor          (pps) — guards sub-pps noise, and
+      - center * relative_floor_ratio — guards high-volume but very stable
+        baselines whose raw MAD is negligible relative to their median.
+
+    Both floors only raise the denominator, so they can only lower |z| (turn
+    QUARANTINED into ELIGIBLE); they can never create a false-learn from the
+    quarantine gate. Rejection gates (confirmed_attack, strong signal,
+    protected/campaign) are independent and unaffected.
+    """
+    center_value = _finite_float(center)
+    deviation_value = _finite_float(deviation)
+    if deviation_value is None:
+        deviation_value = 0.0
+    floor_abs = _finite_float(absolute_floor) or 0.0
+    floor_rel = (_finite_float(center) or 0.0) * (_finite_float(relative_floor_ratio) or 0.0)
+    floor_rel = max(0.0, floor_rel)
+    return max(0.0, deviation_value, floor_abs, floor_rel)
+
+
 def ratio(current: Any, baseline: Any) -> float | None:
     """Current / baseline ratio.
 
@@ -365,6 +398,15 @@ DEFAULT_QUARANTINE_MINUTES = 15
 # DEFAULT_MIN_QUARANTINE_SAMPLES. Readiness does not change the decision math.
 DEFAULT_MIN_ROBUST_SAMPLES = 24
 
+# Near-zero MAD floors for the robust z-score denominator (see effective_mad).
+# Derived from production shadow data (2026-08-29): ~87% of quarantined windows
+# had an absolute deviation < 1 pps and ~91% had mad_pps < 0.1. A 0.5 pps
+# absolute floor plus a 5%-of-baseline relative floor removes ~96% of these
+# trivial quarantines while leaving real anomalies (large absolute or relative
+# deviations) unchanged.
+DEFAULT_MAD_ABSOLUTE_FLOOR_PPS = 0.5
+DEFAULT_MAD_RELATIVE_FLOOR_RATIO = 0.05
+
 # Observations whose timestamp deviates from wall-clock beyond this tolerance
 # are treated as clock-skewed and excluded from the baseline update path.
 DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS = 3600
@@ -417,6 +459,10 @@ def safe_learning_decision(
     min_quarantine_samples: int = DEFAULT_MIN_QUARANTINE_SAMPLES,
     quarantine_minutes: int = DEFAULT_QUARANTINE_MINUTES,
     robust_stats_ready: bool = False,
+    protected_or_internal: bool = False,
+    campaign_blocked: bool = False,
+    mad_absolute_floor: float = DEFAULT_MAD_ABSOLUTE_FLOOR_PPS,
+    mad_relative_floor_ratio: float = DEFAULT_MAD_RELATIVE_FLOOR_RATIO,
 ) -> dict[str, Any]:
     """Deterministic Safe Learning decision for one baseline window.
 
@@ -424,9 +470,45 @@ def safe_learning_decision(
     baseline should update, the next maturity state/clean-count, promotion and
     the next quarantine deadline. The caller decides whether to actually apply
     the update (feature switch) and what to persist.
+
+    Guardrail precedence (highest first):
+      1. malicious campaign (campaign_rejected)
+      2. protected / internal / customer / CGNAT (protected_or_internal)
+      3. confirmed attack (confirmed_attack)
+      4. strong detector signal (detector_signal / bootstrap_strong_signal)
+      5. robust-z quarantine (robust_z / quarantine_extended)
+      6. normal learning (normal / bootstrap_clean / bootstrap_promoted)
+    A strong detector signal is an ABSOLUTE gate and is never learned,
+    regardless of robust-stat readiness or z-score.
     """
     state = baseline_state if baseline_state in (BOOTSTRAP, TRUSTED) else BOOTSTRAP
     frozen = bool(quarantined_until and now_iso and str(quarantined_until) > str(now_iso))
+
+    # A destination associated with a known malicious campaign always rejects
+    # the window and never feeds the baseline (deterministic, no LLM).
+    if campaign_blocked:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": state,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "campaign_rejected",
+            "next_quarantined_until": "",
+        }
+
+    # Protected / internal / customer / CGNAT destinations never feed the
+    # baseline (same classification the rest of the system uses).
+    if protected_or_internal:
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": state,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "protected_or_internal",
+            "next_quarantined_until": "",
+        }
 
     # A confirmed attack (or CRITICAL) signal always rejects the window and
     # never feeds the baseline.
@@ -441,10 +523,12 @@ def safe_learning_decision(
             "next_quarantined_until": "",
         }
 
-    if state == BOOTSTRAP:
-        # During bootstrap there is no trusted baseline to z-score against, so
-        # "clean" is decided by absolute detector evidence only.
-        if strong_detector_signal:
+    # Strong detector signal is an ABSOLUTE gate: it is never learned into the
+    # baseline, regardless of robust-stat readiness or z-score (robust_z must
+    # never override strong_detector_signal). BOOTSTRAP keeps its distinct
+    # reason; TRUSTED reuses detector_signal (same contract as before).
+    if strong_detector_signal:
+        if state == BOOTSTRAP:
             return {
                 "classification": REJECTED,
                 "should_update": False,
@@ -454,6 +538,19 @@ def safe_learning_decision(
                 "reason": "bootstrap_strong_signal",
                 "next_quarantined_until": "",
             }
+        return {
+            "classification": REJECTED,
+            "should_update": False,
+            "next_state": TRUSTED,
+            "next_clean_count": 0,
+            "promoted": False,
+            "reason": "detector_signal",
+            "next_quarantined_until": "",
+        }
+
+    if state == BOOTSTRAP:
+        # During bootstrap there is no trusted baseline to z-score against, so
+        # "clean" is decided by absolute detector evidence only.
         clean_count = max(0, int(bootstrap_clean_count)) + 1
         if clean_count >= max(1, int(bootstrap_min_clean_windows)):
             return {
@@ -478,7 +575,13 @@ def safe_learning_decision(
     # TRUSTED state.
     if frozen:
         if robust_stats_ready:
-            z_score = robust_z_score(window_pps, ema_pps, mad_pps)
+            z_score = robust_z_score(
+                window_pps,
+                ema_pps,
+                effective_mad(ema_pps, mad_pps,
+                              absolute_floor=mad_absolute_floor,
+                              relative_floor_ratio=mad_relative_floor_ratio),
+            )
             if abs(z_score) >= float(quarantine_z):
                 return {
                     "classification": QUARANTINED,
@@ -499,27 +602,18 @@ def safe_learning_decision(
             "next_quarantined_until": quarantined_until,
         }
 
-    # A strong detector signal while robust statistics are not yet ready must
-    # not be learned into the baseline (cold-start protection without MAD).
-    # When the feature is OFF this only produces a shadow divergence; V1 still
-    # applies its own update.
-    if strong_detector_signal and not robust_stats_ready:
-        return {
-            "classification": REJECTED,
-            "should_update": False,
-            "next_state": TRUSTED,
-            "next_clean_count": 0,
-            "promoted": False,
-            "reason": "detector_signal",
-            "next_quarantined_until": "",
-        }
-
     # Not frozen: quarantine only via a robust z-score once the robust
     # statistics are ready (MAD accumulated over >= DEFAULT_MIN_ROBUST_SAMPLES
     # deviation samples). Legacy baselines without ready stats are protected by
     # confirmed_attack / strong_detector_signal above, never by an immature MAD.
     if robust_stats_ready and _finite_float(ema_pps) is not None and _finite_float(ema_pps) > 0:
-        z_score = robust_z_score(window_pps, ema_pps, mad_pps)
+        z_score = robust_z_score(
+            window_pps,
+            ema_pps,
+            effective_mad(ema_pps, mad_pps,
+                          absolute_floor=mad_absolute_floor,
+                          relative_floor_ratio=mad_relative_floor_ratio),
+        )
         if abs(z_score) >= float(quarantine_z):
             return {
                 "classification": QUARANTINED,

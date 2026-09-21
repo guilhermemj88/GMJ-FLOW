@@ -126,6 +126,32 @@ def lookup_ip(
     )
 
 
+@router.get("/iocs")
+def list_consolidated_iocs(
+    tier: str = "",
+    category: str = "",
+    provider: str = "",
+    freshness: str = "",
+    search: str = Query("", max_length=64),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    return THREAT_INTEL_MANAGER.consolidated_iocs(
+        tier=tier,
+        category=category,
+        provider=provider,
+        freshness=freshness,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/iocs/{ip}")
+def get_consolidated_ioc(ip: str) -> dict[str, Any]:
+    return THREAT_INTEL_MANAGER.consolidated_ioc(ip)
+
+
 @router.get("/map")
 def threat_intel_map(
     group_by: str = Query("country", pattern="^(country|asn|organization|ip)$"),
