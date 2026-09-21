@@ -182,6 +182,30 @@ class BgpMitigationTest(unittest.TestCase):
             )
         )
 
+    def test_dns_seed_does_not_hardcode_connector_id_on_fresh_db(self):
+        """Regressao: o seed/UPDATE do perfil DNS nao pode hardcodar connector_id.
+
+        Em um banco novo nao existe conector id=2; o seed deve deixar o perfil
+        FLOWSPEC_AUTO_BLOCK_DST_DNS com connector_id NULL (seguro para FK) em vez
+        de falhar com 'FOREIGN KEY constraint failed' durante a inicializacao.
+        """
+        with temporary_main_db():
+            conn = main.sqlite_connection()
+            row = conn.execute(
+                "SELECT id, connector_id, approval_mode FROM bgp_response_profiles "
+                "WHERE name = 'FLOWSPEC_AUTO_BLOCK_DST_DNS'"
+            ).fetchone()
+            self.assertIsNotNone(row, "FLOWSPEC_AUTO_BLOCK_DST_DNS deve existir apos o seed")
+            self.assertIsNone(
+                row["connector_id"],
+                "connector_id nao deve ser hardcoded; deve ficar NULL ate configuracao explicita",
+            )
+            self.assertEqual(
+                0,
+                conn.execute("SELECT count(*) FROM bgp_connectors WHERE id = 2").fetchone()[0],
+                "nao deve existir referencia a um conector id=2 inexistente no banco novo",
+            )
+
     def _connector_and_profile(self, max_duration=3600):
         conn = main.sqlite_connection()
         now = main.utc_now_iso()
@@ -5050,6 +5074,8 @@ class BgpMitigationTest(unittest.TestCase):
             "pipe_ok": True,
             "bgp_state": "established",
             "flowspec_state": "established",
+            # delivery path requires its own evidence: fifo + active reader.
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
         }
         readiness = main.evaluate_bgp_connector_readiness(host_agent_payload)
         self.assertTrue(readiness["ready"])
@@ -5117,6 +5143,7 @@ class BgpMitigationTest(unittest.TestCase):
             "pipe_ok": True,
             "bgp_state": "established",
             "flowspec_state": "established",
+            "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
             "session": {
                 "close_wait_count": 6,
                 "close_wait_alert_threshold": 5,
@@ -5484,6 +5511,212 @@ class BgpMitigationTest(unittest.TestCase):
                     "fifo_written"
                 ]
             )
+
+
+class DeliveryPathReadinessTest(unittest.TestCase):
+    """delivery_path_ready = direct_pipe_ready OR host_agent_delivery_ready.
+
+    The gate must stay a safety gate, but it accepts multiple valid proofs of
+    the FlowSpec delivery path: a directly-visible backend FIFO, a verified
+    direct pipe payload (fifo + active reader), or a reachable host-agent with
+    an active FIFO reader. BGP established alone is never delivery evidence.
+    """
+
+    @staticmethod
+    def _healthy_status(**overrides) -> dict:
+        status = {
+            "service": {"active": True, "check_possible": True},
+            "listener": {"listening": False, "required": False},
+            "session": {"tcp_established": True},
+            "bgp_state": "established",
+            "flowspec_state": "established",
+            "passive_listen_enabled": False,
+            "checks": {
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": True,
+                "close_wait_ok": True,
+            },
+        }
+        status.update(overrides)
+        return status
+
+    def _backend_unavailable(self) -> dict:
+        return {
+            "delivery_path_ready": False,
+            "backend_pipe_in_visible": False,
+            "backend_mount_visible": False,
+            "reason": "backend_exabgp_pipe_unavailable",
+        }
+
+    def test_direct_pipe_ready_sets_direct_pipe_source(self):
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "exists": True,
+                "is_fifo": True,
+                "reader_active": True,
+                "ok": True,
+            }
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value={"delivery_path_ready": True, "backend_pipe_in_visible": True, "reason": ""},
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "direct_pipe")
+        self.assertEqual(readiness["delivery_path_reason"], "direct_pipe_reader_verified")
+
+    def test_host_agent_delivery_ready_when_direct_pipe_invisible(self):
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": True,
+                "ok": True,
+                "source": "host_agent",
+            },
+            host_agent={
+                "enabled": True,
+                "available": True,
+                "pipes": {"is_fifo": True, "reader_active": True},
+            },
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertTrue(readiness["ready"])
+        self.assertTrue(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "host_agent")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_verified_via_host_agent")
+        self.assertTrue(readiness["host_agent_reachable"])
+
+    def test_host_agent_reachable_without_reader_is_not_delivery_ready(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            },
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": False,
+                "ok": False,
+                "source": "host_agent",
+            },
+            host_agent={
+                "enabled": True,
+                "available": True,
+                "pipes": {"is_fifo": True, "reader_active": False},
+            },
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+        self.assertEqual(readiness["delivery_path_reason"], "host_agent_delivery_unavailable")
+
+    def test_direct_pipe_unavailable_and_host_agent_unavailable_is_not_ready(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            },
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "is_fifo": True,
+                "reader_active": False,
+                "ok": False,
+            },
+            host_agent={"enabled": True, "available": False},
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+
+    def test_bgp_established_alone_does_not_prove_delivery_path(self):
+        status = self._healthy_status(
+            checks={
+                "service_ok": True,
+                "listener_ok": True,
+                "bgp_ok": True,
+                "flowspec_ok": True,
+                "pipe_ok": False,
+                "close_wait_ok": True,
+            }
+        )
+        status.pop("pipes", None)
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "unavailable")
+        self.assertNotEqual(readiness["delivery_path_source"], "operational_evidence")
+
+    def test_writable_pipe_without_verified_reader_is_not_delivery_ready(self):
+        # pipe exists + writable + pipe_ok=true, but the reader is UNKNOWN.
+        # A writable-only pipe must never prove the delivery path on its own.
+        status = self._healthy_status(
+            pipes={"path": "/run/exabgp/exabgp.in", "ok": True, "is_fifo": True}
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "operational_evidence")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_reader_unverified")
+
+    def test_bgp_established_with_writable_pipe_no_reader_is_not_delivery_ready(self):
+        # BGP established does NOT prove a FIFO reader; writable + no reader
+        # stays delivery-not-ready (operational evidence only).
+        status = self._healthy_status(
+            pipes={
+                "path": "/run/exabgp/exabgp.in",
+                "ok": True,
+                "is_fifo": True,
+                "reader_active": False,
+            }
+        )
+        with patch.object(
+            main,
+            "exabgp_backend_delivery_path_status",
+            return_value=self._backend_unavailable(),
+        ):
+            readiness = main.evaluate_bgp_connector_readiness(status)
+        self.assertFalse(readiness["delivery_path_ready"])
+        self.assertEqual(readiness["delivery_path_source"], "operational_evidence")
+        self.assertEqual(readiness["delivery_path_reason"], "delivery_reader_unverified")
 
 
 if __name__ == "__main__":
