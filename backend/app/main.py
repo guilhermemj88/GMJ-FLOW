@@ -46444,7 +46444,7 @@ def active_monitored_cidrs() -> list[str]:
         with sqlite_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT p.cidr
+                SELECT DISTINCT p.cidr
                 FROM ip_zone_prefixes p
                 JOIN ip_zones z ON z.id = p.zone_id
                 WHERE p.active = 1 AND z.active = 1

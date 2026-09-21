@@ -121,6 +121,51 @@ class MonitoredAsnTest(unittest.TestCase):
         self.assertIn("item[\"asn_number\"] not in monitored_asns", main_source)
 
 
+class MonitoredCidrsDedupTest(unittest.TestCase):
+    """CIDR repetido em zonas/prefixos ativos nao e retornado duas vezes."""
+
+    ZONE_ID = 9001
+    CIDR = "192.0.2.0/24"
+
+    def setUp(self):
+        main.ensure_sensor_db()
+        self._cleanup()
+
+    def tearDown(self):
+        self._cleanup()
+
+    def _cleanup(self):
+        with main.sqlite_connection() as conn:
+            conn.execute("DELETE FROM ip_zone_prefixes WHERE zone_id = ?", (self.ZONE_ID,))
+            conn.execute("DELETE FROM ip_zones WHERE id = ?", (self.ZONE_ID,))
+            conn.commit()
+
+    def _insert_duplicate(self):
+        with main.sqlite_connection() as conn:
+            conn.execute(
+                "INSERT INTO ip_zones (id, name, description, active, subscriber_addressing_mode, created_at, updated_at) "
+                "VALUES (?, 'Zona duplicada', '', 1, 'cgnat', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (self.ZONE_ID,),
+            )
+            for prefix_name in ("dup-1", "dup-2"):
+                conn.execute(
+                    "INSERT INTO ip_zone_prefixes (zone_id, cidr, name, description, prefix_type, active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, '', 'client', 1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                    (self.ZONE_ID, self.CIDR, prefix_name),
+                )
+            conn.commit()
+
+    def test_duplicate_cidr_is_returned_once(self):
+        self._insert_duplicate()
+        cidrs = main.active_monitored_cidrs()
+        self.assertEqual(cidrs.count(self.CIDR), 1)
+
+    def test_unique_cidr_is_still_returned(self):
+        self._insert_duplicate()
+        cidrs = main.active_monitored_cidrs()
+        self.assertIn(self.CIDR, cidrs)
+
+
 class EmptyPayloadTest(unittest.TestCase):
     """Sem blocos monitorados o endpoint nao executa ClickHouse e sinaliza vazio."""
 
