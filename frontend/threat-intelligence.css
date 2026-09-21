@@ -643,3 +643,122 @@ body.security-event-drawer-open {
   .security-event-drawer__panel { width: 100%; }
   .security-event-detail-grid { grid-template-columns: 1fr; }
 }
+
+.threat-ioc-priority { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: .72rem; font-weight: 700; line-height: 1.4; }
+.threat-ioc-p1 { color: #fff; background: #b91c1c; }
+.threat-ioc-p2 { color: #fff; background: #c2410c; }
+.threat-ioc-p3 { color: #fff; background: #b45309; }
+.threat-ioc-p4 { color: #fff; background: #0369a1; }
+.threat-ioc-p5 { color: #334155; background: #e2e8f0; }
+tr.threat-ioc-c2 { background: rgba(185, 28, 28, .07); }
+tr.threat-ioc-c2:hover { background: rgba(185, 28, 28, .12); }
+
+.transport-semantic-badge {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: center;
+  margin: 2px 0;
+  font-size: 0.82em;
+  line-height: 1.35;
+}
+.transport-semantic-role { font-weight: 600; color: #334155; }
+.transport-semantic-service,
+.transport-semantic-confidence { color: #64748b; }
+.transport-semantic-c2 {
+  font-weight: 700;
+  color: #b91c1c;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+/* Anomaly/security-event detail: grouped evidence sections (SITUACAO -> ENVOLVIDOS -> EVIDENCIA -> DECISAO -> EXECUCAO -> CONFIRMACAO) */
+.ux-section {
+  margin-bottom: .8rem;
+}
+
+.ux-section-title {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin: 0 0 .35rem;
+}
+
+details.ux-collapsible {
+  margin-bottom: .8rem;
+}
+
+details.ux-collapsible > summary.ux-section-title {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+details.ux-collapsible > summary.ux-section-title::-webkit-details-marker {
+  display: none;
+}
+
+details.ux-collapsible > summary.ux-section-title::before {
+  content: "\25B8";
+  margin-right: .3rem;
+  display: inline-block;
+  transition: transform .15s ease;
+}
+
+details.ux-collapsible[open] > summary.ux-section-title::before {
+  transform: rotate(90deg);
+}
+
+/* Anomaly detail UX pass 2: decision lead block + compact flows table */
+.ux-decision {
+  padding: .75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  margin-bottom: .4rem;
+}
+
+.ux-decision-title {
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: .4rem;
+}
+
+.ux-decision-state {
+  margin-bottom: .3rem;
+}
+
+.ux-decision-reason {
+  color: var(--text-primary);
+  font-size: .9rem;
+  line-height: 1.45;
+}
+
+.ux-decision-reason-label {
+  color: var(--muted);
+  font-weight: 700;
+  margin-right: .4rem;
+}
+
+.flow-conversation {
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.flow-arrow {
+  color: var(--muted);
+  margin: 0 .2rem;
+}
+
+.flow-secondary {
+  font-size: .78rem;
+}

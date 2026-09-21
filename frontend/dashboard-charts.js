@@ -5,10 +5,19 @@
 })(typeof window !== 'undefined' ? window : globalThis, function createDashboardCharts() {
   'use strict';
 
+  function resolveChartToken(token, fallback) {
+    try {
+      const value = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+      return value || fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
   const DEFAULT_APPEARANCE = Object.freeze({
     palette_mode: 'default',
-    upload_color: '#2563eb',
-    download_color: '#16a34a',
+    get upload_color() { return resolveChartToken('--chart-tx', '#2563eb'); },
+    get download_color() { return resolveChartToken('--chart-rx', '#16a34a'); },
     line_width: 2,
     area_opacity: 0.22,
     smooth_lines: true,

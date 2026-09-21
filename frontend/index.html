@@ -580,6 +580,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
   <script src="dashboard-layout.js"></script>
   <script src="dashboard-resize.js"></script>
   <script src="dashboard-prefix-controls.js"></script>
+  <script src="dashboard-sparkline.js"></script>
   <style>
     :root {
       --background: #f3f5f7;
@@ -612,6 +613,15 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --accent-dark: var(--accent-strong);
       --sidebar: var(--sidebar-background);
       --sidebar-2: var(--sidebar-active);
+      --surface-tertiary: #e2e8f0;
+      --text-dim: #9aa1ac;
+      --text-faint: #b9c0ca;
+      --accent-hover: #115e59;
+      --accent-subtle: rgba(15, 118, 110, 0.10);
+      --chart-rx: #16a34a;
+      --chart-tx: #2563eb;
+      --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       --radius: 8px;
     }
 
@@ -636,6 +646,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --map-surface: #111f32;
       --map-label: #e2e8f0;
       --chart-grid: #334155;
+      --surface-tertiary: #243044;
+      --text-dim: #7d8896;
+      --text-faint: #566172;
+      --accent-hover: #5eead4;
+      --accent-subtle: rgba(45, 212, 191, 0.12);
+      --chart-rx: #16a34a;
+      --chart-tx: #2563eb;
       --overlay: rgba(2, 6, 23, .78);
     }
 
@@ -660,7 +677,45 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       --map-surface: #071525;
       --map-label: #dff7ff;
       --chart-grid: #143047;
+      --surface-tertiary: #0d1f31;
+      --text-dim: #6d8296;
+      --text-faint: #4d6375;
+      --accent-hover: #67e8f9;
+      --accent-subtle: rgba(34, 211, 238, 0.12);
+      --chart-rx: #16a34a;
+      --chart-tx: #2563eb;
       --overlay: rgba(1, 5, 12, .86);
+    }
+
+    html[data-theme="operator"] {
+      --background: #0B0B0D;
+      --surface: #101012;
+      --surface-secondary: #151517;
+      --surface-tertiary: #1A1A1D;
+      --text-primary: #E8E8EC;
+      --text-secondary: #A4A4AE;
+      --text-dim: #74747F;
+      --text-faint: #60606B;
+      --border: #25252A;
+      --border-strong: #34343C;
+      --accent: #7A67E8;
+      --accent-strong: #5F4ECB;
+      --accent-hover: #9A8BF2;
+      --accent-subtle: rgba(122, 103, 232, 0.12);
+      --success: #3FB765;
+      --warning: #D9A23B;
+      --danger: #E5484D;
+      --info: #4CA6D9;
+      --violet: #7A67E8;
+      --sidebar-background: #0B0B0D;
+      --sidebar-active: #1A1A1D;
+      --map-background: #0B0B0D;
+      --map-surface: #151517;
+      --map-label: #E8E8EC;
+      --chart-grid: #1C1C20;
+      --overlay: rgba(0, 0, 0, 0.55);
+      --chart-rx: #7A67E8;
+      --chart-tx: #5E8CB8;
     }
 
     * {
@@ -672,6 +727,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       margin: 0;
       color: var(--ink);
       background: var(--page-bg);
+      font-family: var(--font-sans);
       letter-spacing: 0;
     }
 
@@ -736,6 +792,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .brand-block {
+      flex: 0 0 auto;
       padding: 18px 18px 16px;
       border-bottom: 1px solid rgba(255, 255, 255, .08);
     }
@@ -757,9 +814,33 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     .side-nav {
-      display: grid;
-      gap: .25rem;
+      display: flex;
+      flex-direction: column;
       padding: 12px;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, .28) transparent;
+    }
+
+    .side-nav::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .side-nav::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .side-nav::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, .22);
+      border-radius: 999px;
+    }
+
+    .side-nav::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, .36);
     }
 
     .side-nav button {
@@ -785,6 +866,79 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
     .side-nav button.active {
       box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .nav-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .nav-group + .nav-group {
+      margin-top: .3rem;
+      padding-top: .3rem;
+      border-top: 1px solid rgba(255, 255, 255, .06);
+    }
+
+    .nav-group-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: .45rem;
+      min-height: 28px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: rgba(255, 255, 255, .42);
+      font-family: inherit;
+      font-size: .66rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .09em;
+      text-align: left;
+      padding: .38rem .72rem;
+      cursor: pointer;
+    }
+
+    .nav-group-toggle:hover {
+      color: rgba(255, 255, 255, .75);
+      background: rgba(255, 255, 255, .04);
+    }
+
+    .nav-group-chevron {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      color: rgba(255, 255, 255, .4);
+      transition: transform .15s ease;
+    }
+
+    .nav-group-chevron svg {
+      width: 13px;
+      height: 13px;
+      flex: 0 0 13px;
+    }
+
+    .nav-group.collapsed .nav-group-chevron {
+      transform: rotate(-90deg);
+    }
+
+    .nav-group.collapsed .nav-group-items {
+      display: none;
+    }
+
+    .nav-group-items {
+      display: flex;
+      flex-direction: column;
+      gap: .25rem;
+    }
+
+    .nav-footer {
+      display: flex;
+      flex-direction: column;
+      gap: .25rem;
+      margin-top: .3rem;
+      padding-top: .3rem;
+      border-top: 1px solid rgba(255, 255, 255, .08);
     }
 
     .side-nav svg,
@@ -1168,6 +1322,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       border-radius: 50%;
       background: #94a3b8;
     }
+
+    .status-dot.ok { background: var(--success); }
+    .status-dot.warn { background: var(--warning); }
+    .status-dot.crit { background: var(--danger); }
+    .status-dot.unknown { background: #94a3b8; }
 
     .status-dot.ok {
       background: #22c55e;
@@ -2274,11 +2433,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       }
 
       .side-nav {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        align-content: start;
+        gap: .25rem .5rem;
+        max-height: 46vh;
       }
 
       .side-nav button {
-        justify-content: center;
+        justify-content: flex-start;
+      }
+
+      .nav-group,
+      .nav-group + .nav-group {
+        border-top: 0;
+        margin-top: 0;
+        padding-top: 0;
       }
 
       .sensor-layout {
@@ -2355,7 +2525,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       }
 
       .side-nav {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        max-height: 40vh;
       }
     }
 
@@ -2363,7 +2534,17 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: none;
     }
 
-    #view-dashboard.dashboard-engine-active > section:not(#configurableDashboardGrid):not(#dashboardPrefixControls) {
+    /* Fase 7 - composicao final do Overview:
+       - dashboard padrao/operacional (is_default) mostra o chrome operacional completo
+         (AlertStrip + KPI Strip + Aggregate Throughput + Top Interfaces + Secondary Analytics)
+         no lugar da grade de widgets;
+       - dashboard personalizado mantem a grade configuravel e recebe apenas o AlertStrip
+         quando existe alerta operacional relevante (a faixa nao e um widget). */
+    #view-dashboard.dashboard-engine-active:not(.dashboard-operational) > section:not(#configurableDashboardGrid):not(#dashboardPrefixControls):not(#dashboardAlertSection) {
+      display: none !important;
+    }
+
+    #view-dashboard.dashboard-engine-active.dashboard-operational > section:not(#dashboardAlertSection):not(#dashboardOverviewChrome):not(#dashboardAggregateSection):not(#dashboardTopInterfacesSection):not(#dashboardSecondaryAnalyticsSection):not(#dashboardPrefixControls) {
       display: none !important;
     }
 
@@ -3123,6 +3304,331 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         grid-template-columns: 1fr;
       }
     }
+
+    /* ---- Shell (Sidebar + Toolbar) no tema Operator ---- */
+    html[data-theme="operator"] .sidebar {
+      border-right-color: var(--border);
+    }
+
+    html[data-theme="operator"] .side-nav {
+      padding: 8px;
+    }
+
+    html[data-theme="operator"] .side-nav button {
+      min-height: 32px;
+      gap: .55rem;
+      padding: .38rem .6rem;
+      border-radius: 5px;
+      font-weight: 500;
+      font-family: var(--font-sans);
+      font-size: .84rem;
+      color: var(--text-secondary);
+    }
+
+    html[data-theme="operator"] .side-nav button:hover {
+      color: var(--text-primary);
+      background: var(--surface-tertiary);
+    }
+
+    html[data-theme="operator"] .side-nav button.active {
+      color: var(--text-primary);
+      background: var(--accent-subtle);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+
+    html[data-theme="operator"] .side-nav svg {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 15px;
+    }
+
+    html[data-theme="operator"] .nav-group + .nav-group,
+    html[data-theme="operator"] .nav-footer {
+      border-top-color: var(--border);
+    }
+
+    html[data-theme="operator"] .nav-group-toggle {
+      color: var(--text-faint);
+      font-size: .64rem;
+      padding: .32rem .6rem;
+    }
+
+    html[data-theme="operator"] .nav-group-toggle:hover {
+      color: var(--text-secondary);
+      background: transparent;
+    }
+
+    html[data-theme="operator"] .view-header {
+      margin-bottom: 12px;
+    }
+
+    html[data-theme="operator"] .dashboard-controls,
+    html[data-theme="operator"] .toolbar {
+      gap: .4rem;
+    }
+
+    html[data-theme="operator"] .dashboard-controls .form-select,
+    html[data-theme="operator"] .toolbar .form-select {
+      min-width: 0;
+      border-color: var(--border);
+      border-radius: 5px;
+      background-color: var(--surface);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: .82rem;
+    }
+
+    html[data-theme="operator"] .dashboard-controls .form-select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent-subtle);
+    }
+
+    html[data-theme="operator"] .dashboard-controls .btn {
+      border-radius: 5px;
+      font-family: var(--font-sans);
+    }
+
+    /* ---- Overview chrome (Fase 3) ---- */
+    .dashboard-overview-chrome[hidden] { display: none; }
+    .dashboard-alert-strip {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      flex-wrap: wrap;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      padding: .45rem .7rem;
+      margin-bottom: .6rem;
+      font-size: .82rem;
+    }
+    .dashboard-alert-strip.has-critical {
+      border-color: var(--danger);
+      background: var(--surface-secondary);
+    }
+    .dashboard-alert-strip.has-warning {
+      border-color: var(--warning);
+    }
+    .dashboard-alert-strip .as-crit { color: var(--danger); font-weight: 700; }
+    .dashboard-alert-strip .as-warn { color: var(--warning); font-weight: 700; }
+    .dashboard-alert-strip .alert-strip-summary { color: var(--muted); }
+    .dashboard-kpi-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 360px));
+      justify-content: start;
+      gap: .5rem;
+      margin-bottom: .75rem;
+    }
+    .dashboard-kpi {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+      padding: .55rem .75rem;
+    }
+    .dashboard-kpi-main { min-width: 0; }
+    .dashboard-kpi-label {
+      color: var(--muted);
+      font-family: var(--font-sans);
+      font-size: .66rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .dashboard-kpi-value {
+      font-family: var(--font-mono);
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: var(--ink);
+      line-height: 1.15;
+      font-variant-numeric: tabular-nums;
+    }
+    .dashboard-kpi-unit {
+      font-family: var(--font-mono);
+      font-size: .7rem;
+      color: var(--muted);
+    }
+    .dashboard-kpi-sub {
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: .7rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .dashboard-kpi-spark { margin-left: auto; flex: 0 0 auto; }
+    .traffic-legend {
+      display: grid;
+      grid-template-columns: auto repeat(3, minmax(0, 1fr));
+      gap: .25rem .6rem;
+      margin-top: .5rem;
+      font-family: var(--font-mono);
+      font-size: .74rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .traffic-legend .tl-head {
+      color: var(--muted);
+      text-align: right;
+      text-transform: uppercase;
+      font-size: .62rem;
+      letter-spacing: .04em;
+    }
+    .traffic-legend .tl-dir {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      color: var(--muted);
+    }
+    .traffic-legend .tl-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+    .traffic-legend .tl-val { text-align: right; color: var(--ink); }
+    .top-interfaces { width: 100%; border-collapse: collapse; font-size: .84rem; }
+    .top-interfaces th {
+      text-align: right;
+      font-family: var(--font-sans);
+      font-size: .62rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+      font-weight: 700;
+      padding: .35rem .5rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .top-interfaces th:first-child, .top-interfaces td:first-child { text-align: left; }
+    .top-interfaces td {
+      padding: .32rem .5rem;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--font-mono);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
+    }
+    .top-interfaces td.ti-name { font-family: var(--font-sans); text-align: left; }
+    .top-interfaces .rank { color: var(--muted); }
+    .top-interfaces .ti-share { color: var(--muted); font-size: .72rem; margin-right: .4rem; }
+    .share-bar {
+      display: inline-block;
+      width: 56px;
+      height: 3px;
+      border-radius: 999px;
+      background: var(--surface-secondary);
+      overflow: hidden;
+      vertical-align: middle;
+    }
+    .share-bar > span { display: block; height: 100%; background: var(--accent); }
+    .sparkline { display: block; }
+
+    /* ---- Interface Drawer + Interfaces view (Fase 4) ---- */
+    .interface-drawer-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 400; }
+    .interface-drawer-backdrop[hidden] { display: none; }
+    .interface-drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: 520px; max-width: 94vw;
+      background: var(--surface); border-left: 1px solid var(--line-strong);
+      z-index: 401; display: flex; flex-direction: column;
+      transform: translateX(102%); visibility: hidden;
+      transition: transform .22s ease, visibility 0s linear .22s;
+    }
+    .interface-drawer.open { transform: translateX(0); visibility: visible; transition: transform .22s ease; }
+    .interface-drawer-header {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem;
+      padding: .8rem 1rem; border-bottom: 1px solid var(--line);
+    }
+    .interface-drawer-heading { display: flex; align-items: center; gap: .5rem; min-width: 0; flex-wrap: wrap; }
+    .interface-drawer-title { font-family: var(--font-mono); font-size: .95rem; font-weight: 600; margin: 0; color: var(--ink); }
+    .interface-drawer-chip { font-family: var(--font-mono); font-size: .72rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 .4rem; }
+    .interface-drawer-tabs { display: flex; gap: .25rem; padding: .3rem 1rem 0; border-bottom: 1px solid var(--line); }
+    .interface-drawer-tab {
+      border: 0; background: transparent; padding: .45rem .8rem; cursor: pointer;
+      font-family: var(--font-sans); font-size: .8rem; color: var(--muted); border-bottom: 2px solid transparent;
+    }
+    .interface-drawer-tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+    .interface-drawer-body { flex: 1; overflow-y: auto; padding: 1rem; }
+    .interface-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+    .interface-detail-field { border: 1px solid var(--line); border-radius: 6px; padding: .55rem .7rem; min-width: 0; }
+    .interface-detail-label { font-family: var(--font-sans); font-size: .62rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .interface-detail-value { font-family: var(--font-mono); font-size: .9rem; color: var(--ink); margin-top: .15rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .util-bar { height: 4px; border-radius: 999px; background: var(--surface-secondary); overflow: hidden; margin-top: .3rem; }
+    .util-bar > span { display: block; height: 100%; background: var(--ink); }
+    .util-warning > span { background: var(--warning); }
+    .util-critical > span { background: var(--danger); }
+    .util-neutral { color: var(--ink); }
+    .util-warning-text { color: var(--warning); }
+    .util-critical-text { color: var(--danger); }
+    .interfaces-row { cursor: pointer; }
+    .interfaces-row:hover { background: var(--surface-secondary); }
+    .interfaces-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .interface-drawer-loading { color: var(--muted); font-size: .84rem; padding: 1rem 0; }
+
+    /* ---- Secondary Analytics (Fase 5) ---- */
+    .dashboard-secondary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .75rem;
+      align-items: start;
+    }
+    .dashboard-secondary-panel { padding: .7rem .85rem; }
+    .dashboard-secondary-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: .5rem;
+      margin-bottom: .3rem;
+    }
+    .dashboard-secondary-head .panel-title { margin: 0; }
+    .secondary-rank-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .secondary-rank-table th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 500;
+      font-size: .64rem;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      padding: .2rem .35rem .35rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .secondary-rank-table td {
+      padding: .3rem .35rem;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    .secondary-rank-table tbody tr:last-child td { border-bottom: 0; }
+    .secondary-rank-table .rank { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .secondary-rank-table td.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+    .secondary-rank-table .secondary-asn-org { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+    .secondary-share { color: var(--muted); font-size: .68rem; margin-right: .4rem; font-variant-numeric: tabular-nums; }
+    .dashboard-flows-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .55rem .85rem;
+      margin-top: .75rem;
+    }
+    .secondary-flows-text { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+    @media (max-width: 991.98px) {
+      .dashboard-secondary-grid { grid-template-columns: 1fr; }
+    }
+
+    /* ---- Alerts view (Fase 6) ---- */
+    .alerts-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: .75rem;
+      align-items: end;
+    }
+    .alerts-table td { white-space: nowrap; }
+    .alerts-table .alerts-title { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+    .alerts-table .alerts-target { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+    html[data-theme] .badge-soft.status-acknowledged {
+      color: var(--warning);
+      border-color: var(--warning);
+    }
+    @media (max-width: 991.98px) {
+      .alerts-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 575.98px) {
+      .alerts-filter-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -3176,70 +3682,99 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         </div>
       </div>
       <nav class="side-nav" aria-label="Menu principal">
-        <button type="button" class="active" data-nav-view="dashboard" data-required-permission="dashboard.view">
-          <i data-lucide="layout-dashboard"></i><span>Dashboard</span>
-        </button>
-        <button type="button" data-nav-view="flows" data-required-permission="dashboard.view">
-          <i data-lucide="search"></i><span>Flows</span>
-        </button>
-        <button id="globalMapNavButton" type="button" data-nav-view="global-map" data-required-permission="dashboard.view">
-          <i data-lucide="globe-2"></i><span>Mapa Global</span>
-        </button>
-        <button type="button" data-nav-view="sensors" data-required-permission="sensors.view">
-          <i data-lucide="radio-tower"></i><span>Sensores</span>
-        </button>
-        <button id="databaseNavButton" type="button" data-nav-view="database" data-required-permission="settings.view">
-          <i data-lucide="database"></i><span>Banco de Dados</span>
-        </button>
-        <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors" data-required-permission="anomalies.view">
-          <i data-lucide="shield-alert"></i><span>Vetores de Ataque</span>
-        </button>
-        <button id="anomaliesNavButton" type="button" data-nav-view="anomalies" data-required-permission="anomalies.view">
-          <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
-          <span id="anomalyNavSeverity" class="nav-anomaly-severity" aria-hidden="true">
-            <span id="anomalyNavWarningBadge" class="nav-severity-count severity-warning" title="Avisos ativos">0</span>
-            <span id="anomalyNavCriticalBadge" class="nav-severity-count severity-critical" title="Anomalias críticas ativas">0</span>
-          </span>
-        </button>
-        <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter" data-required-permission="anomalies.view">
-          <i data-lucide="activity"></i><span>Peak Hunter</span>
-        </button>
-        <button id="mitigationNavButton" type="button" data-nav-view="mitigation" data-required-permission="mitigations.view">
-          <i data-lucide="shield-check"></i><span>Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
-        </button>
-        <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors" data-required-permission="bgp.view">
-          <i data-lucide="network"></i><span>BGP / Conectores</span>
-        </button>
-        <button id="aiNavButton" type="button" data-nav-view="ai" data-required-permission="settings.view">
-          <i data-lucide="brain-circuit"></i><span>IA</span>
-        </button>
-        <button id="systemNavButton" type="button" data-nav-view="system" data-required-permission="settings.view">
-          <i data-lucide="activity"></i><span>Sistema</span>
-        </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Interfaces" data-required-permission="sensors.view">
-          <i data-lucide="panel-top"></i><span>Interfaces</span>
-        </button>
-        <button type="button" data-nav-view="ip-zones" data-required-permission="dashboard.view">
-          <i data-lucide="network"></i><span>Clientes/Prefixos</span>
-        </button>
-        <button type="button" data-nav-view="placeholder" data-placeholder-title="Alertas" data-required-permission="anomalies.view">
-          <i data-lucide="bell"></i><span>Alertas</span>
-        </button>
-        <button id="cgnatNavButton" type="button" data-nav-view="cgnat" data-required-permission="cgnat.view">
-          <i data-lucide="settings"></i><span>Configurações / CGNAT</span>
-        </button>
-        <button id="usersNavButton" type="button" data-nav-view="users" data-required-permission="users.view">
-          <i data-lucide="users"></i><span>Usuários e Acessos</span>
-        </button>
-        <button id="threatIntelligenceNavButton" type="button" data-nav-view="threat-intelligence" data-required-permission="anomalies.view">
-          <i data-lucide="radar"></i><span>Threat Intelligence</span>
-        </button>
-        <button id="myAccountNavButton" type="button" data-nav-view="my-account">
-          <i data-lucide="circle-user-round"></i><span>Minha conta</span>
-        </button>
-        <button id="logoutButton" type="button">
-          <i data-lucide="log-out"></i><span>Sair</span>
-        </button>
+        <div class="nav-group" data-nav-group="overview">
+          <button type="button" class="nav-group-toggle" aria-expanded="true" aria-controls="navGroupOverview">
+            <span>Visão geral</span>
+            <span class="nav-group-chevron"><i data-lucide="chevron-down"></i></span>
+          </button>
+          <div class="nav-group-items" id="navGroupOverview">
+            <button type="button" class="active" data-nav-view="dashboard" data-required-permission="dashboard.view">
+              <i data-lucide="layout-dashboard"></i><span>Dashboard</span>
+            </button>
+            <button type="button" data-nav-view="flows" data-required-permission="dashboard.view">
+              <i data-lucide="search"></i><span>Flows</span>
+            </button>
+            <button id="globalMapNavButton" type="button" data-nav-view="global-map" data-required-permission="dashboard.view">
+              <i data-lucide="globe-2"></i><span>Mapa Global</span>
+            </button>
+            <button type="button" data-nav-view="sensors" data-required-permission="sensors.view">
+              <i data-lucide="radio-tower"></i><span>Sensores</span>
+            </button>
+            <button id="interfacesNavButton" type="button" data-nav-view="interfaces" data-required-permission="sensors.view">
+              <i data-lucide="panel-top"></i><span>Interfaces</span>
+            </button>
+            <button type="button" data-nav-view="ip-zones" data-required-permission="dashboard.view">
+              <i data-lucide="network"></i><span>Clientes/Prefixos</span>
+            </button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="security">
+          <button type="button" class="nav-group-toggle" aria-expanded="true" aria-controls="navGroupSecurity">
+            <span>Segurança</span>
+            <span class="nav-group-chevron"><i data-lucide="chevron-down"></i></span>
+          </button>
+          <div class="nav-group-items" id="navGroupSecurity">
+            <button id="anomaliesNavButton" type="button" data-nav-view="anomalies" data-required-permission="anomalies.view">
+              <i data-lucide="siren"></i><span>Anomalias</span><span id="anomalyNavBadge" class="nav-badge">0</span>
+              <span id="anomalyNavSeverity" class="nav-anomaly-severity" aria-hidden="true">
+                <span id="anomalyNavWarningBadge" class="nav-severity-count severity-warning" title="Avisos ativos">0</span>
+                <span id="anomalyNavCriticalBadge" class="nav-severity-count severity-critical" title="Anomalias críticas ativas">0</span>
+              </span>
+            </button>
+            <button id="attackVectorsNavButton" type="button" data-nav-view="attack-vectors" data-required-permission="anomalies.view">
+              <i data-lucide="shield-alert"></i><span>Vetores de Ataque</span>
+            </button>
+            <button id="peakHunterNavButton" type="button" data-nav-view="peak-hunter" data-required-permission="anomalies.view">
+              <i data-lucide="activity"></i><span>Peak Hunter</span>
+            </button>
+            <button id="threatIntelligenceNavButton" type="button" data-nav-view="threat-intelligence" data-required-permission="anomalies.view">
+              <i data-lucide="radar"></i><span>Threat Intelligence</span>
+            </button>
+            <button id="alertsNavButton" type="button" data-nav-view="alerts" data-required-permission="anomalies.view">
+              <i data-lucide="bell"></i><span>Alertas</span>
+            </button>
+            <button id="mitigationNavButton" type="button" data-nav-view="mitigation" data-required-permission="mitigations.view">
+              <i data-lucide="shield-check"></i><span>Mitigação</span><span id="bgpNavBadge" class="nav-badge">0</span>
+            </button>
+            <button id="bgpNavButton" type="button" data-nav-view="bgp-connectors" data-required-permission="bgp.view">
+              <i data-lucide="network"></i><span>BGP / Conectores</span>
+            </button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="system">
+          <button type="button" class="nav-group-toggle" aria-expanded="true" aria-controls="navGroupSystem">
+            <span>Sistema</span>
+            <span class="nav-group-chevron"><i data-lucide="chevron-down"></i></span>
+          </button>
+          <div class="nav-group-items" id="navGroupSystem">
+            <button id="databaseNavButton" type="button" data-nav-view="database" data-required-permission="settings.view">
+              <i data-lucide="database"></i><span>Banco de Dados</span>
+            </button>
+            <button id="codecsNavButton" type="button" data-nav-view="codecs" data-required-permission="settings.view">
+              <i data-lucide="tags"></i><span>Codecs</span>
+            </button>
+            <button id="aiNavButton" type="button" data-nav-view="ai" data-required-permission="settings.view">
+              <i data-lucide="brain-circuit"></i><span>IA</span>
+            </button>
+            <button id="systemNavButton" type="button" data-nav-view="system" data-required-permission="settings.view">
+              <i data-lucide="activity"></i><span>Sistema</span>
+            </button>
+            <button id="cgnatNavButton" type="button" data-nav-view="cgnat" data-required-permission="cgnat.view">
+              <i data-lucide="settings"></i><span>Configurações / CGNAT</span>
+            </button>
+            <button id="usersNavButton" type="button" data-nav-view="users" data-required-permission="users.view">
+              <i data-lucide="users"></i><span>Usuários e Acessos</span>
+            </button>
+          </div>
+        </div>
+        <div class="nav-footer">
+          <button id="myAccountNavButton" type="button" data-nav-view="my-account">
+            <i data-lucide="circle-user-round"></i><span>Minha conta</span>
+          </button>
+          <button id="logoutButton" type="button">
+            <i data-lucide="log-out"></i><span>Sair</span>
+          </button>
+        </div>
       </nav>
     </aside>
 
@@ -3339,6 +3874,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </button>
             </div>
           </div>
+
+          <section class="dashboard-alert-chrome" id="dashboardAlertSection">
+            <div id="dashboardAlertStrip" class="dashboard-alert-strip" hidden></div>
+          </section>
 
           <section id="dashboardPrefixControls" class="panel dashboard-prefix-controls is-collapsed" aria-label="Filtro global por prefixo">
             <div id="dashboardPrefixControlsHeader" class="dashboard-prefix-controls-header"
@@ -3468,7 +4007,28 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
-          <section class="row g-3">
+          <section class="dashboard-overview-chrome" id="dashboardOverviewChrome">
+            <div id="dashboardKpiStrip" class="dashboard-kpi-strip">
+              <div class="dashboard-kpi" id="kpiTraffic">
+                <div class="dashboard-kpi-main">
+                  <div class="dashboard-kpi-label">Tráfego total</div>
+                  <div><span id="kpiTrafficValue" class="dashboard-kpi-value">—</span> <span class="dashboard-kpi-unit">b/s</span></div>
+                  <div id="kpiTrafficSub" class="dashboard-kpi-sub">—</div>
+                </div>
+                <div id="kpiTrafficSpark" class="dashboard-kpi-spark"></div>
+              </div>
+              <div class="dashboard-kpi" id="kpiPackets">
+                <div class="dashboard-kpi-main">
+                  <div class="dashboard-kpi-label">Pacotes / seg</div>
+                  <div><span id="kpiPacketsValue" class="dashboard-kpi-value">—</span> <span class="dashboard-kpi-unit">pps</span></div>
+                  <div id="kpiPacketsSub" class="dashboard-kpi-sub">—</div>
+                </div>
+                <div id="kpiPacketsSpark" class="dashboard-kpi-spark"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="row g-3" id="dashboardAggregateSection">
             <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="bps-chart" data-widget-width="medium" data-widget-height="low">
               <div class="panel p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -3488,6 +4048,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                   </div>
                 </div>
                 <div id="bpsChart" class="chart"></div>
+                <div id="bpsTrafficLegend" class="traffic-legend" hidden></div>
               </div>
             </div>
             <div class="col-12 col-xl-6 dashboard-widget" data-widget-id="pps-chart" data-widget-width="medium" data-widget-height="low">
@@ -3510,6 +4071,58 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 </div>
                 <div id="ppsChart" class="chart"></div>
               </div>
+            </div>
+          </section>
+
+          <section class="dashboard-overview-chrome" id="dashboardTopInterfacesSection">
+            <div class="panel p-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="panel-title">Top Interfaces</div>
+                <div id="topInterfacesMeta" class="metric-readout">por throughput</div>
+              </div>
+              <div class="table-wrap">
+                <table class="top-interfaces">
+                  <thead>
+                    <tr><th>#</th><th>Interface</th><th>Sensor</th><th>RX</th><th>TX</th><th>Total</th><th>Share</th></tr>
+                  </thead>
+                  <tbody id="topInterfacesTable">
+                    <tr><td colspan="7" class="text-muted">Carregando…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="dashboard-overview-chrome" id="dashboardSecondaryAnalyticsSection" aria-label="Analytics secundário">
+            <div class="dashboard-secondary-grid">
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top Protocolos</div>
+                  <div id="secondaryProtocolsMeta" class="metric-readout">por bits/s</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>Protocolo</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="secondaryProtocolsTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="panel dashboard-secondary-panel">
+                <div class="dashboard-secondary-head">
+                  <div class="panel-title">Top ASN de origem</div>
+                  <div id="secondaryAsnMeta" class="metric-readout">por bits/s</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="secondary-rank-table">
+                    <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
+                    <tbody id="secondaryAsnTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="panel dashboard-flows-summary">
+              <span id="secondaryFlowsSummary" class="secondary-flows-text">—</span>
+              <button id="secondaryFlowsLink" type="button" class="btn btn-sm btn-outline-secondary" onclick="showView('flows')">Ver flows →</button>
             </div>
           </section>
 
@@ -6840,6 +7453,129 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
         </section>
 
+        <section id="view-codecs" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Codecs</h1>
+              <div class="subtle">Classificação de tráfego por protocolo/porta/contexto. Codec NÃO é whitelist, NÃO é autorização e NÃO reduz score sozinho.</div>
+            </div>
+            <div class="toolbar">
+              <button id="codecTesterButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="flask-conical"></i><span>Testar codec</span></button>
+              <button id="newCodecButton" type="button" class="btn btn-sm btn-success"><i data-lucide="plus"></i><span>Novo codec</span></button>
+              <button id="refreshCodecsButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="refresh-cw"></i><span>Atualizar</span></button>
+            </div>
+          </div>
+          <div id="codecsStatus" class="subtle mb-3">Carregando codecs...</div>
+
+          <section class="panel p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+              <div>
+                <div class="panel-title">Registro de codecs</div>
+                <div class="subtle">BUILTIN = fornecido pelo sistema (identidade protegida). CUSTOM = criado/duplicado pelo operador. 0 ou vazio em Source/Destination Port = ANY.</div>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>Nome</th><th>Origem</th><th>Protocolo</th><th>Src Port</th><th>Dst Port</th><th>Direção</th><th>Prioridade</th><th>Grupo</th><th>Ativo</th><th>Ações</th></tr></thead>
+                <tbody id="codecsTable"><tr><td colspan="10" class="text-muted">Nenhum codec.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3">
+            <div class="panel-title mb-2">Semântica da porta 443 e codecs</div>
+            <div class="metric-readout mb-2">Codec match ≠ whitelist · Codec match ≠ tráfego legítimo · Codec match ≠ autorização. Codec é apenas classificação de tráfego.</div>
+            <ul class="mb-0">
+              <li><strong>HTTPS_CLIENT</strong> (TCP dst 443): apenas tráfego indo para serviço HTTPS. Não reduz score por si só.</li>
+              <li><strong>HTTPS_RETURN</strong> (TCP src 443): identifica retorno TCP de serviço HTTPS. ACK/PSH+ACK e direção são usados em contexto comportamental.</li>
+              <li><strong>QUIC_CLIENT</strong> (UDP dst 443) e <strong>QUIC_RETURN</strong> (UDP src 443): identificam tráfego compatível com QUIC por porta. Não implicam legitimidade sem contexto de Network Asset / Expected Service.</li>
+              <li>Porta 443 sozinha é evidência fraca (hint). TCP dst 443 + SYN flood continua sendo ataque. O contexto decide.</li>
+            </ul>
+          </section>
+
+          <aside id="codecEditorDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="codecEditorDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-codec-action="closeEditor" aria-label="Fechar editor"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div id="codecEditorDrawerContext" class="subtle">Codec</div><h2 id="codecEditorDrawerTitle">Novo codec</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeEditor" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="codecEditorStatus" class="subtle"></div>
+              <div class="security-event-drawer__body">
+                <input id="codecEditorId" type="hidden">
+                <section>
+                  <h3>Identificação</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorName">Nome</label><input id="codecEditorName" class="form-control form-control-sm" placeholder="MEU_CODEC"></div>
+                    <div class="field"><label for="codecEditorDisplayName">Display name</label><input id="codecEditorDisplayName" class="form-control form-control-sm" placeholder="Meu codec"></div>
+                    <div class="field"><label for="codecEditorProtocol">Protocolo</label><select id="codecEditorProtocol" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorDirection">Direção</label><select id="codecEditorDirection" class="form-select form-select-sm"></select></div>
+                    <div class="field grid-span-3"><label for="codecEditorDescription">Descrição</label><input id="codecEditorDescription" class="form-control form-control-sm" placeholder="Classificação de tráfego (não whitelist, não veredito)"></div>
+                  </div>
+                </section>
+                <section>
+                  <h3>Correspondência</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorSourcePort">Source Port</label><input id="codecEditorSourcePort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorDestinationPort">Destination Port</label><input id="codecEditorDestinationPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorTcpFlags">TCP Flags</label><input id="codecEditorTcpFlags" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecEditorIcmpType">ICMP Type</label><input id="codecEditorIcmpType" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecEditorIcmpCode">ICMP Code</label><input id="codecEditorIcmpCode" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecEditorSourceRole">Source Role</label><select id="codecEditorSourceRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorDestinationRole">Destination Role</label><select id="codecEditorDestinationRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecEditorProvider">Provider</label><input id="codecEditorProvider" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                  </div>
+                </section>
+                <section>
+                  <h3>Classificação e consumo</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecEditorPriority">Specificity Priority</label><input id="codecEditorPriority" type="number" min="0" class="form-control form-control-sm" value="0"></div>
+                    <div class="field"><label for="codecEditorExclusiveGroup">Exclusive Group</label><input id="codecEditorExclusiveGroup" class="form-control form-control-sm" placeholder="ex.: UDP_SERVICE"></div>
+                    <div class="field"><label for="codecEditorConsumeTraffic">Consume Traffic</label><select id="codecEditorConsumeTraffic" class="form-select form-select-sm"><option value="false">Não</option><option value="true">Sim</option></select></div>
+                    <div class="field"><label for="codecEditorActive">Ativo</label><select id="codecEditorActive" class="form-select form-select-sm"><option value="true">Ativo</option><option value="false">Desativado</option></select></div>
+                  </div>
+                </section>
+              </div>
+              <div class="toolbar mt-3">
+                <button id="saveCodecButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeEditor"><i data-lucide="x"></i><span>Cancelar</span></button>
+              </div>
+            </section>
+          </aside>
+
+          <aside id="codecTesterDrawer" class="security-event-drawer" hidden aria-hidden="true" aria-labelledby="codecTesterDrawerTitle">
+            <button type="button" class="security-event-drawer__backdrop" data-codec-action="closeTester" aria-label="Fechar testador"></button>
+            <section class="security-event-drawer__panel" role="dialog" aria-modal="true">
+              <header class="security-event-drawer__header">
+                <div><div class="subtle">Classificação de um flow sintético (somente leitura)</div><h2 id="codecTesterDrawerTitle">Testar codec</h2></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="closeTester" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </header>
+              <div id="codecTesterStatus" class="subtle"></div>
+              <div class="security-event-drawer__body">
+                <section>
+                  <h3>Flow</h3>
+                  <div class="sensor-form-grid">
+                    <div class="field"><label for="codecTestProtocol">Protocolo</label><select id="codecTestProtocol" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestSrcPort">Src Port</label><input id="codecTestSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestDstPort">Dst Port</label><input id="codecTestDstPort" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestDirection">Direção</label><select id="codecTestDirection" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestTcpFlags">TCP Flags</label><input id="codecTestTcpFlags" type="number" min="0" max="65535" class="form-control form-control-sm" placeholder="0 = ANY"></div>
+                    <div class="field"><label for="codecTestIcmpType">ICMP Type</label><input id="codecTestIcmpType" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecTestIcmpCode">ICMP Code</label><input id="codecTestIcmpCode" type="number" min="0" max="255" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                    <div class="field"><label for="codecTestSourceRole">Source Role</label><select id="codecTestSourceRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestDestinationRole">Destination Role</label><select id="codecTestDestinationRole" class="form-select form-select-sm"></select></div>
+                    <div class="field"><label for="codecTestProvider">Provider</label><input id="codecTestProvider" class="form-control form-control-sm" placeholder="vazio = ANY"></div>
+                  </div>
+                </section>
+              </div>
+              <div class="toolbar mt-3">
+                <button id="runCodecTestButton" type="button" class="btn btn-sm btn-success"><i data-lucide="flask-conical"></i><span>Executar</span></button>
+              </div>
+              <div id="codecTestResults" class="mt-3"></div>
+            </section>
+          </aside>
+        </section>
+
         <section id="view-system" class="app-view">
           <div class="view-header">
             <div>
@@ -6861,6 +7597,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                   <option value="light">Claro</option>
                   <option value="dark">Escuro</option>
                   <option value="noc-dark">GMJ Dark / NOC Dark</option>
+                  <option value="operator">Operator</option>
                 </select>
                 <div id="appearanceThemeStatus" class="subtle mt-2">Segue a preferência do sistema.</div>
               </div>
@@ -7316,7 +8053,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="flow-search-grid mb-3">
               <div class="field"><label for="cgnatSourceType">Fabricante/formato</label><select id="cgnatSourceType" class="form-select form-select-sm"><option value="auto">Detectar automaticamente</option><option value="mikrotik_netmap">MikroTik RouterOS NETMAP</option><option value="expanded_mapping_table">Tabela expandida IP público / portas / IP privado</option><option value="a10">A10</option><option value="generic">Genérico</option><option value="ai">Interpretar com IA local</option></select></div>
               <div class="field"><label for="cgnatDeviceName">Equipamento</label><input id="cgnatDeviceName" class="form-control form-control-sm" placeholder="A10-CGNAT-01"></div>
-              <div class="field"><label for="cgnatPoolName">Pool</label><input id="cgnatPoolName" class="form-control form-control-sm" placeholder="POOL-OUTSIDE"></div>
+              <div class="field"><label for="cgnatImportPoolName">Pool</label><input id="cgnatImportPoolName" class="form-control form-control-sm" placeholder="POOL-OUTSIDE"></div>
               <div class="field"><label for="cgnatConnector">Conector</label><select id="cgnatConnector" class="form-select form-select-sm"><option value="">Sem vínculo</option></select></div>
               <div class="field"><label for="cgnatValidFrom">Válido desde</label><input id="cgnatValidFrom" type="datetime-local" class="form-control form-control-sm"></div>
               <div class="field"><label for="cgnatValidUntil">Válido até</label><input id="cgnatValidUntil" type="datetime-local" class="form-control form-control-sm"></div>
@@ -7662,6 +8399,101 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <section class="panel p-3"><div class="d-flex justify-content-between align-items-center mb-2"><div class="panel-title">Sessões</div><button id="revokeMySessionsButton" type="button" class="btn btn-sm btn-outline-danger">Revogar todas</button></div><div id="accountSessions" class="subtle">Carregando...</div></section>
             </div>
           </div>
+        </section>
+
+        <section id="view-interfaces" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Interfaces</h1>
+              <div class="subtle">Inventário SNMP das interfaces monitoradas</div>
+            </div>
+            <div class="toolbar">
+              <select id="interfacesSensor" class="form-select form-select-sm" aria-label="Sensor">
+                <option value="">Todos os sensores</option>
+              </select>
+              <button id="refreshInterfacesButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+          <div class="panel p-3">
+            <div id="interfacesViewStatus" class="subtle mb-2"></div>
+            <div class="table-wrap">
+              <table class="top-interfaces">
+                <thead>
+                  <tr><th>Status</th><th>Interface</th><th>Sensor</th><th>Descrição</th><th>Capacidade</th><th>Utilização</th><th>RX</th><th>TX</th></tr>
+                </thead>
+                <tbody id="interfacesViewTable">
+                  <tr><td colspan="8" class="text-muted">Carregando…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-alerts" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Alertas</h1>
+              <div id="alertsViewStatus" class="subtle">Visão operacional consolidada de anomalias e eventos que exigem atenção.</div>
+            </div>
+            <div class="toolbar">
+              <button id="alertsRefreshButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-3 mb-3">
+            <div class="alerts-filter-grid">
+              <div class="field"><label for="alertsStatusFilter">Status</label>
+                <select id="alertsStatusFilter" class="form-select form-select-sm">
+                  <option value="active" selected>Ativos e reconhecidos</option>
+                  <option value="acknowledged">Somente reconhecidos</option>
+                  <option value="all">Todos</option>
+                </select>
+              </div>
+              <div class="field"><label for="alertsSeverityFilter">Severidade</label>
+                <select id="alertsSeverityFilter" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="critical">Critical</option>
+                  <option value="warning">Warning</option>
+                  <option value="info">Info</option>
+                </select>
+              </div>
+              <div class="field"><label for="alertsSourceFilter">Fonte</label>
+                <select id="alertsSourceFilter" class="form-select form-select-sm">
+                  <option value="">Todas</option>
+                  <option value="anomaly">Anomalias</option>
+                  <option value="bgp">BGP</option>
+                  <option value="mitigation">Mitigação</option>
+                  <option value="collector">Coletores</option>
+                </select>
+              </div>
+              <div class="field"><label for="alertsSensorFilter">Sensor/Fonte</label>
+                <select id="alertsSensorFilter" class="form-select form-select-sm">
+                  <option value="">Todos</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel p-0">
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0 alerts-table">
+                <thead>
+                  <tr>
+                    <th>Severidade</th><th>Status</th><th>Alerta/Anomalia</th><th>Alvo/Entidade</th>
+                    <th>Sensor/Fonte</th><th>Primeira ocorrência</th><th>Última ocorrência</th>
+                    <th class="text-end">Eventos</th><th>Ação</th>
+                  </tr>
+                </thead>
+                <tbody id="alertsTable">
+                  <tr><td colspan="9" class="text-muted">Carregando alertas…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section id="view-placeholder" class="app-view">
@@ -8205,11 +9037,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <table class="table table-sm align-middle mb-0 flow-table">
                   <thead>
                     <tr>
-                      <th>Tempo</th>
-                      <th>Src IP</th>
-                      <th>Dst IP</th>
-                      <th class="text-end">Src porta</th>
-                      <th class="text-end">Dst porta</th>
+                      <th>Conversa</th>
                       <th>Proto</th>
                       <th class="text-end">Bytes</th>
                       <th class="text-end">Pacotes</th>
@@ -9951,7 +10779,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     const API_BASE = '';
     const AUTH_TOKEN_KEY = 'gmjFlowAuthToken';
     const APPEARANCE_THEME_KEY = 'gmjFlowAppearanceTheme';
-    const APPEARANCE_THEMES = ['auto', 'light', 'dark', 'noc-dark'];
+    const APPEARANCE_THEMES = ['auto', 'light', 'dark', 'noc-dark', 'operator'];
     let currentAuthUser = null;
     let accessUsers = [];
     let accessRoles = [];
@@ -10054,6 +10882,11 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       document.querySelectorAll('.database-cleanup-button').forEach(element => {
         element.classList.toggle('auth-hidden', !hasPermission('settings.manage'));
       });
+      document.querySelectorAll('.nav-group').forEach(group => {
+        const visible = Array.from(group.querySelectorAll('[data-nav-view]'))
+          .some(button => !button.classList.contains('auth-hidden'));
+        group.classList.toggle('auth-hidden', !visible);
+      });
     }
 
     function resolvedAppearanceTheme(preference) {
@@ -10118,7 +10951,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         auto: `Automático · ${resolved === 'dark' ? 'Escuro' : 'Claro'} pelo sistema`,
         light: 'Tema claro ativo',
         dark: 'Tema escuro ativo',
-        'noc-dark': 'GMJ Dark / NOC Dark ativo'
+        'noc-dark': 'GMJ Dark / NOC Dark ativo',
+        operator: 'Operator ativo'
       };
       setText('appearanceThemeStatus', labels[selected]);
       globalGeoFlowMap?.setTheme(resolved);
@@ -18881,13 +19715,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function renderOpsSummary(summary) {
-      renderAnomalyBadge({
+      const anomalySummary = {
         active_count: summary.active_anomalies ?? summary.active_count ?? summary.active_total ?? 0,
         active_total: summary.active_total ?? summary.active_anomalies ?? summary.active_count ?? 0,
         active_critical: summary.active_critical ?? summary.critical_count ?? 0,
         active_warning: summary.active_warning ?? summary.warning_count ?? 0
-      });
+      };
+      renderAnomalyBadge(anomalySummary);
       renderMitigationBadge(summary);
+      // O AlertStrip compartilha a mesma fonte do badge da sidebar (sem requisicao extra).
+      renderAlertStrip(anomalySummary);
     }
 
     function requestOpsSummary() {
@@ -20109,7 +20946,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Classificação', event.classification || 'attack'],
         ['Confiança determinística', event.confidence_label || 'high']
       ] : [];
-      const cgnatBadge = effectiveAddressingMode === 'direct_public'
+      const cgnatAttributionStatus = event.cgnat_attribution_status || '';
+      const cgnatContributors = Array.isArray(event.cgnat_contributors) ? event.cgnat_contributors : [];
+      const cgnatBadge = cgnatAttributionStatus === 'not_applicable'
+        ? '<span class="badge-soft ok">Cliente com IPv4 público direto</span>'
+        : cgnatAttributionStatus === 'multiple'
+        ? `<span class="badge-soft warn">Múltiplos clientes CGNAT (${cgnatContributors.length})</span>`
+        : cgnatAttributionStatus === 'ambiguous'
+        ? '<span class="badge-soft warn">Mapeamento CGNAT ambíguo</span>'
+        : cgnatAttributionStatus === 'identified'
+        ? '<span class="badge-soft ok">Cliente CGNAT identificado</span>'
+        : cgnatAttributionStatus === 'insufficient_evidence'
+        ? '<span class="badge-soft off">Evidência insuficiente para atribuição CGNAT</span>'
+        : effectiveAddressingMode === 'direct_public'
         ? '<span class="badge-soft ok">Cliente com IPv4 público direto</span>'
         : event.cgnat_ambiguous || subscriberAddressing.ambiguity
         ? '<span class="badge-soft warn">Mapeamento CGNAT ambíguo</span>'
@@ -20124,7 +20973,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['CGNAT aplicável', subscriberAddressing.cgnat_lookup_required === true ? 'sim' : effectiveAddressingMode === 'direct_public' ? 'não' : '-'],
         ['Motivo da classificação', subscriberAddressing.reason || '-'],
         ['Origem dentro da zona', subscriberAddressing.source_in_protected_zone === true ? 'sim' : subscriberAddressing.source_in_protected_zone === false ? 'não' : '-'],
-        ['Identidade do cliente', effectiveAddressingMode === 'direct_public'
+        ['Identidade do cliente', cgnatAttributionStatus === 'multiple'
+          ? `Múltiplos clientes CGNAT (${cgnatContributors.length})`
+          : effectiveAddressingMode === 'direct_public'
           ? `IPv4 público ${subscriberAddressing.source_ip || event.public_ip || '-'}`
           : [event.private_ip, event.subscriber_id, event.subscriber_name].filter(Boolean).join(' / ') || '-'],
         ['Gate CGNAT', event.cgnat_gate || autoMitigationDetails.cgnat_gate || subscriberAddressing.cgnat_gate || '-'],
@@ -20134,7 +20985,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const cgnatFields = event.cgnat_lookup_performed ? [
         ['IP público CGNAT', event.public_ip || '-'],
         ['Porta pública observada', event.public_port ?? '-'],
-        ['Cliente CGNAT/private_ip', event.private_ip || '-'],
+        ['Cliente CGNAT/private_ip', cgnatAttributionStatus === 'multiple' ? 'múltiplos' : (event.private_ip || '-')],
         ['Faixa atribuída', event.mapped_port_start !== null && event.mapped_port_start !== undefined ? `${event.mapped_port_start}-${event.mapped_port_end}` : '-'],
         ['Equipamento CGNAT', event.cgnat_device_name || '-'],
         ['Pool CGNAT', event.cgnat_pool_name || '-'],
@@ -20148,6 +20999,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Participação da conversa', event.cgnat_conversation_share !== null && event.cgnat_conversation_share !== undefined ? `${(Number(event.cgnat_conversation_share) * 100).toFixed(1)}%` : '-'],
         ['Bloqueio CGNAT', event.cgnat_mitigation_block_reason || '-']
       ] : [];
+      const cgnatContributorsFields = cgnatContributors.length > 1 ? [[
+        'Clientes CGNAT contribuintes',
+        '<ul class="mb-0 ps-3">' + cgnatContributors.map(contributor => (
+          `<li>${escapeHtml(contributor.private_ip || '-')} · porta(s) ${(contributor.observed_public_ports && contributor.observed_public_ports.length ? contributor.observed_public_ports.join(', ') : (contributor.public_port ?? '-'))} · ${formatNumber(contributor.packets)} pacotes · ${((Number(contributor.share) || 0) * 100).toFixed(1)}%</li>`
+        )).join('') + '</ul>'
+      ]] : [];
       const cgnatPoolFields = event.is_cgnat ? [
         ['CGNAT', 'Sim'],
         ['Pool CGNAT', event.cgnat_pool || '-'],
@@ -20161,91 +21018,165 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ['Tamanho do pool', `${formatNumber(event.target_context.pool_size || 0)} IPs`],
         ['Destinos únicos atingidos', `${formatNumber(event.target_context.unique_targets_reached || 0)} / ${formatNumber(event.target_context.pool_size || 0)} — ${((event.target_context.cgnat_pool_coverage || 0) * 100).toFixed(1)}% do pool`]
       ] : [];
-      const fields = [
-        ['Nome', anomalyTypeLabel(event)],
-        ['Severidade disparada', triggeredSeverity],
-        ...dnsSingleFlowFields,
+      const isSemanticEmpty = value =>
+        value === null ||
+        value === undefined ||
+        (typeof value === 'string' && value.trim() === '') ||
+        (typeof value === 'string' && value.trim() === '-') ||
+        (Array.isArray(value) && value.length === 0);
+
+      const renderSection = (title, items, collapsed = false) => {
+        const chips = items
+          .filter(([, value]) => !isSemanticEmpty(value))
+          .map(([label, value]) => `
+            <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
+          `).join('');
+        if (!chips) return '';
+        const body = `<div class="d-flex flex-wrap gap-2">${chips}</div>`;
+        if (collapsed) {
+          return `<details class="ux-collapsible"><summary class="ux-section-title">${escapeHtml(title)}</summary>${body}</details>`;
+        }
+        return `<div class="ux-section"><div class="ux-section-title">${escapeHtml(title)}</div>${body}</div>`;
+      };
+
+      const triggeredAtText = formatDateTime(event.triggered_at || detection.triggered_at);
+      const durationText = anomalyDuration(event);
+      const situationFields = isDnsSingleFlowOutbound(event)
+        ? [['Nome', anomalyTypeLabel(event)], ...dnsSingleFlowFields]
+        : [
+            ['Nome', anomalyTypeLabel(event)],
+            ['Alvo', target],
+            ['Direção', formatAnomalyDirectionLabel(event.direction)],
+            ['Protocolo', (event.protocol || event.decoder || '').toUpperCase() || null],
+            ['Horário', triggeredAtText],
+            ['Duração', durationText],
+            ['Valor que disparou', formatOptionalMetricValue(triggerValue, event.metric_unit)],
+          ];
+
+      const subscriberIdentity = cgnatAttributionStatus === 'multiple'
+        ? `Múltiplos clientes CGNAT (${cgnatContributors.length})`
+        : effectiveAddressingMode === 'direct_public'
+          ? `IPv4 público ${subscriberAddressing.source_ip || event.public_ip || '-'}`
+          : [event.private_ip, event.subscriber_id, event.subscriber_name].filter(Boolean).join(' / ') || null;
+      const involvedFields = [
+        ['Origem / assinante', subscriberIdentity],
+        ['IP de origem', event.top_src_ip || subscriberAddressing.source_ip || null],
+        ['Destino / alvo', target],
+        ['Protocolo', (event.protocol || event.decoder || '').toUpperCase() || null],
+        ['Porta de destino', event.target_port || event.top_dst_port || null],
+        ...cgnatContributorsFields,
+      ];
+
+      const addressingContextFields = [
         ...subscriberAddressingFields,
         ...cgnatFields,
         ...cgnatPoolFields,
         ...targetContextFields,
-        ['Origem', anomalySourceLabel(event.anomaly_source)],
-        ['Engine', event.source_engine || '-'],
-        ['Fonte', anomalySourceSummary(event)],
-        ['Regra tecnica', event.technical_rule || sourceDetails.rule_name || event.source_name || '-'],
-        ['Vetor tecnico', event.technical_vector || event.vector_name || event.attack_vector_name || '-'],
-        ['Template', sourceDetails.template_name || sourceDetails.template_id || '-'],
-        ['Peak Analysis ID', sourceDetails.peak_analysis_id || '-'],
-        ['Job/Run', [sourceDetails.job_id ? `job #${sourceDetails.job_id}` : '', sourceDetails.run_id ? `run #${sourceDetails.run_id}` : ''].filter(Boolean).join(' / ') || '-'],
-        ['Alvo', target],
-        ['Porta alvo', event.target_port || '-'],
-        ['Origens unicas', event.unique_src_ips || '-'],
-        ['Destinos unicos', event.unique_dst_ips || '-'],
-        ['Portas destino unicas', event.unique_dst_ports || '-'],
+        ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : null)],
         ['Escopo', scope],
-        ['Direção', formatAnomalyDirectionLabel(event.direction)],
-        ['Input if', event.input_if || '-'],
-        ['Output if', event.output_if || event.interface_if_index || '-'],
-        ['Zona', event.zone_name || (event.zone_id ? `#${event.zone_id}` : '-')],
-        ['Decoder', event.decoder || '-'],
-        ['Protocolo', event.protocol || event.decoder || '-'],
-        ['Métrica canônica', event.canonical_unit || detection.canonical_unit || (event.metric_unit ? unitLabel(event.metric_unit) : '-')],
-        ['Valor que disparou', formatOptionalMetricValue(triggerValue, event.metric_unit)],
+      ];
+
+      const evidenceFields = [
+        ['Flows', event.flow_count === null || event.flow_count === undefined ? null : formatNumber(event.flow_count)],
+        ['Top flow', topFlowText],
+        ['Resumo completo', event.summary || null],
+        ['Métrica canônica', event.canonical_unit || detection.canonical_unit || (event.metric_unit ? unitLabel(event.metric_unit) : null)],
+        ['Evidência temporal', (temporalEvidence.points_count || temporalEvidence.duration_seconds)
+          ? `${temporalEvidence.points_count ?? detail.timeseries_points ?? 0} ponto(s), ${temporalEvidence.duration_seconds ?? event.evidence_duration_seconds ?? 0}s${temporalEvidence.sufficient_for_automatic === false ? ' / insuficiente para automático' : temporalEvidence.sufficient_for_automatic === true ? ' / suficiente' : ''}`
+          : null],
+      ];
+
+      const decisionStateLabel = mitigationState.label;
+      const decisionStateBadge = mitigationState.badge;
+      const decisionReason = autoMitigationDetails.deterministic_authorization_reason
+        || event.auto_mitigation_reason
+        || event.mitigation_reason
+        || '';
+      const decisionSecondaryFields = [
+        ['Base mitigação', mitigationBasis],
+        ['Gates determinísticos', Array.isArray(autoMitigationDetails.deterministic_gate_reasons) ? autoMitigationDetails.deterministic_gate_reasons.join(' | ') : null],
+        ['Whitelist consultada', autoMitigationDetails.whitelist_consulted === true ? 'sim' : autoMitigationDetails.whitelist_consulted === false ? 'não' : null],
+        ['Resultado da whitelist', autoMitigationDetails.whitelist_result || null],
+        ['Modo da análise', autoMitigationDetails.analysis_mode || null],
+        ['Decisao IA', autoMitigationDetails.ai_decision_status || null],
+        ['Motivo IA', autoMitigationDetails.ai_decision_reason || null],
+      ];
+      const decisionLead = `
+        <div class="ux-decision">
+          <div class="ux-decision-title">Mitigação automática</div>
+          <div class="ux-decision-state"><span class="badge-soft ${decisionStateBadge}">${escapeHtml(decisionStateLabel)}</span></div>
+          ${decisionReason ? `<div class="ux-decision-reason"><span class="ux-decision-reason-label">Motivo</span>${escapeHtml(decisionReason)}</div>` : ''}
+        </div>`;
+      const decisionSection = `
+        <div class="ux-section">
+          <div class="ux-section-title">Decisão</div>
+          ${decisionLead}
+          ${renderSection('Gates, whitelist e IA', decisionSecondaryFields, true)}
+        </div>`;
+
+      const executionFields = [
+        ['Escopo automático', autoMitigationDetails.mitigation_scope || null],
+        ['Destino bloqueado', autoMitigationDetails.blocked_destination_ip || null],
+        ['TTL da mitigação', autoMitigationDetails.ttl_seconds ? `${autoMitigationDetails.ttl_seconds}s (${autoMitigationDetails.ttl_minutes} min)` : null],
+        ['Cliente privado responsável', autoMitigationDetails.private_ip || event.private_ip || null],
+        ['Porta pública CGNAT', autoMitigationDetails.public_port || event.public_port || null],
+        ['Faixa Fixed NAT', autoMitigationDetails.fixed_nat_port_start ? `${autoMitigationDetails.fixed_nat_port_start}-${autoMitigationDetails.fixed_nat_port_end}` : null],
+        ['Candidatos gerados', autoMitigationDetails.candidate_count ?? null],
+        ['Candidato seguro', autoMitigationDetails.safe_candidate_generated === true ? 'sim' : autoMitigationDetails.safe_candidate_generated === false ? 'não' : null],
+        ['Papéis rejeitados', Array.isArray(autoMitigationDetails.rejected_candidate_roles) ? autoMitigationDetails.rejected_candidate_roles.join(', ') : null],
+        ['Resolucao conector', autoMitigationDetails.resolution_source || autoMitigationDetails.connector_resolution_method || null],
+        ['Conector resolvido', autoMitigationDetails.connector_name || (autoMitigationDetails.connector_id ? `#${autoMitigationDetails.connector_id}` : null)],
+        ['FIFO', autoMitigationDetails.pipe_path || null],
+        ['Prontidao', autoMitigationDetails.readiness?.ready === true ? 'ready' : autoMitigationDetails.readiness?.ready === false ? `nao pronto (${autoMitigationDetails.readiness.reason || '-'})` : null],
+        ['Versao candidato', autoMitigationDetails.candidate_version || null],
+      ];
+      const confirmationFields = [
+        ['Anúncio criado', autoMitigationDetails.announcement_created === true ? 'sim' : autoMitigationDetails.announcement_created === false ? 'não' : null],
+        ['Anúncio pendente', autoMitigationDetails.announcement_pending === true ? 'sim' : autoMitigationDetails.announcement_pending === false ? 'não' : null],
+        ['Erro resolucao', autoMitigationDetails.resolution_error || null],
+      ];
+      const technicalFields = [
+        ['Engine', event.source_engine || null],
+        ['Fonte', anomalySourceSummary(event)],
+        ['Fonte da detecção', anomalySourceLabel(event.anomaly_source)],
+        ['Regra tecnica', event.technical_rule || sourceDetails.rule_name || event.source_name || null],
+        ['Vetor tecnico', event.technical_vector || event.vector_name || event.attack_vector_name || null],
+        ['Template', sourceDetails.template_name || sourceDetails.template_id || null],
+        ['Peak Analysis ID', sourceDetails.peak_analysis_id || null],
+        ['Job/Run', [sourceDetails.job_id ? `job #${sourceDetails.job_id}` : '', sourceDetails.run_id ? `run #${sourceDetails.run_id}` : ''].filter(Boolean).join(' / ') || null],
+        ['Input if', event.input_if || null],
+        ['Output if', event.output_if || event.interface_if_index || null],
         ['Threshold warning', formatOptionalMetricValue(warningThreshold, event.metric_unit)],
         ['Threshold critical', formatOptionalMetricValue(criticalThreshold, event.metric_unit)],
         ['Threshold automático', formatOptionalMetricValue(automaticThreshold, event.metric_unit)],
         ['Threshold do gatilho', formatOptionalMetricValue(triggerThreshold, event.metric_unit)],
         ['Threshold efetivo na detecção', formatOptionalMetricValue(event.effective_threshold_at_detection ?? detection.effective_threshold_at_detection, event.metric_unit)],
-        ['Fonte threshold', event.threshold_source || detection.threshold_source || '-'],
-        ['Versão threshold', event.threshold_version || detection.threshold_version || '-'],
+        ['Fonte threshold', event.threshold_source || detection.threshold_source || null],
+        ['Versão threshold', event.threshold_version || detection.threshold_version || null],
         ['Disparado em', formatDateTime(event.triggered_at || detection.triggered_at)],
-        ['Condição do gatilho', triggerCondition.metric ? `${triggerCondition.metric} ${triggerCondition.comparison || 'over'} ${triggerCondition.threshold}` : '-'],
-        ['Condições adicionais', conditionsText || '-'],
-        ['Flows', formatNumber(event.flow_count || 0)],
-        ['Serie', detail.timeseries_scope === 'specific_conversation' ? 'conversa especifica' : detail.timeseries_scope === 'target_total' ? 'total do alvo' : detail.timeseries_source || '-'],
-        ['Pontos serie', detail.timeseries_points ? `${detail.timeseries_points}${detail.timeseries_warning ? ` / ${detail.timeseries_warning}` : ''}` : '-'],
-        ['Evidência temporal', `${temporalEvidence.points_count ?? detail.timeseries_points ?? 0} ponto(s), ${temporalEvidence.duration_seconds ?? event.evidence_duration_seconds ?? 0}s${temporalEvidence.sufficient_for_automatic === false ? ' / insuficiente para automático' : temporalEvidence.sufficient_for_automatic === true ? ' / suficiente' : ''}`],
-        ['Modo serie', detail.timeseries_query_mode || '-'],
-        ['Base mitigação', mitigationBasis],
-        ['Top flow', topFlowText],
-        ['Resumo completo', event.summary || '-'],
-        ['Motivo', event.mitigation_reason || '-'],
-        ['Estado da mitigação', mitigationState.label],
-        ['Mitigacao automatica', event.auto_mitigation_status || '-'],
-        ['Motivo nao aplicada', event.auto_mitigation_reason || '-'],
-        ['Gates determinísticos', Array.isArray(autoMitigationDetails.deterministic_gate_reasons) ? autoMitigationDetails.deterministic_gate_reasons.join(' | ') : '-'],
-        ['Whitelist consultada', autoMitigationDetails.whitelist_consulted === true ? 'sim' : autoMitigationDetails.whitelist_consulted === false ? 'não' : '-'],
-        ['Resultado da whitelist', autoMitigationDetails.whitelist_result || '-'],
-        ['Escopo automático', autoMitigationDetails.mitigation_scope || '-'],
-        ['Destino bloqueado', autoMitigationDetails.blocked_destination_ip || '-'],
-        ['TTL da mitigação', autoMitigationDetails.ttl_seconds ? `${autoMitigationDetails.ttl_seconds}s (${autoMitigationDetails.ttl_minutes} min)` : '-'],
-        ['Cliente privado responsável', autoMitigationDetails.private_ip || event.private_ip || '-'],
-        ['Porta pública CGNAT', autoMitigationDetails.public_port || event.public_port || '-'],
-        ['Faixa Fixed NAT', autoMitigationDetails.fixed_nat_port_start ? `${autoMitigationDetails.fixed_nat_port_start}-${autoMitigationDetails.fixed_nat_port_end}` : '-'],
-        ['Motivo determinístico', autoMitigationDetails.deterministic_authorization_reason || '-'],
-        ['Modo da análise', autoMitigationDetails.analysis_mode || '-'],
-        ['Candidatos gerados', autoMitigationDetails.candidate_count ?? '-'],
-        ['Candidato seguro', autoMitigationDetails.safe_candidate_generated === true ? 'sim' : autoMitigationDetails.safe_candidate_generated === false ? 'não' : '-'],
-        ['Papéis rejeitados', Array.isArray(autoMitigationDetails.rejected_candidate_roles) ? autoMitigationDetails.rejected_candidate_roles.join(', ') : '-'],
-        ['Anúncio criado', autoMitigationDetails.announcement_created === true ? 'sim' : autoMitigationDetails.announcement_created === false ? 'não' : '-'],
-        ['Anúncio pendente', autoMitigationDetails.announcement_pending === true ? 'sim' : autoMitigationDetails.announcement_pending === false ? 'não' : '-'],
-        ['Resolucao conector', autoMitigationDetails.resolution_source || autoMitigationDetails.connector_resolution_method || '-'],
-        ['Erro resolucao', autoMitigationDetails.resolution_error || '-'],
-        ['Conector resolvido', autoMitigationDetails.connector_name || (autoMitigationDetails.connector_id ? `#${autoMitigationDetails.connector_id}` : '-')],
-        ['FIFO', autoMitigationDetails.pipe_path || '-'],
-        ['Prontidao', autoMitigationDetails.readiness?.ready === true ? 'ready' : autoMitigationDetails.readiness?.ready === false ? `nao pronto (${autoMitigationDetails.readiness.reason || '-'})` : '-'],
-        ['Versao candidato', autoMitigationDetails.candidate_version || '-'],
-        ['Decisao IA', autoMitigationDetails.ai_decision_status || '-'],
-        ['Motivo IA', autoMitigationDetails.ai_decision_reason || '-']
+        ['Condição do gatilho', triggerCondition.metric ? `${triggerCondition.metric} ${triggerCondition.comparison || 'over'} ${triggerCondition.threshold}` : null],
+        ['Condições adicionais', conditionsText || null],
+        ['Serie', detail.timeseries_scope === 'specific_conversation' ? 'conversa especifica' : detail.timeseries_scope === 'target_total' ? 'total do alvo' : detail.timeseries_source || null],
+        ['Pontos serie', detail.timeseries_points ? `${detail.timeseries_points}${detail.timeseries_warning ? ` / ${detail.timeseries_warning}` : ''}` : null],
+        ['Modo serie', detail.timeseries_query_mode || null],
       ];
-      if (event.invalid_scope) fields.push(['Validação', 'invalid_scope']);
+      if (event.invalid_scope) technicalFields.push(['Validação', 'invalid_scope']);
       const legacyDnsWarning = isLegacyDnsAnomaly(event)
         ? '<div class="text-warning mb-2">Detector legacy: mitigação automática desativada. Use templates de detecção.</div>'
         : '';
-      return `${legacyDnsWarning}<div class="mb-2">${cgnatBadge}</div><div class="d-flex flex-wrap gap-2">${fields.map(([label, value]) => `
-        <div class="metric-chip"><span>${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>
-      `).join('')}</div>`;
+      return `${legacyDnsWarning}
+        <div class="mb-2">${cgnatBadge}</div>
+        ${renderSection('Situação', situationFields)}
+        ${renderSection('Envolvidos', involvedFields)}
+        ${renderSection('Contexto de endereçamento / CGNAT', addressingContextFields, true)}
+        ${renderSection('Evidência', evidenceFields)}
+        ${decisionSection}
+        ${renderSection('Execução', executionFields)}
+        ${renderSection('Confirmação', confirmationFields)}
+        ${renderSection('Detalhes técnicos', technicalFields, true)}
+      `;
     }
+
 
     function normalizedAnomalyMetricPoints(points, event) {
       const unit = event.metric_unit || 'bits_s';
@@ -20360,13 +21291,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         detailStatus.textContent = event.status || '-';
         detailStatus.className = `badge-soft ${anomalyStatusBadgeClass(event.status)}`;
         setText('anomalyDetailPeak', formatMetricValue(event.peak_value, event.metric_unit));
-        const legacyThresholdText = formatMetricValue(event.threshold_value, event.metric_unit);
-        setText(
-          'anomalyDetailThreshold',
-          event.trigger_threshold === null || event.trigger_threshold === undefined
-            ? legacyThresholdText
-            : formatOptionalMetricValue(event.trigger_threshold, event.metric_unit)
-        );
+        const detailSourceDetails = event.source_details_json || event.source_details || {};
+        const detailDetection = detailSourceDetails.detection && typeof detailSourceDetails.detection === 'object' ? detailSourceDetails.detection : {};
+        const cardTriggerThreshold = event.trigger_threshold ?? detailDetection.trigger_threshold ?? event.threshold_value;
+        setText('anomalyDetailThreshold', formatOptionalMetricValue(cardTriggerThreshold, event.metric_unit));
         setText('anomalyDetailTotal', formatBytes(event.estimated_bytes));
         const conversations = Array.isArray(detail.top_conversations) ? detail.top_conversations : [];
         document.getElementById('anomalyConversationTable').innerHTML = conversations.map(conversation => {
@@ -20383,19 +21311,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const flows = Array.isArray(detail.related_flows) && detail.related_flows.length ? detail.related_flows : evidenceFlows.length ? evidenceFlows : Array.isArray(detail.flows) ? detail.flows : [];
         document.getElementById('anomalyFlowTable').innerHTML = flows.map(relatedFlow => {
           const flow = relatedFlow || {};
+          const secondaryParts = [];
+          if (flow.flow_time) secondaryParts.push(formatDateTime(flow.flow_time));
+          if (flow.src_port || flow.dst_port) secondaryParts.push(`porta ${flow.src_port ?? '-'} → ${flow.dst_port ?? '-'}`);
+          const secondaryLine = secondaryParts.join(' · ');
           return `
           <tr>
-            <td>${formatDateTime(flow.flow_time)}</td>
-            <td>${escapeHtml(flow.src_ip || '-')}</td>
-            <td>${escapeHtml(flow.dst_ip || '-')}</td>
-            <td class="text-end">${formatNumber(flow.src_port)}</td>
-            <td class="text-end">${formatNumber(flow.dst_port)}</td>
+            <td>
+              <div class="flow-conversation">${escapeHtml(flow.src_ip || '-')} <span class="flow-arrow">→</span> ${escapeHtml(flow.dst_ip || '-')}</div>
+              ${secondaryLine ? `<div class="subtle flow-secondary">${escapeHtml(secondaryLine)}</div>` : ''}
+            </td>
             <td>${escapeHtml(flow.proto_name || flow.proto || '-')}</td>
             <td class="text-end">${formatBytes(flow.bytes)}</td>
             <td class="text-end">${formatNumber(flow.packets)}</td>
           </tr>
         `;
-        }).join('') || '<tr><td colspan="8" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
+        }).join('') || '<tr><td colspan="4" class="text-muted">Nenhum flow relacionado encontrado para o filtro desta anomalia.</td></tr>';
         const rawPoints = Array.isArray(detail.timeseries) ? detail.timeseries : detail.metric_points;
         const points = normalizedAnomalyMetricPoints(rawPoints, event);
         document.getElementById('anomalyMetricChartWarning').textContent = detail.timeseries_warning === 'only_one_point' || points.length === 1
@@ -20582,7 +21513,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       items.forEach((item, index) => {
         const direction = item.direction || ((item.name || '').toLowerCase().includes('upload') ? 'upload' : 'download');
         const valueSign = direction === 'upload' ? -1 : 1;
-        const color = item.color || protocolPalette[item.group] || palette[index % palette.length];
+        const aggregateDirectionColor = items.length <= 2
+          ? (direction === 'upload' ? semanticColor('--chart-tx', '') : semanticColor('--chart-rx', ''))
+          : '';
+        const color = aggregateDirectionColor || item.color || protocolPalette[item.group] || palette[index % palette.length];
         const data = (item.points || []).map(point => {
           const value = Number(point.value) || 0;
           maxMagnitude = Math.max(maxMagnitude, value);
@@ -24737,12 +25671,42 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function setLegacyTopRankingsFallbackVisible(visible) {
+      // Fase 5: a grade legada de top-rankings foi substituída pela faixa compacta
+      // de analytics secundário. Ela permanece no DOM apenas para migração/tests,
+      // mas não é mais exibida — o parâmetro `visible` agora controla o chrome.
       const fallback = document.querySelector(
         '[data-dashboard-legacy-fallback="top-rankings"]'
       );
-      if (!fallback) return;
-      fallback.hidden = !visible;
-      fallback.setAttribute('aria-hidden', String(!visible));
+      if (fallback) {
+        fallback.hidden = true;
+        fallback.setAttribute('aria-hidden', 'true');
+      }
+      document.querySelectorAll('.dashboard-overview-chrome').forEach(element => {
+        element.hidden = !visible;
+        element.setAttribute('aria-hidden', String(!visible));
+      });
+    }
+
+    let dashboardOverviewOperational = false;
+
+    function applyOverviewComposition(operational) {
+      // Regra de produto da fase de fechamento: o dashboard padrao (`is_default`, metadado real
+      // da API /api/dashboards) e o Overview operacional; dashboards personalizados continuam
+      // sendo a fonte de verdade da configuracao do usuario.
+      dashboardOverviewOperational = Boolean(operational);
+      const view = document.getElementById('view-dashboard');
+      if (view) {
+        view.classList.toggle('dashboard-operational', dashboardOverviewOperational);
+        view.classList.toggle('dashboard-custom', !dashboardOverviewOperational);
+      }
+      setLegacyTopRankingsFallbackVisible(dashboardOverviewOperational);
+    }
+
+    function resetOverviewComposition() {
+      dashboardOverviewOperational = false;
+      const view = document.getElementById('view-dashboard');
+      if (view) view.classList.remove('dashboard-operational', 'dashboard-custom');
+      setLegacyTopRankingsFallbackVisible(true);
     }
 
     async function loadConfigurableDashboard(dashboardId) {
@@ -24818,10 +25782,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       syncConfigurablePrefixControls();
       try {
         renderConfigurableDashboard();
-        setLegacyTopRankingsFallbackVisible(false);
+        applyOverviewComposition(Boolean(dashboard.is_default));
+        if (dashboardOverviewOperational) refresh().finally(scheduleDashboardRefresh).catch(console.error);
       } catch (error) {
         configurableDashboardActive = false;
-        setLegacyTopRankingsFallbackVisible(true);
+        resetOverviewComposition();
         document.getElementById('view-dashboard').classList.remove('dashboard-engine-active');
         console.error('Falha ao renderizar dashboard configurável; usando layout legado.', error);
         throw error;
@@ -24848,7 +25813,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         await loadConfigurableDashboard(dashboardId);
       } catch (error) {
         configurableDashboardActive = false;
-        setLegacyTopRankingsFallbackVisible(true);
+        resetOverviewComposition();
         document.getElementById('view-dashboard').classList.remove('dashboard-engine-active');
         console.error('Motor de dashboards configuráveis indisponível; usando layout legado.', error);
       }
@@ -25768,6 +26733,793 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       return payload?.__error ? 'Erro ao carregar widget' : '';
     }
 
+    function topInterfacesQuery() {
+      const query = new URLSearchParams(dashboardParams({ includeSensorId: true, includeInterfaceId: false }));
+      query.set('group_by', 'interface');
+      query.set('metric', 'bits_s');
+      query.set('direction', 'both');
+      query.set('limit', '12');
+      return query.toString();
+    }
+
+    function overviewSeriesDirectionPoints(items) {
+      const map = new Map();
+      items.forEach(item => {
+        (item.points || []).forEach(point => {
+          const ts = point.ts;
+          if (ts === null || ts === undefined) return;
+          const direction = (item.direction || '').toLowerCase() === 'upload' ? 'upload' : 'download';
+          let entry = map.get(ts);
+          if (!entry) { entry = { ts, download: 0, upload: 0 }; map.set(ts, entry); }
+          entry[direction] += Number(point.value) || 0;
+        });
+      });
+      return Array.from(map.values()).sort((a, b) => a.ts - b.ts);
+    }
+
+    function overviewSparkColor() {
+      return semanticColor('--accent', '#7A67E8');
+    }
+
+    function renderKpiStrip(name, items, apiMetric) {
+      const formatter = metricFormatter(metricFromApi(apiMetric));
+      const points = overviewSeriesDirectionPoints(items);
+      const latest = points.length ? points[points.length - 1] : { download: 0, upload: 0 };
+      const total = latest.download + latest.upload;
+      const id = name === 'bps' ? 'Traffic' : 'Packets';
+      setText(`kpi${id}Value`, formatter(total));
+      const sub = document.getElementById(`kpi${id}Sub`);
+      if (sub) sub.textContent = `RX ${formatter(latest.download)} · TX ${formatter(latest.upload)}`;
+      const spark = document.getElementById(`kpi${id}Spark`);
+      if (spark) {
+        const series = points.map(point => point.download + point.upload);
+        spark.innerHTML = window.GMJDashboardSparkline
+          ? window.GMJDashboardSparkline.renderSparkline(series, { width: 90, height: 32, color: overviewSparkColor() })
+          : '';
+      }
+    }
+
+    function renderTrafficLegend(items, apiMetric) {
+      const legend = document.getElementById('bpsTrafficLegend');
+      if (!legend) return;
+      const formatter = metricFormatter(metricFromApi(apiMetric));
+      const points = overviewSeriesDirectionPoints(items);
+      const rx = points.map(point => point.download);
+      const tx = points.map(point => point.upload);
+      const average = arr => arr.length ? arr.reduce((sum, value) => sum + value, 0) / arr.length : 0;
+      const rows = [
+        ['RX', rx, semanticColor('--chart-rx', '#7A67E8')],
+        ['TX', tx, semanticColor('--chart-tx', '#5E8CB8')]
+      ];
+      legend.hidden = false;
+      legend.innerHTML = [
+        '<span></span><span class="tl-head">Current</span><span class="tl-head">Avg</span><span class="tl-head">Peak</span>',
+        rows.map(([label, arr, color]) => {
+          const cur = arr.length ? arr[arr.length - 1] : 0;
+          const peak = arr.length ? Math.max.apply(null, arr) : 0;
+          return `<span class="tl-dir"><span class="tl-dot" style="background:${color}"></span>${label}</span>` +
+            `<span class="tl-val">${formatter(cur)}</span>` +
+            `<span class="tl-val">${formatter(average(arr))}</span>` +
+            `<span class="tl-val">${formatter(peak)}</span>`;
+        }).join('')
+      ].join('');
+    }
+
+    function renderAlertStrip(payload) {
+      const strip = document.getElementById('dashboardAlertStrip');
+      if (!strip) return;
+      const total = Number(payload?.active_total ?? payload?.active_count ?? payload?.active_anomalies ?? 0);
+      const critical = Number(payload?.active_critical ?? payload?.critical_count ?? 0);
+      const warning = Number(payload?.active_warning ?? payload?.warning_count ?? 0);
+      if (total <= 0) {
+        strip.hidden = true;
+        strip.innerHTML = '';
+        return;
+      }
+      strip.hidden = false;
+      strip.className = `dashboard-alert-strip ${critical > 0 ? 'has-critical' : 'has-warning'}`;
+      const counts = [];
+      if (critical > 0) counts.push(`<span class="as-crit">${formatNumber(critical)} crítico(s)</span>`);
+      if (warning > 0) counts.push(`<span class="as-warn">${formatNumber(warning)} aviso(s)</span>`);
+      strip.innerHTML = `<span class="alert-strip-counts">${counts.join(' · ')}</span>` +
+        `<span class="alert-strip-summary">${critical > 0 ? 'Atenção: anomalias críticas ativas' : 'Anomalias ativas no período'}</span>`;
+    }
+
+    function interfaceStatusInfo(operStatus) {
+      const value = String(operStatus || '').toLowerCase();
+      if (value === 'up') return { label: 'UP', tone: 'ok' };
+      if (value === 'down') return { label: 'DOWN', tone: 'crit' };
+      return { label: value ? value.toUpperCase() : 'DESCONHECIDO', tone: 'unknown' };
+    }
+
+    function interfaceUtilization(item) {
+      const inBps = Number(item.snmp_in_bps) || 0;
+      const outBps = Number(item.snmp_out_bps) || 0;
+      const speedIn = Number(item.speed_in_bps) || 0;
+      const speedOut = Number(item.speed_out_bps) || 0;
+      if (speedIn > 0 && speedOut > 0) return Math.max(inBps / speedIn, outBps / speedOut) * 100;
+      if (speedIn > 0) return ((inBps + outBps) / speedIn) * 100;
+      return null;
+    }
+
+    function utilizationTone(utilization) {
+      if (utilization === null || utilization === undefined || !Number.isFinite(utilization)) return 'neutral';
+      if (utilization >= 85) return 'critical';
+      if (utilization >= 65) return 'warning';
+      return 'neutral';
+    }
+
+    function sensorNameById(id) {
+      const sensor = (Array.isArray(dashboardSensorCache) ? dashboardSensorCache : []).find(item => Number(item.id) === Number(id));
+      return sensor?.name || '';
+    }
+
+    let allInterfacesCache = [];
+    let allInterfacesCacheAt = 0;
+    let allInterfacesLoading = false;
+    let allInterfacesLoadPromise = null;
+
+    async function loadAllInterfaces(force = false) {
+      const now = Date.now();
+      if (!force && allInterfacesCache.length && now - allInterfacesCacheAt < 20000) return allInterfacesCache;
+      // A varredura SNMP leva segundos por sensor: quem chamar durante uma carga em
+      // andamento espera a mesma varredura (evita renderizar "sem dados" com cache vazio).
+      if (allInterfacesLoading && allInterfacesLoadPromise) return allInterfacesLoadPromise;
+      if (allInterfacesLoading) return allInterfacesCache;
+      allInterfacesLoading = true;
+      allInterfacesLoadPromise = (async () => {
+        const sensors = (Array.isArray(dashboardSensorCache) && dashboardSensorCache.length)
+          ? dashboardSensorCache
+          : ((await apiRequest('/api/dashboard/sensors')).items || []);
+        const results = await Promise.all(sensors.map(async sensor => {
+          try {
+            const payload = await apiRequest(`/api/sensors/${sensor.id}/interfaces`);
+            return (Array.isArray(payload.items) ? payload.items : []).map(item => ({ ...item, sensor_id: Number(item.sensor_id || sensor.id), sensor_name: sensor.name }));
+          } catch (error) {
+            return [];
+          }
+        }));
+        allInterfacesCache = results.flat();
+        allInterfacesCacheAt = Date.now();
+        return allInterfacesCache;
+      })();
+      try {
+        return await allInterfacesLoadPromise;
+      } finally {
+        allInterfacesLoading = false;
+        allInterfacesLoadPromise = null;
+      }
+    }
+
+    function interfaceRowStatus(item) {
+      return interfaceStatusInfo(item.snmp_if_oper_status || item.if_oper_status);
+    }
+
+    function interfaceRowHtml(item, index, includeSensor) {
+      const status = interfaceRowStatus(item);
+      const util = interfaceUtilization(item);
+      const tone = utilizationTone(util);
+      const formatter = metricFormatter(metricFromApi('bits_s'));
+      const rx = Number(item.snmp_in_bps) || 0;
+      const tx = Number(item.snmp_out_bps) || 0;
+      const cap = Number(item.speed_in_bps) || Number(item.speed_out_bps) || 0;
+      const sensor = item.sensor_name || sensorNameById(item.sensor_id);
+      const utilCell = util === null
+        ? '<span class="text-muted">—</span>'
+        : `<span class="${tone === 'critical' ? 'util-critical-text' : tone === 'warning' ? 'util-warning-text' : 'util-neutral'}">${util.toFixed(0)}%</span><span class="util-bar ${tone === 'critical' ? 'util-critical' : tone === 'warning' ? 'util-warning' : ''}"><span style="width:${Math.min(100, Math.max(2, util))}%"></span></span>`;
+      return `<tr class="interfaces-row" tabindex="0" role="button" data-interface-sensor="${escapeHtml(item.sensor_id)}" data-interface-ifindex="${escapeHtml(item.if_index)}" aria-label="Investigar ${escapeHtml(item.name)} em ${escapeHtml(sensor)}">
+        <td><span class="status-dot ${status.tone}" title="${escapeHtml(status.label)}"></span></td>
+        <td class="ti-name">${escapeHtml(item.name)}</td>
+        ${includeSensor ? `<td>${escapeHtml(sensor)}</td>` : ''}
+        <td class="text-muted">${escapeHtml(item.if_descr || item.if_alias || '—')}</td>
+        <td>${cap ? formatMetricValue(cap, 'bits_s') : '—'}</td>
+        <td>${utilCell}</td>
+        <td>${formatter(rx)}</td>
+        <td>${formatter(tx)}</td>
+      </tr>`;
+    }
+
+    function renderTopInterfaces(interfaces) {
+      const table = document.getElementById('topInterfacesTable');
+      const meta = document.getElementById('topInterfacesMeta');
+      const rows = Array.isArray(interfaces) ? interfaces : [];
+      const ranked = rows
+        .map(item => ({ ...item, rx: Number(item.snmp_in_bps) || 0, tx: Number(item.snmp_out_bps) || 0 }))
+        .map(item => ({ ...item, total: item.rx + item.tx }))
+        .filter(item => item.total > 0)
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 10);
+      const grandTotal = ranked.reduce((sum, item) => sum + item.total, 0) || 1;
+      const formatter = metricFormatter(metricFromApi('bits_s'));
+      if (!table) return;
+      if (!ranked.length) {
+        table.innerHTML = '<tr><td colspan="7" class="text-muted">Sem dados SNMP de interface.</td></tr>';
+        if (meta) meta.textContent = 'sem dados';
+        return;
+      }
+      table.innerHTML = ranked.map((item, index) => {
+        const share = item.total / grandTotal * 100;
+        const status = interfaceRowStatus(item);
+        const sensor = item.sensor_name || sensorNameById(item.sensor_id);
+        return `<tr class="interfaces-row" tabindex="0" role="button" data-interface-sensor="${escapeHtml(item.sensor_id)}" data-interface-ifindex="${escapeHtml(item.if_index)}" aria-label="Investigar ${escapeHtml(item.name)} em ${escapeHtml(sensor)}">
+          <td class="rank">${index + 1}</td>
+          <td class="ti-name"><span class="status-dot ${status.tone}"></span> ${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(sensor)}</td>
+          <td>${formatter(item.rx)}</td>
+          <td>${formatter(item.tx)}</td>
+          <td>${formatter(item.total)}</td>
+          <td><span class="ti-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
+        </tr>`;
+      }).join('');
+      if (meta) meta.textContent = `top ${ranked.length} · por throughput SNMP`;
+    }
+
+    async function renderInterfacesViewTable() {
+      const table = document.getElementById('interfacesViewTable');
+      const status = document.getElementById('interfacesViewStatus');
+      if (status) status.textContent = 'Carregando interfaces…';
+      try {
+        const all = await loadAllInterfaces();
+        const filter = Number(document.getElementById('interfacesSensor')?.value || 0);
+        const rows = filter ? all.filter(item => Number(item.sensor_id) === filter) : all;
+        const ordered = rows
+          .map(item => ({ ...item, rx: Number(item.snmp_in_bps) || 0, tx: Number(item.snmp_out_bps) || 0 }))
+          .sort((a, b) => (b.rx + b.tx) - (a.rx + a.tx));
+        if (!table) return;
+        if (!ordered.length) {
+          table.innerHTML = '<tr><td colspan="8" class="text-muted">Nenhuma interface encontrada.</td></tr>';
+          if (status) status.textContent = 'Nenhuma interface encontrada.';
+          return;
+        }
+        table.innerHTML = ordered.map((item, index) => interfaceRowHtml(item, index, true)).join('');
+        if (status) status.textContent = `${ordered.length} interface(s)`;
+      } catch (error) {
+        if (table) table.innerHTML = '<tr><td colspan="8" class="text-muted">Falha ao carregar interfaces.</td></tr>';
+        if (status) status.textContent = 'Falha ao carregar interfaces.';
+      }
+    }
+
+    function renderInterfacesSensorSelect() {
+      const select = document.getElementById('interfacesSensor');
+      if (!select) return;
+      const sensors = Array.isArray(dashboardSensorCache) ? dashboardSensorCache : [];
+      const current = select.value;
+      select.innerHTML = '<option value="">Todos os sensores</option>' + sensors.map(sensor => `<option value="${escapeHtml(sensor.id)}">${escapeHtml(sensor.name)}</option>`).join('');
+      if (current) select.value = current;
+    }
+
+    async function loadInterfacesView() {
+      await loadDashboardSensors();
+      renderInterfacesSensorSelect();
+      await renderInterfacesViewTable();
+    }
+
+    const interfaceDrawerState = { open: false, sensorId: null, ifIndex: null, lastFocus: null, activeTab: 'overview', item: null };
+    let interfaceDrawerTrafficChart = null;
+    let interfaceDrawerTrafficResizeTimer = null;
+
+    function disposeInterfaceDrawerTrafficChart() {
+      if (interfaceDrawerTrafficResizeTimer) {
+        clearTimeout(interfaceDrawerTrafficResizeTimer);
+        interfaceDrawerTrafficResizeTimer = null;
+      }
+      if (interfaceDrawerTrafficChart) {
+        try { interfaceDrawerTrafficChart.dispose(); } catch (error) { /* ignore */ }
+        interfaceDrawerTrafficChart = null;
+      }
+    }
+
+    function closeInterfaceDrawer() {
+      const drawer = document.getElementById('interfaceDrawer');
+      if (drawer) { drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); }
+      const backdrop = document.getElementById('interfaceDrawerBackdrop');
+      if (backdrop) backdrop.hidden = true;
+      interfaceDrawerState.open = false;
+      disposeInterfaceDrawerTrafficChart();
+      if (interfaceDrawerState.lastFocus) {
+        try { interfaceDrawerState.lastFocus.focus(); } catch (error) { /* ignore */ }
+        interfaceDrawerState.lastFocus = null;
+      }
+    }
+
+    function openInterfaceDrawer(sensorId, ifIndex, triggerElement) {
+      const drawer = document.getElementById('interfaceDrawer');
+      if (!drawer) return;
+      if (interfaceDrawerState.open) closeInterfaceDrawer();
+      interfaceDrawerState.open = true;
+      interfaceDrawerState.sensorId = Number(sensorId);
+      interfaceDrawerState.ifIndex = Number(ifIndex);
+      interfaceDrawerState.activeTab = 'overview';
+      interfaceDrawerState.lastFocus = triggerElement || document.activeElement;
+      document.getElementById('interfaceDrawerTitle').textContent = 'Carregando…';
+      document.getElementById('interfaceDrawerSensor').textContent = '';
+      const statusDot = document.getElementById('interfaceDrawerStatusDot');
+      if (statusDot) statusDot.className = 'status-dot unknown';
+      drawer.classList.add('open');
+      drawer.setAttribute('aria-hidden', 'false');
+      document.getElementById('interfaceDrawerBackdrop').hidden = false;
+      document.querySelectorAll('.interface-drawer-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.interfaceTab === 'overview');
+        tab.setAttribute('aria-selected', String(tab.dataset.interfaceTab === 'overview'));
+      });
+      renderInterfaceDrawerOverview();
+      const closeButton = document.getElementById('interfaceDrawerClose');
+      if (closeButton) closeButton.focus();
+    }
+
+    function interfaceDrawerItem() {
+      const find = async () => {
+        const all = await loadAllInterfaces(true);
+        const item = all.find(entry => Number(entry.sensor_id) === interfaceDrawerState.sensorId && Number(entry.if_index) === interfaceDrawerState.ifIndex);
+        if (item) {
+          interfaceDrawerState.item = item;
+          return item;
+        }
+        try {
+          const payload = await apiRequest(`/api/sensors/${interfaceDrawerState.sensorId}/interfaces`);
+          const items = Array.isArray(payload.items) ? payload.items : [];
+          const found = items.find(entry => Number(entry.if_index) === interfaceDrawerState.ifIndex) || null;
+          if (found) interfaceDrawerState.item = found;
+          return found;
+        } catch (error) {
+          return null;
+        }
+      };
+      return find();
+    }
+
+    function renderInterfaceDrawerOverview() {
+      const body = document.getElementById('interfaceDrawerBody');
+      if (!body) return;
+      body.innerHTML = '<div class="interface-drawer-loading">Carregando…</div>';
+      interfaceDrawerItem().then(item => {
+        if (interfaceDrawerState.activeTab !== 'overview') return;
+        if (!item) {
+          body.innerHTML = '<div class="interface-drawer-loading">Interface não encontrada ou sensor indisponível.</div>';
+          return;
+        }
+        const status = interfaceRowStatus(item);
+        document.getElementById('interfaceDrawerTitle').textContent = item.name || `ifIndex ${item.if_index}`;
+        document.getElementById('interfaceDrawerSensor').textContent = item.sensor_name || sensorNameById(item.sensor_id);
+        const statusDot = document.getElementById('interfaceDrawerStatusDot');
+        if (statusDot) statusDot.className = `status-dot ${status.tone}`;
+        const formatter = metricFormatter(metricFromApi('bits_s'));
+        const rx = Number(item.snmp_in_bps) || 0;
+        const tx = Number(item.snmp_out_bps) || 0;
+        const cap = Number(item.speed_in_bps) || Number(item.speed_out_bps) || 0;
+        const util = interfaceUtilization(item);
+        const tone = utilizationTone(util);
+        const fields = [
+          ['RX', formatter(rx)],
+          ['TX', formatter(tx)],
+          ['Total', formatter(rx + tx)],
+          ['Capacidade', cap ? formatMetricValue(cap, 'bits_s') : null],
+          ['Utilização', util === null ? null : `${util.toFixed(1)}%`],
+          ['Estado operacional', status.label],
+          ['ifIndex', String(item.if_index ?? '')],
+          ['Descrição', item.if_descr || item.if_alias || null],
+          ['Sensor', item.sensor_name || sensorNameById(item.sensor_id)],
+          ['Última amostra', item.snmp_sample_time ? String(item.snmp_sample_time).replace('T', ' ').slice(0, 16) : null]
+        ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+        const utilBar = util !== null
+          ? `<span class="util-bar ${tone === 'critical' ? 'util-critical' : tone === 'warning' ? 'util-warning' : ''}"><span style="width:${Math.min(100, Math.max(2, util))}%"></span></span>`
+          : '';
+        body.innerHTML = `<div class="interface-detail-grid">${fields.map(([label, value]) =>
+          `<div class="interface-detail-field"><div class="interface-detail-label">${escapeHtml(label)}</div><div class="interface-detail-value">${escapeHtml(value)}</div></div>`
+        ).join('')}</div>${utilBar}`;
+      }).catch(() => {
+        body.innerHTML = '<div class="interface-drawer-loading">Falha ao carregar a interface.</div>';
+      });
+    }
+
+    function renderInterfaceDrawerTraffic() {
+      const body = document.getElementById('interfaceDrawerBody');
+      if (!body) return;
+      body.innerHTML = '<div class="interface-drawer-loading">Carregando tráfego…</div>';
+      const query = new URLSearchParams();
+      appendRangeParams(query, 'rangeMinutes', 'dashboard');
+      query.set('sensor_id', String(interfaceDrawerState.sensorId));
+      query.set('if_index', String(interfaceDrawerState.ifIndex));
+      query.set('metric', 'bits_s');
+      query.set('direction', 'both');
+      query.set('group_by', 'total');
+      fetchJSON('/api/dashboard/series', query.toString(), {})
+        .then(payload => {
+          if (interfaceDrawerState.activeTab !== 'traffic') return;
+          const items = payloadSeries(payload);
+          if (!items.length) {
+            body.innerHTML = '<div class="interface-drawer-loading">Sem histórico de tráfego para esta interface.</div>';
+            return;
+          }
+          const mount = document.createElement('div');
+          mount.id = 'interfaceDrawerTrafficChart';
+          mount.className = 'chart';
+          mount.style.height = '260px';
+          body.innerHTML = '';
+          body.appendChild(mount);
+          const chart = echarts.init(mount);
+          interfaceDrawerTrafficChart = chart;
+          chart.setOption(stackedTrafficOption(items, 'bits_s'), true);
+          interfaceDrawerTrafficResizeTimer = setTimeout(() => {
+            interfaceDrawerTrafficResizeTimer = null;
+            if (interfaceDrawerTrafficChart === chart) chart.resize();
+          }, 50);
+          const points = overviewSeriesDirectionPoints(items);
+          const rx = points.map(p => p.download);
+          const tx = points.map(p => p.upload);
+          const average = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+          const formatter = metricFormatter(metricFromApi('bits_s'));
+          const legend = document.createElement('div');
+          legend.className = 'traffic-legend';
+          legend.style.marginTop = '.5rem';
+          legend.innerHTML = '<span></span><span class="tl-head">Current</span><span class="tl-head">Avg</span><span class="tl-head">Peak</span>' +
+            [['RX', rx, semanticColor('--chart-rx', '#7A67E8')], ['TX', tx, semanticColor('--chart-tx', '#5E8CB8')]]
+              .map(([label, arr, color]) => {
+                const cur = arr.length ? arr[arr.length - 1] : 0;
+                const peak = arr.length ? Math.max.apply(null, arr) : 0;
+                return `<span class="tl-dir"><span class="tl-dot" style="background:${color}"></span>${label}</span><span class="tl-val">${formatter(cur)}</span><span class="tl-val">${formatter(average(arr))}</span><span class="tl-val">${formatter(peak)}</span>`;
+              }).join('');
+          body.appendChild(legend);
+        })
+        .catch(() => {
+          body.innerHTML = '<div class="interface-drawer-loading">Falha ao carregar tráfego.</div>';
+        });
+    }
+
+    function renderInterfaceDrawer() {
+      disposeInterfaceDrawerTrafficChart();
+      if (interfaceDrawerState.activeTab === 'traffic') renderInterfaceDrawerTraffic();
+      else renderInterfaceDrawerOverview();
+    }
+
+    function interfaceDrawerFocusableElements() {
+      const drawer = document.getElementById('interfaceDrawer');
+      if (!drawer) return [];
+      return Array.from(drawer.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(element => !element.disabled && element.getClientRects().length > 0);
+    }
+
+    function bindInterfaceDrawerEvents() {
+      const close = document.getElementById('interfaceDrawerClose');
+      if (close) close.addEventListener('click', closeInterfaceDrawer);
+      const backdrop = document.getElementById('interfaceDrawerBackdrop');
+      if (backdrop) backdrop.addEventListener('click', closeInterfaceDrawer);
+      document.querySelectorAll('.interface-drawer-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          interfaceDrawerState.activeTab = tab.dataset.interfaceTab;
+          document.querySelectorAll('.interface-drawer-tab').forEach(t => {
+            t.classList.toggle('active', t === tab);
+            t.setAttribute('aria-selected', String(t === tab));
+          });
+          renderInterfaceDrawer();
+        });
+      });
+      const interfacesSensor = document.getElementById('interfacesSensor');
+      if (interfacesSensor) interfacesSensor.addEventListener('change', () => renderInterfacesViewTable());
+      const refreshInterfaces = document.getElementById('refreshInterfacesButton');
+      if (refreshInterfaces) refreshInterfaces.addEventListener('click', () => loadInterfacesView());
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && interfaceDrawerState.open) closeInterfaceDrawer();
+        if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+          const row = event.target instanceof Element
+            ? event.target.closest('.interfaces-row[data-interface-sensor][data-interface-ifindex]')
+            : null;
+          if (!row) return;
+          event.preventDefault();
+          openInterfaceDrawer(row.dataset.interfaceSensor, row.dataset.interfaceIfindex, row);
+          return;
+        }
+        if (event.key === 'Tab' && interfaceDrawerState.open) {
+          const focusables = interfaceDrawerFocusableElements();
+          if (!focusables.length) return;
+          const first = focusables[0];
+          const last = focusables[focusables.length - 1];
+          const active = document.activeElement;
+          if (!focusables.includes(active)) {
+            event.preventDefault();
+            first.focus();
+            return;
+          }
+          if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          } else if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+          }
+        }
+      });
+      document.addEventListener('click', event => {
+        const row = event.target.closest('.interfaces-row[data-interface-sensor][data-interface-ifindex]');
+        if (row) {
+          event.preventDefault();
+          openInterfaceDrawer(row.dataset.interfaceSensor, row.dataset.interfaceIfindex, row);
+        }
+      });
+    }
+
+    function renderSecondaryProtocols(items) {
+      const table = document.getElementById('secondaryProtocolsTable');
+      const meta = document.getElementById('secondaryProtocolsMeta');
+      if (!table) return;
+      const rows = Array.isArray(items) ? items : [];
+      const total = rows.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
+      if (!rows.length || total <= 0) {
+        table.innerHTML = '<tr><td colspan="4" class="text-muted">Sem dados de protocolo.</td></tr>';
+        if (meta) meta.textContent = 'sem dados';
+        return;
+      }
+      table.innerHTML = rows.slice(0, 5).map((item, index) => {
+        const bps = Number(item.bps) || 0;
+        const share = bps / total * 100;
+        return `<tr>
+          <td class="rank">${index + 1}</td>
+          <td>${escapeHtml(item.proto)}</td>
+          <td class="text-end mono">${formatBps(bps)}</td>
+          <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
+        </tr>`;
+      }).join('');
+      if (meta) meta.textContent = `top ${Math.min(rows.length, 5)} · por bits/s`;
+    }
+
+    function renderSecondaryAsnSrc(payload) {
+      const table = document.getElementById('secondaryAsnTable');
+      const meta = document.getElementById('secondaryAsnMeta');
+      if (!table) return;
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const total = items.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
+      if (!items.length || total <= 0) {
+        table.innerHTML = '<tr><td colspan="5" class="text-muted">Sem dados de ASN de origem.</td></tr>';
+        if (meta) meta.textContent = payload?.asn_available === false ? 'ASN indisponível' : 'sem dados';
+        return;
+      }
+      table.innerHTML = items.slice(0, 5).map((item, index) => {
+        const bps = Number(item.bps) || 0;
+        const share = bps / total * 100;
+        const code = asnCode(item);
+        const name = asnDisplayName(item);
+        const org = name === code ? '—' : name;
+        return `<tr>
+          <td class="rank">${formatNumber(item.rank || index + 1)}</td>
+          <td class="mono">${escapeHtml(code)}</td>
+          <td class="secondary-asn-org" title="${escapeHtml(org)}">${escapeHtml(org)}</td>
+          <td class="text-end mono">${formatBps(bps)}</td>
+          <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
+        </tr>`;
+      }).join('');
+      if (meta) meta.textContent = `top ${Math.min(items.length, 5)} · por bits/s`;
+    }
+
+    function renderSecondaryFlowsSummary(protocolItems) {
+      const el = document.getElementById('secondaryFlowsSummary');
+      if (!el) return;
+      const rows = Array.isArray(protocolItems) ? protocolItems : [];
+      const totalFlows = rows.reduce((sum, item) => sum + (Number(item.flows) || 0), 0);
+      const totalPps = rows.reduce((sum, item) => sum + (Number(item.packets_s) || 0), 0);
+      // `compactNumber` e privado do componente GeoFlowMap; usa o formatter global.
+      const formatters = window.GMJDashboardFormatters || {};
+      const flowsLabel = typeof formatters.formatCount === 'function'
+        ? formatters.formatCount(totalFlows, { maximumFractionDigits: 1, invalidValue: '0' })
+        : formatNumber(totalFlows);
+      el.textContent = `${flowsLabel} flows · ${formatPps(totalPps)}`;
+    }
+
+    let alertsRows = [];
+    let alertsLoadedAt = '';
+
+    function updateAlertsStatus(visibleCount) {
+      const status = document.getElementById('alertsViewStatus');
+      if (!status || !alertsLoadedAt) return;
+      const total = alertsRows.length;
+      const visible = Number(visibleCount) || 0;
+      status.textContent = visible === total
+        ? `${formatNumber(total)} alerta(s) · atualizado ${alertsLoadedAt}`
+        : `${formatNumber(visible)} de ${formatNumber(total)} alerta(s) · atualizado ${alertsLoadedAt}`;
+    }
+
+    function alertsTime(value) {
+      if (!value) return '-';
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return '-';
+      return parsed.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+
+    function alertsStatusBadge(status) {
+      const value = String(status || '').trim().toLowerCase();
+      if (value === 'active') return 'status-active';
+      if (value === 'acknowledged') return 'status-acknowledged';
+      return 'status-ended';
+    }
+
+    function alertsAnomalyRows(items) {
+      return (Array.isArray(items) ? items : []).map(event => {
+        const actionId = anomalyActionId(event);
+        return {
+          key: `anomaly-${actionId}`,
+          type: 'anomaly',
+          typeLabel: 'Anomalia',
+          severity: String(event.severity || 'info').toLowerCase(),
+          status: String(event.status || 'active').toLowerCase(),
+          title: anomalyTypeLabel(event),
+          summary: anomalyCompactSummary(event),
+          target: event.target_cidr || event.target_ip || event.top_src_ip || event.top_dst_ip || '-',
+          sensor: event.sensor_name || '-',
+          firstSeen: event.started_at || event.created_at,
+          lastSeen: event.last_seen_at || event.updated_at,
+          count: Number(event.detail_count || event.flow_count || event.unique_dst_ips || 0),
+          action: () => openAnomalyDetail(actionId).catch(console.error)
+        };
+      });
+    }
+
+    function alertsBgpRows(items) {
+      const attention = new Set(['pending_approval', 'failed', 'failed_withdraw', 'peer_down']);
+      return (Array.isArray(items) ? items : [])
+        .filter(item => attention.has(String(item.status || '').toLowerCase()))
+        .map(item => {
+          const status = String(item.status || '').toLowerCase();
+          return {
+            key: `bgp-${item.id}`,
+            type: 'bgp',
+            typeLabel: 'BGP',
+            severity: ['failed', 'failed_withdraw', 'peer_down'].includes(status) ? 'critical' : 'warning',
+            status,
+            title: item.attack_vector_name || 'Anúncio BGP',
+            summary: item.last_error || item.response_profile_name || item.connector_name || '',
+            target: item.target_prefix || item.dst_prefix || item.dst_ip || '-',
+            sensor: item.connector_name || '-',
+            firstSeen: item.created_at,
+            lastSeen: item.updated_at,
+            count: 1,
+            action: () => showView('bgp-connectors')
+          };
+        });
+    }
+
+    function alertsMitigationRows(items) {
+      const attention = new Set(['failed', 'blocked']);
+      return (Array.isArray(items) ? items : [])
+        .filter(item => attention.has(String(item.status || '').toLowerCase()))
+        .map(item => {
+          const status = String(item.status || '').toLowerCase();
+          return {
+            key: `mitigation-${item.id}`,
+            type: 'mitigation',
+            typeLabel: 'Mitigação',
+            severity: status === 'failed' ? 'critical' : 'warning',
+            status,
+            title: item.vector || 'Mitigação automática',
+            summary: item.error_message || item.policy_reason || '',
+            target: item.anomaly_id ? `#${item.anomaly_id}` : '-',
+            sensor: item.connector_type || '-',
+            firstSeen: item.created_at,
+            lastSeen: item.updated_at,
+            count: 1,
+            action: () => showView('mitigation')
+          };
+        });
+    }
+
+    function alertsCollectorRows(items) {
+      const attention = new Set(['atrasado', 'sem_flow_recente']);
+      return (Array.isArray(items) ? items : [])
+        .filter(item => attention.has(String(item.status || '').toLowerCase()))
+        .map(item => {
+          const status = String(item.status || '').toLowerCase();
+          return {
+            key: `collector-${item.sensor_id ?? item.sensor ?? 'unknown'}`,
+            type: 'collector',
+            typeLabel: 'Coletor',
+            severity: 'warning',
+            status,
+            title: 'Ingestão de fluxo',
+            summary: item.last_flow_time ? `Último flow ${alertsTime(item.last_flow_time)}` : 'Sem fluxo recente',
+            target: item.sensor || '-',
+            sensor: item.sensor || '-',
+            firstSeen: '',
+            lastSeen: item.last_flow_time,
+            count: 1,
+            action: () => showView('sensors')
+          };
+        });
+    }
+
+    function renderAlertsTable() {
+      const tbody = document.getElementById('alertsTable');
+      if (!tbody) return;
+      const statusFilter = document.getElementById('alertsStatusFilter')?.value || 'active';
+      const severityFilter = document.getElementById('alertsSeverityFilter')?.value || '';
+      const sourceFilter = document.getElementById('alertsSourceFilter')?.value || '';
+      const sensorFilter = document.getElementById('alertsSensorFilter')?.value || '';
+      const rank = { critical: 0, warning: 1, info: 2 };
+      const rows = alertsRows
+        .filter(row => {
+          if (statusFilter === 'active' && !['active', 'acknowledged'].includes(row.status)) return false;
+          if (statusFilter === 'acknowledged' && row.status !== 'acknowledged') return false;
+          if (severityFilter && row.severity !== severityFilter) return false;
+          if (sourceFilter && row.type !== sourceFilter) return false;
+          if (sensorFilter && String(row.sensor || '') !== sensorFilter) return false;
+          return true;
+        })
+        .sort((a, b) => {
+          const diff = (rank[a.severity] ?? 3) - (rank[b.severity] ?? 3);
+          if (diff !== 0) return diff;
+          return String(b.lastSeen || '').localeCompare(String(a.lastSeen || ''));
+        });
+      tbody.innerHTML = rows.map(row => `<tr>
+          <td><span class="badge-soft ${severityBadgeClass(row.severity)}">${escapeHtml(row.severity)}</span></td>
+          <td><span class="badge-soft ${alertsStatusBadge(row.status)}">${escapeHtml(row.status)}</span></td>
+          <td class="alerts-title" title="${escapeHtml(row.summary)}"><span class="subtle">${escapeHtml(row.typeLabel)}</span> ${escapeHtml(row.title)}${row.summary ? `<div class="subtle">${escapeHtml(row.summary)}</div>` : ''}</td>
+          <td class="alerts-target" title="${escapeHtml(row.target)}">${escapeHtml(row.target)}</td>
+          <td>${escapeHtml(row.sensor || '-')}</td>
+          <td>${alertsTime(row.firstSeen)}</td>
+          <td>${alertsTime(row.lastSeen)}</td>
+          <td class="text-end">${formatNumber(row.count)}</td>
+          <td><button type="button" class="btn btn-sm btn-outline-secondary" data-alert-action="${escapeHtml(row.key)}">Investigar</button></td>
+        </tr>`).join('') || '<tr><td colspan="9" class="text-muted">Nenhum alerta correspondente.</td></tr>';
+      updateAlertsStatus(rows.length);
+    }
+
+    function renderAlertsSensorFilter() {
+      const select = document.getElementById('alertsSensorFilter');
+      if (!select) return;
+      const sensors = Array.from(new Set(alertsRows.map(row => String(row.sensor || '').trim()).filter(Boolean))).sort();
+      const current = select.value;
+      select.innerHTML = '<option value="">Todos</option>' + sensors.map(sensor => `<option value="${escapeHtml(sensor)}">${escapeHtml(sensor)}</option>`).join('');
+      if (current) select.value = current;
+    }
+
+    async function loadAlertsView() {
+      const status = document.getElementById('alertsViewStatus');
+      if (status) status.textContent = 'Carregando alertas…';
+      const tasks = [
+        apiRequest('/api/anomalies/active?limit=1000')
+          .then(payload => alertsAnomalyRows(payloadItems(payload)))
+          .catch(error => { console.warn('Alertas: falha ao carregar anomalias', error); return []; })
+      ];
+      if (hasPermission('bgp.view')) {
+        tasks.push(
+          apiRequest('/api/bgp/announcements?limit=500')
+            .then(payload => alertsBgpRows(payloadItems(payload)))
+            .catch(error => { console.warn('Alertas: falha ao carregar BGP', error); return []; })
+        );
+      }
+      if (hasPermission('mitigations.view')) {
+        tasks.push(
+          apiRequest('/api/mitigation/executions?limit=500')
+            .then(payload => alertsMitigationRows(payloadItems(payload)))
+            .catch(error => { console.warn('Alertas: falha ao carregar mitigações', error); return []; })
+        );
+      }
+      if (hasPermission('collectors.view')) {
+        tasks.push(
+          apiRequest('/api/collectors/health')
+            .then(payload => alertsCollectorRows(Array.isArray(payload?.items) ? payload.items : []))
+            .catch(error => { console.warn('Alertas: falha ao carregar coletores', error); return []; })
+        );
+      }
+      const results = await Promise.all(tasks);
+      alertsRows = results.flat();
+      alertsLoadedAt = new Date().toLocaleTimeString('pt-BR');
+      renderAlertsTable();
+      renderAlertsSensorFilter();
+    }
+
+    function bindAlertsView() {
+      ['alertsStatusFilter', 'alertsSeverityFilter', 'alertsSourceFilter', 'alertsSensorFilter'].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.addEventListener('change', renderAlertsTable);
+      });
+      const refreshButton = document.getElementById('alertsRefreshButton');
+      if (refreshButton) refreshButton.addEventListener('click', () => loadAlertsView().catch(console.error));
+      document.addEventListener('click', event => {
+        const actionButton = event.target.closest('[data-alert-action]');
+        if (!actionButton) return;
+        const row = alertsRows.find(item => item.key === actionButton.dataset.alertAction);
+        if (row?.action) row.action();
+      });
+    }
+
     function renderDashboardSettledEntry(name, payload) {
       if (payload?.__aborted || activeView !== 'dashboard') return;
       const failed = Boolean(payload?.__error);
@@ -25786,6 +27538,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         );
         const hiddenCount = Math.max(0, allItems.length - items.length);
         setText('bpsReadout', `${stackedReadout(items, 'bits_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
+        renderKpiStrip('bps', items, 'bits_s');
+        renderTrafficLegend(items, 'bits_s');
         return;
       }
       if (name === 'pps') {
@@ -25802,6 +27556,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         );
         const hiddenCount = Math.max(0, allItems.length - items.length);
         setText('ppsReadout', `${stackedReadout(items, 'packets_s')}${hiddenCount ? ` - Top ${items.length} de ${allItems.length} series por pico.` : ''}`);
+        renderKpiStrip('pps', items, 'packets_s');
+        return;
+      }
+      if (name === 'topInterfaces') {
+        if (failed) {
+          renderTableMessage('topInterfacesTable', 7, widgetErrorMessage(payload), true);
+          const meta = document.getElementById('topInterfacesMeta');
+          if (meta) meta.textContent = 'indisponível';
+        } else {
+          renderTopInterfaces(payload);
+        }
         return;
       }
       const topWidgets = {
@@ -25816,11 +27581,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (failed) {
           renderChartError(chart);
           renderTableMessage(tableId, 3, widgetErrorMessage(payload), true);
+          if (name === 'protocols') {
+            renderTableMessage('secondaryProtocolsTable', 4, widgetErrorMessage(payload), true);
+            setText('secondaryFlowsSummary', '—');
+          }
           return;
         }
         const items = payloadItems(payload);
         chart.setOption(optionBuilder(items, key), true);
         fillTable(tableId, items, key, secondary);
+        if (name === 'protocols') {
+          renderSecondaryProtocols(items);
+          renderSecondaryFlowsSummary(items);
+        }
         return;
       }
       if (name === 'anomaliesSummary') {
@@ -25844,8 +27617,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           renderChartError(chart);
           renderTableMessage(tableId, 7, widgetErrorMessage(payload), true);
           setText(statusId, 'Erro ao carregar widget');
+          if (source) {
+            renderTableMessage('secondaryAsnTable', 5, widgetErrorMessage(payload), true);
+            setText('secondaryAsnMeta', 'indisponível');
+          }
         } else {
           renderAsnWidget(chart, tableId, statusId, payload);
+          if (source) renderSecondaryAsnSrc(payload);
         }
         return;
       }
@@ -25876,7 +27654,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!authToken()) return;
       if (document.visibilityState !== 'visible') return;
       if (activeView !== 'dashboard') return;
-      if (configurableDashboardActive) {
+      if (configurableDashboardActive && !dashboardOverviewOperational) {
         return refreshConfigurableDashboard();
       }
       if (dashboardRefreshInFlight) abortDashboardRequest();
@@ -25905,7 +27683,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ['tcpFlags', fetchJSON('/api/tops/tcp-flags', topQuery, requestOptions)],
           ['anomaliesSummary', fetchJSON('/api/dashboard/anomalies-summary', `${topQuery}&limit=20`, requestOptions)],
           ['asnSrc', fetchJSON('/api/tops/asn-src', topQuery, requestOptions)],
-          ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)]
+          ['asnDst', fetchJSON('/api/tops/asn-dst', topQuery, requestOptions)],
+          ['topInterfaces', loadAllInterfaces()]
         ];
         if (isDashboardWidgetVisible('bps-chart')) {
           entries.unshift(['bps', fetchJSON('/api/dashboard/series', bpsSeriesQuery, requestOptions)]);
@@ -25973,7 +27752,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         clearTimeout(dashboardRefreshTimer);
         dashboardRefreshTimer = null;
       }
-      if (configurableDashboardActive) return;
+      if (configurableDashboardActive && !dashboardOverviewOperational) return;
       const interval = selectedDashboardRefreshMs();
       if (!interval || !authToken() || activeView !== 'dashboard' || document.visibilityState !== 'visible' || dashboardRefreshFailures >= 3) return;
       dashboardRefreshTimer = setTimeout(async () => {
@@ -27389,6 +29168,276 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       createIcons();
     }
 
+    let codecsStateItems = [];
+    let codecOptionsState = { protocols: [], directions: [], roles: [], exclusive_groups: [] };
+
+    function codecPortLabel(value) {
+      const num = Number(value);
+      if (value === null || value === undefined || value === '' || !Number.isFinite(num) || num <= 0) return 'ANY';
+      return String(num);
+    }
+
+    function codecPortPayload(value) {
+      const text = String(value ?? '').trim();
+      if (!text) return null;
+      const num = Number(text);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function codecOptionalIntPayload(value) {
+      const text = String(value ?? '').trim();
+      if (!text) return null;
+      const num = Number(text);
+      return Number.isFinite(num) ? num : null;
+    }
+
+    function codecSelectOptions(list, includeAny = false) {
+      const anyOption = includeAny ? '<option value="">ANY</option>' : '';
+      return anyOption + (list || []).map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('');
+    }
+
+    function populateCodecOptions() {
+      const protocols = codecOptionsState.protocols?.length ? codecOptionsState.protocols : ['ANY', 'TCP', 'UDP', 'ICMP', 'ICMPV6', 'GRE', 'ESP', 'AH'];
+      const directions = codecOptionsState.directions?.length ? codecOptionsState.directions : ['ANY', 'TO_CUSTOMERS', 'FROM_CUSTOMERS', 'INBOUND', 'OUTBOUND'];
+      const roles = codecOptionsState.roles || [];
+      const protocolHtml = codecSelectOptions(protocols);
+      const directionHtml = codecSelectOptions(directions);
+      const roleHtml = codecSelectOptions(roles, true);
+      ['codecEditorProtocol', 'codecTestProtocol'].forEach(id => { document.getElementById(id).innerHTML = protocolHtml; });
+      ['codecEditorDirection', 'codecTestDirection'].forEach(id => { document.getElementById(id).innerHTML = directionHtml; });
+      ['codecEditorSourceRole', 'codecEditorDestinationRole', 'codecTestSourceRole', 'codecTestDestinationRole'].forEach(id => { document.getElementById(id).innerHTML = roleHtml; });
+    }
+
+    function renderCodecsTable(items) {
+      codecsStateItems = items || [];
+      document.getElementById('codecsTable').innerHTML = codecsStateItems.map(item => {
+        const builtin = Number(item.builtin) === 1;
+        const active = Number(item.active) === 1;
+        const actions = [
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="edit" data-id="${item.id}">Editar</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-secondary" data-codec-action="duplicate" data-id="${item.id}">Duplicar</button>`,
+          `<button type="button" class="btn btn-sm btn-outline-${active ? 'warning' : 'success'}" data-codec-action="toggle" data-id="${item.id}">${active ? 'Desativar' : 'Ativar'}</button>`,
+          builtin ? '' : `<button type="button" class="btn btn-sm btn-outline-danger" data-codec-action="delete" data-id="${item.id}">Excluir</button>`
+        ].filter(Boolean).join('');
+        return `
+          <tr>
+            <td><strong>${escapeHtml(item.name)}</strong>${item.description ? `<div class="small text-muted">${escapeHtml(item.description)}</div>` : ''}</td>
+            <td>${builtin ? '<span class="badge-soft ok">BUILTIN</span>' : '<span class="badge-soft warn">CUSTOM</span>'}</td>
+            <td>${escapeHtml(item.protocol || 'ANY')}</td>
+            <td>${escapeHtml(codecPortLabel(item.source_port))}</td>
+            <td>${escapeHtml(codecPortLabel(item.destination_port))}</td>
+            <td>${escapeHtml(item.direction || 'ANY')}</td>
+            <td>${formatNumber(item.specificity_priority || 0)}</td>
+            <td>${escapeHtml(item.exclusive_group || '-')}</td>
+            <td><span class="badge-soft ${active ? 'ok' : 'off'}">${active ? 'Ativo' : 'Desativado'}</span></td>
+            <td><div class="toolbar">${actions}</div></td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="10" class="text-muted">Nenhum codec cadastrado.</td></tr>';
+      createIcons();
+    }
+
+    async function loadCodecsWorkspace() {
+      setText('codecsStatus', 'Carregando codecs e opções...');
+      const [result, options] = await Promise.all([
+        apiRequest('/api/flow-codecs'),
+        apiRequest('/api/flow-codecs/options').catch(() => ({ protocols: [], directions: [], roles: [], exclusive_groups: [] }))
+      ]);
+      codecOptionsState = options || {};
+      populateCodecOptions();
+      renderCodecsTable(result.items || []);
+      const total = (result.items || []).length;
+      const builtin = (result.items || []).filter(item => Number(item.builtin) === 1).length;
+      setText('codecsStatus', `${formatNumber(total)} codec(s) — ${builtin} builtin, ${formatNumber(total - builtin)} custom.`);
+    }
+
+    function clearCodecEditor() {
+      setValue('codecEditorId', '');
+      setValue('codecEditorName', '');
+      setValue('codecEditorDisplayName', '');
+      setValue('codecEditorDescription', '');
+      setValue('codecEditorProtocol', 'ANY');
+      setValue('codecEditorDirection', 'ANY');
+      setValue('codecEditorSourcePort', '');
+      setValue('codecEditorDestinationPort', '');
+      setValue('codecEditorTcpFlags', '');
+      setValue('codecEditorIcmpType', '');
+      setValue('codecEditorIcmpCode', '');
+      setValue('codecEditorSourceRole', '');
+      setValue('codecEditorDestinationRole', '');
+      setValue('codecEditorProvider', '');
+      setValue('codecEditorPriority', '0');
+      setValue('codecEditorExclusiveGroup', '');
+      setBoolSelect('codecEditorConsumeTraffic', false);
+      setBoolSelect('codecEditorActive', true);
+      setText('codecEditorDrawerTitle', 'Novo codec');
+      setText('codecEditorDrawerContext', 'Codec');
+      setText('codecEditorStatus', '');
+    }
+
+    function openCodecEditor(codec) {
+      clearCodecEditor();
+      if (codec) {
+        setValue('codecEditorId', codec.id);
+        setValue('codecEditorName', codec.name || '');
+        setValue('codecEditorDisplayName', codec.display_name || '');
+        setValue('codecEditorDescription', codec.description || '');
+        setValue('codecEditorProtocol', codec.protocol || 'ANY');
+        setValue('codecEditorDirection', codec.direction || 'ANY');
+        setValue('codecEditorSourcePort', codec.source_port === null || codec.source_port === undefined ? '' : codec.source_port);
+        setValue('codecEditorDestinationPort', codec.destination_port === null || codec.destination_port === undefined ? '' : codec.destination_port);
+        setValue('codecEditorTcpFlags', codec.tcp_flags === null || codec.tcp_flags === undefined ? '' : codec.tcp_flags);
+        setValue('codecEditorIcmpType', codec.icmp_type === null || codec.icmp_type === undefined ? '' : codec.icmp_type);
+        setValue('codecEditorIcmpCode', codec.icmp_code === null || codec.icmp_code === undefined ? '' : codec.icmp_code);
+        setValue('codecEditorSourceRole', codec.source_role || '');
+        setValue('codecEditorDestinationRole', codec.destination_role || '');
+        setValue('codecEditorProvider', codec.provider || '');
+        setValue('codecEditorPriority', codec.specificity_priority ?? 0);
+        setValue('codecEditorExclusiveGroup', codec.exclusive_group || '');
+        setBoolSelect('codecEditorConsumeTraffic', Number(codec.consume_traffic) === 1);
+        setBoolSelect('codecEditorActive', Number(codec.active) === 1);
+        const builtin = Number(codec.builtin) === 1;
+        setText('codecEditorDrawerTitle', builtin ? `Codec builtin: ${codec.name}` : `Editar codec: ${codec.name}`);
+        setText('codecEditorDrawerContext', builtin ? 'BUILTIN — identidade protegida; edite apenas metadados/ativo' : 'CUSTOM');
+      }
+      document.getElementById('codecEditorDrawer').hidden = false;
+      createIcons();
+    }
+
+    function closeCodecEditor() {
+      document.getElementById('codecEditorDrawer').hidden = true;
+    }
+
+    function codecEditorPayload() {
+      return {
+        name: selectValue('codecEditorName').trim(),
+        display_name: selectValue('codecEditorDisplayName').trim(),
+        description: selectValue('codecEditorDescription').trim(),
+        protocol: selectValue('codecEditorProtocol') || 'ANY',
+        source_port: codecPortPayload(selectValue('codecEditorSourcePort')),
+        destination_port: codecPortPayload(selectValue('codecEditorDestinationPort')),
+        direction: selectValue('codecEditorDirection') || 'ANY',
+        tcp_flags: codecOptionalIntPayload(selectValue('codecEditorTcpFlags')),
+        icmp_type: codecOptionalIntPayload(selectValue('codecEditorIcmpType')),
+        icmp_code: codecOptionalIntPayload(selectValue('codecEditorIcmpCode')),
+        source_role: selectValue('codecEditorSourceRole').trim().toUpperCase(),
+        destination_role: selectValue('codecEditorDestinationRole').trim().toUpperCase(),
+        provider: selectValue('codecEditorProvider').trim().toUpperCase(),
+        specificity_priority: numberValue('codecEditorPriority', 0),
+        exclusive_group: selectValue('codecEditorExclusiveGroup').trim(),
+        consume_traffic: boolSelectValue('codecEditorConsumeTraffic'),
+        active: boolSelectValue('codecEditorActive')
+      };
+    }
+
+    async function saveCodec() {
+      const id = selectValue('codecEditorId');
+      const payload = codecEditorPayload();
+      if (!payload.name) throw new Error('Informe o nome do codec.');
+      await apiRequest(id ? `/api/flow-codecs/${id}` : '/api/flow-codecs', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      closeCodecEditor();
+      await loadCodecsWorkspace();
+    }
+
+    async function handleCodecAction(button) {
+      const codecId = Number(button.dataset.id);
+      const action = button.dataset.action;
+      const item = codecsStateItems.find(codec => Number(codec.id) === codecId);
+      if (action === 'edit') {
+        if (!item) return;
+        openCodecEditor(item);
+        return;
+      }
+      if (action === 'duplicate') {
+        await apiRequest(`/api/flow-codecs/${codecId}/duplicate`, { method: 'POST' });
+        await loadCodecsWorkspace();
+        return;
+      }
+      if (action === 'toggle') {
+        if (!item) return;
+        await apiRequest(`/api/flow-codecs/${codecId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: Number(item.active) !== 1 })
+        });
+        await loadCodecsWorkspace();
+        return;
+      }
+      if (action === 'delete') {
+        if (!item) return;
+        if (Number(item.builtin) === 1) {
+          setText('codecsStatus', 'Codecs builtin não podem ser excluídos.');
+          return;
+        }
+        if (!confirm(`Excluir o codec ${item.name}?`)) return;
+        await apiRequest(`/api/flow-codecs/${codecId}`, { method: 'DELETE' });
+        await loadCodecsWorkspace();
+      }
+    }
+
+    function openCodecTester() {
+      document.getElementById('codecTesterDrawer').hidden = false;
+      setText('codecTesterStatus', 'Informe os campos e clique em Executar.');
+      document.getElementById('codecTestResults').innerHTML = '';
+      createIcons();
+    }
+
+    function closeCodecTester() {
+      document.getElementById('codecTesterDrawer').hidden = true;
+    }
+
+    function renderCodecTestResults(result) {
+      const matches = result.matches || [];
+      document.getElementById('codecTestResults').innerHTML = matches.length
+        ? `<div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>#</th><th>Codec</th><th>Display</th><th>Protocolo</th><th>Src Port</th><th>Dst Port</th><th>Direção</th><th>Prioridade</th><th>Grupo</th></tr></thead><tbody>${matches.map((item, index) => `
+          <tr>
+            <td>${index + 1}</td>
+            <td><strong>${escapeHtml(item.name)}</strong></td>
+            <td>${escapeHtml(item.display_name || '-')}</td>
+            <td>${escapeHtml(item.protocol || 'ANY')}</td>
+            <td>${escapeHtml(codecPortLabel(item.source_port))}</td>
+            <td>${escapeHtml(codecPortLabel(item.destination_port))}</td>
+            <td>${escapeHtml(item.direction || 'ANY')}</td>
+            <td>${formatNumber(item.specificity_priority || 0)}</td>
+            <td>${escapeHtml(item.exclusive_group || '-')}</td>
+          </tr>`).join('')}</tbody></table></div>`
+        : '<div class="metric-readout">Nenhum codec ativo corresponde ao flow informado.</div>';
+    }
+
+    async function runCodecTest() {
+      setText('codecTesterStatus', 'Classificando flow sintético...');
+      const payload = { flow: {
+        protocol: selectValue('codecTestProtocol') || 'ANY',
+        source_port: codecPortPayload(selectValue('codecTestSrcPort')),
+        destination_port: codecPortPayload(selectValue('codecTestDstPort')),
+        direction: selectValue('codecTestDirection') || 'ANY',
+        tcp_flags: codecOptionalIntPayload(selectValue('codecTestTcpFlags')),
+        icmp_type: codecOptionalIntPayload(selectValue('codecTestIcmpType')),
+        icmp_code: codecOptionalIntPayload(selectValue('codecTestIcmpCode'))
+      } };
+      const sourceRole = selectValue('codecTestSourceRole').trim();
+      const destinationRole = selectValue('codecTestDestinationRole').trim();
+      const provider = selectValue('codecTestProvider').trim();
+      const sourceContext = {};
+      if (sourceRole) sourceContext.role = sourceRole;
+      if (provider) sourceContext.provider = provider;
+      if (Object.keys(sourceContext).length) payload.source_context = sourceContext;
+      const destinationContext = {};
+      if (destinationRole) destinationContext.role = destinationRole;
+      if (Object.keys(destinationContext).length) payload.destination_context = destinationContext;
+      const result = await apiRequest('/api/flow-codecs/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      renderCodecTestResults(result);
+      setText('codecTesterStatus', `${formatNumber((result.matches || []).length)} codec(s) correspondente(s), em ordem de prioridade.`);
+    }
+
     async function processCgnatFile() {
       if (!selectedCgnatFile) throw new Error('Selecione um arquivo CGNAT.');
       const maxBytes = Number(cgnatConfigState?.limits?.max_file_bytes || 0);
@@ -27401,7 +29450,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         mime_type: selectedCgnatFile.type || null,
         source_type: selectValue('cgnatSourceType') || 'auto',
         device_name: selectValue('cgnatDeviceName').trim() || null,
-        pool_name: selectValue('cgnatPoolName').trim() || null,
+        pool_name: selectValue('cgnatImportPoolName').trim() || null,
         connector_id: Number(selectValue('cgnatConnector')) || null,
         valid_from: cgnatDateValue('cgnatValidFrom'),
         valid_until: cgnatDateValue('cgnatValidUntil')
@@ -27766,16 +29815,64 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function requiredPermissionForView(view) {
       const requirements = {
         dashboard: 'dashboard.view', flows: 'dashboard.view', 'global-map': 'dashboard.view',
-        sensors: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
-        'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'threat-intelligence': 'anomalies.view', 'peak-hunter': 'anomalies.view',
+        sensors: 'sensors.view', interfaces: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
+        'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'threat-intelligence': 'anomalies.view', 'peak-hunter': 'anomalies.view', alerts: 'anomalies.view',
         mitigation: 'mitigations.view', 'bgp-connectors': 'bgp.view', ai: 'settings.view',
-        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view'
+        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view', codecs: 'settings.view'
       };
       return requirements[canonicalNavigationView(view)] || '';
     }
 
     function viewFromLocationHash() {
       return canonicalNavigationView(window.location.hash);
+    }
+
+    function scrollActiveNavIntoView() {
+      const nav = document.querySelector('.side-nav');
+      const active = nav ? nav.querySelector('button.active') : null;
+      if (nav && active) {
+        active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      }
+    }
+
+    function ensureActiveGroupExpanded() {
+      const active = document.querySelector('.side-nav button.active[data-nav-view]');
+      if (!active) return;
+      const group = active.closest('.nav-group');
+      if (group) {
+        group.classList.remove('collapsed');
+        const toggle = group.querySelector('.nav-group-toggle');
+        if (toggle) toggle.setAttribute('aria-expanded', 'true');
+      }
+    }
+
+    function initNavGroups() {
+      const STORAGE_KEY = 'gmjFlow.nav-groups.v1';
+      let collapsed = {};
+      try {
+        collapsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      } catch (error) {
+        collapsed = {};
+      }
+      document.querySelectorAll('.nav-group').forEach(group => {
+        const key = group.dataset.navGroup;
+        const toggle = group.querySelector('.nav-group-toggle');
+        if (!toggle) return;
+        if (collapsed[key]) {
+          group.classList.add('collapsed');
+          toggle.setAttribute('aria-expanded', 'false');
+        }
+        toggle.addEventListener('click', () => {
+          const isCollapsed = group.classList.toggle('collapsed');
+          toggle.setAttribute('aria-expanded', String(!isCollapsed));
+          try {
+            const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+            if (isCollapsed) state[key] = true;
+            else delete state[key];
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          } catch (error) { /* ignore */ }
+        });
+      });
     }
 
     function showView(view, placeholderTitle = '') {
@@ -27824,7 +29921,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         Object.values(charts).forEach(chart => chart.resize());
         Promise.all([loadDashboardSensors(), loadIpZoneFilters()])
           .then(() => configurableDashboardActive
-            ? refreshConfigurableDashboard()
+            ? (dashboardOverviewOperational ? refresh() : refreshConfigurableDashboard())
             : initializeConfigurableDashboards().then(() => refresh()))
           .catch(console.error);
       } else if (view === 'flows') {
@@ -27852,6 +29949,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-database').classList.add('active');
         document.querySelector('[data-nav-view="database"]').classList.add('active');
         loadDatabaseStatus().catch(console.error);
+      } else if (view === 'codecs') {
+        document.getElementById('view-codecs').classList.add('active');
+        document.querySelector('[data-nav-view="codecs"]').classList.add('active');
+        loadCodecsWorkspace().catch(error => setText('codecsStatus', `Falha: ${error.message}`));
       } else if (view === 'ip-zones') {
         document.getElementById('view-ip-zones').classList.add('active');
         document.querySelector('[data-nav-view="ip-zones"]').classList.add('active');
@@ -27910,12 +30011,22 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-my-account').classList.add('active');
         document.querySelector('[data-nav-view="my-account"]').classList.add('active');
         loadMyAccount().catch(error => setText('accountStatus', `Falha: ${error.message}`));
+      } else if (view === 'interfaces') {
+        document.getElementById('view-interfaces').classList.add('active');
+        document.querySelector('[data-nav-view="interfaces"]').classList.add('active');
+        loadInterfacesView().catch(error => setText('interfacesViewStatus', `Falha: ${error.message}`));
+      } else if (view === 'alerts') {
+        document.getElementById('view-alerts').classList.add('active');
+        document.querySelector('[data-nav-view="alerts"]').classList.add('active');
+        loadAlertsView().catch(error => setText('alertsViewStatus', `Falha: ${error.message}`));
       } else {
         document.getElementById('placeholderTitle').textContent = placeholderTitle || 'Modulo';
         document.getElementById('view-placeholder').classList.add('active');
         const button = Array.from(document.querySelectorAll('.side-nav button')).find(item => item.dataset.placeholderTitle === placeholderTitle);
         if (button) button.classList.add('active');
       }
+      ensureActiveGroupExpanded();
+      scrollActiveNavIntoView();
       scheduleDashboardRefresh();
     }
 
@@ -28470,6 +30581,19 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('cgnatPoolsTable').addEventListener('click', event => {
       const button = event.target.closest('[data-cgnat-pool-action]');
       if (button) handleCgnatPoolAction(button).catch(error => setText('cgnatStatus', `Falha no pool: ${error.message}`));
+    });
+    document.getElementById('codecsTable').addEventListener('click', event => {
+      const button = event.target.closest('[data-codec-action]');
+      if (button) handleCodecAction(button).catch(error => setText('codecsStatus', `Falha: ${error.message}`));
+    });
+    document.getElementById('newCodecButton').addEventListener('click', () => openCodecEditor(null));
+    document.getElementById('refreshCodecsButton').addEventListener('click', () => loadCodecsWorkspace().catch(error => setText('codecsStatus', `Falha: ${error.message}`)));
+    document.getElementById('saveCodecButton').addEventListener('click', () => saveCodec().catch(error => setText('codecEditorStatus', `Falha: ${error.message}`)));
+    document.getElementById('codecTesterButton').addEventListener('click', openCodecTester);
+    document.getElementById('runCodecTestButton').addEventListener('click', () => runCodecTest().catch(error => setText('codecTesterStatus', `Falha: ${error.message}`)));
+    document.addEventListener('click', event => {
+      if (event.target.closest('[data-codec-action="closeEditor"]')) closeCodecEditor();
+      if (event.target.closest('[data-codec-action="closeTester"]')) closeCodecTester();
     });
     document.getElementById('appearanceTheme').addEventListener('change', event => {
       setAppearanceTheme(event.target.value);
@@ -29069,6 +31193,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     mountDetectionTemplateSection();
     initializeAppearanceTheme();
+    initNavGroups();
+    bindInterfaceDrawerEvents();
+    bindAlertsView();
     applyDashboardLayout();
     try {
       installConfigurableDashboardEvents();
@@ -29085,5 +31212,24 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }).catch(console.error);
     window.addEventListener('beforeunload', stopOpsSummaryPolling);
   </script>
+
+  <div id="interfaceDrawerBackdrop" class="interface-drawer-backdrop" hidden></div>
+  <aside id="interfaceDrawer" class="interface-drawer" role="dialog" aria-modal="true" aria-labelledby="interfaceDrawerTitle" aria-hidden="true">
+    <header class="interface-drawer-header">
+      <div class="interface-drawer-heading">
+        <span id="interfaceDrawerStatusDot" class="status-dot" aria-hidden="true"></span>
+        <h2 id="interfaceDrawerTitle" class="interface-drawer-title">—</h2>
+        <span id="interfaceDrawerSensor" class="interface-drawer-chip"></span>
+      </div>
+      <button type="button" id="interfaceDrawerClose" class="icon-button" aria-label="Fechar">
+        <i data-lucide="x"></i>
+      </button>
+    </header>
+    <nav class="interface-drawer-tabs" role="tablist" aria-label="Seções da interface">
+      <button type="button" class="interface-drawer-tab active" role="tab" aria-selected="true" data-interface-tab="overview">Overview</button>
+      <button type="button" class="interface-drawer-tab" role="tab" aria-selected="false" data-interface-tab="traffic">Traffic</button>
+    </nav>
+    <div class="interface-drawer-body" id="interfaceDrawerBody"></div>
+  </aside>
 </body>
 </html>
