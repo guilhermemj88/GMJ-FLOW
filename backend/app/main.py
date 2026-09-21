@@ -29,7 +29,7 @@ from importlib import import_module
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from statistics import median
-from typing import Any, Mapping, Union
+from typing import Any, Callable, Mapping, Union
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - production image uses Python 3.12.
@@ -103,6 +103,8 @@ from app.services.network_assets import (
 )
 from app.services.flow_codecs import (
     classify_flow_codecs,
+    codec_is_aggregate_classifiable,
+    codec_service_group,
     create_flow_codec,
     delete_flow_codec,
     duplicate_flow_codec,
@@ -110,6 +112,9 @@ from app.services.flow_codecs import (
     flow_codec_options,
     get_flow_codec,
     list_flow_codecs,
+    order_flow_codecs,
+    PROTOCOL_ANY,
+    PROTOCOL_BY_NAME,
     seed_builtin_flow_codecs,
     update_flow_codec,
 )
@@ -46436,6 +46441,108 @@ _DIRECTIONAL_PROTOCOL_LABEL_EXPR = (
 
 _DIRECTIONAL_PROTOCOL_ORDER = ("TCP", "UDP", "GRE", "ESP", "ICMP", "OTHER")
 
+# Fallback do modo SERVICOS: TCP/UDP sem codec viram "TCP OTHER"/"UDP OTHER"
+# (nao se confundem com os labels de protocolo TCP/UDP do modo PROTOCOLOS).
+_DIRECTIONAL_SERVICE_FALLBACK_EXPR = (
+    "multiIf("
+    "proto = 6, 'TCP OTHER', "
+    "proto = 17, 'UDP OTHER', "
+    "proto = 47, 'GRE', "
+    "proto = 50, 'ESP', "
+    "proto = 1, 'ICMP', "
+    "'OTHER')"
+)
+
+# Servicos consolidados (CLIENT/RETURN/QUERY/RESPONSE agrupados) exibidos no
+# grafico stacked. A selecao do Top N e feita pelo throughput TOTAL da janela
+# (soma das direcoes) para que o conjunto de series e as cores sejam estaveis
+# entre Total/Download/Upload e entre refreshes.
+_DIRECTIONAL_SERVICE_STACK_LIMIT = 7
+_DIRECTIONAL_OTHER_LABEL = "OTHER"
+
+# Cores fixas por servico/fallback. Reutiliza tokens da paleta existente.
+_DIRECTIONAL_SERVICE_COLORS = {
+    "HTTPS": "#2563eb",
+    "HTTP": "#f59e0b",
+    "QUIC": "#16a34a",
+    "DNS": "#7c3aed",
+    "NTP": "#0891b2",
+    "SSDP": "#dc2626",
+    "SNMP": "#0f766e",
+    "CLDAP": "#b45309",
+    "CHARGEN": "#a16207",
+    "MEMCACHED": "#6d28d9",
+    "TCP OTHER": "#64748b",
+    "UDP OTHER": "#94a3b8",
+    "GRE": "#0891b2",
+    "ESP": "#7c3aed",
+    "ICMP": "#f59e0b",
+    "OTHER": "#475569",
+}
+
+
+def _directional_stable_color(label: str, palette: tuple[str, ...]) -> str:
+    """Cor fixa por label (mesma cor em refreshes/direcoes)."""
+    text_label = clean_text(label).upper() or _DIRECTIONAL_OTHER_LABEL
+    mapped = _DIRECTIONAL_SERVICE_COLORS.get(text_label)
+    if mapped:
+        return mapped
+    index = 0
+    for char in text_label:
+        index = (index * 31 + ord(char)) % 1000000007
+    return palette[index % len(palette)]
+
+
+def _directional_protocol_color(label: str) -> str:
+    return PROTOCOL_COLORS.get(clean_text(label).upper(), PROTOCOL_COLORS["OTHER"])
+
+
+def _directional_service_color(label: str) -> str:
+    return _directional_stable_color(label, DASHBOARD_PALETTE)
+
+
+def _directional_service_label_expr(codecs: list[dict[str, Any]], params: dict[str, Any]) -> str:
+    """Expressao multiIf parametrizada: primeiro codec compativel vence.
+
+    A ordem das branches e a MESMA precedencia canonica do registry
+    (priority DESC, specificity DESC, id ASC via order_flow_codecs), o que
+    garante atribuicao unica: cada linha do agregado casa no maximo um codec
+    e a soma das series empilhadas preserva o total direcional.
+
+    Todos os valores (proto, portas e nomes) entram como parametros do
+    ClickHouse; nenhum valor configuravel e concatenado no SQL.
+    """
+    branches: list[str] = []
+    for index, codec in enumerate(codecs):
+        conditions: list[str] = []
+        protocol = clean_text(codec.get("protocol")).upper() or PROTOCOL_ANY
+        if protocol != PROTOCOL_ANY:
+            protocol_number = PROTOCOL_BY_NAME.get(protocol)
+            if protocol_number is None:
+                continue
+            key = f"dslv_proto_{index}"
+            params[key] = int(protocol_number)
+            conditions.append("proto = {%s:UInt8}" % key)
+        source_port = codec.get("source_port")
+        if source_port is not None and int(source_port) > 0:
+            key = f"dslv_src_{index}"
+            params[key] = int(source_port)
+            conditions.append("src_port = {%s:UInt16}" % key)
+        destination_port = codec.get("destination_port")
+        if destination_port is not None and int(destination_port) > 0:
+            key = f"dslv_dst_{index}"
+            params[key] = int(destination_port)
+            conditions.append("dst_port = {%s:UInt16}" % key)
+        if not conditions:
+            continue
+        label = codec_service_group(codec.get("name")) or codec.get("name") or "OTHER"
+        label_key = f"dslv_label_{index}"
+        params[label_key] = clean_text(label)
+        branches.append(" AND ".join(conditions) + " , {%s:String}" % label_key)
+    if not branches:
+        return _DIRECTIONAL_SERVICE_FALLBACK_EXPR
+    return "multiIf(" + ", ".join(branches) + ", " + _DIRECTIONAL_SERVICE_FALLBACK_EXPR + ")"
+
 
 def active_monitored_cidrs() -> list[str]:
     """CIDRs ativos de todas as zonas monitoradas (fonte canonica)."""
@@ -46478,13 +46585,34 @@ def monitored_asn_numbers(cidrs: list[str]) -> set[int]:
     return numbers
 
 
-def _directional_protocol_series(rows: list[dict[str, Any]], direction_filter: str) -> list[dict[str, Any]]:
+def _directional_top_labels(rows: list[dict[str, Any]], key_field: str, limit: int) -> set[str]:
+    """Top N labels por throughput TOTAL da janela (estavel entre direcoes)."""
+    totals: dict[str, float] = {}
+    for row in rows:
+        label = clean_text(row.get(key_field)) or _DIRECTIONAL_OTHER_LABEL
+        totals[label] = totals.get(label, 0.0) + float(row.get("bps") or 0)
+    ranked = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    return {label for label, _value in ranked[: max(1, int(limit))]}
+
+
+def _directional_stacked_series(
+    rows: list[dict[str, Any]],
+    direction_filter: str,
+    *,
+    key_field: str,
+    color_resolver: Callable[[str], str],
+    order: tuple[str, ...] = (),
+    selected_labels: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Series empilhadas (ts, label, bps) para uma direcao ou o total."""
     series_by_label: dict[str, dict[str, Any]] = {}
     for row in rows:
         flow_direction = clean_text(row.get("flow_direction"))
         if direction_filter != "total" and flow_direction != direction_filter:
             continue
-        label = clean_text(row.get("label")) or "OTHER"
+        label = clean_text(row.get(key_field)) or _DIRECTIONAL_OTHER_LABEL
+        if selected_labels is not None and label not in selected_labels:
+            label = _DIRECTIONAL_OTHER_LABEL
         ts = row.get("ts")
         if ts is None:
             continue
@@ -46495,19 +46623,19 @@ def _directional_protocol_series(rows: list[dict[str, Any]], direction_filter: s
                 "group": label,
                 "label": label,
                 "direction": "download",
-                "color": dashboard_series_color(label, "protocol", 0),
+                "color": color_resolver(label),
                 "points_by_ts": {},
             },
         )
         group["points_by_ts"][ts] = group["points_by_ts"].get(ts, 0.0) + float(row.get("bps") or 0)
 
     ordered: list[dict[str, Any]] = []
-    for label in _DIRECTIONAL_PROTOCOL_ORDER:
+    for label in order:
         if label in series_by_label:
             ordered.append(series_by_label[label])
-    for label, group in series_by_label.items():
-        if label not in _DIRECTIONAL_PROTOCOL_ORDER:
-            ordered.append(group)
+    for label in sorted(series_by_label):
+        if label not in order:
+            ordered.append(series_by_label[label])
 
     return [
         {
@@ -46526,6 +46654,27 @@ def _directional_protocol_series(rows: list[dict[str, Any]], direction_filter: s
         }
         for group in ordered
     ]
+
+
+def _directional_protocol_series(
+    rows: list[dict[str, Any]], direction_filter: str
+) -> list[dict[str, Any]]:
+    """Compatibilidade: series por protocolo a partir do resultado agrupado."""
+    return _directional_stacked_series(
+        rows,
+        direction_filter,
+        key_field="label",
+        color_resolver=_directional_protocol_color,
+        order=_DIRECTIONAL_PROTOCOL_ORDER,
+    )
+
+
+def _directional_aggregate_codecs() -> list[dict[str, Any]]:
+    """Codecs ativos classificaveis no agregado minuto, em ordem canonica."""
+    with sqlite_connection() as conn:
+        codecs = list_flow_codecs(conn, active_only=True)
+    eligible = [codec for codec in codecs if codec_is_aggregate_classifiable(codec)]
+    return order_flow_codecs(eligible)
 
 
 def directional_analytics_payload(
@@ -46554,6 +46703,7 @@ def directional_analytics_payload(
         "monitored_prefixes": 0,
         "monitored_asns": [],
         "protocol_timeseries": {"total": [], "download": [], "upload": []},
+        "service_timeseries": {"total": [], "download": [], "upload": []},
         "external_asn_download": {"items": []},
         "external_asn_upload": {"items": []},
         "local_ip_download": {"items": []},
@@ -46567,6 +46717,11 @@ def directional_analytics_payload(
         return empty_payload
 
     ensure_clickhouse_schema()
+
+    aggregate_codecs = [
+        codec
+        for codec in _directional_aggregate_codecs()
+    ]
 
     context = flow_query_context(
         range_minutes,
@@ -46601,6 +46756,7 @@ def directional_analytics_payload(
             "if_index": if_index,
             "limit": limit,
             "metric": metric,
+            "codecs": [codec["id"] for codec in aggregate_codecs],
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(effective_range_minutes))
@@ -46619,8 +46775,10 @@ def directional_analytics_payload(
     multiplier = "8" if metric == "bits_s" else "1"
     where = context["where"]
     rated_where = context["rated_where"]
+    # src_port/dst_port: necessarios para classificar por codecs com a mesma base do agregado
     dimensions = [
-        "src_ip", "dst_ip", "proto", "src_asn", "dst_asn", "src_as_name", "dst_as_name",
+        "src_ip", "dst_ip", "proto", "src_port", "dst_port",
+        "src_asn", "dst_asn", "src_as_name", "dst_as_name",
     ]
 
     query_prefix = dashboard_raw_rated_source_cte(where, dimensions)
@@ -46643,36 +46801,70 @@ def directional_analytics_payload(
     upload_factor = "dashboard_output_sample_rate"
 
     # --- 1) serie temporal por protocolo (download + upload) ---
+    service_label_expr = _directional_service_label_expr(aggregate_codecs, params)
     series_query = query_prefix + f"""
         ,
         directional_weighted_series AS (
             SELECT
                 toStartOfInterval(flow_time, INTERVAL {{bucket_seconds:UInt32}} SECOND) AS ts,
-                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS label,
+                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS proto_label,
+                {service_label_expr} AS service_label,
                 'download' AS flow_direction,
                 sum({corrected_value_expr(value_field, download_factor)}) * {multiplier} / {{seconds:Float64}} AS bps
             FROM {source_table}
             WHERE {rated_where} AND {download_filter}
-            GROUP BY ts, label
+            GROUP BY ts, proto_label, service_label
             UNION ALL
             SELECT
                 toStartOfInterval(flow_time, INTERVAL {{bucket_seconds:UInt32}} SECOND) AS ts,
-                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS label,
+                {_DIRECTIONAL_PROTOCOL_LABEL_EXPR} AS proto_label,
+                {service_label_expr} AS service_label,
                 'upload' AS flow_direction,
                 sum({corrected_value_expr(value_field, upload_factor)}) * {multiplier} / {{seconds:Float64}} AS bps
             FROM {source_table}
             WHERE {rated_where} AND {upload_filter}
-            GROUP BY ts, label
+            GROUP BY ts, proto_label, service_label
         )
-        SELECT ts, label, flow_direction, bps
+        SELECT ts, proto_label, service_label, flow_direction, bps
         FROM directional_weighted_series
-        ORDER BY ts, label, flow_direction
+        ORDER BY ts, proto_label, service_label, flow_direction
     """
     series_rows = rows_as_dicts(query_clickhouse(series_query, params))
     protocol_timeseries = {
-        "total": _directional_protocol_series(series_rows, "total"),
-        "download": _directional_protocol_series(series_rows, "download"),
-        "upload": _directional_protocol_series(series_rows, "upload"),
+        "total": _directional_stacked_series(
+            series_rows,
+            "total",
+            key_field="proto_label",
+            color_resolver=_directional_protocol_color,
+            order=_DIRECTIONAL_PROTOCOL_ORDER,
+        ),
+        "download": _directional_stacked_series(
+            series_rows,
+            "download",
+            key_field="proto_label",
+            color_resolver=_directional_protocol_color,
+            order=_DIRECTIONAL_PROTOCOL_ORDER,
+        ),
+        "upload": _directional_stacked_series(
+            series_rows,
+            "upload",
+            key_field="proto_label",
+            color_resolver=_directional_protocol_color,
+            order=_DIRECTIONAL_PROTOCOL_ORDER,
+        ),
+    }
+    selected_services = _directional_top_labels(
+        series_rows, "service_label", _DIRECTIONAL_SERVICE_STACK_LIMIT
+    )
+    service_timeseries = {
+        direction: _directional_stacked_series(
+            series_rows,
+            direction,
+            key_field="service_label",
+            color_resolver=_directional_service_color,
+            selected_labels=selected_services,
+        )
+        for direction in ("total", "download", "upload")
     }
 
     # --- 2) rankings direcionais (4 branches) ---
@@ -46779,6 +46971,8 @@ def directional_analytics_payload(
         "monitored_prefixes": len(cidrs),
         "monitored_asns": sorted(monitored_asns),
         "protocol_timeseries": protocol_timeseries,
+        "service_timeseries": service_timeseries,
+        "service_labels": sorted(selected_services),
         "external_asn_download": {"items": finalize_ranking(external_download)},
         "external_asn_upload": {"items": finalize_ranking(external_upload)},
         "local_ip_download": {"items": finalize_ranking(

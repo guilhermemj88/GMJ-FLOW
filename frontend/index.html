@@ -4074,17 +4074,21 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
-          <section class="dashboard-overview-chrome" id="dashboardProtocolSection" aria-label="Tráfego por protocolo">
+          <section class="dashboard-overview-chrome" id="dashboardProtocolSection" aria-label="Tráfego por serviço e protocolo">
             <div class="panel p-3">
               <div class="d-flex justify-content-between align-items-center mb-2">
-                <div class="panel-title">Tráfego por Protocolo</div>
+                <div class="panel-title" id="protocolSectionTitle">Tráfego por Serviço</div>
                 <div class="d-flex align-items-center gap-2">
-                  <div class="btn-group btn-group-sm directional-protocol-toggle" role="group" aria-label="Direção do gráfico por protocolo">
+                  <div class="btn-group btn-group-sm directional-series-toggle" role="group" aria-label="Agrupamento do gráfico de tráfego">
+                    <button type="button" class="btn btn-outline-secondary active" data-series-group="service">Serviços</button>
+                    <button type="button" class="btn btn-outline-secondary" data-series-group="protocol">Protocolos</button>
+                  </div>
+                  <div class="btn-group btn-group-sm directional-protocol-toggle" role="group" aria-label="Direção do gráfico de tráfego">
                     <button type="button" class="btn btn-outline-secondary active" data-protocol-direction="total">Total</button>
                     <button type="button" class="btn btn-outline-secondary" data-protocol-direction="download">Download</button>
                     <button type="button" class="btn btn-outline-secondary" data-protocol-direction="upload">Upload</button>
                   </div>
-                  <div id="protocolSectionMeta" class="metric-readout">por protocolo</div>
+                  <div id="protocolSectionMeta" class="metric-readout">por serviço (codecs)</div>
                 </div>
               </div>
               <div id="protocolChart" class="chart" style="height:280px;"></div>
@@ -27394,6 +27398,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     let directionalAnalyticsData = null;
     let directionalProtocolMode = 'total';
+    // "service" = stacked por codecs (classificacao canonica), "protocol" = stacked por protocolo IP
+    let directionalSeriesMode = 'service';
 
     function directionalRankingShare(items) {
       return items.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
@@ -27450,22 +27456,33 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (meta) meta.textContent = `top ${rows.length} · nossos blocos`;
     }
 
-    function directionalProtocolItems() {
-      const series = directionalAnalyticsData?.protocol_timeseries?.[directionalProtocolMode] || [];
+    function directionalSeriesKey() {
+      return directionalSeriesMode === 'protocol' ? 'protocol_timeseries' : 'service_timeseries';
+    }
+
+    function directionalSeriesItems() {
+      const series = directionalAnalyticsData?.[directionalSeriesKey()]?.[directionalProtocolMode] || [];
       return series.map(item => ({ ...item, direction: 'download' }));
     }
 
     function renderDirectionalProtocolChart() {
-      const items = directionalProtocolItems();
+      const byProtocol = directionalSeriesMode === 'protocol';
+      const items = directionalSeriesItems();
       const meta = document.getElementById('protocolSectionMeta');
+      const title = document.getElementById('protocolSectionTitle');
+      if (title) title.textContent = byProtocol ? 'Tráfego por Protocolo' : 'Tráfego por Serviço';
       if (!charts.protocol) return;
       if (!items.length || !items.some(item => (item.points || []).length)) {
-        GMJDashboardCharts.replaceChartOption(charts.protocol, emptyChartOption('Sem dados de protocolo no período'));
-        if (meta) meta.textContent = 'sem dados';
+        GMJDashboardCharts.replaceChartOption(charts.protocol, emptyChartOption(
+          byProtocol ? 'Sem dados de protocolo no período' : 'Sem dados de serviço no período'
+        ));
+        if (meta) meta.textContent = byProtocol ? 'por protocolo · sem dados' : 'por serviço · sem dados';
         return;
       }
-      GMJDashboardCharts.replaceChartOption(charts.protocol, directionalProtocolOption(items, 'bits_s'));
-      if (meta) meta.textContent = `por protocolo · ${directionalProtocolMode}`;
+      GMJDashboardCharts.replaceChartOption(charts.protocol, directionalSeriesOption(items, 'bits_s'));
+      if (meta) {
+        meta.textContent = `${byProtocol ? 'por protocolo' : 'por serviço (codecs)'} · ${directionalProtocolMode}`;
+      }
     }
 
     function renderDirectionalAnalytics(payload) {
@@ -27479,7 +27496,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderDirectionalProtocolChart();
     }
 
-    function directionalProtocolOption(items, apiMetric) {
+    function directionalSeriesOption(items, apiMetric) {
       const metric = metricFromApi(apiMetric);
       const formatter = metricFormatter(metric);
       const series = items.map(item => {
@@ -27490,10 +27507,11 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           type: 'line',
           smooth: true,
           showSymbol: false,
+          stack: 'traffic',
           connectNulls: false,
-          lineStyle: { width: 2, color },
+          lineStyle: { width: 1, color },
           itemStyle: { color },
-          areaStyle: { color: hexToRgba(color, 0.22) },
+          areaStyle: { color: hexToRgba(color, 0.72), opacity: 1 },
           label: { show: false },
           emphasis: { focus: 'series' },
           data
@@ -30413,6 +30431,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       button.addEventListener('click', () => {
         directionalProtocolMode = button.dataset.protocolDirection || 'total';
         document.querySelectorAll('.directional-protocol-toggle button').forEach(btn => btn.classList.toggle('active', btn === button));
+        renderDirectionalProtocolChart();
+      });
+    });
+    document.querySelectorAll('.directional-series-toggle button').forEach(button => {
+      button.addEventListener('click', () => {
+        directionalSeriesMode = button.dataset.seriesGroup || 'service';
+        document.querySelectorAll('.directional-series-toggle button').forEach(btn => btn.classList.toggle('active', btn === button));
         renderDirectionalProtocolChart();
       });
     });

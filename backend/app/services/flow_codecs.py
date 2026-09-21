@@ -488,6 +488,68 @@ def match_flow_codec(
     return True
 
 
+# Suffixes that describe the role inside a service conversation. They are
+# stripped only for aggregate/operational visualisation; the Codecs tab keeps
+# the detailed names.
+CODEC_SERVICE_ROLE_SUFFIXES = (
+    "CLIENT",
+    "RETURN",
+    "QUERY",
+    "RESPONSE",
+    "REQUEST",
+    "REPLY",
+    "UDP",
+    "TCP",
+    "SRC",
+    "DST",
+)
+
+
+def codec_service_group(name: Any) -> str:
+    """Consolidate a codec name into its service group (e.g. HTTP).
+
+    ``HTTPS_CLIENT``/``HTTPS_RETURN`` -> ``HTTPS``;
+    ``DNS_QUERY_UDP``/``DNS_RESPONSE_UDP`` -> ``DNS``.
+    Trailing role tokens are stripped repeatedly while at least one token
+    remains; a name made only of role tokens is returned unchanged.
+    """
+    text_value = clean_text(name).upper()
+    if not text_value:
+        return ""
+    tokens = [token for token in text_value.replace("-", "_").split("_") if token]
+    while len(tokens) > 1 and tokens[-1] in CODEC_SERVICE_ROLE_SUFFIXES:
+        tokens.pop()
+    return "_".join(tokens)
+
+
+def codec_is_aggregate_classifiable(codec: Mapping[str, Any]) -> bool:
+    """True when the codec can be evaluated from proto + src_port + dst_port alone.
+
+    The minute aggregates (flow_dashboard_prefix_1m) carry proto/src_port/dst_port,
+    but not icmp_type/icmp_code/roles/provider, and only ``tcp_flags`` when the
+    aggregate view filters TCP. Codecs that need those fields must not be applied
+    to aggregates: they are documented as out of scope for the stacked chart.
+    """
+    if clean_text(codec.get("direction")).upper() not in {"", "ANY"}:
+        return False
+    if _safe_int(codec.get("tcp_flags")) != 0:
+        return False
+    if codec.get("icmp_type") is not None or codec.get("icmp_code") is not None:
+        return False
+    if clean_text(codec.get("source_role")) or clean_text(codec.get("destination_role")):
+        return False
+    if clean_text(codec.get("provider")):
+        return False
+    protocol = clean_text(codec.get("protocol")).upper() or PROTOCOL_ANY
+    if protocol != PROTOCOL_ANY and protocol not in PROTOCOL_BY_NAME:
+        return False
+    has_port = (
+        _safe_int(codec.get("source_port")) > 0
+        or _safe_int(codec.get("destination_port")) > 0
+    )
+    return protocol != PROTOCOL_ANY or has_port
+
+
 def _codec_specificity(codec: Mapping[str, Any]) -> int:
     count = 0
     if clean_text(codec.get("protocol")).upper() not in {"", PROTOCOL_ANY}:
@@ -513,6 +575,24 @@ def _codec_specificity(codec: Mapping[str, Any]) -> int:
     return count
 
 
+def flow_codec_sort_key(codec: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Canonical precedence key: priority DESC, specificity DESC, id ASC.
+
+    This is the single source of truth for codec precedence. Any consumer that
+    needs "first match wins" semantics must order with this key.
+    """
+    return (
+        -_safe_int(codec.get("specificity_priority")),
+        -_codec_specificity(codec),
+        _safe_int(codec.get("id")),
+    )
+
+
+def order_flow_codecs(codecs: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return the codecs in canonical precedence order (does not filter)."""
+    return [dict(codec) for codec in sorted(codecs, key=flow_codec_sort_key)]
+
+
 def classify_flow_codecs(
     flow: Any,
     codecs: Sequence[Mapping[str, Any]],
@@ -528,13 +608,7 @@ def classify_flow_codecs(
         if int(codec.get("active", 1)) == 1
         and match_flow_codec(flow, codec, source_context, destination_context)
     ]
-    matches.sort(
-        key=lambda codec: (
-            -_safe_int(codec.get("specificity_priority")),
-            -_codec_specificity(codec),
-            _safe_int(codec.get("id")),
-        )
-    )
+    matches.sort(key=flow_codec_sort_key)
     return [dict(codec) for codec in matches]
 
 
@@ -556,6 +630,11 @@ __all__ = [
     "PROTOCOL_NAMES",
     "FLOW_CODEC_PROTOCOLS",
     "BUILTIN_CODECS",
+    "CODEC_SERVICE_ROLE_SUFFIXES",
+    "codec_service_group",
+    "codec_is_aggregate_classifiable",
+    "flow_codec_sort_key",
+    "order_flow_codecs",
     "ensure_flow_codecs_schema",
     "seed_builtin_flow_codecs",
     "flow_codec_row_to_dict",
