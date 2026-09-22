@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.services.peak_hunter_runner import run_peak_hunter_cycle
+from app.services.peak_hunter_auto import run_peak_hunter_cycle
 from app.services.peak_events import list_peak_events
 
 PEAK_EPOCH = 1780000000
@@ -94,8 +94,7 @@ class RunnerV2Test(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_runner_source_has_no_legacy_pipeline(self):
-        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_runner.py").read_text(encoding="utf-8")
-        v2 = source[source.index("run_peak_hunter_cycle"):]
+        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_auto.py").read_text(encoding="utf-8")
         for forbidden in (
             "analyze_peak_hunter",
             "generate_mitigation_candidates",
@@ -106,15 +105,14 @@ class RunnerV2Test(unittest.TestCase):
             "fetch_peak_flows",
             "fetch_interface_series",
         ):
-            self.assertNotIn(forbidden, v2, forbidden)
+            self.assertNotIn(forbidden, source, forbidden)
 
     def test_runner_source_uses_peak_analysis(self):
-        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_runner.py").read_text(encoding="utf-8")
-        self.assertIn("from app.services.peak_analysis import analyze_peak_scope", source)
+        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_auto.py").read_text(encoding="utf-8")
         self.assertIn("analyze_peak_scope(", source)
 
     def test_no_concurrent_cycle(self):
-        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_runner.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("backend", "app", "services", "peak_hunter_auto.py").read_text(encoding="utf-8")
         self.assertIn("_CYCLE_LOCK.acquire(blocking=False)", source)
 
 

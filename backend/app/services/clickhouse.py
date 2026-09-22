@@ -398,48 +398,6 @@ def _proto_number(value: str) -> int:
     return int(text)
 
 
-def fetch_interface_aggregate_series(
-    sensor: str,
-    interface_id: int,
-    direction: str,
-    start_time: datetime,
-    end_time: datetime,
-) -> list[dict[str, Any]]:
-    """Minute-granular BPS/PPS series for an interface from the aggregate.
-
-    Uses flow_dashboard_series_1m (never flow_raw) so the Peak Hunter polling
-    path stays cheap and bounded. Returns rows with bucket/bits_s/packets_s.
-    """
-    direction = str(direction or "total").strip().lower()
-    if direction in {"sends", "transmits", "outbound"}:
-        where_if = "AND output_if = {interface_id:UInt32}"
-    elif direction in {"receives", "inbound"}:
-        where_if = "AND input_if = {interface_id:UInt32}"
-    else:
-        where_if = "AND (input_if = {interface_id:UInt32} OR output_if = {interface_id:UInt32})"
-    params: dict[str, Any] = {
-        "start": start_time,
-        "end": end_time,
-        "sensor": sensor,
-        "interface_id": int(interface_id),
-    }
-    return query_clickhouse_context(
-        "fetch_interface_aggregate_series",
-        f"""
-        SELECT
-            minute AS bucket,
-            sum(bytes * {FLOW_SAMPLE_RATE_FALLBACK}) * 8 / 60 AS bits_s,
-            sum(packets * {FLOW_SAMPLE_RATE_FALLBACK}) / 60 AS packets_s
-        FROM flow_dashboard_series_1m
-        WHERE minute >= {{start:DateTime}} AND minute <= {{end:DateTime}}
-          AND sensor = {{sensor:String}}
-          {where_if}
-        GROUP BY minute
-        ORDER BY minute
-        """,
-        params,
-    )
-
 def peak_sample_rate_details(sensor: str, interface_id: int, direction: str) -> dict[str, Any]:
     config = sensor_sample_rate_config(resolve_sensor_id(sensor))
     if not config:

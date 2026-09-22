@@ -9,20 +9,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from app.services.active_ioc_hotset import ActiveIocHotSet
-from app.services.clickhouse import (
-    ClickHouseQueryError,
-    fetch_interface_aggregate_series,
-    fetch_interface_series,
-    fetch_peak_flows,
-    fetch_peak_hunter_interfaces,
-    fetch_peak_hunter_sensors,
-    query_clickhouse,
-)
-from app.services.peak_analysis import analyze_peak_scope
-from app.services.peak_detection import PeakDetectionConfig
-from app.services.peak_events import ensure_peak_events_db, get_peak_event, list_peak_events
-from app.services.peak_evidence import PeakEvidenceConfig
 from app.services.peak_hunter import (
     PeakHunterRequest,
     analyze_peak_hunter,
@@ -37,6 +23,20 @@ from app.services.peak_hunter import (
     save_peak_analysis,
     update_peak_analysis_feedback,
 )
+from app.services.active_ioc_hotset import ActiveIocHotSet
+from app.services.clickhouse import (
+    ClickHouseQueryError,
+    fetch_interface_series,
+    fetch_peak_flows,
+    fetch_peak_hunter_interfaces,
+    fetch_peak_hunter_sensors,
+    query_clickhouse,
+)
+from app.services.peak_analysis import analyze_peak_scope
+from app.services.peak_detection import PeakDetectionConfig
+from app.services.peak_series import fetch_interface_aggregate_series
+from app.services.peak_events import ensure_peak_events_db, get_peak_event, list_peak_events
+from app.services.peak_evidence import PeakEvidenceConfig
 from app.services.peak_hunter_runner import (
     create_peak_hunter_job,
     delete_peak_hunter_job,
