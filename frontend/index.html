@@ -27807,21 +27807,37 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     let allInterfacesCache = [];
     let allInterfacesCacheAt = 0;
+    let allInterfacesCacheKey = '';
     let allInterfacesLoading = false;
     let allInterfacesLoadPromise = null;
 
     async function loadAllInterfaces(force = false) {
+      // O TOP INTERFACES deve respeitar o mesmo contexto global dos demais widgets:
+      // sensores selecionados restringem a varredura SNMP na fonte; interfaces
+      // selecionadas restringem as linhas exibidas.
+      const scopeSensors = selectedDashboardSensors().map(Number);
+      const scopeInterfaces = selectedDashboardInterfaces().map(Number);
+      const scopeKey = `${scopeSensors.join(',')}|${scopeInterfaces.join(',')}`;
       const now = Date.now();
-      if (!force && allInterfacesCache.length && now - allInterfacesCacheAt < 20000) return allInterfacesCache;
+      if (
+        !force
+        && allInterfacesCache.length
+        && allInterfacesCacheKey === scopeKey
+        && now - allInterfacesCacheAt < 20000
+      ) return allInterfacesCache;
       // A varredura SNMP leva segundos por sensor: quem chamar durante uma carga em
       // andamento espera a mesma varredura (evita renderizar "sem dados" com cache vazio).
       if (allInterfacesLoading && allInterfacesLoadPromise) return allInterfacesLoadPromise;
       if (allInterfacesLoading) return allInterfacesCache;
       allInterfacesLoading = true;
       allInterfacesLoadPromise = (async () => {
-        const sensors = (Array.isArray(dashboardSensorCache) && dashboardSensorCache.length)
+        let sensors = (Array.isArray(dashboardSensorCache) && dashboardSensorCache.length)
           ? dashboardSensorCache
           : ((await apiRequest('/api/dashboard/sensors')).items || []);
+        if (scopeSensors.length) {
+          const allowed = new Set(scopeSensors);
+          sensors = sensors.filter(sensor => allowed.has(Number(sensor.id)));
+        }
         const results = await Promise.all(sensors.map(async sensor => {
           try {
             const payload = await apiRequest(`/api/sensors/${sensor.id}/interfaces`);
@@ -27830,7 +27846,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
             return [];
           }
         }));
-        allInterfacesCache = results.flat();
+        let merged = results.flat();
+        if (scopeInterfaces.length) {
+          const selected = new Set(scopeInterfaces);
+          merged = merged.filter(item => selected.has(Number(item.id)));
+        }
+        allInterfacesCache = merged;
+        allInterfacesCacheKey = scopeKey;
         allInterfacesCacheAt = Date.now();
         return allInterfacesCache;
       })();

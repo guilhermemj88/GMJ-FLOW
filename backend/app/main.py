@@ -44174,9 +44174,18 @@ def dashboard_anomaly_summary_payload(
     classification: str,
     include_negative_samples: bool,
     limit: int,
+    sensor_ids: str | None = None,
 ) -> dict[str, Any]:
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
-    sensor_name = clean_text(sensor) or dashboard_sensor_name(sensor_id)
+    sensor_id_list = split_filter_int_list(sensor_ids, "sensor_ids")
+    sensor_names = [
+        dashboard_sensor_name(current)
+        for current in sensor_id_list
+        if dashboard_sensor_name(current)
+    ]
+    sensor_name = clean_text(sensor) or (
+        sensor_names[0] if len(sensor_names) == 1 else dashboard_sensor_name(sensor_id)
+    )
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
     normalized_direction = clean_text(direction)
     normalized_protocol = clean_text(protocol)
@@ -44189,6 +44198,7 @@ def dashboard_anomaly_summary_payload(
             "end": end or end_time or "",
             "sensor": sensor_name,
             "sensor_id": sensor_id,
+            "sensor_ids": sorted(sensor_names),
             "interface_id": interface_id,
             "if_index": if_index,
             "zone_id": zone_id,
@@ -44205,7 +44215,10 @@ def dashboard_anomaly_summary_payload(
 
     where = ["COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) >= ?", "COALESCE(NULLIF(peak_time_utc, ''), peak_time, created_at) <= ?"]
     values: list[Any] = [iso(start_dt), iso(end_dt)]
-    if sensor_name:
+    if len(sensor_names) > 1:
+        where.append("sensor IN (%s)" % ", ".join(["?"] * len(sensor_names)))
+        values.extend(sensor_names)
+    elif sensor_name:
         where.append("sensor = ?")
         values.append(sensor_name)
     if resolved_if_index is not None:
@@ -44387,6 +44400,7 @@ def dashboard_anomalies_summary(
     classification: str = "",
     include_negative_samples: bool = False,
     limit: int = Query(20, ge=1, le=200),
+    sensor_ids: str | None = None,
 ) -> dict[str, Any]:
     return dashboard_anomaly_summary_payload(
         range_minutes,
@@ -44404,6 +44418,7 @@ def dashboard_anomalies_summary(
         classification,
         include_negative_samples,
         limit,
+        sensor_ids,
     )
 
 
@@ -45498,6 +45513,10 @@ def geo_flows(
     prefix_end: str | None = None,
     prefix_address_family: str = "both",
     prefix_match_side: str = "either",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
 ):
     ensure_clickhouse_schema()
     metric = clean_text(metric).lower() or "bits_s"
@@ -45549,6 +45568,10 @@ def geo_flows(
         decoder,
         direction,
         global_prefix_filter,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
     )
     start_dt = context["start"]
     end_dt = context["end"]
