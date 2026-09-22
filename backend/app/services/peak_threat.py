@@ -1,16 +1,26 @@
 from __future__ import annotations
 
-"""Threat Intelligence / Threat Engine integration for a peak's evidence.
+"""Threat handoff layer for a peak's evidence.
 
-Reuses EXCLUSIVELY the existing infrastructure and never creates a parallel
-threat score, attack classification or mitigation path:
+This module does NOT create a new threat score or a parallel attack
+classifier. It separates two distinct things:
 
-  - ``ActiveIocHotSet`` (local, in-memory, O(1) IOC lookup);
-  - the canonical TI verdict vocabulary from ``threat_intel_verdict``.
+  * PEAK EVIDENCE (objective): deltas, concentration, protocol shift,
+    packet-size change, source-count increase, IOC presence. Computed here
+    as plain signals — facts, never decisions.
 
-A peak threat assessment only answers: "is there a known signal among the
-peak's participants, and how strong is it?" The outcome is a triage label
-(normal / noteworthy / suspicious) — not a score, not a decision.
+  * THREAT VERDICT (belongs to the existing Threat Engine / Threat
+    Intelligence): the canonical verdicts from ``threat_intel_verdict`` and
+    the Threat Policy Engine. The Peak Hunter only reuses them.
+
+The returned ``verdict`` is a triage label used to decide the handoff:
+
+  - ``normal``:      no strong objective signal and no IOC;
+  - ``noteworthy``:  objective signals present (concentration, surge, shift);
+  - ``suspicious``:  an IOC hit from the existing TI infrastructure.
+
+It is a routing hint, NOT an attack classification and NOT a mitigation
+decision.
 """
 
 from typing import Any
@@ -19,7 +29,6 @@ VERDICT_NORMAL = "normal"
 VERDICT_NOTEWORTHY = "noteworthy"
 VERDICT_SUSPICIOUS = "suspicious"
 
-# Strong IOC categories that immediately make a peak suspicious.
 STRONG_THREAT_TYPES = {
     "c2",
     "botnet",
@@ -43,7 +52,6 @@ def _entry_signal(entry: Any) -> dict[str, Any]:
 
 
 def _signal_strength(signal: dict[str, Any]) -> str:
-    """Map an IOC entry to strong/weak/none using existing vocabulary."""
     threat_types = {str(value).lower() for value in signal.get("threat_types") or []}
     categories = {str(value).lower() for value in signal.get("categories") or []}
     combined = threat_types | categories
@@ -59,11 +67,7 @@ def _signal_strength(signal: dict[str, Any]) -> str:
 
 
 def enrich_peak_iocs(hotset: Any, ips: list[str]) -> list[dict[str, Any]]:
-    """Batch-enrich IPs against the existing local IOC hot set (no N+1 I/O).
-
-    ``hotset`` may be None or an object exposing ``lookup(ip)`` returning an
-    IOC entry or None. Each lookup is an in-memory O(1) operation.
-    """
+    """Batch-enrich IPs against the existing local IOC hot set (no N+1 I/O)."""
     signals: list[dict[str, Any]] = []
     if hotset is None:
         return signals
@@ -82,7 +86,7 @@ def _collect_participants(evidence: dict[str, Any]) -> list[str]:
     changed = evidence.get("changed") or {}
     concentration = evidence.get("concentration") or {}
     seen: set[str] = set()
-    for kind in ("dst_ips", "src_ips"):
+    for kind in ("external_ips", "local_ips", "dst_ips", "src_ips"):
         for row in changed.get(kind) or []:
             key = str(row.get("key") or row.get("label") or "").strip()
             if key and key not in seen:
@@ -94,34 +98,69 @@ def _collect_participants(evidence: dict[str, Any]) -> list[str]:
     return sorted(seen)
 
 
-def assess_peak_threat(evidence: dict[str, Any], hotset: Any = None) -> dict[str, Any]:
-    """Assess the peak evidence using existing TI infrastructure.
+def compute_peak_signals(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Objective signals derived from evidence. Facts, not decisions."""
+    deltas = evidence.get("deltas") or {}
+    concentration = evidence.get("concentration") or {}
+    signals: list[dict[str, Any]] = []
 
-    Returns a triage label plus audit reasons. No mitigation, no new score.
+    pps_delta = float(deltas.get("pps_delta_pct") or 0)
+    bps_delta = float(deltas.get("bps_delta_pct") or 0)
+    share = float(concentration.get("top_dst_share_pct") or 0)
+    unique_src = int(concentration.get("unique_src_count") or 0)
+
+    if pps_delta >= 100.0:
+        signals.append({"name": "pps_surge", "value": round(pps_delta, 2), "detail": "PPS subiu acima de 100% vs baseline"})
+    if bps_delta >= 50.0:
+        signals.append({"name": "bps_surge", "value": round(bps_delta, 2), "detail": "BPS subiu acima de 50% vs baseline"})
+    if share >= 50.0:
+        signals.append({"name": "concentrated_traffic", "value": round(share, 2), "detail": f"Top destino concentra {share:.1f}% do trafego"})
+    if unique_src >= 10:
+        signals.append({"name": "many_sources", "value": unique_src, "detail": f"{unique_src} origens distintas"})
+
+    before_size = float(deltas.get("avg_packet_size_before") or 0)
+    peak_size = float(deltas.get("avg_packet_size_peak") or 0)
+    if before_size > 0 and peak_size > 0 and abs(peak_size - before_size) / before_size >= 0.30:
+        signals.append({"name": "packet_size_change", "value": round(peak_size, 2), "detail": f"Tamanho medio do pacote mudou de {before_size:.1f} para {peak_size:.1f} bytes"})
+
+    protocols = (evidence.get("changed") or {}).get("protocols") or []
+    for row in protocols[:1]:
+        if float(row.get("delta_bps_pct") or 0) >= 100.0:
+            signals.append({"name": "protocol_shift", "value": row.get("label"), "detail": f"Protocolo {row.get('label')} +{float(row.get('delta_bps_pct') or 0):.0f}%"})
+    return signals
+
+
+def assess_peak_threat(evidence: dict[str, Any], hotset: Any = None) -> dict[str, Any]:
+    """Triage a peak using existing TI + objective signals.
+
+    Returns a routing hint (normal/noteworthy/suspicious), the objective
+    signals and the IOC signals from the existing TI hot set. No mitigation,
+    no new score, no attack classification.
     """
     ips = _collect_participants(evidence)
     ioc_signals = enrich_peak_iocs(hotset, ips)
-    reasons: list[str] = []
+    signals = compute_peak_signals(evidence)
+
     verdict = VERDICT_NORMAL
+    reasons: list[str] = []
     if any(signal.get("strength") == "strong" for signal in ioc_signals):
         verdict = VERDICT_SUSPICIOUS
         reasons.append("strong_ioc")
     elif ioc_signals:
         verdict = VERDICT_NOTEWORTHY
         reasons.append("ioc_signal")
-
-    deltas = evidence.get("deltas") or {}
-    concentration = evidence.get("concentration") or {}
-    pps_delta = float(deltas.get("pps_delta_pct") or 0)
-    share = float(concentration.get("top_dst_share_pct") or 0)
-    if share >= 50.0 and pps_delta >= 100.0:
-        reasons.append("concentrated_pps_surge")
+    if signals:
         if verdict == VERDICT_NORMAL:
             verdict = VERDICT_NOTEWORTHY
+        reasons.extend(signal["name"] for signal in signals)
+
+    handoff_recommended = verdict != VERDICT_NORMAL
     return {
         "verdict": verdict,
         "reasons": sorted(set(reasons)),
+        "signals": signals,
         "ioc_hit_count": len(ioc_signals),
         "ioc_signals": ioc_signals,
         "participants_checked": len(ips),
+        "handoff_recommended": handoff_recommended,
     }
