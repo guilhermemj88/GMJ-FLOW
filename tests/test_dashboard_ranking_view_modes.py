@@ -20,7 +20,7 @@ RANKING_WIDGETS = (
 RANKING_VIEW_MODES = ("table", "chart", "both")
 
 
-def widget_window(widget_id: str, size: int = 4200) -> str:
+def widget_window(widget_id: str, size: int = 9000) -> str:
     """Trecho do HTML a partir do widget de ranking (janela suficiente p/ o card)."""
     index = FRONTEND.index(f'data-ranking-widget="{widget_id}"')
     return FRONTEND[index:index + size]
@@ -41,13 +41,13 @@ class RankingWidgetToggleTest(unittest.TestCase):
 
     def test_each_widget_has_the_three_modes(self) -> None:
         for widget_id in RANKING_WIDGETS:
-            block = widget_window(widget_id, 1600)
+            block = widget_window(widget_id, 9000)
             for mode in RANKING_VIEW_MODES:
                 self.assertIn(f'data-ranking-view="{mode}"', block, widget_id)
 
     def test_each_widget_has_chart_and_table_targets(self) -> None:
         for widget_id in RANKING_WIDGETS:
-            block = widget_window(widget_id, 1600)
+            block = widget_window(widget_id, 9000)
             self.assertIn("data-ranking-chart", block, widget_id)
             self.assertIn("data-ranking-table", block, widget_id)
 

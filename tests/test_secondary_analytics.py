@@ -15,11 +15,14 @@ class SecondaryAnalyticsStaticTest(unittest.TestCase):
         cls.html = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
     def test_section_after_top_interfaces_before_legacy_grid(self) -> None:
-        self.assertIn('class="dashboard-overview-chrome" id="dashboardSecondaryAnalyticsSection"', self.html)
-        top = self.html.index('id="dashboardTopInterfacesSection"')
+        # Top Interfaces virou widget do grid; o resumo de flows continua depois dele
+        # e antes da grade legada (que permanece oculta).
+        grid = self.html.index('id="dashboardWidgetGrid"')
+        interfaces = self.html.index('data-widget-id="top-interfaces"')
         secondary = self.html.index('id="dashboardSecondaryAnalyticsSection"')
         legacy = self.html.index('data-dashboard-legacy-fallback="top-rankings"')
-        self.assertLess(top, secondary)
+        self.assertLess(grid, interfaces)
+        self.assertLess(interfaces, secondary)
         self.assertLess(secondary, legacy)
 
     def test_top_protocolos_uses_throughput_and_share(self) -> None:

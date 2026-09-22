@@ -120,7 +120,7 @@ class Phase7OverviewCompositionTest(unittest.TestCase):
             "#dashboardAlertSection",
             "#dashboardOverviewChrome",
             "#dashboardAggregateSection",
-            "#dashboardTopInterfacesSection",
+            "#dashboardWidgetGrid",
             "#dashboardSecondaryAnalyticsSection",
         ):
             self.assertIn(section, block)

@@ -191,12 +191,15 @@ class FrontendStaticTest(unittest.TestCase):
         self.assertIn("/api/dashboard/directional-analytics", self.html)
 
     def test_markup_contains_directional_sections(self):
-        for section_id in (
-            "dashboardProtocolSection",
-            "dashboardExternalAsnSection",
-            "dashboardLocalIpSection",
+        # os cards direcionais agora sao widgets reais do dashboard
+        for widget_id in (
+            "top-asn-external-download",
+            "top-asn-external-upload",
+            "top-ip-download",
+            "top-ip-upload",
         ):
-            self.assertIn(f'id="{section_id}"', self.html)
+            self.assertIn(f'data-widget-id="{widget_id}"', self.html)
+            self.assertIn(f'data-ranking-widget="{widget_id}"', self.html)
 
     def test_markup_contains_ranking_tables(self):
         for table_id in (
@@ -212,9 +215,10 @@ class FrontendStaticTest(unittest.TestCase):
             self.assertIn(f'data-protocol-direction="{direction}"', self.html)
 
     def test_operational_composition_includes_new_sections(self):
-        self.assertIn(":not(#dashboardProtocolSection)", self.html)
-        self.assertIn(":not(#dashboardExternalAsnSection)", self.html)
-        self.assertIn(":not(#dashboardLocalIpSection)", self.html)
+        # a grade de widgets passou a fazer parte do chrome operacional
+        self.assertIn(":not(#dashboardWidgetGrid)", self.html)
+        self.assertIn(":not(#dashboardSecondaryAnalyticsSection)", self.html)
+        self.assertIn(":not(#dashboardAggregateSection)", self.html)
 
     def test_custom_composition_keeps_configurable_grid_only(self):
         # O modo custom continua exibindo apenas o grid configuravel + prefixo + alerta.
@@ -224,8 +228,16 @@ class FrontendStaticTest(unittest.TestCase):
         )
 
     def test_existing_overview_sections_not_removed(self):
-        for section_id in ("dashboardTopInterfacesSection", "dashboardSecondaryAnalyticsSection"):
+        for section_id in (
+            "dashboardAlertSection",
+            "dashboardAggregateSection",
+            "dashboardWidgetGrid",
+            "dashboardSecondaryAnalyticsSection",
+        ):
             self.assertIn(f'id="{section_id}"', self.html)
+        # os cards migraram para o grid preservando os ids funcionais
+        for widget_id in ("traffic-by-service", "top-interfaces", "top-protocols"):
+            self.assertIn(f'data-widget-id="{widget_id}"', self.html)
 
     def test_empty_state_does_not_leave_infinite_loading(self):
         self.assertIn("Sem dados direcionais no período.", self.html)
