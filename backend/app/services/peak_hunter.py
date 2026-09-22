@@ -263,6 +263,10 @@ def detect_local_peaks(
 
 
 def candidates_for_enrichment(request: PeakHunterRequest, enrichment: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     if enrichment.get("evidence_status") != "complete" or not enrichment.get("dominant_group"):
         return [], False
     dominant = enrichment["dominant_group"]
@@ -851,6 +855,10 @@ def build_peak_hunter_response_profile_draft(
     item: dict[str, Any],
     active_connectors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     context = _peak_hunter_action_context(item)
     dominant = context["dominant_group"]
     classification = context["classification"]
@@ -915,6 +923,10 @@ def build_peak_hunter_response_profile_draft(
 
 
 def build_peak_hunter_detection_rule_draft(item: dict[str, Any]) -> dict[str, Any]:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     context = _peak_hunter_action_context(item, require_candidate=False)
     dominant = context["dominant_group"]
     classification = context["classification"]
@@ -978,6 +990,10 @@ def build_peak_hunter_detection_rule_draft(item: dict[str, Any]) -> dict[str, An
 
 
 def build_peak_hunter_playbook_draft(item: dict[str, Any]) -> dict[str, Any]:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     context = _peak_hunter_action_context(item, require_candidate=False, allow_investigation=True)
     classification = context["classification"]
     dominant = context["dominant_group"]
@@ -1017,6 +1033,10 @@ def build_peak_hunter_playbook_draft(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_peak_hunter_attack_vector_draft(item: dict[str, Any]) -> dict[str, Any]:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     rule = build_peak_hunter_detection_rule_draft(item)
     protocol = str(rule.get("protocol") or "ALL").lower()
     decoder = "UDP" if protocol == "udp" else "TCP" if protocol == "tcp" else "ICMP" if protocol == "icmp" else "IP"
@@ -1280,6 +1300,10 @@ def dataset_case_from_history_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_peak_analysis_dataset(conn: sqlite3.Connection, filters: dict[str, Any] | None = None, limit: int = 1000) -> str:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     items = list_peak_analysis_history(conn, filters, limit=limit)
     return "\n".join(json.dumps(dataset_case_from_history_item(item), sort_keys=True, default=str) for item in items) + ("\n" if items else "")
 

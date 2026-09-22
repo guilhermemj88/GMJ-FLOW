@@ -101,6 +101,10 @@ def classify_dominant_group(
     evidence_status: str,
     direction: str = "sends",
 ) -> str:
+    """DEPRECATED: the refactored Peak Hunter only detects, contextualizes and
+    hands evidence to the existing Threat Engine / Threat Intelligence. This
+    parallel mitigation/classification helper is kept for compatibility and
+    will be removed once its consumers are migrated."""
     if evidence_status != "complete" or not dominant_group:
         return "insufficient_flow_evidence"
     protocol = str(dominant_group.get("protocol") or "").lower()
