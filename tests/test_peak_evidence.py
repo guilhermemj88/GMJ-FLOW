@@ -76,6 +76,24 @@ class FakeExecutor:
             return [
                 {"dimension": 64500, "dst_as_name": "EXAMPLE", "bytes": 250.0, "packets": 25.0},
             ]
+        if table == "flow_dashboard_asn_src_1m":
+            if phase == "baseline_before":
+                return [
+                    {"dimension": 64511, "src_as_name": "EXTERNAL-SRC", "bytes": 40.0, "packets": 4.0},
+                ]
+            return [
+                {"dimension": 64511, "src_as_name": "EXTERNAL-SRC", "bytes": 200.0, "packets": 20.0},
+            ]
+        if table == "flow_dashboard_prefix_1m":
+            if phase == "baseline_before":
+                return [
+                    {"dimension": 12345, "bytes": 10.0, "packets": 1.0},
+                    {"dimension": 443, "bytes": 60.0, "packets": 6.0},
+                ]
+            return [
+                {"dimension": 12345, "bytes": 200.0, "packets": 20.0},
+                {"dimension": 443, "bytes": 70.0, "packets": 7.0},
+            ]
         if table == "flow_dashboard_src_ip_1m":
             if phase == "baseline_before":
                 return [{"dimension": "10.0.0.1", "bytes": 60.0, "packets": 6.0}]
@@ -119,7 +137,7 @@ class PeakEvidenceTest(unittest.TestCase):
         evidence = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
         asns = evidence["changed"]["dst_asns"]
         self.assertEqual(len(asns), 1)
-        self.assertEqual(asns[0]["key"], "64500")
+        self.assertEqual(asns[0]["key"], "64511")  # download -> external = src ASN
         self.assertGreater(asns[0]["delta_bps_pct"], 100.0)
 
     def test_concentrated_local_ip(self):
@@ -136,6 +154,50 @@ class PeakEvidenceTest(unittest.TestCase):
         self.assertEqual(direction_label("receives"), "download")
         self.assertEqual(direction_label("total"), "total")
         self.assertEqual(direction_label("outbound"), "upload")
+
+    def test_services_are_labelled(self):
+        executor = FakeExecutor(PEAK_TIME)
+        evidence = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
+        services = evidence["changed"]["services"]
+        dns = next(s for s in services if s["key"] == "53")
+        self.assertEqual(dns["label"], "DNS")
+
+    def test_src_ports_present(self):
+        executor = FakeExecutor(PEAK_TIME)
+        evidence = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
+        src_ports = evidence["changed"]["src_ports"]
+        self.assertTrue(any(row["key"] == "12345" for row in src_ports))
+
+    def test_external_asns_respect_direction_download(self):
+        executor = FakeExecutor(PEAK_TIME)
+        evidence = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
+        asns = evidence["changed"]["external_asns"]
+        # download -> external = src ASN (64511)
+        self.assertTrue(any(row["key"] == "64511" for row in asns))
+
+    def test_external_asns_respect_direction_upload(self):
+        executor = FakeExecutor(PEAK_TIME)
+        evidence = build_peak_evidence(executor, "sensor-A", 7, "sends", PEAK_TIME)
+        asns = evidence["changed"]["external_asns"]
+        # upload -> external = dst ASN (64500)
+        self.assertTrue(any(row["key"] == "64500" for row in asns))
+
+    def test_external_local_ips_by_direction(self):
+        executor = FakeExecutor(PEAK_TIME)
+        download = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
+        # download: external = src (10.0.0.1), local = dst (45.0.0.1)
+        self.assertTrue(any(row["key"] == "10.0.0.1" for row in download["changed"]["external_ips"]))
+        self.assertTrue(any(row["key"] == "45.0.0.1" for row in download["changed"]["local_ips"]))
+        upload = build_peak_evidence(executor, "sensor-A", 7, "sends", PEAK_TIME)
+        # upload: external = dst (45.0.0.1), local = src (10.0.0.1)
+        self.assertTrue(any(row["key"] == "45.0.0.1" for row in upload["changed"]["external_ips"]))
+        self.assertTrue(any(row["key"] == "10.0.0.1" for row in upload["changed"]["local_ips"]))
+
+    def test_flows_and_packet_size(self):
+        executor = FakeExecutor(PEAK_TIME)
+        evidence = build_peak_evidence(executor, "sensor-A", 7, "receives", PEAK_TIME)
+        self.assertGreater(evidence["deltas"]["flows_s_peak"], 0)
+        self.assertIn("avg_packet_size_peak", evidence["deltas"])
 
 
 if __name__ == "__main__":

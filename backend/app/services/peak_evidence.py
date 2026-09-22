@@ -32,6 +32,17 @@ DIRECTION_LABELS = {
 
 PROTO_NAMES = {6: "tcp", 17: "udp", 1: "icmp", 0: "hopopt"}
 
+# Common service/port mapping used only as a human-readable label (codec-like
+# classification). It is NOT a verdict and NOT a whitelist.
+SERVICE_BY_PORT = {
+    53: "DNS", 80: "HTTP", 443: "HTTPS", 8443: "HTTPS-alt", 8080: "HTTP-alt",
+    25: "SMTP", 465: "SMTPS", 587: "SMTP-submission", 22: "SSH",
+    123: "NTP", 853: "DNS-over-TLS", 143: "IMAP", 993: "IMAPS",
+    110: "POP3", 995: "POP3S", 21: "FTP", 20: "FTP-data",
+    161: "SNMP", 162: "SNMP-trap", 67: "DHCP", 68: "DHCP",
+    5060: "SIP", 3478: "STUN", 4433: "QUIC", 1935: "RTMP",
+}
+
 
 @dataclass
 class PeakEvidenceConfig:
@@ -43,6 +54,46 @@ class PeakEvidenceConfig:
 
 def direction_label(direction: str) -> str:
     return DIRECTION_LABELS.get(str(direction or "total").strip().lower(), "total")
+
+
+def _service_label(port: Any) -> str:
+    try:
+        number = int(port)
+    except (TypeError, ValueError):
+        return str(port or "?")
+    return SERVICE_BY_PORT.get(number, f"port-{number}")
+
+
+def _direction_columns(direction: str) -> dict[str, str]:
+    """External vs local ASN/IP columns for the given direction.
+
+    DOWNLOAD (receives): external = src side, local = dst side.
+    UPLOAD (sends):      external = dst side, local = src side.
+    """
+    direction = str(direction or "total").strip().lower()
+    if direction in {"receives", "inbound"}:
+        return {
+            "external_asn_table": "flow_dashboard_asn_src_1m",
+            "external_asn_dim": "src_asn",
+            "external_asn_name": "src_as_name",
+            "external_ip_dim": "src_ip",
+            "local_ip_dim": "dst_ip",
+        }
+    if direction in {"sends", "transmits", "outbound"}:
+        return {
+            "external_asn_table": "flow_dashboard_asn_dst_1m",
+            "external_asn_dim": "dst_asn",
+            "external_asn_name": "dst_as_name",
+            "external_ip_dim": "dst_ip",
+            "local_ip_dim": "src_ip",
+        }
+    return {
+        "external_asn_table": "flow_dashboard_asn_dst_1m",
+        "external_asn_dim": "dst_asn",
+        "external_asn_name": "dst_as_name",
+        "external_ip_dim": "dst_ip",
+        "local_ip_dim": "src_ip",
+    }
 
 
 def _interface_predicate(direction: str, interface_id: int) -> str:
@@ -261,6 +312,24 @@ def build_peak_evidence(
     peak = totals["peak"]
     after = totals["after"]
     label = direction_label(direction)
+    dir_cols = _direction_columns(direction)
+
+    protocols = _changed_rows(executor, "flow_dashboard_protocol_1m", "proto", "", sensor, interface_id, direction, bounds, config.top_n, key_label=_proto_label)
+    dst_ports = _changed_rows(executor, "flow_dashboard_dst_port_1m", "dst_port", "proto", sensor, interface_id, direction, bounds, config.top_n)
+    src_ports = _changed_rows(executor, "flow_dashboard_prefix_1m", "src_port", "", sensor, interface_id, direction, bounds, config.top_n)
+    src_ips = _changed_rows(executor, "flow_dashboard_src_ip_1m", "src_ip", "", sensor, interface_id, direction, bounds, config.top_n)
+    dst_ips = _changed_rows(executor, "flow_dashboard_dst_ip_1m", "dst_ip", "", sensor, interface_id, direction, bounds, config.top_n)
+    external_asns = _changed_rows(executor, dir_cols["external_asn_table"], dir_cols["external_asn_dim"], dir_cols["external_asn_name"], sensor, interface_id, direction, bounds, config.top_n)
+
+    # services are derived from dst_ports (no extra query)
+    services = [{**row, "label": _service_label(row.get("key"))} for row in dst_ports]
+
+    # external/local IPs follow direction (no extra query)
+    if direction in {"receives", "inbound"}:
+        external_ips, local_ips = src_ips, dst_ips
+    else:
+        external_ips, local_ips = dst_ips, src_ips
+
     return {
         "scope": {
             "sensor": sensor,
@@ -284,13 +353,20 @@ def build_peak_evidence(
             "flows_s": before["flows_s"],
             "flows_s_peak": peak["flows_s"],
             "flows_s_delta_pct": _delta_pct(before["flows_s"], peak["flows_s"]),
+            "avg_packet_size_before": before["avg_packet_size"],
+            "avg_packet_size_peak": peak["avg_packet_size"],
         },
         "changed": {
-            "protocols": _changed_rows(executor, "flow_dashboard_protocol_1m", "proto", "", sensor, interface_id, direction, bounds, config.top_n, key_label=_proto_label),
-            "dst_ports": _changed_rows(executor, "flow_dashboard_dst_port_1m", "dst_port", "proto", sensor, interface_id, direction, bounds, config.top_n),
-            "dst_asns": _changed_rows(executor, "flow_dashboard_asn_dst_1m", "dst_asn", "dst_as_name", sensor, interface_id, direction, bounds, config.top_n),
-            "src_ips": _changed_rows(executor, "flow_dashboard_src_ip_1m", "src_ip", "", sensor, interface_id, direction, bounds, config.top_n),
-            "dst_ips": _changed_rows(executor, "flow_dashboard_dst_ip_1m", "dst_ip", "", sensor, interface_id, direction, bounds, config.top_n),
+            "protocols": protocols,
+            "services": services,
+            "dst_ports": dst_ports,
+            "src_ports": src_ports,
+            "dst_asns": external_asns,
+            "external_asns": external_asns,
+            "src_ips": src_ips,
+            "dst_ips": dst_ips,
+            "external_ips": external_ips,
+            "local_ips": local_ips,
         },
         "concentration": fetch_concentration(executor, sensor, interface_id, direction, bounds["peak"][0], bounds["peak"][1], config.top_n),
     }
