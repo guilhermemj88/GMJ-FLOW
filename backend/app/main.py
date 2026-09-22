@@ -8817,6 +8817,55 @@ def clean_ip(value: Any) -> str:
     return str(parsed)
 
 
+DASHBOARD_SERVICE_FILTERS: dict[str, tuple[int, tuple[int, ...]]] = {
+    "HTTPS": (6, (443,)),
+    "HTTP": (6, (80,)),
+    "DNS": (17, (53,)),
+    "QUIC": (17, (443,)),
+    "NTP": (17, (123,)),
+    "SIP": (17, (5060, 5061)),
+    "NETBIOS": (17, (137, 138, 139)),
+    "MEMCACHED": (17, (11211,)),
+    "SSDP": (17, (1900,)),
+    "CLDAP": (17, (389,)),
+    "CHARGEN": (17, (19,)),
+    "MAIL": (6, (25, 465, 587, 110, 995, 143, 993)),
+}
+
+
+def split_filter_list(value: Any) -> list[str]:
+    """Normaliza um parametro de filtro multi-valor (CSV ou lista)."""
+
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        tokens = [str(item) for item in value]
+    else:
+        tokens = str(value).replace(";", ",").split(",")
+    normalized: list[str] = []
+    for token in tokens:
+        item = token.strip()
+        if item and item.lower() not in {"all", "*", "todos", "any"}:
+            normalized.append(item)
+    return normalized
+
+
+def split_filter_int_list(value: Any, field_name: str) -> list[int]:
+    """Normaliza uma lista de inteiros positivos vinda de CSV/lista."""
+
+    parsed: list[int] = []
+    for token in split_filter_list(value):
+        try:
+            number = int(token)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+        if number < 1:
+            raise HTTPException(status_code=400, detail=f"{field_name} invalido") from None
+        if number not in parsed:
+            parsed.append(number)
+    return parsed
+
+
 def clickhouse_ip_string_param(value: str, field_name: str) -> str:
     try:
         parsed = ip_address(value.strip())
@@ -41945,6 +41994,176 @@ def interface_diagnostics(sensor_id: int, if_index: int):
     }
 
 
+def dashboard_prefix_filter_params(
+    prefix_enabled: bool,
+    prefix_id: int | None,
+    prefix_cidr: str | None,
+    prefix_start: str | None,
+    prefix_end: str | None,
+    prefix_address_family: str,
+    prefix_match_side: str,
+) -> dict[str, Any] | None:
+    """Resolve o filtro de rede do painel de filtros do dashboard."""
+
+    if not prefix_enabled:
+        return None
+    try:
+        with sqlite_connection() as conn:
+            ensure_prefix_schema(conn)
+            return effective_prefix_filter(
+                resolve_prefix_filter(
+                    conn,
+                    {
+                        "enabled": True,
+                        "prefix_id": prefix_id,
+                        "cidr": prefix_cidr,
+                        "start_ip": prefix_start,
+                        "end_ip": prefix_end,
+                        "address_family": prefix_address_family,
+                        "match_side": prefix_match_side,
+                    },
+                )
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=clean_text(exc))
+
+
+def resolve_scope_ids(
+    sensor_id: int | None,
+    sensor_ids: Any,
+    interface_id: int | None,
+    interface_ids: Any,
+    if_index: int | None,
+) -> tuple[str | None, list[str], int | None, list[int]]:
+    """Resolve sensores/interfaces singulares ou multiplos.
+
+    Retorna (exporter_ip, exporter_ips, if_index, if_indexes). Quando ha
+    listas, os valores singulares correspondentes ficam nulos para evitar
+    filtros contraditorios.
+    """
+
+    sensor_list = split_filter_int_list(sensor_ids, "sensor_ids")
+    interface_list = split_filter_int_list(interface_ids, "interface_ids")
+    exporter_ip: str | None = None
+    exporter_ips: list[str] = []
+    if sensor_list:
+        exporter_ips = [
+            clickhouse_ip_string_param(sensor_exporter_ip(current), "sensor_ids")
+            for current in sensor_list
+        ]
+    elif sensor_id is not None:
+        exporter_ip = sensor_exporter_ip(sensor_id)
+    scoped_sensors = sensor_list or ([int(sensor_id)] if sensor_id is not None else [])
+    if interface_list:
+        if not scoped_sensors:
+            raise HTTPException(
+                status_code=400,
+                detail="sensor_ids e obrigatorio ao filtrar por interface_ids",
+            )
+        resolved_indexes: list[int] = []
+        for current_interface in interface_list:
+            for current_sensor in scoped_sensors:
+                resolved = resolve_dashboard_if_index(current_sensor, current_interface, None)
+                if resolved is not None and int(resolved) not in resolved_indexes:
+                    resolved_indexes.append(int(resolved))
+        return exporter_ip, exporter_ips, None, resolved_indexes
+    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    return exporter_ip, exporter_ips, resolved_if_index, []
+
+
+def service_filter_condition(
+    services: Any,
+    params: dict[str, Any],
+    prefix: str,
+) -> str:
+    """Constroi a condicao OR para servicos/codecs canonicos."""
+
+    atoms: list[str] = []
+    for index, token in enumerate(split_filter_list(services)):
+        service = DASHBOARD_SERVICE_FILTERS.get(token.upper())
+        if service is None:
+            raise HTTPException(status_code=400, detail="servico invalido: %s" % token)
+        service_proto, service_ports = service
+        if not service_ports:
+            continue
+        proto_key = "%s_proto_%d" % (prefix, index)
+        ports_key = "%s_ports_%d" % (prefix, index)
+        params[proto_key] = int(service_proto)
+        params[ports_key] = [int(port) for port in service_ports]
+        atoms.append(
+            "(proto = {%s:UInt8} AND (src_port IN {%s:Array(UInt16)} "
+            "OR dst_port IN {%s:Array(UInt16)}))" % (proto_key, ports_key, ports_key)
+        )
+    if not atoms:
+        return ""
+    return "(" + " OR ".join(atoms) + ")"
+
+
+def protocol_filter_condition(
+    protocols: Any,
+    params: dict[str, Any],
+    key: str,
+) -> str:
+    """Constroi a condicao de protocolos (lista) com suporte a 'other'."""
+
+    texts = [token.lower() for token in split_filter_list(protocols)]
+    if not texts:
+        return ""
+    values: list[int] = []
+    include_other = False
+    for token in texts:
+        if token in {"other", "outros"}:
+            include_other = True
+            continue
+        parsed = parse_proto_filter(token)
+        if parsed is not None and int(parsed) not in values:
+            values.append(int(parsed))
+    clauses: list[str] = []
+    if values:
+        params[key] = values
+        clauses.append("proto IN {%s:Array(UInt8)}" % key)
+    if include_other:
+        clauses.append("proto NOT IN (1, 6, 17, 47, 50, 58)")
+    if not clauses:
+        return ""
+    return "(" + " OR ".join(clauses) + ")"
+
+
+def raw_flow_where_multi(
+    start: datetime,
+    end: datetime,
+    sensor: str | None,
+    params: dict[str, Any],
+    exporter_ip: str | None = None,
+    if_index: int | None = None,
+    exporter_ips: list[str] | None = None,
+    if_indexes: list[int] | None = None,
+) -> str:
+    where = flow_time_where(params, start, end)
+    if exporter_ips:
+        params["exporter_ips"] = [
+            clickhouse_ip_string_param(current, "exporter_ips")
+            for current in exporter_ips
+        ]
+        where += " AND toString(exporter_ip) IN {exporter_ips:Array(String)}"
+    elif exporter_ip:
+        params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
+        where += " AND toString(exporter_ip) = {exporter_ip:String}"
+    elif sensor:
+        params["sensor"] = sensor
+        where += " AND sensor = {sensor:String}"
+    if if_indexes:
+        params["if_indexes"] = [int(current) for current in if_indexes]
+        where += (
+            " AND (input_if IN {if_indexes:Array(UInt32)} "
+            "OR output_if IN {if_indexes:Array(UInt32)})"
+        )
+    elif if_index is not None:
+        params["if_index"] = int(if_index)
+        where += " AND (input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})"
+    return where
+
+
 def raw_flow_where(
     start: datetime,
     end: datetime,
@@ -41953,17 +42172,14 @@ def raw_flow_where(
     exporter_ip: str | None = None,
     if_index: int | None = None,
 ) -> str:
-    where = flow_time_where(params, start, end)
-    if exporter_ip:
-        params["exporter_ip"] = clickhouse_ip_string_param(exporter_ip, "exporter_ip")
-        where += " AND toString(exporter_ip) = {exporter_ip:String}"
-    elif sensor:
-        params["sensor"] = sensor
-        where += " AND sensor = {sensor:String}"
-    if if_index is not None:
-        params["if_index"] = int(if_index)
-        where += " AND (input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})"
-    return where
+    return raw_flow_where_multi(
+        start,
+        end,
+        sensor,
+        params,
+        exporter_ip=exporter_ip,
+        if_index=if_index,
+    )
 
 
 def prefix_filter_active(prefix_filter: Any) -> bool:
@@ -43528,6 +43744,11 @@ def dashboard_series_payload(
     zone_direction: str = "both",
     include_partial_bucket: bool = False,
     maximum_data_points: int = 1000,
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
+    protocols: Any | None = None,
+    services: Any | None = None,
+    prefix_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure_clickhouse_schema()
     group_by = clean_text(group_by).lower() or "total"
@@ -43559,6 +43780,11 @@ def dashboard_series_payload(
         None,
         None,
         "both",
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=prefix_filter,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -43586,6 +43812,11 @@ def dashboard_series_payload(
             "limit": limit,
             "zone_id": zone_id,
             "zone_direction": zone_direction,
+            "sensor_ids": split_filter_list(sensor_ids),
+            "interface_ids": split_filter_list(interface_ids),
+            "protocols": split_filter_list(protocols),
+            "services": split_filter_list(services),
+            "prefix_filter": prefix_filter,
         },
     )
     cached = dashboard_cache_get(
@@ -43861,6 +44092,17 @@ def dashboard_series(
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
     include_partial_bucket: bool = False,
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
     return dashboard_series_payload(
         range_minutes,
@@ -43878,6 +44120,19 @@ def dashboard_series(
         zone_id,
         zone_direction,
         include_partial_bucket,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
     )
 
 
@@ -44180,6 +44435,10 @@ def top_conversations_payload(
     zone_direction: str = "both",
     include_partial_bucket: bool = False,
     prefix_filter: dict[str, Any] | None = None,
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
+    protocols: Any | None = None,
+    services: Any | None = None,
 ) -> dict[str, Any]:
     sort_by = clean_text(sort_by).lower() or "bits_s"
     order_columns = {
@@ -44213,6 +44472,10 @@ def top_conversations_payload(
         None,
         direction,
         prefix_filter,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -44233,6 +44496,10 @@ def top_conversations_payload(
             "zone_direction": zone_direction,
             "include_partial_bucket": bool(include_partial_bucket),
             "prefix_filter": prefix_filter,
+            "sensor_ids": split_filter_list(sensor_ids),
+            "interface_ids": split_filter_list(interface_ids),
+            "protocols": split_filter_list(protocols),
+            "services": split_filter_list(services),
         },
     )
     cached = dashboard_cache_get(cache_key, dashboard_cache_ttl(range_minutes))
@@ -44455,6 +44722,17 @@ def dashboard_top_conversations(
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
     include_partial_bucket: bool = False,
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
     return top_conversations_payload(
         range_minutes,
@@ -44472,6 +44750,19 @@ def dashboard_top_conversations(
         zone_id,
         zone_direction,
         include_partial_bucket,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
     )
 
 
@@ -44491,6 +44782,17 @@ def dashboard_top_syn(
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
     include_partial_bucket: bool = False,
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
     mode = clean_text(mode).lower()
     if mode not in {"src", "dst"}:
@@ -44515,6 +44817,19 @@ def dashboard_top_syn(
         None,
         None,
         direction,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -45560,6 +45875,10 @@ def top_dimension(
     prefix_filter: dict[str, Any] | None = None,
     prefix_grouping: dict[str, Any] | None = None,
     protocol: str | None = None,
+    protocols: Any | None = None,
+    services: Any | None = None,
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
 ):
     if dimension not in {
         "src_ip",
@@ -45602,6 +45921,10 @@ def top_dimension(
             "zone_direction": zone_direction,
             "metric": metric,
             "protocol": clean_text(protocol).lower(),
+            "protocols": split_filter_list(protocols),
+            "services": split_filter_list(services),
+            "sensor_ids": split_filter_list(sensor_ids),
+            "interface_ids": split_filter_list(interface_ids),
             "prefix_filter": prefix_filter,
             "prefix_grouping": prefix_grouping,
         },
@@ -45611,9 +45934,23 @@ def top_dimension(
         return cached
     seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"limit": limit, "seconds": seconds}
-    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
-    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
-    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip, resolved_if_index)
+    exporter_ip, exporter_ips, resolved_if_index, resolved_if_indexes = resolve_scope_ids(
+        sensor_id,
+        sensor_ids,
+        interface_id,
+        interface_ids,
+        if_index,
+    )
+    where = raw_flow_where_multi(
+        start_dt,
+        end_dt,
+        sensor,
+        params,
+        exporter_ip,
+        resolved_if_index,
+        exporter_ips,
+        resolved_if_indexes,
+    )
     zone_filter = build_zone_flow_filter(zone_id, zone_direction, params, "top_zone")
     if zone_filter:
         where += f" AND {zone_filter}"
@@ -45624,12 +45961,18 @@ def top_dimension(
     )
     if prefix_condition:
         where += f" AND {prefix_condition}"
+    protocol_condition = protocol_filter_condition(protocols, params, "top_protocols")
+    if protocol_condition:
+        where += " AND " + protocol_condition
     requested_protocol = clean_text(protocol).lower()
-    if requested_protocol:
+    if not protocol_condition and requested_protocol:
         parsed_protocol = parse_proto_filter(requested_protocol)
         if parsed_protocol is not None:
             params["top_protocol"] = parsed_protocol
             where += " AND proto = {top_protocol:UInt8}"
+    service_condition = service_filter_condition(services, params, "top_service")
+    if service_condition:
+        where += " AND " + service_condition
     if dimension == "tcp_flags":
         where += " AND proto = 6"
     rated_where = dashboard_rated_source_where(where)
@@ -45848,8 +46191,48 @@ def top_src_ip(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_dimension("src_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_dimension(
+        "src_ip",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 @app.get("/api/tops/dst-ip")
@@ -45866,8 +46249,48 @@ def top_dst_ip(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_dimension("dst_ip", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_dimension(
+        "dst_ip",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 @app.get("/api/tops/ports")
@@ -45884,8 +46307,48 @@ def top_ports(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_dimension("dst_port", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_dimension(
+        "dst_port",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 @app.get("/api/tops/protocols")
@@ -45902,8 +46365,48 @@ def top_protocols(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_dimension("proto", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_dimension(
+        "proto",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 @app.get("/api/tops/tcp-flags")
@@ -45920,8 +46423,48 @@ def top_tcp_flags(
     limit: int = Query(10, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_dimension("tcp_flags", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_dimension(
+        "tcp_flags",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 def top_asn_dimension(
@@ -45942,6 +46485,10 @@ def top_asn_dimension(
     prefix_filter: dict[str, Any] | None = None,
     protocol: str | None = None,
     flow_orientation: str = "canonical",
+    protocols: Any | None = None,
+    services: Any | None = None,
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
 ):
     ensure_clickhouse_schema()
     prefix_filter = effective_prefix_filter(prefix_filter)
@@ -45961,6 +46508,10 @@ def top_asn_dimension(
             "zone_direction": zone_direction,
             "traffic_direction": traffic_direction or "",
             "protocol": clean_text(protocol).lower(),
+            "protocols": split_filter_list(protocols),
+            "services": split_filter_list(services),
+            "sensor_ids": split_filter_list(sensor_ids),
+            "interface_ids": split_filter_list(interface_ids),
             "flow_orientation": clean_text(flow_orientation).lower() or "canonical",
             "prefix_filter": prefix_filter,
         },
@@ -45970,9 +46521,23 @@ def top_asn_dimension(
         return cached
     seconds = range_seconds(start_dt, end_dt)
     params: dict[str, Any] = {"seconds": seconds, "limit": limit}
-    exporter_ip = sensor_exporter_ip(sensor_id) if sensor_id is not None else None
-    resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
-    where = raw_flow_where(start_dt, end_dt, sensor, params, exporter_ip)
+    exporter_ip, exporter_ips, resolved_if_index, resolved_if_indexes = resolve_scope_ids(
+        sensor_id,
+        sensor_ids,
+        interface_id,
+        interface_ids,
+        if_index,
+    )
+    where = raw_flow_where_multi(
+        start_dt,
+        end_dt,
+        sensor,
+        params,
+        exporter_ip,
+        resolved_if_index,
+        exporter_ips,
+        resolved_if_indexes,
+    )
     prefix_condition = clickhouse_prefix_filter_condition(
         prefix_filter,
         params,
@@ -45980,12 +46545,18 @@ def top_asn_dimension(
     )
     if prefix_condition:
         where += f" AND {prefix_condition}"
+    protocol_condition = protocol_filter_condition(protocols, params, "asn_protocols")
+    if protocol_condition:
+        where += " AND " + protocol_condition
     requested_protocol = clean_text(protocol).lower()
-    if requested_protocol:
+    if not protocol_condition and requested_protocol:
         parsed_protocol = parse_proto_filter(requested_protocol)
         if parsed_protocol is not None:
             params["asn_protocol"] = parsed_protocol
             where += " AND proto = {asn_protocol:UInt8}"
+    service_condition = service_filter_condition(services, params, "asn_service")
+    if service_condition:
+        where += " AND " + service_condition
     requested_traffic_direction = clean_text(traffic_direction).lower()
     normalized_flow_orientation = clean_text(flow_orientation).lower() or "canonical"
     if normalized_flow_orientation not in {"canonical", "reversed"}:
@@ -46391,8 +46962,48 @@ def top_asn_src(
     limit: int = Query(15, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_asn_dimension("src", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_asn_dimension(
+        "src",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 @app.get("/api/tops/asn-dst")
@@ -46409,8 +47020,48 @@ def top_asn_dst(
     limit: int = Query(15, ge=1, le=100),
     zone_id: int | None = Query(None, ge=1),
     zone_direction: str = "both",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    protocol: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
-    return top_asn_dimension("dst", range_minutes, sensor, sensor_id, limit, start, end, start_time, end_time, interface_id, if_index, zone_id, zone_direction)
+    return top_asn_dimension(
+        "dst",
+        range_minutes,
+        sensor,
+        sensor_id,
+        limit,
+        start,
+        end,
+        start_time,
+        end_time,
+        interface_id,
+        if_index,
+        zone_id,
+        zone_direction,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
+        protocol=protocol,
+        protocols=protocols,
+        services=services,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+    )
 
 
 # =====================================================================
@@ -46689,6 +47340,11 @@ def directional_analytics_payload(
     if_index: int | None = None,
     limit: int = 5,
     metric: str = "bits_s",
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
+    protocols: Any | None = None,
+    services: Any | None = None,
+    prefix_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metric = clean_text(metric).lower() or "bits_s"
     if metric not in {"bits_s", "packets_s"}:
@@ -46734,6 +47390,11 @@ def directional_analytics_payload(
         interface_id=interface_id,
         if_index=if_index,
         direction="both",
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=prefix_filter,
     )
     start_dt = context["start"]
     end_dt = context["end"]
@@ -46999,6 +47660,17 @@ def dashboard_directional_analytics(
     if_index: int | None = Query(None, ge=0),
     limit: int = Query(5, ge=1, le=50),
     metric: str = "bits_s",
+    sensor_ids: str | None = None,
+    interface_ids: str | None = None,
+    protocols: str | None = None,
+    services: str | None = None,
+    prefix_enabled: bool = False,
+    prefix_id: int | None = Query(None, ge=1),
+    prefix_cidr: str | None = None,
+    prefix_start: str | None = None,
+    prefix_end: str | None = None,
+    prefix_address_family: str = "both",
+    prefix_match_side: str = "either",
 ):
     return directional_analytics_payload(
         range_minutes,
@@ -47012,6 +47684,19 @@ def dashboard_directional_analytics(
         if_index,
         limit,
         metric,
+        sensor_ids=sensor_ids,
+        interface_ids=interface_ids,
+        protocols=protocols,
+        services=services,
+        prefix_filter=dashboard_prefix_filter_params(
+            prefix_enabled,
+            prefix_id,
+            prefix_cidr,
+            prefix_start,
+            prefix_end,
+            prefix_address_family,
+            prefix_match_side,
+        ),
     )
 
 
@@ -47036,38 +47721,68 @@ def flow_query_context(
     decoder: str | None = None,
     direction: str = "both",
     prefix_filter: dict[str, Any] | None = None,
+    sensor_ids: Any | None = None,
+    interface_ids: Any | None = None,
+    protocols: Any | None = None,
+    services: Any | None = None,
 ) -> dict[str, Any]:
     start_dt, end_dt = resolve_requested_range(range_minutes, start, end, start_time, end_time)
     params: dict[str, Any] = {"start": start_dt, "end": end_dt}
     filters = ["flow_time >= {start:DateTime}", "flow_time <= {end:DateTime}"]
-    if sensor_id is not None:
+    sensor_id_list = split_filter_int_list(sensor_ids, "sensor_ids")
+    interface_id_list = split_filter_int_list(interface_ids, "interface_ids")
+    if sensor_id_list:
+        exporter_ips = [
+            clickhouse_ip_string_param(sensor_exporter_ip(current), "sensor_ids")
+            for current in sensor_id_list
+        ]
+        params["sensor_exporter_ips"] = exporter_ips
+        filters.append("toString(exporter_ip) IN {sensor_exporter_ips:Array(String)}")
+    elif sensor_id is not None:
         params["exporter_ip"] = clickhouse_ip_string_param(sensor_exporter_ip(sensor_id), "exporter_ip")
         filters.append("toString(exporter_ip) = {exporter_ip:String}")
     elif sensor:
         params["sensor"] = sensor
         filters.append("sensor = {sensor:String}")
+    scoped_sensor_ids = sensor_id_list or ([int(sensor_id)] if sensor_id is not None else [])
+    resolved_if_indexes: list[int] = []
+    if interface_id_list:
+        if not scoped_sensor_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="sensor_ids e obrigatorio ao filtrar por interface_ids",
+            )
+        for current_interface in interface_id_list:
+            for current_sensor in scoped_sensor_ids:
+                resolved = resolve_dashboard_if_index(current_sensor, current_interface, None)
+                if resolved is not None and int(resolved) not in resolved_if_indexes:
+                    resolved_if_indexes.append(int(resolved))
     resolved_if_index = resolve_dashboard_if_index(sensor_id, interface_id, if_index)
+    if resolved_if_index is not None and int(resolved_if_index) not in resolved_if_indexes:
+        resolved_if_indexes.append(int(resolved_if_index))
     direction = clean_text(direction).lower() or "both"
     if direction not in {"both", "upload", "download"}:
         raise HTTPException(status_code=400, detail="direction invalida")
     rate_direction = "auto"
     if direction == "upload":
         rate_direction = "output"
-        if resolved_if_index is not None:
-            params["if_index"] = resolved_if_index
-            filters.append("output_if = {if_index:UInt32}")
+        if resolved_if_indexes:
+            params["if_indexes"] = resolved_if_indexes
+            filters.append("output_if IN {if_indexes:Array(UInt32)}")
         else:
             filters.append("output_if > 0")
     elif direction == "download":
         rate_direction = "input"
-        if resolved_if_index is not None:
-            params["if_index"] = resolved_if_index
-            filters.append("input_if = {if_index:UInt32}")
+        if resolved_if_indexes:
+            params["if_indexes"] = resolved_if_indexes
+            filters.append("input_if IN {if_indexes:Array(UInt32)}")
         else:
             filters.append("input_if > 0")
-    elif resolved_if_index is not None:
-        params["if_index"] = resolved_if_index
-        filters.append("(input_if = {if_index:UInt32} OR output_if = {if_index:UInt32})")
+    elif resolved_if_indexes:
+        params["if_indexes"] = resolved_if_indexes
+        filters.append(
+            "(input_if IN {if_indexes:Array(UInt32)} OR output_if IN {if_indexes:Array(UInt32)})"
+        )
     if ip:
         src_ip_condition = build_ip_condition("src_ip", ip, params, "ip_src", "IP")
         dst_ip_condition = build_ip_condition("dst_ip", ip, params, "ip_dst", "IP")
@@ -47085,9 +47800,31 @@ def flow_query_context(
     dst_port_condition = build_port_condition("dst_port", dst_port, params, "dst_port", "DST porta")
     if dst_port_condition:
         filters.append(dst_port_condition)
+    protocol_texts = [token.lower() for token in split_filter_list(protocols)]
+    if protocol_texts:
+        protocol_values: list[int] = []
+        include_other = False
+        for token in protocol_texts:
+            if token in {"other", "outros"}:
+                include_other = True
+                continue
+            parsed_protocol = parse_proto_filter(token)
+            if parsed_protocol is not None and parsed_protocol not in protocol_values:
+                protocol_values.append(int(parsed_protocol))
+        if include_other and protocol_values:
+            params["protocol_list"] = protocol_values
+            filters.append(
+                "(proto NOT IN (1, 6, 17, 47, 50, 58) "
+                "OR proto IN {protocol_list:Array(UInt8)})"
+            )
+        elif include_other:
+            filters.append("proto NOT IN (1, 6, 17, 47, 50, 58)")
+        elif protocol_values:
+            params["protocol_list"] = protocol_values
+            filters.append("proto IN {protocol_list:Array(UInt8)}")
     proto_text = clean_text(proto).lower()
     proto_value = None if proto_text == "other" else parse_proto_filter(proto)
-    if proto_text == "other":
+    if not protocol_texts and proto_text == "other":
         filters.append("proto NOT IN (1, 6, 17, 47, 50, 58)")
     decoder_text = clean_text(decoder).upper()
     decoder_proto: int | None = None
@@ -47103,7 +47840,7 @@ def flow_query_context(
         decoder_proto = 50
     if proto_value is None and decoder_proto is not None:
         proto_value = decoder_proto
-    if proto_value is not None:
+    if not protocol_texts and proto_value is not None:
         params["proto"] = proto_value
         filters.append("proto = {proto:UInt8}")
     tcp_flags_value = parse_tcp_flags_filter(tcp_flags)
@@ -47132,6 +47869,24 @@ def flow_query_context(
     if decoder_text in decoder_ports and port is None and src_port is None and dst_port is None:
         params["decoder_port"] = decoder_ports[decoder_text]
         filters.append("(src_port = {decoder_port:UInt16} OR dst_port = {decoder_port:UInt16})")
+    service_atoms: list[str] = []
+    for index, token in enumerate(split_filter_list(services)):
+        service = DASHBOARD_SERVICE_FILTERS.get(token.upper())
+        if service is None:
+            raise HTTPException(status_code=400, detail="servico invalido: %s" % token)
+        service_proto, service_ports = service
+        if not service_ports:
+            continue
+        proto_key = "service_proto_%d" % index
+        ports_key = "service_ports_%d" % index
+        params[proto_key] = int(service_proto)
+        params[ports_key] = [int(port) for port in service_ports]
+        service_atoms.append(
+            "(proto = {%s:UInt8} AND (src_port IN {%s:Array(UInt16)} "
+            "OR dst_port IN {%s:Array(UInt16)}))" % (proto_key, ports_key, ports_key)
+        )
+    if service_atoms:
+        filters.append("(" + " OR ".join(service_atoms) + ")")
     prefix_condition = clickhouse_prefix_filter_condition(
         prefix_filter,
         params,
@@ -47152,6 +47907,7 @@ def flow_query_context(
         "source_where": source_where,
         "rated_where": dashboard_rated_source_where(source_where),
         "resolved_if_index": resolved_if_index,
+        "resolved_if_indexes": list(resolved_if_indexes),
         "rate_direction": rate_direction,
     }
 

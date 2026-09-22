@@ -1114,6 +1114,102 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       background: color-mix(in srgb, var(--success) 12%, var(--surface));
     }
 
+    .dashboard-filter-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .35rem;
+      padding: 0 1rem .6rem;
+      grid-column: 1 / -1;
+    }
+
+    .dashboard-filter-tab {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-secondary);
+      color: var(--text-secondary);
+      font-size: .74rem;
+      font-weight: 600;
+      padding: .25rem .7rem;
+      cursor: pointer;
+    }
+
+    .dashboard-filter-tab.is-active {
+      color: var(--text);
+      border-color: var(--text-secondary);
+      background: var(--surface);
+    }
+
+    .dashboard-filter-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: .65rem;
+      align-items: end;
+      grid-column: 1 / -1;
+    }
+
+    .dashboard-filter-group[hidden] {
+      display: none !important;
+    }
+
+    .dashboard-filter-multiselect {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .3rem;
+      align-items: center;
+      min-height: 32px;
+      max-height: 148px;
+      overflow-y: auto;
+      padding: .2rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface-secondary);
+    }
+
+    .dashboard-filter-option {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text-secondary);
+      font-size: .72rem;
+      font-weight: 600;
+      padding: .2rem .6rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .dashboard-filter-option.is-active {
+      color: var(--success);
+      border-color: var(--success);
+      background: var(--surface);
+    }
+
+    .dashboard-filter-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .3rem;
+      margin-top: .35rem;
+      grid-column: 1 / -1;
+    }
+
+    .dashboard-filter-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: .3rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-secondary);
+      color: var(--text);
+      font-size: .72rem;
+      font-weight: 600;
+      padding: .2rem .5rem;
+      cursor: pointer;
+    }
+
+    .dashboard-filter-chip svg {
+      width: 12px;
+      height: 12px;
+    }
+
     .dashboard-prefix-controls:not(.is-collapsed) .dashboard-prefix-controls-header {
       padding-bottom: .65rem;
     }
@@ -3900,25 +3996,6 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <option value="259200">Ultimos 6 meses</option>
                 <option value="custom">Personalizado...</option>
               </select>
-              <select id="sensor" class="form-select form-select-sm" aria-label="Sensor">
-                <option value="">Todos os sensores</option>
-              </select>
-              <select id="interface" class="form-select form-select-sm" aria-label="Interface" disabled>
-                <option value="">Todas as interfaces</option>
-              </select>
-              <select id="dashboardZone" class="form-select form-select-sm" aria-label="Grupo de Prefixos / Cliente">
-                <option value="">Grupo de Prefixos / Cliente</option>
-              </select>
-              <select id="dashboardZoneDirection" class="form-select form-select-sm" aria-label="Direção da IP Zone">
-                <option value="transmits">Saindo da zona</option>
-                <option value="receives">Entrando na zona</option>
-                <option value="both" selected>Envolvendo a zona</option>
-              </select>
-              <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
-                <option value="total" selected>Total</option>
-                <option value="protocol">Por protocolo</option>
-                <option value="interface">Por interface</option>
-              </select>
               <select id="dashboardSeriesLimit" class="form-select form-select-sm" aria-label="Limite de series">
                 <option value="5">Top 5</option>
                 <option value="10" selected>Top 10</option>
@@ -3957,11 +4034,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               role="button" tabindex="0" aria-expanded="false" aria-controls="dashboardPrefixControlsBody">
               <div class="dashboard-prefix-header-main">
                 <div class="dashboard-prefix-header-copy">
-                  <div class="panel-title">Filtro de IPs / Prefixos</div>
+                  <div class="panel-title">Filtros do Dashboard</div>
                   <div id="dashboardPrefixSummary" class="subtle dashboard-prefix-summary" aria-live="polite"
                     title="Todos os IPs · Agrupamento: IPv4 /24 · IPv6 /64">
                     Todos os IPs · Agrupamento: IPv4 /24 · IPv6 /64
                   </div>
+                  <div id="dashboardFilterChips" class="dashboard-filter-chips" hidden aria-live="polite"></div>
                 </div>
                 <span id="dashboardPrefixStateBadge" class="dashboard-prefix-state-badge" data-state="none">Sem filtro</span>
               </div>
@@ -3974,6 +4052,13 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </div>
             </div>
             <div id="dashboardPrefixControlsBody" class="dashboard-prefix-controls-body" hidden>
+            <div class="dashboard-filter-tabs" role="tablist" aria-label="Grupos de filtros">
+              <button type="button" class="dashboard-filter-tab is-active" role="tab" aria-selected="true" data-filter-tab="network">Rede</button>
+              <button type="button" class="dashboard-filter-tab" role="tab" aria-selected="false" data-filter-tab="collection">Sensores / Interfaces</button>
+              <button type="button" class="dashboard-filter-tab" role="tab" aria-selected="false" data-filter-tab="traffic">Tráfego</button>
+              <button type="button" class="dashboard-filter-tab" role="tab" aria-selected="false" data-filter-tab="advanced">Avançado</button>
+            </div>
+            <div class="dashboard-filter-group" data-filter-group="network">
             <div class="field">
               <label for="dashboardPrefixFilterType">Tipo de filtro</label>
               <select id="dashboardPrefixFilterType" class="form-select form-select-sm">
@@ -4026,6 +4111,68 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </select>
             </div>
             <div class="field">
+              <label for="dashboardFilterIp">IP específico</label>
+              <input id="dashboardFilterIp" class="form-control form-control-sm" placeholder="200.160.0.1" autocomplete="off">
+            </div>
+            </div>
+            <div class="dashboard-filter-group" data-filter-group="collection" hidden>
+            <div class="field">
+              <label id="dashboardFilterSensorsLabel">Sensores</label>
+              <div id="dashboardFilterSensorList" class="dashboard-filter-multiselect" role="group" aria-labelledby="dashboardFilterSensorsLabel">
+                <span class="subtle">Carregando sensores…</span>
+              </div>
+              <div class="subtle">Sem seleção usa todos os sensores.</div>
+            </div>
+            <div class="field">
+              <label id="dashboardFilterInterfacesLabel">Interfaces</label>
+              <div id="dashboardFilterInterfaceList" class="dashboard-filter-multiselect" role="group" aria-labelledby="dashboardFilterInterfacesLabel">
+                <span class="subtle">Selecione um sensor para listar as interfaces.</span>
+              </div>
+              <div class="subtle">A lista respeita os sensores selecionados.</div>
+            </div>
+            </div>
+            <div class="dashboard-filter-group" data-filter-group="traffic" hidden>
+            <div class="field">
+              <label for="dashboardZone">Cliente / Grupo de Prefixos</label>
+              <select id="dashboardZone" class="form-select form-select-sm">
+                <option value="">Grupo de Prefixos / Cliente</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardZoneDirection">Direção da zona</label>
+              <select id="dashboardZoneDirection" class="form-select form-select-sm">
+                <option value="transmits">Saindo da zona</option>
+                <option value="receives">Entrando na zona</option>
+                <option value="both" selected>Envolvendo a zona</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dashboardFilterDirection">Direção do tráfego</label>
+              <select id="dashboardFilterDirection" class="form-select form-select-sm">
+                <option value="both" selected>Total</option>
+                <option value="download">Download</option>
+                <option value="upload">Upload</option>
+              </select>
+            </div>
+            <div class="field">
+              <label id="dashboardFilterProtocolsLabel">Protocolos IP</label>
+              <div id="dashboardFilterProtocolList" class="dashboard-filter-multiselect" role="group" aria-labelledby="dashboardFilterProtocolsLabel"></div>
+            </div>
+            <div class="field">
+              <label id="dashboardFilterServicesLabel">Serviços / Codecs</label>
+              <div id="dashboardFilterServiceList" class="dashboard-filter-multiselect" role="group" aria-labelledby="dashboardFilterServicesLabel"></div>
+            </div>
+            <div class="field">
+              <label for="dashboardFilterSrcPort">Porta origem</label>
+              <input id="dashboardFilterSrcPort" class="form-control form-control-sm" placeholder="0-65535" inputmode="numeric" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="dashboardFilterDstPort">Porta destino</label>
+              <input id="dashboardFilterDstPort" class="form-control form-control-sm" placeholder="0-65535" inputmode="numeric" autocomplete="off">
+            </div>
+            </div>
+            <div class="dashboard-filter-group" data-filter-group="advanced" hidden>
+            <div class="field">
               <label for="dashboardPrefixIpv4Length">Divisão IPv4</label>
               <input id="dashboardPrefixIpv4Length" type="number" min="0" max="32" value="24" class="form-control form-control-sm">
             </div>
@@ -4064,6 +4211,15 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <option value="global">Global durante a navegação</option>
                 <option value="dashboard">Somente este dashboard</option>
               </select>
+            </div>
+            <div class="field">
+              <label for="dashboardSeriesMode">Séries do gráfico (apresentação)</label>
+              <select id="dashboardSeriesMode" class="form-select form-select-sm" aria-label="Visualizacao">
+                <option value="total" selected>Total</option>
+                <option value="protocol">Por protocolo</option>
+                <option value="interface">Por interface</option>
+              </select>
+            </div>
             </div>
             <div class="toolbar">
               <button id="applyDashboardPrefixFilter" type="button" class="btn btn-sm btn-success">Aplicar temporariamente</button>
@@ -11804,14 +11960,409 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       }
     }
 
+    // ------------------------------------------------------------------
+    // FILTROS DO DASHBOARD: estado unificado (fonte unica do universo)
+    // ------------------------------------------------------------------
+    const DASHBOARD_FILTER_PROTOCOL_OPTIONS = [
+      ['tcp', 'TCP'],
+      ['udp', 'UDP'],
+      ['icmp', 'ICMP'],
+      ['gre', 'GRE'],
+      ['esp', 'ESP'],
+      ['icmpv6', 'ICMPv6'],
+      ['other', 'Outros']
+    ];
+    const DASHBOARD_FILTER_SERVICE_OPTIONS = [
+      'HTTPS', 'HTTP', 'DNS', 'QUIC', 'NTP', 'SIP', 'MAIL',
+      'NETBIOS', 'MEMCACHED', 'SSDP', 'CLDAP', 'CHARGEN'
+    ];
+    const DASHBOARD_FILTER_MULTISELECT_KINDS = ['sensors', 'interfaces', 'protocols', 'services'];
+
+    function emptyDashboardFilterState() {
+      return {
+        sensors: [],
+        interfaces: [],
+        protocols: [],
+        services: [],
+        ip: '',
+        direction: 'both',
+        src_port: '',
+        dst_port: ''
+      };
+    }
+
+    let dashboardFilterState = emptyDashboardFilterState();
+
+    function normalizeDashboardFilterValues(kind, values) {
+      const list = Array.isArray(values) ? values : [];
+      const unique = [];
+      list.forEach(item => {
+        const value = String(item ?? '').trim();
+        if (!value || unique.includes(value)) return;
+        unique.push(value);
+      });
+      if (kind === 'sensors' || kind === 'interfaces') {
+        return unique.map(Number).filter(value => Number.isFinite(value) && value > 0);
+      }
+      return unique;
+    }
+
+    function dashboardFilterValues(kind) {
+      const values = dashboardFilterState[kind];
+      return Array.isArray(values) ? values.slice() : [];
+    }
+
+    function setDashboardFilterValues(kind, values, options = {}) {
+      if (!DASHBOARD_FILTER_MULTISELECT_KINDS.includes(kind)) return;
+      dashboardFilterState[kind] = normalizeDashboardFilterValues(kind, values);
+      if (kind === 'sensors') {
+        const allowed = new Set(dashboardFilterState.sensors.map(String));
+        dashboardFilterState.interfaces = dashboardFilterState.interfaces.filter(iface => {
+          const entry = dashboardInterfaceCache.find(item => String(item.id) === String(iface));
+          return !entry || !entry.dashboard_sensor_id || allowed.has(String(entry.dashboard_sensor_id));
+        });
+        if (options.reloadInterfaces !== false) {
+          loadDashboardInterfaces().catch(console.error);
+        }
+      }
+      renderDashboardFilterPanel();
+    }
+
+    function toggleDashboardFilterValue(kind, value) {
+      const current = dashboardFilterValues(kind).map(String);
+      const token = String(value);
+      const next = current.includes(token)
+        ? current.filter(item => item !== token)
+        : current.concat([token]);
+      setDashboardFilterValues(kind, next);
+    }
+
+    function dashboardFilterChipEntries() {
+      const entries = [];
+      const sensorLabel = id => {
+        const sensor = dashboardSensorCache.find(item => String(item.id) === String(id));
+        return sensor ? sensor.name : `Sensor ${id}`;
+      };
+      const interfaceLabel = id => {
+        const entry = dashboardInterfaceCache.find(item => String(item.id) === String(id));
+        return entry ? dashboardInterfaceLabel(entry) : `Interface ${id}`;
+      };
+      dashboardFilterValues('sensors').forEach(id => entries.push({ kind: 'sensors', value: String(id), label: sensorLabel(id) }));
+      dashboardFilterValues('interfaces').forEach(id => entries.push({ kind: 'interfaces', value: String(id), label: interfaceLabel(id) }));
+      dashboardFilterValues('protocols').forEach(value => {
+        const option = DASHBOARD_FILTER_PROTOCOL_OPTIONS.find(item => item[0] === value);
+        entries.push({ kind: 'protocols', value, label: option ? option[1] : value.toUpperCase() });
+      });
+      dashboardFilterValues('services').forEach(value => entries.push({ kind: 'services', value, label: value.toUpperCase() }));
+      const zoneSelect = document.getElementById('dashboardZone');
+      if (zoneSelect && zoneSelect.value) {
+        const option = zoneSelect.options[zoneSelect.selectedIndex];
+        entries.push({ kind: 'zone', value: zoneSelect.value, label: option ? option.textContent.trim() : zoneSelect.value });
+      }
+      const ipValue = cleanFilterText(document.getElementById('dashboardFilterIp')?.value);
+      if (ipValue) entries.push({ kind: 'ip', value: ipValue, label: ipValue });
+      const directionValue = document.getElementById('dashboardFilterDirection')?.value || 'both';
+      if (directionValue !== 'both') {
+        entries.push({ kind: 'direction', value: directionValue, label: directionValue === 'download' ? 'Download' : 'Upload' });
+      }
+      const srcPort = cleanFilterText(document.getElementById('dashboardFilterSrcPort')?.value);
+      if (srcPort) entries.push({ kind: 'src_port', value: srcPort, label: `src ${srcPort}` });
+      const dstPort = cleanFilterText(document.getElementById('dashboardFilterDstPort')?.value);
+      if (dstPort) entries.push({ kind: 'dst_port', value: dstPort, label: `dst ${dstPort}` });
+      const prefixFilter = configurableActivePrefixFilter();
+      if (prefixFilter?.enabled) {
+        const summary = GMJDashboardPrefixControls.prefixSummaryState(
+          prefixFilter,
+          configurableActivePrefixGrouping(),
+          {}
+        );
+        entries.push({ kind: 'prefix', value: 'on', label: summary.active });
+      }
+      return entries;
+    }
+
+    function cleanFilterText(value) {
+      return String(value ?? '').trim();
+    }
+
+    function renderDashboardFilterChips() {
+      const container = document.getElementById('dashboardFilterChips');
+      if (!container) return;
+      const entries = dashboardFilterChipEntries();
+      if (!entries.length) {
+        container.hidden = true;
+        container.innerHTML = '';
+        return;
+      }
+      container.hidden = false;
+      container.innerHTML = entries.map(entry => (
+        `<button type="button" class="dashboard-filter-chip" data-filter-chip="${escapeHtml(entry.kind)}" data-filter-chip-value="${escapeHtml(entry.value)}" title="Remover filtro">` +
+        `<span>${escapeHtml(entry.label)}</span><i data-lucide="x"></i></button>`
+      )).join('');
+      createIcons();
+    }
+
+    function removeDashboardFilterChip(kind, value) {
+      if (DASHBOARD_FILTER_MULTISELECT_KINDS.includes(kind)) {
+        setDashboardFilterValues(kind, dashboardFilterValues(kind).filter(item => String(item) !== String(value)), { reloadInterfaces: kind === 'sensors' });
+        return;
+      }
+      if (kind === 'zone') {
+        const select = document.getElementById('dashboardZone');
+        if (select) select.value = '';
+      } else if (kind === 'ip') {
+        const input = document.getElementById('dashboardFilterIp');
+        if (input) input.value = '';
+      } else if (kind === 'direction') {
+        const select = document.getElementById('dashboardFilterDirection');
+        if (select) select.value = 'both';
+      } else if (kind === 'src_port') {
+        const input = document.getElementById('dashboardFilterSrcPort');
+        if (input) input.value = '';
+      } else if (kind === 'dst_port') {
+        const input = document.getElementById('dashboardFilterDstPort');
+        if (input) input.value = '';
+      } else if (kind === 'prefix') {
+        clearConfigurablePrefixFilter().catch(console.error);
+        return;
+      }
+      renderDashboardFilterPanel();
+    }
+
+    function renderDashboardFilterMultiselect(containerId, kind, options) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const selected = dashboardFilterValues(kind).map(String);
+      if (!options.length) {
+        container.innerHTML = '<span class="subtle">Sem opções disponíveis.</span>';
+        return;
+      }
+      container.innerHTML = options.map(option => {
+        const active = selected.includes(String(option.value));
+        return `<button type="button" class="dashboard-filter-option${active ? ' is-active' : ''}" ` +
+          `data-filter-kind="${escapeHtml(kind)}" data-filter-value="${escapeHtml(option.value)}" ` +
+          `aria-pressed="${active}">${escapeHtml(option.label)}</button>`;
+      }).join('');
+    }
+
+    function renderDashboardFilterPanel() {
+      renderDashboardFilterMultiselect(
+        'dashboardFilterSensorList',
+        'sensors',
+        dashboardSensorCache.map(sensor => ({ value: sensor.id, label: sensor.name || `Sensor ${sensor.id}` }))
+      );
+      renderDashboardFilterMultiselect(
+        'dashboardFilterInterfaceList',
+        'interfaces',
+        dashboardInterfaceCache.map(iface => ({ value: iface.id, label: dashboardInterfaceLabel(iface) }))
+      );
+      renderDashboardFilterMultiselect(
+        'dashboardFilterProtocolList',
+        'protocols',
+        DASHBOARD_FILTER_PROTOCOL_OPTIONS.map(([value, label]) => ({ value, label }))
+      );
+      renderDashboardFilterMultiselect(
+        'dashboardFilterServiceList',
+        'services',
+        DASHBOARD_FILTER_SERVICE_OPTIONS.map(value => ({ value, label: value }))
+      );
+      const ipInput = document.getElementById('dashboardFilterIp');
+      if (ipInput && !ipInput.value) ipInput.value = dashboardFilterState.ip || '';
+      renderDashboardFilterChips();
+    }
+
+    function dashboardFilterQueryValues() {
+      return {
+        sensors: dashboardFilterValues('sensors').map(Number).filter(value => value > 0),
+        interfaces: dashboardFilterValues('interfaces').map(Number).filter(value => value > 0),
+        protocols: dashboardFilterValues('protocols'),
+        services: dashboardFilterValues('services'),
+        direction: document.getElementById('dashboardFilterDirection')?.value || 'both',
+        ip: cleanFilterText(document.getElementById('dashboardFilterIp')?.value),
+        srcPort: cleanFilterText(document.getElementById('dashboardFilterSrcPort')?.value),
+        dstPort: cleanFilterText(document.getElementById('dashboardFilterDstPort')?.value)
+      };
+    }
+
+    function appendDashboardFilterQuery(query) {
+      const values = dashboardFilterQueryValues();
+      if (values.sensors.length > 1) query.set('sensor_ids', values.sensors.join(','));
+      if (values.interfaces.length) query.set('interface_ids', values.interfaces.join(','));
+      if (values.protocols.length) query.set('protocols', values.protocols.join(','));
+      if (values.services.length) query.set('services', values.services.join(','));
+      if (values.ip) query.set('ip', values.ip);
+      if (values.srcPort) query.set('src_port', values.srcPort);
+      if (values.dstPort) query.set('dst_port', values.dstPort);
+      appendDashboardPrefixQuery(query);
+      return query;
+    }
+
+    function appendDashboardPrefixQuery(query) {
+      const filter = configurableActivePrefixFilter();
+      const enabled = Boolean(filter?.enabled);
+      query.set('prefix_enabled', String(enabled));
+      if (!enabled) return query;
+      if (filter.prefix_id) query.set('prefix_id', String(filter.prefix_id));
+      if (filter.cidr) query.set('prefix_cidr', filter.cidr);
+      if (filter.start_ip) query.set('prefix_start', filter.start_ip);
+      if (filter.end_ip) query.set('prefix_end', filter.end_ip);
+      query.set('prefix_address_family', filter.address_family || 'both');
+      query.set('prefix_match_side', filter.match_side || 'either');
+      return query;
+    }
+
+    function dashboardFiltersToGlobalFilters() {
+      const rules = [];
+      const sensors = dashboardFilterValues('sensors');
+      if (sensors.length) {
+        const names = sensors
+          .map(id => dashboardSensorCache.find(item => String(item.id) === String(id))?.name)
+          .filter(Boolean);
+        if (names.length) rules.push({ field: 'sensor', operator: 'in', value: names });
+      }
+      const interfaces = dashboardFilterValues('interfaces');
+      if (interfaces.length) {
+        const indexes = interfaces
+          .map(id => dashboardInterfaceCache.find(item => String(item.id) === String(id))?.if_index)
+          .filter(value => Number.isFinite(Number(value)) && Number(value) > 0)
+          .map(Number);
+        if (indexes.length) rules.push({ field: 'interface', operator: 'in', value: indexes });
+      }
+      const protocols = dashboardFilterValues('protocols');
+      if (protocols.length) rules.push({ field: 'protocol', operator: 'in', value: protocols });
+      return rules;
+    }
+
+    function applyDashboardFilterStateFromGlobalFilters(rules) {
+      const list = Array.isArray(rules) ? rules : [];
+      const next = emptyDashboardFilterState();
+      list.forEach(rule => {
+        const field = String(rule?.field || '').toLowerCase();
+        const values = Array.isArray(rule?.value) ? rule.value : [rule?.value];
+        if (String(rule?.operator || 'eq').toLowerCase() !== 'in') return;
+        if (field === 'sensor') {
+          values.forEach(name => {
+            const sensor = dashboardSensorCache.find(item => item.name === name);
+            if (sensor) next.sensors.push(Number(sensor.id));
+          });
+        } else if (field === 'interface') {
+          values.forEach(value => {
+            const entry = dashboardInterfaceCache.find(item => String(item.if_index) === String(value));
+            if (entry) next.interfaces.push(Number(entry.id));
+          });
+        } else if (field === 'protocol') {
+          values.forEach(value => next.protocols.push(String(value).toLowerCase()));
+        }
+      });
+      dashboardFilterState = {
+        ...dashboardFilterState,
+        sensors: normalizeDashboardFilterValues('sensors', next.sensors),
+        interfaces: normalizeDashboardFilterValues('interfaces', next.interfaces),
+        protocols: normalizeDashboardFilterValues('protocols', next.protocols)
+      };
+      renderDashboardFilterPanel();
+    }
+
+    const DASHBOARD_FILTER_TEMP_KEY = 'gmjflow.dashboard-filters.temporary.v1';
+
+    function persistDashboardFilterTemporaryState() {
+      try {
+        const scope = document.getElementById('dashboardPrefixTemporaryScope')?.value || 'global';
+        if (scope === 'global') {
+          sessionStorage.setItem(DASHBOARD_FILTER_TEMP_KEY, JSON.stringify(dashboardFilterQueryValues()));
+        } else {
+          sessionStorage.removeItem(DASHBOARD_FILTER_TEMP_KEY);
+        }
+      } catch (error) {
+        console.debug('Estado temporario dos filtros indisponivel.', error);
+      }
+    }
+
+    function restoreDashboardFilterTemporaryState() {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(DASHBOARD_FILTER_TEMP_KEY) || 'null');
+        if (!saved || typeof saved !== 'object') return;
+        dashboardFilterState = {
+          ...emptyDashboardFilterState(),
+          sensors: normalizeDashboardFilterValues('sensors', saved.sensors),
+          interfaces: normalizeDashboardFilterValues('interfaces', saved.interfaces),
+          protocols: normalizeDashboardFilterValues('protocols', saved.protocols),
+          services: normalizeDashboardFilterValues('services', saved.services)
+        };
+        const direction = document.getElementById('dashboardFilterDirection');
+        if (direction && saved.direction) direction.value = saved.direction;
+        const ip = document.getElementById('dashboardFilterIp');
+        if (ip && saved.ip) ip.value = saved.ip;
+        const srcPort = document.getElementById('dashboardFilterSrcPort');
+        if (srcPort && saved.srcPort) srcPort.value = saved.srcPort;
+        const dstPort = document.getElementById('dashboardFilterDstPort');
+        if (dstPort && saved.dstPort) dstPort.value = saved.dstPort;
+      } catch (error) {
+        sessionStorage.removeItem(DASHBOARD_FILTER_TEMP_KEY);
+      }
+    }
+
+    function activateDashboardFilterTab(name) {
+      const panel = document.getElementById('dashboardPrefixControls');
+      if (!panel) return;
+      const body = panel;
+      body.querySelectorAll('[data-filter-tab]').forEach(button => {
+        const active = button.dataset.filterTab === name;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      body.querySelectorAll('[data-filter-group]').forEach(group => {
+        group.hidden = group.dataset.filterGroup !== name;
+      });
+    }
+
+    function initDashboardFiltersPanel() {
+      activateDashboardFilterTab('network');
+      restoreDashboardFilterTemporaryState();
+      renderDashboardFilterPanel();
+      const panel = document.getElementById('dashboardPrefixControls');
+      panel?.addEventListener('click', event => {
+        const tab = event.target.closest('[data-filter-tab]');
+        if (tab) {
+          event.preventDefault();
+          activateDashboardFilterTab(tab.dataset.filterTab);
+          return;
+        }
+        const option = event.target.closest('[data-filter-kind]');
+        if (option) {
+          event.preventDefault();
+          toggleDashboardFilterValue(option.dataset.filterKind, option.dataset.filterValue);
+          return;
+        }
+        const chip = event.target.closest('[data-filter-chip]');
+        if (chip) {
+          event.preventDefault();
+          removeDashboardFilterChip(chip.dataset.filterChip, chip.dataset.filterChipValue);
+        }
+      });
+      ['dashboardFilterIp', 'dashboardFilterSrcPort', 'dashboardFilterDstPort'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', () => renderDashboardFilterChips());
+      });
+      document.getElementById('dashboardFilterDirection')?.addEventListener('change', () => renderDashboardFilterChips());
+      document.getElementById('dashboardZone')?.addEventListener('change', () => renderDashboardFilterChips());
+    }
+
+    function selectedDashboardSensors() {
+      return dashboardFilterValues('sensors');
+    }
+
+    function selectedDashboardInterfaces() {
+      return dashboardFilterValues('interfaces');
+    }
+
     function selectedDashboardSensorId() {
-      const value = document.getElementById('sensor').value;
-      return value ? Number(value) : null;
+      const sensors = selectedDashboardSensors();
+      return sensors.length === 1 ? Number(sensors[0]) : null;
     }
 
     function selectedDashboardInterfaceId() {
-      const value = document.getElementById('interface').value;
-      return value ? Number(value) : null;
+      const interfaces = selectedDashboardInterfaces();
+      return interfaces.length === 1 ? Number(interfaces[0]) : null;
     }
 
     function selectedDashboardZoneId() {
@@ -11881,20 +12432,31 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const sensorId = selectedDashboardSensorId();
       const interfaceId = selectedDashboardInterfaceId();
       const zoneId = selectedDashboardZoneId();
-      if (includeSensorId && sensorId) query.set('sensor_id', String(sensorId));
-      if (includeInterfaceId && interfaceId) query.set('interface_id', String(interfaceId));
+      const sensors = selectedDashboardSensors();
+      const interfaces = selectedDashboardInterfaces();
+      if (includeSensorId && sensors.length > 1) {
+        query.set('sensor_ids', sensors.join(','));
+      } else if (includeSensorId && sensorId) {
+        query.set('sensor_id', String(sensorId));
+      }
+      if (includeInterfaceId && interfaces.length) {
+        query.set('interface_ids', interfaces.join(','));
+      } else if (includeInterfaceId && interfaceId) {
+        query.set('interface_id', String(interfaceId));
+      }
       if (zoneId) {
         query.set('zone_id', String(zoneId));
         query.set('zone_direction', document.getElementById('dashboardZoneDirection')?.value || 'both');
       }
+      appendDashboardFilterQuery(query);
       return query.toString();
     }
 
     function dashboardSeriesParams(metric) {
       const query = new URLSearchParams(dashboardParams({ includeSensorId: true, includeInterfaceId: true }));
-      query.set('group_by', document.getElementById('dashboardSeriesMode').value || 'total');
+      query.set('group_by', document.getElementById('dashboardSeriesMode')?.value || 'total');
       query.set('metric', metric);
-      query.set('direction', 'both');
+      query.set('direction', dashboardFilterQueryValues().direction || 'both');
       return query.toString();
     }
 
@@ -12276,15 +12838,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function renderDashboardSensorSelect() {
-      const select = document.getElementById('sensor');
-      const current = select.value;
-      select.innerHTML = [
-        '<option value="">Todos os sensores</option>',
-        ...dashboardSensorCache.map(sensor => (
-          `<option value="${sensor.id}">${escapeHtml(sensor.name)}</option>`
-        ))
-      ].join('');
-      select.value = dashboardSensorCache.some(sensor => String(sensor.id) === current) ? current : '';
+      const allowed = new Set(dashboardSensorCache.map(sensor => String(sensor.id)));
+      const filtered = dashboardFilterValues('sensors').filter(value => allowed.has(String(value)));
+      if (filtered.length !== dashboardFilterValues('sensors').length) {
+        dashboardFilterState.sensors = filtered;
+      }
+      renderDashboardFilterPanel();
     }
 
     function renderFlowSensorSelect() {
@@ -12396,17 +12955,12 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function renderDashboardInterfaceSelect() {
-      const select = document.getElementById('interface');
-      const current = select.value;
-      const sensorId = selectedDashboardSensorId();
-      select.disabled = !sensorId;
-      select.innerHTML = [
-        '<option value="">Todas as interfaces</option>',
-        ...dashboardInterfaceCache.map(iface => (
-          `<option value="${iface.id}">${escapeHtml(dashboardInterfaceLabel(iface))}</option>`
-        ))
-      ].join('');
-      select.value = dashboardInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
+      const allowed = new Set(dashboardInterfaceCache.map(iface => String(iface.id)));
+      const filtered = dashboardFilterValues('interfaces').filter(value => allowed.has(String(value)));
+      if (filtered.length !== dashboardFilterValues('interfaces').length) {
+        dashboardFilterState.interfaces = filtered;
+      }
+      renderDashboardFilterPanel();
     }
 
     async function loadMapInterfaces(sensorId = selectedMapSensorId()) {
@@ -12467,16 +13021,29 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       select.value = mapInterfaceCache.some(iface => String(iface.id) === current) ? current : '';
     }
 
-    async function loadDashboardInterfaces(sensorId = selectedDashboardSensorId()) {
+    async function loadDashboardInterfaces() {
+      const sensorIds = selectedDashboardSensors();
+      const previous = dashboardFilterValues('interfaces');
       dashboardInterfaceCache = [];
-      document.getElementById('interface').value = '';
-      renderDashboardInterfaceSelect();
-      if (!sensorId) return;
-
+      if (!sensorIds.length) {
+        dashboardFilterState.interfaces = [];
+        renderDashboardFilterPanel();
+        return;
+      }
       try {
-        const payload = await apiRequest(`/api/sensors/${sensorId}/interfaces`);
-        dashboardInterfaceCache = Array.isArray(payload.items) ? payload.items : [];
-        renderDashboardInterfaceSelect();
+        const payloads = await Promise.all(sensorIds.map(current =>
+          apiRequest(`/api/sensors/${current}/interfaces`)
+            .then(payload => ({ sensorId: current, items: Array.isArray(payload.items) ? payload.items : [] }))
+            .catch(() => ({ sensorId: current, items: [] }))
+        ));
+        const merged = [];
+        payloads.forEach(({ sensorId, items }) => {
+          items.forEach(item => merged.push({ ...item, dashboard_sensor_id: sensorId }));
+        });
+        dashboardInterfaceCache = merged;
+        const allowed = new Set(merged.map(item => String(item.id)));
+        dashboardFilterState.interfaces = previous.filter(value => allowed.has(String(value)));
+        renderDashboardFilterPanel();
       } catch (error) {
         console.error('Falha ao carregar interfaces do sensor', error);
       }
@@ -23481,6 +24048,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('dashboardPrefixClearCompact').hidden = !state.hasFilter;
       const manager = document.getElementById('dashboardManagerPrefixSummary');
       if (manager) manager.textContent = state.text;
+      renderDashboardFilterChips();
     }
 
     function syncConfigurablePrefixControls() {
@@ -23560,11 +24128,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prefix_filter: { ...filter, temporary: false },
-            prefix_grouping: grouping
+            prefix_grouping: grouping,
+            global_filters: dashboardFiltersToGlobalFilters()
           })
         });
         configurableDashboard.prefix_filter = updated.prefix_filter;
         configurableDashboard.prefix_grouping = updated.prefix_grouping;
+        if (Array.isArray(updated.global_filters)) {
+          configurableDashboard.global_filters = updated.global_filters;
+        }
         configurableTemporaryPrefixFilter = null;
         configurableTemporaryPrefixGrouping = null;
         configurableTemporaryPrefixScope = 'global';
@@ -23575,6 +24147,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableTemporaryPrefixScope =
           document.getElementById('dashboardPrefixTemporaryScope').value;
         persistConfigurableTemporaryPrefix();
+        persistDashboardFilterTemporaryState();
       }
       cancelConfigurableWidgetQueries();
       updateConfigurablePrefixSummary();
@@ -23585,6 +24158,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function clearConfigurablePrefixFilter() {
+      dashboardFilterState = emptyDashboardFilterState();
+      try {
+        sessionStorage.removeItem(DASHBOARD_FILTER_TEMP_KEY);
+      } catch (error) {
+        console.debug('Estado temporario dos filtros indisponivel.', error);
+      }
+      ['dashboardFilterIp', 'dashboardFilterSrcPort', 'dashboardFilterDstPort'].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+      });
+      const direction = document.getElementById('dashboardFilterDirection');
+      if (direction) direction.value = 'both';
       configurableTemporaryPrefixFilter = {
         enabled: false,
         cidr: null,
@@ -23610,6 +24195,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       persistConfigurableTemporaryPrefix();
       cancelConfigurableWidgetQueries();
       syncConfigurablePrefixControls();
+      renderDashboardFilterPanel();
       await refreshConfigurableDashboard();
     }
 
@@ -23622,6 +24208,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         ),
         sensor_id: selectedDashboardSensorId(),
         interface_id: selectedDashboardInterfaceId(),
+        sensor_ids: selectedDashboardSensors(),
+        interface_ids: selectedDashboardInterfaces(),
+        protocols: dashboardFilterValues('protocols'),
+        services: dashboardFilterValues('services'),
+        direction: document.getElementById('dashboardFilterDirection')?.value || 'both',
+        ip: cleanFilterText(document.getElementById('dashboardFilterIp')?.value),
+        src_port: cleanFilterText(document.getElementById('dashboardFilterSrcPort')?.value),
+        dst_port: cleanFilterText(document.getElementById('dashboardFilterDstPort')?.value),
         zone_id: selectedDashboardZoneId(),
         zone_direction: document.getElementById('dashboardZoneDirection')?.value || 'both',
         prefix_filter: configurableActivePrefixFilter(),
@@ -26038,6 +26632,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         configurableTemporaryPrefixGrouping = null;
       }
       configurableDashboard = dashboard;
+      applyDashboardFilterStateFromGlobalFilters(dashboard.global_filters || []);
       ensureConfigurablePrefixControlsController().restore(dashboard.id);
       syncConfigurablePersistentLayout(configurableWidgetLayoutItems(dashboard.widgets || []));
       const clientLayoutRepaired = repairConfigurableDashboardClientLayout();
@@ -31102,8 +31697,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     document.getElementById('dashboardRefreshInterval').addEventListener('change', scheduleDashboardRefresh);
     document.getElementById('flowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('flow'));
     document.getElementById('topFlowRangeMinutes').addEventListener('change', () => handleRangeSelectChange('top'));
-    document.getElementById('sensor').addEventListener('change', () => handleDashboardSensorChange().catch(console.error));
-    document.getElementById('interface').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
+    initDashboardFiltersPanel();
     document.getElementById('dashboardAnomaliesTable').addEventListener('click', event => {
       const button = event.target.closest('.dashboard-anomaly-open');
       if (!button) return;
