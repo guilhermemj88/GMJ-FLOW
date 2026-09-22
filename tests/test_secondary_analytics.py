@@ -32,18 +32,23 @@ class SecondaryAnalyticsStaticTest(unittest.TestCase):
         # reusa a ShareBar existente
         self.assertIn('class="share-bar"', self.html)
 
-    def test_top_asn_explicitly_origin(self) -> None:
-        self.assertIn("Top ASN de origem", self.html)
-        self.assertIn('id="secondaryAsnTable"', self.html)
-        self.assertIn("function renderSecondaryAsnSrc(payload)", self.html)
-        # apenas o payload de origem (asnSrc) alimenta a tabela compacta
-        self.assertIn("if (source) renderSecondaryAsnSrc(payload);", self.html)
+    def test_top_asn_origin_removed_from_default_overview(self) -> None:
+        # O card "Top ASN de origem" era redundante: duplicava o painel
+        # "Destinos do Upload" (mesmo payload asnSrc) e o widget
+        # "Top ASN Externo · Upload". Saiu do overview default; a fonte de dados
+        # (asnSrcTable) segue viva e a API nao foi alterada.
+        self.assertNotIn('id="secondaryAsnTable"', self.html)
+        self.assertNotIn("Top ASN de origem", self.html)
+        self.assertNotIn("renderSecondaryAsnSrc", self.html)
+        self.assertIn('id="asnSrcTable"', self.html)
+        self.assertIn("renderAsnWidget(chart, tableId, statusId, payload);", self.html)
 
     def test_asn_names_from_real_source_only(self) -> None:
         self.assertIn("asnDisplayName(item)", self.html)
         self.assertIn("asnCode(item)", self.html)
-        # sem nome real -> exibe "—", nunca inventa organização
-        self.assertIn("const org = name === code ? '—' : name;", self.html)
+        # o widget de ASN exibe o codigo e usa o nome real como descricao/tooltip
+        self.assertIn("escapeHtml(asnCode(item))", self.html)
+        self.assertIn('title="${escapeHtml(asnDisplayName(item))}"', self.html)
 
     def test_flows_summary_and_navigation(self) -> None:
         self.assertIn('id="secondaryFlowsSummary"', self.html)
@@ -68,9 +73,9 @@ class SecondaryAnalyticsStaticTest(unittest.TestCase):
 
     def test_empty_and_error_states(self) -> None:
         self.assertIn("Sem dados de protocolo.", self.html)
-        self.assertIn("Sem dados de ASN de origem.", self.html)
         self.assertIn("renderTableMessage('secondaryProtocolsTable'", self.html)
-        self.assertIn("renderTableMessage('secondaryAsnTable'", self.html)
+        # o widget de ranking publica o mesmo vazio para tabela e grafico
+        self.assertIn("emptyLabel: 'Sem dados de protocolo.'", self.html)
 
     def test_legacy_top_rankings_superseded(self) -> None:
         # grade legada permanece no DOM (migração/tests) mas nunca mais é exibida

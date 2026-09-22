@@ -1304,6 +1304,35 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       display: inline-flex;
     }
 
+    /* Widgets de ranking: Tabela | Grafico | Ambos */
+    .ranking-widget .ranking-chart {
+      width: 100%;
+      height: 200px;
+    }
+
+    .ranking-widget[data-ranking-mode="chart"] .ranking-chart {
+      height: 260px;
+    }
+
+    .ranking-widget[data-ranking-mode="both"] .ranking-chart {
+      height: 170px;
+      margin-bottom: .5rem;
+    }
+
+    .ranking-widget .ranking-chart[hidden] {
+      display: none;
+    }
+
+    .ranking-view-toggle .btn {
+      padding: .1rem .35rem;
+      line-height: 1;
+    }
+
+    .ranking-view-toggle .btn svg {
+      width: 14px;
+      height: 14px;
+    }
+
     .table-sm td,
     .table-sm th {
       padding-top: .42rem;
@@ -3567,6 +3596,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       align-items: start;
     }
     .dashboard-secondary-panel { padding: .7rem .85rem; }
+    /* Quando o grid fica com um unico painel, ele ocupa a linha inteira. */
+    .dashboard-secondary-grid > .dashboard-secondary-panel:only-child { grid-column: 1 / -1; }
     .dashboard-secondary-head {
       display: flex;
       align-items: baseline;
@@ -4096,12 +4127,20 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
 
           <section class="dashboard-overview-chrome" id="dashboardTopInterfacesSection">
-            <div class="panel p-3">
+            <div class="panel p-3 ranking-widget" data-ranking-widget="top-interfaces">
               <div class="d-flex justify-content-between align-items-center mb-2">
                 <div class="panel-title">Top Interfaces</div>
-                <div id="topInterfacesMeta" class="metric-readout">por throughput</div>
+                <div class="d-flex align-items-center gap-2">
+                  <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top Interfaces">
+                    <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                    <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                    <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                  </div>
+                  <div id="topInterfacesMeta" class="metric-readout">por throughput</div>
+                </div>
               </div>
-              <div class="table-wrap">
+              <div class="ranking-chart" data-ranking-chart hidden></div>
+              <div class="table-wrap" data-ranking-table>
                 <table class="top-interfaces">
                   <thead>
                     <tr><th>#</th><th>Interface</th><th>Sensor</th><th>RX</th><th>TX</th><th>Total</th><th>Share</th></tr>
@@ -4116,27 +4155,23 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="dashboard-overview-chrome" id="dashboardSecondaryAnalyticsSection" aria-label="Analytics secundário">
             <div class="dashboard-secondary-grid">
-              <div class="panel dashboard-secondary-panel">
+              <div class="panel dashboard-secondary-panel ranking-widget" data-ranking-widget="top-protocols">
                 <div class="dashboard-secondary-head">
                   <div class="panel-title">Top Protocolos</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top Protocolos">
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                    </div>
                   <div id="secondaryProtocolsMeta" class="metric-readout">por bits/s</div>
+                  </div>
                 </div>
-                <div class="table-wrap">
+                <div class="ranking-chart" data-ranking-chart hidden></div>
+                <div class="table-wrap" data-ranking-table>
                   <table class="secondary-rank-table">
                     <thead><tr><th>#</th><th>Protocolo</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
                     <tbody id="secondaryProtocolsTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
-                  </table>
-                </div>
-              </div>
-              <div class="panel dashboard-secondary-panel">
-                <div class="dashboard-secondary-head">
-                  <div class="panel-title">Top ASN de origem</div>
-                  <div id="secondaryAsnMeta" class="metric-readout">por bits/s</div>
-                </div>
-                <div class="table-wrap">
-                  <table class="secondary-rank-table">
-                    <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
-                    <tbody id="secondaryAsnTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
                   </table>
                 </div>
               </div>
@@ -4149,24 +4184,40 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="dashboard-overview-chrome" id="dashboardExternalAsnSection" aria-label="Top ASN externo direcional">
             <div class="dashboard-secondary-grid">
-              <div class="panel dashboard-secondary-panel">
+              <div class="panel dashboard-secondary-panel ranking-widget" data-ranking-widget="top-asn-external-download">
                 <div class="dashboard-secondary-head">
                   <div class="panel-title">Top ASN Externo · Download</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top ASN Externo · Download">
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                    </div>
                   <div id="externalAsnDownloadMeta" class="metric-readout">externo → nossos blocos</div>
+                  </div>
                 </div>
-                <div class="table-wrap">
+                <div class="ranking-chart" data-ranking-chart hidden></div>
+                <div class="table-wrap" data-ranking-table>
                   <table class="secondary-rank-table">
                     <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
                     <tbody id="externalAsnDownloadTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
                   </table>
                 </div>
               </div>
-              <div class="panel dashboard-secondary-panel">
+              <div class="panel dashboard-secondary-panel ranking-widget" data-ranking-widget="top-asn-external-upload">
                 <div class="dashboard-secondary-head">
                   <div class="panel-title">Top ASN Externo · Upload</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top ASN Externo · Upload">
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                    </div>
                   <div id="externalAsnUploadMeta" class="metric-readout">nossos blocos → externo</div>
+                  </div>
                 </div>
-                <div class="table-wrap">
+                <div class="ranking-chart" data-ranking-chart hidden></div>
+                <div class="table-wrap" data-ranking-table>
                   <table class="secondary-rank-table">
                     <thead><tr><th>#</th><th>ASN</th><th>Organização</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
                     <tbody id="externalAsnUploadTable"><tr><td colspan="5" class="text-muted">Carregando…</td></tr></tbody>
@@ -4178,24 +4229,40 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
 
           <section class="dashboard-overview-chrome" id="dashboardLocalIpSection" aria-label="Top IPs direcional">
             <div class="dashboard-secondary-grid">
-              <div class="panel dashboard-secondary-panel">
+              <div class="panel dashboard-secondary-panel ranking-widget" data-ranking-widget="top-ip-download">
                 <div class="dashboard-secondary-head">
                   <div class="panel-title">Top IPs · Download</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top IPs · Download">
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                    </div>
                   <div id="localIpDownloadMeta" class="metric-readout">IPs dos nossos blocos recebendo</div>
+                  </div>
                 </div>
-                <div class="table-wrap">
+                <div class="ranking-chart" data-ranking-chart hidden></div>
+                <div class="table-wrap" data-ranking-table>
                   <table class="secondary-rank-table">
                     <thead><tr><th>#</th><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
                     <tbody id="localIpDownloadTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
                   </table>
                 </div>
               </div>
-              <div class="panel dashboard-secondary-panel">
+              <div class="panel dashboard-secondary-panel ranking-widget" data-ranking-widget="top-ip-upload">
                 <div class="dashboard-secondary-head">
                   <div class="panel-title">Top IPs · Upload</div>
+                  <div class="d-flex align-items-center gap-2">
+                    <div class="btn-group btn-group-sm ranking-view-toggle" role="group" aria-label="Visualização: Top IPs · Upload">
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="table" title="Somente tabela" aria-pressed="false"><i data-lucide="table"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="chart" title="Somente gráfico" aria-pressed="false"><i data-lucide="bar-chart-3"></i></button>
+                      <button type="button" class="btn btn-outline-secondary" data-ranking-view="both" title="Gráfico e tabela" aria-pressed="false"><i data-lucide="rows-3"></i></button>
+                    </div>
                   <div id="localIpUploadMeta" class="metric-readout">IPs dos nossos blocos transmitindo</div>
+                  </div>
                 </div>
-                <div class="table-wrap">
+                <div class="ranking-chart" data-ranking-chart hidden></div>
+                <div class="table-wrap" data-ranking-table>
                   <table class="secondary-rank-table">
                     <thead><tr><th>#</th><th>IP</th><th class="text-end">Bits/s</th><th class="text-end">Share</th></tr></thead>
                     <tbody id="localIpUploadTable"><tr><td colspan="4" class="text-muted">Carregando…</td></tr></tbody>
@@ -26642,7 +26709,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           topConversations: {
             sort_by: selectedTopConversationSort(),
             limit: selectedTopConversationLimit()
-          }
+          },
+          rankings: { ...rankingViewModes }
         },
         hidden: widgets.filter(widget => widget.classList.contains('hidden-widget')).map(widget => widget.dataset.widgetId)
       }));
@@ -26662,6 +26730,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (sort && layout.config.topConversations.sort_by) sort.value = layout.config.topConversations.sort_by;
         if (limit && layout.config.topConversations.limit) limit.value = String(layout.config.topConversations.limit);
       }
+      rankingViewModes = (layout.config?.rankings && typeof layout.config.rankings === 'object')
+        ? { ...layout.config.rankings }
+        : {};
+      RANKING_WIDGET_IDS.forEach(id => applyRankingViewMode(id));
       dashboardWidgets().forEach(widget => {
         const id = widget.dataset.widgetId;
         const defaultSize = defaultWidgetSize(widget);
@@ -26702,6 +26774,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
       document.getElementById('topConversationsSort').value = 'bits_s';
       document.getElementById('topConversationsLimit').value = '10';
+      rankingViewModes = {};
+      RANKING_WIDGET_IDS.forEach(id => applyRankingViewMode(id));
       dashboardWidgets().forEach(widget => {
         const defaultSize = defaultWidgetSize(widget);
         if (defaultSize.width) widget.dataset.widgetWidth = defaultSize.width;
@@ -26719,6 +26793,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function resizeDashboardCharts() {
       Object.values(charts).forEach(chart => chart.resize());
+      resizeRankingCharts();
     }
 
     function shiftWidgetSize(widget, kind, delta) {
@@ -27025,11 +27100,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const formatter = metricFormatter(metricFromApi('bits_s'));
       if (!table) return;
       if (!ranked.length) {
-        table.innerHTML = '<tr><td colspan="7" class="text-muted">Sem dados SNMP de interface.</td></tr>';
+        updateRankingWidget('top-interfaces', {
+          rows: [],
+          emptyLabel: 'Sem dados SNMP de interface.',
+          tableHtml: '<tr><td colspan="7" class="text-muted">Sem dados SNMP de interface.</td></tr>'
+        });
         if (meta) meta.textContent = 'sem dados';
         return;
       }
-      table.innerHTML = ranked.map((item, index) => {
+      const tableHtml = ranked.map((item, index) => {
         const share = item.total / grandTotal * 100;
         const status = interfaceRowStatus(item);
         const sensor = item.sensor_name || sensorNameById(item.sensor_id);
@@ -27043,6 +27122,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td><span class="ti-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
         </tr>`;
       }).join('');
+      updateRankingWidget('top-interfaces', {
+        rows: ranked.map(item => ({
+          label: item.name,
+          secondary: item.sensor_name || sensorNameById(item.sensor_id),
+          value: item.total,
+          rx: item.rx,
+          tx: item.tx
+        })),
+        options: { metric: 'bits_s', color: (row, index) => palette[index % palette.length] },
+        emptyLabel: 'Sem dados SNMP de interface.',
+        tableHtml
+      });
       if (meta) meta.textContent = `top ${ranked.length} · por throughput SNMP`;
     }
 
@@ -27337,11 +27428,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const rows = Array.isArray(items) ? items : [];
       const total = rows.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
       if (!rows.length || total <= 0) {
-        table.innerHTML = '<tr><td colspan="4" class="text-muted">Sem dados de protocolo.</td></tr>';
+        updateRankingWidget('top-protocols', {
+          rows: [],
+          emptyLabel: 'Sem dados de protocolo.',
+          tableHtml: '<tr><td colspan="4" class="text-muted">Sem dados de protocolo.</td></tr>'
+        });
         if (meta) meta.textContent = 'sem dados';
         return;
       }
-      table.innerHTML = rows.slice(0, 5).map((item, index) => {
+      const top = rows.slice(0, 5);
+      const tableHtml = top.map((item, index) => {
         const bps = Number(item.bps) || 0;
         const share = bps / total * 100;
         return `<tr>
@@ -27351,35 +27447,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
         </tr>`;
       }).join('');
-      if (meta) meta.textContent = `top ${Math.min(rows.length, 5)} · por bits/s`;
-    }
-
-    function renderSecondaryAsnSrc(payload) {
-      const table = document.getElementById('secondaryAsnTable');
-      const meta = document.getElementById('secondaryAsnMeta');
-      if (!table) return;
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      const total = items.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
-      if (!items.length || total <= 0) {
-        table.innerHTML = '<tr><td colspan="5" class="text-muted">Sem dados de ASN de origem.</td></tr>';
-        if (meta) meta.textContent = payload?.asn_available === false ? 'ASN indisponível' : 'sem dados';
-        return;
-      }
-      table.innerHTML = items.slice(0, 5).map((item, index) => {
-        const bps = Number(item.bps) || 0;
-        const share = bps / total * 100;
-        const code = asnCode(item);
-        const name = asnDisplayName(item);
-        const org = name === code ? '—' : name;
-        return `<tr>
-          <td class="rank">${formatNumber(item.rank || index + 1)}</td>
-          <td class="mono">${escapeHtml(code)}</td>
-          <td class="secondary-asn-org" title="${escapeHtml(org)}">${escapeHtml(org)}</td>
-          <td class="text-end mono">${formatBps(bps)}</td>
-          <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
-        </tr>`;
-      }).join('');
-      if (meta) meta.textContent = `top ${Math.min(items.length, 5)} · por bits/s`;
+      updateRankingWidget('top-protocols', {
+        rows: top.map(item => ({ label: item.proto, value: Number(item.bps) || 0 })),
+        options: {
+          metric: 'bits_s',
+          color: row => protocolPalette[row.label] || palette[0]
+        },
+        emptyLabel: 'Sem dados de protocolo.',
+        tableHtml
+      });
+      if (meta) meta.textContent = `top ${top.length} · por bits/s`;
     }
 
     function renderSecondaryFlowsSummary(protocolItems) {
@@ -27401,6 +27478,200 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     // "service" = stacked por codecs (classificacao canonica), "protocol" = stacked por protocolo IP
     let directionalSeriesMode = 'service';
 
+    // --- Visualizacao dos widgets de ranking: Tabela | Grafico | Ambos ---
+    const RANKING_VIEW_MODES = ['table', 'chart', 'both'];
+    const DEFAULT_RANKING_VIEW_MODE = 'table';
+    const RANKING_WIDGET_IDS = [
+      'top-interfaces',
+      'top-protocols',
+      'top-asn-external-download',
+      'top-asn-external-upload',
+      'top-ip-download',
+      'top-ip-upload'
+    ];
+    const RANKING_TABLE_WIDGETS = {
+      topInterfacesTable: 'top-interfaces',
+      secondaryProtocolsTable: 'top-protocols',
+      externalAsnDownloadTable: 'top-asn-external-download',
+      externalAsnUploadTable: 'top-asn-external-upload',
+      localIpDownloadTable: 'top-ip-download',
+      localIpUploadTable: 'top-ip-upload'
+    };
+    const rankingWidgetState = {};
+    const rankingChartInstances = {};
+    let rankingViewModes = {};
+
+    function rankingWidgetElement(widgetId) {
+      return document.querySelector(`[data-ranking-widget="${widgetId}"]`);
+    }
+
+    function rankingViewMode(widgetId) {
+      const mode = rankingViewModes[widgetId];
+      return RANKING_VIEW_MODES.includes(mode) ? mode : DEFAULT_RANKING_VIEW_MODE;
+    }
+
+    function setRankingViewMode(widgetId, mode, options = {}) {
+      if (!RANKING_WIDGET_IDS.includes(widgetId)) return;
+      const normalized = RANKING_VIEW_MODES.includes(mode) ? mode : DEFAULT_RANKING_VIEW_MODE;
+      if (rankingViewMode(widgetId) === normalized && options.force !== true) {
+        applyRankingViewMode(widgetId);
+        return;
+      }
+      rankingViewModes[widgetId] = normalized;
+      applyRankingViewMode(widgetId);
+      if (options.persist !== false) saveDashboardLayout();
+    }
+
+    function applyRankingViewMode(widgetId) {
+      const widget = rankingWidgetElement(widgetId);
+      if (!widget) return;
+      const mode = rankingViewMode(widgetId);
+      widget.dataset.rankingMode = mode;
+      const showChart = mode === 'chart' || mode === 'both';
+      const showTable = mode === 'table' || mode === 'both';
+      const tableWrap = widget.querySelector('[data-ranking-table]');
+      const chartContainer = widget.querySelector('[data-ranking-chart]');
+      if (tableWrap) tableWrap.hidden = !showTable;
+      if (chartContainer) chartContainer.hidden = !showChart;
+      widget.querySelectorAll('.ranking-view-toggle button').forEach(button => {
+        const active = button.dataset.rankingView === mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      const state = rankingWidgetState[widgetId];
+      if (showTable && state && typeof state.tableHtml === 'string' && tableWrap) {
+        const body = tableWrap.querySelector('tbody');
+        if (body && body.dataset.rankingRendered !== state.tableHtml) {
+          body.innerHTML = state.tableHtml;
+          body.dataset.rankingRendered = state.tableHtml;
+        }
+      }
+      if (showChart) renderRankingChartFor(widgetId);
+      else disposeRankingChart(widgetId);
+    }
+
+    function disposeRankingChart(widgetId) {
+      const chart = rankingChartInstances[widgetId];
+      if (!chart) return;
+      try { chart.dispose(); } catch (error) { /* ignore */ }
+      delete rankingChartInstances[widgetId];
+    }
+
+    function resizeRankingCharts() {
+      Object.values(rankingChartInstances).forEach(chart => {
+        try { chart.resize(); } catch (error) { /* ignore */ }
+      });
+    }
+
+    function truncateRankingLabel(value, maximum = 22) {
+      const text = String(value ?? '');
+      const limit = Math.max(6, Number(maximum) || 22);
+      return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+    }
+
+    // Componente reutilizavel: barra horizontal para qualquer ranking.
+    function rankingBarOption(rows, options = {}) {
+      const metric = options.metric || 'bits_s';
+      const formatter = metricFormatter(metricFromApi(metric));
+      const items = (Array.isArray(rows) ? rows : [])
+        .map((row, index) => ({
+          label: String(options.label ? options.label(row, index) : (row.label ?? '')) || '—',
+          secondary: String(options.secondary ? options.secondary(row, index) : (row.secondary ?? '')) || '',
+          value: Math.max(0, Number(options.value ? options.value(row, index) : row.value) || 0),
+          row,
+          index
+        }))
+        .filter(item => item.value > 0);
+      if (!items.length) return emptyChartOption(options.emptyLabel || 'Sem dados no período');
+      const total = items.reduce((sum, item) => sum + item.value, 0) || 1;
+      const colorOf = typeof options.color === 'function' ? options.color : null;
+      return {
+        animation: false,
+        grid: { left: 4, right: 88, top: 6, bottom: 4, containLabel: true },
+        tooltip: {
+          trigger: 'item',
+          formatter: params => {
+            const item = items[params.dataIndex] || { label: params.name, value: params.value, secondary: '' };
+            const share = item.value / total * 100;
+            const head = item.secondary
+              ? `${escapeHtml(item.label)} · ${escapeHtml(item.secondary)}`
+              : escapeHtml(item.label);
+            return `${head}<br/>${formatter(item.value)} (${share.toFixed(1)}%)`;
+          }
+        },
+        xAxis: { type: 'value', min: 0, show: false, max: 'dataMax' },
+        yAxis: {
+          type: 'category',
+          inverse: true,
+          data: items.map(item => item.label),
+          axisLabel: { color: '#374151', formatter: value => truncateRankingLabel(value) },
+          axisLine: { show: false },
+          axisTick: { show: false }
+        },
+        series: [{
+          type: 'bar',
+          barMaxWidth: 16,
+          itemStyle: { borderRadius: [0, 3, 3, 0] },
+          label: {
+            show: true,
+            position: 'right',
+            distance: 6,
+            color: '#374151',
+            formatter: params => formatter(params.value)
+          },
+          emphasis: { focus: 'self' },
+          data: items.map(item => ({
+            value: item.value,
+            ...(colorOf ? { itemStyle: { color: colorOf(item.row, item.index) } } : {})
+          }))
+        }]
+      };
+    }
+
+    function renderRankingChartFor(widgetId, attempt = 0) {
+      const state = rankingWidgetState[widgetId];
+      const widget = rankingWidgetElement(widgetId);
+      if (!state || !widget) return;
+      const container = widget.querySelector('[data-ranking-chart]');
+      if (!container || container.hidden) return;
+      let chart = rankingChartInstances[widgetId];
+      if (!chart && (!container.clientWidth || !container.clientHeight)) {
+        if (attempt < 6) setTimeout(() => renderRankingChartFor(widgetId, attempt + 1), 80);
+        return;
+      }
+      if (!state.rows.length) {
+        if (chart) GMJDashboardCharts.replaceChartOption(chart, emptyChartOption(state.emptyLabel || 'Sem dados no período'));
+        return;
+      }
+      if (!chart) {
+        chart = echarts.init(container);
+        rankingChartInstances[widgetId] = chart;
+      }
+      GMJDashboardCharts.replaceChartOption(chart, rankingBarOption(state.rows, state.options || {}));
+      chart.resize();
+    }
+
+    function updateRankingWidget(widgetId, payload) {
+      if (!RANKING_WIDGET_IDS.includes(widgetId)) return;
+      const widget = rankingWidgetElement(widgetId);
+      if (!widget) return;
+      rankingWidgetState[widgetId] = {
+        rows: Array.isArray(payload.rows) ? payload.rows : [],
+        options: payload.options || {},
+        emptyLabel: payload.emptyLabel || 'Sem dados no período.',
+        tableHtml: typeof payload.tableHtml === 'string' ? payload.tableHtml : ''
+      };
+      const tableWrap = widget.querySelector('[data-ranking-table]');
+      const body = tableWrap ? tableWrap.querySelector('tbody') : null;
+      if (body && tableWrap && !tableWrap.hidden) {
+        body.innerHTML = rankingWidgetState[widgetId].tableHtml;
+        body.dataset.rankingRendered = rankingWidgetState[widgetId].tableHtml;
+      }
+      const mode = rankingViewMode(widgetId);
+      if (mode === 'chart' || mode === 'both') renderRankingChartFor(widgetId);
+      else disposeRankingChart(widgetId);
+    }
+
     function directionalRankingShare(items) {
       return items.reduce((sum, item) => sum + (Number(item.bps) || 0), 0);
     }
@@ -27411,12 +27682,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!table) return;
       const rows = Array.isArray(items) ? items : [];
       const total = directionalRankingShare(rows);
+      const widgetId = RANKING_TABLE_WIDGETS[tableId];
       if (!rows.length || total <= 0) {
-        table.innerHTML = `<tr><td colspan="5" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`;
+        updateRankingWidget(widgetId, {
+          rows: [],
+          emptyLabel,
+          tableHtml: `<tr><td colspan="5" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`
+        });
         if (meta) meta.textContent = 'sem dados';
         return;
       }
-      table.innerHTML = rows.map((item, index) => {
+      const tableHtml = rows.map((item, index) => {
         const bps = Number(item.bps) || 0;
         const share = bps / total * 100;
         const code = item.asn || '—';
@@ -27429,6 +27705,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
         </tr>`;
       }).join('');
+      updateRankingWidget(widgetId, {
+        rows: rows.map((item, index) => ({
+          label: `AS${item.asn || '—'}`,
+          secondary: item.org_name || item.display_name || '',
+          value: Number(item.bps) || 0
+        })),
+        options: { metric: 'bits_s', color: (row, index) => palette[index % palette.length] },
+        emptyLabel,
+        tableHtml
+      });
       if (meta) meta.textContent = `top ${rows.length} · externo`;
     }
 
@@ -27438,12 +27724,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (!table) return;
       const rows = Array.isArray(items) ? items : [];
       const total = directionalRankingShare(rows);
+      const widgetId = RANKING_TABLE_WIDGETS[tableId];
       if (!rows.length || total <= 0) {
-        table.innerHTML = `<tr><td colspan="4" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`;
+        updateRankingWidget(widgetId, {
+          rows: [],
+          emptyLabel,
+          tableHtml: `<tr><td colspan="4" class="text-muted">${escapeHtml(emptyLabel)}</td></tr>`
+        });
         if (meta) meta.textContent = 'sem dados';
         return;
       }
-      table.innerHTML = rows.map((item, index) => {
+      const tableHtml = rows.map((item, index) => {
         const bps = Number(item.bps) || 0;
         const share = bps / total * 100;
         return `<tr>
@@ -27453,6 +27744,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           <td class="text-end"><span class="secondary-share">${share.toFixed(1)}%</span><span class="share-bar"><span style="width:${Math.min(100, Math.max(2, share))}%"></span></span></td>
         </tr>`;
       }).join('');
+      updateRankingWidget(widgetId, {
+        rows: rows.map(item => ({ label: item.ip || '—', value: Number(item.bps) || 0 })),
+        options: { metric: 'bits_s', color: (row, index) => palette[index % palette.length] },
+        emptyLabel,
+        tableHtml
+      });
       if (meta) meta.textContent = `top ${rows.length} · nossos blocos`;
     }
 
@@ -27879,13 +28176,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           renderChartError(chart);
           renderTableMessage(tableId, 7, widgetErrorMessage(payload), true);
           setText(statusId, 'Erro ao carregar widget');
-          if (source) {
-            renderTableMessage('secondaryAsnTable', 5, widgetErrorMessage(payload), true);
-            setText('secondaryAsnMeta', 'indisponível');
-          }
         } else {
           renderAsnWidget(chart, tableId, statusId, payload);
-          if (source) renderSecondaryAsnSrc(payload);
         }
         return;
       }
@@ -30441,6 +30733,14 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         renderDirectionalProtocolChart();
       });
     });
+    document.addEventListener('click', event => {
+      const button = event.target.closest('.ranking-view-toggle button[data-ranking-view]');
+      if (!button) return;
+      const widget = button.closest('[data-ranking-widget]');
+      if (!widget) return;
+      event.preventDefault();
+      setRankingViewMode(widget.dataset.rankingWidget, button.dataset.rankingView);
+    });
     document.getElementById('dashboardSeriesLimit').addEventListener('change', () => refresh().finally(scheduleDashboardRefresh).catch(console.error));
     document.getElementById('dashboardZone').addEventListener('change', () => {
       updateDashboardZoneLabels();
@@ -31458,6 +31758,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     window.addEventListener('resize', () => {
       Object.values(charts).forEach(chart => chart.resize());
+      resizeRankingCharts();
       if (
         configurableDashboardActive
         && !configurableResizeController?.activeSession
