@@ -52,7 +52,7 @@ from app.services.humanize import format_bits_per_second, format_bytes, format_f
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.sqlite_managed import open_managed
 from app.services.peak_hunter import ensure_peak_analysis_db
-from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_due_peak_hunter_jobs
+from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped, run_peak_hunter_cycle
 from app.services.cgnat_mapping import (
     CGNAT_AI_PROMPT_VERSION,
     CGNAT_AI_SCHEMA,
@@ -4830,7 +4830,7 @@ def peak_hunter_runner_enabled() -> bool:
 def peak_hunter_runner_loop() -> None:
     while not PEAK_HUNTER_RUNNER_STOP.is_set():
         try:
-            run_due_peak_hunter_jobs()
+            run_peak_hunter_cycle()
         except Exception as exc:  # pragma: no cover - background resilience.
             logger.warning("Falha no runner automatico do Peak Hunter: %s", exc)
         PEAK_HUNTER_RUNNER_STOP.wait(60)
