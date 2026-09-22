@@ -575,6 +575,12 @@ CALIBRATION_MIN_CONFIDENCE = float(os.getenv("GMJFLOW_CALIBRATION_MIN_CONFIDENCE
 SNMP_PAIR_SCAN_LIMIT = 20
 SNMP_POLL_STOP = threading.Event()
 SNMP_POLL_THREAD: threading.Thread | None = None
+SNMP_POLL_LOCKS_GUARD = threading.Lock()
+SNMP_POLL_LOCKS: dict[int, threading.Lock] = {}
+SNMP_BACKOFF_GUARD = threading.Lock()
+SNMP_BACKOFF: dict[int, dict[str, Any]] = {}
+SNMP_BACKOFF_BASE_SECONDS = float(os.getenv("SNMP_BACKOFF_BASE_SECONDS", "15"))
+SNMP_BACKOFF_MAX_SECONDS = float(os.getenv("SNMP_BACKOFF_MAX_SECONDS", "600"))
 
 SENSOR_COLUMNS = [
     "name",
@@ -6683,8 +6689,8 @@ def snmp_config(sensor: dict[str, Any], payload: SnmpActionPayload | None) -> di
         retries = int(retries)
     except (TypeError, ValueError):
         raise SnmpQueryError("timeout/retries SNMP invalidos") from None
-    timeout_seconds = max(0.5, min(timeout_seconds, 30.0))
-    retries = max(0, min(retries, 5))
+    timeout_seconds = max(0.5, min(timeout_seconds, 10.0))
+    retries = max(0, min(retries, 3))
 
     return {
         "ip": target_ip,
@@ -6851,7 +6857,10 @@ async def snmp_get_system(config: dict[str, Any]) -> dict[str, str]:
         auth_data = snmp_auth_data(api, config)
         transport = await snmp_transport(api, config)
         context = api.ContextData()
-        request_timeout = config["timeout_seconds"] * (config["retries"] + 1) + 2
+        request_timeout = min(
+            15.0,
+            config["timeout_seconds"] * (config["retries"] + 1) + 2,
+        )
         oid_names = list(SNMP_SYSTEM_OIDS.keys())
         var_binds = [
             api.ObjectType(api.ObjectIdentity(SNMP_SYSTEM_OIDS[name]))
@@ -7176,6 +7185,37 @@ def sensor_poll_due(conn: sqlite3.Connection, sensor: dict[str, Any], now: datet
     return (now - last_time).total_seconds() >= polling_seconds
 
 
+def snmp_poll_lock(sensor_id: int) -> threading.Lock:
+    """Lock por sensor para evitar polls SNMP concorrentes do mesmo alvo."""
+
+    with SNMP_POLL_LOCKS_GUARD:
+        return SNMP_POLL_LOCKS.setdefault(sensor_id, threading.Lock())
+
+
+def snmp_backoff_blocked(sensor_id: int, now: datetime) -> bool:
+    with SNMP_BACKOFF_GUARD:
+        state = SNMP_BACKOFF.get(sensor_id)
+        if not state:
+            return False
+        return bool(state.get("next_retry_at") and state["next_retry_at"] > now)
+
+
+def snmp_backoff_failure(sensor_id: int, now: datetime) -> None:
+    with SNMP_BACKOFF_GUARD:
+        state = SNMP_BACKOFF.setdefault(sensor_id, {"failures": 0, "next_retry_at": now})
+        state["failures"] = int(state.get("failures") or 0) + 1
+        delay = min(
+            SNMP_BACKOFF_MAX_SECONDS,
+            SNMP_BACKOFF_BASE_SECONDS * (2 ** min(int(state["failures"]) - 1, 6)),
+        )
+        state["next_retry_at"] = now + timedelta(seconds=delay)
+
+
+def snmp_backoff_success(sensor_id: int) -> None:
+    with SNMP_BACKOFF_GUARD:
+        SNMP_BACKOFF.pop(sensor_id, None)
+
+
 def poll_snmp_samples(sensor_id: int | None = None, force: bool = True) -> dict[str, Any]:
     ensure_sensor_db()
     now = datetime.now(timezone.utc)
@@ -7201,41 +7241,57 @@ def poll_snmp_samples(sensor_id: int | None = None, force: bool = True) -> dict[
             raise HTTPException(status_code=400, detail="Sensor precisa estar ativo e com Exporter SNMP habilitado")
         for row in rows:
             sensor = dict(row)
-            if not force and not sensor_poll_due(conn, sensor, now):
+            sensor_pk = int(sensor["id"])
+            if not force:
+                if not sensor_poll_due(conn, sensor, now):
+                    continue
+                if snmp_backoff_blocked(sensor_pk, now):
+                    continue
+            lock = snmp_poll_lock(sensor_pk)
+            if not lock.acquire(blocking=False):
+                # Ja existe um poll em andamento para este sensor; evita
+                # duplicar espera SNMP no threadpool/thread de background.
                 continue
             try:
                 config = snmp_config(sensor, None)
                 counters = run_snmp(snmp_get_interface_counters(config))
-                samples = [insert_snmp_counter_sample(conn, int(sensor["id"]), counter, now) for counter in counters]
+                samples = [insert_snmp_counter_sample(conn, sensor_pk, counter, now) for counter in counters]
                 results.append(
                     {
-                        "sensor_id": int(sensor["id"]),
+                        "sensor_id": sensor_pk,
                         "sensor": sensor["name"],
                         "ok": True,
                         "samples": samples,
                         "sample_count": len(samples),
                     }
                 )
+                snmp_backoff_success(sensor_pk)
             except SnmpQueryError as exc:
+                if not force:
+                    snmp_backoff_failure(sensor_pk, now)
                 logger.warning(
                     "SNMP error sensor_id=%s snmp_ip=%s ifIndex=%s oid=%s error=%s",
-                    sensor["id"],
+                    sensor_pk,
                     sensor.get("snmp_ip") or sensor.get("exporter_ip"),
                     "*",
                     ",".join([SNMP_COUNTER_OIDS["if_hc_in_octets"], SNMP_COUNTER_OIDS["if_hc_out_octets"]]),
                     exc,
                 )
-                results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": str(exc)})
+                results.append({"sensor_id": sensor_pk, "sensor": sensor["name"], "ok": False, "message": str(exc)})
             except Exception as exc:  # pragma: no cover - defensive guard for SNMP stack/runtime surprises.
+                if not force:
+                    snmp_backoff_failure(sensor_pk, now)
                 logger.warning(
                     "SNMP error sensor_id=%s snmp_ip=%s ifIndex=%s oid=%s error=%s",
-                    sensor["id"],
+                    sensor_pk,
                     sensor.get("snmp_ip") or sensor.get("exporter_ip"),
                     "*",
                     ",".join([SNMP_COUNTER_OIDS["if_hc_in_octets"], SNMP_COUNTER_OIDS["if_hc_out_octets"]]),
                     exc,
                 )
-                results.append({"sensor_id": int(sensor["id"]), "sensor": sensor["name"], "ok": False, "message": f"erro SNMP: {exc}"})
+                results.append({"sensor_id": sensor_pk, "sensor": sensor["name"], "ok": False, "message": f"erro SNMP: {exc}"})
+            finally:
+                lock.release()
         conn.commit()
 
     return {"ok": all(item.get("ok") for item in results), "items": results}
