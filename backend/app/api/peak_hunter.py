@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
+from app.services.active_ioc_hotset import ActiveIocHotSet
 from app.services.clickhouse import (
     ClickHouseQueryError,
+    fetch_interface_aggregate_series,
     fetch_interface_series,
     fetch_peak_flows,
     fetch_peak_hunter_interfaces,
     fetch_peak_hunter_sensors,
+    query_clickhouse,
 )
+from app.services.peak_analysis import analyze_peak_scope
+from app.services.peak_detection import PeakDetectionConfig
+from app.services.peak_evidence import PeakEvidenceConfig
 from app.services.peak_hunter import (
     PeakHunterRequest,
     analyze_peak_hunter,
@@ -88,6 +95,63 @@ class PeakHunterJobPayload(BaseModel):
     negative_sample_interval_runs: int = Field(6, ge=1)
     min_peak_score: float = 2.0
     min_peak_value: float | None = None
+
+
+class PeakSimplePayload(BaseModel):
+    sensor: str = ""
+    interface_id: int = Field(..., ge=1)
+    direction: str = "receives"
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    recent_period_minutes: int | None = Field(None, ge=1, le=1440)
+    top_n: int = Field(5, ge=1, le=50)
+
+
+_PEAK_HOTSET: ActiveIocHotSet | None = None
+_PEAK_HOTSET_LOCK = threading.Lock()
+
+
+def _peak_hunter_hotset() -> ActiveIocHotSet | None:
+    """Lazy opt-in IOC hot set for TI enrichment (never blocks the API)."""
+    global _PEAK_HOTSET
+    enabled = str(os.getenv("GMJFLOW_TI_HOTSET_ENABLED", "false")).strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    with _PEAK_HOTSET_LOCK:
+        if _PEAK_HOTSET is None:
+            _PEAK_HOTSET = ActiveIocHotSet(enabled=True)
+            try:
+                _PEAK_HOTSET.refresh()
+            except Exception:
+                _PEAK_HOTSET = None
+        return _PEAK_HOTSET
+
+
+@router.post("/simple/analyze")
+def peak_hunter_simple_analyze(payload: PeakSimplePayload) -> dict[str, Any]:
+    """Refactored Peak Hunter: detect -> contextualize -> threat triage.
+
+    Detects BPS/PPS peaks against the minute aggregate, builds the
+    before/peak/after evidence snapshot and triages with the existing
+    threat-intelligence infrastructure. Never applies mitigation.
+    """
+    start_time, end_time = _request_window(payload.start_time, payload.end_time, payload.recent_period_minutes)
+    direction = _normalize_direction(payload.direction)
+
+    def series_fetcher(sensor: str, interface_id: int, direction: str) -> list[dict[str, Any]]:
+        return fetch_interface_aggregate_series(sensor, interface_id, direction, start_time, end_time)
+
+    return analyze_peak_scope(
+        payload.sensor,
+        payload.interface_id,
+        direction,
+        series_fetcher,
+        series_fetcher,
+        query_clickhouse,
+        _peak_hunter_hotset(),
+        detection_config=PeakDetectionConfig(),
+        evidence_config=PeakEvidenceConfig(top_n=payload.top_n),
+    )
 
 
 @router.post("/analyze")
