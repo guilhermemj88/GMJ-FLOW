@@ -702,7 +702,7 @@ def selective_targets(
         bps = safe_float(item.get("bps") or item.get("attack_bps_observed"))
         pps = safe_float(item.get("pps") or item.get("attack_pps_observed"))
         rows_sum_bps += bps
-        rows.append({"host": str(host), "bps": bps, "pps": pps, "bytes": safe_float(item.get("bytes"))})
+        rows.append({"host": str(host), "bps": bps, "pps": pps, "bytes": safe_float(item.get("total_bytes", item.get("bytes")))})
     effective_total = safe_float(total_bps) if total_bps is not None else rows_sum_bps
     if effective_total <= 0:
         return []

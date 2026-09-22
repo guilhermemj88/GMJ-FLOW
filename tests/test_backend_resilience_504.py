@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
 CLICKHOUSE = (ROOT / "backend" / "app" / "services" / "clickhouse.py").read_text(encoding="utf-8")
 BEHAVIORAL = (ROOT / "backend" / "app" / "services" / "behavioral_detection.py").read_text(encoding="utf-8")
+TRANSIT_RTBH = (ROOT / "backend" / "app" / "services" / "transit_rtbh.py").read_text(encoding="utf-8")
 
 
 def block(text: str, start_marker: str, end_marker: str) -> str:
@@ -126,6 +127,14 @@ class RtbhQueryTest(unittest.TestCase):
         self.assertIn("sum(tx_bytes) AS tx_bytes", body)
         self.assertIn("input_if AS interface_id", body)
         self.assertIn("output_if AS interface_id", body)
+
+    def test_rtbh_candidate_query_uses_non_colliding_alias(self) -> None:
+        body = block(MAIN, "def generate_rtbh_candidates_from_behavioral_decision(", "def apply_mitigation_candidates(")
+        self.assertIn("sum(bytes) AS total_bytes", body)
+        self.assertNotIn("sum(bytes) AS bytes", body)
+
+    def test_rtbh_consumer_reads_total_bytes(self) -> None:
+        self.assertIn('item.get("total_bytes", item.get("bytes"))', TRANSIT_RTBH)
 
     def test_rtbh_cycles_do_not_overlap(self) -> None:
         self.assertIn("if not self._run_lock.acquire(blocking=False):", BEHAVIORAL)
