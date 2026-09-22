@@ -21,6 +21,7 @@ from app.services.clickhouse import (
 )
 from app.services.peak_analysis import analyze_peak_scope
 from app.services.peak_detection import PeakDetectionConfig
+from app.services.peak_events import ensure_peak_events_db, get_peak_event, list_peak_events
 from app.services.peak_evidence import PeakEvidenceConfig
 from app.services.peak_hunter import (
     PeakHunterRequest,
@@ -152,6 +153,23 @@ def peak_hunter_simple_analyze(payload: PeakSimplePayload) -> dict[str, Any]:
         detection_config=PeakDetectionConfig(),
         evidence_config=PeakEvidenceConfig(top_n=payload.top_n),
     )
+
+
+@router.get("/events")
+def peak_hunter_events(limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
+    """Persisted Peak Events (refactored runner output)."""
+    with _sqlite_connect() as conn:
+        items = list_peak_events(conn, limit=limit)
+    return {"items": items}
+
+
+@router.get("/events/{event_id}")
+def peak_hunter_event_detail(event_id: int) -> dict[str, Any]:
+    with _sqlite_connect() as conn:
+        item = get_peak_event(conn, event_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Peak event nao encontrado")
+    return item
 
 
 @router.post("/analyze")

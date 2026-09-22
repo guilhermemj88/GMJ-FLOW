@@ -7034,17 +7034,17 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </div>
 
           <div class="toolbar mb-3">
-            <button type="button" class="btn btn-sm btn-success peak-hunter-tab-button" data-peak-hunter-tab="manual">
+            <button type="button" class="btn btn-sm btn-success peak-hunter-tab-button" data-peak-hunter-tab="simple">
+              <i data-lucide="zap"></i><span>Picos recentes</span>
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="manual">
               <i data-lucide="search"></i><span>Análise manual</span>
             </button>
             <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="history">
-              <i data-lucide="database"></i><span>Histórico / Dataset</span>
+              <i data-lucide="database"></i><span>Histórico (legacy)</span>
             </button>
             <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="automation">
-              <i data-lucide="timer"></i><span>Automacao / Coleta</span>
-            </button>
-            <button type="button" class="btn btn-sm btn-outline-secondary peak-hunter-tab-button" data-peak-hunter-tab="simple">
-              <i data-lucide="zap"></i><span>Picos recentes</span>
+              <i data-lucide="timer"></i><span>Automação (legacy)</span>
             </button>
           </div>
 
@@ -19425,6 +19425,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     function loadPeakHunterSimpleTab() {
+      loadPeakHunterEvents();
       if (!peakHunterSensorOptionsCache.length) {
         return loadPeakHunterSensors().then(() => {
           if (document.getElementById('peakHunterSimpleSensor').value) loadPeakHunterSimpleInterfaces();
@@ -19489,6 +19490,56 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           </div>
           ${changed.length ? `<div class="mt-2"><strong>O que mudou</strong><br>${changed.slice(0, 5).join(' · ')}</div>` : ''}
           ${t.ioc_hit_count ? `<div class="mt-2"><strong>Threat Intelligence</strong><br>${t.ioc_hit_count} IOC(s) entre os participantes</div>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    async function loadPeakHunterEvents() {
+      const results = document.getElementById('peakHunterSimpleResults');
+      try {
+        const payload = await apiRequest('/api/peak-hunter/events?limit=50');
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        renderPeakHunterEvents(items);
+      } catch (error) {
+        results.innerHTML = '<div class="alert alert-danger">Erro: ' + escapeHtml(error?.message || error) + '</div>';
+      }
+    }
+
+    function peakHunterDeltaText(before, peak) {
+      if (!before) return '—';
+      const pct = ((peak - before) / before) * 100;
+      return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+    }
+
+    function renderPeakHunterEvents(items) {
+      const results = document.getElementById('peakHunterSimpleResults');
+      if (!items.length) {
+        results.innerHTML = '<div class="subtle">Nenhum pico persistido ainda. Use \"Analisar\" para análise on-demand, ou aguarde o runner automático.</div>';
+        return;
+      }
+      results.innerHTML = items.map((ev) => {
+        const badge = ev.threat_verdict === 'suspicious' ? 'badge-soft danger' : ev.threat_verdict === 'noteworthy' ? 'badge-soft warn' : 'badge-soft success';
+        const dirLabel = { receives: 'download', sends: 'upload', total: 'total' }[ev.direction] || ev.direction;
+        const related = ev.anomaly_id ? `<div class="mt-2"><strong>Relacionado</strong><br>Anomalia #${ev.anomaly_id}${ev.security_event_id ? ' · Evento #' + ev.security_event_id : ''}</div>` : '';
+        const changed = [];
+        const evd = ev.evidence_json || {};
+        for (const kind of ['protocols', 'services', 'dst_ports']) {
+          for (const row of (evd.changed?.[kind] || [])) {
+            if (row.delta_bps_pct > 0) changed.push(`${escapeHtml(row.label)} +${Number(row.delta_bps_pct).toFixed(0)}%`);
+          }
+        }
+        return `<div class="panel p-3 mb-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="panel-title">PICO ${formatPeakHunterLocal(ev.peak_time || '')}</div>
+            <span class="${badge}">${escapeHtml(ev.threat_verdict || 'normal')}</span>
+          </div>
+          <div class="metric-readout">${escapeHtml(dirLabel)} · ${escapeHtml(ev.sensor || '')} · interface ${escapeHtml(String(ev.interface_id ?? ''))}</div>
+          <div class="row g-2 mt-2">
+            <div class="col"><strong>BPS</strong><br>${peakHunterMetricValue(ev.baseline_bps || 0, 'bits_s')} → ${peakHunterMetricValue(ev.peak_bps || 0, 'bits_s')} <span class="subtle">${peakHunterDeltaText(ev.baseline_bps, ev.peak_bps)}</span></div>
+            <div class="col"><strong>PPS</strong><br>${peakHunterMetricValue(ev.baseline_pps || 0, 'packets_s')} → ${peakHunterMetricValue(ev.peak_pps || 0, 'packets_s')} <span class="subtle">${peakHunterDeltaText(ev.baseline_pps, ev.peak_pps)}</span></div>
+          </div>
+          ${changed.length ? `<div class="mt-2"><strong>O que mudou</strong><br>${changed.slice(0, 5).join(' · ')}</div>` : ''}
+          ${related}
         </div>`;
       }).join('');
     }
