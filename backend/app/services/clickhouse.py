@@ -356,25 +356,23 @@ def fetch_peak_hunter_interfaces(sensor: str) -> list[dict[str, Any]]:
         (
             SELECT
                 input_if AS interface_id,
-                max(flow_time) AS last_seen,
-                sum(packets) AS rx_packets,
+                flow_time AS last_seen,
+                packets AS rx_packets,
                 0 AS tx_packets,
-                sum(bytes) AS rx_bytes,
+                bytes AS rx_bytes,
                 0 AS tx_bytes
             FROM flow_raw
             {where}
-            GROUP BY input_if
             UNION ALL
             SELECT
                 output_if AS interface_id,
-                max(flow_time) AS last_seen,
+                flow_time AS last_seen,
                 0 AS rx_packets,
-                sum(packets) AS tx_packets,
+                packets AS tx_packets,
                 0 AS rx_bytes,
-                sum(bytes) AS tx_bytes
+                bytes AS tx_bytes
             FROM flow_raw
             {where}
-            GROUP BY output_if
         )
         WHERE interface_id > 0
         GROUP BY interface_id
