@@ -18,6 +18,7 @@ from app.services.peak_hunter import (
 from app.services.sqlite_managed import open_managed
 from app.services.peak_analysis import analyze_peak_scope
 from app.services.peak_events import find_existing_peak_event, save_peak_event
+from app.services.peak_handoff import handoff_peak_event
 from app.services.peak_detection import PeakDetectionConfig
 
 
@@ -753,7 +754,7 @@ def run_peak_hunter_cycle(
     evidence_executor: Any = None,
     hotset: Any = None,
     save_event: Any = save_peak_event,
-    handoff: Any = None,
+    handoff: Any = handoff_peak_event,
     list_scopes: Any = None,
     conn_factory: Any = None,
     find_existing: Any = None,
